@@ -24,6 +24,12 @@ class SurpriseChartTests(unittest.TestCase):
         self.assertIn("token 12", svg)
         self.assertNotIn("grouped into", svg)
 
+    def test_the_peak_label_points_at_the_peak_token_not_the_bin_end(self):
+        spiked = metrics(500)
+        spiked[6]["surprise_bits"] = 9.0
+        svg = charts.surprise_chart(spiked)
+        self.assertIn("peak 9.0 bits at token 7", svg)
+
     def test_long_responses_are_binned_and_say_so(self):
         svg = charts.surprise_chart(metrics(5000))
         self.assertLessEqual(svg.count("<title>"), charts.MAX_BINS)

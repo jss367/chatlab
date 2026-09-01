@@ -34,11 +34,15 @@ def _bin_metrics(metrics: Sequence[dict], bins: int) -> list[dict]:
     for start in range(0, len(metrics), size):
         chunk = metrics[start : start + size]
         values = [float(metric["surprise_bits"]) for metric in chunk]
+        peak = max(range(len(values)), key=values.__getitem__)
         grouped.append(
             {
                 "mean": sum(values) / len(values),
                 "low": min(values),
-                "high": max(values),
+                "high": values[peak],
+                # Where the bin's maximum actually sits, which is only the last
+                # token of the bin by coincidence.
+                "peak_position": int(chunk[peak]["position"]),
                 "first": int(chunk[0]["position"]),
                 "last": int(chunk[-1]["position"]),
             }
@@ -98,7 +102,7 @@ def surprise_chart(metrics: Sequence[dict], *, title: str = "Surprise per token"
         f'<circle class="viz-peak-dot" cx="{peak_x:.1f}" cy="{peak_y:.1f}" r="4" />'
         f'<text class="viz-peak-label" x="{label_x:.1f}" y="{max(peak_y - 8, 10):.1f}" '
         f'text-anchor="{anchor}">peak {bins[peak]["high"]:.1f} bits '
-        f'at token {bins[peak]["last"]}</text>'
+        f'at token {bins[peak]["peak_position"]:,}</text>'
     )
 
     hover = "".join(
