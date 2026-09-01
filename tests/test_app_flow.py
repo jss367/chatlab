@@ -144,6 +144,13 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(final[TURNS][1]["reasoning"], "revised")
         self.assertEqual(final[TURNS][1]["content"], "answer")
 
+    def test_blanking_a_user_message_is_refused(self):
+        turns = [make_turn("user", "one"), make_turn("assistant", "first")]
+        event = gr.EditData(None, {"index": 0, "previous_value": "one", "value": "   "})
+        final = self.last(app.edit_message(event, "draft", turns, *SETTINGS))[-1]
+        self.assertEqual(final[TURNS], turns)
+        self.assertEqual(final[STATUS], "A user message cannot be empty.")
+
     def test_a_failed_generation_stays_out_of_the_history(self):
         class Exploding:
             loaded = True

@@ -413,8 +413,15 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
         yield idle_state(prompt_text, turns, "Assistant message edited.")
         return
 
+    edited = new_value.strip()
+    if not edited:
+        # An empty user turn is skipped by model_messages(), which would leave
+        # the request with no user message at all.
+        yield idle_state(prompt_text, turns, "A user message cannot be empty.")
+        return
+
     turns = turns[: position + 1]
-    turns[position]["content"] = new_value
+    turns[position]["content"] = edited
     yield from regenerate_from(position, prompt_text, turns, *settings)
 
 
