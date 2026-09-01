@@ -1,4 +1,4 @@
-"""Gradio interface for chatting with and inspecting OLMo tokens."""
+"""Chatlab interface for chatting with and inspecting model tokens."""
 
 from __future__ import annotations
 
@@ -202,13 +202,13 @@ CSS = """
 
 def build_app() -> gr.Blocks:
     with gr.Blocks(
-        title="OLMo Token Explorer", css=CSS, theme=gr.themes.Soft()
+        title="Chatlab", css=CSS, theme=gr.themes.Soft()
     ) as demo:
         conversation_state = gr.State([])
         metrics_state = gr.State([])
 
         gr.Markdown(
-            "# OLMo Token Explorer\nChat with an open model and see exactly how likely every generated token was.",
+            "# Chatlab\nChat with an open model and see exactly how likely every generated token was.",
             elem_id="hero",
         )
 
