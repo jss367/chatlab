@@ -38,13 +38,24 @@ def _trim_partial_tag(text: str) -> str:
     return text
 
 
-def split_reasoning(text: str, *, streaming: bool = False) -> tuple[str, str, bool]:
+def split_reasoning(
+    text: str,
+    *,
+    streaming: bool = False,
+    reasoning_prefilled: bool = False,
+) -> tuple[str, str, bool]:
     """Split raw model output into ``(reasoning, answer, closed)``.
 
     ``closed`` is False while the model is still inside a ``<think>`` block, so
     a caller streaming tokens can show the block as pending. When ``streaming``
     is set, a partially emitted tag at the very end is withheld instead of being
     shown as literal text.
+
+    ``reasoning_prefilled`` says the prompt itself ended with the opening
+    ``<think>`` marker, which is what OLMo Think templates do. The generated
+    text then starts *inside* the reasoning block and carries no opening marker
+    at all, so without this flag every token would look like answer text until
+    the closing marker finally arrived thousands of tokens later.
     """
 
     if streaming:
@@ -55,10 +66,13 @@ def split_reasoning(text: str, *, streaming: bool = False) -> tuple[str, str, bo
     closed = True
     rest = text
 
-    if THINK_OPEN not in rest and THINK_CLOSE in rest:
-        # Some chat templates pre-fill the opening tag, so only the close arrives.
-        head, _, rest = rest.partition(THINK_CLOSE)
+    if reasoning_prefilled or (THINK_OPEN not in rest and THINK_CLOSE in rest):
+        # The chat template supplied the opening tag, so only the close arrives.
+        head, marker, rest = rest.partition(THINK_CLOSE)
         reasoning.append(head)
+        if not marker:
+            # Still inside the prefilled block: everything so far is reasoning.
+            closed = False
 
     while THINK_OPEN in rest:
         head, _, rest = rest.partition(THINK_OPEN)

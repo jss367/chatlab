@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
+from conversation import THINK_OPEN
 from token_metrics import (
     TokenMetric,
     build_metric,
@@ -59,6 +60,14 @@ class GenerationUpdate:
     text: str
     metrics: list[dict]
     """Live list owned by the generator. Copy it before storing it anywhere."""
+
+    reasoning_prefilled: bool = False
+    """Whether the prompt already ended with the opening ``<think>`` marker.
+
+    When it did, ``text`` starts inside the reasoning block and never contains
+    an opening marker of its own, so a caller splitting reasoning from the
+    answer has to be told.
+    """
 
 
 class IncrementalDecoder:
@@ -221,14 +230,29 @@ class ModelManager:
             if torch.backends.mps.is_available():
                 torch.mps.empty_cache()
 
-    def _prompt_inputs(self, messages: list[dict]):
+    def _prompt_inputs(self, messages: list[dict]) -> tuple[dict, bool]:
+        """Tokenize the prompt, reporting whether it prefills ``<think>``.
+
+        Reasoning templates such as OLMo Think end the generation prompt with
+        the opening marker, so the model resumes inside the block and never
+        emits an opener. The flag rides along to the caller because only the
+        prompt can reveal it.
+        """
+
         import torch
 
         assert self.tokenizer is not None
         assert self.model is not None
         tokenizer = self.tokenizer
+        prefilled = False
 
         if tokenizer.chat_template:
+            rendered = tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False
+            )
+            prefilled = isinstance(rendered, str) and rendered.rstrip().endswith(
+                THINK_OPEN
+            )
             inputs = tokenizer.apply_chat_template(
                 messages,
                 add_generation_prompt=True,
@@ -244,11 +268,12 @@ class ModelManager:
             inputs = tokenizer(f"{transcript}\nAssistant:", return_tensors="pt")
 
         device = next(self.model.parameters()).device
-        return {
+        tensors = {
             name: tensor.to(device)
             for name, tensor in inputs.items()
             if torch.is_tensor(tensor)
         }
+        return tensors, prefilled
 
     def _stop_token_ids(self) -> set[int]:
         assert self.model is not None
@@ -302,7 +327,7 @@ class ModelManager:
             assert self.tokenizer is not None
             model = self.model
             tokenizer = self.tokenizer
-            inputs = self._prompt_inputs(messages)
+            inputs, reasoning_prefilled = self._prompt_inputs(messages)
             attention_mask = inputs.get("attention_mask")
             rng = np.random.default_rng(int(seed))
             metrics: list[dict] = []
@@ -371,7 +396,11 @@ class ModelManager:
                 ):
                     pending_tokens = 0
                     last_yield = now
-                    yield GenerationUpdate(text=decoder.text, metrics=metrics)
+                    yield GenerationUpdate(
+                        text=decoder.text,
+                        metrics=metrics,
+                        reasoning_prefilled=reasoning_prefilled,
+                    )
 
                 if stopping:
                     break

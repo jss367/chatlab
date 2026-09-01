@@ -184,6 +184,45 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual([turn["role"] for turn in final[TURNS]], ["user"])
         self.assertIn("out of memory", final[STATUS])
 
+    def test_prefilled_reasoning_streams_into_the_reasoning_block(self):
+        # The OLMo Think template ends the prompt with <think>, so the reply
+        # carries no opening marker. Until </think> lands, every token belongs
+        # in the pending Reasoning block rather than the answer bubble.
+        def thinking(*_args, **_kwargs):
+            yield GenerationUpdate(
+                text="Let me add two and two",
+                metrics=[],
+                reasoning_prefilled=True,
+            )
+            yield GenerationUpdate(
+                text="Let me add two and two.</think>Four.",
+                metrics=[],
+                reasoning_prefilled=True,
+            )
+
+        app.MANAGER.generate = thinking
+        frames = self.last(app.chat("hi", [], *SETTINGS))
+
+        # frames[0] is the pre-generation snapshot, frames[1] the first update.
+        mid = frames[1][TURNS][1]
+        self.assertEqual(mid["reasoning"], "Let me add two and two")
+        self.assertEqual(mid["content"], "")
+        self.assertFalse(mid["reasoning_closed"])
+
+        final = frames[-1][TURNS][1]
+        self.assertEqual(final["reasoning"], "Let me add two and two.")
+        self.assertEqual(final["content"], "Four.")
+        self.assertTrue(final["reasoning_closed"])
+
+    def test_a_plain_reply_never_streams_as_reasoning(self):
+        def plain(*_args, **_kwargs):
+            yield GenerationUpdate(text="Four.", metrics=[])
+
+        app.MANAGER.generate = plain
+        final = self.last(app.chat("hi", [], *SETTINGS))[-1]
+        self.assertEqual(final[TURNS][1]["reasoning"], "")
+        self.assertEqual(final[TURNS][1]["content"], "Four.")
+
     def test_a_failure_after_some_tokens_keeps_them(self):
         def failing(*_args, **_kwargs):
             yield GenerationUpdate(text="<think>Hmm", metrics=[])

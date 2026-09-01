@@ -54,6 +54,42 @@ class SplitReasoningTests(unittest.TestCase):
     def test_a_lone_angle_bracket_survives_a_finished_response(self):
         self.assertEqual(split_reasoning("a < b")[1], "a < b")
 
+    def test_prefilled_reasoning_stays_hidden_before_the_closing_tag(self):
+        # An OLMo Think prompt ends with <think>, so the reasoning arrives with
+        # no marker at all and must not be shown as an answer while it streams.
+        reasoning, answer, closed = split_reasoning(
+            "Let me add two and two",
+            streaming=True,
+            reasoning_prefilled=True,
+        )
+        self.assertEqual(reasoning, "Let me add two and two")
+        self.assertEqual(answer, "")
+        self.assertFalse(closed)
+
+    def test_prefilled_reasoning_closes_when_the_tag_arrives(self):
+        reasoning, answer, closed = split_reasoning(
+            "Let me add two and two.</think>\n\nFour.",
+            streaming=True,
+            reasoning_prefilled=True,
+        )
+        self.assertEqual(reasoning, "Let me add two and two.")
+        self.assertEqual(answer, "Four.")
+        self.assertTrue(closed)
+
+    def test_prefilled_reasoning_hides_a_half_written_closing_tag(self):
+        reasoning, answer, closed = split_reasoning(
+            "Counting.</thi", streaming=True, reasoning_prefilled=True
+        )
+        self.assertEqual(reasoning, "Counting.")
+        self.assertEqual(answer, "")
+        self.assertFalse(closed)
+
+    def test_a_plain_prompt_never_turns_an_answer_into_reasoning(self):
+        self.assertEqual(
+            split_reasoning("Just an answer.", streaming=True),
+            ("", "Just an answer.", True),
+        )
+
 
 class DisplayTests(unittest.TestCase):
     def test_reasoning_becomes_its_own_collapsible_message(self):

@@ -282,6 +282,9 @@ def generate_reply(
 
     started = time.monotonic()
     raw_text = ""
+    # Reasoning templates end the prompt with the opening <think> marker, so the
+    # generated text never carries one. Only the runtime can tell us that.
+    prefilled = False
     highlight: list[tuple[str, str]] = []
     metrics: list[dict] = []
     status = "The model produced no tokens."
@@ -301,7 +304,10 @@ def generate_reply(
         with contextlib.closing(stream):
             for update in stream:
                 raw_text = update.text
-                reasoning, answer, closed = split_reasoning(raw_text, streaming=True)
+                prefilled = update.reasoning_prefilled
+                reasoning, answer, closed = split_reasoning(
+                    raw_text, streaming=True, reasoning_prefilled=prefilled
+                )
                 pending["reasoning"] = reasoning
                 pending["content"] = answer
                 pending["reasoning_closed"] = closed
@@ -312,14 +318,14 @@ def generate_reply(
     except Exception as error:
         # The diagnostic only goes to the status line. Storing it as the
         # assistant turn would feed the failure back to the model next turn.
-        reasoning, answer, _ = split_reasoning(raw_text)
+        reasoning, answer, _ = split_reasoning(raw_text, reasoning_prefilled=prefilled)
         pending["reasoning"] = reasoning
         pending["content"] = answer
         finalize_partial(turns)
         yield snapshot(highlight, metrics, f"Generation failed: {error}", busy=False)
         return
 
-    reasoning, answer, _ = split_reasoning(raw_text)
+    reasoning, answer, _ = split_reasoning(raw_text, reasoning_prefilled=prefilled)
     pending["reasoning"] = reasoning
     pending["content"] = answer
     pending["reasoning_closed"] = True

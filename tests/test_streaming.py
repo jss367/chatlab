@@ -257,6 +257,74 @@ class GenerateStreamingTests(unittest.TestCase):
         self.assertIn("Be terse.", manager.tokenizer.last_prompt)
 
 
+class ChatTemplateTokenizer(FakeTokenizer):
+    """A tokenizer whose chat template can pre-fill the opening <think> tag."""
+
+    chat_template = "{{ messages }}"
+
+    def __init__(self, suffix, pieces=PIECES, eos_id=EOS_ID):
+        super().__init__(pieces, eos_id)
+        self.suffix = suffix
+
+    def apply_chat_template(self, messages, add_generation_prompt=True, **kwargs):
+        rendered = (
+            "\n".join(f"{m['role']}: {m['content']}" for m in messages) + self.suffix
+        )
+        if not kwargs.get("tokenize", True):
+            return rendered
+        self.last_prompt = rendered
+        return {
+            "input_ids": torch.tensor([[0]]),
+            "attention_mask": torch.tensor([[1]]),
+        }
+
+
+class PrefilledReasoningTests(unittest.TestCase):
+    """Only the prompt can reveal that the opening <think> tag was supplied."""
+
+    def manager(self, tokenizer):
+        manager = ModelManager()
+        manager.tokenizer = tokenizer
+        manager.model = FakeModel([0], vocab_size=len(PIECES))
+        return manager
+
+    def test_a_template_ending_in_the_open_tag_is_detected(self):
+        manager = self.manager(ChatTemplateTokenizer("\nassistant: <think>"))
+        _inputs, prefilled = manager._prompt_inputs([{"role": "user", "content": "hi"}])
+        self.assertTrue(prefilled)
+
+    def test_a_trailing_newline_after_the_open_tag_still_counts(self):
+        manager = self.manager(ChatTemplateTokenizer("\nassistant: <think>\n"))
+        _inputs, prefilled = manager._prompt_inputs([{"role": "user", "content": "hi"}])
+        self.assertTrue(prefilled)
+
+    def test_an_ordinary_template_is_not_prefilled(self):
+        manager = self.manager(ChatTemplateTokenizer("\nassistant: "))
+        _inputs, prefilled = manager._prompt_inputs([{"role": "user", "content": "hi"}])
+        self.assertFalse(prefilled)
+
+    def test_the_transcript_fallback_is_not_prefilled(self):
+        manager = self.manager(FakeTokenizer())
+        _inputs, prefilled = manager._prompt_inputs([{"role": "user", "content": "hi"}])
+        self.assertFalse(prefilled)
+
+    def test_the_flag_rides_along_on_every_update(self):
+        manager = self.manager(ChatTemplateTokenizer("\nassistant: <think>"))
+        manager.model = FakeModel([0, EOS_ID], vocab_size=len(PIECES))
+        updates = list(
+            manager.generate(
+                [{"role": "user", "content": "hi"}],
+                temperature=0.0,
+                top_p=1.0,
+                top_k=0,
+                max_new_tokens=4,
+                seed=1,
+            )
+        )
+        self.assertTrue(updates)
+        self.assertTrue(all(update.reasoning_prefilled for update in updates))
+
+
 class HiddenTokenTests(unittest.TestCase):
     def test_reasoning_markers_survive_special_token_filtering(self):
         pieces = ["<think>", "</think>", "<eos>", "ok"]
