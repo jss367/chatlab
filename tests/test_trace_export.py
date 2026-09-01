@@ -1,9 +1,12 @@
 import csv
 import io
 import json
+import shutil
+import stat
 import unittest
+from pathlib import Path
 
-from trace_export import build_trace, trace_to_csv, trace_to_json
+from trace_export import build_trace, trace_to_csv, trace_to_json, write_trace_export
 
 
 def sample_metrics():
@@ -68,6 +71,13 @@ class TraceExportTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertIn("position", rows[0])
+
+    def test_export_file_and_directory_are_owner_only(self):
+        path = Path(write_trace_export(self.trace, "json"))
+        self.addCleanup(shutil.rmtree, path.parent)
+
+        self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
 
 if __name__ == "__main__":
