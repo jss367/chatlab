@@ -197,12 +197,25 @@ def stop_generation(turns: list[dict] | None):
 
 
 def resolve_seed(seed, randomize: bool) -> int:
+    """Pick the seed for one generation, inside the range NumPy will accept.
+
+    ``np.random.default_rng()`` rejects negative integers, so a locked seed of
+    ``-1`` used to fail every generation with "expected non-negative integer"
+    and produce no reply at all. The number input is constrained to 0 and above,
+    but the clamp lives here as well: this is the only place the value is turned
+    into the one the generator is handed, and it can still arrive out of range
+    from the API, from a browser that ignores the constraint, or from a float
+    the input rounded. Non-numeric and missing values keep falling back to 0.
+    """
+
     if randomize:
         return random.randrange(SEED_LIMIT)
     try:
-        return int(seed)
-    except (TypeError, ValueError):
+        # OverflowError covers infinities, which int() refuses to convert.
+        value = int(seed)
+    except (OverflowError, TypeError, ValueError):
         return 0
+    return max(value, 0)
 
 
 def generation_progress(count: int, started: float, seed: int) -> str:
@@ -898,6 +911,7 @@ def build_app() -> gr.Blocks:
                 seed = gr.Number(
                     value=42,
                     precision=0,
+                    minimum=0,
                     label="Random seed",
                     info="Updated after each response so you can reproduce it.",
                 )

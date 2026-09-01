@@ -2,6 +2,7 @@ import inspect
 import unittest
 
 import gradio as gr
+import numpy as np
 
 import app
 from conversation import display_messages, make_turn, model_messages
@@ -374,6 +375,57 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(reply["content"], "")
         self.assertTrue(reply["reasoning_closed"])
         self.assertIn("gpu fell over", final[STATUS])
+
+
+class SeedTests(unittest.TestCase):
+    """Whatever reaches resolve_seed(), NumPy has to accept the result.
+
+    ``np.random.default_rng()`` rejects negative integers, so a locked seed of
+    ``-1`` reaching the generator makes every response fail instead of being
+    produced.
+    """
+
+    def usable(self, seed):
+        resolved = app.resolve_seed(seed, False)
+        # The assertion that matters: this is the call the generator makes.
+        np.random.default_rng(resolved)
+        return resolved
+
+    def test_a_negative_seed_is_clamped_to_a_usable_one(self):
+        self.assertEqual(self.usable(-1), 0)
+        self.assertEqual(self.usable(-(2**40)), 0)
+
+    def test_a_usable_seed_is_kept(self):
+        self.assertEqual(self.usable(42), 42)
+        self.assertEqual(self.usable(0), 0)
+        self.assertEqual(self.usable(app.SEED_LIMIT - 1), app.SEED_LIMIT - 1)
+
+    def test_unusable_values_fall_back_to_zero(self):
+        for value in (None, "", "abc", float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                self.assertEqual(self.usable(value), 0)
+
+    def test_a_float_seed_is_truncated_then_clamped(self):
+        self.assertEqual(self.usable(7.9), 7)
+        # -1.5 truncates to -1, which is the value NumPy rejects.
+        self.assertEqual(self.usable(-1.5), 0)
+
+    def test_randomizing_ignores_the_typed_value(self):
+        self.assertNotEqual(app.resolve_seed(-1, True), -1)
+        for _ in range(20):
+            np.random.default_rng(app.resolve_seed(-1, True))
+
+    def test_the_seed_input_rejects_negative_values(self):
+        # The clamp above is the backstop; the input is what stops a typed -1
+        # from ever becoming a seed the user thinks was used.
+        demo = app.build_app()
+        numbers = [
+            block
+            for block in demo.blocks.values()
+            if isinstance(block, gr.Number) and block.label == "Random seed"
+        ]
+        self.assertEqual(len(numbers), 1)
+        self.assertEqual(numbers[0].minimum, 0)
 
 
 class CancellationTests(unittest.TestCase):
