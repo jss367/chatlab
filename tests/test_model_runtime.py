@@ -613,6 +613,17 @@ class ScoreTextGuardTests(unittest.TestCase):
 
 
 
+class NeverRoundTrips(FakeTokenizer):
+    """Declines both joint paths: no offsets, and a decode that says nothing true.
+
+    That combination is the only way to reach the last-resort split, so it is
+    the only way to test what that split builds.
+    """
+
+    def decode(self, ids, skip_special_tokens=False, **kwargs) -> str:
+        return " nope"
+
+
 class LastResortTrailingSpecialTests(unittest.TestCase):
     """The fallback that encodes the halves apart still has to build a passage.
 
@@ -644,6 +655,28 @@ class LastResortTrailingSpecialTests(unittest.TestCase):
 
         self.assertNotIn(closing, split.context_ids)
         self.assertTrue(split.seam_verified)
+
+    def test_the_opening_special_survives_the_sweep(self):
+        # An empty context is nothing but its prepended BOS, which is the last
+        # id only because it is also the first. Sweeping it off would score the
+        # text as if the passage never began — while claiming to be exact.
+        tokenizer = NeverRoundTrips(is_fast=False, trailing_specials=0)
+        opening = tokenizer.vocab["<s>"]
+
+        split = split_context_and_text(tokenizer, "", "France")
+
+        self.assertEqual(split.context_ids, [opening])
+        self.assertTrue(split.seam_verified)
+
+    def test_a_closing_special_still_goes_when_there_is_content(self):
+        tokenizer = NeverRoundTrips(is_fast=False, trailing_specials=1)
+        opening = tokenizer.vocab["<s>"]
+        closing = tokenizer.vocab["</s>"]
+
+        split = split_context_and_text(tokenizer, "The capital of", " France")
+
+        self.assertEqual(split.context_ids[0], opening)
+        self.assertNotIn(closing, split.context_ids)
 
 
 if __name__ == "__main__":

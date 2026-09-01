@@ -320,10 +320,19 @@ def split_context_and_text(
     # text would be scored as what follows the end of a passage rather than
     # what follows the context. Nothing was appended when the caller spells
     # out its own specials, so only sweep when the tokenizer added them.
+    #
+    # Only specials standing after the context's own tokens were appended. An
+    # empty context encodes to nothing but the prepended BOS, which is last
+    # only because it is also first — dropping it would score the text as if
+    # the passage never began, so a run of specials with no content in front
+    # of it is left alone.
     if add_special_tokens:
         specials = set(getattr(tokenizer, "all_special_ids", None) or ())
-        while context_ids and context_ids[-1] in specials:
-            context_ids.pop()
+        content = [
+            index for index, value in enumerate(context_ids) if value not in specials
+        ]
+        if content:
+            del context_ids[content[-1] + 1 :]
 
     return SplitPassage(
         context_ids,
