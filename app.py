@@ -240,6 +240,40 @@ def idle_state(
     )
 
 
+BUSY_STATUS = "A response is already generating. Press Stop first."
+
+
+def busy_state():
+    """Refuse to start a generation while one is running, touching nothing else.
+
+    Gradio reads a listener's inputs when the request is queued, so a Retry or
+    an Edit clicked mid-stream arrives holding the conversation as it looked at
+    click time. Publishing that snapshot - which is what idle_state() would do,
+    since it returns copy_turns(turns) - would overwrite whatever the running
+    generation has written since, silently erasing a whole exchange. So this
+    refusal skips the chatbot and the conversation state entirely, along with
+    the prompt box and the token panel, and reports the reason.
+
+    The buttons are restored to idle rather than left busy: if the running
+    generation happens to finish between the check and this yield, a "busy"
+    button state would strand the user with a dead Send button, whereas an
+    idle one is corrected by the very next frame the generation publishes.
+    """
+
+    return (
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        gr.skip(),
+        BUSY_STATUS,
+        gr.skip(),
+        *send_stop_buttons(False),
+        gr.skip(),
+        gr.skip(),
+    )
+
+
 def generate_reply(
     turns: list[dict],
     prompt_text: str,
@@ -353,6 +387,13 @@ def chat(
     seed,
     randomize_seed: bool,
 ):
+    if MANAGER.busy:
+        # Before anything else, including the checks below: every other exit
+        # from this function writes the conversation back, and while another
+        # generation is streaming that write is a stale overwrite.
+        yield busy_state()
+        return
+
     turns = copy_turns(turns)
     message = (prompt_text or "").strip()
     if not message:
@@ -392,6 +433,12 @@ def regenerate_from(
 ):
     """Throw away everything after the user turn at ``position`` and reply again."""
 
+    if MANAGER.busy:
+        # Covers Retry and the chatbot's own retry button, which reach a
+        # generation only through here.
+        yield busy_state()
+        return
+
     turns = copy_turns(turns)
     if position is None:
         yield idle_state(prompt_text, turns, "There is nothing to retry.")
@@ -427,6 +474,12 @@ def retry_message(event: gr.RetryData, prompt_text, turns, *settings):
 
 
 def edit_message(event: gr.EditData, prompt_text, turns, *settings):
+    if MANAGER.busy:
+        # Not just the branch that regenerates: editing an assistant turn
+        # rewrites the conversation on its own, from the same stale snapshot.
+        yield busy_state()
+        return
+
     turns = copy_turns(turns)
     found = locate(turns, event.index)
     if found is None:
@@ -853,6 +906,12 @@ def build_app() -> gr.Blocks:
         # chatbot and the state, resurrecting what was just removed. Send,
         # Retry and Edit are exempt because they *are* the generation - they
         # re-enter generate_reply, and they are what everything else cancels.
+        # They cannot be made to cancel each other either: Gradio captures a
+        # listener's inputs when the request is queued, so the survivor would
+        # rebuild the conversation from a snapshot taken before the cancelled
+        # run wrote anything. A shared concurrency group has the same flaw - it
+        # only delays the stale handler. Each of them refuses outright instead
+        # while MANAGER.busy (see busy_state).
         undo_button.click(undo_last, conversation_state, undo_outputs, cancels=running)
         chatbot.undo(undo_message, conversation_state, undo_outputs, cancels=running)
         clear_button.click(

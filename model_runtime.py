@@ -155,10 +155,27 @@ class ModelManager:
         self.local_path: Path | None = None
         self.device_name: str | None = None
         self._lock = threading.RLock()
+        # A separate, non-reentrant flag for "a generation is running right
+        # now". The model lock cannot answer that question: it is reentrant
+        # (load() nests unload() inside it), so a test on the holding thread -
+        # and, more importantly, any future nested use - would see it as free.
+        self._generating = threading.Lock()
 
     @property
     def loaded(self) -> bool:
         return self.model is not None and self.tokenizer is not None
+
+    @property
+    def busy(self) -> bool:
+        """True while a generation holds the model.
+
+        Callers use this to refuse to *start* a second generation. It never
+        blocks, so the answer can be stale by the time it is acted on; the
+        model lock inside generate() remains the backstop that keeps two
+        generations from running at once.
+        """
+
+        return self._generating.locked()
 
     def download(self, model_id: str, hf_token: str | None = None) -> Path:
         from huggingface_hub import snapshot_download
@@ -319,7 +336,7 @@ class ModelManager:
     ) -> Iterator[GenerationUpdate]:
         import torch
 
-        with self._lock, torch.inference_mode():
+        with self._generating, self._lock, torch.inference_mode():
             if not self.loaded:
                 raise RuntimeError("Download and load a model before chatting.")
 

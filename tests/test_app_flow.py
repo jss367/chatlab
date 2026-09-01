@@ -253,6 +253,7 @@ class ChatFlowTests(unittest.TestCase):
     def test_a_failed_generation_stays_out_of_the_history(self):
         class Exploding:
             loaded = True
+            busy = False
 
             def generate(self, *_args, **_kwargs):
                 raise RuntimeError("out of memory")
@@ -589,6 +590,149 @@ class SaveLoadTests(unittest.TestCase):
         ]
         app.load_conversation(None, turns)
         self.assertFalse(turns[-1]["reasoning_closed"])
+
+
+class BusyRefusalTests(unittest.TestCase):
+    """A second generation is refused outright, not queued behind the first.
+
+    Gradio captures a listener's inputs when the click is queued, so a Retry or
+    an Edit that waited for the model lock and then ran would rebuild the
+    conversation from a snapshot older than everything the first generation
+    wrote - the "new question" the user sent seconds earlier simply disappears.
+    Cancelling or serializing the second handler does not help; only refusing
+    to start it does.
+
+    The refusal must therefore write neither the chatbot nor the conversation
+    state: idle_state() returns copy_turns(turns), which is exactly the stale
+    snapshot, so using it here would cause the overwrite it is guarding
+    against.
+    """
+
+    class HeldLock:
+        """A generation flag that reads as held but never blocks.
+
+        Really acquiring app.MANAGER._generating would model a running
+        generation more literally, but then deleting the busy check would
+        deadlock these tests instead of failing them: chat() would go on to
+        call generate(), which waits on that same flag. Reporting the flag as
+        held leaves the manager otherwise usable, so a missing check shows up
+        as a full stream of frames - a plain assertion failure.
+        """
+
+        def locked(self):
+            return True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+    def setUp(self):
+        self.original = app.MANAGER
+        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, app, "MANAGER", self.original)
+        # ModelManager.busy reads this flag, so the real property is exercised.
+        app.MANAGER._generating = self.HeldLock()
+        self.assertTrue(app.MANAGER.busy)
+
+    def turns(self):
+        """The conversation as it looked when the second click was queued."""
+
+        return [make_turn("user", "old q"), make_turn("assistant", "old a")]
+
+    def assert_refused(self, stream):
+        frames = list(stream)
+        self.assertEqual(len(frames), 1)
+        (frame,) = frames
+        self.assertEqual(len(frame), 11)
+        self.assertEqual(frame[STATUS], app.BUSY_STATUS)
+        # The chatbot and the conversation state are the two outputs that would
+        # carry the stale snapshot, so they are the ones that must be skipped.
+        for index in (CHATBOT, TURNS, PROMPT, STRIP, METRICS, SEED, DETAIL, ALTS):
+            self.assertIsInstance(frame[index], gr.skip().__class__)
+        # The buttons still go back to idle: the running generation republishes
+        # its own busy state on its next frame, and if it has just finished the
+        # user would otherwise be left with a dead Send button.
+        self.assertEqual(frame[SEND], gr.update(visible=True))
+        self.assertEqual(frame[STOP], gr.update(visible=False))
+        return frame
+
+    def test_sending_while_generating_is_refused(self):
+        self.assert_refused(app.chat("new question", self.turns(), *SETTINGS))
+
+    def test_an_empty_send_is_refused_before_its_own_complaint(self):
+        """ "Enter a message first." also republishes the turns, so it waits."""
+
+        self.assert_refused(app.chat("   ", self.turns(), *SETTINGS))
+
+    def test_retry_is_refused(self):
+        self.assert_refused(app.retry_last("", self.turns(), *SETTINGS))
+
+    def test_a_retry_with_nothing_to_retry_is_refused(self):
+        """ "There is nothing to retry." would write the stale turns too."""
+
+        self.assert_refused(app.retry_last("", [], *SETTINGS))
+
+    def test_the_chatbot_retry_button_is_refused(self):
+        event = gr.RetryData(None, {"index": 1, "value": "old a"})
+        self.assert_refused(app.retry_message(event, "", self.turns(), *SETTINGS))
+
+    def test_regenerating_from_a_position_is_refused(self):
+        self.assert_refused(app.regenerate_from(0, "", self.turns(), *SETTINGS))
+
+    def test_editing_a_user_message_is_refused(self):
+        event = gr.EditData(
+            None, {"index": 0, "previous_value": "old q", "value": "edited"}
+        )
+        self.assert_refused(app.edit_message(event, "", self.turns(), *SETTINGS))
+
+    def test_editing_an_assistant_message_is_refused(self):
+        """The assistant branch never generates, but it still rewrites turns."""
+
+        event = gr.EditData(
+            None, {"index": 1, "previous_value": "old a", "value": "fixed"}
+        )
+        self.assert_refused(app.edit_message(event, "", self.turns(), *SETTINGS))
+
+    def test_an_edit_of_a_missing_message_is_refused(self):
+        event = gr.EditData(None, {"index": 99, "previous_value": "gone", "value": "x"})
+        self.assert_refused(app.edit_message(event, "", self.turns(), *SETTINGS))
+
+
+class BusyFlagTests(unittest.TestCase):
+    """The flag the refusal reads has to follow a real generation."""
+
+    def setUp(self):
+        self.original = app.MANAGER
+        app.MANAGER = loaded_manager([2, 3], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, app, "MANAGER", self.original)
+
+    def test_an_idle_manager_is_not_busy(self):
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_the_manager_is_busy_while_streaming(self):
+        settings = dict(FIXED, max_new_tokens=8192)
+        stream = app.chat("hi", [], *settings.values())
+        next(stream)
+        next(stream)
+        self.assertTrue(app.MANAGER.busy)
+        # Stop closes the generator, which unwinds generate() and frees it.
+        stream.close()
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_a_finished_generation_leaves_the_manager_free(self):
+        list(app.chat("hi", [], *SETTINGS))
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_a_failed_generation_leaves_the_manager_free(self):
+        def failing(*_args, **_kwargs):
+            yield GenerationUpdate(text="Hmm", metrics=[])
+            raise RuntimeError("gpu fell over")
+
+        app.MANAGER.generate = failing
+        list(app.chat("hi", [], *SETTINGS))
+        self.assertFalse(app.MANAGER.busy)
 
 
 class CancelWiringTests(unittest.TestCase):
