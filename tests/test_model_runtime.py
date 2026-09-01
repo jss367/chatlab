@@ -144,7 +144,7 @@ class CutsCharactersInHalf:
 class ContextSplitTests(unittest.TestCase):
     def test_the_seam_is_tokenized_as_one_passage(self):
         tokenizer = FakeTokenizer()
-        context_ids, text_ids = split_context_and_text(tokenizer, "foo", "bar")
+        context_ids, text_ids, _ = split_context_and_text(tokenizer, "foo", "bar")
 
         # "foobar" merges into a single token, so scoring the two halves
         # encoded apart would measure a sequence the passage never produces.
@@ -153,7 +153,7 @@ class ContextSplitTests(unittest.TestCase):
 
     def test_a_clean_seam_keeps_every_context_token(self):
         tokenizer = FakeTokenizer()
-        context_ids, text_ids = split_context_and_text(tokenizer, "foo ", "bar")
+        context_ids, text_ids, _ = split_context_and_text(tokenizer, "foo ", "bar")
 
         self.assertEqual(
             context_ids, [0, tokenizer.vocab["foo"], tokenizer.vocab[" "]]
@@ -162,14 +162,14 @@ class ContextSplitTests(unittest.TestCase):
 
     def test_an_empty_context_still_carries_the_special_token(self):
         tokenizer = FakeTokenizer()
-        context_ids, text_ids = split_context_and_text(tokenizer, "", "bar")
+        context_ids, text_ids, _ = split_context_and_text(tokenizer, "", "bar")
 
         self.assertEqual(context_ids, [0])
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
 
     def test_a_trailing_special_token_is_not_scored_as_text(self):
         tokenizer = FakeTokenizer(trailing_specials=1)
-        context_ids, text_ids = split_context_and_text(tokenizer, "foo ", "bar")
+        context_ids, text_ids, _ = split_context_and_text(tokenizer, "foo ", "bar")
 
         # The appended EOS sits after the first text token, so the seam search
         # alone would leave it in the scored segment.
@@ -180,21 +180,21 @@ class ContextSplitTests(unittest.TestCase):
 
     def test_a_trailing_special_token_is_dropped_without_a_context(self):
         tokenizer = FakeTokenizer(trailing_specials=1)
-        context_ids, text_ids = split_context_and_text(tokenizer, "", "bar")
+        context_ids, text_ids, _ = split_context_and_text(tokenizer, "", "bar")
 
         self.assertEqual(context_ids, [0])
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
 
     def test_every_trailing_empty_span_is_dropped(self):
         tokenizer = FakeTokenizer(trailing_specials=2)
-        context_ids, text_ids = split_context_and_text(tokenizer, "foo", "bar")
+        context_ids, text_ids, _ = split_context_and_text(tokenizer, "foo", "bar")
 
         self.assertEqual(context_ids, [0])
         self.assertEqual(text_ids, [tokenizer.vocab["foobar"]])
 
     def test_a_whitespace_only_context_keeps_its_token(self):
         tokenizer = FakeTokenizer()
-        context_ids, text_ids = split_context_and_text(tokenizer, " ", "bar")
+        context_ids, text_ids, _ = split_context_and_text(tokenizer, " ", "bar")
 
         # A lone space is what makes the text start with a leading-space token,
         # so it has to survive into the scored passage.
@@ -206,14 +206,14 @@ class ContextSplitTests(unittest.TestCase):
         # prefix back to text. The passage is still encoded once, so the
         # merged token is the one that gets scored.
         tokenizer = FakeTokenizer(is_fast=False)
-        context_ids, text_ids = split_context_and_text(tokenizer, "foo", "bar")
+        context_ids, text_ids, _ = split_context_and_text(tokenizer, "foo", "bar")
 
         self.assertEqual(context_ids, [0])
         self.assertEqual(text_ids, [tokenizer.vocab["foobar"]])
 
     def test_a_slow_tokenizer_drops_its_trailing_special_token(self):
         tokenizer = FakeTokenizer(is_fast=False, trailing_specials=1)
-        context_ids, text_ids = split_context_and_text(tokenizer, "foo ", "bar")
+        context_ids, text_ids, _ = split_context_and_text(tokenizer, "foo ", "bar")
 
         self.assertEqual(
             context_ids, [0, tokenizer.vocab["foo"], tokenizer.vocab[" "]]
@@ -226,7 +226,7 @@ class ContextSplitTests(unittest.TestCase):
         # than move the seam by a token and score part of the context, the
         # split gives up and each half is encoded on its own.
         tokenizer = EatsTheLeadingSpace(is_fast=False)
-        context_ids, text_ids = split_context_and_text(tokenizer, " foo", "bar")
+        context_ids, text_ids, _ = split_context_and_text(tokenizer, " foo", "bar")
 
         self.assertEqual(context_ids, [0, tokenizer.vocab[" "], tokenizer.vocab["foo"]])
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
@@ -236,15 +236,47 @@ class ContextSplitTests(unittest.TestCase):
         # the split lands on gives the mistake away: it has to reach the seam,
         # and a run of bytes cut inside a character does not.
         tokenizer = CutsCharactersInHalf()
-        context_ids, text_ids = split_context_and_text(tokenizer, "日本語", "です")
+        context_ids, text_ids, _ = split_context_and_text(tokenizer, "日本語", "です")
 
         self.assertEqual(context_ids, list("日本語".encode()))
         self.assertEqual(text_ids, list("です".encode()))
 
+    def test_a_checked_seam_reports_itself_as_verified(self):
+        # Both the offsets path and the decoding path cut one joint encoding,
+        # so the ids are the passage's own and the caller has nothing to warn
+        # about.
+        for tokenizer in (FakeTokenizer(), FakeTokenizer(is_fast=False)):
+            with self.subTest(is_fast=tokenizer.is_fast):
+                split = split_context_and_text(tokenizer, "foo", "bar")
+
+                self.assertTrue(split.seam_verified)
+
+    def test_an_unverifiable_seam_reports_itself(self):
+        # Encoding the halves apart is still better than refusing to score at
+        # all — the numbers are off by at most the token spanning the seam —
+        # but the caller has to be able to say the numbers are approximate.
+        cases = (
+            (EatsTheLeadingSpace(is_fast=False), " foo", "bar"),
+            (CutsCharactersInHalf(), "日本語", "です"),
+        )
+        for tokenizer, context, text in cases:
+            with self.subTest(tokenizer=type(tokenizer).__name__):
+                split = split_context_and_text(tokenizer, context, text)
+
+                self.assertFalse(split.seam_verified)
+
+    def test_a_fallback_without_a_context_is_still_exact(self):
+        # No context means no seam for a merge to cross: the text is encoded
+        # exactly as the joint passage would encode it, so warning here would
+        # be noise on every score.
+        split = split_context_and_text(EatsTheLeadingSpace(is_fast=False), "", "bar")
+
+        self.assertTrue(split.seam_verified)
+
     def test_a_tokenizer_that_cannot_decode_falls_back(self):
         tokenizer = FakeTokenizer(is_fast=False)
         tokenizer.decode = None
-        context_ids, text_ids = split_context_and_text(tokenizer, "foo", "bar")
+        context_ids, text_ids, _ = split_context_and_text(tokenizer, "foo", "bar")
 
         self.assertEqual(context_ids, [0, tokenizer.vocab["foo"]])
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
@@ -253,7 +285,7 @@ class ContextSplitTests(unittest.TestCase):
 class ScoringEncodeTests(unittest.TestCase):
     def test_a_whitespace_only_context_is_scored_not_discarded(self):
         tokenizer = FakeTokenizer()
-        context_ids, text_ids = encode_for_scoring(tokenizer, "bar", context=" ")
+        context_ids, text_ids, _ = encode_for_scoring(tokenizer, "bar", context=" ")
 
         self.assertEqual(context_ids, [0, tokenizer.vocab[" "]])
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
@@ -273,7 +305,7 @@ class ScoringEncodeTests(unittest.TestCase):
         tokenizer = FakeTokenizer(
             chat_template="{{ messages }}", generation_prompt="<|assistant|> "
         )
-        context_ids, text_ids = encode_for_scoring(
+        context_ids, text_ids, _ = encode_for_scoring(
             tokenizer, "bar", context="hello", use_chat_template=True
         )
 
@@ -291,7 +323,7 @@ class ScoringEncodeTests(unittest.TestCase):
         # rendered prompt and the reply apart would report ranks for a first
         # token the model never sees.
         tokenizer = FakeTokenizer(chat_template="{{ messages }}")
-        context_ids, text_ids = encode_for_scoring(
+        context_ids, text_ids, _ = encode_for_scoring(
             tokenizer, "bar", context="hello", use_chat_template=True
         )
 
@@ -310,7 +342,7 @@ class ScoringEncodeTests(unittest.TestCase):
         # No offsets, so the seam is found by decoding; the specials the
         # template rendered have to survive that decode to round trip.
         tokenizer = FakeTokenizer(is_fast=False, chat_template="{{ messages }}")
-        context_ids, text_ids = encode_for_scoring(
+        context_ids, text_ids, _ = encode_for_scoring(
             tokenizer, "bar", context="hello", use_chat_template=True
         )
 
@@ -329,7 +361,7 @@ class ScoringEncodeTests(unittest.TestCase):
         # The template renders its own opening special; asking the tokenizer
         # to add one as well would prepend a second <s> the model never sees.
         tokenizer = FakeTokenizer(chat_template="{{ messages }}")
-        context_ids, _ = encode_for_scoring(
+        context_ids, _, _ = encode_for_scoring(
             tokenizer, "bar", context="hello", use_chat_template=True
         )
 
@@ -340,7 +372,7 @@ class ScoringEncodeTests(unittest.TestCase):
         # Pure whitespace is not a turn worth wrapping in a user message, but
         # it still belongs in front of the text, so the plain path scores it.
         tokenizer = FakeTokenizer(chat_template="{{ messages }}")
-        context_ids, text_ids = encode_for_scoring(
+        context_ids, text_ids, _ = encode_for_scoring(
             tokenizer, "bar", context=" ", use_chat_template=True
         )
 
@@ -448,6 +480,13 @@ class ScoreTextGuardTests(unittest.TestCase):
         )
         self.assertEqual(len(result.metrics), 1)
         self.assertTrue(result.metrics[0]["scored"])
+
+    def test_an_unverifiable_seam_reaches_the_result(self):
+        manager = self.manager()
+        manager.tokenizer = EatsTheLeadingSpace(is_fast=False)
+
+        self.assertFalse(manager.score_text("bar", context=" foo").seam_verified)
+        self.assertTrue(self.manager().score_text("bar", context="foo ").seam_verified)
 
     def test_a_passage_past_the_model_window_is_refused_by_name(self):
         # The flat cap is not the only ceiling: a model with a shorter

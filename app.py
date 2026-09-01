@@ -29,6 +29,16 @@ CHART_EVERY = 16
 
 SELECT_HINT = "Select a token to inspect it."
 
+# This tokenizer offers neither offsets nor a decode that round trips, so the
+# context and the text had to be encoded apart and the token spanning the seam
+# may not be the one the whole passage produces. Everything after it is
+# unaffected, so the numbers are worth showing — just not as exact ones.
+SEAM_CAVEAT = (
+    "Approximate: this tokenizer could not confirm where the context ends, "
+    "so the first scored token may differ from the one the full passage "
+    "produces."
+)
+
 
 def status_card(title: str, detail: str, tone: str = "neutral") -> str:
     icon = {"success": "●", "error": "●", "working": "◌"}.get(tone, "○")
@@ -326,6 +336,12 @@ def score_text(
         return (skip,) * 7 + (f"Could not score that text: {error}", skip, skip)
 
     summary = summarize(result.metrics)
+    status = (
+        f"Scored {summary['token_count']:,} tokens. "
+        f"Perplexity {summary['perplexity']:,.1f}."
+    )
+    if not result.seam_verified:
+        status = f"{status} {SEAM_CAVEAT}"
     return (
         strip_update(result.metrics, scale_name, "Scored tokens — click one"),
         result.metrics,
@@ -334,7 +350,7 @@ def score_text(
         prompt_note_text(len(result.context_metrics), "", "context"),
         charts.summary_tiles(summary),
         charts.surprise_chart(result.metrics, title="Surprise per scored token"),
-        f"Scored {summary['token_count']:,} tokens. Perplexity {summary['perplexity']:,.1f}.",
+        status,
         SELECT_HINT,
         [],
     )

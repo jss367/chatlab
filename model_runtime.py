@@ -8,6 +8,7 @@ import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -54,6 +55,22 @@ def validate_model_id(model_id: str) -> str:
             "Enter a Hugging Face model ID in the form organization/model-name."
         )
     return cleaned
+
+
+class SplitPassage(NamedTuple):
+    """A passage's two token runs, and whether the seam between them is sure.
+
+    ``seam_verified`` is false only where the ids were not taken from one
+    joint encoding: the last-resort path that encodes each half alone, for a
+    tokenizer that reports no offsets and whose ``decode`` cannot say where
+    the seam fell. The scores that come back are then off by at most the one
+    token that spans the seam, and the caller is expected to say so rather
+    than present them as exact.
+    """
+
+    context_ids: list[int]
+    text_ids: list[int]
+    seam_verified: bool = True
 
 
 def model_position_limit(model) -> int | None:
@@ -204,7 +221,7 @@ def _split_by_decoding(
 
 def split_context_and_text(
     tokenizer, context: str, text: str, *, add_special_tokens: bool = True
-) -> tuple[list[int], list[int]]:
+) -> SplitPassage:
     """Tokenize ``context + text`` as one passage, then split at the seam.
 
     Encoding the two halves separately can give a different sequence from
@@ -233,7 +250,10 @@ def split_context_and_text(
     decoding a growing prefix of the one joint encoding, and only the halves
     that decode back to the passage verbatim are used. Encoding each half on
     its own is the last resort, for a tokenizer whose ``decode`` cannot say
-    where the seam fell.
+    where the seam fell. Those ids can differ from the joint encoding by the
+    one token that spans the seam, so that path clears ``seam_verified`` and
+    the caller reports the numbers as approximate rather than dropping a
+    feature the reader asked for.
     """
 
     if getattr(tokenizer, "is_fast", False):
@@ -263,15 +283,19 @@ def split_context_and_text(
                 if int(end) > int(start):
                     break
                 stop -= 1
-            return ids[:split], ids[split:stop]
+            return SplitPassage(ids[:split], ids[split:stop])
 
     halves = _split_by_decoding(
         tokenizer, context, text, add_special_tokens=add_special_tokens
     )
     if halves is not None:
-        return halves
+        return SplitPassage(*halves)
 
-    return (
+    # Last resort. With no context there is no seam for a merge to cross —
+    # the joint encoding is the text's own, plus whatever specials the
+    # tokenizer prepends — so those ids are exact. A context with characters
+    # in it is the case that cannot be checked, and it says so.
+    return SplitPassage(
         [
             int(value)
             for value in tokenizer(
@@ -279,6 +303,7 @@ def split_context_and_text(
             ).input_ids
         ],
         [int(value) for value in tokenizer(text, add_special_tokens=False).input_ids],
+        seam_verified=not context,
     )
 
 
@@ -288,7 +313,7 @@ def encode_for_scoring(
     *,
     context: str = "",
     use_chat_template: bool = False,
-) -> tuple[list[int], list[int]]:
+) -> SplitPassage:
     """Turn a context and the text to score into their two token runs.
 
     A context that carries actual words is wrapped in the chat template when
@@ -336,10 +361,16 @@ class GenerationUpdate:
 
 @dataclass(frozen=True)
 class ScoredText:
-    """Per-token measurements for text the model did not generate."""
+    """Per-token measurements for text the model did not generate.
+
+    ``seam_verified`` carries :class:`SplitPassage`'s answer through to the
+    interface, which says so rather than presenting approximate numbers as
+    exact.
+    """
 
     context_metrics: list[dict]
     metrics: list[dict]
+    seam_verified: bool = True
 
 
 class ModelManager:
@@ -709,7 +740,7 @@ class ModelManager:
             if not text:
                 raise ValueError("Enter some text to score.")
 
-            context_ids, text_ids = encode_for_scoring(
+            context_ids, text_ids, seam_verified = encode_for_scoring(
                 tokenizer, text, context=context, use_chat_template=use_chat_template
             )
 
@@ -744,4 +775,5 @@ class ModelManager:
                 metrics=[
                     metric for metric in metrics if metric["segment"] == "response"
                 ],
+                seam_verified=seam_verified,
             )
