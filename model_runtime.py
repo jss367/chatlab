@@ -35,7 +35,16 @@ PROMPT_SCORE_LIMIT = 1024
 SCORE_TOKEN_LIMIT = 4096
 
 # Where a config keeps the length of its position table, newest name first.
-POSITION_LIMIT_ATTRIBUTES = ("max_position_embeddings", "n_positions", "n_ctx")
+# ``max_seq_len`` is MPT's and DBRX's spelling. RWKV's ``context_length`` is
+# deliberately absent: it is recurrent, so a longer sequence costs accuracy
+# rather than indexing off the end of a table, and capping it would refuse
+# passages that run.
+POSITION_LIMIT_ATTRIBUTES = (
+    "max_position_embeddings",
+    "n_positions",
+    "n_ctx",
+    "max_seq_len",
+)
 
 # A window shorter than this is a mislabeled config rather than a real limit —
 # no passage worth scoring would fit — so it is ignored in favour of the flat

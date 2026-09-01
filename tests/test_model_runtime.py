@@ -462,6 +462,13 @@ class ScoreTokenLimitTests(unittest.TestCase):
 
         self.assertEqual(limit, 512)
 
+    def test_mpt_style_configs_name_their_window_differently(self):
+        # MPT and DBRX call it max_seq_len; nothing else in the config says
+        # how long the window is, so missing this name means missing the cap.
+        limit = score_token_limit(Model(Config(max_seq_len=2048)))
+
+        self.assertEqual(limit, 2048)
+
     def test_a_config_that_does_not_say_keeps_the_flat_limit(self):
         # A model that carries no position table — or one whose config simply
         # does not name its window — would otherwise be blocked outright.
