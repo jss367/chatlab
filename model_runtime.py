@@ -159,6 +159,12 @@ class ModelManager:
         # now". The model lock cannot answer that question: it is reentrant
         # (load() nests unload() inside it), so a test on the holding thread -
         # and, more importantly, any future nested use - would see it as free.
+        #
+        # A plain Lock, deliberately: it is acquired and released by whichever
+        # worker thread happens to be running the generator at the time, and
+        # Gradio is free to resume a streaming handler on a different thread
+        # than the one that started it. An RLock, or any owner-checked
+        # primitive, would refuse the release from that second thread.
         self._generating = threading.Lock()
 
     @property
@@ -167,15 +173,37 @@ class ModelManager:
 
     @property
     def busy(self) -> bool:
-        """True while a generation holds the model.
+        """True while the generation slot is reserved.
 
-        Callers use this to refuse to *start* a second generation. It never
-        blocks, so the answer can be stale by the time it is acted on; the
-        model lock inside generate() remains the backstop that keeps two
-        generations from running at once.
+        Never blocks, so it can only ever be an early exit: a caller that is
+        about to generate has to take the slot with reserve_generation()
+        rather than act on this answer.
         """
 
         return self._generating.locked()
+
+    def reserve_generation(self) -> bool:
+        """Claim the right to run a generation, or report that it is taken.
+
+        Never blocks: a caller that loses the race must refuse, not queue.
+        Queuing is what corrupts the conversation - a handler that waited would
+        resume holding the inputs Gradio captured when its click was queued,
+        and write that stale snapshot over everything the running generation
+        produced in the meantime.
+
+        The caller must reserve *before* publishing its first frame and release
+        in a ``finally``. Checking :attr:`busy` and then generating is not the
+        same thing: those two steps are separated by a yield, and Gradio does
+        not resume a streaming handler until the browser has been sent the
+        frame, so the window between them is a network round trip wide.
+        """
+
+        return self._generating.acquire(blocking=False)
+
+    def release_generation(self) -> None:
+        """Give the generation slot back. Pairs with a successful reservation."""
+
+        self._generating.release()
 
     def download(self, model_id: str, hf_token: str | None = None) -> Path:
         from huggingface_hub import snapshot_download
@@ -334,9 +362,44 @@ class ModelManager:
         max_new_tokens: int,
         seed: int,
     ) -> Iterator[GenerationUpdate]:
+        # The application reserves the slot before it publishes its first
+        # frame, so by the time this body runs the reservation is normally
+        # already held - on its behalf, not by it. Taking it again would
+        # deadlock, so this only claims the slot when nobody else has, which is
+        # the case for a direct call (tests, or any future non-streaming use):
+        # such a call still reports as busy for its whole run and frees the
+        # slot afterwards. It releases only what it took.
+        #
+        # Mutual exclusion never rested on this flag anyway. The model lock
+        # below is what keeps two generations off the model at once, and it is
+        # still acquired unconditionally.
+        reserved = self.reserve_generation()
+        try:
+            yield from self._generate(
+                messages,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                max_new_tokens=max_new_tokens,
+                seed=seed,
+            )
+        finally:
+            if reserved:
+                self.release_generation()
+
+    def _generate(
+        self,
+        messages: list[dict],
+        *,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        max_new_tokens: int,
+        seed: int,
+    ) -> Iterator[GenerationUpdate]:
         import torch
 
-        with self._generating, self._lock, torch.inference_mode():
+        with self._lock, torch.inference_mode():
             if not self.loaded:
                 raise RuntimeError("Download and load a model before chatting.")
 

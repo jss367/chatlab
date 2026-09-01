@@ -286,7 +286,56 @@ def generate_reply(
     seed,
     randomize_seed: bool,
 ):
-    """Stream one assistant reply for ``turns``, which must end with a user turn."""
+    """Stream one assistant reply for ``turns``, which must end with a user turn.
+
+    The generation slot is reserved here, before the first frame is published,
+    because this is the first moment a handler is committed to generating. The
+    MANAGER.busy checks in chat(), regenerate_from() and edit_message() are an
+    early exit, not the guard: between such a check and the model lock that
+    generate() takes sits the "Generating…" yield, and Gradio does not resume a
+    handler until it has serialized that frame and sent it to the browser. A
+    second click arriving inside that round trip used to sail past a manager
+    that looked idle and overwrite the conversation from its stale snapshot.
+    """
+
+    if not MANAGER.reserve_generation():
+        yield busy_state()
+        return
+
+    try:
+        yield from _stream_reply(
+            turns,
+            prompt_text,
+            system_prompt,
+            keep_reasoning,
+            temperature,
+            top_p,
+            top_k,
+            max_new_tokens,
+            seed,
+            randomize_seed,
+        )
+    finally:
+        # Every exit runs this: a finished stream, a failure, and - the one
+        # that matters - cancellation, where Gradio throws GeneratorExit in at
+        # whichever yield the stream is parked on. Leaving the slot reserved
+        # there would wedge the app: Send would refuse forever.
+        MANAGER.release_generation()
+
+
+def _stream_reply(
+    turns: list[dict],
+    prompt_text: str,
+    system_prompt: str,
+    keep_reasoning: bool,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    max_new_tokens: int,
+    seed,
+    randomize_seed: bool,
+):
+    """The body of generate_reply(), run with the generation slot held."""
 
     turns = copy_turns(turns)
     used_seed = resolve_seed(seed, randomize_seed)

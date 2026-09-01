@@ -255,6 +255,12 @@ class ChatFlowTests(unittest.TestCase):
             loaded = True
             busy = False
 
+            def reserve_generation(self):
+                return True
+
+            def release_generation(self):
+                pass
+
             def generate(self, *_args, **_kwargs):
                 raise RuntimeError("out of memory")
                 yield  # pragma: no cover - makes this a generator
@@ -612,21 +618,24 @@ class BusyRefusalTests(unittest.TestCase):
         """A generation flag that reads as held but never blocks.
 
         Really acquiring app.MANAGER._generating would model a running
-        generation more literally, but then deleting the busy check would
-        deadlock these tests instead of failing them: chat() would go on to
-        call generate(), which waits on that same flag. Reporting the flag as
-        held leaves the manager otherwise usable, so a missing check shows up
-        as a full stream of frames - a plain assertion failure.
+        generation more literally, but then deleting a refusal would deadlock
+        these tests instead of failing them. Reporting the flag as held and
+        every reservation as lost leaves the manager otherwise usable, so a
+        missing refusal shows up as a full stream of frames - a plain
+        assertion failure.
+
+        Both refusals read this: the early MANAGER.busy check in the handler
+        and, behind it, generate_reply()'s reservation.
         """
 
         def locked(self):
             return True
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc_info):
+        def acquire(self, blocking=True):
             return False
+
+        def release(self):  # pragma: no cover - a failed acquire never pairs
+            raise AssertionError("released a reservation that was never taken")
 
     def setUp(self):
         self.original = app.MANAGER
@@ -711,13 +720,36 @@ class BusyFlagTests(unittest.TestCase):
     def test_an_idle_manager_is_not_busy(self):
         self.assertFalse(app.MANAGER.busy)
 
-    def test_the_manager_is_busy_while_streaming(self):
+    def streaming(self, message="hi", turns=None):
+        """A generation parked on its first frame, closed when the test ends."""
+
         settings = dict(FIXED, max_new_tokens=8192)
-        stream = app.chat("hi", [], *settings.values())
+        stream = app.chat(
+            message, turns if turns is not None else [], *settings.values()
+        )
+        self.addCleanup(stream.close)
+        return stream
+
+    def test_the_first_frame_already_marks_the_manager_busy(self):
+        """The window this closes: the "Generating…" frame is a suspension point.
+
+        Gradio does not resume a streaming handler until it has serialized that
+        frame and shipped it to the browser, so MANAGER.generate() - and the
+        lock it used to be the only thing to take - is a network round trip
+        away. Any click landing in there found an idle manager.
+        """
+
+        stream = self.streaming()
+        self.assertFalse(app.MANAGER.busy)
+        next(stream)
+        self.assertTrue(app.MANAGER.busy, "the first frame left the slot free")
+
+    def test_the_manager_is_busy_while_streaming(self):
+        stream = self.streaming()
         next(stream)
         next(stream)
         self.assertTrue(app.MANAGER.busy)
-        # Stop closes the generator, which unwinds generate() and frees it.
+        # Stop closes the generator, which unwinds generate_reply() and frees it.
         stream.close()
         self.assertFalse(app.MANAGER.busy)
 
@@ -726,13 +758,152 @@ class BusyFlagTests(unittest.TestCase):
         self.assertFalse(app.MANAGER.busy)
 
     def test_a_failed_generation_leaves_the_manager_free(self):
+        """The reservation outlives the runtime, so its release must too.
+
+        Replacing generate() takes the manager's own bookkeeping out of the
+        picture: what frees the slot here is generate_reply()'s finally.
+        """
+
         def failing(*_args, **_kwargs):
             yield GenerationUpdate(text="Hmm", metrics=[])
             raise RuntimeError("gpu fell over")
 
         app.MANAGER.generate = failing
-        list(app.chat("hi", [], *SETTINGS))
+        stream = app.chat("hi", [], *SETTINGS)
+        next(stream)
+        self.assertTrue(app.MANAGER.busy)
+        list(stream)
         self.assertFalse(app.MANAGER.busy)
+
+    def test_cancelling_the_first_frame_frees_the_slot(self):
+        """Stop before a single token: the reservation is already outstanding."""
+
+        stream = self.streaming()
+        next(stream)
+        stream.close()
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_a_cancelled_generation_does_not_wedge_the_app(self):
+        """The regression to fear: every later Send refused, forever."""
+
+        stream = self.streaming()
+        next(stream)
+        stream.close()
+
+        final = list(app.chat("again", [], *SETTINGS))[-1]
+        self.assertNotEqual(final[STATUS], app.BUSY_STATUS)
+        self.assertEqual([turn["role"] for turn in final[TURNS]], ["user", "assistant"])
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_cancelling_still_releases_the_model_lock(self):
+        stream = self.streaming()
+        next(stream)
+        stream.close()
+
+        acquired = app.MANAGER._lock.acquire(blocking=False)
+        self.assertTrue(acquired, "the model lock survived cancellation")
+        app.MANAGER._lock.release()
+
+    def test_a_direct_generate_call_reserves_the_slot_itself(self):
+        """Nothing above generate() has reserved anything here.
+
+        The runtime is used directly by tests and could be used directly by a
+        non-streaming caller, so it still has to claim - and free - the slot
+        when it finds it available, without deadlocking against the reservation
+        generate_reply() normally holds on its behalf.
+        """
+
+        stream = app.MANAGER.generate(
+            [{"role": "user", "content": "hi"}],
+            temperature=0.0,
+            top_p=1.0,
+            top_k=0,
+            max_new_tokens=8192,
+            seed=42,
+        )
+        self.addCleanup(stream.close)
+        next(stream)
+        self.assertTrue(app.MANAGER.busy)
+        stream.close()
+        self.assertFalse(app.MANAGER.busy)
+
+
+class FirstFrameWindowTests(unittest.TestCase):
+    """A second click landing before the first frame is answered is refused.
+
+    Round 7 refused it by testing MANAGER.busy on entry, which is a check the
+    running generation had not yet earned: it publishes "Generating…" and
+    suspends there, and Gradio only resumes it - and only then reaches the
+    model - once the browser has the frame. A Retry or an Edit arriving inside
+    that round trip sailed through and rebuilt the conversation from the
+    snapshot Gradio captured when its own click was queued, erasing the
+    exchange the running generation had just added.
+    """
+
+    def setUp(self):
+        self.original = app.MANAGER
+        app.MANAGER = loaded_manager([2, 3], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, app, "MANAGER", self.original)
+
+    def stale(self):
+        """The conversation as it looked before the running generation began."""
+
+        return [make_turn("user", "old q"), make_turn("assistant", "old a")]
+
+    def parked_at_the_first_frame(self):
+        settings = dict(FIXED, max_new_tokens=8192)
+        stream = app.chat("new question", self.stale(), *settings.values())
+        self.addCleanup(stream.close)
+        frame = next(stream)
+        self.assertEqual(len(frame), 11)
+        return stream, frame
+
+    def assert_refused(self, competing):
+        frames = list(competing)
+        self.assertEqual(len(frames), 1)
+        (frame,) = frames
+        self.assertEqual(len(frame), 11)
+        self.assertEqual(frame[STATUS], app.BUSY_STATUS)
+        # The two outputs that would carry the stale snapshot.
+        for index in (CHATBOT, TURNS):
+            self.assertEqual(frame[index], gr.skip())
+        self.assertEqual(frame[SEND], gr.update(visible=True))
+        self.assertEqual(frame[STOP], gr.update(visible=False))
+
+    def test_a_retry_in_the_window_is_refused(self):
+        _stream, frame = self.parked_at_the_first_frame()
+        self.assertEqual(frame[TURNS][2]["content"], "new question")
+        self.assert_refused(app.retry_last("", self.stale(), *SETTINGS))
+
+    def test_an_edit_in_the_window_is_refused(self):
+        self.parked_at_the_first_frame()
+        event = gr.EditData(
+            None, {"index": 0, "previous_value": "old q", "value": "edited"}
+        )
+        self.assert_refused(app.edit_message(event, "", self.stale(), *SETTINGS))
+
+    def test_a_second_send_in_the_window_is_refused(self):
+        self.parked_at_the_first_frame()
+        self.assert_refused(app.chat("another", self.stale(), *SETTINGS))
+
+    def test_a_competing_retry_cannot_erase_the_new_question(self):
+        """The harm, stated as an outcome rather than as a mechanism.
+
+        The retry holds the conversation from before the running generation
+        started. Publishing it at all - at any point in its life, refused or
+        not - drops the question the user just sent.
+        """
+
+        self.parked_at_the_first_frame()
+        for frame in app.retry_last("", self.stale(), *SETTINGS):
+            published = frame[TURNS]
+            if published == gr.skip():
+                continue
+            self.fail(
+                "the competing retry published a conversation without the "
+                "question the running generation had already added: "
+                f"{[turn['content'] for turn in published]}"
+            )
 
 
 class CancelWiringTests(unittest.TestCase):
