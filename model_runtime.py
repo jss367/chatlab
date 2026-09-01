@@ -429,10 +429,11 @@ def encode_for_scoring(
     Everything else goes through :func:`split_context_and_text` with the
     context **verbatim**, whitespace included. A context of a single space is a
     real choice — it decides which token the text begins with under BPE — so
-    stripping it would report ranks for a passage the reader never wrote. The
-    template path is the one exception: a message of pure whitespace is not a
-    turn worth wrapping, so it falls through to the plain path, where the
-    whitespace is still scored as the text's leading context.
+    stripping it would report ranks for a passage the reader never wrote. That
+    holds for the template path too: a turn of pure whitespace is still a turn
+    the reader asked to send, and wrapping it is what the box promised, so
+    only a genuinely empty box falls through — there is no message there for
+    any template to render.
 
     A tokenizer with no chat template at all — GPT-2, say — also falls through
     to the plain path, and ``chat_template_missing`` says so. Scoring is not
@@ -448,7 +449,7 @@ def encode_for_scoring(
     """
 
     template = getattr(tokenizer, "chat_template", None)
-    wants_template = bool(context.strip()) and use_chat_template
+    wants_template = bool(context) and use_chat_template
     if wants_template and template:
         rendered = tokenizer.apply_chat_template(
             [{"role": "user", "content": context}],

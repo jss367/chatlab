@@ -375,16 +375,29 @@ class ScoringEncodeTests(unittest.TestCase):
         self.assertNotIn(tokenizer.vocab["<s>"], context_ids)
         self.assertEqual(context_ids[0], tokenizer.vocab["<|user|>"])
 
-    def test_a_whitespace_only_context_skips_the_chat_template(self):
-        # Pure whitespace is not a turn worth wrapping in a user message, but
-        # it still belongs in front of the text, so the plain path scores it.
+    def test_a_whitespace_only_context_is_wrapped_as_a_turn(self):
+        # A turn of pure whitespace is still the turn the reader asked to
+        # send. Dropping the template for it would quietly score the raw
+        # characters instead: no role markers, no generation prompt, and no
+        # caveat either, because the model has a template all along.
         tokenizer = FakeTokenizer(chat_template="{{ messages }}")
-        context_ids, text_ids, *_ = encode_for_scoring(
+        split = encode_for_scoring(
             tokenizer, "bar", context=" ", use_chat_template=True
         )
 
-        self.assertEqual(context_ids, [0, tokenizer.vocab[" "]])
-        self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+        self.assertEqual(split.context_ids[0], tokenizer.vocab["<|user|>"])
+        self.assertNotIn(tokenizer.vocab["<s>"], split.context_ids)
+        self.assertFalse(split.chat_template_missing)
+
+    def test_an_empty_context_is_not_wrapped_as_a_turn(self):
+        # An empty box holds no message for a template to render, so this is
+        # the plain path by nature rather than a request that got dropped.
+        tokenizer = FakeTokenizer(chat_template="{{ messages }}")
+
+        self.assertEqual(
+            encode_for_scoring(tokenizer, "bar", context="", use_chat_template=True),
+            split_context_and_text(tokenizer, "", "bar"),
+        )
 
     def test_a_model_without_a_chat_template_still_scores_and_says_so(self):
         # GPT-2 and friends have no turn to wrap the context in. Refusing here
@@ -421,9 +434,21 @@ class ScoringEncodeTests(unittest.TestCase):
 
                 self.assertFalse(split.chat_template_missing)
 
-    def test_a_blank_context_raises_no_template_caveat(self):
+    def test_an_empty_context_raises_no_template_caveat(self):
         # There is no turn in an empty box for any model to wrap, so this is
         # not the missing-template case and saying it was would misdirect.
+        split = encode_for_scoring(
+            FakeTokenizer(chat_template=None),
+            "bar",
+            context="",
+            use_chat_template=True,
+        )
+
+        self.assertFalse(split.chat_template_missing)
+
+    def test_a_whitespace_turn_still_raises_the_template_caveat(self):
+        # The turn was real and the model had nothing to wrap it in, which is
+        # exactly what the caveat is for.
         split = encode_for_scoring(
             FakeTokenizer(chat_template=None),
             "bar",
@@ -431,7 +456,7 @@ class ScoringEncodeTests(unittest.TestCase):
             use_chat_template=True,
         )
 
-        self.assertFalse(split.chat_template_missing)
+        self.assertTrue(split.chat_template_missing)
 
 
 class Config:
