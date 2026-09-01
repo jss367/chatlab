@@ -286,6 +286,49 @@ def _guess_seam(
     return split
 
 
+_WRAPPER_PROBE = "the"
+
+
+def _appended_by_the_post_processor(tokenizer) -> int | None:
+    """How many ids this tokenizer's post-processor puts after a passage.
+
+    The wrapping is a property of the tokenizer, not of the passage, so it is
+    measured rather than inferred: an ordinary word is encoded both ways, and
+    whatever the wrapped encoding carries past the end of the bare one is
+    what this tokenizer appends to anything. That count then holds for the
+    reader's passage too — including a passage that cannot answer the
+    question about itself, such as one made of nothing but the very special
+    token being appended, where every reading of the ids explains them
+    equally well.
+
+    ``None`` says the measurement did not come out, and then nothing about
+    the wrapping has been established: the probe would not encode one way or
+    the other, or its bare ids do not sit inside its wrapped ids with
+    specials and nothing else on either side. A normalizer that only runs
+    alongside the post-processor looks like that, and so would a probe that
+    is not an ordinary word in this vocabulary. Neither is guessed at.
+    """
+
+    specials = set(getattr(tokenizer, "all_special_ids", None) or ())
+    wrapped = _joint_ids(tokenizer, _WRAPPER_PROBE, add_special_tokens=True)
+    bare = _joint_ids(tokenizer, _WRAPPER_PROBE, add_special_tokens=False)
+    if not wrapped or not bare or any(value in specials for value in bare):
+        return None
+
+    starts = [
+        index
+        for index in range(len(wrapped) - len(bare) + 1)
+        if wrapped[index : index + len(bare)] == bare
+    ]
+    if len(starts) != 1:
+        return None
+
+    opening, closing = wrapped[: starts[0]], wrapped[starts[0] + len(bare) :]
+    if not all(value in specials for value in opening + closing):
+        return None
+    return len(closing)
+
+
 def _end_of_written_text(tokenizer, passage: str, ids: list[int]) -> int:
     """Where ``ids`` stops being what the reader wrote, for a slow tokenizer.
 
@@ -300,24 +343,35 @@ def _end_of_written_text(tokenizer, passage: str, ids: list[int]) -> int:
     carries a real span and an appended one carries ``(0, 0)`` — and this
     asks the same question by provenance, of a tokenizer with no offsets.
 
-    Encoding the passage a second time with ``add_special_tokens=False``
-    answers it: whatever specials survive that encoding are the reader's own,
-    and the post-processor's are the ones that appear only when it runs. So
-    ``ids`` is that bare encoding wrapped in specials, and what has to come
-    off is the length of the wrapping *suffix*. The shortest suffix that
-    explains ``ids`` is the one taken, so only the specials proven to have
-    been added come off: an extra that could be read either way — a tokenizer
-    whose opening and closing ids are the same, scoring a passage that is
-    nothing but that token — stays on the opening side, where the fallback
-    context already keeps its opening special.
+    The wrapping is the tokenizer's own, so the first thing asked is the
+    tokenizer, not the passage: :func:`_appended_by_the_post_processor`
+    measures how much of the wrapping trails a probe, and that many ids come
+    off the end of ``ids``. What is left is the reader's, whatever it is made
+    of. A passage of nothing but specials — the reader scoring a lone
+    ``</s>`` on a tokenizer that opens with one id and closes with the same
+    one — is settled that way and no other: read off the passage alone, its
+    every arrangement is consistent, so the reader's token and the appended
+    closer cannot be told apart there at all.
 
-    The second encoding is only asked for when there is a trailing special to
-    account for, so a passage that ends in an ordinary token still costs one
-    encoding. Where the probe cannot be encoded, or where ``ids`` is not the
-    bare encoding wrapped in specials — a normalizer that runs differently
-    with the post-processor, say — nothing has been proven, and the whole
-    trailing run comes off as it did before: a pasted token can still be lost
-    there, but no reader is scored on a closer they never wrote.
+    A post-processor that appends conditionally can still leave a passage
+    with less trailing wrapping than the probe measured, and a count measured
+    elsewhere may not be subtracted from a passage that contradicts it. There
+    the passage is asked after all, as it was before there was a probe:
+    encoding it again with ``add_special_tokens=False`` says which specials
+    are the reader's, because whatever survives that encoding is theirs and
+    the post-processor's are the ones that appear only when it runs, so
+    ``ids`` is that bare encoding wrapped in specials and the wrapping
+    *suffix* is what comes off. The shortest such suffix is taken, which is
+    what leaves the ambiguous case above to the measurement rather than to
+    this.
+
+    Where neither the measurement nor the passage proves anything — the probe
+    refused, and a normalizer that rewrites the passage when the
+    post-processor is off — the whole trailing run comes off as it always
+    did: a pasted token can still be lost there, but no reader is scored on a
+    closer they never wrote. None of this is asked for unless there is a
+    trailing special to account for, so a passage that ends in an ordinary
+    token still costs the one encoding it always did.
     """
 
     specials = set(getattr(tokenizer, "all_special_ids", None) or ())
@@ -327,13 +381,17 @@ def _end_of_written_text(tokenizer, passage: str, ids: list[int]) -> int:
     if swept == len(ids):
         return len(ids)
 
+    # An appended special is part of the trailing run, so a measurement that
+    # claims more than that run holds is not describing this passage.
+    appended = _appended_by_the_post_processor(tokenizer)
+    if appended is not None and appended <= len(ids) - swept:
+        return len(ids) - appended
+
+    # The same bound holds for a suffix read off the passage itself; the
+    # opening specials are whatever is left in front of the bare encoding.
     bare = _joint_ids(tokenizer, passage, add_special_tokens=False)
     if not bare:
         return swept
-
-    # An appended special is part of the trailing run, so the suffix to drop
-    # is never longer than that run; the opening specials are whatever is
-    # left in front of the bare encoding.
     for appended in range(len(ids) - swept + 1):
         end = len(ids) - appended
         start = end - len(bare)

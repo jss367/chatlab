@@ -154,6 +154,30 @@ class RefusesTheProbe(FakeTokenizer):
         )
 
 
+class SkipsADoubledCloser(FakeTokenizer):
+    """Appends its closers only where the text does not already end in one.
+
+    A post-processor that avoids writing ``</s></s>`` behaves this way, and
+    it means the wrapping measured on an ordinary probe is more than such a
+    passage carries. A count measured elsewhere says nothing about a passage
+    that contradicts it, so the passage itself has to answer for its own
+    trailing specials.
+    """
+
+    def __call__(self, text, return_offsets_mapping=False, add_special_tokens=True):
+        doubled = text.endswith("</s>")
+        keep = self.trailing_specials
+        self.trailing_specials = 0 if doubled else keep
+        try:
+            return super().__call__(
+                text,
+                return_offsets_mapping=return_offsets_mapping,
+                add_special_tokens=add_special_tokens,
+            )
+        finally:
+            self.trailing_specials = keep
+
+
 class CutsCharactersInHalf:
     """One token per byte, as byte-level BPE does when it has no merge left.
 
@@ -279,6 +303,32 @@ class ContextSplitTests(unittest.TestCase):
         )
         self.assertEqual(text_ids, [tokenizer.vocab["</s>"]])
 
+    def test_an_all_special_passage_keeps_the_token_the_reader_wrote(self):
+        # The passage is nothing but special tokens: the tokenizer opens with
+        # <s>, the reader wrote </s>, and the post-processor closed with the
+        # same </s>. Nothing about the passage itself can say which of the
+        # two closers is the reader's — every reading of it explains the ids —
+        # so the wrapping is measured on the tokenizer instead, and the
+        # reader's token is the one that gets scored.
+        tokenizer = FakeTokenizer(is_fast=False, trailing_specials=1)
+        context_ids, text_ids, *_ = split_context_and_text(tokenizer, "", "</s>")
+
+        self.assertEqual(context_ids, [tokenizer.vocab["<s>"]])
+        self.assertEqual(text_ids, [tokenizer.vocab["</s>"]])
+
+    def test_a_wrapper_the_passage_contradicts_is_not_applied_to_it(self):
+        # The probe says two closers are appended, but this passage ends in
+        # one special token altogether, so the count measured elsewhere is
+        # not subtracted here. The passage is asked instead, and it answers:
+        # nothing was appended to it, and the </s> is the reader's.
+        tokenizer = SkipsADoubledCloser(is_fast=False, trailing_specials=2)
+        context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo ", "</s>")
+
+        self.assertEqual(
+            context_ids, [0, tokenizer.vocab["foo"], tokenizer.vocab[" "]]
+        )
+        self.assertEqual(text_ids, [tokenizer.vocab["</s>"]])
+
     def test_the_offsets_path_keeps_a_pasted_trailing_special_token(self):
         # The fast path never had to guess, and still does not: the pasted
         # token carries a real span and the appended one carries (0, 0).
@@ -373,6 +423,99 @@ class ContextSplitTests(unittest.TestCase):
         self.assertEqual(split.context_ids, [0])
         self.assertEqual(split.text_ids, [tokenizer.vocab["foobar"]])
         self.assertFalse(split.seam_verified)
+
+
+def _gpt2_or_none():
+    """The cached GPT-2 tokenizer, or ``None`` where it is not on this machine.
+
+    The vocabulary is the point: a real one where the literal
+    ``<|endoftext|>`` a reader might paste and the id a post-processor would
+    append are the same token, which is the case the fake tokenizers can only
+    assert into being.
+    """
+
+    try:
+        from transformers import AutoTokenizer
+
+        return AutoTokenizer.from_pretrained("gpt2", local_files_only=True)
+    except Exception:  # noqa: BLE001 - no tokenizer on this machine is fine
+        return None
+
+
+GPT2 = _gpt2_or_none()
+
+
+class WrappedWithoutOffsets:
+    """A real tokenizer given a post-processor and no offsets to search.
+
+    Transformers no longer ships a genuine slow GPT-2 class, so the slow
+    path is reached by refusing offsets rather than by asking for one. What
+    the wrapper adds is a post-processor of the shape this whole question is
+    about: an opening id and a closing id that happen to be the same token.
+    """
+
+    is_fast = False
+    chat_template = None
+
+    def __init__(self, inner, opening: list[int], closing: list[int]):
+        self._inner = inner
+        self.opening, self.closing = opening, closing
+        self.all_special_ids = list(inner.all_special_ids)
+
+    def __call__(self, text, return_offsets_mapping=False, add_special_tokens=True):
+        if return_offsets_mapping:
+            raise NotImplementedError("offset mapping needs a fast tokenizer")
+        ids = [
+            int(value)
+            for value in self._inner(text, add_special_tokens=False).input_ids
+        ]
+        if add_special_tokens:
+            ids = self.opening + ids + self.closing
+        return Encoding(input_ids=ids)
+
+    def decode(self, ids, **kwargs) -> str:
+        return self._inner.decode(list(ids), **kwargs)
+
+
+@unittest.skipIf(GPT2 is None, "the GPT-2 tokenizer is not cached on this machine")
+class RealVocabularyTests(unittest.TestCase):
+    """The all-special case with a real vocabulary behind it."""
+
+    def tokenizer(self):
+        closer = [int(GPT2.eos_token_id)]
+        return WrappedWithoutOffsets(GPT2, closer, list(closer))
+
+    def test_a_passage_of_nothing_but_specials_scores_the_pasted_one(self):
+        # The reader pasted <|endoftext|> and nothing else, so the ids are
+        # the opening id, their token, and the appended closer — all three
+        # the same number. The scored token is theirs, and the closer the
+        # post-processor wrote is not scored.
+        tokenizer = self.tokenizer()
+        eos = int(GPT2.eos_token_id)
+        self.assertEqual(
+            tokenizer("<|endoftext|>").input_ids, [eos, eos, eos]
+        )
+
+        context_ids, text_ids, *_ = split_context_and_text(
+            tokenizer, "", "<|endoftext|>"
+        )
+
+        self.assertEqual(context_ids, [eos])
+        self.assertEqual(text_ids, [eos])
+
+    def test_an_ordinary_appended_closer_still_comes_off(self):
+        tokenizer = self.tokenizer()
+        eos = int(GPT2.eos_token_id)
+        context_ids, text_ids, *_ = split_context_and_text(
+            tokenizer, "the cat sat on the ", "mat"
+        )
+
+        self.assertEqual(context_ids[0], eos)
+        self.assertNotIn(eos, text_ids)
+        # The token that straddles the seam carries the context's trailing
+        # space with it, and is scored as part of the text, as it is
+        # everywhere else.
+        self.assertEqual(GPT2.decode(text_ids), " mat")
 
 
 class ScoringEncodeTests(unittest.TestCase):
