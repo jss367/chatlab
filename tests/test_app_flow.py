@@ -31,6 +31,17 @@ PROMPT, CHATBOT, TURNS, STRIP, METRICS, STATUS, SEED, SEND, STOP, DETAIL, ALTS =
 )
 
 
+def metrics_of(payload):
+    """The metrics half of a metrics_state payload, dropping its stamp."""
+
+    _generation, metrics = payload
+    return metrics
+
+
+def select(index):
+    return gr.SelectData(None, {"index": index, "value": "x"})
+
+
 class ChatFlowTests(unittest.TestCase):
     def setUp(self):
         self.original = app.MANAGER
@@ -146,7 +157,7 @@ class ChatFlowTests(unittest.TestCase):
         )
         final = self.last(app.edit_message(event, "", turns, *SETTINGS))[-1]
         self.assertEqual(final[STRIP], [])
-        self.assertEqual(final[METRICS], [])
+        self.assertEqual(metrics_of(final[METRICS]), [])
         self.assertEqual(final[DETAIL], app.NO_TOKEN_SELECTED)
         self.assertEqual(final[ALTS], [])
 
@@ -428,6 +439,137 @@ class SeedTests(unittest.TestCase):
         self.assertEqual(numbers[0].minimum, 0)
 
 
+class TokenSelectionTests(unittest.TestCase):
+    """The strip's select listener is independent, so it can land too late.
+
+    A click made a moment before Send is resolved against the metrics of the
+    response being replaced. Publishing it would paint the old token's
+    probabilities beside the new response and leave them there: every streaming
+    frame after the opening one returns gr.skip() for these two outputs, so
+    nothing would correct them until the user clicked again.
+    """
+
+    def setUp(self):
+        self.original = app.MANAGER
+        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, app, "MANAGER", self.original)
+
+    def respond(self, turns=()):
+        """Stream one whole response and return its frames."""
+
+        return list(app.chat("hi", list(turns), *SETTINGS))
+
+    def assertDropped(self, payload):
+        self.assertEqual(app.inspect_token(payload, select(0)), (gr.skip(), gr.skip()))
+
+    def initial_metrics_state(self):
+        """The value a fresh session starts inspect_token()'s input with."""
+
+        demo = app.build_app()
+        listener = next(
+            fn
+            for fn in demo.fns.values()
+            if getattr(fn.fn, "__name__", None) == "inspect_token"
+        )
+        (state_block,) = listener.inputs
+        return state_block.value
+
+    def test_a_selection_against_the_strip_on_screen_is_published(self):
+        payload = self.respond()[-1][METRICS]
+        detail, alternatives = app.inspect_token(payload, select(0))
+        self.assertIn("Token 1", detail)
+        self.assertTrue(alternatives)
+
+    def test_a_selection_from_the_previous_response_is_dropped(self):
+        payload = self.respond()[-1][METRICS]
+        self.respond()
+        self.assertDropped(payload)
+
+    def test_the_opening_frame_alone_drops_it(self):
+        # The window the user hits is the first frame - the one that empties
+        # the strip - not the end of the stream.
+        payload = self.respond()[-1][METRICS]
+        stream = app.chat("hi", [], *SETTINGS)
+        try:
+            next(stream)
+            self.assertDropped(payload)
+        finally:
+            stream.close()
+
+    def test_a_selection_made_mid_stream_survives_the_rest_of_it(self):
+        # Later frames only append to the strip, so a token picked while the
+        # response is still arriving is still on screen when it finishes.
+        frames = self.respond()
+        detail, _alternatives = app.inspect_token(frames[1][METRICS], select(0))
+        self.assertIn("Token 1", detail)
+
+    def test_clear_drops_earlier_selections(self):
+        payload = self.respond()[-1][METRICS]
+        app.clear_chat()
+        self.assertDropped(payload)
+
+    def test_undo_drops_earlier_selections(self):
+        final = self.respond()[-1]
+        app.undo_last(final[TURNS])
+        self.assertDropped(final[METRICS])
+
+    def test_loading_a_conversation_drops_earlier_selections(self):
+        saved, _status = app.save_conversation([make_turn("user", "hi")], "")
+        final = self.respond()[-1]
+        app.load_conversation(saved["value"], final[TURNS])
+        self.assertDropped(final[METRICS])
+
+    def test_editing_an_assistant_message_drops_earlier_selections(self):
+        final = self.respond()[-1]
+        event = gr.EditData(
+            None, {"index": 1, "previous_value": "Hello world", "value": "fixed"}
+        )
+        list(app.edit_message(event, "", final[TURNS], *SETTINGS))
+        self.assertDropped(final[METRICS])
+
+    def test_a_refused_send_leaves_the_selection_alone(self):
+        # Nothing replaced the strip, so the panel beside it is still true.
+        payload = self.respond()[-1][METRICS]
+        list(app.chat("   ", [], *SETTINGS))
+        detail, _alternatives = app.inspect_token(payload, select(0))
+        self.assertIn("Token 1", detail)
+
+    def test_an_out_of_range_index_still_reports_the_token_as_gone(self):
+        payload = self.respond()[-1][METRICS]
+        detail, alternatives = app.inspect_token(payload, select(99))
+        self.assertIn("no longer available", detail)
+        self.assertEqual(alternatives, [])
+
+    def test_an_empty_strip_asks_for_a_selection(self):
+        detail, alternatives = app.inspect_token(app.empty_metrics(), select(0))
+        self.assertEqual(detail, app.NO_TOKEN_SELECTED)
+        self.assertEqual(alternatives, [])
+
+    def test_every_publisher_stamps_what_it_writes_to_the_state(self):
+        """inspect_token() unpacks the payload, so every producer must pair it."""
+
+        saved, _status = app.save_conversation([make_turn("user", "hi")], "")
+        final = self.respond()[-1]
+        event = gr.EditData(
+            None, {"index": 1, "previous_value": "Hello world", "value": "fixed"}
+        )
+        payloads = {
+            "stream": final[METRICS],
+            "clear": app.clear_chat()[3],
+            "undo": app.undo_last(final[TURNS])[4],
+            "load": app.load_conversation(saved["value"], final[TURNS])[4],
+            "edit": list(app.edit_message(event, "", final[TURNS], *SETTINGS))[-1][
+                METRICS
+            ],
+            "initial": self.initial_metrics_state(),
+        }
+        for name, payload in payloads.items():
+            with self.subTest(publisher=name):
+                generation, metrics = payload
+                self.assertIsInstance(generation, int)
+                self.assertIsInstance(metrics, list)
+
+
 class CancellationTests(unittest.TestCase):
     """What the Stop button does: Gradio closes the running generator."""
 
@@ -509,7 +651,7 @@ class UndoTests(unittest.TestCase):
             stop,
         ) = app.undo_last(turns)
         self.assertEqual(strip, [])
-        self.assertEqual(metrics, [])
+        self.assertEqual(metrics_of(metrics), [])
         self.assertEqual(detail, app.NO_TOKEN_SELECTED)
         self.assertEqual(alts, [])
         # Undo cancels the generator, which then never reaches its final yield.

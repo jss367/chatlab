@@ -6,6 +6,7 @@ import contextlib
 import html
 import os
 import random
+import threading
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -121,7 +122,57 @@ def highlighted_tokens(metrics: list[dict]) -> list[tuple[str, str]]:
     return [(metric["display_text"], metric["category"]) for metric in metrics]
 
 
-def inspect_token(metrics: list[dict], event: gr.SelectData):
+# The token strip's select listener runs independently of the generation
+# stream. Clicking a token queues its own event, and Gradio resolves that
+# event's inputs when it gets round to processing it, so a click made a moment
+# before Send can still be holding the previous response's metrics when it
+# finally runs - after the generation's opening frame has emptied the strip and
+# reset the detail panel. Publishing that click would put the old token's
+# probabilities beside the new response, and every later streaming frame
+# returns gr.skip() for those two outputs, so the stale numbers would sit there
+# until the user clicked again.
+#
+# The fix is a generation number that each click carries with it, issued and
+# compared here on the server. It cannot live in gr.State on its own: a
+# listener's state inputs are snapshotted together, so a number travelling that
+# way would go stale in lockstep with the metrics it is meant to date, and
+# every comparison would agree with itself. So the number is minted here, and
+# only rides along in the state beside the metrics it stamps. Every path that
+# replaces the strip mints a new one, which is what makes the older selections
+# detectable.
+#
+# The counter is process-wide rather than per session, so on a shared server
+# one user's generation also drops another's in-flight click. That costs the
+# second user one repeated click and never shows either of them a wrong number,
+# and the only per-session store Gradio offers is the one that cannot carry
+# this.
+_metrics_lock = threading.Lock()
+_metrics_generation = 0
+
+
+def new_metrics_generation() -> int:
+    """Stamp a new token strip, invalidating selections made against the old one."""
+
+    global _metrics_generation
+    with _metrics_lock:
+        _metrics_generation += 1
+        return _metrics_generation
+
+
+def empty_metrics() -> tuple[int, list[dict]]:
+    """The metrics payload for a path that clears the strip."""
+
+    return new_metrics_generation(), []
+
+
+def inspect_token(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
+    generation, metrics = metrics_state
+    if generation != _metrics_generation:
+        # The strip this click was made against is gone. Whatever replaced it
+        # already reset the detail panel, so leave that reset alone instead of
+        # repainting it with a token the user can no longer see.
+        return gr.skip(), gr.skip()
+
     if not metrics:
         return NO_TOKEN_SELECTED, []
 
@@ -244,7 +295,7 @@ def idle_state(
         messages,
         copy_turns(turns),
         [] if clear_tokens else gr.skip(),
-        [] if clear_tokens else gr.skip(),
+        empty_metrics() if clear_tokens else gr.skip(),
         status,
         gr.skip(),
         *send_stop_buttons(False),
@@ -357,6 +408,12 @@ def _stream_reply(
 
     turns = copy_turns(turns)
     used_seed = resolve_seed(seed, randomize_seed)
+    # Minted once for the whole stream, not once per frame: the strip is
+    # replaced by the opening frame and only appended to afterwards, so a token
+    # picked mid-stream is still on screen and its click must stay valid. What
+    # this number invalidates is every selection made against the response this
+    # one replaces.
+    generation = new_metrics_generation()
     request = model_messages(
         turns, system_prompt=system_prompt, include_reasoning=keep_reasoning
     )
@@ -380,7 +437,7 @@ def _stream_reply(
             messages,
             copy_turns(turns),
             highlight,
-            metrics,
+            (generation, metrics),
             status,
             used_seed,
             *send_stop_buttons(busy),
@@ -664,7 +721,7 @@ def undo_from(position: int | None, turns: list[dict] | None):
         messages,
         remaining,
         [],
-        [],
+        empty_metrics(),
         "Removed the last exchange.",
         NO_TOKEN_SELECTED,
         [],
@@ -696,7 +753,7 @@ def clear_chat():
         [],
         [],
         [],
-        [],
+        empty_metrics(),
         "Conversation cleared.",
         *send_stop_buttons(False),
         NO_TOKEN_SELECTED,
@@ -776,7 +833,7 @@ def load_conversation(file_path, turns):
         turns,
         system_prompt,
         [],
-        [],
+        empty_metrics(),
         f"Loaded {len(turns)} message{'s' if len(turns) != 1 else ''}.",
         NO_TOKEN_SELECTED,
         [],
@@ -800,7 +857,7 @@ def build_app() -> gr.Blocks:
         title="OLMo Token Explorer", css=CSS, theme=gr.themes.Soft()
     ) as demo:
         conversation_state = gr.State([])
-        metrics_state = gr.State([])
+        metrics_state = gr.State(empty_metrics())
 
         gr.Markdown(
             "# OLMo Token Explorer\nChat with an open model and see exactly how likely every generated token was.",
