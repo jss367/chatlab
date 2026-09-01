@@ -1,0 +1,6 @@
+accelerate>=1.2
+gradio>=5.20,<6
+huggingface-hub>=0.28
+numpy>=1.26
+torch>=2.5
+transformers>=4.57,<6
