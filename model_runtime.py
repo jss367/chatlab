@@ -89,6 +89,70 @@ def validate_model_id(model_id: str) -> str:
     return cleaned
 
 
+@dataclass(frozen=True)
+class CacheStatus:
+    """What the Hugging Face cache already holds for one model.
+
+    ``cached_bytes`` counts finished files; ``partial_files`` and
+    ``partial_bytes`` count the ``.incomplete`` blobs a cut-off download
+    left behind, which ``snapshot_download`` resumes rather than restarts.
+    """
+
+    cached_bytes: int = 0
+    partial_files: int = 0
+    partial_bytes: int = 0
+
+    @property
+    def present(self) -> bool:
+        return self.cached_bytes > 0 or self.partial_files > 0
+
+    @property
+    def total_bytes(self) -> int:
+        return self.cached_bytes + self.partial_bytes
+
+
+def cache_folder(model_id: str, cache_dir: Path | None = None) -> Path:
+    """The ``models--org--name`` folder ``huggingface_hub`` keeps a model in."""
+
+    if cache_dir is None:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        cache_dir = Path(HF_HUB_CACHE)
+    return Path(cache_dir) / f"models--{validate_model_id(model_id).replace('/', '--')}"
+
+
+def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
+    """Measure what is already on disk for ``model_id``, without touching the network."""
+
+    blobs = cache_folder(model_id, cache_dir) / "blobs"
+    if not blobs.is_dir():
+        return CacheStatus()
+    cached = partial_files = partial_bytes = 0
+    for blob in blobs.iterdir():
+        if not blob.is_file():
+            continue
+        size = blob.stat().st_size
+        if blob.name.endswith(".incomplete"):
+            partial_files += 1
+            partial_bytes += size
+        else:
+            cached += size
+    return CacheStatus(cached, partial_files, partial_bytes)
+
+
+def format_bytes(count: int) -> str:
+    """Render a byte count the way a download dialog would: ``1.2 GB``."""
+
+    size = float(count)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1000 or unit == "GB":
+            break
+        size /= 1000
+    if unit == "B":
+        return f"{count} B"
+    return f"{size:.1f} {unit}" if size < 100 else f"{size:.0f} {unit}"
+
+
 class SplitPassage(NamedTuple):
     """A passage's two token runs, and whether the seam between them is sure.
 

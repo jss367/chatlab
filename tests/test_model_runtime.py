@@ -1,11 +1,15 @@
 import re
+import tempfile
 import unittest
+from pathlib import Path
 
 from model_runtime import (
     MIN_MODEL_POSITION_LIMIT,
     SCORE_TOKEN_LIMIT,
     ModelManager,
+    cache_status,
     encode_for_scoring,
+    format_bytes,
     score_token_limit,
     split_context_and_text,
     validate_model_id,
@@ -24,6 +28,53 @@ class ModelIdTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     validate_model_id(value)
+
+
+class CacheStatusTests(unittest.TestCase):
+    """What the cache inspection reports for the three states a model can be in."""
+
+    def folder(self, root: str) -> Path:
+        blobs = Path(root) / "models--allenai--Olmo-3-7B-Think" / "blobs"
+        blobs.mkdir(parents=True)
+        return blobs
+
+    def test_an_unknown_model_is_absent(self):
+        with tempfile.TemporaryDirectory() as root:
+            status = cache_status("allenai/Olmo-3-7B-Think", Path(root))
+
+        self.assertFalse(status.present)
+        self.assertEqual(status.total_bytes, 0)
+
+    def test_partial_blobs_are_counted_apart_from_finished_ones(self):
+        with tempfile.TemporaryDirectory() as root:
+            blobs = self.folder(root)
+            (blobs / "abc").write_bytes(b"x" * 10)
+            (blobs / "def.1234.incomplete").write_bytes(b"x" * 100)
+            (blobs / "ghi.5678.incomplete").write_bytes(b"x" * 200)
+            status = cache_status("allenai/Olmo-3-7B-Think", Path(root))
+
+        self.assertTrue(status.present)
+        self.assertEqual(status.cached_bytes, 10)
+        self.assertEqual(status.partial_files, 2)
+        self.assertEqual(status.partial_bytes, 300)
+
+    def test_a_finished_download_has_no_partials(self):
+        with tempfile.TemporaryDirectory() as root:
+            (self.folder(root) / "abc").write_bytes(b"x" * 10)
+            status = cache_status("allenai/Olmo-3-7B-Think", Path(root))
+
+        self.assertEqual(status.partial_files, 0)
+        self.assertEqual(status.cached_bytes, 10)
+
+    def test_an_invalid_id_is_rejected_before_the_disk_is_read(self):
+        with self.assertRaises(ValueError):
+            cache_status("../escape", Path("/nonexistent"))
+
+    def test_byte_counts_read_like_a_download_dialog(self):
+        self.assertEqual(format_bytes(512), "512 B")
+        self.assertEqual(format_bytes(3_418_357_760), "3.4 GB")
+        self.assertEqual(format_bytes(146_800_640), "147 MB")
+        self.assertEqual(format_bytes(15_000_000_000), "15.0 GB")
 
 
 class Encoding(dict):
