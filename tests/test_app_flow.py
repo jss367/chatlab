@@ -4,7 +4,7 @@ import unittest
 import gradio as gr
 
 import app
-from conversation import make_turn
+from conversation import display_messages, make_turn, model_messages
 from model_runtime import GenerationUpdate
 from test_streaming import loaded_manager
 
@@ -904,6 +904,96 @@ class FirstFrameWindowTests(unittest.TestCase):
                 "question the running generation had already added: "
                 f"{[turn['content'] for turn in published]}"
             )
+
+
+class EmptyResponseTests(unittest.TestCase):
+    """A generation that succeeds but renders nothing must not leave a turn.
+
+    The turn survives with neither answer nor reasoning, and the two
+    transcripts then disagree: display_messages() draws a blank assistant
+    bubble, model_messages() skips the turn entirely. The interface would be
+    showing a reply the model never sees, and the next request would carry two
+    user messages in a row into a template that requires alternation.
+
+    Dropping the turn is the fix, not inventing an assistant slot: with no
+    bubble drawn, "no reply" is what the screen shows and what the model is
+    told, and consecutive user turns are then an accurate record.
+    """
+
+    def setUp(self):
+        self.original = app.MANAGER
+        self.addCleanup(setattr, app, "MANAGER", self.original)
+
+    def use(self, script, pieces=THINK_PIECES, eos_id=THINK_EOS):
+        app.MANAGER = loaded_manager(script, pieces, eos_id)
+
+    def reply(self, turns=None, message="hi"):
+        frames = list(app.chat(message, turns if turns is not None else [], *SETTINGS))
+        self.assertTrue(frames)
+        for frame in frames:
+            self.assertEqual(len(frame), 11)
+        return frames[-1]
+
+    def assert_no_reply(self, final):
+        """The user turn stands alone, in the chatbot and in the state alike."""
+
+        self.assertEqual([turn["role"] for turn in final[TURNS]], ["user"])
+        self.assertEqual([message["role"] for message in final[CHATBOT]], ["user"])
+        self.assertNotIn("", [message["content"] for message in final[CHATBOT]])
+        # The buttons still come back: the generation did finish.
+        self.assertEqual(final[SEND], gr.update(visible=True))
+        self.assertEqual(final[STOP], gr.update(visible=False))
+
+    def test_a_hidden_eos_as_the_first_token_leaves_no_turn(self):
+        self.use([THINK_EOS])
+        self.assert_no_reply(self.reply())
+
+    def test_a_whitespace_only_reply_leaves_no_turn(self):
+        # split_reasoning() strips the answer, so these tokens render as
+        # nothing at all even though the model really did emit them.
+        self.use([0, 1, 2], ["   ", "\n\n", "<eos>"], 2)
+        self.assert_no_reply(self.reply())
+
+    def test_an_empty_reasoning_block_leaves_no_turn(self):
+        # "<think></think>": a block opened and closed with nothing inside.
+        self.use([0, 1, THINK_EOS])
+        self.assert_no_reply(self.reply())
+
+    def test_the_next_send_invents_no_assistant_slot(self):
+        self.use([THINK_EOS])
+        first = self.reply(message="one")
+        second = self.reply(first[TURNS], message="two")
+
+        self.assertEqual([turn["role"] for turn in second[TURNS]], ["user", "user"])
+        displayed, _ = display_messages(second[TURNS])
+        self.assertEqual([message["role"] for message in displayed], ["user", "user"])
+        # The two transcripts agree, which is the whole point: no assistant
+        # bubble on screen, no assistant slot in the request.
+        self.assertEqual(
+            model_messages(second[TURNS]),
+            [
+                {"role": "user", "content": "one"},
+                {"role": "user", "content": "two"},
+            ],
+        )
+
+    def test_a_reply_that_is_only_reasoning_still_survives(self):
+        """The guard must not swallow a Think turn with an empty answer."""
+
+        # "<think>Hello</think>" and then stop: reasoning, but no answer.
+        self.use([0, 2, 1, THINK_EOS])
+        final = self.reply()
+        self.assertEqual([turn["role"] for turn in final[TURNS]], ["user", "assistant"])
+        self.assertEqual(final[TURNS][1]["reasoning"], "Hello")
+        self.assertEqual(final[TURNS][1]["content"], "")
+        self.assertTrue(final[TURNS][1]["reasoning_closed"])
+
+    def test_an_ordinary_reply_is_untouched(self):
+        self.use([2, 3, THINK_EOS])
+        final = self.reply()
+        self.assertEqual([turn["role"] for turn in final[TURNS]], ["user", "assistant"])
+        self.assertEqual(final[TURNS][1]["content"], "Hello world")
+        self.assertTrue(final[TURNS][1]["reasoning_closed"])
 
 
 class CancelWiringTests(unittest.TestCase):

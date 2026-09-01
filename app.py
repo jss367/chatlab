@@ -420,7 +420,19 @@ def _stream_reply(
     reasoning, answer, _ = split_reasoning(raw_text, reasoning_prefilled=prefilled)
     pending["reasoning"] = reasoning
     pending["content"] = answer
-    pending["reasoning_closed"] = True
+    # A generation can succeed and still leave nothing renderable behind: the
+    # first sampled token is a hidden EOS, the model emits only whitespace,
+    # which split_reasoning() strips away, or it opens and closes a reasoning
+    # block without writing in it. Publishing that turn would draw a blank
+    # bubble in display_messages() that model_messages() skips, so the visible
+    # conversation and the model's would disagree - the UI would show a reply
+    # the model never sees. finalize_partial() is what the failure and
+    # cancellation paths already use for exactly this, so success uses it too:
+    # it closes the reasoning block when the turn is worth keeping and drops
+    # the turn when it holds neither answer nor reasoning. Dropping it leaves
+    # the user turn without a reply, which is the honest shape - no assistant
+    # bubble is drawn, so both transcripts agree that no reply exists.
+    finalize_partial(turns)
     yield snapshot(highlight, metrics, status, busy=False)
 
 
