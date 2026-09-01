@@ -494,6 +494,10 @@ def undo_from(position: int | None, turns: list[dict] | None):
 
     turns = copy_turns(turns)
     if position is None:
+        # Nothing is removed here, so this is the one Undo path that keeps what
+        # the cancelled generator left behind and therefore has to finalize it,
+        # exactly as Stop does. Every other path truncates the partial turn away.
+        finalize_partial(turns)
         messages, _ = display_messages(turns)
         return (
             gr.skip(),
@@ -579,35 +583,47 @@ def save_conversation(turns, system_prompt):
     )
 
 
-def load_conversation(file_path):
+def load_conversation(file_path, turns):
     """Replace the conversation with a saved one.
 
-    A failed load leaves every output alone, so a bad file cannot wipe the
-    conversation already on screen. Loading cancels any generation still
-    running, so the buttons are restored here for the same reason Clear
-    restores them: a cancelled generator never reaches its final yield.
+    A failed load keeps the conversation already on screen, so a bad file
+    cannot wipe it, and leaves the token panel describing it alone. Loading
+    cancels any generation still running, so the buttons are restored here for
+    the same reason Clear restores them: a cancelled generator never reaches
+    its final yield. For the same reason the kept conversation has to be
+    finalized like Stop does - the cancelled generator left its last turn with
+    a pending reasoning block, which would spin for the rest of the session,
+    or empty if the cancel landed before the first token.
     """
 
-    skipped = (gr.skip(),) * 5
-    if not file_path:
+    def keep_current(status):
+        """Return the conversation the cancelled generator left behind."""
+
+        kept = copy_turns(turns)
+        finalize_partial(kept)
+        messages, _ = display_messages(kept)
         return (
-            *skipped,
-            "No file chosen.",
+            messages,
+            kept,
             gr.skip(),
             gr.skip(),
-            *send_stop_buttons(False),
-        )
-    try:
-        turns, system_prompt = from_json(Path(file_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        return (
-            *skipped,
-            f"Could not load that file: {error}",
+            gr.skip(),
+            status,
             gr.skip(),
             gr.skip(),
             *send_stop_buttons(False),
         )
 
+    if not file_path:
+        return keep_current("No file chosen.")
+    try:
+        loaded, system_prompt = from_json(Path(file_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return keep_current(f"Could not load that file: {error}")
+
+    # A successful load replaces the conversation wholesale, so whatever the
+    # cancelled generator left behind goes with it and needs no finalizing.
+    turns = loaded
     messages, _ = display_messages(turns)
     # The selected token described a response from the conversation being
     # replaced, so it goes with it, exactly as Clear and Undo reset it.
@@ -862,7 +878,7 @@ def build_app() -> gr.Blocks:
         )
         load_upload.upload(
             load_conversation,
-            load_upload,
+            [load_upload, conversation_state],
             [
                 chatbot,
                 conversation_state,

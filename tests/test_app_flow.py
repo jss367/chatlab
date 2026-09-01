@@ -412,6 +412,22 @@ class UndoTests(unittest.TestCase):
         # The cancel fires on the click, so even this path must undo the swap.
         self.assertEqual(result[8:], app.send_stop_buttons(False))
 
+    def test_undo_with_nothing_to_remove_finalizes_a_cancelled_turn(self):
+        # Undo cancels the generator, so even the path that removes nothing has
+        # to close the reasoning block the generator never got to close.
+        turns = [
+            {
+                "role": "assistant",
+                "content": "orphan",
+                "reasoning": "half a thought",
+                "reasoning_closed": False,
+            }
+        ]
+        result = app.undo_last(turns)
+        self.assertEqual(result[5], "There is nothing to undo.")
+        self.assertTrue(result[2][-1]["reasoning_closed"])
+        self.assertFalse(turns[-1]["reasoning_closed"])
+
     def test_undo_on_an_empty_conversation(self):
         result = app.undo_last([])
         self.assertEqual(result[2], [])
@@ -482,7 +498,7 @@ class SaveLoadTests(unittest.TestCase):
             alternatives,
             send,
             stop,
-        ) = app.load_conversation(update["value"])
+        ) = app.load_conversation(update["value"], [make_turn("user", "stale")])
         self.assertEqual(restored, turns)
         self.assertEqual(system_prompt, "Be terse.")
         self.assertEqual(len(messages), 3)
@@ -510,21 +526,69 @@ class SaveLoadTests(unittest.TestCase):
     def test_loading_a_bad_file_reports_the_problem(
         self,
     ):
-        result = app.load_conversation("/nonexistent/conversation.json")
+        turns = [make_turn("user", "one"), make_turn("assistant", "first")]
+        result = app.load_conversation("/nonexistent/conversation.json", turns)
         self.assertIn("Could not load that file", result[5])
-        # A failed load leaves the token panel alone rather than blanking it.
         self.assertEqual(len(result), 10)
-        for index in (0, 1, 2, 3, 4, 6, 7):
+        # The conversation survives a bad file, and the token panel that
+        # describes it is left alone rather than blanked.
+        self.assertEqual([turn["content"] for turn in result[1]], ["one", "first"])
+        for index in (2, 3, 4, 6, 7):
             self.assertIsInstance(result[index], gr.skip().__class__)
         self.assertEqual(result[8:], app.send_stop_buttons(False))
 
-    def test_loading_nothing_skips_every_output(self):
-        result = app.load_conversation(None)
+    def test_loading_nothing_keeps_the_conversation(self):
+        turns = [make_turn("user", "one"), make_turn("assistant", "first")]
+        result = app.load_conversation(None, turns)
         self.assertEqual(result[5], "No file chosen.")
         self.assertEqual(len(result), 10)
-        for index in (0, 1, 2, 3, 4, 6, 7):
+        self.assertEqual([turn["content"] for turn in result[1]], ["one", "first"])
+        for index in (2, 3, 4, 6, 7):
             self.assertIsInstance(result[index], gr.skip().__class__)
         self.assertEqual(result[8:], app.send_stop_buttons(False))
+
+    def test_a_failed_load_finalizes_the_cancelled_turn(self):
+        # Uploading a bad file mid-stream cancels the generator, which then
+        # never closes its own reasoning block; the accordion would spin for
+        # the rest of the session.
+        turns = [
+            make_turn("user", "one"),
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning": "half a thought",
+                "reasoning_closed": False,
+            },
+        ]
+        result = app.load_conversation("/nonexistent/conversation.json", turns)
+        self.assertTrue(result[1][-1]["reasoning_closed"])
+        self.assertEqual(result[0][-1]["metadata"]["status"], "done")
+
+    def test_a_failed_load_drops_a_turn_cancelled_before_any_tokens(self):
+        turns = [
+            make_turn("user", "one"),
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning": "",
+                "reasoning_closed": False,
+            },
+        ]
+        result = app.load_conversation(None, turns)
+        self.assertEqual([turn["role"] for turn in result[1]], ["user"])
+
+    def test_a_failed_load_does_not_mutate_the_state_it_was_given(self):
+        turns = [
+            make_turn("user", "one"),
+            {
+                "role": "assistant",
+                "content": "partial",
+                "reasoning": "",
+                "reasoning_closed": False,
+            },
+        ]
+        app.load_conversation(None, turns)
+        self.assertFalse(turns[-1]["reasoning_closed"])
 
 
 class CancelWiringTests(unittest.TestCase):
