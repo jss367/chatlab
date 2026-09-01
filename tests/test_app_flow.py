@@ -212,6 +212,37 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(final[TURNS][1]["reasoning"], "revised")
         self.assertEqual(final[TURNS][1]["content"], "answer")
 
+    def test_blanking_an_assistant_message_is_refused(self):
+        # An empty assistant turn is still drawn as a bubble but skipped by
+        # model_messages(), so the screen and the model would disagree and the
+        # next request would carry two user messages in a row.
+        turns = [make_turn("user", "one"), make_turn("assistant", "first")]
+        event = gr.EditData(
+            None, {"index": 1, "previous_value": "first", "value": "   "}
+        )
+        final = self.last(app.edit_message(event, "draft", turns, *SETTINGS))[-1]
+        self.assertEqual(final[TURNS], turns)
+        self.assertEqual(final[STATUS], "An assistant message cannot be emptied.")
+
+    def test_blanking_an_answer_that_still_has_reasoning_is_allowed(self):
+        # model_messages() keeps an empty slot for a turn that has reasoning,
+        # so role alternation survives and the edit is a legitimate one.
+        turns = [make_turn("user", "one"), make_turn("assistant", "answer", "thought")]
+        event = gr.EditData(None, {"index": 2, "previous_value": "answer", "value": ""})
+        final = self.last(app.edit_message(event, "", turns, *SETTINGS))[-1]
+        self.assertEqual(final[TURNS][1]["content"], "")
+        self.assertEqual(final[TURNS][1]["reasoning"], "thought")
+        self.assertEqual(final[STATUS], "Assistant message edited.")
+
+    def test_blanking_the_only_reasoning_of_an_empty_answer_is_refused(self):
+        turns = [make_turn("user", "one"), make_turn("assistant", "", "thought")]
+        event = gr.EditData(
+            None, {"index": 1, "previous_value": "thought", "value": ""}
+        )
+        final = self.last(app.edit_message(event, "", turns, *SETTINGS))[-1]
+        self.assertEqual(final[TURNS], turns)
+        self.assertEqual(final[STATUS], "An assistant message cannot be emptied.")
+
     def test_blanking_a_user_message_is_refused(self):
         turns = [make_turn("user", "one"), make_turn("assistant", "first")]
         event = gr.EditData(None, {"index": 0, "previous_value": "one", "value": "   "})

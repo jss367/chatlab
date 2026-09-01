@@ -437,7 +437,23 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
     new_value = event.value if isinstance(event.value, str) else str(event.value)
 
     if turns[position]["role"] == "assistant":
-        turns[position]["reasoning" if part == "reasoning" else "content"] = new_value
+        edited_turn = dict(turns[position])
+        edited_turn["reasoning" if part == "reasoning" else "content"] = new_value
+        if not (
+            (edited_turn.get("content") or "").strip()
+            or (edited_turn.get("reasoning") or "").strip()
+        ):
+            # An assistant turn with neither answer nor reasoning is drawn as a
+            # bubble by display_messages() but skipped by model_messages(), so
+            # the visible transcript and the model's would disagree and the next
+            # request would carry two user messages in a row. Rejecting matches
+            # how an emptied user message is handled below; the alternative,
+            # dropping the exchange, would silently discard the prompt too.
+            yield idle_state(
+                prompt_text, turns, "An assistant message cannot be emptied."
+            )
+            return
+        turns[position] = edited_turn
         # The ranks and probabilities on screen describe the text the model
         # generated, not what the user just typed over it.
         yield idle_state(
