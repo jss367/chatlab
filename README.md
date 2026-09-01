@@ -18,7 +18,7 @@ The default model is [`allenai/Olmo-3-7B-Think`](https://huggingface.co/allenai/
 
 ### As a macOS application
 
-Build the native desktop application on an Apple Silicon or Intel Mac:
+Build the native desktop application on an Apple Silicon Mac:
 
 ```bash
 ./scripts/build_macos_app.sh
