@@ -130,7 +130,8 @@ def surprise_chart(metrics: Sequence[dict], *, title: str = "Surprise per token"
         f"{peak_label}"
         f'<line class="viz-axis" x1="{_PAD_LEFT}" x2="{_VIEW_WIDTH - _PAD_RIGHT}" '
         f'y1="{y_at(0):.1f}" y2="{y_at(0):.1f}" />'
-        f'<text class="viz-tick" x="{_PAD_LEFT}" y="{_VIEW_HEIGHT - 6:g}">token 1</text>'
+        f'<text class="viz-tick" x="{_PAD_LEFT}" y="{_VIEW_HEIGHT - 6:g}">'
+        f'token {bins[0]["first"]:,}</text>'
         f'<text class="viz-tick" x="{_VIEW_WIDTH - _PAD_RIGHT}" y="{_VIEW_HEIGHT - 6:g}" '
         f'text-anchor="end">token {bins[-1]["last"]:,}</text>'
         f"{hover}</svg></figure>"

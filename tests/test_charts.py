@@ -24,6 +24,26 @@ class SurpriseChartTests(unittest.TestCase):
         self.assertIn("token 12", svg)
         self.assertNotIn("grouped into", svg)
 
+    def test_the_left_axis_names_the_first_scored_token(self):
+        # A tokenizer that adds no BOS leaves the sequence's first token
+        # unscored when no context precedes it, so the leftmost plotted point
+        # is token 2 and the axis has to say so.
+        run = metrics(12)
+        run[0]["scored"] = False
+        svg = charts.surprise_chart(run)
+
+        self.assertIn("token 2</text>", svg)
+        self.assertNotIn("token 1</text>", svg)
+        self.assertEqual(svg.count("<title>"), 11)
+
+    def test_the_left_axis_groups_thousands(self):
+        run = metrics(5000)
+        for metric in run[:1500]:
+            metric["scored"] = False
+        svg = charts.surprise_chart(run)
+
+        self.assertIn("token 1,501</text>", svg)
+
     def test_the_peak_label_points_at_the_peak_token_not_the_bin_end(self):
         spiked = metrics(500)
         spiked[6]["surprise_bits"] = 9.0
