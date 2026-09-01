@@ -539,12 +539,20 @@ def load_conversation(file_path):
     """Replace the conversation with a saved one.
 
     A failed load leaves every output alone, so a bad file cannot wipe the
-    conversation already on screen.
+    conversation already on screen. Loading cancels any generation still
+    running, so the buttons are restored here for the same reason Clear
+    restores them: a cancelled generator never reaches its final yield.
     """
 
     skipped = (gr.skip(),) * 5
     if not file_path:
-        return (*skipped, "No file chosen.", gr.skip(), gr.skip())
+        return (
+            *skipped,
+            "No file chosen.",
+            gr.skip(),
+            gr.skip(),
+            *send_stop_buttons(False),
+        )
     try:
         turns, system_prompt = from_json(Path(file_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
@@ -553,6 +561,7 @@ def load_conversation(file_path):
             f"Could not load that file: {error}",
             gr.skip(),
             gr.skip(),
+            *send_stop_buttons(False),
         )
 
     messages, _ = display_messages(turns)
@@ -567,6 +576,7 @@ def load_conversation(file_path):
         f"Loaded {len(turns)} message{'s' if len(turns) != 1 else ''}.",
         NO_TOKEN_SELECTED,
         [],
+        *send_stop_buttons(False),
     )
 
 
@@ -813,7 +823,10 @@ def build_app() -> gr.Blocks:
                 generation_status,
                 token_detail,
                 alternatives,
+                send_button,
+                stop_button,
             ],
+            cancels=running,
         )
 
         token_strip.select(

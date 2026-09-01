@@ -388,6 +388,8 @@ class SaveLoadTests(unittest.TestCase):
             load_status,
             detail,
             alternatives,
+            send,
+            stop,
         ) = app.load_conversation(update["value"])
         self.assertEqual(restored, turns)
         self.assertEqual(system_prompt, "Be terse.")
@@ -397,6 +399,8 @@ class SaveLoadTests(unittest.TestCase):
         # The previous conversation's selected token goes with it.
         self.assertEqual(detail, app.NO_TOKEN_SELECTED)
         self.assertEqual(alternatives, [])
+        # Loading cancels any running generation, so Send must come back.
+        self.assertEqual((send, stop), app.send_stop_buttons(False))
 
     def test_saving_an_empty_conversation_is_refused(self):
         update, status = app.save_conversation([], "")
@@ -409,16 +413,37 @@ class SaveLoadTests(unittest.TestCase):
         result = app.load_conversation("/nonexistent/conversation.json")
         self.assertIn("Could not load that file", result[5])
         # A failed load leaves the token panel alone rather than blanking it.
-        self.assertEqual(len(result), 8)
+        self.assertEqual(len(result), 10)
         for index in (0, 1, 2, 3, 4, 6, 7):
             self.assertIsInstance(result[index], gr.skip().__class__)
+        self.assertEqual(result[8:], app.send_stop_buttons(False))
 
     def test_loading_nothing_skips_every_output(self):
         result = app.load_conversation(None)
         self.assertEqual(result[5], "No file chosen.")
-        self.assertEqual(len(result), 8)
+        self.assertEqual(len(result), 10)
         for index in (0, 1, 2, 3, 4, 6, 7):
             self.assertIsInstance(result[index], gr.skip().__class__)
+        self.assertEqual(result[8:], app.send_stop_buttons(False))
+
+
+class CancelWiringTests(unittest.TestCase):
+    """Anything that replaces the conversation must cancel a running generation.
+
+    Otherwise the generator's next snapshot writes its private copy of the
+    in-progress turns straight back over the new conversation.
+    """
+
+    def test_clear_and_load_cancel_the_same_events_as_stop(self):
+        config = app.build_app().get_config_file()
+        cancels = [
+            tuple(dep["cancels"])
+            for dep in config["dependencies"]
+            if dep.get("cancels")
+        ]
+        self.assertEqual(len(cancels), 3, "Stop, Clear, and Load must all cancel")
+        self.assertEqual(len(set(cancels)), 1, "all three cancel the same events")
+        self.assertTrue(cancels[0], "the cancelled event list is not empty")
 
 
 if __name__ == "__main__":
