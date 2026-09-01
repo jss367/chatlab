@@ -24,8 +24,8 @@ FIXED = {
 }
 SETTINGS = tuple(FIXED.values())
 
-PROMPT, CHATBOT, TURNS, STRIP, METRICS, STATUS, SEED, SEND, STOP, DETAIL, ALTS = (
-    range(11)
+PROMPT, CHATBOT, TURNS, STRIP, METRICS, STATUS, SEED, SEND, STOP, DETAIL, ALTS = range(
+    11
 )
 
 
@@ -261,9 +261,25 @@ class UndoTests(unittest.TestCase):
             make_turn("assistant", "second"),
         ]
         result = app.undo_last(turns)
-        self.assertEqual(len(result), 6)
+        self.assertEqual(len(result), 8)
         self.assertEqual(result[0], "two")
         self.assertEqual([turn["content"] for turn in result[2]], ["one", "first"])
+
+    def test_undo_clears_the_token_panel(self):
+        turns = [make_turn("user", "one"), make_turn("assistant", "first")]
+        _prompt, _messages, _turns, strip, metrics, _status, detail, alts = (
+            app.undo_last(turns)
+        )
+        self.assertEqual(strip, [])
+        self.assertEqual(metrics, [])
+        self.assertEqual(detail, app.NO_TOKEN_SELECTED)
+        self.assertEqual(alts, [])
+
+    def test_undo_with_nothing_to_remove_keeps_the_token_panel(self):
+        result = app.undo_last([make_turn("assistant", "orphan")])
+        self.assertEqual(result[5], "There is nothing to undo.")
+        for index in (3, 4, 6, 7):
+            self.assertEqual(result[index], gr.skip())
 
     def test_undo_on_an_empty_conversation(self):
         result = app.undo_last([])

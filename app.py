@@ -458,10 +458,14 @@ def undo_from(position: int | None, turns: list[dict] | None):
             gr.skip(),
             gr.skip(),
             "There is nothing to undo.",
+            gr.skip(),
+            gr.skip(),
         )
 
     remaining = turns[:position]
     messages, _ = display_messages(remaining)
+    # The selected-token details describe the response being removed, so they
+    # go with it, exactly as Clear resets them.
     return (
         turns[position]["content"],
         messages,
@@ -469,6 +473,8 @@ def undo_from(position: int | None, turns: list[dict] | None):
         [],
         [],
         "Removed the last exchange.",
+        NO_TOKEN_SELECTED,
+        [],
     )
 
 
@@ -721,6 +727,8 @@ def build_app() -> gr.Blocks:
             token_strip,
             metrics_state,
             generation_status,
+            token_detail,
+            alternatives,
         ]
 
         running = [
