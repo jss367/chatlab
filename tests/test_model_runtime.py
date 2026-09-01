@@ -764,7 +764,7 @@ class ScoreTextGuardTests(unittest.TestCase):
         manager.tokenizer = FakeTokenizer()
         self.prefilled: list[int] = []
 
-        def fake_prefill(token_ids, *, segments, positions, score_from, collect):
+        def fake_prefill(token_ids, *, segments, positions, score_from, **_options):
             self.prefilled = list(token_ids)
             return (
                 [

@@ -2,14 +2,19 @@ import json
 import unittest
 
 from conversation import (
+    MAIN_BRANCH,
     REASONING_TITLE,
     SAVE_FORMAT,
+    copy_forks,
     display_messages,
+    fork_at,
     from_json,
     last_user_index,
     locate,
     make_turn,
     model_messages,
+    new_forks,
+    next_fork_name,
     split_reasoning,
     to_json,
     user_index_at_or_before,
@@ -211,6 +216,67 @@ class ModelMessagesTests(unittest.TestCase):
         messages = model_messages(turns, include_reasoning=True)
         self.assertEqual([m["role"] for m in messages], ["user", "assistant"])
         self.assertIn("Thinking…", messages[1]["content"])
+
+
+class ForkTests(unittest.TestCase):
+    def turns(self):
+        return [
+            make_turn("user", "one"),
+            make_turn("assistant", "first", "thinking"),
+            make_turn("user", "two"),
+            make_turn("assistant", "second"),
+        ]
+
+    def test_a_fresh_set_of_forks_has_only_the_main_branch(self):
+        forks = new_forks()
+        self.assertEqual(forks["active"], MAIN_BRANCH)
+        self.assertEqual(list(forks["branches"]), [MAIN_BRANCH])
+
+    def test_fork_names_skip_the_ones_in_use(self):
+        forks = new_forks()
+        self.assertEqual(next_fork_name(forks), "Fork 1")
+        forks["branches"]["Fork 1"] = []
+        forks["branches"]["Fork 3"] = []
+        self.assertEqual(next_fork_name(forks), "Fork 2")
+
+    def test_copying_forks_detaches_every_turn(self):
+        forks = new_forks()
+        forks["branches"][MAIN_BRANCH] = self.turns()
+        copied = copy_forks(forks)
+        copied["branches"][MAIN_BRANCH][0]["content"] = "changed"
+        self.assertEqual(forks["branches"][MAIN_BRANCH][0]["content"], "one")
+
+    def test_copying_nothing_gives_a_fresh_set(self):
+        self.assertEqual(copy_forks(None), new_forks())
+
+    def test_no_selection_copies_the_whole_conversation(self):
+        turns = self.turns()
+        forked, box = fork_at(turns, None)
+        self.assertEqual(forked, turns)
+        self.assertIsNone(box)
+        forked[0]["content"] = "changed"
+        self.assertEqual(turns[0]["content"], "one")
+
+    def test_an_assistant_message_keeps_the_conversation_through_its_turn(self):
+        # The reasoning block and the answer are one turn, so clicking either
+        # forks at the same place.
+        turns = self.turns()
+        for part in ("reasoning", "content"):
+            with self.subTest(part=part):
+                forked, box = fork_at(turns, (1, part))
+                self.assertEqual([t["content"] for t in forked], ["one", "first"])
+                self.assertIsNone(box)
+
+    def test_a_user_message_is_handed_back_for_rewording(self):
+        forked, box = fork_at(self.turns(), (2, "content"))
+        self.assertEqual([t["content"] for t in forked], ["one", "first"])
+        self.assertEqual(box, "two")
+
+    def test_an_index_past_the_end_copies_everything(self):
+        turns = self.turns()
+        forked, box = fork_at(turns, (9, "content"))
+        self.assertEqual(forked, turns)
+        self.assertIsNone(box)
 
 
 class SaveLoadTests(unittest.TestCase):

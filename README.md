@@ -17,6 +17,8 @@ A local chat interface that shows what happened under the hood for every token, 
 - Full metric-trace export as JSON or CSV
 - A system prompt, plus temperature, top-p, top-k, seed, and response-length controls
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
+- Branching a response from any token into one of the alternatives the model considered
+- Forking the conversation so the same transcript can be taken in several directions
 - Apple Metal, NVIDIA CUDA, and CPU loading
 
 The default model is [`allenai/Olmo-3-7B-Think`](https://huggingface.co/allenai/Olmo-3-7B-Think). Its full weights require a download of roughly 15 GB. Other Hugging Face causal language models with built-in Transformers support can also work.
@@ -72,6 +74,28 @@ Model files use the standard Hugging Face cache. By default this is under `~/.ca
 - **Retry** regenerates the last reply. Because **🎲 New seed each response** is on by default, a retry actually explores a different sample; turn it off to lock the seed and reproduce a response exactly. The seed field always shows the seed that produced the response on screen.
 - Hovering a message in the transcript gives per-message retry, edit, and undo. Editing one of your messages truncates the conversation there and generates a new reply; editing a reply just corrects it in place. **↩️ Undo last** removes the last exchange and puts your message back in the input box.
 - **💾 Save conversation** writes a JSON file containing every turn, its reasoning block, and the system prompt. **📂 Load conversation** restores it.
+
+## Branching from a token
+
+Every response token comes with the alternatives the model ranked highest. Branching lets you take one of them instead and see where the model goes from there.
+
+1. Click a token in **Response tokens**.
+2. Click a row in **Most likely alternatives**. The detail panel confirms what the branch will do.
+3. Press **🌱 Branch from token**.
+
+The response is kept up to the token before the one you clicked, the alternative is put in its place, and the model continues from there under the current sampling settings. The branched response replaces the one on screen, so **Retry** and **Undo** work on it as usual. Choosing the token the model already picked resamples the rest of the response from that point, which is a way to see how much of what followed was chance.
+
+The replayed tokens are still measured against the model's own distribution, so a token the model would never have chosen shows its real rank and surprise. **Maximum new tokens** counts the tokens sampled after the branch point, so a branch made late in a long response still has room to finish. The JSON export records how many tokens were replayed as `forced_prefix_tokens`.
+
+Only a chat response can be branched. Prompt tokens and text measured in the **Score text** tab have no conversation to continue.
+
+## Forking the conversation
+
+**🌿 Fork** copies the conversation into a new fork and switches to it, so you can ask something different without losing the original. The **Conversation fork** dropdown moves between forks, and **Delete fork** removes the one on screen.
+
+Click a message before pressing Fork to fork at that point. Forking at a reply keeps the conversation through that reply, ready for a different next question. Forking at one of your own messages keeps what came before it and puts the message back in the input box so it can be reworded, the same shape **Undo** gives.
+
+Each fork has its own transcript, but the token panel describes only the response on screen: switching forks clears it until the next response. **💾 Save conversation** writes the fork on screen, and **🗑️ Clear** removes every fork.
 
 ## Reasoning blocks
 

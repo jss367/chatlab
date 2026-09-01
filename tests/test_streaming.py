@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -95,7 +96,12 @@ class SentencePieceTokenizer:
 
 
 class FakeModel(torch.nn.Module):
-    """Emits ``script`` one token at a time, whatever the sampler asks for."""
+    """Emits ``script`` one token at a time, whatever the sampler asks for.
+
+    Every input position advances the script by one step and predicts the
+    next scripted token, so a multi-token prefill chunk gets one distribution
+    per position exactly as a real model would give it.
+    """
 
     def __init__(self, script, vocab_size=None, eos_id=EOS_ID):
         super().__init__()
@@ -108,9 +114,11 @@ class FakeModel(torch.nn.Module):
     def forward(
         self, input_ids=None, attention_mask=None, past_key_values=None, use_cache=True
     ):
-        logits = torch.full((1, 1, self.vocab_size), -20.0)
-        logits[0, 0, self.script[self.step % len(self.script)]] = 20.0
-        self.step += 1
+        length = 1 if input_ids is None else int(input_ids.shape[-1])
+        logits = torch.full((1, length, self.vocab_size), -20.0)
+        for offset in range(length):
+            logits[0, offset, self.script[self.step % len(self.script)]] = 20.0
+            self.step += 1
         return SimpleNamespace(logits=logits, past_key_values=None)
 
 
@@ -263,6 +271,88 @@ class GenerateStreamingTests(unittest.TestCase):
             ]
         )
         self.assertIn("Be terse.", manager.tokenizer.last_prompt)
+
+
+class ForcedPrefixTests(unittest.TestCase):
+    """A branched response replays kept tokens before it samples anything."""
+
+    def updates(self, manager, forced, **kwargs):
+        options = {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "top_k": 0,
+            "max_new_tokens": 40,
+            "seed": 1,
+            "forced_ids": forced,
+        }
+        options.update(kwargs)
+        # The metrics list on an update is the generator's own and keeps
+        # growing, so each update is snapshotted as it arrives.
+        return [
+            replace(update, metrics=list(update.metrics))
+            for update in manager.generate(
+                [{"role": "user", "content": "hi"}], **options
+            )
+        ]
+
+    def test_forced_tokens_come_first_and_are_measured_honestly(self):
+        # The script predicts "Hello" then " world"; the reader kept "Hello"
+        # and swapped " are" in for " world".
+        manager = loaded_manager([0, 1, 2, EOS_ID])
+        updates = self.updates(manager, [0, 5])
+
+        first = updates[0]
+        self.assertEqual(first.text, "Hello are")
+        self.assertEqual([m["token_id"] for m in first.metrics], [0, 5])
+        self.assertEqual(first.metrics[0]["raw_rank"], 1)
+        # The swapped token was not what the model wanted, and its metric
+        # says so instead of pretending it was sampled.
+        self.assertGreater(first.metrics[1]["raw_rank"], 1)
+        self.assertEqual([m["position"] for m in first.metrics], [1, 2])
+
+        final = updates[-1]
+        self.assertEqual(final.text, "Hello are!")
+        self.assertEqual([m["token_id"] for m in final.metrics], [0, 5, 2, EOS_ID])
+        self.assertEqual([m["position"] for m in final.metrics], [1, 2, 3, 4])
+
+    def test_the_prefix_is_measured_under_the_sampling_settings(self):
+        manager = loaded_manager([0, 1, 2, EOS_ID])
+        (first, *_rest) = self.updates(manager, [0, 5], temperature=0.0)
+        # Greedy sampling gives the swapped token no sampling probability at
+        # all, which is exactly what its sampling shift should report.
+        self.assertEqual(first.metrics[1]["sampling_probability"], 0.0)
+        self.assertEqual(first.metrics[0]["sampling_probability"], 1.0)
+
+    def test_a_stop_token_inside_the_prefix_ends_the_response_there(self):
+        manager = loaded_manager([0, 1, 2, EOS_ID])
+        updates = self.updates(manager, [0, EOS_ID, 1])
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0].text, "Hello")
+        self.assertEqual([m["token_id"] for m in updates[0].metrics], [0, EOS_ID])
+
+    def test_the_token_budget_counts_only_sampled_tokens(self):
+        manager = loaded_manager([0, 1, 2, 4, 5, 6])
+        final = self.updates(manager, [0, 1], max_new_tokens=2)[-1]
+        self.assertEqual(len(final.metrics), 4)
+
+    def test_prompt_and_response_metrics_stay_apart(self):
+        manager = loaded_manager([0, 1, 2, EOS_ID])
+        final = self.updates(manager, [0, 1])[-1]
+        self.assertEqual([m["segment"] for m in final.prompt_metrics], ["prompt"])
+        self.assertTrue(all(m["segment"] == "response" for m in final.metrics))
+
+    def test_an_unmeasured_prompt_still_leaves_the_prefix_measured(self):
+        manager = loaded_manager([0, 1, 2, EOS_ID])
+        final = self.updates(manager, [0, 1], analyze_prompt=False)[-1]
+        self.assertEqual(final.prompt_metrics, [])
+        self.assertEqual([m["token_id"] for m in final.metrics][:2], [0, 1])
+        self.assertTrue(all(m["scored"] for m in final.metrics))
+
+    def test_no_prefix_is_the_ordinary_stream(self):
+        manager = loaded_manager([0, 1, EOS_ID])
+        updates = self.updates(manager, [])
+        self.assertEqual(updates[-1].text, "Hello world")
+        self.assertEqual(len(updates[-1].metrics), 3)
 
 
 class ChatTemplateTokenizer(FakeTokenizer):
