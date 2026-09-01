@@ -37,9 +37,20 @@ class SplitReasoningTests(unittest.TestCase):
         self.assertFalse(closed)
 
     def test_handles_a_template_supplied_opening_tag(self):
-        reasoning, answer, closed = split_reasoning("Counting.</think>Four.")
+        reasoning, answer, closed = split_reasoning(
+            "Counting.</think>Four.", reasoning_prefilled=True
+        )
         self.assertEqual(reasoning, "Counting.")
         self.assertEqual(answer, "Four.")
+        self.assertTrue(closed)
+
+    def test_a_lone_closing_tag_is_literal_without_the_prefilled_flag(self):
+        # A model that writes about the marker instead of using it must keep
+        # its whole answer: only the runtime can say the prompt prefilled one.
+        text = "The marker </think> ends a reasoning block."
+        reasoning, answer, closed = split_reasoning(text)
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, text)
         self.assertTrue(closed)
 
     def test_collects_several_blocks(self):

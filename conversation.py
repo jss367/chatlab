@@ -56,6 +56,11 @@ def split_reasoning(
     text then starts *inside* the reasoning block and carries no opening marker
     at all, so without this flag every token would look like answer text until
     the closing marker finally arrived thousands of tokens later.
+
+    Only that flag can imply a prefilled opener. A closing marker on its own is
+    not evidence of one: a model that merely writes ``</think>`` in its prose -
+    explaining the marker, or quoting a template - would otherwise have the text
+    before it hidden as reasoning and its answer truncated to whatever followed.
     """
 
     if streaming:
@@ -66,7 +71,7 @@ def split_reasoning(
     closed = True
     rest = text
 
-    if reasoning_prefilled or (THINK_OPEN not in rest and THINK_CLOSE in rest):
+    if reasoning_prefilled:
         # The chat template supplied the opening tag, so only the close arrives.
         head, marker, rest = rest.partition(THINK_CLOSE)
         reasoning.append(head)
