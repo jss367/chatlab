@@ -452,6 +452,13 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
         yield idle_state(prompt_text, turns, "A user message cannot be empty.")
         return
 
+    if not MANAGER.loaded:
+        # regenerate_from() would refuse too, but only after the truncation
+        # below had already thrown away every later turn for a reply that is
+        # never generated.
+        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        return
+
     turns = turns[: position + 1]
     turns[position]["content"] = edited
     yield from regenerate_from(position, prompt_text, turns, *settings)

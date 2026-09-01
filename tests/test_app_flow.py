@@ -176,6 +176,33 @@ class ChatFlowTests(unittest.TestCase):
         for index in (STRIP, METRICS, DETAIL, ALTS):
             self.assertEqual(final[index], gr.skip())
 
+    def test_editing_a_user_turn_keeps_history_when_no_model_is_loaded(self):
+        """A refused edit must not truncate the conversation it cannot replace."""
+
+        app.MANAGER = self.original  # nothing loaded
+        turns = [
+            make_turn("user", "one"),
+            make_turn("assistant", "first"),
+            make_turn("user", "two"),
+            make_turn("assistant", "second"),
+        ]
+        event = gr.EditData(
+            None, {"index": 0, "previous_value": "one", "value": "edited"}
+        )
+        final = self.last(app.edit_message(event, "", turns, *SETTINGS))[-1]
+        self.assertEqual(
+            [turn["content"] for turn in final[TURNS]],
+            ["one", "first", "two", "second"],
+        )
+        self.assertEqual(final[STATUS], "Download and load a model first.")
+
+    def test_retrying_keeps_history_when_no_model_is_loaded(self):
+        app.MANAGER = self.original
+        turns = [make_turn("user", "one"), make_turn("assistant", "first")]
+        final = self.last(app.retry_last("", turns, *SETTINGS))[-1]
+        self.assertEqual([turn["content"] for turn in final[TURNS]], ["one", "first"])
+        self.assertEqual(final[STATUS], "Download and load a model first.")
+
     def test_editing_a_reasoning_block_leaves_the_answer_alone(self):
         turns = [make_turn("user", "one"), make_turn("assistant", "answer", "thought")]
         event = gr.EditData(
