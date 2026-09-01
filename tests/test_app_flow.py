@@ -658,13 +658,24 @@ class BusyRefusalTests(unittest.TestCase):
         self.assertEqual(frame[STATUS], app.BUSY_STATUS)
         # The chatbot and the conversation state are the two outputs that would
         # carry the stale snapshot, so they are the ones that must be skipped.
-        for index in (CHATBOT, TURNS, PROMPT, STRIP, METRICS, SEED, DETAIL, ALTS):
-            self.assertIsInstance(frame[index], gr.skip().__class__)
-        # The buttons still go back to idle: the running generation republishes
-        # its own busy state on its next frame, and if it has just finished the
-        # user would otherwise be left with a dead Send button.
-        self.assertEqual(frame[SEND], gr.update(visible=True))
-        self.assertEqual(frame[STOP], gr.update(visible=False))
+        # The buttons go with them: the refusal tells the user to press Stop,
+        # so it must not be the thing that hides Stop. Only the generation that
+        # owns the slot drives that pair.
+        for index in (
+            CHATBOT,
+            TURNS,
+            PROMPT,
+            STRIP,
+            METRICS,
+            SEED,
+            DETAIL,
+            ALTS,
+            SEND,
+            STOP,
+        ):
+            # gr.skip() and gr.update() are both plain dicts, so this compares
+            # values: an isinstance check here passes for either of them.
+            self.assertEqual(frame[index], gr.skip())
         return frame
 
     def test_sending_while_generating_is_refused(self):
@@ -867,8 +878,10 @@ class FirstFrameWindowTests(unittest.TestCase):
         # The two outputs that would carry the stale snapshot.
         for index in (CHATBOT, TURNS):
             self.assertEqual(frame[index], gr.skip())
-        self.assertEqual(frame[SEND], gr.update(visible=True))
-        self.assertEqual(frame[STOP], gr.update(visible=False))
+        # The refused click must not take the Stop button away from the
+        # generation parked on its first frame.
+        for index in (SEND, STOP):
+            self.assertEqual(frame[index], gr.skip())
 
     def test_a_retry_in_the_window_is_refused(self):
         _stream, frame = self.parked_at_the_first_frame()
@@ -994,6 +1007,98 @@ class EmptyResponseTests(unittest.TestCase):
         self.assertEqual([turn["role"] for turn in final[TURNS]], ["user", "assistant"])
         self.assertEqual(final[TURNS][1]["content"], "Hello world")
         self.assertTrue(final[TURNS][1]["reasoning_closed"])
+
+
+class IdleRefusalButtonTests(unittest.TestCase):
+    """Refusals that can only happen while idle still restore the buttons.
+
+    The busy refusal skips the button outputs because a generation it does not
+    own is driving them (see BusyRefusalTests). Every refusal below is reached
+    only after the MANAGER.busy check has already passed, so no generation is
+    running and nothing else will ever swap the buttons back - these have to
+    do it themselves, exactly as Stop, Clear and Undo do.
+    """
+
+    def setUp(self):
+        self.original = app.MANAGER
+        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, app, "MANAGER", self.original)
+
+    def unloaded(self):
+        app.MANAGER = self.original
+        self.assertFalse(app.MANAGER.loaded)
+
+    def assert_idle_refusal(self, stream, status):
+        frames = list(stream)
+        self.assertEqual(len(frames), 1)
+        (frame,) = frames
+        self.assertEqual(len(frame), 11)
+        self.assertEqual(frame[STATUS], status)
+        self.assertNotEqual(frame[STATUS], app.BUSY_STATUS)
+        self.assertEqual(frame[SEND], gr.update(visible=True))
+        self.assertEqual(frame[STOP], gr.update(visible=False))
+
+    def turns(self):
+        return [make_turn("user", "q"), make_turn("assistant", "a")]
+
+    def test_an_empty_message_restores_the_buttons(self):
+        self.assert_idle_refusal(
+            app.chat("   ", self.turns(), *SETTINGS), "Enter a message first."
+        )
+
+    def test_sending_with_no_model_restores_the_buttons(self):
+        self.unloaded()
+        self.assert_idle_refusal(
+            app.chat("hi", [], *SETTINGS), "Download and load a model first."
+        )
+
+    def test_nothing_to_retry_restores_the_buttons(self):
+        self.assert_idle_refusal(
+            app.retry_last("draft", [], *SETTINGS), "There is nothing to retry."
+        )
+
+    def test_retrying_with_no_model_restores_the_buttons(self):
+        self.unloaded()
+        self.assert_idle_refusal(
+            app.retry_last("draft", self.turns(), *SETTINGS),
+            "Download and load a model first.",
+        )
+
+    def test_editing_a_missing_message_restores_the_buttons(self):
+        event = gr.EditData(None, {"index": 99, "previous_value": "gone", "value": "x"})
+        self.assert_idle_refusal(
+            app.edit_message(event, "", self.turns(), *SETTINGS),
+            "That message is no longer available.",
+        )
+
+    def test_emptying_an_assistant_message_restores_the_buttons(self):
+        event = gr.EditData(None, {"index": 1, "previous_value": "a", "value": "  "})
+        self.assert_idle_refusal(
+            app.edit_message(event, "", self.turns(), *SETTINGS),
+            "An assistant message cannot be emptied.",
+        )
+
+    def test_emptying_a_user_message_restores_the_buttons(self):
+        event = gr.EditData(None, {"index": 0, "previous_value": "q", "value": "  "})
+        self.assert_idle_refusal(
+            app.edit_message(event, "", self.turns(), *SETTINGS),
+            "A user message cannot be empty.",
+        )
+
+    def test_editing_a_user_message_with_no_model_restores_the_buttons(self):
+        self.unloaded()
+        event = gr.EditData(None, {"index": 0, "previous_value": "q", "value": "new"})
+        self.assert_idle_refusal(
+            app.edit_message(event, "", self.turns(), *SETTINGS),
+            "Download and load a model first.",
+        )
+
+    def test_an_accepted_assistant_edit_restores_the_buttons(self):
+        event = gr.EditData(None, {"index": 1, "previous_value": "a", "value": "fixed"})
+        self.assert_idle_refusal(
+            app.edit_message(event, "", self.turns(), *SETTINGS),
+            "Assistant message edited.",
+        )
 
 
 class CancelWiringTests(unittest.TestCase):

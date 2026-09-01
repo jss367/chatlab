@@ -254,10 +254,14 @@ def busy_state():
     refusal skips the chatbot and the conversation state entirely, along with
     the prompt box and the token panel, and reports the reason.
 
-    The buttons are restored to idle rather than left busy: if the running
-    generation happens to finish between the check and this yield, a "busy"
-    button state would strand the user with a dead Send button, whereas an
-    idle one is corrected by the very next frame the generation publishes.
+    The two buttons are skipped for the same reason: the generation that owns
+    the slot is still running, so it - not this refusal - decides what the
+    buttons say. Forcing them idle would hide Stop while telling the user to
+    press Stop, and nothing would bring it back until the running generation
+    published its next batched update, which on a slow model is seconds away
+    and never arrives at all if inference stalls. Skipping leaves the busy
+    pair the running generation already published in place, and that
+    generation restores the idle pair itself on whichever path it exits.
     """
 
     return (
@@ -268,7 +272,8 @@ def busy_state():
         gr.skip(),
         BUSY_STATUS,
         gr.skip(),
-        *send_stop_buttons(False),
+        gr.skip(),
+        gr.skip(),
         gr.skip(),
         gr.skip(),
     )
