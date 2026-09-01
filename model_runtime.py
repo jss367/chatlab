@@ -311,13 +311,22 @@ def split_context_and_text(
     # the joint encoding is the text's own, plus whatever specials the
     # tokenizer prepends — so those ids are exact. A context with characters
     # in it is the case that cannot be checked, and it says so.
+    context_ids = [
+        int(value)
+        for value in tokenizer(context, add_special_tokens=add_special_tokens).input_ids
+    ]
+    # A post-processor closes the context with EOS or SEP, and encoding the
+    # halves apart would leave that closing token sitting between them: the
+    # text would be scored as what follows the end of a passage rather than
+    # what follows the context. Nothing was appended when the caller spells
+    # out its own specials, so only sweep when the tokenizer added them.
+    if add_special_tokens:
+        specials = set(getattr(tokenizer, "all_special_ids", None) or ())
+        while context_ids and context_ids[-1] in specials:
+            context_ids.pop()
+
     return SplitPassage(
-        [
-            int(value)
-            for value in tokenizer(
-                context, add_special_tokens=add_special_tokens
-            ).input_ids
-        ],
+        context_ids,
         [int(value) for value in tokenizer(text, add_special_tokens=False).input_ids],
         seam_verified=not context,
     )

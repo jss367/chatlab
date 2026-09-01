@@ -612,5 +612,39 @@ class ScoreTextGuardTests(unittest.TestCase):
         self.assertIn("did not produce any tokens", str(caught.exception))
 
 
+
+class LastResortTrailingSpecialTests(unittest.TestCase):
+    """The fallback that encodes the halves apart still has to build a passage.
+
+    A post-processor closes the context with ``</s>``. Left in place, the
+    scored text would follow the end of a passage rather than the context.
+    """
+
+    def tokenizer(self):
+        # Slow, so there are no offsets; the leading space is eaten, so the
+        # decoded seam cannot be verified either. Both joint paths decline.
+        return EatsTheLeadingSpace(is_fast=False, trailing_specials=1)
+
+    def test_the_closing_special_does_not_land_between_the_halves(self):
+        tokenizer = self.tokenizer()
+        closing = tokenizer.vocab["</s>"]
+
+        split = split_context_and_text(tokenizer, "The capital of", " France")
+
+        self.assertNotIn(closing, split.context_ids)
+        self.assertFalse(split.seam_verified)
+
+    def test_an_empty_context_is_not_closed_off_either(self):
+        # This half claims to be exact, so a stray closing token here would be
+        # wrong while reporting itself as certain.
+        tokenizer = self.tokenizer()
+        closing = tokenizer.vocab["</s>"]
+
+        split = split_context_and_text(tokenizer, "", "France")
+
+        self.assertNotIn(closing, split.context_ids)
+        self.assertTrue(split.seam_verified)
+
+
 if __name__ == "__main__":
     unittest.main()
