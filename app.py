@@ -2,14 +2,31 @@
 
 from __future__ import annotations
 
+import contextlib
 import html
 import os
+import random
+import threading
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import gradio as gr
+from gradio.utils import get_upload_folder
 
 import charts
+from conversation import (
+    copy_turns,
+    display_messages,
+    from_json,
+    last_user_index,
+    locate,
+    make_turn,
+    model_messages,
+    split_reasoning,
+    to_json,
+    user_index_at_or_before,
+)
 from model_runtime import PROMPT_SCORE_LIMIT, ModelManager
 from token_metrics import (
     COLOR_SCALES,
@@ -23,12 +40,14 @@ from trace_export import build_trace, write_trace_export
 
 DEFAULT_MODEL = "allenai/Olmo-3-7B-Think"
 MANAGER = ModelManager()
+SEED_LIMIT = 2**31 - 1
+NO_TOKEN_SELECTED = "Select a token to inspect it."
 
 # Redrawing the trace on every streamed token is wasted work, so it catches up
 # in batches and again once the response finishes.
 CHART_EVERY = 16
 
-SELECT_HINT = "Select a token to inspect it."
+RESPONSE_STRIP_LABEL = "Response tokens — click one"
 
 # This tokenizer offers neither offsets nor a decode that round trips, so
 # where the context ends had to be counted out rather than confirmed. The
@@ -162,18 +181,83 @@ def strip_update(metrics: list[dict], scale_name: str, label: str | None = None)
     return gr.update(**update)
 
 
-def recolor(metrics: list[dict], prompt_metrics: list[dict], scale_name: str):
-    scale = resolve_scale(scale_name)
+# The token strip's select listener runs independently of the generation
+# stream. Clicking a token queues its own event, and Gradio resolves that
+# event's inputs when it gets round to processing it, so a click made a moment
+# before Send can still be holding the previous response's metrics when it
+# finally runs - after the generation's opening frame has emptied the strip and
+# reset the detail panel. Publishing that click would put the old token's
+# probabilities beside the new response, and every later streaming frame
+# returns gr.skip() for those two outputs, so the stale numbers would sit there
+# until the user clicked again.
+#
+# The fix is a generation number that each click carries with it, issued and
+# compared here on the server. It cannot live in gr.State on its own: a
+# listener's state inputs are snapshotted together, so a number travelling that
+# way would go stale in lockstep with the metrics it is meant to date, and
+# every comparison would agree with itself. So the number is minted here, and
+# only rides along in the state beside the metrics it stamps. Every path that
+# replaces the strip mints a new one, which is what makes the older selections
+# detectable.
+#
+# The counter is process-wide rather than per session, so on a shared server
+# one user's generation also drops another's in-flight click. That costs the
+# second user one repeated click and never shows either of them a wrong number,
+# and the only per-session store Gradio offers is the one that cannot carry
+# this.
+_metrics_lock = threading.Lock()
+_metrics_generation = 0
+
+
+def new_metrics_generation() -> int:
+    """Stamp a new token strip, invalidating selections made against the old one."""
+
+    global _metrics_generation
+    with _metrics_lock:
+        _metrics_generation += 1
+        return _metrics_generation
+
+
+def stamped(metrics: list[dict], generation: int | None = None):
+    """Pair metrics with the stamp a click has to match to be published."""
+
+    return (new_metrics_generation() if generation is None else generation), metrics
+
+
+def empty_metrics() -> tuple[int, list[dict]]:
+    """The metrics payload for a path that clears the strip."""
+
+    return stamped([])
+
+
+def cleared_strips(scale_name: str):
+    """Empty both token strips under one stamp.
+
+    The response strip and the prompt strip are replaced together, so they
+    share a stamp: minting one each would leave the first of them looking
+    stale to inspect_token() the instant the second was minted.
+    """
+
+    generation = new_metrics_generation()
     return (
-        strip_update(metrics, scale.name),
-        strip_update(prompt_metrics, scale.name),
-        scale.caption,
+        strip_update([], scale_name, RESPONSE_STRIP_LABEL),
+        stamped([], generation),
+        strip_update([], scale_name),
+        stamped([], generation),
+        "",
     )
 
 
-def inspect_token(metrics: list[dict], event: gr.SelectData):
+def inspect_token(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
+    generation, metrics = metrics_state
+    if generation != _metrics_generation:
+        # The strip this click was made against is gone. Whatever replaced it
+        # already reset the detail panel, so leave that reset alone instead of
+        # repainting it with a token the user can no longer see.
+        return gr.skip(), gr.skip()
+
     if not metrics:
-        return SELECT_HINT, []
+        return NO_TOKEN_SELECTED, []
 
     index = event.index
     if isinstance(index, (list, tuple)):
@@ -220,6 +304,19 @@ def inspect_token(metrics: list[dict], event: gr.SelectData):
     return summary, rows
 
 
+def recolor(response_state, prompt_state, scale_name: str):
+    """Repaint both strips when the reader picks a different color scale."""
+
+    _generation, metrics = response_state
+    _prompt_generation, prompt_metrics = prompt_state
+    scale = resolve_scale(scale_name)
+    return (
+        strip_update(metrics, scale.name),
+        strip_update(prompt_metrics, scale.name),
+        scale.caption,
+    )
+
+
 def prompt_note_text(count: int, note: str, kind: str) -> str:
     if not count:
         return ""
@@ -229,140 +326,848 @@ def prompt_note_text(count: int, note: str, kind: str) -> str:
     return text
 
 
-def chat(
-    prompt: str,
-    conversation: list[dict] | None,
+# ---------------------------------------------------------------- generation
+
+
+# Every generation handler publishes this tuple, in this order. Naming the rows
+# here keeps the refusal paths - which skip most of them - from counting
+# placeholders by hand.
+CHAT_OUTPUT_NAMES = (
+    "prompt",
+    "chatbot",
+    "turns",
+    "strip",
+    "metrics",
+    "status",
+    "seed",
+    "send",
+    "stop",
+    "detail",
+    "alternatives",
+    "prompt_strip",
+    "prompt_metrics",
+    "prompt_note",
+    "summary",
+    "surprise",
+    "trace",
+)
+
+
+def send_stop_buttons(busy: bool):
+    """Swap the Send and Stop buttons for each other."""
+
+    return gr.update(visible=not busy), gr.update(visible=busy)
+
+
+def finalize_partial(turns: list[dict]) -> bool:
+    """Close out a half-written assistant turn, dropping it when it holds nothing.
+
+    Returns whether a partial response was worth keeping. Cancelling or failing
+    mid-stream can leave a turn whose reasoning block is still marked pending,
+    which would keep the accordion spinning for the rest of the session.
+    """
+
+    if not turns or turns[-1]["role"] != "assistant":
+        return False
+    if not (turns[-1].get("content") or turns[-1].get("reasoning")):
+        turns.pop()
+        return False
+    turns[-1]["reasoning_closed"] = True
+    return True
+
+
+def stop_generation(turns: list[dict] | None):
+    """Finish the turn that the cancelled generator left behind.
+
+    Gradio closes ``generate_reply`` at its last yield, so nothing else ever
+    finalizes that turn.
+    """
+
+    turns = copy_turns(turns)
+    kept = finalize_partial(turns)
+    messages, _ = display_messages(turns)
+    return (
+        messages,
+        turns,
+        *send_stop_buttons(False),
+        "Stopped. The partial response was kept."
+        if kept
+        else "Stopped before the model produced anything.",
+    )
+
+
+def resolve_seed(seed, randomize: bool) -> int:
+    """Pick the seed for one generation, inside the range NumPy will accept.
+
+    ``np.random.default_rng()`` rejects negative integers, so a locked seed of
+    ``-1`` used to fail every generation with "expected non-negative integer"
+    and produce no reply at all. The number input is constrained to 0 and above,
+    but the clamp lives here as well: this is the only place the value is turned
+    into the one the generator is handed, and it can still arrive out of range
+    from the API, from a browser that ignores the constraint, or from a float
+    the input rounded. Non-numeric and missing values keep falling back to 0.
+    """
+
+    if randomize:
+        return random.randrange(SEED_LIMIT)
+    try:
+        # OverflowError covers infinities, which int() refuses to convert.
+        value = int(seed)
+    except (OverflowError, TypeError, ValueError):
+        return 0
+    return max(value, 0)
+
+
+def generation_progress(count: int, started: float, seed: int) -> str:
+    elapsed = max(time.monotonic() - started, 1e-6)
+    plural = "" if count == 1 else "s"
+    return (
+        f"{count} token{plural} · {elapsed:.1f}s · {count / elapsed:.1f} tok/s "
+        f"· seed {seed}"
+    )
+
+
+def idle_state(
+    prompt_text: str,
+    turns: list[dict],
+    status: str,
+    *,
+    clear_tokens: bool = False,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
+    """A non-streaming result that leaves the seed untouched.
+
+    The token panel is normally left alone as well: paths such as "Enter a
+    message first." must not wipe the diagnostics of the response already on
+    screen. ``clear_tokens`` is for the one case where those diagnostics stop
+    describing the visible text - an edited assistant reply. Both strips go
+    together there: they carry one shared stamp, so re-stamping the response
+    strip alone would silently stop the prompt strip's clicks from publishing.
+    """
+
+    messages, _ = display_messages(turns)
+    panels = (
+        cleared_strips(scale_name)
+        if clear_tokens
+        else (gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip())
+    )
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = panels
+    return (
+        prompt_text,
+        messages,
+        copy_turns(turns),
+        strip,
+        metrics,
+        status,
+        gr.skip(),
+        *send_stop_buttons(False),
+        NO_TOKEN_SELECTED if clear_tokens else gr.skip(),
+        [] if clear_tokens else gr.skip(),
+        prompt_strip,
+        prompt_metrics,
+        prompt_note,
+        charts.summary_tiles({}) if clear_tokens else gr.skip(),
+        charts.EMPTY_CHART if clear_tokens else gr.skip(),
+        {} if clear_tokens else gr.skip(),
+    )
+
+
+BUSY_STATUS = "A response is already generating. Press Stop first."
+
+
+def busy_state():
+    """Refuse to start a generation while one is running, touching nothing else.
+
+    Gradio reads a listener's inputs when the request is queued, so a Retry or
+    an Edit clicked mid-stream arrives holding the conversation as it looked at
+    click time. Publishing that snapshot - which is what idle_state() would do,
+    since it returns copy_turns(turns) - would overwrite whatever the running
+    generation has written since, silently erasing a whole exchange. So this
+    refusal skips the chatbot and the conversation state entirely, along with
+    the prompt box and the token panel, and reports the reason.
+
+    The two buttons are skipped for the same reason: the generation that owns
+    the slot is still running, so it - not this refusal - decides what the
+    buttons say. Forcing them idle would hide Stop while telling the user to
+    press Stop, and nothing would bring it back until the running generation
+    published its next batched update, which on a slow model is seconds away
+    and never arrives at all if inference stalls. Skipping leaves the busy
+    pair the running generation already published in place, and that
+    generation restores the idle pair itself on whichever path it exits.
+    """
+
+    return (
+        (gr.skip(),) * 5
+        + (BUSY_STATUS,)
+        + (gr.skip(),) * (len(CHAT_OUTPUT_NAMES) - 6)
+    )
+
+
+def generate_reply(
+    turns: list[dict],
+    prompt_text: str,
+    system_prompt: str,
+    keep_reasoning: bool,
     temperature: float,
     top_p: float,
     top_k: int,
     max_new_tokens: int,
-    seed: int,
-    analyze_prompt: bool,
-    scale_name: str,
+    seed,
+    randomize_seed: bool,
+    analyze_prompt: bool = True,
+    scale_name: str = DEFAULT_COLOR_SCALE,
 ):
-    skip = gr.skip()
-    conversation = list(conversation or [])
-    prompt = prompt.strip()
-    if not prompt:
-        yield (skip,) * 5 + ("Enter a message first.",) + (skip,) * 8
-        return
-    if not MANAGER.loaded:
-        yield (skip,) * 5 + ("Download and load a model first.",) + (skip,) * 8
+    """Stream one assistant reply for ``turns``, which must end with a user turn.
+
+    The generation slot is reserved here, before the first frame is published,
+    because this is the first moment a handler is committed to generating. The
+    MANAGER.busy checks in chat(), regenerate_from() and edit_message() are an
+    early exit, not the guard: between such a check and the model lock that
+    generate() takes sits the "Generating…" yield, and Gradio does not resume a
+    handler until it has serialized that frame and sent it to the browser. A
+    second click arriving inside that round trip used to sail past a manager
+    that looked idle and overwrite the conversation from its stale snapshot.
+    """
+
+    if not MANAGER.reserve_generation():
+        yield busy_state()
         return
 
-    request_messages = conversation + [{"role": "user", "content": prompt}]
-    display = request_messages + [{"role": "assistant", "content": ""}]
-    yield (
-        "",
-        list(display),
-        conversation,
-        strip_update([], scale_name, "Response tokens — click one"),
-        [],
-        "Reading the prompt…",
-        strip_update([], scale_name),
-        [],
-        "",
-        charts.summary_tiles({}),
-        charts.EMPTY_CHART,
-        SELECT_HINT,
-        [],
-        {},
+    try:
+        yield from _stream_reply(
+            turns,
+            prompt_text,
+            system_prompt,
+            keep_reasoning,
+            temperature,
+            top_p,
+            top_k,
+            max_new_tokens,
+            seed,
+            randomize_seed,
+            analyze_prompt,
+            scale_name,
+        )
+    finally:
+        # Every exit runs this: a finished stream, a failure, and - the one
+        # that matters - cancellation, where Gradio throws GeneratorExit in at
+        # whichever yield the stream is parked on. Leaving the slot reserved
+        # there would wedge the app: Send would refuse forever.
+        MANAGER.release_generation()
+
+
+def _stream_reply(
+    turns: list[dict],
+    prompt_text: str,
+    system_prompt: str,
+    keep_reasoning: bool,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    max_new_tokens: int,
+    seed,
+    randomize_seed: bool,
+    analyze_prompt: bool = True,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
+    """The body of generate_reply(), run with the generation slot held."""
+
+    turns = copy_turns(turns)
+    used_seed = resolve_seed(seed, randomize_seed)
+    # Minted once for the whole stream, not once per frame: the strip is
+    # replaced by the opening frame and only appended to afterwards, so a token
+    # picked mid-stream is still on screen and its click must stay valid. What
+    # this number invalidates is every selection made against the response this
+    # one replaces.
+    generation = new_metrics_generation()
+    request = model_messages(
+        turns, system_prompt=system_prompt, include_reasoning=keep_reasoning
     )
 
+    pending = make_turn("assistant", "", "")
+    pending["reasoning_closed"] = True
+    turns.append(pending)
+
+    def snapshot(
+        highlight,
+        metrics,
+        status,
+        busy=True,
+        reset_details=False,
+        prompt_panel=None,
+        charts_panel=None,
+        trace=None,
+    ):
+        """One frame of the stream.
+
+        ``reset_details`` belongs to the first frame only. That frame empties
+        the strip, so a token selected in the previous response is gone and its
+        probabilities must go with it. Later frames only append to the strip, so
+        a token picked mid-stream stays valid and its details are left alone.
+
+        ``prompt_panel`` and ``charts_panel`` are skipped on most frames. The
+        prompt tokens are all measured before the first one is generated, so
+        they are published once and never change; the charts redraw in batches
+        because rebuilding an SVG per token is wasted work.
+        """
+
+        messages, _ = display_messages(turns)
+        prompt_strip, prompt_metrics, prompt_note = prompt_panel or (
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+        )
+        summary_panel, surprise_panel = charts_panel or (gr.skip(), gr.skip())
+        return (
+            prompt_text,
+            messages,
+            copy_turns(turns),
+            highlight,
+            (generation, metrics),
+            status,
+            used_seed,
+            *send_stop_buttons(busy),
+            NO_TOKEN_SELECTED if reset_details else gr.skip(),
+            [] if reset_details else gr.skip(),
+            prompt_strip,
+            prompt_metrics,
+            prompt_note,
+            summary_panel,
+            surprise_panel,
+            gr.skip() if trace is None else trace,
+        )
+
+    # The opening frame empties everything the previous response left behind,
+    # the export included: a trace kept here would still be downloadable while
+    # a different response was streaming in above it.
+    yield snapshot(
+        strip_update([], scale_name, RESPONSE_STRIP_LABEL),
+        [],
+        "Generating…",
+        reset_details=True,
+        prompt_panel=(strip_update([], scale_name), (generation, []), ""),
+        charts_panel=(charts.summary_tiles({}), charts.EMPTY_CHART),
+        trace={},
+    )
+
+    started = time.monotonic()
+    raw_text = ""
+    # Reasoning templates end the prompt with the opening <think> marker, so the
+    # generated text never carries one. Only the runtime can tell us that.
+    prefilled = False
+    highlight: list[tuple[str, str]] = []
     metrics: list[dict] = []
+    status = "The model produced no tokens."
     first = True
+
+    stream = MANAGER.generate(
+        request,
+        temperature=float(temperature),
+        top_p=float(top_p),
+        top_k=int(top_k),
+        max_new_tokens=int(max_new_tokens),
+        seed=used_seed,
+        analyze_prompt=bool(analyze_prompt),
+    )
+
     try:
-        last_update = None
-        for update in MANAGER.generate(
-            request_messages,
-            temperature=float(temperature),
-            top_p=float(top_p),
-            top_k=int(top_k),
-            max_new_tokens=int(max_new_tokens),
-            seed=int(seed),
-            analyze_prompt=bool(analyze_prompt),
-        ):
-            last_update = update
-            metrics = update.metrics
-            display[-1] = {"role": "assistant", "content": update.text}
-            count = len(metrics)
-            refresh = first or count % CHART_EVERY == 0
-            yield (
-                "",
-                list(display),
-                list(display),
-                strip_value(metrics, scale_name),
-                metrics,
-                f"Generated {count} token{'s' if count != 1 else ''}.",
-                strip_update(update.prompt_metrics, scale_name)
-                if first
-                else skip,
-                update.prompt_metrics if first else skip,
-                prompt_note_text(
-                    len(update.prompt_metrics), update.prompt_note, "prompt"
+        # closing() releases the model lock the moment the Stop button cancels
+        # this event and Gradio closes the outer generator.
+        with contextlib.closing(stream):
+            for update in stream:
+                raw_text = update.text
+                prefilled = update.reasoning_prefilled
+                reasoning, answer, closed = split_reasoning(
+                    raw_text, streaming=True, reasoning_prefilled=prefilled
                 )
-                if first
-                else skip,
-                charts.summary_tiles(summarize(metrics)) if refresh else skip,
-                charts.surprise_chart(metrics) if refresh else skip,
-                skip,
-                skip,
-                skip,
-            )
-            first = False
+                pending["reasoning"] = reasoning
+                pending["content"] = answer
+                pending["reasoning_closed"] = closed
+                highlight = strip_value(update.metrics, scale_name)
+                metrics = list(update.metrics)
+                status = generation_progress(len(metrics), started, used_seed)
+                prompt_panel = None
+                if first:
+                    # Every prompt token is measured before the first response
+                    # token exists, so this is published once and never
+                    # changes. It shares the response strip's stamp: the two
+                    # are replaced together, and a click on either has to
+                    # match the stamp the pair was drawn with.
+                    prompt_metrics = list(update.prompt_metrics)
+                    prompt_panel = (
+                        strip_update(prompt_metrics, scale_name),
+                        (generation, prompt_metrics),
+                        prompt_note_text(
+                            len(prompt_metrics), update.prompt_note, "prompt"
+                        ),
+                    )
+                yield snapshot(
+                    highlight,
+                    metrics,
+                    status,
+                    prompt_panel=prompt_panel,
+                    charts_panel=(
+                        (
+                            charts.summary_tiles(summarize(metrics)),
+                            charts.surprise_chart(metrics),
+                        )
+                        if first or len(metrics) % CHART_EVERY == 0
+                        else None
+                    ),
+                )
+                first = False
     except Exception as error:
-        display[-1] = {"role": "assistant", "content": f"Generation failed: {error}"}
-        # A failed response is not a response to export, so the trace opened
-        # at the top of this run stays empty.
-        yield (
-            "",
-            list(display),
-            conversation,
-            skip,
-            skip,
-            f"Generation failed: {error}",
-        ) + (skip,) * 7 + ({},)
+        # The diagnostic only goes to the status line. Storing it as the
+        # assistant turn would feed the failure back to the model next turn.
+        reasoning, answer, _ = split_reasoning(raw_text, reasoning_prefilled=prefilled)
+        pending["reasoning"] = reasoning
+        pending["content"] = answer
+        finalize_partial(turns)
+        # A failed response is not a response to export, so the trace the
+        # opening frame emptied stays empty.
+        yield snapshot(highlight, metrics, f"Generation failed: {error}", busy=False)
         return
 
+    reasoning, answer, _ = split_reasoning(raw_text, reasoning_prefilled=prefilled)
+    pending["reasoning"] = reasoning
+    pending["content"] = answer
+    # A generation can succeed and still leave nothing renderable behind: the
+    # first sampled token is a hidden EOS, the model emits only whitespace,
+    # which split_reasoning() strips away, or it opens and closes a reasoning
+    # block without writing in it. Publishing that turn would draw a blank
+    # bubble in display_messages() that model_messages() skips, so the visible
+    # conversation and the model's would disagree - the UI would show a reply
+    # the model never sees. finalize_partial() is what the failure and
+    # cancellation paths already use for exactly this, so success uses it too:
+    # it closes the reasoning block when the turn is worth keeping and drops
+    # the turn when it holds neither answer nor reasoning. Dropping it leaves
+    # the user turn without a reply, which is the honest shape - no assistant
+    # bubble is drawn, so both transcripts agree that no reply exists.
+    kept = finalize_partial(turns)
     trace = (
         build_trace(
             model_id=MANAGER.model_id,
-            messages=request_messages,
-            response=last_update.text,
+            messages=request,
+            response=raw_text,
             sampling={
                 "temperature": float(temperature),
                 "top_p": float(top_p),
                 "top_k": int(top_k),
                 "max_new_tokens": int(max_new_tokens),
-                "seed": int(seed),
+                "seed": used_seed,
             },
             metrics=metrics,
         )
-        if last_update is not None and metrics
+        if kept and metrics
         else {}
     )
-    status = f"Generated {len(metrics)} token{'s' if len(metrics) != 1 else ''}."
     if trace:
         status = f"{status} Exports are ready."
-    yield (skip,) * 5 + (
+    yield snapshot(
+        highlight,
+        metrics,
         status,
-        skip,
-        skip,
-        skip,
-        charts.summary_tiles(summarize(metrics)),
-        charts.surprise_chart(metrics),
-        skip,
-        skip,
-        trace,
+        busy=False,
+        charts_panel=(
+            charts.summary_tiles(summarize(metrics)),
+            charts.surprise_chart(metrics),
+        ),
+        trace=trace,
     )
+
+
+def chat(
+    prompt_text: str,
+    turns: list[dict] | None,
+    system_prompt: str,
+    keep_reasoning: bool,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    max_new_tokens: int,
+    seed,
+    randomize_seed: bool,
+    analyze_prompt: bool = True,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
+    if MANAGER.busy:
+        # Before anything else, including the checks below: every other exit
+        # from this function writes the conversation back, and while another
+        # generation is streaming that write is a stale overwrite.
+        yield busy_state()
+        return
+
+    turns = copy_turns(turns)
+    message = (prompt_text or "").strip()
+    if not message:
+        yield idle_state(prompt_text, turns, "Enter a message first.")
+        return
+    if not MANAGER.loaded:
+        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        return
+
+    turns.append(make_turn("user", message))
+    yield from generate_reply(
+        turns,
+        "",
+        system_prompt,
+        keep_reasoning,
+        temperature,
+        top_p,
+        top_k,
+        max_new_tokens,
+        seed,
+        randomize_seed,
+        analyze_prompt,
+        scale_name,
+    )
+
+
+def regenerate_from(
+    position: int | None,
+    prompt_text: str,
+    turns: list[dict] | None,
+    system_prompt: str,
+    keep_reasoning: bool,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    max_new_tokens: int,
+    seed,
+    randomize_seed: bool,
+    analyze_prompt: bool = True,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
+    """Throw away everything after the user turn at ``position`` and reply again."""
+
+    if MANAGER.busy:
+        # Covers Retry and the chatbot's own retry button, which reach a
+        # generation only through here.
+        yield busy_state()
+        return
+
+    turns = copy_turns(turns)
+    if position is None:
+        yield idle_state(prompt_text, turns, "There is nothing to retry.")
+        return
+    if not MANAGER.loaded:
+        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        return
+
+    yield from generate_reply(
+        turns[: position + 1],
+        prompt_text,
+        system_prompt,
+        keep_reasoning,
+        temperature,
+        top_p,
+        top_k,
+        max_new_tokens,
+        seed,
+        randomize_seed,
+        analyze_prompt,
+        scale_name,
+    )
+
+
+def retry_last(prompt_text, turns, *settings):
+    yield from regenerate_from(last_user_index(turns), prompt_text, turns, *settings)
+
+
+def retry_message(event: gr.RetryData, prompt_text, turns, *settings):
+    found = locate(turns, event.index)
+    position = (
+        user_index_at_or_before(turns, found[0]) if found else last_user_index(turns)
+    )
+    yield from regenerate_from(position, prompt_text, turns, *settings)
+
+
+def edit_message(event: gr.EditData, prompt_text, turns, *settings):
+    # The color scale is the last of the settings a generation is given, and
+    # this handler needs it for the one path that clears the strips itself.
+    scale_name = settings[-1] if settings else DEFAULT_COLOR_SCALE
+    if MANAGER.busy:
+        # Not just the branch that regenerates: editing an assistant turn
+        # rewrites the conversation on its own, from the same stale snapshot.
+        yield busy_state()
+        return
+
+    turns = copy_turns(turns)
+    found = locate(turns, event.index)
+    if found is None:
+        yield idle_state(prompt_text, turns, "That message is no longer available.")
+        return
+
+    position, part = found
+    new_value = event.value if isinstance(event.value, str) else str(event.value)
+
+    if turns[position]["role"] == "assistant":
+        edited_turn = dict(turns[position])
+        edited_turn["reasoning" if part == "reasoning" else "content"] = new_value
+        if not (
+            (edited_turn.get("content") or "").strip()
+            or (edited_turn.get("reasoning") or "").strip()
+        ):
+            # An assistant turn with neither answer nor reasoning is drawn as a
+            # bubble by display_messages() but skipped by model_messages(), so
+            # the visible transcript and the model's would disagree and the next
+            # request would carry two user messages in a row. Rejecting matches
+            # how an emptied user message is handled below; the alternative,
+            # dropping the exchange, would silently discard the prompt too.
+            yield idle_state(
+                prompt_text, turns, "An assistant message cannot be emptied."
+            )
+            return
+        # Reserve for the same reason a generation does. This branch rewrites
+        # the conversation without generating, so the busy check above is not
+        # enough: a Send starting in the same instant would pass its own check,
+        # and whichever frame landed second would erase the other's work. The
+        # slot is held across the yield, because releasing before the frame
+        # reaches the browser reopens exactly that window.
+        if not MANAGER.reserve_generation():
+            yield busy_state()
+            return
+        try:
+            turns[position] = edited_turn
+            # The ranks and probabilities on screen describe the text the model
+            # generated, not what the user just typed over it.
+            yield idle_state(
+                prompt_text,
+                turns,
+                "Assistant message edited.",
+                clear_tokens=True,
+                scale_name=scale_name,
+            )
+        finally:
+            MANAGER.release_generation()
+        return
+
+    edited = new_value.strip()
+    if not edited:
+        # An empty user turn is skipped by model_messages(), which would leave
+        # the request with no user message at all.
+        yield idle_state(prompt_text, turns, "A user message cannot be empty.")
+        return
+
+    if not MANAGER.loaded:
+        # regenerate_from() would refuse too, but only after the truncation
+        # below had already thrown away every later turn for a reply that is
+        # never generated.
+        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        return
+
+    turns = turns[: position + 1]
+    turns[position]["content"] = edited
+    yield from regenerate_from(position, prompt_text, turns, *settings)
+
+
+def undo_from(
+    position: int | None,
+    turns: list[dict] | None,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
+    """Drop the exchange starting at the user turn ``position``.
+
+    The message goes back into the input box so it can be reworded and sent again.
+
+    Undo cancels a running generation (see ``cancels`` on its listeners), and a
+    cancelled ``generate_reply`` never reaches its final yield, so every path
+    here restores the Send button itself exactly as Clear and Load do. That
+    includes "There is nothing to undo.": the cancel fires on the click, not on
+    what this function decides afterwards.
+    """
+
+    turns = copy_turns(turns)
+    if position is None:
+        # Nothing is removed here, so this is the one Undo path that keeps what
+        # the cancelled generator left behind and therefore has to finalize it,
+        # exactly as Stop does. Every other path truncates the partial turn away.
+        finalize_partial(turns)
+        messages, _ = display_messages(turns)
+        return (
+            gr.skip(),
+            messages,
+            turns,
+            gr.skip(),
+            gr.skip(),
+            "There is nothing to undo.",
+            gr.skip(),
+            gr.skip(),
+            *send_stop_buttons(False),
+            *(gr.skip(),) * 6,
+        )
+
+    remaining = turns[:position]
+    messages, _ = display_messages(remaining)
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
+        scale_name
+    )
+    # The selected-token details describe the response being removed, so they
+    # go with it, exactly as Clear resets them. So do the prompt tokens, the
+    # charts and the export: all of them measure the exchange that just left.
+    return (
+        turns[position]["content"],
+        messages,
+        remaining,
+        strip,
+        metrics,
+        "Removed the last exchange.",
+        NO_TOKEN_SELECTED,
+        [],
+        *send_stop_buttons(False),
+        prompt_strip,
+        prompt_metrics,
+        prompt_note,
+        charts.summary_tiles({}),
+        charts.EMPTY_CHART,
+        {},
+    )
+
+
+def undo_last(turns, scale_name: str = DEFAULT_COLOR_SCALE):
+    return undo_from(last_user_index(turns), turns, scale_name)
+
+
+def undo_message(event: gr.UndoData, turns, scale_name: str = DEFAULT_COLOR_SCALE):
+    found = locate(turns, event.index)
+    position = (
+        user_index_at_or_before(turns, found[0]) if found else last_user_index(turns)
+    )
+    return undo_from(position, turns, scale_name)
+
+
+def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
+    """Empty everything the conversation owns.
+
+    Clear cancels a running generation (see ``cancels`` on its listener), and a
+    cancelled ``generate_reply`` never reaches its final yield, so this has to
+    restore the Send button itself exactly as Stop does.
+    """
+
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
+        scale_name
+    )
+    return (
+        [],
+        [],
+        strip,
+        metrics,
+        "Conversation cleared.",
+        *send_stop_buttons(False),
+        NO_TOKEN_SELECTED,
+        [],
+        prompt_strip,
+        prompt_metrics,
+        prompt_note,
+        charts.summary_tiles({}),
+        charts.EMPTY_CHART,
+        {},
+    )
+
+
+# --------------------------------------------------------------- save / load
+
+
+def save_conversation(turns, system_prompt):
+    if not turns:
+        return gr.update(value=None, visible=False), "There is nothing to save yet."
+
+    # Gradio only serves files it created or was told to allow, so the saved
+    # conversation has to live inside its upload folder.
+    directory = Path(get_upload_folder()) / "chatlab-conversations"
+    directory.mkdir(parents=True, exist_ok=True)
+    # The timestamp only resolves to the second, and every session shares this
+    # upload folder, so a random suffix keeps two saves from landing on the same
+    # path and silently overwriting each other's download.
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    path = directory / f"conversation-{stamp}-{uuid4().hex[:8]}.json"
+    path.write_text(to_json(turns, system_prompt=system_prompt), encoding="utf-8")
+    return (
+        gr.update(value=str(path), visible=True),
+        f"Saved {len(turns)} message{'s' if len(turns) != 1 else ''}.",
+    )
+
+
+def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE):
+    """Replace the conversation with a saved one.
+
+    A failed load keeps the conversation already on screen, so a bad file
+    cannot wipe it, and leaves the token panel describing it alone. Loading
+    cancels any generation still running, so the buttons are restored here for
+    the same reason Clear restores them: a cancelled generator never reaches
+    its final yield. For the same reason the kept conversation has to be
+    finalized like Stop does - the cancelled generator left its last turn with
+    a pending reasoning block, which would spin for the rest of the session,
+    or empty if the cancel landed before the first token.
+    """
+
+    def keep_current(status):
+        """Return the conversation the cancelled generator left behind."""
+
+        kept = copy_turns(turns)
+        finalize_partial(kept)
+        messages, _ = display_messages(kept)
+        return (
+            messages,
+            kept,
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            status,
+            gr.skip(),
+            gr.skip(),
+            *send_stop_buttons(False),
+            *(gr.skip(),) * 6,
+        )
+
+    if not file_path:
+        return keep_current("No file chosen.")
+    try:
+        loaded, system_prompt = from_json(Path(file_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return keep_current(f"Could not load that file: {error}")
+
+    # A successful load replaces the conversation wholesale, so whatever the
+    # cancelled generator left behind goes with it and needs no finalizing.
+    turns = loaded
+    messages, _ = display_messages(turns)
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
+        scale_name
+    )
+    # The selected token described a response from the conversation being
+    # replaced, so it goes with it, exactly as Clear and Undo reset it. The
+    # charts and the export measured that response too, and a loaded
+    # conversation has no measurements of its own to put in their place.
+    return (
+        messages,
+        turns,
+        system_prompt,
+        strip,
+        metrics,
+        f"Loaded {len(turns)} message{'s' if len(turns) != 1 else ''}.",
+        NO_TOKEN_SELECTED,
+        [],
+        *send_stop_buttons(False),
+        prompt_strip,
+        prompt_metrics,
+        prompt_note,
+        charts.summary_tiles({}),
+        charts.EMPTY_CHART,
+        {},
+    )
+
+
+# ---------------------------------------------------------------- score text
 
 
 def score_text(
     context: str,
     text: str,
     use_chat_template: bool,
-    scale_name: str,
+    scale_name: str = DEFAULT_COLOR_SCALE,
 ):
+    """Measure text the model did not write, and put it in the same panel."""
+
     skip = gr.skip()
     if not MANAGER.loaded:
         return (skip,) * 7 + ("Download and load a model first.", skip, skip)
@@ -386,35 +1191,20 @@ def score_text(
         status = f"{status} {TEMPLATE_CAVEAT}"
     if not result.seam_verified:
         status = f"{status} {SEAM_CAVEAT}"
+    # Both strips are replaced, so they take one shared stamp - and that stamp
+    # is what drops a click made against the response they overwrite.
+    generation = new_metrics_generation()
     return (
         strip_update(result.metrics, scale_name, "Scored tokens — click one"),
-        result.metrics,
+        stamped(result.metrics, generation),
         strip_update(result.context_metrics, scale_name),
-        result.context_metrics,
+        stamped(result.context_metrics, generation),
         prompt_note_text(len(result.context_metrics), "", "context"),
         charts.summary_tiles(summary),
         charts.surprise_chart(result.metrics, title="Surprise per scored token"),
         status,
-        SELECT_HINT,
+        NO_TOKEN_SELECTED,
         [],
-    )
-
-
-def clear_chat(scale_name: str):
-    return (
-        [],
-        [],
-        strip_update([], scale_name, "Response tokens — click one"),
-        [],
-        strip_update([], scale_name),
-        [],
-        "",
-        "Conversation cleared.",
-        SELECT_HINT,
-        [],
-        charts.summary_tiles({}),
-        charts.EMPTY_CHART,
-        {},
     )
 
 
@@ -471,12 +1261,10 @@ CSS = """
 
 
 def build_app() -> gr.Blocks:
-    with gr.Blocks(
-        title="Chatlab", css=CSS, theme=gr.themes.Soft()
-    ) as demo:
+    with gr.Blocks(title="Chatlab", css=CSS, theme=gr.themes.Soft()) as demo:
         conversation_state = gr.State([])
-        metrics_state = gr.State([])
-        prompt_metrics_state = gr.State([])
+        metrics_state = gr.State(empty_metrics())
+        prompt_metrics_state = gr.State(empty_metrics())
         trace_state = gr.State({})
 
         gr.Markdown(
@@ -514,6 +1302,19 @@ def build_app() -> gr.Blocks:
                         elem_id="model-status",
                     )
 
+        with gr.Accordion("System prompt and reasoning", open=False):
+            system_prompt = gr.Textbox(
+                label="System prompt",
+                placeholder="You are a careful assistant that answers concisely.",
+                lines=3,
+                info="Sent as a system message ahead of the conversation. Leave empty to use the model's default behavior.",
+            )
+            keep_reasoning = gr.Checkbox(
+                value=False,
+                label="Send previous reasoning back to the model",
+                info="Off by default. Think models write a fresh reasoning block each turn, so replaying old ones burns context and usually hurts the next answer.",
+            )
+
         with gr.Row(equal_height=True):
             with gr.Column(scale=3):
                 with gr.Tabs():
@@ -521,7 +1322,8 @@ def build_app() -> gr.Blocks:
                         chatbot = gr.Chatbot(
                             type="messages",
                             label="Conversation",
-                            height=520,
+                            height=560,
+                            editable="all",
                             placeholder="Load a model, then start a conversation.",
                         )
                         prompt = gr.Textbox(
@@ -531,7 +1333,24 @@ def build_app() -> gr.Blocks:
                         )
                         with gr.Row():
                             send_button = gr.Button("Send", variant="primary")
-                            clear_button = gr.Button("Clear conversation")
+                            stop_button = gr.Button(
+                                "Stop", variant="stop", visible=False
+                            )
+                            retry_button = gr.Button("🔁 Retry")
+                            undo_button = gr.Button("↩️ Undo last")
+                            clear_button = gr.Button("🗑️ Clear")
+                        with gr.Row():
+                            save_button = gr.Button("💾 Save conversation")
+                            load_upload = gr.UploadButton(
+                                "📂 Load conversation",
+                                file_types=[".json"],
+                                type="filepath",
+                            )
+                        saved_file = gr.File(
+                            label="Saved conversation",
+                            visible=False,
+                            interactive=False,
+                        )
                         generation_status = gr.Markdown("Ready.")
                         with gr.Accordion("Export full metric trace", open=False):
                             with gr.Row():
@@ -595,13 +1414,13 @@ def build_app() -> gr.Blocks:
                     elem_classes=["scale-caption"],
                 )
                 token_strip = gr.HighlightedText(
-                    label="Response tokens — click one",
+                    label=RESPONSE_STRIP_LABEL,
                     color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
                     show_legend=True,
                     combine_adjacent=False,
                     elem_id="token-strip",
                 )
-                token_detail = gr.Markdown(SELECT_HINT)
+                token_detail = gr.Markdown(NO_TOKEN_SELECTED)
                 alternatives = gr.Dataframe(
                     headers=["Token ID", "Token", "Raw probability"],
                     datatype=["number", "str", "number"],
@@ -629,7 +1448,18 @@ def build_app() -> gr.Blocks:
                 max_new_tokens = gr.Slider(
                     1, 8192, value=1024, step=1, label="Maximum new tokens"
                 )
-                seed = gr.Number(value=42, precision=0, label="Random seed")
+                seed = gr.Number(
+                    value=42,
+                    precision=0,
+                    minimum=0,
+                    label="Random seed",
+                    info="Updated after each response so you can reproduce it.",
+                )
+                randomize_seed = gr.Checkbox(
+                    value=True,
+                    label="🎲 New seed each response",
+                    info="Turn off to lock the seed and reproduce a response exactly.",
+                )
                 analyze_prompt = gr.Checkbox(
                     value=True,
                     label="Measure prompt tokens",
@@ -649,17 +1479,21 @@ def build_app() -> gr.Blocks:
         cached_button.click(load_cached_model, model_id, model_status)
         unload_button.click(unload_model, outputs=model_status)
 
-        chat_inputs = [
-            prompt,
-            conversation_state,
+        settings_inputs = [
+            system_prompt,
+            keep_reasoning,
             temperature,
             top_p,
             top_k,
             max_new_tokens,
             seed,
+            randomize_seed,
             analyze_prompt,
             color_scale,
         ]
+        chat_inputs = [prompt, conversation_state, *settings_inputs]
+        # The order every generation handler publishes in; see
+        # CHAT_OUTPUT_NAMES.
         chat_outputs = [
             prompt,
             chatbot,
@@ -667,17 +1501,82 @@ def build_app() -> gr.Blocks:
             token_strip,
             metrics_state,
             generation_status,
+            seed,
+            send_button,
+            stop_button,
+            token_detail,
+            alternatives,
             prompt_strip,
             prompt_metrics_state,
             prompt_note,
             summary_panel,
             surprise_panel,
-            token_detail,
-            alternatives,
             trace_state,
         ]
-        send_button.click(chat, chat_inputs, chat_outputs)
-        prompt.submit(chat, chat_inputs, chat_outputs)
+        undo_outputs = [
+            prompt,
+            chatbot,
+            conversation_state,
+            token_strip,
+            metrics_state,
+            generation_status,
+            token_detail,
+            alternatives,
+            send_button,
+            stop_button,
+            prompt_strip,
+            prompt_metrics_state,
+            prompt_note,
+            summary_panel,
+            surprise_panel,
+            trace_state,
+        ]
+
+        running = [
+            send_button.click(chat, chat_inputs, chat_outputs),
+            prompt.submit(chat, chat_inputs, chat_outputs),
+            retry_button.click(retry_last, chat_inputs, chat_outputs),
+            chatbot.retry(retry_message, chat_inputs, chat_outputs),
+            chatbot.edit(edit_message, chat_inputs, chat_outputs),
+        ]
+
+        stop_button.click(
+            stop_generation,
+            inputs=conversation_state,
+            outputs=[
+                chatbot,
+                conversation_state,
+                send_button,
+                stop_button,
+                generation_status,
+            ],
+            cancels=running,
+        )
+
+        # Undo, Clear and Load all replace or truncate the conversation, so
+        # each has to stop the generator first: a surviving generate_reply
+        # would write its own snapshot of the in-progress turns back into the
+        # chatbot and the state, resurrecting what was just removed. Send,
+        # Retry and Edit are exempt because they *are* the generation - they
+        # re-enter generate_reply, and they are what everything else cancels.
+        # They cannot be made to cancel each other either: Gradio captures a
+        # listener's inputs when the request is queued, so the survivor would
+        # rebuild the conversation from a snapshot taken before the cancelled
+        # run wrote anything. A shared concurrency group has the same flaw - it
+        # only delays the stale handler. Each of them refuses outright instead
+        # while MANAGER.busy (see busy_state).
+        undo_button.click(
+            undo_last,
+            [conversation_state, color_scale],
+            undo_outputs,
+            cancels=running,
+        )
+        chatbot.undo(
+            undo_message,
+            [conversation_state, color_scale],
+            undo_outputs,
+            cancels=running,
+        )
         clear_button.click(
             clear_chat,
             inputs=color_scale,
@@ -686,17 +1585,50 @@ def build_app() -> gr.Blocks:
                 conversation_state,
                 token_strip,
                 metrics_state,
+                generation_status,
+                send_button,
+                stop_button,
+                token_detail,
+                alternatives,
                 prompt_strip,
                 prompt_metrics_state,
                 prompt_note,
-                generation_status,
-                token_detail,
-                alternatives,
                 summary_panel,
                 surprise_panel,
                 trace_state,
             ],
+            cancels=running,
         )
+
+        save_button.click(
+            save_conversation,
+            [conversation_state, system_prompt],
+            [saved_file, generation_status],
+        )
+        load_upload.upload(
+            load_conversation,
+            [load_upload, conversation_state, color_scale],
+            [
+                chatbot,
+                conversation_state,
+                system_prompt,
+                token_strip,
+                metrics_state,
+                generation_status,
+                token_detail,
+                alternatives,
+                send_button,
+                stop_button,
+                prompt_strip,
+                prompt_metrics_state,
+                prompt_note,
+                summary_panel,
+                surprise_panel,
+                trace_state,
+            ],
+            cancels=running,
+        )
+
         score_button.click(
             score_text,
             [score_context, score_input, use_chat_template, color_scale],
@@ -718,6 +1650,7 @@ def build_app() -> gr.Blocks:
             [metrics_state, prompt_metrics_state, color_scale],
             [token_strip, prompt_strip, scale_caption],
         )
+
         token_strip.select(
             inspect_token,
             inputs=metrics_state,

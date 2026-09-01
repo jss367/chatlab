@@ -5,13 +5,15 @@ from __future__ import annotations
 import gc
 import re
 import threading
+import time
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
 
+from conversation import THINK_OPEN
 from token_metrics import (
     TokenMetric,
     UNSCORED_BEYOND_LIMIT,
@@ -50,6 +52,27 @@ POSITION_LIMIT_ATTRIBUTES = (
 # no passage worth scoring would fit — so it is ignored in favour of the flat
 # application cap.
 MIN_MODEL_POSITION_LIMIT = 16
+
+
+# Streaming updates are batched so a long response does not re-serialize the
+# whole token strip on every single token.
+STREAM_BATCH_TOKENS = 8
+STREAM_INTERVAL_SECONDS = 0.05
+
+# Longest run of tokens held back waiting for a safe split point.
+DECODE_CACHE_LIMIT = 32
+
+# Tokens kept after a flush purely as decoder context. Tokenizers are
+# context-sensitive: SentencePiece drops the word-boundary space at the start of
+# a sequence, and byte-level decoders need the preceding bytes to finish a
+# character, so a flush must never look like the start of a fresh sequence.
+DECODE_CONTEXT_TOKENS = 8
+
+# A UTF-8 character is at most four bytes, so a byte-level tokenizer needs at
+# most this many extra tokens to complete one that a flush would have split.
+DECODE_FLUSH_GRACE = 4
+
+REPLACEMENT_CHARACTER = "\ufffd"
 
 
 MODEL_ID_PATTERN = re.compile(
@@ -586,8 +609,92 @@ def encode_for_scoring(
 class GenerationUpdate:
     text: str
     metrics: list[dict]
-    prompt_metrics: list[dict]
+    """Live list owned by the generator. Copy it before storing it anywhere."""
+
+    prompt_metrics: list[dict] = field(default_factory=list)
     prompt_note: str = ""
+    reasoning_prefilled: bool = False
+    """Whether the prompt already ended with the opening ``<think>`` marker.
+
+    When it did, ``text`` starts inside the reasoning block and never contains
+    an opening marker of its own, so a caller splitting reasoning from the
+    answer has to be told.
+    """
+
+
+class IncrementalDecoder:
+    """Decode a growing token stream without re-decoding it from the start.
+
+    Tokens are held in a small cache until a whitespace boundary makes their
+    text final, which keeps each step proportional to the cache rather than to
+    the length of the response.
+
+    ``text`` always equals a full decode of every token pushed so far. That
+    holds because each cache window keeps a suffix of the previous one as
+    decoder context, so no decode ever starts in the middle of a sequence and
+    loses a word-boundary space or half of a multi-byte character.
+    """
+
+    def __init__(self, tokenizer, skip_ids: set[int] | None = None) -> None:
+        self._tokenizer = tokenizer
+        self._skip_ids = skip_ids or set()
+        self._cache: list[int] = []
+        self._context = 0
+        """How many leading entries of ``_cache`` are kept only as context."""
+        self._settled = ""
+        self._pending = ""
+        self._printed = 0
+
+    @property
+    def text(self) -> str:
+        return self._settled + self._pending
+
+    def _decode(self, token_ids: list[int]) -> str:
+        return self._tokenizer.decode(
+            token_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+
+    def _ready_to_flush(self, decoded: str) -> bool:
+        fresh = len(self._cache) - self._context
+        if fresh >= DECODE_CACHE_LIMIT + DECODE_FLUSH_GRACE:
+            return True
+        if decoded.endswith(REPLACEMENT_CHARACTER):
+            # Half of a multi-byte character is still in the cache. Settling now
+            # would freeze the replacement character into the text for good, so
+            # wait for the token that completes it.
+            return False
+        return decoded.endswith("\n") or fresh >= DECODE_CACHE_LIMIT
+
+    def _flush(self) -> None:
+        """Start a new cache window, keeping a token suffix as decoder context.
+
+        The already-settled text is re-derived from that suffix, so the next
+        decode continues the sequence instead of restarting it.
+        """
+
+        self._cache = self._cache[len(self._cache) - DECODE_CONTEXT_TOKENS :]
+        self._context = len(self._cache)
+        self._printed = len(self._decode(self._cache))
+        self._pending = ""
+
+    def push(self, token_id: int) -> None:
+        if token_id in self._skip_ids:
+            return
+        self._cache.append(token_id)
+        decoded = self._decode(self._cache)
+
+        if self._ready_to_flush(decoded):
+            self._settled += decoded[self._printed :]
+            self._flush()
+            return
+
+        boundary = decoded.rfind(" ") + 1
+        if boundary > self._printed:
+            self._settled += decoded[self._printed : boundary]
+            self._printed = boundary
+        self._pending = decoded[self._printed :]
 
 
 @dataclass(frozen=True)
@@ -616,10 +723,55 @@ class ModelManager:
         self.local_path: Path | None = None
         self.device_name: str | None = None
         self._lock = threading.RLock()
+        # A separate, non-reentrant flag for "a generation is running right
+        # now". The model lock cannot answer that question: it is reentrant
+        # (load() nests unload() inside it), so a test on the holding thread -
+        # and, more importantly, any future nested use - would see it as free.
+        #
+        # A plain Lock, deliberately: it is acquired and released by whichever
+        # worker thread happens to be running the generator at the time, and
+        # Gradio is free to resume a streaming handler on a different thread
+        # than the one that started it. An RLock, or any owner-checked
+        # primitive, would refuse the release from that second thread.
+        self._generating = threading.Lock()
 
     @property
     def loaded(self) -> bool:
         return self.model is not None and self.tokenizer is not None
+
+    @property
+    def busy(self) -> bool:
+        """True while the generation slot is reserved.
+
+        Never blocks, so it can only ever be an early exit: a caller that is
+        about to generate has to take the slot with reserve_generation()
+        rather than act on this answer.
+        """
+
+        return self._generating.locked()
+
+    def reserve_generation(self) -> bool:
+        """Claim the right to run a generation, or report that it is taken.
+
+        Never blocks: a caller that loses the race must refuse, not queue.
+        Queuing is what corrupts the conversation - a handler that waited would
+        resume holding the inputs Gradio captured when its click was queued,
+        and write that stale snapshot over everything the running generation
+        produced in the meantime.
+
+        The caller must reserve *before* publishing its first frame and release
+        in a ``finally``. Checking :attr:`busy` and then generating is not the
+        same thing: those two steps are separated by a yield, and Gradio does
+        not resume a streaming handler until the browser has been sent the
+        frame, so the window between them is a network round trip wide.
+        """
+
+        return self._generating.acquire(blocking=False)
+
+    def release_generation(self) -> None:
+        """Give the generation slot back. Pairs with a successful reservation."""
+
+        self._generating.release()
 
     def download(self, model_id: str, hf_token: str | None = None) -> Path:
         from huggingface_hub import snapshot_download
@@ -691,13 +843,26 @@ class ModelManager:
             if torch.backends.mps.is_available():
                 torch.mps.empty_cache()
 
-    def _prompt_token_ids(self, messages: list[dict]) -> list[int]:
-        """Token ids for a chat prompt, including the generation prompt."""
+    def _prompt_token_ids(self, messages: list[dict]) -> tuple[list[int], bool]:
+        """Token ids for a chat prompt, and whether it prefills ``<think>``.
+
+        Reasoning templates such as OLMo Think end the generation prompt with
+        the opening marker, so the model resumes inside the block and never
+        emits an opener. The flag rides along to the caller because only the
+        prompt can reveal it.
+        """
 
         assert self.tokenizer is not None
         tokenizer = self.tokenizer
+        prefilled = False
 
         if tokenizer.chat_template:
+            rendered = tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False
+            )
+            prefilled = isinstance(rendered, str) and rendered.rstrip().endswith(
+                THINK_OPEN
+            )
             encoded = tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=True
             )
@@ -710,7 +875,7 @@ class ModelManager:
 
         if encoded and isinstance(encoded[0], (list, tuple)):
             encoded = encoded[0]
-        return [int(value) for value in encoded]
+        return [int(value) for value in encoded], prefilled
 
     def _decode_token(self, token_id: int) -> str:
         assert self.tokenizer is not None
@@ -760,6 +925,24 @@ class ModelManager:
             elif candidate:
                 values.update(int(value) for value in candidate)
         return values
+
+    def _hidden_token_ids(self) -> set[int]:
+        """Special tokens to keep out of the visible text.
+
+        Reasoning markers are deliberately kept: on models such as OLMo Think
+        they are registered as special tokens, and dropping them would leave the
+        interface with no way to find the reasoning block.
+        """
+
+        assert self.tokenizer is not None
+        tokenizer = self.tokenizer
+        hidden: set[int] = set()
+        for token_id in getattr(tokenizer, "all_special_ids", None) or []:
+            piece = tokenizer.convert_ids_to_tokens(int(token_id)) or ""
+            if "think" in piece.lower():
+                continue
+            hidden.add(int(token_id))
+        return hidden
 
     def _prefill(
         self,
@@ -858,6 +1041,43 @@ class ModelManager:
         seed: int,
         analyze_prompt: bool = True,
     ) -> Iterator[GenerationUpdate]:
+        # The application reserves the slot before it publishes its first
+        # frame, so by the time this body runs the reservation is normally
+        # already held - on its behalf, not by it. Taking it again would
+        # deadlock, so this only claims the slot when nobody else has, which is
+        # the case for a direct call (tests, or any future non-streaming use):
+        # such a call still reports as busy for its whole run and frees the
+        # slot afterwards. It releases only what it took.
+        #
+        # Mutual exclusion never rested on this flag anyway. The model lock
+        # below is what keeps two generations off the model at once, and it is
+        # still acquired unconditionally.
+        reserved = self.reserve_generation()
+        try:
+            yield from self._generate(
+                messages,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                max_new_tokens=max_new_tokens,
+                seed=seed,
+                analyze_prompt=analyze_prompt,
+            )
+        finally:
+            if reserved:
+                self.release_generation()
+
+    def _generate(
+        self,
+        messages: list[dict],
+        *,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        max_new_tokens: int,
+        seed: int,
+        analyze_prompt: bool = True,
+    ) -> Iterator[GenerationUpdate]:
         import torch
 
         with self._lock, torch.inference_mode():
@@ -870,7 +1090,7 @@ class ModelManager:
             tokenizer = self.tokenizer
             device = next(model.parameters()).device
 
-            prompt_ids = self._prompt_token_ids(messages)
+            prompt_ids, reasoning_prefilled = self._prompt_token_ids(messages)
             score_from = (
                 max(1, len(prompt_ids) - PROMPT_SCORE_LIMIT) if analyze_prompt else 0
             )
@@ -889,10 +1109,12 @@ class ModelManager:
                 )
 
             rng = np.random.default_rng(int(seed))
-            generated_ids: list[int] = []
             metrics: list[dict] = []
             stop_ids = self._stop_token_ids()
+            decoder = IncrementalDecoder(tokenizer, self._hidden_token_ids())
             limit = int(max_new_tokens)
+            pending_tokens = 0
+            last_yield = time.monotonic()
 
             for position in range(1, limit + 1):
                 assert raw_log_probs is not None
@@ -908,7 +1130,7 @@ class ModelManager:
                 else:
                     token_id = int(rng.choice(sampled_probs.size, p=sampled_probs))
 
-                generated_ids.append(token_id)
+                decoder.push(token_id)
                 metrics.append(
                     self._describe_token(
                         position=position,
@@ -918,19 +1140,25 @@ class ModelManager:
                         segment="response",
                     )
                 )
-                text = tokenizer.decode(
-                    generated_ids,
-                    skip_special_tokens=True,
-                    clean_up_tokenization_spaces=False,
-                )
-                yield GenerationUpdate(
-                    text=text,
-                    metrics=list(metrics),
-                    prompt_metrics=prompt_metrics,
-                    prompt_note=prompt_note,
-                )
+                stopping = token_id in stop_ids or position == limit
+                pending_tokens += 1
+                now = time.monotonic()
+                if (
+                    stopping
+                    or pending_tokens >= STREAM_BATCH_TOKENS
+                    or now - last_yield >= STREAM_INTERVAL_SECONDS
+                ):
+                    pending_tokens = 0
+                    last_yield = now
+                    yield GenerationUpdate(
+                        text=decoder.text,
+                        metrics=metrics,
+                        prompt_metrics=prompt_metrics,
+                        prompt_note=prompt_note,
+                        reasoning_prefilled=reasoning_prefilled,
+                    )
 
-                if token_id in stop_ids or position == limit:
+                if stopping:
                     break
 
                 outputs = model(

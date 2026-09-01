@@ -16,7 +16,9 @@ class Selection:
 
 class InspectTokenTests(unittest.TestCase):
     def inspect(self, metric: dict):
-        return app.inspect_token([metric], Selection(0))
+        # The state pairs the metrics with the stamp of the strip they were
+        # drawn for, and inspect_token() drops a click that misses it.
+        return app.inspect_token(app.stamped([metric]), Selection(0))
 
     def test_the_opening_token_is_explained_as_unpredicted(self):
         detail, rows = self.inspect(
