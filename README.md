@@ -1,4 +1,4 @@
-# ChatLab: OLMo Token Explorer
+# Chatlab
 
 A local chat interface that shows what happened under the hood for every generated token. Tokens are colored by their rank in the model's original next-token distribution. Clicking a token shows its probability, sampling probability, surprise, and the alternatives the model preferred.
 
@@ -18,7 +18,7 @@ The default model is [`allenai/Olmo-3-7B-Think`](https://huggingface.co/allenai/
 
 ### In Conductor
 
-Create a workspace for this repository. Its setup script creates the Python environment and installs the dependencies. Use the **olmo-token-explorer** action to start the app on the workspace's assigned port.
+Create a workspace for this repository. Its setup script creates the Python environment and installs the dependencies. Use the **Chatlab** action to start the app on the workspace's assigned port.
 
 ### From a terminal
 
