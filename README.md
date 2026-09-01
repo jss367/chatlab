@@ -9,6 +9,7 @@ A local chat interface that shows what happened under the hood for every generat
 - Live token-by-token generation
 - Exact raw vocabulary rank for each generated token
 - Raw and post-sampling probabilities
+- Full metric-trace export as JSON or CSV
 - Temperature, top-p, top-k, seed, and response-length controls
 - Apple Metal, NVIDIA CUDA, and CPU loading
 
@@ -50,6 +51,8 @@ Model files use the standard Hugging Face cache. By default this is under `~/.ca
 - **Probability mass above it** is the combined raw probability of every token ranked above the generated token.
 
 The color scale uses raw rank: rank 1, ranks 2–5, ranks 6–20, ranks 21–100, and ranks 101 or lower. Quantized model weights can slightly change logits, probabilities, and ranks.
+
+After a response finishes, use **Download JSON** or **Download CSV** under the token inspector. JSON preserves the complete trace, including conversation context, generation settings, and nested alternatives. CSV contains one row per generated token, repeats the generation metadata, and expands every recorded alternative into numbered columns.
 
 ## Tests
 
