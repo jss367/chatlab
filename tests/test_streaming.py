@@ -22,6 +22,14 @@ PIECES = [
 EOS_ID = PIECES.index("<eos>")
 
 
+class Encoding(dict):
+    """The subset of a Hugging Face ``BatchEncoding`` the prompt path uses."""
+
+    @property
+    def input_ids(self) -> list[int]:
+        return self["input_ids"]
+
+
 class FakeTokenizer:
     """A whitespace-joining stand-in for a Hugging Face tokenizer."""
 
@@ -33,9 +41,9 @@ class FakeTokenizer:
         self.all_special_ids = [eos_id]
         self.last_prompt = ""
 
-    def __call__(self, text, return_tensors=None):
+    def __call__(self, text, **_kwargs):
         self.last_prompt = text
-        return {"input_ids": torch.tensor([[0]]), "attention_mask": torch.tensor([[1]])}
+        return Encoding(input_ids=[0])
 
     def decode(self, token_ids, skip_special_tokens=False, **_kwargs):
         return "".join(
@@ -248,7 +256,7 @@ class GenerateStreamingTests(unittest.TestCase):
 
     def test_a_system_prompt_reaches_the_prompt_text(self):
         manager = loaded_manager([0])
-        manager._prompt_inputs(
+        manager._prompt_token_ids(
             [
                 {"role": "system", "content": "Be terse."},
                 {"role": "user", "content": "hi"},
@@ -273,10 +281,7 @@ class ChatTemplateTokenizer(FakeTokenizer):
         if not kwargs.get("tokenize", True):
             return rendered
         self.last_prompt = rendered
-        return {
-            "input_ids": torch.tensor([[0]]),
-            "attention_mask": torch.tensor([[1]]),
-        }
+        return [0]
 
 
 class PrefilledReasoningTests(unittest.TestCase):
@@ -290,22 +295,22 @@ class PrefilledReasoningTests(unittest.TestCase):
 
     def test_a_template_ending_in_the_open_tag_is_detected(self):
         manager = self.manager(ChatTemplateTokenizer("\nassistant: <think>"))
-        _inputs, prefilled = manager._prompt_inputs([{"role": "user", "content": "hi"}])
+        _ids, prefilled = manager._prompt_token_ids([{"role": "user", "content": "hi"}])
         self.assertTrue(prefilled)
 
     def test_a_trailing_newline_after_the_open_tag_still_counts(self):
         manager = self.manager(ChatTemplateTokenizer("\nassistant: <think>\n"))
-        _inputs, prefilled = manager._prompt_inputs([{"role": "user", "content": "hi"}])
+        _ids, prefilled = manager._prompt_token_ids([{"role": "user", "content": "hi"}])
         self.assertTrue(prefilled)
 
     def test_an_ordinary_template_is_not_prefilled(self):
         manager = self.manager(ChatTemplateTokenizer("\nassistant: "))
-        _inputs, prefilled = manager._prompt_inputs([{"role": "user", "content": "hi"}])
+        _ids, prefilled = manager._prompt_token_ids([{"role": "user", "content": "hi"}])
         self.assertFalse(prefilled)
 
     def test_the_transcript_fallback_is_not_prefilled(self):
         manager = self.manager(FakeTokenizer())
-        _inputs, prefilled = manager._prompt_inputs([{"role": "user", "content": "hi"}])
+        _ids, prefilled = manager._prompt_token_ids([{"role": "user", "content": "hi"}])
         self.assertFalse(prefilled)
 
     def test_the_flag_rides_along_on_every_update(self):

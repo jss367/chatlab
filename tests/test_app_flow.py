@@ -5,8 +5,11 @@ import gradio as gr
 import numpy as np
 
 import app
+import charts
 from conversation import display_messages, make_turn, model_messages
 from model_runtime import GenerationUpdate
+from token_metrics import DEFAULT_COLOR_SCALE
+
 from test_streaming import loaded_manager
 
 
@@ -23,12 +26,39 @@ FIXED = {
     "max_new_tokens": 8,
     "seed": 42,
     "randomize_seed": False,
+    "analyze_prompt": True,
+    "scale_name": DEFAULT_COLOR_SCALE,
 }
 SETTINGS = tuple(FIXED.values())
 
-PROMPT, CHATBOT, TURNS, STRIP, METRICS, STATUS, SEED, SEND, STOP, DETAIL, ALTS = range(
-    11
-)
+# The chat handlers publish app.CHAT_OUTPUT_NAMES, in that order.
+(
+    PROMPT,
+    CHATBOT,
+    TURNS,
+    STRIP,
+    METRICS,
+    STATUS,
+    SEED,
+    SEND,
+    STOP,
+    DETAIL,
+    ALTS,
+    PROMPT_STRIP,
+    PROMPT_METRICS,
+    PROMPT_NOTE,
+    SUMMARY,
+    SURPRISE,
+    TRACE,
+) = range(len(app.CHAT_OUTPUT_NAMES))
+CHAT_OUTPUTS = len(app.CHAT_OUTPUT_NAMES)
+
+# The panels every conversation-replacing handler resets after its own rows:
+# the prompt strip and its state and note, the two charts, and the export.
+PANEL_OUTPUTS = 6
+UNDO_OUTPUTS = 10 + PANEL_OUTPUTS
+CLEAR_OUTPUTS = 9 + PANEL_OUTPUTS
+LOAD_OUTPUTS = 10 + PANEL_OUTPUTS
 
 
 def metrics_of(payload):
@@ -36,6 +66,12 @@ def metrics_of(payload):
 
     _generation, metrics = payload
     return metrics
+
+
+def strip_of(value):
+    """The tokens in a strip output, whether it is a value or a gr.update."""
+
+    return value["value"] if isinstance(value, dict) else value
 
 
 def select(index):
@@ -52,7 +88,7 @@ class ChatFlowTests(unittest.TestCase):
         frames = list(stream)
         self.assertTrue(frames)
         for frame in frames:
-            self.assertEqual(len(frame), 11)
+            self.assertEqual(len(frame), CHAT_OUTPUTS)
         return frames
 
     def test_a_message_produces_a_user_turn_and_a_reply(self):
@@ -156,7 +192,7 @@ class ChatFlowTests(unittest.TestCase):
             None, {"index": 1, "previous_value": "stale", "value": "fixed"}
         )
         final = self.last(app.edit_message(event, "", turns, *SETTINGS))[-1]
-        self.assertEqual(final[STRIP], [])
+        self.assertEqual(strip_of(final[STRIP]), [])
         self.assertEqual(metrics_of(final[METRICS]), [])
         self.assertEqual(final[DETAIL], app.NO_TOKEN_SELECTED)
         self.assertEqual(final[ALTS], [])
@@ -166,7 +202,7 @@ class ChatFlowTests(unittest.TestCase):
         # in the previous response no longer exists and its probabilities must
         # not stay on screen beside a strip that no longer contains it.
         frames = self.last(app.chat("hi", [], *SETTINGS))
-        self.assertEqual(frames[0][STRIP], [])
+        self.assertEqual(strip_of(frames[0][STRIP]), [])
         self.assertEqual(frames[0][DETAIL], app.NO_TOKEN_SELECTED)
         self.assertEqual(frames[0][ALTS], [])
         # Later frames only append to the strip, so a token picked mid-stream
@@ -570,6 +606,120 @@ class TokenSelectionTests(unittest.TestCase):
                 self.assertIsInstance(metrics, list)
 
 
+class AnalysisPanelTests(unittest.TestCase):
+    """The prompt strip, the charts and the export follow the conversation.
+
+    They measure one response, so every path that replaces or removes that
+    response has to take them with it - otherwise the tiles keep reporting a
+    perplexity for text that is no longer on screen, and the export button
+    keeps offering it.
+    """
+
+    def setUp(self):
+        self.original = app.MANAGER
+        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, app, "MANAGER", self.original)
+
+    def respond(self):
+        return list(app.chat("hi", [], *SETTINGS))
+
+    def prompt_payload(self, frames):
+        """The last prompt-metrics payload a stream actually published."""
+
+        published = [
+            frame[PROMPT_METRICS]
+            for frame in frames
+            if frame[PROMPT_METRICS] != gr.skip()
+        ]
+        return published[-1]
+
+    def test_the_prompt_tokens_are_published_once(self):
+        frames = self.respond()
+        # frames[0] empties the panel, frames[1] is the first update.
+        self.assertEqual(strip_of(frames[0][PROMPT_STRIP]), [])
+        self.assertTrue(strip_of(frames[1][PROMPT_STRIP]))
+        self.assertTrue(metrics_of(frames[1][PROMPT_METRICS]))
+        self.assertIn("prompt tokens", frames[1][PROMPT_NOTE])
+        for frame in frames[2:]:
+            self.assertEqual(frame[PROMPT_STRIP], gr.skip())
+
+    def test_both_strips_share_one_stamp(self):
+        # inspect_token() drops a click whose stamp is not the current one, so
+        # a prompt strip stamped separately would be unclickable from the
+        # moment the response strip was stamped.
+        frames = self.respond()
+        prompt_payload = self.prompt_payload(frames)
+        self.assertEqual(prompt_payload[0], frames[-1][METRICS][0])
+        detail, _alternatives = app.inspect_token(prompt_payload, select(0))
+        self.assertIn("Prompt token", detail)
+
+    def test_the_finished_response_is_exportable(self):
+        frames = self.respond()
+        self.assertEqual(frames[0][TRACE], {})
+        trace = frames[-1][TRACE]
+        self.assertEqual(trace["response"], "Hello world")
+        self.assertEqual(len(trace["tokens"]), 3)
+        self.assertIn("Exports are ready", frames[-1][STATUS])
+
+    def test_a_failed_response_is_not_exportable(self):
+        def failing(*_args, **_kwargs):
+            yield GenerationUpdate(text="Hmm", metrics=[])
+            raise RuntimeError("gpu fell over")
+
+        app.MANAGER.generate = failing
+        frames = list(app.chat("hi", [], *SETTINGS))
+        self.assertEqual(frames[0][TRACE], {})
+        for frame in frames[1:]:
+            self.assertEqual(frame[TRACE], gr.skip())
+
+    def test_clear_empties_the_panels(self):
+        self.respond()
+        result = app.clear_chat()
+        prompt_strip, prompt_metrics, prompt_note = result[9:12]
+        self.assertEqual(strip_of(prompt_strip), [])
+        self.assertEqual(metrics_of(prompt_metrics), [])
+        self.assertEqual(prompt_note, "")
+        self.assertEqual(result[13], charts.EMPTY_CHART)
+        self.assertEqual(result[14], {})
+
+    def test_undo_empties_the_panels(self):
+        final = self.respond()[-1]
+        result = app.undo_last(final[TURNS])
+        self.assertEqual(strip_of(result[10]), [])
+        self.assertEqual(metrics_of(result[11]), [])
+        self.assertEqual(result[14], charts.EMPTY_CHART)
+        self.assertEqual(result[15], {})
+
+    def test_loading_a_conversation_empties_the_panels(self):
+        saved, _status = app.save_conversation([make_turn("user", "hi")], "")
+        final = self.respond()[-1]
+        result = app.load_conversation(saved["value"], final[TURNS])
+        self.assertEqual(strip_of(result[10]), [])
+        self.assertEqual(metrics_of(result[11]), [])
+        self.assertEqual(result[14], charts.EMPTY_CHART)
+        self.assertEqual(result[15], {})
+
+    def test_an_assistant_edit_empties_the_panels(self):
+        final = self.respond()[-1]
+        event = gr.EditData(
+            None, {"index": 1, "previous_value": "Hello world", "value": "fixed"}
+        )
+        edited = list(app.edit_message(event, "", final[TURNS], *SETTINGS))[-1]
+        self.assertEqual(strip_of(edited[PROMPT_STRIP]), [])
+        self.assertEqual(metrics_of(edited[PROMPT_METRICS]), [])
+        self.assertEqual(edited[SURPRISE], charts.EMPTY_CHART)
+        self.assertEqual(edited[TRACE], {})
+
+    def test_the_color_scale_repaints_both_strips(self):
+        frames = self.respond()
+        strip, prompt_strip, caption = app.recolor(
+            frames[-1][METRICS], self.prompt_payload(frames), "Surprise"
+        )
+        self.assertEqual(len(strip["value"]), 3)
+        self.assertTrue(prompt_strip["value"])
+        self.assertTrue(caption)
+
+
 class CancellationTests(unittest.TestCase):
     """What the Stop button does: Gradio closes the running generator."""
 
@@ -632,7 +782,7 @@ class UndoTests(unittest.TestCase):
             make_turn("assistant", "second"),
         ]
         result = app.undo_last(turns)
-        self.assertEqual(len(result), 10)
+        self.assertEqual(len(result), UNDO_OUTPUTS)
         self.assertEqual(result[0], "two")
         self.assertEqual([turn["content"] for turn in result[2]], ["one", "first"])
 
@@ -649,8 +799,9 @@ class UndoTests(unittest.TestCase):
             alts,
             send,
             stop,
+            *_panels,
         ) = app.undo_last(turns)
-        self.assertEqual(strip, [])
+        self.assertEqual(strip_of(strip), [])
         self.assertEqual(metrics_of(metrics), [])
         self.assertEqual(detail, app.NO_TOKEN_SELECTED)
         self.assertEqual(alts, [])
@@ -663,7 +814,7 @@ class UndoTests(unittest.TestCase):
         for index in (3, 4, 6, 7):
             self.assertEqual(result[index], gr.skip())
         # The cancel fires on the click, so even this path must undo the swap.
-        self.assertEqual(result[8:], app.send_stop_buttons(False))
+        self.assertEqual(result[8:10], app.send_stop_buttons(False))
 
     def test_undo_with_nothing_to_remove_finalizes_a_cancelled_turn(self):
         # Undo cancels the generator, so even the path that removes nothing has
@@ -727,7 +878,7 @@ class ClearCancelsGenerationTests(unittest.TestCase):
         # Cancelling means generate_reply never reaches its final yield, so
         # Clear has to swap the buttons back itself.
         result = app.clear_chat()
-        self.assertEqual(len(result), 9)
+        self.assertEqual(len(result), CLEAR_OUTPUTS)
         self.assertEqual(result[5], gr.update(visible=True))
         self.assertEqual(result[6], gr.update(visible=False))
         self.assertEqual(result[7], app.NO_TOKEN_SELECTED)
@@ -751,11 +902,12 @@ class SaveLoadTests(unittest.TestCase):
             alternatives,
             send,
             stop,
+            *_panels,
         ) = app.load_conversation(update["value"], [make_turn("user", "stale")])
         self.assertEqual(restored, turns)
         self.assertEqual(system_prompt, "Be terse.")
         self.assertEqual(len(messages), 3)
-        self.assertEqual(strip, [])
+        self.assertEqual(strip_of(strip), [])
         self.assertIn("Loaded 2 messages", load_status)
         # The previous conversation's selected token goes with it.
         self.assertEqual(detail, app.NO_TOKEN_SELECTED)
@@ -782,23 +934,23 @@ class SaveLoadTests(unittest.TestCase):
         turns = [make_turn("user", "one"), make_turn("assistant", "first")]
         result = app.load_conversation("/nonexistent/conversation.json", turns)
         self.assertIn("Could not load that file", result[5])
-        self.assertEqual(len(result), 10)
+        self.assertEqual(len(result), LOAD_OUTPUTS)
         # The conversation survives a bad file, and the token panel that
         # describes it is left alone rather than blanked.
         self.assertEqual([turn["content"] for turn in result[1]], ["one", "first"])
         for index in (2, 3, 4, 6, 7):
             self.assertIsInstance(result[index], gr.skip().__class__)
-        self.assertEqual(result[8:], app.send_stop_buttons(False))
+        self.assertEqual(result[8:10], app.send_stop_buttons(False))
 
     def test_loading_nothing_keeps_the_conversation(self):
         turns = [make_turn("user", "one"), make_turn("assistant", "first")]
         result = app.load_conversation(None, turns)
         self.assertEqual(result[5], "No file chosen.")
-        self.assertEqual(len(result), 10)
+        self.assertEqual(len(result), LOAD_OUTPUTS)
         self.assertEqual([turn["content"] for turn in result[1]], ["one", "first"])
         for index in (2, 3, 4, 6, 7):
             self.assertIsInstance(result[index], gr.skip().__class__)
-        self.assertEqual(result[8:], app.send_stop_buttons(False))
+        self.assertEqual(result[8:10], app.send_stop_buttons(False))
 
     def test_a_failed_load_finalizes_the_cancelled_turn(self):
         # Uploading a bad file mid-stream cancels the generator, which then
@@ -900,7 +1052,7 @@ class BusyRefusalTests(unittest.TestCase):
         frames = list(stream)
         self.assertEqual(len(frames), 1)
         (frame,) = frames
-        self.assertEqual(len(frame), 11)
+        self.assertEqual(len(frame), CHAT_OUTPUTS)
         self.assertEqual(frame[STATUS], app.BUSY_STATUS)
         # The chatbot and the conversation state are the two outputs that would
         # carry the stale snapshot, so they are the ones that must be skipped.
@@ -1112,14 +1264,14 @@ class FirstFrameWindowTests(unittest.TestCase):
         stream = app.chat("new question", self.stale(), *settings.values())
         self.addCleanup(stream.close)
         frame = next(stream)
-        self.assertEqual(len(frame), 11)
+        self.assertEqual(len(frame), CHAT_OUTPUTS)
         return stream, frame
 
     def assert_refused(self, competing):
         frames = list(competing)
         self.assertEqual(len(frames), 1)
         (frame,) = frames
-        self.assertEqual(len(frame), 11)
+        self.assertEqual(len(frame), CHAT_OUTPUTS)
         self.assertEqual(frame[STATUS], app.BUSY_STATUS)
         # The two outputs that would carry the stale snapshot.
         for index in (CHATBOT, TURNS):
@@ -1190,7 +1342,7 @@ class EmptyResponseTests(unittest.TestCase):
         frames = list(app.chat(message, turns if turns is not None else [], *SETTINGS))
         self.assertTrue(frames)
         for frame in frames:
-            self.assertEqual(len(frame), 11)
+            self.assertEqual(len(frame), CHAT_OUTPUTS)
         return frames[-1]
 
     def assert_no_reply(self, final):
@@ -1278,7 +1430,7 @@ class IdleRefusalButtonTests(unittest.TestCase):
         frames = list(stream)
         self.assertEqual(len(frames), 1)
         (frame,) = frames
-        self.assertEqual(len(frame), 11)
+        self.assertEqual(len(frame), CHAT_OUTPUTS)
         self.assertEqual(frame[STATUS], status)
         self.assertNotEqual(frame[STATUS], app.BUSY_STATUS)
         self.assertEqual(frame[SEND], gr.update(visible=True))

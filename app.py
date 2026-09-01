@@ -1,4 +1,4 @@
-"""Gradio interface for chatting with and inspecting OLMo tokens."""
+"""Chatlab interface for chatting with and inspecting model tokens."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from uuid import uuid4
 import gradio as gr
 from gradio.utils import get_upload_folder
 
+import charts
 from conversation import (
     copy_turns,
     display_messages,
@@ -26,14 +27,48 @@ from conversation import (
     to_json,
     user_index_at_or_before,
 )
-from model_runtime import ModelManager
-from token_metrics import CATEGORY_COLORS
+from model_runtime import PROMPT_SCORE_LIMIT, ModelManager
+from token_metrics import (
+    COLOR_SCALES,
+    DEFAULT_COLOR_SCALE,
+    UNSCORED_BEYOND_LIMIT,
+    category_for,
+    summarize,
+)
+from trace_export import build_trace, write_trace_export
 
 
 DEFAULT_MODEL = "allenai/Olmo-3-7B-Think"
 MANAGER = ModelManager()
 SEED_LIMIT = 2**31 - 1
-NO_TOKEN_SELECTED = "Select a generated token to inspect it."
+NO_TOKEN_SELECTED = "Select a token to inspect it."
+
+# Redrawing the trace on every streamed token is wasted work, so it catches up
+# in batches and again once the response finishes.
+CHART_EVERY = 16
+
+RESPONSE_STRIP_LABEL = "Response tokens — click one"
+
+# This tokenizer offers neither offsets nor a decode that round trips, so
+# where the context ends had to be counted out rather than confirmed. The
+# scored tokens are still the whole passage's own single encoding, so every
+# probability is exact; what is uncertain is where the line between the two
+# halves was drawn, and a line a token out moves that token between the two
+# tables and the summary figures they feed.
+SEAM_CAVEAT = (
+    "Approximate split: this tokenizer could not confirm where the context "
+    "ends, so the boundary between it and the scored text may sit a token "
+    "off. Every probability shown is the full passage's own either way."
+)
+
+# The chat-message box was ticked for a model that ships no chat template, so
+# there was no turn to wrap the context in. The numbers are exact — they are
+# the plain passage's own — but they are not the framing the box promised, and
+# the difference is the reader's to know about.
+TEMPLATE_CAVEAT = (
+    "Plain text, not a chat turn: this model has no chat template, so the "
+    "context was measured as ordinary characters in front of the text."
+)
 
 
 def status_card(title: str, detail: str, tone: str = "neutral") -> str:
@@ -118,8 +153,32 @@ def unload_model():
     return status_card("Model unloaded", "Model memory has been released.", "success")
 
 
-def highlighted_tokens(metrics: list[dict]) -> list[tuple[str, str]]:
-    return [(metric["display_text"], metric["category"]) for metric in metrics]
+def resolve_scale(scale_name: str):
+    return COLOR_SCALES.get(scale_name) or COLOR_SCALES[DEFAULT_COLOR_SCALE]
+
+
+def strip_value(metrics: list[dict], scale_name: str) -> list[tuple[str, str]]:
+    """Bucket every token for the strip under one color scale."""
+
+    scale = resolve_scale(scale_name)
+    return [
+        (metric["display_text"], category_for(metric, scale.name))
+        for metric in metrics or []
+    ]
+
+
+def strip_update(metrics: list[dict], scale_name: str, label: str | None = None):
+    """Repaint a token strip, legend and all.
+
+    Streaming updates send the value alone, because rebuilding the component
+    for every token to carry an unchanged legend is wasted work.
+    """
+
+    scale = resolve_scale(scale_name)
+    update = {"value": strip_value(metrics, scale.name), "color_map": scale.color_map}
+    if label is not None:
+        update["label"] = label
+    return gr.update(**update)
 
 
 # The token strip's select listener runs independently of the generation
@@ -159,10 +218,34 @@ def new_metrics_generation() -> int:
         return _metrics_generation
 
 
+def stamped(metrics: list[dict], generation: int | None = None):
+    """Pair metrics with the stamp a click has to match to be published."""
+
+    return (new_metrics_generation() if generation is None else generation), metrics
+
+
 def empty_metrics() -> tuple[int, list[dict]]:
     """The metrics payload for a path that clears the strip."""
 
-    return new_metrics_generation(), []
+    return stamped([])
+
+
+def cleared_strips(scale_name: str):
+    """Empty both token strips under one stamp.
+
+    The response strip and the prompt strip are replaced together, so they
+    share a stamp: minting one each would leave the first of them looking
+    stale to inspect_token() the instant the second was minted.
+    """
+
+    generation = new_metrics_generation()
+    return (
+        strip_update([], scale_name, RESPONSE_STRIP_LABEL),
+        stamped([], generation),
+        strip_update([], scale_name),
+        stamped([], generation),
+        "",
+    )
 
 
 def inspect_token(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
@@ -184,13 +267,33 @@ def inspect_token(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
     except (IndexError, TypeError, ValueError):
         return "That token is no longer available. Generate another response.", []
 
-    token_repr = repr(metric["text"])
+    token_repr = html.escape(repr(metric["text"]))
+    where = "Prompt token" if metric["segment"] == "prompt" else "Token"
+    if not metric.get("scored", True):
+        if metric.get("unscored_reason") == UNSCORED_BEYOND_LIMIT:
+            why = (
+                f"Only the most recent {PROMPT_SCORE_LIMIT:,} tokens of a long "
+                "prompt are scored, and this one sits before that window, so it "
+                "was skipped."
+            )
+        else:
+            why = "Nothing came before this token, so the model never predicted it."
+        return (
+            f"### {where} {metric['position']}: `{token_repr}`\n\n"
+            f"{why}\n\n"
+            f"- **Token ID:** {metric['token_id']:,}",
+            [],
+        )
+
     summary = (
-        f"### Token {metric['position']}: `{html.escape(token_repr)}`\n\n"
+        f"### {where} {metric['position']}: `{token_repr}`\n\n"
         f"- **Raw rank:** {metric['raw_rank']:,}\n"
         f"- **Raw model probability:** {metric['raw_probability']:.5%}\n"
         f"- **Actual sampling probability:** {metric['sampling_probability']:.5%}\n"
         f"- **Surprise:** {metric['surprise_bits']:.2f} bits\n"
+        f"- **Distribution entropy:** {metric['entropy_bits']:.2f} bits\n"
+        f"- **Top-1 margin:** {metric['top1_margin']:.2%} between the model's first and second choice\n"
+        f"- **Sampling shift:** {metric['sampling_shift_bits']:+.2f} bits versus the raw model\n"
         f"- **Probability mass above it:** {metric['probability_mass_above']:.2%}\n"
         f"- **Token ID:** {metric['token_id']:,}"
     )
@@ -201,7 +304,53 @@ def inspect_token(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
     return summary, rows
 
 
+def recolor(response_state, prompt_state, scale_name: str):
+    """Repaint both strips when the reader picks a different color scale."""
+
+    _generation, metrics = response_state
+    _prompt_generation, prompt_metrics = prompt_state
+    scale = resolve_scale(scale_name)
+    return (
+        strip_update(metrics, scale.name),
+        strip_update(prompt_metrics, scale.name),
+        scale.caption,
+    )
+
+
+def prompt_note_text(count: int, note: str, kind: str) -> str:
+    if not count:
+        return ""
+    text = f"{count:,} {kind} tokens. The first one has no prediction behind it."
+    if note:
+        text = f"{text} {note}"
+    return text
+
+
 # ---------------------------------------------------------------- generation
+
+
+# Every generation handler publishes this tuple, in this order. Naming the rows
+# here keeps the refusal paths - which skip most of them - from counting
+# placeholders by hand.
+CHAT_OUTPUT_NAMES = (
+    "prompt",
+    "chatbot",
+    "turns",
+    "strip",
+    "metrics",
+    "status",
+    "seed",
+    "send",
+    "stop",
+    "detail",
+    "alternatives",
+    "prompt_strip",
+    "prompt_metrics",
+    "prompt_note",
+    "summary",
+    "surprise",
+    "trace",
+)
 
 
 def send_stop_buttons(busy: bool):
@@ -279,28 +428,47 @@ def generation_progress(count: int, started: float, seed: int) -> str:
 
 
 def idle_state(
-    prompt_text: str, turns: list[dict], status: str, *, clear_tokens: bool = False
+    prompt_text: str,
+    turns: list[dict],
+    status: str,
+    *,
+    clear_tokens: bool = False,
+    scale_name: str = DEFAULT_COLOR_SCALE,
 ):
     """A non-streaming result that leaves the seed untouched.
 
     The token panel is normally left alone as well: paths such as "Enter a
     message first." must not wipe the diagnostics of the response already on
     screen. ``clear_tokens`` is for the one case where those diagnostics stop
-    describing the visible text - an edited assistant reply.
+    describing the visible text - an edited assistant reply. Both strips go
+    together there: they carry one shared stamp, so re-stamping the response
+    strip alone would silently stop the prompt strip's clicks from publishing.
     """
 
     messages, _ = display_messages(turns)
+    panels = (
+        cleared_strips(scale_name)
+        if clear_tokens
+        else (gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip())
+    )
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = panels
     return (
         prompt_text,
         messages,
         copy_turns(turns),
-        [] if clear_tokens else gr.skip(),
-        empty_metrics() if clear_tokens else gr.skip(),
+        strip,
+        metrics,
         status,
         gr.skip(),
         *send_stop_buttons(False),
         NO_TOKEN_SELECTED if clear_tokens else gr.skip(),
         [] if clear_tokens else gr.skip(),
+        prompt_strip,
+        prompt_metrics,
+        prompt_note,
+        charts.summary_tiles({}) if clear_tokens else gr.skip(),
+        charts.EMPTY_CHART if clear_tokens else gr.skip(),
+        {} if clear_tokens else gr.skip(),
     )
 
 
@@ -329,17 +497,9 @@ def busy_state():
     """
 
     return (
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        BUSY_STATUS,
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
-        gr.skip(),
+        (gr.skip(),) * 5
+        + (BUSY_STATUS,)
+        + (gr.skip(),) * (len(CHAT_OUTPUT_NAMES) - 6)
     )
 
 
@@ -354,6 +514,8 @@ def generate_reply(
     max_new_tokens: int,
     seed,
     randomize_seed: bool,
+    analyze_prompt: bool = True,
+    scale_name: str = DEFAULT_COLOR_SCALE,
 ):
     """Stream one assistant reply for ``turns``, which must end with a user turn.
 
@@ -383,6 +545,8 @@ def generate_reply(
             max_new_tokens,
             seed,
             randomize_seed,
+            analyze_prompt,
+            scale_name,
         )
     finally:
         # Every exit runs this: a finished stream, a failure, and - the one
@@ -403,6 +567,8 @@ def _stream_reply(
     max_new_tokens: int,
     seed,
     randomize_seed: bool,
+    analyze_prompt: bool = True,
+    scale_name: str = DEFAULT_COLOR_SCALE,
 ):
     """The body of generate_reply(), run with the generation slot held."""
 
@@ -422,16 +588,36 @@ def _stream_reply(
     pending["reasoning_closed"] = True
     turns.append(pending)
 
-    def snapshot(highlight, metrics, status, busy=True, reset_details=False):
+    def snapshot(
+        highlight,
+        metrics,
+        status,
+        busy=True,
+        reset_details=False,
+        prompt_panel=None,
+        charts_panel=None,
+        trace=None,
+    ):
         """One frame of the stream.
 
         ``reset_details`` belongs to the first frame only. That frame empties
         the strip, so a token selected in the previous response is gone and its
         probabilities must go with it. Later frames only append to the strip, so
         a token picked mid-stream stays valid and its details are left alone.
+
+        ``prompt_panel`` and ``charts_panel`` are skipped on most frames. The
+        prompt tokens are all measured before the first one is generated, so
+        they are published once and never change; the charts redraw in batches
+        because rebuilding an SVG per token is wasted work.
         """
 
         messages, _ = display_messages(turns)
+        prompt_strip, prompt_metrics, prompt_note = prompt_panel or (
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+        )
+        summary_panel, surprise_panel = charts_panel or (gr.skip(), gr.skip())
         return (
             prompt_text,
             messages,
@@ -443,9 +629,26 @@ def _stream_reply(
             *send_stop_buttons(busy),
             NO_TOKEN_SELECTED if reset_details else gr.skip(),
             [] if reset_details else gr.skip(),
+            prompt_strip,
+            prompt_metrics,
+            prompt_note,
+            summary_panel,
+            surprise_panel,
+            gr.skip() if trace is None else trace,
         )
 
-    yield snapshot([], [], "Generating…", reset_details=True)
+    # The opening frame empties everything the previous response left behind,
+    # the export included: a trace kept here would still be downloadable while
+    # a different response was streaming in above it.
+    yield snapshot(
+        strip_update([], scale_name, RESPONSE_STRIP_LABEL),
+        [],
+        "Generating…",
+        reset_details=True,
+        prompt_panel=(strip_update([], scale_name), (generation, []), ""),
+        charts_panel=(charts.summary_tiles({}), charts.EMPTY_CHART),
+        trace={},
+    )
 
     started = time.monotonic()
     raw_text = ""
@@ -455,6 +658,7 @@ def _stream_reply(
     highlight: list[tuple[str, str]] = []
     metrics: list[dict] = []
     status = "The model produced no tokens."
+    first = True
 
     stream = MANAGER.generate(
         request,
@@ -463,6 +667,7 @@ def _stream_reply(
         top_k=int(top_k),
         max_new_tokens=int(max_new_tokens),
         seed=used_seed,
+        analyze_prompt=bool(analyze_prompt),
     )
 
     try:
@@ -478,10 +683,39 @@ def _stream_reply(
                 pending["reasoning"] = reasoning
                 pending["content"] = answer
                 pending["reasoning_closed"] = closed
-                highlight = highlighted_tokens(update.metrics)
+                highlight = strip_value(update.metrics, scale_name)
                 metrics = list(update.metrics)
                 status = generation_progress(len(metrics), started, used_seed)
-                yield snapshot(highlight, metrics, status)
+                prompt_panel = None
+                if first:
+                    # Every prompt token is measured before the first response
+                    # token exists, so this is published once and never
+                    # changes. It shares the response strip's stamp: the two
+                    # are replaced together, and a click on either has to
+                    # match the stamp the pair was drawn with.
+                    prompt_metrics = list(update.prompt_metrics)
+                    prompt_panel = (
+                        strip_update(prompt_metrics, scale_name),
+                        (generation, prompt_metrics),
+                        prompt_note_text(
+                            len(prompt_metrics), update.prompt_note, "prompt"
+                        ),
+                    )
+                yield snapshot(
+                    highlight,
+                    metrics,
+                    status,
+                    prompt_panel=prompt_panel,
+                    charts_panel=(
+                        (
+                            charts.summary_tiles(summarize(metrics)),
+                            charts.surprise_chart(metrics),
+                        )
+                        if first or len(metrics) % CHART_EVERY == 0
+                        else None
+                    ),
+                )
+                first = False
     except Exception as error:
         # The diagnostic only goes to the status line. Storing it as the
         # assistant turn would feed the failure back to the model next turn.
@@ -489,6 +723,8 @@ def _stream_reply(
         pending["reasoning"] = reasoning
         pending["content"] = answer
         finalize_partial(turns)
+        # A failed response is not a response to export, so the trace the
+        # opening frame emptied stays empty.
         yield snapshot(highlight, metrics, f"Generation failed: {error}", busy=False)
         return
 
@@ -507,8 +743,37 @@ def _stream_reply(
     # the turn when it holds neither answer nor reasoning. Dropping it leaves
     # the user turn without a reply, which is the honest shape - no assistant
     # bubble is drawn, so both transcripts agree that no reply exists.
-    finalize_partial(turns)
-    yield snapshot(highlight, metrics, status, busy=False)
+    kept = finalize_partial(turns)
+    trace = (
+        build_trace(
+            model_id=MANAGER.model_id,
+            messages=request,
+            response=raw_text,
+            sampling={
+                "temperature": float(temperature),
+                "top_p": float(top_p),
+                "top_k": int(top_k),
+                "max_new_tokens": int(max_new_tokens),
+                "seed": used_seed,
+            },
+            metrics=metrics,
+        )
+        if kept and metrics
+        else {}
+    )
+    if trace:
+        status = f"{status} Exports are ready."
+    yield snapshot(
+        highlight,
+        metrics,
+        status,
+        busy=False,
+        charts_panel=(
+            charts.summary_tiles(summarize(metrics)),
+            charts.surprise_chart(metrics),
+        ),
+        trace=trace,
+    )
 
 
 def chat(
@@ -522,6 +787,8 @@ def chat(
     max_new_tokens: int,
     seed,
     randomize_seed: bool,
+    analyze_prompt: bool = True,
+    scale_name: str = DEFAULT_COLOR_SCALE,
 ):
     if MANAGER.busy:
         # Before anything else, including the checks below: every other exit
@@ -551,6 +818,8 @@ def chat(
         max_new_tokens,
         seed,
         randomize_seed,
+        analyze_prompt,
+        scale_name,
     )
 
 
@@ -566,6 +835,8 @@ def regenerate_from(
     max_new_tokens: int,
     seed,
     randomize_seed: bool,
+    analyze_prompt: bool = True,
+    scale_name: str = DEFAULT_COLOR_SCALE,
 ):
     """Throw away everything after the user turn at ``position`` and reply again."""
 
@@ -594,6 +865,8 @@ def regenerate_from(
         max_new_tokens,
         seed,
         randomize_seed,
+        analyze_prompt,
+        scale_name,
     )
 
 
@@ -610,6 +883,9 @@ def retry_message(event: gr.RetryData, prompt_text, turns, *settings):
 
 
 def edit_message(event: gr.EditData, prompt_text, turns, *settings):
+    # The color scale is the last of the settings a generation is given, and
+    # this handler needs it for the one path that clears the strips itself.
+    scale_name = settings[-1] if settings else DEFAULT_COLOR_SCALE
     if MANAGER.busy:
         # Not just the branch that regenerates: editing an assistant turn
         # rewrites the conversation on its own, from the same stale snapshot.
@@ -656,7 +932,11 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
             # The ranks and probabilities on screen describe the text the model
             # generated, not what the user just typed over it.
             yield idle_state(
-                prompt_text, turns, "Assistant message edited.", clear_tokens=True
+                prompt_text,
+                turns,
+                "Assistant message edited.",
+                clear_tokens=True,
+                scale_name=scale_name,
             )
         finally:
             MANAGER.release_generation()
@@ -681,7 +961,11 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
     yield from regenerate_from(position, prompt_text, turns, *settings)
 
 
-def undo_from(position: int | None, turns: list[dict] | None):
+def undo_from(
+    position: int | None,
+    turns: list[dict] | None,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
     """Drop the exchange starting at the user turn ``position``.
 
     The message goes back into the input box so it can be reworded and sent again.
@@ -710,38 +994,49 @@ def undo_from(position: int | None, turns: list[dict] | None):
             gr.skip(),
             gr.skip(),
             *send_stop_buttons(False),
+            *(gr.skip(),) * 6,
         )
 
     remaining = turns[:position]
     messages, _ = display_messages(remaining)
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
+        scale_name
+    )
     # The selected-token details describe the response being removed, so they
-    # go with it, exactly as Clear resets them.
+    # go with it, exactly as Clear resets them. So do the prompt tokens, the
+    # charts and the export: all of them measure the exchange that just left.
     return (
         turns[position]["content"],
         messages,
         remaining,
-        [],
-        empty_metrics(),
+        strip,
+        metrics,
         "Removed the last exchange.",
         NO_TOKEN_SELECTED,
         [],
         *send_stop_buttons(False),
+        prompt_strip,
+        prompt_metrics,
+        prompt_note,
+        charts.summary_tiles({}),
+        charts.EMPTY_CHART,
+        {},
     )
 
 
-def undo_last(turns):
-    return undo_from(last_user_index(turns), turns)
+def undo_last(turns, scale_name: str = DEFAULT_COLOR_SCALE):
+    return undo_from(last_user_index(turns), turns, scale_name)
 
 
-def undo_message(event: gr.UndoData, turns):
+def undo_message(event: gr.UndoData, turns, scale_name: str = DEFAULT_COLOR_SCALE):
     found = locate(turns, event.index)
     position = (
         user_index_at_or_before(turns, found[0]) if found else last_user_index(turns)
     )
-    return undo_from(position, turns)
+    return undo_from(position, turns, scale_name)
 
 
-def clear_chat():
+def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
     """Empty everything the conversation owns.
 
     Clear cancels a running generation (see ``cancels`` on its listener), and a
@@ -749,15 +1044,24 @@ def clear_chat():
     restore the Send button itself exactly as Stop does.
     """
 
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
+        scale_name
+    )
     return (
         [],
         [],
-        [],
-        empty_metrics(),
+        strip,
+        metrics,
         "Conversation cleared.",
         *send_stop_buttons(False),
         NO_TOKEN_SELECTED,
         [],
+        prompt_strip,
+        prompt_metrics,
+        prompt_note,
+        charts.summary_tiles({}),
+        charts.EMPTY_CHART,
+        {},
     )
 
 
@@ -784,7 +1088,7 @@ def save_conversation(turns, system_prompt):
     )
 
 
-def load_conversation(file_path, turns):
+def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE):
     """Replace the conversation with a saved one.
 
     A failed load keeps the conversation already on screen, so a bad file
@@ -813,6 +1117,7 @@ def load_conversation(file_path, turns):
             gr.skip(),
             gr.skip(),
             *send_stop_buttons(False),
+            *(gr.skip(),) * 6,
         )
 
     if not file_path:
@@ -826,18 +1131,80 @@ def load_conversation(file_path, turns):
     # cancelled generator left behind goes with it and needs no finalizing.
     turns = loaded
     messages, _ = display_messages(turns)
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
+        scale_name
+    )
     # The selected token described a response from the conversation being
-    # replaced, so it goes with it, exactly as Clear and Undo reset it.
+    # replaced, so it goes with it, exactly as Clear and Undo reset it. The
+    # charts and the export measured that response too, and a loaded
+    # conversation has no measurements of its own to put in their place.
     return (
         messages,
         turns,
         system_prompt,
-        [],
-        empty_metrics(),
+        strip,
+        metrics,
         f"Loaded {len(turns)} message{'s' if len(turns) != 1 else ''}.",
         NO_TOKEN_SELECTED,
         [],
         *send_stop_buttons(False),
+        prompt_strip,
+        prompt_metrics,
+        prompt_note,
+        charts.summary_tiles({}),
+        charts.EMPTY_CHART,
+        {},
+    )
+
+
+# ---------------------------------------------------------------- score text
+
+
+def score_text(
+    context: str,
+    text: str,
+    use_chat_template: bool,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
+    """Measure text the model did not write, and put it in the same panel."""
+
+    skip = gr.skip()
+    if not MANAGER.loaded:
+        return (skip,) * 7 + ("Download and load a model first.", skip, skip)
+
+    try:
+        result = MANAGER.score_text(
+            text, context=context or "", use_chat_template=bool(use_chat_template)
+        )
+    except Exception as error:
+        return (skip,) * 7 + (f"Could not score that text: {error}", skip, skip)
+
+    summary = summarize(result.metrics)
+    status = (
+        f"Scored {summary['token_count']:,} tokens. "
+        f"Perplexity {summary['perplexity']:,.1f}."
+    )
+    # What was scored comes before how exactly it was scored: the template
+    # caveat says which passage the numbers describe, the seam caveat says how
+    # sure their first token is.
+    if result.chat_template_missing:
+        status = f"{status} {TEMPLATE_CAVEAT}"
+    if not result.seam_verified:
+        status = f"{status} {SEAM_CAVEAT}"
+    # Both strips are replaced, so they take one shared stamp - and that stamp
+    # is what drops a click made against the response they overwrite.
+    generation = new_metrics_generation()
+    return (
+        strip_update(result.metrics, scale_name, "Scored tokens — click one"),
+        stamped(result.metrics, generation),
+        strip_update(result.context_metrics, scale_name),
+        stamped(result.context_metrics, generation),
+        prompt_note_text(len(result.context_metrics), "", "context"),
+        charts.summary_tiles(summary),
+        charts.surprise_chart(result.metrics, title="Surprise per scored token"),
+        status,
+        NO_TOKEN_SELECTED,
+        [],
     )
 
 
@@ -847,20 +1214,61 @@ CSS = """
 #hero h1 { font-size: 2.1rem; margin-bottom: 0.25rem; }
 #model-status { min-height: 128px; }
 #token-strip { min-height: 150px; }
-#token-strip span { cursor: pointer; border-radius: 5px; }
+#token-strip span, #prompt-strip span { cursor: pointer; border-radius: 5px; }
+/* Token fills are light in both themes, so their ink is pinned dark. */
+#token-strip .textspan.hl, #prompt-strip .textspan.hl,
+#token-strip .category-label, #prompt-strip .category-label { color: #0b0b0b; }
 .footer-note { color: var(--body-text-color-subdued); font-size: 0.9rem; }
+.scale-caption { color: var(--body-text-color-subdued); font-size: 0.85rem; }
+
+.viz-root {
+  --viz-ink: #0b0b0b;
+  --viz-muted: #898781;
+  --viz-grid: #e1e0d9;
+  --viz-axis: #c3c2b7;
+  --viz-line: #2a78d6;
+  --viz-band: #cde2fb;
+  margin: 0;
+  font-family: var(--font, system-ui, -apple-system, "Segoe UI", sans-serif);
+}
+.dark .viz-root {
+  --viz-ink: #ffffff;
+  --viz-muted: #898781;
+  --viz-grid: #2c2c2a;
+  --viz-axis: #383835;
+  --viz-line: #3987e5;
+  --viz-band: #1c5cab;
+}
+.viz-root svg { width: 100%; height: auto; display: block; }
+.viz-title { color: var(--viz-ink); font-size: 0.9rem; font-weight: 600; padding: 0 0 0.2rem; }
+.viz-sub { color: var(--viz-muted); font-weight: 400; font-size: 0.8rem; margin-left: 0.4rem; }
+.viz-grid { stroke: var(--viz-grid); stroke-width: 1; }
+.viz-axis { stroke: var(--viz-axis); stroke-width: 1; }
+.viz-band { fill: var(--viz-band); opacity: 0.55; stroke: none; }
+.viz-line { fill: none; stroke: var(--viz-line); stroke-width: 2; stroke-linejoin: round; }
+.viz-peak-dot { fill: var(--viz-line); stroke: var(--body-background-fill); stroke-width: 2; }
+.viz-peak-label, .viz-tick { fill: var(--viz-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.viz-hit { fill: transparent; }
+.viz-empty, .viz-note { color: var(--body-text-color-subdued); font-size: 0.85rem; padding: 0.4rem 0; }
+.viz-tiles { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.viz-tile {
+  flex: 1 1 5.5rem; padding: 0.45rem 0.6rem; border-radius: 8px;
+  background: var(--background-fill-secondary);
+}
+.viz-value { color: var(--viz-ink); font-size: 1.25rem; line-height: 1.2; }
+.viz-label { color: var(--viz-muted); font-size: 0.72rem; text-transform: lowercase; }
 """
 
 
 def build_app() -> gr.Blocks:
-    with gr.Blocks(
-        title="OLMo Token Explorer", css=CSS, theme=gr.themes.Soft()
-    ) as demo:
+    with gr.Blocks(title="Chatlab", css=CSS, theme=gr.themes.Soft()) as demo:
         conversation_state = gr.State([])
         metrics_state = gr.State(empty_metrics())
+        prompt_metrics_state = gr.State(empty_metrics())
+        trace_state = gr.State({})
 
         gr.Markdown(
-            "# OLMo Token Explorer\nChat with an open model and see exactly how likely every generated token was.",
+            "# Chatlab\nChat with an open model and see exactly how likely every generated token was.",
             elem_id="hero",
         )
 
@@ -909,41 +1317,105 @@ def build_app() -> gr.Blocks:
 
         with gr.Row(equal_height=True):
             with gr.Column(scale=3):
-                chatbot = gr.Chatbot(
-                    type="messages",
-                    label="Conversation",
-                    height=560,
-                    editable="all",
-                    placeholder="Load a model, then start a conversation.",
-                )
-                prompt = gr.Textbox(
-                    label="Message",
-                    placeholder="Ask OLMo something…",
-                    lines=3,
-                )
-                with gr.Row():
-                    send_button = gr.Button("Send", variant="primary")
-                    stop_button = gr.Button("Stop", variant="stop", visible=False)
-                    retry_button = gr.Button("🔁 Retry")
-                    undo_button = gr.Button("↩️ Undo last")
-                    clear_button = gr.Button("🗑️ Clear")
-                with gr.Row():
-                    save_button = gr.Button("💾 Save conversation")
-                    load_upload = gr.UploadButton(
-                        "📂 Load conversation",
-                        file_types=[".json"],
-                        type="filepath",
-                    )
-                saved_file = gr.File(
-                    label="Saved conversation", visible=False, interactive=False
-                )
-                generation_status = gr.Markdown("Ready.")
+                with gr.Tabs():
+                    with gr.Tab("Chat"):
+                        chatbot = gr.Chatbot(
+                            type="messages",
+                            label="Conversation",
+                            height=560,
+                            editable="all",
+                            placeholder="Load a model, then start a conversation.",
+                        )
+                        prompt = gr.Textbox(
+                            label="Message",
+                            placeholder="Ask OLMo something…",
+                            lines=3,
+                        )
+                        with gr.Row():
+                            send_button = gr.Button("Send", variant="primary")
+                            stop_button = gr.Button(
+                                "Stop", variant="stop", visible=False
+                            )
+                            retry_button = gr.Button("🔁 Retry")
+                            undo_button = gr.Button("↩️ Undo last")
+                            clear_button = gr.Button("🗑️ Clear")
+                        with gr.Row():
+                            save_button = gr.Button("💾 Save conversation")
+                            load_upload = gr.UploadButton(
+                                "📂 Load conversation",
+                                file_types=[".json"],
+                                type="filepath",
+                            )
+                        saved_file = gr.File(
+                            label="Saved conversation",
+                            visible=False,
+                            interactive=False,
+                        )
+                        generation_status = gr.Markdown("Ready.")
+                        with gr.Accordion("Export full metric trace", open=False):
+                            with gr.Row():
+                                gr.DownloadButton(
+                                    "Download JSON",
+                                    value=lambda trace: write_trace_export(
+                                        trace, "json"
+                                    ),
+                                    inputs=trace_state,
+                                    size="sm",
+                                )
+                                gr.DownloadButton(
+                                    "Download CSV",
+                                    value=lambda trace: write_trace_export(trace, "csv"),
+                                    inputs=trace_state,
+                                    size="sm",
+                                )
+                            gr.Markdown(
+                                "Exports include every token metric and all recorded "
+                                "alternatives for the latest completed response.",
+                                elem_classes=["footer-note"],
+                            )
+
+                    with gr.Tab("Score text"):
+                        gr.Markdown(
+                            "Measure text the model did not write. One forward pass "
+                            "gives every token the same rank, probability, surprise, "
+                            "and entropy the chat view shows."
+                        )
+                        score_context = gr.Textbox(
+                            label="Context (optional)",
+                            placeholder="Text that comes before the part you want scored.",
+                            lines=3,
+                        )
+                        use_chat_template = gr.Checkbox(
+                            value=False,
+                            label="Treat the context as a chat message",
+                            info=(
+                                "Wraps the context in the model's chat template, so the "
+                                "scored text is measured as a reply. Models without a "
+                                "chat template score the context as plain text, and say so."
+                            ),
+                        )
+                        score_input = gr.Textbox(
+                            label="Text to score",
+                            placeholder="Paste the text you want measured…",
+                            lines=8,
+                        )
+                        score_button = gr.Button("Score text", variant="primary")
+                        score_status = gr.Markdown("Nothing scored yet.")
 
             with gr.Column(scale=2):
                 gr.Markdown("## Under the hood")
+                color_scale = gr.Dropdown(
+                    choices=list(COLOR_SCALES),
+                    value=DEFAULT_COLOR_SCALE,
+                    label="Color tokens by",
+                )
+                scale_caption = gr.Markdown(
+                    COLOR_SCALES[DEFAULT_COLOR_SCALE].caption,
+                    elem_classes=["scale-caption"],
+                )
                 token_strip = gr.HighlightedText(
-                    label="Latest response — click a token",
-                    color_map=CATEGORY_COLORS,
+                    label=RESPONSE_STRIP_LABEL,
+                    color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
                     show_legend=True,
                     combine_adjacent=False,
                     elem_id="token-strip",
@@ -955,8 +1427,19 @@ def build_app() -> gr.Blocks:
                     interactive=False,
                     label="Most likely alternatives",
                 )
+                summary_panel = gr.HTML(charts.summary_tiles({}))
+                surprise_panel = gr.HTML(charts.EMPTY_CHART)
+                with gr.Accordion("Prompt and context tokens", open=False):
+                    prompt_note = gr.Markdown("", elem_classes=["scale-caption"])
+                    prompt_strip = gr.HighlightedText(
+                        label="Prompt tokens — click one",
+                        color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
+                        show_legend=True,
+                        combine_adjacent=False,
+                        elem_id="prompt-strip",
+                    )
 
-        with gr.Accordion("Sampling controls", open=False):
+        with gr.Accordion("Sampling and analysis controls", open=False):
             with gr.Row():
                 temperature = gr.Slider(0, 2, value=0.8, step=0.05, label="Temperature")
                 top_p = gr.Slider(0.05, 1, value=0.95, step=0.01, label="Top-p")
@@ -976,6 +1459,11 @@ def build_app() -> gr.Blocks:
                     value=True,
                     label="🎲 New seed each response",
                     info="Turn off to lock the seed and reproduce a response exactly.",
+                )
+                analyze_prompt = gr.Checkbox(
+                    value=True,
+                    label="Measure prompt tokens",
+                    info="Scores every prompt token during the same pass that warms the cache.",
                 )
 
         gr.Markdown(
@@ -1000,8 +1488,12 @@ def build_app() -> gr.Blocks:
             max_new_tokens,
             seed,
             randomize_seed,
+            analyze_prompt,
+            color_scale,
         ]
         chat_inputs = [prompt, conversation_state, *settings_inputs]
+        # The order every generation handler publishes in; see
+        # CHAT_OUTPUT_NAMES.
         chat_outputs = [
             prompt,
             chatbot,
@@ -1014,6 +1506,12 @@ def build_app() -> gr.Blocks:
             stop_button,
             token_detail,
             alternatives,
+            prompt_strip,
+            prompt_metrics_state,
+            prompt_note,
+            summary_panel,
+            surprise_panel,
+            trace_state,
         ]
         undo_outputs = [
             prompt,
@@ -1026,6 +1524,12 @@ def build_app() -> gr.Blocks:
             alternatives,
             send_button,
             stop_button,
+            prompt_strip,
+            prompt_metrics_state,
+            prompt_note,
+            summary_panel,
+            surprise_panel,
+            trace_state,
         ]
 
         running = [
@@ -1061,10 +1565,21 @@ def build_app() -> gr.Blocks:
         # run wrote anything. A shared concurrency group has the same flaw - it
         # only delays the stale handler. Each of them refuses outright instead
         # while MANAGER.busy (see busy_state).
-        undo_button.click(undo_last, conversation_state, undo_outputs, cancels=running)
-        chatbot.undo(undo_message, conversation_state, undo_outputs, cancels=running)
+        undo_button.click(
+            undo_last,
+            [conversation_state, color_scale],
+            undo_outputs,
+            cancels=running,
+        )
+        chatbot.undo(
+            undo_message,
+            [conversation_state, color_scale],
+            undo_outputs,
+            cancels=running,
+        )
         clear_button.click(
             clear_chat,
+            inputs=color_scale,
             outputs=[
                 chatbot,
                 conversation_state,
@@ -1075,6 +1590,12 @@ def build_app() -> gr.Blocks:
                 stop_button,
                 token_detail,
                 alternatives,
+                prompt_strip,
+                prompt_metrics_state,
+                prompt_note,
+                summary_panel,
+                surprise_panel,
+                trace_state,
             ],
             cancels=running,
         )
@@ -1086,7 +1607,7 @@ def build_app() -> gr.Blocks:
         )
         load_upload.upload(
             load_conversation,
-            [load_upload, conversation_state],
+            [load_upload, conversation_state, color_scale],
             [
                 chatbot,
                 conversation_state,
@@ -1098,13 +1619,46 @@ def build_app() -> gr.Blocks:
                 alternatives,
                 send_button,
                 stop_button,
+                prompt_strip,
+                prompt_metrics_state,
+                prompt_note,
+                summary_panel,
+                surprise_panel,
+                trace_state,
             ],
             cancels=running,
+        )
+
+        score_button.click(
+            score_text,
+            [score_context, score_input, use_chat_template, color_scale],
+            [
+                token_strip,
+                metrics_state,
+                prompt_strip,
+                prompt_metrics_state,
+                prompt_note,
+                summary_panel,
+                surprise_panel,
+                score_status,
+                token_detail,
+                alternatives,
+            ],
+        )
+        color_scale.change(
+            recolor,
+            [metrics_state, prompt_metrics_state, color_scale],
+            [token_strip, prompt_strip, scale_caption],
         )
 
         token_strip.select(
             inspect_token,
             inputs=metrics_state,
+            outputs=[token_detail, alternatives],
+        )
+        prompt_strip.select(
+            inspect_token,
+            inputs=prompt_metrics_state,
             outputs=[token_detail, alternatives],
         )
 
