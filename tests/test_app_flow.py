@@ -24,7 +24,9 @@ FIXED = {
 }
 SETTINGS = tuple(FIXED.values())
 
-PROMPT, CHATBOT, TURNS, STRIP, METRICS, STATUS, SEED, SEND, STOP = range(9)
+PROMPT, CHATBOT, TURNS, STRIP, METRICS, STATUS, SEED, SEND, STOP, DETAIL, ALTS = (
+    range(11)
+)
 
 
 class ChatFlowTests(unittest.TestCase):
@@ -37,7 +39,7 @@ class ChatFlowTests(unittest.TestCase):
         frames = list(stream)
         self.assertTrue(frames)
         for frame in frames:
-            self.assertEqual(len(frame), 9)
+            self.assertEqual(len(frame), 11)
         return frames
 
     def test_a_message_produces_a_user_turn_and_a_reply(self):
@@ -134,6 +136,24 @@ class ChatFlowTests(unittest.TestCase):
         final = self.last(app.edit_message(event, "", turns, *SETTINGS))[-1]
         self.assertEqual([turn["content"] for turn in final[TURNS]], ["one", "fixed"])
         self.assertEqual(final[STATUS], "Assistant message edited.")
+
+    def test_editing_an_assistant_message_drops_the_token_diagnostics(self):
+        turns = [make_turn("user", "one"), make_turn("assistant", "stale")]
+        event = gr.EditData(
+            None, {"index": 1, "previous_value": "stale", "value": "fixed"}
+        )
+        final = self.last(app.edit_message(event, "", turns, *SETTINGS))[-1]
+        self.assertEqual(final[STRIP], [])
+        self.assertEqual(final[METRICS], [])
+        self.assertEqual(final[DETAIL], app.NO_TOKEN_SELECTED)
+        self.assertEqual(final[ALTS], [])
+
+    def test_a_refused_send_keeps_the_token_diagnostics(self):
+        # gr.skip() leaves the previous response's panel on screen.
+        final = self.last(app.chat("   ", [], *SETTINGS))[-1]
+        self.assertEqual(final[STATUS], "Enter a message first.")
+        for index in (STRIP, METRICS, DETAIL, ALTS):
+            self.assertEqual(final[index], gr.skip())
 
     def test_editing_a_reasoning_block_leaves_the_answer_alone(self):
         turns = [make_turn("user", "one"), make_turn("assistant", "answer", "thought")]

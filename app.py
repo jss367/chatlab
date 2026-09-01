@@ -31,6 +31,7 @@ from token_metrics import CATEGORY_COLORS
 DEFAULT_MODEL = "allenai/Olmo-3-7B-Think"
 MANAGER = ModelManager()
 SEED_LIMIT = 2**31 - 1
+NO_TOKEN_SELECTED = "Select a generated token to inspect it."
 
 
 def status_card(title: str, detail: str, tone: str = "neutral") -> str:
@@ -121,7 +122,7 @@ def highlighted_tokens(metrics: list[dict]) -> list[tuple[str, str]]:
 
 def inspect_token(metrics: list[dict], event: gr.SelectData):
     if not metrics:
-        return "Select a generated token to inspect it.", []
+        return NO_TOKEN_SELECTED, []
 
     index = event.index
     if isinstance(index, (list, tuple)):
@@ -212,19 +213,29 @@ def generation_progress(count: int, started: float, seed: int) -> str:
     )
 
 
-def idle_state(prompt_text: str, turns: list[dict], status: str):
-    """A non-streaming result that leaves the token panel and seed untouched."""
+def idle_state(
+    prompt_text: str, turns: list[dict], status: str, *, clear_tokens: bool = False
+):
+    """A non-streaming result that leaves the seed untouched.
+
+    The token panel is normally left alone as well: paths such as "Enter a
+    message first." must not wipe the diagnostics of the response already on
+    screen. ``clear_tokens`` is for the one case where those diagnostics stop
+    describing the visible text - an edited assistant reply.
+    """
 
     messages, _ = display_messages(turns)
     return (
         prompt_text,
         messages,
         copy_turns(turns),
-        gr.skip(),
-        gr.skip(),
+        [] if clear_tokens else gr.skip(),
+        [] if clear_tokens else gr.skip(),
         status,
         gr.skip(),
         *send_stop_buttons(False),
+        NO_TOKEN_SELECTED if clear_tokens else gr.skip(),
+        [] if clear_tokens else gr.skip(),
     )
 
 
@@ -263,6 +274,8 @@ def generate_reply(
             status,
             used_seed,
             *send_stop_buttons(busy),
+            gr.skip(),
+            gr.skip(),
         )
 
     yield snapshot([], [], "Generating…")
@@ -410,7 +423,11 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
 
     if turns[position]["role"] == "assistant":
         turns[position]["reasoning" if part == "reasoning" else "content"] = new_value
-        yield idle_state(prompt_text, turns, "Assistant message edited.")
+        # The ranks and probabilities on screen describe the text the model
+        # generated, not what the user just typed over it.
+        yield idle_state(
+            prompt_text, turns, "Assistant message edited.", clear_tokens=True
+        )
         return
 
     edited = new_value.strip()
@@ -631,7 +648,7 @@ def build_app() -> gr.Blocks:
                     combine_adjacent=False,
                     elem_id="token-strip",
                 )
-                token_detail = gr.Markdown("Select a generated token to inspect it.")
+                token_detail = gr.Markdown(NO_TOKEN_SELECTED)
                 alternatives = gr.Dataframe(
                     headers=["Token ID", "Token", "Raw probability"],
                     datatype=["number", "str", "number"],
@@ -694,6 +711,8 @@ def build_app() -> gr.Blocks:
             seed,
             send_button,
             stop_button,
+            token_detail,
+            alternatives,
         ]
         undo_outputs = [
             prompt,
