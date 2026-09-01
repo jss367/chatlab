@@ -49,9 +49,18 @@ class FakeTokenizer:
         self.trailing_specials = trailing_specials
         self.chat_template = chat_template
         self.vocab: dict[str, int] = {"<s>": 0, "</s>": 1, "<|user|>": 2, "<|assistant|>": 3}
+        self.all_special_ids = list(self.vocab.values())
 
     def _id(self, piece: str) -> int:
         return self.vocab.setdefault(piece, len(self.vocab))
+
+    def decode(self, ids, skip_special_tokens=False, **kwargs) -> str:
+        pieces = {index: piece for piece, index in self.vocab.items()}
+        return "".join(
+            pieces[int(index)]
+            for index in ids
+            if not (skip_special_tokens and int(index) in self.all_special_ids)
+        )
 
     def __call__(self, text, return_offsets_mapping=False, add_special_tokens=True):
         if return_offsets_mapping and not self.is_fast:
@@ -79,6 +88,39 @@ class FakeTokenizer:
         if add_generation_prompt:
             ids.append(self.vocab["<|assistant|>"])
         return ids
+
+
+class EatsTheLeadingSpace(FakeTokenizer):
+    """Decodes the way SentencePiece does: the opening space is the marker.
+
+    ``decode`` is then not the inverse of ``encode``, so a seam found by
+    decoding a prefix of the sequence would sit one token off.
+    """
+
+    def decode(self, ids, skip_special_tokens=False, **kwargs) -> str:
+        spoken = super().decode(ids, skip_special_tokens=skip_special_tokens, **kwargs)
+        return spoken[1:] if spoken.startswith(" ") else spoken
+
+
+class CutsCharactersInHalf:
+    """One token per byte, as byte-level BPE does when it has no merge left.
+
+    Decoding a run of bytes that ends mid-character says U+FFFD rather than
+    the character, so a seam found by decoding can be stranded early even
+    though the two halves still concatenate to the passage.
+    """
+
+    is_fast = False
+    chat_template = None
+    all_special_ids: list[int] = []
+
+    def __call__(self, text, return_offsets_mapping=False, add_special_tokens=True):
+        if return_offsets_mapping:
+            raise NotImplementedError("offset mapping needs a fast tokenizer")
+        return Encoding(input_ids=list(text.encode()))
+
+    def decode(self, ids, skip_special_tokens=False, **kwargs) -> str:
+        return bytes(int(index) for index in ids).decode("utf-8", errors="replace")
 
 
 class ContextSplitTests(unittest.TestCase):
@@ -141,8 +183,49 @@ class ContextSplitTests(unittest.TestCase):
         self.assertEqual(context_ids, [0, tokenizer.vocab[" "]])
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
 
-    def test_slow_tokenizers_fall_back_to_encoding_each_half(self):
+    def test_slow_tokenizers_keep_the_joint_encoding(self):
+        # No offsets to search, so the seam is found by decoding a growing
+        # prefix back to text. The passage is still encoded once, so the
+        # merged token is the one that gets scored.
         tokenizer = FakeTokenizer(is_fast=False)
+        context_ids, text_ids = split_context_and_text(tokenizer, "foo", "bar")
+
+        self.assertEqual(context_ids, [0])
+        self.assertEqual(text_ids, [tokenizer.vocab["foobar"]])
+
+    def test_a_slow_tokenizer_drops_its_trailing_special_token(self):
+        tokenizer = FakeTokenizer(is_fast=False, trailing_specials=1)
+        context_ids, text_ids = split_context_and_text(tokenizer, "foo ", "bar")
+
+        self.assertEqual(
+            context_ids, [0, tokenizer.vocab["foo"], tokenizer.vocab[" "]]
+        )
+        self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+
+    def test_a_decode_that_does_not_round_trip_falls_back(self):
+        # SentencePiece eats the space that opens a sequence, so decoding the
+        # leading run of tokens no longer says what the context said. Rather
+        # than move the seam by a token and score part of the context, the
+        # split gives up and each half is encoded on its own.
+        tokenizer = EatsTheLeadingSpace(is_fast=False)
+        context_ids, text_ids = split_context_and_text(tokenizer, " foo", "bar")
+
+        self.assertEqual(context_ids, [0, tokenizer.vocab[" "], tokenizer.vocab["foo"]])
+        self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+
+    def test_a_seam_stranded_mid_character_falls_back(self):
+        # The halves still concatenate to the passage here, so only the token
+        # the split lands on gives the mistake away: it has to reach the seam,
+        # and a run of bytes cut inside a character does not.
+        tokenizer = CutsCharactersInHalf()
+        context_ids, text_ids = split_context_and_text(tokenizer, "日本語", "です")
+
+        self.assertEqual(context_ids, list("日本語".encode()))
+        self.assertEqual(text_ids, list("です".encode()))
+
+    def test_a_tokenizer_that_cannot_decode_falls_back(self):
+        tokenizer = FakeTokenizer(is_fast=False)
+        tokenizer.decode = None
         context_ids, text_ids = split_context_and_text(tokenizer, "foo", "bar")
 
         self.assertEqual(context_ids, [0, tokenizer.vocab["foo"]])

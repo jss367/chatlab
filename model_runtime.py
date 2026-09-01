@@ -48,6 +48,87 @@ def validate_model_id(model_id: str) -> str:
     return cleaned
 
 
+def _split_by_decoding(
+    tokenizer, context: str, text: str
+) -> tuple[list[int], list[int]] | None:
+    """Locate the seam in one joint encoding by decoding it back to text.
+
+    A tokenizer without offsets can still be asked what a run of ids says, so
+    the passage is still encoded once and the seam is found afterwards: the
+    context keeps the longest run of leading tokens that decodes to a prefix
+    of ``context``, and the token after it — the one that straddles the seam,
+    if any — starts the scored text, exactly as it does when offsets are
+    available. Trailing special tokens are dropped for the same reason they
+    are there.
+
+    The split is returned only when the two halves decode back to the passage
+    verbatim. A ``decode`` that does not round trip — a byte-level merge cut
+    mid-character, a normalizer that rewrites whitespace, a SentencePiece
+    model that eats a leading space — would otherwise move the seam by a
+    token and score part of the context, so those cases say so with ``None``
+    instead of guessing.
+    """
+
+    decode = getattr(tokenizer, "decode", None)
+    if decode is None:
+        return None
+
+    try:
+        ids = [int(value) for value in tokenizer(context + text).input_ids]
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    if not ids:
+        return None
+
+    def spoken(start: int, end: int) -> str | None:
+        try:
+            return decode(
+                ids[start:end],
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+        except (NotImplementedError, TypeError, ValueError):
+            return None
+
+    specials = set(getattr(tokenizer, "all_special_ids", None) or ())
+    stop = len(ids)
+    while stop and ids[stop - 1] in specials:
+        stop -= 1
+
+    def within_context(end: int) -> bool:
+        prefix = spoken(0, end)
+        return prefix is not None and context.startswith(prefix)
+
+    low, high = 0, stop
+    while low < high:
+        middle = (low + high + 1) // 2
+        if within_context(middle):
+            low = middle
+        else:
+            high = middle - 1
+    split = low
+
+    # The token the split lands on has to reach the seam, because it is the
+    # one that straddles it. A byte-level merge cut mid-character decodes to
+    # a replacement character instead of the text, which strands the search
+    # early on a split whose halves still concatenate to the passage; that
+    # token would not reach the seam, and this is what catches it. A token
+    # that instead stops short of the seam belongs to the context, and means
+    # the search above did not find the longest run.
+    if split < stop:
+        reaches = spoken(0, split + 1)
+        if reaches is None or context.startswith(reaches):
+            return None
+        if not reaches.startswith(context):
+            return None
+
+    head, tail = spoken(0, split), spoken(split, stop)
+    if head is None or tail is None or head + tail != context + text:
+        return None
+
+    return ids[:split], ids[split:stop]
+
+
 def split_context_and_text(tokenizer, context: str, text: str) -> tuple[list[int], list[int]]:
     """Tokenize ``context + text`` as one passage, then split at the seam.
 
@@ -69,8 +150,11 @@ def split_context_and_text(tokenizer, context: str, text: str) -> tuple[list[int
     score depends on them, and scoring them would report a ``</s>`` the reader
     never pasted.
 
-    Slow tokenizers cannot report offsets, so those fall back to encoding each
-    half on its own.
+    Slow tokenizers cannot report offsets, so the seam is instead located by
+    decoding a growing prefix of the one joint encoding, and only the halves
+    that decode back to the passage verbatim are used. Encoding each half on
+    its own is the last resort, for a tokenizer whose ``decode`` cannot say
+    where the seam fell.
     """
 
     if getattr(tokenizer, "is_fast", False):
@@ -97,6 +181,10 @@ def split_context_and_text(tokenizer, context: str, text: str) -> tuple[list[int
                     break
                 stop -= 1
             return ids[:split], ids[split:stop]
+
+    halves = _split_by_decoding(tokenizer, context, text)
+    if halves is not None:
+        return halves
 
     return (
         [int(value) for value in tokenizer(context).input_ids],
