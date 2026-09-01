@@ -11,7 +11,7 @@ import gradio as gr
 
 from model_runtime import ModelManager
 from token_metrics import CATEGORY_COLORS
-
+from trace_export import build_trace, write_trace_export
 
 DEFAULT_MODEL = "allenai/Olmo-3-7B-Think"
 MANAGER = ModelManager()
@@ -144,17 +144,26 @@ def chat(
     conversation = list(conversation or [])
     prompt = prompt.strip()
     if not prompt:
-        yield "", conversation, conversation, [], [], "Enter a message first."
+        yield "", conversation, conversation, [], [], {}, "Enter a message first."
         return
     if not MANAGER.loaded:
-        yield "", conversation, conversation, [], [], "Download and load a model first."
+        yield (
+            "",
+            conversation,
+            conversation,
+            [],
+            [],
+            {},
+            "Download and load a model first.",
+        )
         return
 
     request_messages = conversation + [{"role": "user", "content": prompt}]
     display = request_messages + [{"role": "assistant", "content": ""}]
-    yield "", display, conversation, [], [], "Generating…"
+    yield "", display, conversation, [], [], {}, "Generating…"
 
     try:
+        last_update = None
         for update in MANAGER.generate(
             request_messages,
             temperature=float(temperature),
@@ -163,6 +172,7 @@ def chat(
             max_new_tokens=int(max_new_tokens),
             seed=int(seed),
         ):
+            last_update = update
             display[-1] = {"role": "assistant", "content": update.text}
             yield (
                 "",
@@ -170,11 +180,38 @@ def chat(
                 list(display),
                 highlighted_tokens(update.metrics),
                 update.metrics,
+                gr.skip(),
                 f"Generated {len(update.metrics)} token{'s' if len(update.metrics) != 1 else ''}.",
+            )
+        if last_update is not None:
+            trace = build_trace(
+                model_id=MANAGER.model_id,
+                messages=request_messages,
+                response=last_update.text,
+                sampling={
+                    "temperature": float(temperature),
+                    "top_p": float(top_p),
+                    "top_k": int(top_k),
+                    "max_new_tokens": int(max_new_tokens),
+                    "seed": int(seed),
+                },
+                metrics=last_update.metrics,
+            )
+            yield (
+                "",
+                list(display),
+                list(display),
+                highlighted_tokens(last_update.metrics),
+                last_update.metrics,
+                trace,
+                (
+                    f"Generated {len(last_update.metrics)} token"
+                    f"{'s' if len(last_update.metrics) != 1 else ''}. Exports are ready."
+                ),
             )
     except Exception as error:
         display[-1] = {"role": "assistant", "content": f"Generation failed: {error}"}
-        yield "", display, conversation, [], [], f"Generation failed: {error}"
+        yield "", display, conversation, [], [], {}, f"Generation failed: {error}"
 
 
 def clear_chat():
@@ -183,6 +220,7 @@ def clear_chat():
         [],
         [],
         [],
+        {},
         "Conversation cleared.",
         "Select a generated token to inspect it.",
         [],
@@ -206,6 +244,7 @@ def build_app() -> gr.Blocks:
     ) as demo:
         conversation_state = gr.State([])
         metrics_state = gr.State([])
+        trace_state = gr.State({})
 
         gr.Markdown(
             "# OLMo Token Explorer\nChat with an open model and see exactly how likely every generated token was.",
@@ -276,6 +315,25 @@ def build_app() -> gr.Blocks:
                     interactive=False,
                     label="Most likely alternatives",
                 )
+                gr.Markdown("### Export full metric trace")
+                with gr.Row():
+                    gr.DownloadButton(
+                        "Download JSON",
+                        value=lambda trace: write_trace_export(trace, "json"),
+                        inputs=trace_state,
+                        size="sm",
+                    )
+                    gr.DownloadButton(
+                        "Download CSV",
+                        value=lambda trace: write_trace_export(trace, "csv"),
+                        inputs=trace_state,
+                        size="sm",
+                    )
+                gr.Markdown(
+                    "Exports include every token metric and all recorded alternatives "
+                    "for the latest completed response.",
+                    elem_classes=["footer-note"],
+                )
 
         with gr.Accordion("Sampling controls", open=False):
             with gr.Row():
@@ -316,6 +374,7 @@ def build_app() -> gr.Blocks:
             conversation_state,
             token_strip,
             metrics_state,
+            trace_state,
             generation_status,
         ]
         send_button.click(chat, chat_inputs, chat_outputs)
@@ -327,6 +386,7 @@ def build_app() -> gr.Blocks:
                 conversation_state,
                 token_strip,
                 metrics_state,
+                trace_state,
                 generation_status,
                 token_detail,
                 alternatives,
