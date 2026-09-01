@@ -120,6 +120,40 @@ class EatsTheLeadingSpace(FakeTokenizer):
         return spoken[1:] if spoken.startswith(" ") else spoken
 
 
+class ProbesDifferently(FakeTokenizer):
+    """Encodes the passage differently when the post-processor is switched off.
+
+    A normalizer that only runs alongside the post-processor would look like
+    this. The second encoding then proves nothing about where the trailing
+    specials came from.
+    """
+
+    def __call__(self, text, return_offsets_mapping=False, add_special_tokens=True):
+        if not add_special_tokens:
+            text += " unasked"
+        return super().__call__(
+            text,
+            return_offsets_mapping=return_offsets_mapping,
+            add_special_tokens=add_special_tokens,
+        )
+
+
+class RefusesTheProbe(FakeTokenizer):
+    """Will not encode anything without its post-processor.
+
+    There is no second encoding to compare against at all here.
+    """
+
+    def __call__(self, text, return_offsets_mapping=False, add_special_tokens=True):
+        if not add_special_tokens:
+            raise ValueError("this tokenizer always adds its special tokens")
+        return super().__call__(
+            text,
+            return_offsets_mapping=return_offsets_mapping,
+            add_special_tokens=add_special_tokens,
+        )
+
+
 class CutsCharactersInHalf:
     """One token per byte, as byte-level BPE does when it has no merge left.
 
@@ -219,6 +253,58 @@ class ContextSplitTests(unittest.TestCase):
             context_ids, [0, tokenizer.vocab["foo"], tokenizer.vocab[" "]]
         )
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+
+
+    def test_a_pasted_trailing_special_token_survives_a_slow_tokenizer(self):
+        # Nothing was appended here: the reader pasted "</s>" at the end of
+        # their own text. Dropping it by id membership would report ranks and
+        # perplexity for a passage that stops one token early.
+        tokenizer = FakeTokenizer(is_fast=False)
+        context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo ", "</s>")
+
+        self.assertEqual(
+            context_ids, [0, tokenizer.vocab["foo"], tokenizer.vocab[" "]]
+        )
+        self.assertEqual(text_ids, [tokenizer.vocab["</s>"]])
+
+    def test_a_pasted_special_and_an_appended_one_are_told_apart(self):
+        # The case that separates a real fix from a plausible one: the text
+        # ends in a special the reader wrote *and* the post-processor appends
+        # its own after it. Exactly one of the two is the reader's.
+        tokenizer = FakeTokenizer(is_fast=False, trailing_specials=1)
+        context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo ", "</s>")
+
+        self.assertEqual(
+            context_ids, [0, tokenizer.vocab["foo"], tokenizer.vocab[" "]]
+        )
+        self.assertEqual(text_ids, [tokenizer.vocab["</s>"]])
+
+    def test_the_offsets_path_keeps_a_pasted_trailing_special_token(self):
+        # The fast path never had to guess, and still does not: the pasted
+        # token carries a real span and the appended one carries (0, 0).
+        tokenizer = FakeTokenizer(trailing_specials=1)
+        context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo ", "</s>")
+
+        self.assertEqual(
+            context_ids, [0, tokenizer.vocab["foo"], tokenizer.vocab[" "]]
+        )
+        self.assertEqual(text_ids, [tokenizer.vocab["</s>"]])
+
+    def test_a_probe_that_proves_nothing_drops_the_whole_trailing_run(self):
+        # The second encoding does not line up with the joint one, so which
+        # trailing specials the post-processor added is unknown. The pasted
+        # token is lost, as it was before there was a probe at all, rather
+        # than a closer nobody wrote being scored.
+        tokenizer = ProbesDifferently(is_fast=False)
+        context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo ", "</s>")
+
+        self.assertNotIn(tokenizer.vocab["</s>"], context_ids + text_ids)
+
+    def test_a_tokenizer_that_refuses_the_probe_drops_the_whole_run_too(self):
+        tokenizer = RefusesTheProbe(is_fast=False)
+        context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo ", "</s>")
+
+        self.assertNotIn(tokenizer.vocab["</s>"], context_ids + text_ids)
 
     def test_a_decode_that_does_not_round_trip_still_cuts_one_encoding(self):
         # SentencePiece eats the space that opens a sequence, so decoding the

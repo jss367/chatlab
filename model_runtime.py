@@ -286,6 +286,64 @@ def _guess_seam(
     return split
 
 
+def _end_of_written_text(tokenizer, passage: str, ids: list[int]) -> int:
+    """Where ``ids`` stops being what the reader wrote, for a slow tokenizer.
+
+    A post-processor's closing EOS or SEP has to come off before the text is
+    scored: it lands after the last token the reader wrote, so scoring it
+    would report a ``</s>`` nobody pasted. But membership in
+    ``all_special_ids`` cannot tell that closer apart from a special token the
+    reader pasted at the end of their own text, and someone exploring
+    tokenization is exactly the person who pastes ``<|endoftext|>`` to see
+    what it does. Dropping it by id would report ranks and perplexity for
+    truncated text. The offsets path never had to guess — a pasted token
+    carries a real span and an appended one carries ``(0, 0)`` — and this
+    asks the same question by provenance, of a tokenizer with no offsets.
+
+    Encoding the passage a second time with ``add_special_tokens=False``
+    answers it: whatever specials survive that encoding are the reader's own,
+    and the post-processor's are the ones that appear only when it runs. So
+    ``ids`` is that bare encoding wrapped in specials, and what has to come
+    off is the length of the wrapping *suffix*. The shortest suffix that
+    explains ``ids`` is the one taken, so only the specials proven to have
+    been added come off: an extra that could be read either way — a tokenizer
+    whose opening and closing ids are the same, scoring a passage that is
+    nothing but that token — stays on the opening side, where the fallback
+    context already keeps its opening special.
+
+    The second encoding is only asked for when there is a trailing special to
+    account for, so a passage that ends in an ordinary token still costs one
+    encoding. Where the probe cannot be encoded, or where ``ids`` is not the
+    bare encoding wrapped in specials — a normalizer that runs differently
+    with the post-processor, say — nothing has been proven, and the whole
+    trailing run comes off as it did before: a pasted token can still be lost
+    there, but no reader is scored on a closer they never wrote.
+    """
+
+    specials = set(getattr(tokenizer, "all_special_ids", None) or ())
+    swept = len(ids)
+    while swept and ids[swept - 1] in specials:
+        swept -= 1
+    if swept == len(ids):
+        return len(ids)
+
+    bare = _joint_ids(tokenizer, passage, add_special_tokens=False)
+    if not bare:
+        return swept
+
+    # An appended special is part of the trailing run, so the suffix to drop
+    # is never longer than that run; the opening specials are whatever is
+    # left in front of the bare encoding.
+    for appended in range(len(ids) - swept + 1):
+        end = len(ids) - appended
+        start = end - len(bare)
+        if start < 0:
+            break
+        if ids[start:end] == bare and all(value in specials for value in ids[:start]):
+            return end
+    return swept
+
+
 def _encode_halves_apart(
     tokenizer, context: str, text: str, *, add_special_tokens: bool = True
 ) -> SplitPassage:
@@ -381,14 +439,13 @@ def split_context_and_text(
             tokenizer, context, text, add_special_tokens=add_special_tokens
         )
 
-    # Trailing special tokens are dropped for the same reason they are there
-    # under the offsets path: they close the passage off after the last token
-    # the reader wrote.
+    # Trailing special tokens the post-processor appended are dropped for the
+    # same reason they are dropped under the offsets path: they close the
+    # passage off after the last token the reader wrote. Which of them the
+    # reader wrote is the question :func:`_end_of_written_text` answers.
     stop = len(ids)
     if add_special_tokens:
-        specials = set(getattr(tokenizer, "all_special_ids", None) or ())
-        while stop and ids[stop - 1] in specials:
-            stop -= 1
+        stop = _end_of_written_text(tokenizer, context + text, ids)
 
     split = _seam_by_decoding(
         tokenizer, ids, stop, context, text, add_special_tokens=add_special_tokens
