@@ -4,7 +4,7 @@
 setup = "python3 -m venv .venv && .venv/bin/python -m pip install --upgrade pip && .venv/bin/python -m pip install -r requirements.txt"
 run_mode = "concurrent"
 
-[scripts.run.olmo-token-explorer]
+[scripts.run.chatlab]
 available_in = [ "local" ]
 command = ".venv/bin/python app.py"
 default = true

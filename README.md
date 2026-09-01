@@ -1,4 +1,4 @@
-# ChatLab: OLMo Token Explorer
+# Chatlab
 
 A local chat interface that shows what happened under the hood for every token, generated or not. Tokens are colored by whichever measurement you pick, and clicking one shows its probability, sampling probability, surprise, entropy, and the alternatives the model preferred.
 
@@ -14,6 +14,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Prompt tokens scored in the same pass that warms the cache
 - A **Score text** tab for measuring text the model did not write
 - Perplexity, mean surprise, and a surprise trace for each response
+- Full metric-trace export as JSON or CSV
 - Temperature, top-p, top-k, seed, and response-length controls
 - Apple Metal, NVIDIA CUDA, and CPU loading
 
@@ -23,7 +24,7 @@ The default model is [`allenai/Olmo-3-7B-Think`](https://huggingface.co/allenai/
 
 ### In Conductor
 
-Create a workspace for this repository. Its setup script creates the Python environment and installs the dependencies. Use the **olmo-token-explorer** action to start the app on the workspace's assigned port.
+Create a workspace for this repository. Its setup script creates the Python environment and installs the dependencies. Use the **Chatlab** action to start the app on the workspace's assigned port.
 
 ### From a terminal
 
@@ -60,6 +61,8 @@ Model files use the standard Hugging Face cache. By default this is under `~/.ca
 **Color tokens by** repaints the strip without regenerating anything. Rank, surprise, and entropy are magnitudes and share one light-to-dark blue ramp; sampling shift is a diverging red-to-blue scale around no change. Quantized model weights can slightly change logits, probabilities, and ranks.
 
 Under each response are its headline numbers — perplexity, mean surprise, the share of tokens the model ranked first, mean entropy — and a trace of surprise across the response, so a stretch where the model lost the thread is visible at a glance. Long responses are grouped into bins, with the range inside each bin shaded.
+
+After a response finishes, open **Export full metric trace** under the conversation and use **Download JSON** or **Download CSV**. JSON preserves the complete trace, including conversation context, generation settings, and nested alternatives. CSV contains one row per generated token, repeats the generation metadata, and expands every recorded alternative into numbered columns.
 
 ## Prompt tokens and scoring text
 

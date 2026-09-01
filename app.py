@@ -1,4 +1,4 @@
-"""Gradio interface for chatting with and inspecting OLMo tokens."""
+"""Chatlab interface for chatting with and inspecting model tokens."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from token_metrics import (
     category_for,
     summarize,
 )
+from trace_export import build_trace, write_trace_export
 
 
 DEFAULT_MODEL = "allenai/Olmo-3-7B-Think"
@@ -243,10 +244,10 @@ def chat(
     conversation = list(conversation or [])
     prompt = prompt.strip()
     if not prompt:
-        yield (skip,) * 5 + ("Enter a message first.",) + (skip,) * 7
+        yield (skip,) * 5 + ("Enter a message first.",) + (skip,) * 8
         return
     if not MANAGER.loaded:
-        yield (skip,) * 5 + ("Download and load a model first.",) + (skip,) * 7
+        yield (skip,) * 5 + ("Download and load a model first.",) + (skip,) * 8
         return
 
     request_messages = conversation + [{"role": "user", "content": prompt}]
@@ -265,11 +266,13 @@ def chat(
         charts.EMPTY_CHART,
         SELECT_HINT,
         [],
+        {},
     )
 
     metrics: list[dict] = []
     first = True
     try:
+        last_update = None
         for update in MANAGER.generate(
             request_messages,
             temperature=float(temperature),
@@ -279,6 +282,7 @@ def chat(
             seed=int(seed),
             analyze_prompt=bool(analyze_prompt),
         ):
+            last_update = update
             metrics = update.metrics
             display[-1] = {"role": "assistant", "content": update.text}
             count = len(metrics)
@@ -303,10 +307,13 @@ def chat(
                 charts.surprise_chart(metrics) if refresh else skip,
                 skip,
                 skip,
+                skip,
             )
             first = False
     except Exception as error:
         display[-1] = {"role": "assistant", "content": f"Generation failed: {error}"}
+        # A failed response is not a response to export, so the trace opened
+        # at the top of this run stays empty.
         yield (
             "",
             list(display),
@@ -314,11 +321,31 @@ def chat(
             skip,
             skip,
             f"Generation failed: {error}",
-        ) + (skip,) * 7
+        ) + (skip,) * 7 + ({},)
         return
 
+    trace = (
+        build_trace(
+            model_id=MANAGER.model_id,
+            messages=request_messages,
+            response=last_update.text,
+            sampling={
+                "temperature": float(temperature),
+                "top_p": float(top_p),
+                "top_k": int(top_k),
+                "max_new_tokens": int(max_new_tokens),
+                "seed": int(seed),
+            },
+            metrics=metrics,
+        )
+        if last_update is not None and metrics
+        else {}
+    )
+    status = f"Generated {len(metrics)} token{'s' if len(metrics) != 1 else ''}."
+    if trace:
+        status = f"{status} Exports are ready."
     yield (skip,) * 5 + (
-        f"Generated {len(metrics)} token{'s' if len(metrics) != 1 else ''}.",
+        status,
         skip,
         skip,
         skip,
@@ -326,6 +353,7 @@ def chat(
         charts.surprise_chart(metrics),
         skip,
         skip,
+        trace,
     )
 
 
@@ -386,6 +414,7 @@ def clear_chat(scale_name: str):
         [],
         charts.summary_tiles({}),
         charts.EMPTY_CHART,
+        {},
     )
 
 
@@ -443,14 +472,15 @@ CSS = """
 
 def build_app() -> gr.Blocks:
     with gr.Blocks(
-        title="OLMo Token Explorer", css=CSS, theme=gr.themes.Soft()
+        title="Chatlab", css=CSS, theme=gr.themes.Soft()
     ) as demo:
         conversation_state = gr.State([])
         metrics_state = gr.State([])
         prompt_metrics_state = gr.State([])
+        trace_state = gr.State({})
 
         gr.Markdown(
-            "# OLMo Token Explorer\nChat with an open model and see exactly how likely every generated token was.",
+            "# Chatlab\nChat with an open model and see exactly how likely every generated token was.",
             elem_id="hero",
         )
 
@@ -503,6 +533,27 @@ def build_app() -> gr.Blocks:
                             send_button = gr.Button("Send", variant="primary")
                             clear_button = gr.Button("Clear conversation")
                         generation_status = gr.Markdown("Ready.")
+                        with gr.Accordion("Export full metric trace", open=False):
+                            with gr.Row():
+                                gr.DownloadButton(
+                                    "Download JSON",
+                                    value=lambda trace: write_trace_export(
+                                        trace, "json"
+                                    ),
+                                    inputs=trace_state,
+                                    size="sm",
+                                )
+                                gr.DownloadButton(
+                                    "Download CSV",
+                                    value=lambda trace: write_trace_export(trace, "csv"),
+                                    inputs=trace_state,
+                                    size="sm",
+                                )
+                            gr.Markdown(
+                                "Exports include every token metric and all recorded "
+                                "alternatives for the latest completed response.",
+                                elem_classes=["footer-note"],
+                            )
 
                     with gr.Tab("Score text"):
                         gr.Markdown(
@@ -623,6 +674,7 @@ def build_app() -> gr.Blocks:
             surprise_panel,
             token_detail,
             alternatives,
+            trace_state,
         ]
         send_button.click(chat, chat_inputs, chat_outputs)
         prompt.submit(chat, chat_inputs, chat_outputs)
@@ -642,6 +694,7 @@ def build_app() -> gr.Blocks:
                 alternatives,
                 summary_panel,
                 surprise_panel,
+                trace_state,
             ],
         )
         score_button.click(
