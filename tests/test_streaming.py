@@ -48,6 +48,44 @@ class FakeTokenizer:
         return self.pieces[int(token_id)]
 
 
+class BytePieceTokenizer:
+    """A byte-level tokenizer, where one character can span several tokens.
+
+    This is how GPT-2 style BPE behaves: decoding a token run that starts or
+    ends inside a multi-byte character yields replacement characters.
+    """
+
+    chat_template = None
+
+    def __init__(self, pieces: list[bytes]):
+        self.pieces = pieces
+        self.all_special_ids: list[int] = []
+
+    def decode(self, token_ids, skip_special_tokens=False, **_kwargs):
+        raw = b"".join(self.pieces[int(token_id)] for token_id in token_ids)
+        return raw.decode("utf-8", errors="replace")
+
+    def convert_ids_to_tokens(self, token_id):
+        return repr(self.pieces[int(token_id)])
+
+
+class SentencePieceTokenizer:
+    """A SentencePiece stand-in: the word-boundary space is dropped at the start."""
+
+    chat_template = None
+
+    def __init__(self, pieces: list[str]):
+        self.pieces = pieces
+        self.all_special_ids: list[int] = []
+
+    def decode(self, token_ids, skip_special_tokens=False, **_kwargs):
+        text = "".join(self.pieces[int(token_id)] for token_id in token_ids)
+        return text.replace("\u2581", " ").removeprefix(" ")
+
+    def convert_ids_to_tokens(self, token_id):
+        return self.pieces[int(token_id)]
+
+
 class FakeModel(torch.nn.Module):
     """Emits ``script`` one token at a time, whatever the sampler asks for."""
 
@@ -77,8 +115,8 @@ def loaded_manager(script, pieces=PIECES, eos_id=EOS_ID):
 
 
 class IncrementalDecoderTests(unittest.TestCase):
-    def assert_matches_full_decode(self, token_ids, skip_ids=None):
-        tokenizer = FakeTokenizer()
+    def assert_matches_full_decode(self, token_ids, skip_ids=None, tokenizer=None):
+        tokenizer = tokenizer or FakeTokenizer()
         decoder = IncrementalDecoder(tokenizer, skip_ids)
         kept = [i for i in token_ids if i not in (skip_ids or set())]
         for position, token_id in enumerate(token_ids, start=1):
@@ -102,6 +140,62 @@ class IncrementalDecoderTests(unittest.TestCase):
         for _ in range(count):
             decoder.push(0)
         self.assertEqual(decoder.text, "x" * count)
+
+    def test_a_flush_does_not_split_a_multi_byte_character(self):
+        """Emoji span several byte-level tokens, so a flush can land inside one."""
+
+        emoji = "\U0001f4be"  # four UTF-8 bytes, one per token
+        pieces = [b"x"] + [bytes([byte]) for byte in emoji.encode("utf-8")]
+        tokenizer = BytePieceTokenizer(pieces)
+        # Walk the emoji across every offset a flush could cut it at.
+        for filler in range(model_runtime.DECODE_CACHE_LIMIT + 4):
+            with self.subTest(filler=filler):
+                run = [0] * filler + [1, 2, 3, 4]
+                self.assert_matches_full_decode(
+                    run * 4, tokenizer=BytePieceTokenizer(pieces)
+                )
+        # The fake really is context-sensitive: half an emoji does not decode.
+        self.assertIn("\ufffd", tokenizer.decode([1, 2]))
+        self.assertEqual(tokenizer.decode([1, 2, 3, 4]), emoji)
+
+    def test_a_flush_keeps_the_word_boundary_space(self):
+        """SentencePiece suppresses the leading space, so a flush must not restart."""
+
+        words = [f"\u2581w{index}" for index in range(200)]
+        tokenizer = SentencePieceTokenizer(words)
+        self.assert_matches_full_decode(list(range(200)), tokenizer=tokenizer)
+
+    def test_a_real_byte_level_tokenizer_round_trips(self):
+        """The same invariant against GPT-2 BPE, when it is in the local cache."""
+
+        try:
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained("gpt2", local_files_only=True)
+        except (ImportError, OSError, ValueError) as error:  # pragma: no cover
+            self.skipTest(f"gpt2 is not cached locally: {error}")
+
+        text = "\U0001f3b2\U0001f9e0\U0001f501\u21a9\ufe0f\U0001f4be\U0001f4c2" * 8
+        token_ids = tokenizer.encode(text)
+        self.assertGreater(len(token_ids), model_runtime.DECODE_CACHE_LIMIT)
+
+        decoder = IncrementalDecoder(tokenizer)
+        for position, token_id in enumerate(token_ids, start=1):
+            decoder.push(token_id)
+            self.assertEqual(decoder.text, tokenizer.decode(token_ids[:position]))
+        self.assertNotIn("\ufffd", decoder.text)
+
+    def test_the_cache_stays_bounded(self):
+        tokenizer = FakeTokenizer(pieces=["x"])
+        decoder = IncrementalDecoder(tokenizer)
+        ceiling = (
+            model_runtime.DECODE_CACHE_LIMIT
+            + model_runtime.DECODE_FLUSH_GRACE
+            + model_runtime.DECODE_CONTEXT_TOKENS
+        )
+        for _ in range(model_runtime.DECODE_CACHE_LIMIT * 10):
+            decoder.push(0)
+            self.assertLessEqual(len(decoder._cache), ceiling)
 
 
 class GenerateStreamingTests(unittest.TestCase):

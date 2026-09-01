@@ -32,6 +32,18 @@ STREAM_INTERVAL_SECONDS = 0.05
 # Longest run of tokens held back waiting for a safe split point.
 DECODE_CACHE_LIMIT = 32
 
+# Tokens kept after a flush purely as decoder context. Tokenizers are
+# context-sensitive: SentencePiece drops the word-boundary space at the start of
+# a sequence, and byte-level decoders need the preceding bytes to finish a
+# character, so a flush must never look like the start of a fresh sequence.
+DECODE_CONTEXT_TOKENS = 8
+
+# A UTF-8 character is at most four bytes, so a byte-level tokenizer needs at
+# most this many extra tokens to complete one that a flush would have split.
+DECODE_FLUSH_GRACE = 4
+
+REPLACEMENT_CHARACTER = "\ufffd"
+
 
 def validate_model_id(model_id: str) -> str:
     cleaned = model_id.strip()
@@ -55,12 +67,19 @@ class IncrementalDecoder:
     Tokens are held in a small cache until a whitespace boundary makes their
     text final, which keeps each step proportional to the cache rather than to
     the length of the response.
+
+    ``text`` always equals a full decode of every token pushed so far. That
+    holds because each cache window keeps a suffix of the previous one as
+    decoder context, so no decode ever starts in the middle of a sequence and
+    loses a word-boundary space or half of a multi-byte character.
     """
 
     def __init__(self, tokenizer, skip_ids: set[int] | None = None) -> None:
         self._tokenizer = tokenizer
         self._skip_ids = skip_ids or set()
         self._cache: list[int] = []
+        self._context = 0
+        """How many leading entries of ``_cache`` are kept only as context."""
         self._settled = ""
         self._pending = ""
         self._printed = 0
@@ -76,17 +95,38 @@ class IncrementalDecoder:
             clean_up_tokenization_spaces=False,
         )
 
+    def _ready_to_flush(self, decoded: str) -> bool:
+        fresh = len(self._cache) - self._context
+        if fresh >= DECODE_CACHE_LIMIT + DECODE_FLUSH_GRACE:
+            return True
+        if decoded.endswith(REPLACEMENT_CHARACTER):
+            # Half of a multi-byte character is still in the cache. Settling now
+            # would freeze the replacement character into the text for good, so
+            # wait for the token that completes it.
+            return False
+        return decoded.endswith("\n") or fresh >= DECODE_CACHE_LIMIT
+
+    def _flush(self) -> None:
+        """Start a new cache window, keeping a token suffix as decoder context.
+
+        The already-settled text is re-derived from that suffix, so the next
+        decode continues the sequence instead of restarting it.
+        """
+
+        self._cache = self._cache[len(self._cache) - DECODE_CONTEXT_TOKENS :]
+        self._context = len(self._cache)
+        self._printed = len(self._decode(self._cache))
+        self._pending = ""
+
     def push(self, token_id: int) -> None:
         if token_id in self._skip_ids:
             return
         self._cache.append(token_id)
         decoded = self._decode(self._cache)
 
-        if decoded.endswith("\n") or len(self._cache) >= DECODE_CACHE_LIMIT:
+        if self._ready_to_flush(decoded):
             self._settled += decoded[self._printed :]
-            self._cache = []
-            self._printed = 0
-            self._pending = ""
+            self._flush()
             return
 
         boundary = decoded.rfind(" ") + 1
