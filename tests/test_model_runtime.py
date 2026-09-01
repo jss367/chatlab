@@ -33,9 +33,10 @@ class FakeTokenizer:
     differ from ``tokenize(a + b)`` whenever the seam lands mid-run.
     """
 
-    def __init__(self, *, is_fast: bool = True):
+    def __init__(self, *, is_fast: bool = True, trailing_specials: int = 0):
         self.is_fast = is_fast
-        self.vocab: dict[str, int] = {"<s>": 0}
+        self.trailing_specials = trailing_specials
+        self.vocab: dict[str, int] = {"<s>": 0, "</s>": 1}
 
     def _id(self, piece: str) -> int:
         return self.vocab.setdefault(piece, len(self.vocab))
@@ -48,6 +49,11 @@ class FakeTokenizer:
         for match in re.finditer(r"\s+|\S+", text):
             ids.append(self._id(match.group()))
             offsets.append(match.span())
+        if add_special_tokens:
+            # A post-processor appends its closing specials after the text,
+            # each carrying the empty span every special token carries.
+            ids.extend([self.vocab["</s>"]] * self.trailing_specials)
+            offsets.extend([(0, 0)] * self.trailing_specials)
         encoding = Encoding(input_ids=ids)
         if return_offsets_mapping:
             encoding["offset_mapping"] = offsets
@@ -79,6 +85,31 @@ class ContextSplitTests(unittest.TestCase):
 
         self.assertEqual(context_ids, [0])
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+
+    def test_a_trailing_special_token_is_not_scored_as_text(self):
+        tokenizer = FakeTokenizer(trailing_specials=1)
+        context_ids, text_ids = split_context_and_text(tokenizer, "foo ", "bar")
+
+        # The appended EOS sits after the first text token, so the seam search
+        # alone would leave it in the scored segment.
+        self.assertEqual(
+            context_ids, [0, tokenizer.vocab["foo"], tokenizer.vocab[" "]]
+        )
+        self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+
+    def test_a_trailing_special_token_is_dropped_without_a_context(self):
+        tokenizer = FakeTokenizer(trailing_specials=1)
+        context_ids, text_ids = split_context_and_text(tokenizer, "", "bar")
+
+        self.assertEqual(context_ids, [0])
+        self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+
+    def test_every_trailing_empty_span_is_dropped(self):
+        tokenizer = FakeTokenizer(trailing_specials=2)
+        context_ids, text_ids = split_context_and_text(tokenizer, "foo", "bar")
+
+        self.assertEqual(context_ids, [0])
+        self.assertEqual(text_ids, [tokenizer.vocab["foobar"]])
 
     def test_slow_tokenizers_fall_back_to_encoding_each_half(self):
         tokenizer = FakeTokenizer(is_fast=False)

@@ -58,7 +58,14 @@ def split_context_and_text(tokenizer, context: str, text: str) -> tuple[list[int
     A token that straddles the seam covers characters from both halves; it is
     counted as part of the scored text, so every character of ``text`` is
     covered by a token that gets measured. Special tokens carry an empty
-    ``(0, 0)`` span and so stay on the context side.
+    ``(0, 0)`` span, so leading ones stay on the context side.
+
+    A post-processor that appends EOS or SEP puts an empty span *after* the
+    last text token, where the seam search cannot exclude it. Such trailing
+    tokens are dropped outright rather than moved to the context, which comes
+    first in the sequence: they are the final tokens, so no earlier token's
+    score depends on them, and scoring them would report a ``</s>`` the reader
+    never pasted.
 
     Slow tokenizers cannot report offsets, so those fall back to encoding each
     half on its own.
@@ -81,7 +88,13 @@ def split_context_and_text(tokenizer, context: str, text: str) -> tuple[list[int
                 ),
                 len(ids),
             )
-            return ids[:split], ids[split:]
+            stop = len(ids)
+            while stop > split:
+                start, end = offsets[stop - 1]
+                if int(end) > int(start):
+                    break
+                stop -= 1
+            return ids[:split], ids[split:stop]
 
     return (
         [int(value) for value in tokenizer(context).input_ids],
