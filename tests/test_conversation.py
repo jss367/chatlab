@@ -140,6 +140,31 @@ class ModelMessagesTests(unittest.TestCase):
     def test_empty_turns_are_skipped(self):
         self.assertEqual(model_messages([make_turn("assistant", "")]), [])
 
+    def test_a_reasoning_only_reply_keeps_its_slot(self):
+        # Stopping a Think model mid-answer keeps a turn with reasoning but no
+        # text; the request must still alternate user/assistant.
+        turns = [make_turn("user", "hi"), make_turn("assistant", "", "Thinking…")]
+        messages = model_messages(turns)
+        self.assertEqual([m["role"] for m in messages], ["user", "assistant"])
+        self.assertEqual(messages[1]["content"], "")
+
+    def test_a_reasoning_only_reply_never_yields_two_user_messages(self):
+        turns = [
+            make_turn("user", "one"),
+            make_turn("assistant", "", "Thinking…"),
+            make_turn("user", "two"),
+        ]
+        roles = [m["role"] for m in model_messages(turns, system_prompt="Be terse.")]
+        self.assertEqual(roles, ["system", "user", "assistant", "user"])
+        for position, role in enumerate(roles[2:], start=2):
+            self.assertNotEqual(role, roles[position - 1])
+
+    def test_a_reasoning_only_reply_is_replayed_when_reasoning_is_kept(self):
+        turns = [make_turn("user", "hi"), make_turn("assistant", "", "Thinking…")]
+        messages = model_messages(turns, include_reasoning=True)
+        self.assertEqual([m["role"] for m in messages], ["user", "assistant"])
+        self.assertIn("Thinking…", messages[1]["content"])
+
 
 class SaveLoadTests(unittest.TestCase):
     def test_round_trip(self):
