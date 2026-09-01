@@ -2,19 +2,35 @@
 
 from __future__ import annotations
 
+import contextlib
 import html
 import os
+import random
 import time
 from pathlib import Path
 
 import gradio as gr
+from gradio.utils import get_upload_folder
 
+from conversation import (
+    copy_turns,
+    display_messages,
+    from_json,
+    last_user_index,
+    locate,
+    make_turn,
+    model_messages,
+    split_reasoning,
+    to_json,
+    user_index_at_or_before,
+)
 from model_runtime import ModelManager
 from token_metrics import CATEGORY_COLORS
 
 
 DEFAULT_MODEL = "allenai/Olmo-3-7B-Think"
 MANAGER = ModelManager()
+SEED_LIMIT = 2**31 - 1
 
 
 def status_card(title: str, detail: str, tone: str = "neutral") -> str:
@@ -132,49 +148,275 @@ def inspect_token(metrics: list[dict], event: gr.SelectData):
     return summary, rows
 
 
-def chat(
-    prompt: str,
-    conversation: list[dict] | None,
+# ---------------------------------------------------------------- generation
+
+
+def send_stop_buttons(busy: bool):
+    """Swap the Send and Stop buttons for each other."""
+
+    return gr.update(visible=not busy), gr.update(visible=busy)
+
+
+def resolve_seed(seed, randomize: bool) -> int:
+    if randomize:
+        return random.randrange(SEED_LIMIT)
+    try:
+        return int(seed)
+    except (TypeError, ValueError):
+        return 0
+
+
+def generation_progress(count: int, started: float, seed: int) -> str:
+    elapsed = max(time.monotonic() - started, 1e-6)
+    plural = "" if count == 1 else "s"
+    return (
+        f"{count} token{plural} · {elapsed:.1f}s · {count / elapsed:.1f} tok/s "
+        f"· seed {seed}"
+    )
+
+
+def idle_state(prompt_text: str, turns: list[dict], status: str):
+    """A non-streaming result that leaves the token panel and seed untouched."""
+
+    messages, _ = display_messages(turns)
+    return (
+        prompt_text,
+        messages,
+        copy_turns(turns),
+        gr.skip(),
+        gr.skip(),
+        status,
+        gr.skip(),
+        *send_stop_buttons(False),
+    )
+
+
+def generate_reply(
+    turns: list[dict],
+    prompt_text: str,
+    system_prompt: str,
+    keep_reasoning: bool,
     temperature: float,
     top_p: float,
     top_k: int,
     max_new_tokens: int,
-    seed: int,
+    seed,
+    randomize_seed: bool,
 ):
-    conversation = list(conversation or [])
-    prompt = prompt.strip()
-    if not prompt:
-        yield "", conversation, conversation, [], [], "Enter a message first."
-        return
-    if not MANAGER.loaded:
-        yield "", conversation, conversation, [], [], "Download and load a model first."
-        return
+    """Stream one assistant reply for ``turns``, which must end with a user turn."""
 
-    request_messages = conversation + [{"role": "user", "content": prompt}]
-    display = request_messages + [{"role": "assistant", "content": ""}]
-    yield "", display, conversation, [], [], "Generating…"
+    turns = copy_turns(turns)
+    used_seed = resolve_seed(seed, randomize_seed)
+    request = model_messages(
+        turns, system_prompt=system_prompt, include_reasoning=keep_reasoning
+    )
+
+    pending = make_turn("assistant", "", "")
+    pending["reasoning_closed"] = True
+    turns.append(pending)
+
+    def snapshot(highlight, metrics, status, busy=True):
+        messages, _ = display_messages(turns)
+        return (
+            prompt_text,
+            messages,
+            copy_turns(turns),
+            highlight,
+            metrics,
+            status,
+            used_seed,
+            *send_stop_buttons(busy),
+        )
+
+    yield snapshot([], [], "Generating…")
+
+    started = time.monotonic()
+    raw_text = ""
+    highlight: list[tuple[str, str]] = []
+    metrics: list[dict] = []
+    status = "The model produced no tokens."
+
+    stream = MANAGER.generate(
+        request,
+        temperature=float(temperature),
+        top_p=float(top_p),
+        top_k=int(top_k),
+        max_new_tokens=int(max_new_tokens),
+        seed=used_seed,
+    )
 
     try:
-        for update in MANAGER.generate(
-            request_messages,
-            temperature=float(temperature),
-            top_p=float(top_p),
-            top_k=int(top_k),
-            max_new_tokens=int(max_new_tokens),
-            seed=int(seed),
-        ):
-            display[-1] = {"role": "assistant", "content": update.text}
-            yield (
-                "",
-                list(display),
-                list(display),
-                highlighted_tokens(update.metrics),
-                update.metrics,
-                f"Generated {len(update.metrics)} token{'s' if len(update.metrics) != 1 else ''}.",
-            )
+        # closing() releases the model lock the moment the Stop button cancels
+        # this event and Gradio closes the outer generator.
+        with contextlib.closing(stream):
+            for update in stream:
+                raw_text = update.text
+                reasoning, answer, closed = split_reasoning(raw_text, streaming=True)
+                pending["reasoning"] = reasoning
+                pending["content"] = answer
+                pending["reasoning_closed"] = closed
+                highlight = highlighted_tokens(update.metrics)
+                metrics = list(update.metrics)
+                status = generation_progress(len(metrics), started, used_seed)
+                yield snapshot(highlight, metrics, status)
     except Exception as error:
-        display[-1] = {"role": "assistant", "content": f"Generation failed: {error}"}
-        yield "", display, conversation, [], [], f"Generation failed: {error}"
+        pending["content"] = f"Generation failed: {error}"
+        pending["reasoning_closed"] = True
+        yield snapshot(highlight, metrics, f"Generation failed: {error}", busy=False)
+        return
+
+    reasoning, answer, _ = split_reasoning(raw_text)
+    pending["reasoning"] = reasoning
+    pending["content"] = answer
+    pending["reasoning_closed"] = True
+    yield snapshot(highlight, metrics, status, busy=False)
+
+
+def chat(
+    prompt_text: str,
+    turns: list[dict] | None,
+    system_prompt: str,
+    keep_reasoning: bool,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    max_new_tokens: int,
+    seed,
+    randomize_seed: bool,
+):
+    turns = copy_turns(turns)
+    message = (prompt_text or "").strip()
+    if not message:
+        yield idle_state(prompt_text, turns, "Enter a message first.")
+        return
+    if not MANAGER.loaded:
+        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        return
+
+    turns.append(make_turn("user", message))
+    yield from generate_reply(
+        turns,
+        "",
+        system_prompt,
+        keep_reasoning,
+        temperature,
+        top_p,
+        top_k,
+        max_new_tokens,
+        seed,
+        randomize_seed,
+    )
+
+
+def regenerate_from(
+    position: int | None,
+    prompt_text: str,
+    turns: list[dict] | None,
+    system_prompt: str,
+    keep_reasoning: bool,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    max_new_tokens: int,
+    seed,
+    randomize_seed: bool,
+):
+    """Throw away everything after the user turn at ``position`` and reply again."""
+
+    turns = copy_turns(turns)
+    if position is None:
+        yield idle_state(prompt_text, turns, "There is nothing to retry.")
+        return
+    if not MANAGER.loaded:
+        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        return
+
+    yield from generate_reply(
+        turns[: position + 1],
+        prompt_text,
+        system_prompt,
+        keep_reasoning,
+        temperature,
+        top_p,
+        top_k,
+        max_new_tokens,
+        seed,
+        randomize_seed,
+    )
+
+
+def retry_last(prompt_text, turns, *settings):
+    yield from regenerate_from(last_user_index(turns), prompt_text, turns, *settings)
+
+
+def retry_message(event: gr.RetryData, prompt_text, turns, *settings):
+    found = locate(turns, event.index)
+    position = (
+        user_index_at_or_before(turns, found[0]) if found else last_user_index(turns)
+    )
+    yield from regenerate_from(position, prompt_text, turns, *settings)
+
+
+def edit_message(event: gr.EditData, prompt_text, turns, *settings):
+    turns = copy_turns(turns)
+    found = locate(turns, event.index)
+    if found is None:
+        yield idle_state(prompt_text, turns, "That message is no longer available.")
+        return
+
+    position, part = found
+    new_value = event.value if isinstance(event.value, str) else str(event.value)
+
+    if turns[position]["role"] == "assistant":
+        turns[position]["reasoning" if part == "reasoning" else "content"] = new_value
+        yield idle_state(prompt_text, turns, "Assistant message edited.")
+        return
+
+    turns = turns[: position + 1]
+    turns[position]["content"] = new_value
+    yield from regenerate_from(position, prompt_text, turns, *settings)
+
+
+def undo_from(position: int | None, turns: list[dict] | None):
+    """Drop the exchange starting at the user turn ``position``.
+
+    The message goes back into the input box so it can be reworded and sent again.
+    """
+
+    turns = copy_turns(turns)
+    if position is None:
+        messages, _ = display_messages(turns)
+        return (
+            gr.skip(),
+            messages,
+            turns,
+            gr.skip(),
+            gr.skip(),
+            "There is nothing to undo.",
+        )
+
+    remaining = turns[:position]
+    messages, _ = display_messages(remaining)
+    return (
+        turns[position]["content"],
+        messages,
+        remaining,
+        [],
+        [],
+        "Removed the last exchange.",
+    )
+
+
+def undo_last(turns):
+    return undo_from(last_user_index(turns), turns)
+
+
+def undo_message(event: gr.UndoData, turns):
+    found = locate(turns, event.index)
+    position = (
+        user_index_at_or_before(turns, found[0]) if found else last_user_index(turns)
+    )
+    return undo_from(position, turns)
 
 
 def clear_chat():
@@ -186,6 +428,51 @@ def clear_chat():
         "Conversation cleared.",
         "Select a generated token to inspect it.",
         [],
+    )
+
+
+# --------------------------------------------------------------- save / load
+
+
+def save_conversation(turns, system_prompt):
+    if not turns:
+        return gr.update(value=None, visible=False), "There is nothing to save yet."
+
+    # Gradio only serves files it created or was told to allow, so the saved
+    # conversation has to live inside its upload folder.
+    directory = Path(get_upload_folder()) / "chatlab-conversations"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"conversation-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    path.write_text(to_json(turns, system_prompt=system_prompt), encoding="utf-8")
+    return (
+        gr.update(value=str(path), visible=True),
+        f"Saved {len(turns)} message{'s' if len(turns) != 1 else ''}.",
+    )
+
+
+def load_conversation(file_path):
+    if not file_path:
+        return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), "No file chosen."
+    try:
+        turns, system_prompt = from_json(Path(file_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return (
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            f"Could not load that file: {error}",
+        )
+
+    messages, _ = display_messages(turns)
+    return (
+        messages,
+        turns,
+        system_prompt,
+        [],
+        [],
+        f"Loaded {len(turns)} message{'s' if len(turns) != 1 else ''}.",
     )
 
 
@@ -242,12 +529,26 @@ def build_app() -> gr.Blocks:
                         elem_id="model-status",
                     )
 
+        with gr.Accordion("System prompt and reasoning", open=False):
+            system_prompt = gr.Textbox(
+                label="System prompt",
+                placeholder="You are a careful assistant that answers concisely.",
+                lines=3,
+                info="Sent as a system message ahead of the conversation. Leave empty to use the model's default behavior.",
+            )
+            keep_reasoning = gr.Checkbox(
+                value=False,
+                label="Send previous reasoning back to the model",
+                info="Off by default. Think models write a fresh reasoning block each turn, so replaying old ones burns context and usually hurts the next answer.",
+            )
+
         with gr.Row(equal_height=True):
             with gr.Column(scale=3):
                 chatbot = gr.Chatbot(
                     type="messages",
                     label="Conversation",
                     height=560,
+                    editable="all",
                     placeholder="Load a model, then start a conversation.",
                 )
                 prompt = gr.Textbox(
@@ -257,7 +558,20 @@ def build_app() -> gr.Blocks:
                 )
                 with gr.Row():
                     send_button = gr.Button("Send", variant="primary")
-                    clear_button = gr.Button("Clear conversation")
+                    stop_button = gr.Button("Stop", variant="stop", visible=False)
+                    retry_button = gr.Button("🔁 Retry")
+                    undo_button = gr.Button("↩️ Undo last")
+                    clear_button = gr.Button("🗑️ Clear")
+                with gr.Row():
+                    save_button = gr.Button("💾 Save conversation")
+                    load_upload = gr.UploadButton(
+                        "📂 Load conversation",
+                        file_types=[".json"],
+                        type="filepath",
+                    )
+                saved_file = gr.File(
+                    label="Saved conversation", visible=False, interactive=False
+                )
                 generation_status = gr.Markdown("Ready.")
 
             with gr.Column(scale=2):
@@ -286,7 +600,17 @@ def build_app() -> gr.Blocks:
                 max_new_tokens = gr.Slider(
                     1, 8192, value=1024, step=1, label="Maximum new tokens"
                 )
-                seed = gr.Number(value=42, precision=0, label="Random seed")
+                seed = gr.Number(
+                    value=42,
+                    precision=0,
+                    label="Random seed",
+                    info="Updated after each response so you can reproduce it.",
+                )
+                randomize_seed = gr.Checkbox(
+                    value=True,
+                    label="🎲 New seed each response",
+                    info="Turn off to lock the seed and reproduce a response exactly.",
+                )
 
         gr.Markdown(
             "Rank and raw probability come from the unmodified model distribution. "
@@ -301,15 +625,17 @@ def build_app() -> gr.Blocks:
         cached_button.click(load_cached_model, model_id, model_status)
         unload_button.click(unload_model, outputs=model_status)
 
-        chat_inputs = [
-            prompt,
-            conversation_state,
+        settings_inputs = [
+            system_prompt,
+            keep_reasoning,
             temperature,
             top_p,
             top_k,
             max_new_tokens,
             seed,
+            randomize_seed,
         ]
+        chat_inputs = [prompt, conversation_state, *settings_inputs]
         chat_outputs = [
             prompt,
             chatbot,
@@ -317,9 +643,38 @@ def build_app() -> gr.Blocks:
             token_strip,
             metrics_state,
             generation_status,
+            seed,
+            send_button,
+            stop_button,
         ]
-        send_button.click(chat, chat_inputs, chat_outputs)
-        prompt.submit(chat, chat_inputs, chat_outputs)
+        undo_outputs = [
+            prompt,
+            chatbot,
+            conversation_state,
+            token_strip,
+            metrics_state,
+            generation_status,
+        ]
+
+        running = [
+            send_button.click(chat, chat_inputs, chat_outputs),
+            prompt.submit(chat, chat_inputs, chat_outputs),
+            retry_button.click(retry_last, chat_inputs, chat_outputs),
+            chatbot.retry(retry_message, chat_inputs, chat_outputs),
+            chatbot.edit(edit_message, chat_inputs, chat_outputs),
+        ]
+
+        stop_button.click(
+            lambda: (
+                *send_stop_buttons(False),
+                "Stopped. The partial response was kept.",
+            ),
+            outputs=[send_button, stop_button, generation_status],
+            cancels=running,
+        )
+
+        undo_button.click(undo_last, conversation_state, undo_outputs)
+        chatbot.undo(undo_message, conversation_state, undo_outputs)
         clear_button.click(
             clear_chat,
             outputs=[
@@ -332,6 +687,25 @@ def build_app() -> gr.Blocks:
                 alternatives,
             ],
         )
+
+        save_button.click(
+            save_conversation,
+            [conversation_state, system_prompt],
+            [saved_file, generation_status],
+        )
+        load_upload.upload(
+            load_conversation,
+            load_upload,
+            [
+                chatbot,
+                conversation_state,
+                system_prompt,
+                token_strip,
+                metrics_state,
+                generation_status,
+            ],
+        )
+
         token_strip.select(
             inspect_token,
             inputs=metrics_state,

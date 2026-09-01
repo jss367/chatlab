@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import re
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,14 @@ MODEL_ID_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$"
 )
 
+# Streaming updates are batched so a long response does not re-serialize the
+# whole token strip on every single token.
+STREAM_BATCH_TOKENS = 8
+STREAM_INTERVAL_SECONDS = 0.05
+
+# Longest run of tokens held back waiting for a safe split point.
+DECODE_CACHE_LIMIT = 32
+
 
 def validate_model_id(model_id: str) -> str:
     cleaned = model_id.strip()
@@ -37,6 +46,54 @@ def validate_model_id(model_id: str) -> str:
 class GenerationUpdate:
     text: str
     metrics: list[dict]
+    """Live list owned by the generator. Copy it before storing it anywhere."""
+
+
+class IncrementalDecoder:
+    """Decode a growing token stream without re-decoding it from the start.
+
+    Tokens are held in a small cache until a whitespace boundary makes their
+    text final, which keeps each step proportional to the cache rather than to
+    the length of the response.
+    """
+
+    def __init__(self, tokenizer, skip_ids: set[int] | None = None) -> None:
+        self._tokenizer = tokenizer
+        self._skip_ids = skip_ids or set()
+        self._cache: list[int] = []
+        self._settled = ""
+        self._pending = ""
+        self._printed = 0
+
+    @property
+    def text(self) -> str:
+        return self._settled + self._pending
+
+    def _decode(self, token_ids: list[int]) -> str:
+        return self._tokenizer.decode(
+            token_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+
+    def push(self, token_id: int) -> None:
+        if token_id in self._skip_ids:
+            return
+        self._cache.append(token_id)
+        decoded = self._decode(self._cache)
+
+        if decoded.endswith("\n") or len(self._cache) >= DECODE_CACHE_LIMIT:
+            self._settled += decoded[self._printed :]
+            self._cache = []
+            self._printed = 0
+            self._pending = ""
+            return
+
+        boundary = decoded.rfind(" ") + 1
+        if boundary > self._printed:
+            self._settled += decoded[self._printed : boundary]
+            self._printed = boundary
+        self._pending = decoded[self._printed :]
 
 
 class ModelManager:
@@ -167,6 +224,24 @@ class ModelManager:
                 values.update(int(value) for value in candidate)
         return values
 
+    def _hidden_token_ids(self) -> set[int]:
+        """Special tokens to keep out of the visible text.
+
+        Reasoning markers are deliberately kept: on models such as OLMo Think
+        they are registered as special tokens, and dropping them would leave the
+        interface with no way to find the reasoning block.
+        """
+
+        assert self.tokenizer is not None
+        tokenizer = self.tokenizer
+        hidden: set[int] = set()
+        for token_id in getattr(tokenizer, "all_special_ids", None) or []:
+            piece = tokenizer.convert_ids_to_tokens(int(token_id)) or ""
+            if "think" in piece.lower():
+                continue
+            hidden.add(int(token_id))
+        return hidden
+
     def generate(
         self,
         messages: list[dict],
@@ -190,11 +265,13 @@ class ModelManager:
             inputs = self._prompt_inputs(messages)
             attention_mask = inputs.get("attention_mask")
             rng = np.random.default_rng(int(seed))
-            generated_ids: list[int] = []
             metrics: list[dict] = []
             stop_ids = self._stop_token_ids()
+            decoder = IncrementalDecoder(tokenizer, self._hidden_token_ids())
             past_key_values = None
             current_inputs = inputs
+            pending_tokens = 0
+            last_yield = time.monotonic()
 
             for position in range(1, int(max_new_tokens) + 1):
                 outputs = model(
@@ -215,7 +292,7 @@ class ModelManager:
                 else:
                     token_id = int(rng.choice(sampled_probs.size, p=sampled_probs))
 
-                generated_ids.append(token_id)
+                decoder.push(token_id)
                 token_text = tokenizer.decode(
                     [token_id],
                     skip_special_tokens=False,
@@ -244,14 +321,19 @@ class ModelManager:
                 )
                 metrics.append(metric.to_dict())
 
-                text = tokenizer.decode(
-                    generated_ids,
-                    skip_special_tokens=True,
-                    clean_up_tokenization_spaces=False,
-                )
-                yield GenerationUpdate(text=text, metrics=list(metrics))
+                stopping = token_id in stop_ids or position == int(max_new_tokens)
+                pending_tokens += 1
+                now = time.monotonic()
+                if (
+                    stopping
+                    or pending_tokens >= STREAM_BATCH_TOKENS
+                    or now - last_yield >= STREAM_INTERVAL_SECONDS
+                ):
+                    pending_tokens = 0
+                    last_yield = now
+                    yield GenerationUpdate(text=decoder.text, metrics=metrics)
 
-                if token_id in stop_ids:
+                if stopping:
                     break
 
                 device = next(model.parameters()).device
