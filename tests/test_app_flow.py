@@ -203,6 +203,58 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual([turn["content"] for turn in final[TURNS]], ["one", "first"])
         self.assertEqual(final[STATUS], "Download and load a model first.")
 
+    def test_an_assistant_edit_reserves_the_generation_slot(self):
+        """A Send that wins the race between the busy check and the publish.
+
+        The manager reports idle - so the guard at the top of edit_message()
+        lets this through - but the slot is gone by the time the edit tries to
+        claim it. Without the reservation the edit publishes its stale
+        conversation anyway, and the generation frames then erase the edit.
+        """
+
+        class Sniped:
+            """Idle when asked, taken when claimed."""
+
+            loaded = True
+            busy = False
+
+            def reserve_generation(self):
+                return False
+
+            def release_generation(self):  # pragma: no cover - never reached
+                raise AssertionError("released a slot it never held")
+
+        app.MANAGER = Sniped()
+        turns = [make_turn("user", "one"), make_turn("assistant", "reply")]
+        event = gr.EditData(
+            None, {"index": 1, "previous_value": "reply", "value": "fixed"}
+        )
+        final = self.last(app.edit_message(event, "", turns, *SETTINGS))[-1]
+
+        self.assertEqual(final[TURNS], gr.skip(), "published a stale conversation")
+        self.assertEqual(final[CHATBOT], gr.skip())
+        self.assertEqual((final[SEND], final[STOP]), (gr.skip(), gr.skip()))
+        self.assertIn("already generating", final[STATUS].lower())
+
+    def test_an_assistant_edit_releases_the_slot_afterwards(self):
+        turns = [make_turn("user", "one"), make_turn("assistant", "reply")]
+        event = gr.EditData(
+            None, {"index": 1, "previous_value": "reply", "value": "fixed"}
+        )
+        final = self.last(app.edit_message(event, "", turns, *SETTINGS))[-1]
+        self.assertEqual([turn["content"] for turn in final[TURNS]], ["one", "fixed"])
+        self.assertFalse(app.MANAGER.busy, "the slot must not leak")
+
+    def test_a_cancelled_assistant_edit_releases_the_slot(self):
+        turns = [make_turn("user", "one"), make_turn("assistant", "reply")]
+        event = gr.EditData(
+            None, {"index": 1, "previous_value": "reply", "value": "fixed"}
+        )
+        stream = app.edit_message(event, "", turns, *SETTINGS)
+        next(stream)
+        stream.close()
+        self.assertFalse(app.MANAGER.busy, "GeneratorExit must release the slot")
+
     def test_editing_a_reasoning_block_leaves_the_answer_alone(self):
         turns = [make_turn("user", "one"), make_turn("assistant", "answer", "thought")]
         event = gr.EditData(

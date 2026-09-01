@@ -572,12 +572,24 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
                 prompt_text, turns, "An assistant message cannot be emptied."
             )
             return
-        turns[position] = edited_turn
-        # The ranks and probabilities on screen describe the text the model
-        # generated, not what the user just typed over it.
-        yield idle_state(
-            prompt_text, turns, "Assistant message edited.", clear_tokens=True
-        )
+        # Reserve for the same reason a generation does. This branch rewrites
+        # the conversation without generating, so the busy check above is not
+        # enough: a Send starting in the same instant would pass its own check,
+        # and whichever frame landed second would erase the other's work. The
+        # slot is held across the yield, because releasing before the frame
+        # reaches the browser reopens exactly that window.
+        if not MANAGER.reserve_generation():
+            yield busy_state()
+            return
+        try:
+            turns[position] = edited_turn
+            # The ranks and probabilities on screen describe the text the model
+            # generated, not what the user just typed over it.
+            yield idle_state(
+                prompt_text, turns, "Assistant message edited.", clear_tokens=True
+            )
+        finally:
+            MANAGER.release_generation()
         return
 
     edited = new_value.strip()
