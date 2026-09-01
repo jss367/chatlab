@@ -13,6 +13,8 @@ from token_metrics import (
     sampling_probabilities,
     summarize,
     top_margin,
+    UNSCORED_BEYOND_LIMIT,
+    UNSCORED_FIRST_TOKEN,
     unscored_metric,
 )
 
@@ -148,6 +150,21 @@ class ColorScaleTests(unittest.TestCase):
         for name in COLOR_SCALES:
             with self.subTest(scale=name):
                 self.assertEqual(category_for(metric, name), UNSCORED_LABEL)
+
+    def test_unpredicted_tokens_record_why_they_were_not_scored(self):
+        first = unscored_metric(
+            position=1, token_id=7, token_text="<s>", fallback_text="<s>"
+        ).to_dict()
+        capped = unscored_metric(
+            position=4,
+            token_id=9,
+            token_text=" the",
+            fallback_text=" the",
+            reason=UNSCORED_BEYOND_LIMIT,
+        ).to_dict()
+
+        self.assertEqual(first["unscored_reason"], UNSCORED_FIRST_TOKEN)
+        self.assertEqual(capped["unscored_reason"], UNSCORED_BEYOND_LIMIT)
 
 
 class SummaryTests(unittest.TestCase):

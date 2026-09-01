@@ -10,10 +10,11 @@ from pathlib import Path
 import gradio as gr
 
 import charts
-from model_runtime import ModelManager
+from model_runtime import PROMPT_SCORE_LIMIT, ModelManager
 from token_metrics import (
     COLOR_SCALES,
     DEFAULT_COLOR_SCALE,
+    UNSCORED_BEYOND_LIMIT,
     category_for,
     summarize,
 )
@@ -163,9 +164,17 @@ def inspect_token(metrics: list[dict], event: gr.SelectData):
     token_repr = html.escape(repr(metric["text"]))
     where = "Prompt token" if metric["segment"] == "prompt" else "Token"
     if not metric.get("scored", True):
+        if metric.get("unscored_reason") == UNSCORED_BEYOND_LIMIT:
+            why = (
+                f"Only the most recent {PROMPT_SCORE_LIMIT:,} tokens of a long "
+                "prompt are scored, and this one sits before that window, so it "
+                "was skipped."
+            )
+        else:
+            why = "Nothing came before this token, so the model never predicted it."
         return (
             f"### {where} {metric['position']}: `{token_repr}`\n\n"
-            "Nothing came before this token, so the model never predicted it.\n\n"
+            f"{why}\n\n"
             f"- **Token ID:** {metric['token_id']:,}",
             [],
         )

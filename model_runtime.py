@@ -13,6 +13,8 @@ import numpy as np
 
 from token_metrics import (
     TokenMetric,
+    UNSCORED_BEYOND_LIMIT,
+    UNSCORED_FIRST_TOKEN,
     build_metric,
     normalize_log_probabilities,
     sampling_probabilities,
@@ -368,6 +370,11 @@ class ModelManager:
                                 token_text=self._decode_token(token_id),
                                 fallback_text=self._token_fallback(token_id),
                                 segment=segments[index],
+                                reason=(
+                                    UNSCORED_FIRST_TOKEN
+                                    if index == 0
+                                    else UNSCORED_BEYOND_LIMIT
+                                ),
                             ).to_dict()
                         )
                         continue

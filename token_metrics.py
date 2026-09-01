@@ -37,6 +37,7 @@ class TokenMetric:
     top_candidates: list[Candidate]
     scored: bool = True
     segment: str = "response"
+    unscored_reason: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -49,6 +50,13 @@ SEQUENTIAL_FILLS = ("#cde2fb", "#9ec5f4", "#6da7ec", "#5598e7", "#3987e5")
 DIVERGING_FILLS = ("#e34948", "#f09b9a", "#f0efec", "#9ec5f4", "#3987e5")
 UNSCORED_LABEL = "Not predicted"
 UNSCORED_FILL = "#c3c2b7"
+
+# Why a token carries no measurement. The two cases read very differently to a
+# reader: the first token of a sequence had nothing to predict it, while a
+# token beyond the scoring window did have predecessors and was skipped only to
+# keep a long prompt cheap.
+UNSCORED_FIRST_TOKEN = "first"
+UNSCORED_BEYOND_LIMIT = "beyond_limit"
 
 RANK_LABELS = ("Top choice", "Top 5", "Top 20", "Rank 21–100", "Rank 101+")
 
@@ -316,8 +324,16 @@ def unscored_metric(
     token_text: str,
     fallback_text: str,
     segment: str = "prompt",
+    reason: str = UNSCORED_FIRST_TOKEN,
 ) -> TokenMetric:
-    """A token nothing predicted, such as the very first token of a prompt."""
+    """A token carrying no measurement, tagged with why it carries none.
+
+    ``reason`` is ``UNSCORED_FIRST_TOKEN`` for the opening token of a sequence,
+    which nothing preceded, and ``UNSCORED_BEYOND_LIMIT`` for a token that fell
+    outside the scoring window of a long prompt. Callers show different text
+    for the two, so the distinction is recorded here rather than guessed from
+    the position.
+    """
 
     return TokenMetric(
         position=position,
@@ -336,6 +352,7 @@ def unscored_metric(
         top_candidates=[],
         scored=False,
         segment=segment,
+        unscored_reason=reason,
     )
 
 
