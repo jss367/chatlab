@@ -49,7 +49,7 @@ def validate_model_id(model_id: str) -> str:
 
 
 def _split_by_decoding(
-    tokenizer, context: str, text: str
+    tokenizer, context: str, text: str, *, add_special_tokens: bool = True
 ) -> tuple[list[int], list[int]] | None:
     """Locate the seam in one joint encoding by decoding it back to text.
 
@@ -60,6 +60,11 @@ def _split_by_decoding(
     if any — starts the scored text, exactly as it does when offsets are
     available. Trailing special tokens are dropped for the same reason they
     are there.
+
+    ``add_special_tokens=False`` says the passage already spells out every
+    special token it wants — a rendered chat template does — so decoding has
+    to keep them to round trip, and nothing was appended for the trailing
+    sweep to drop.
 
     The split is returned only when the two halves decode back to the passage
     verbatim. A ``decode`` that does not round trip — a byte-level merge cut
@@ -74,7 +79,12 @@ def _split_by_decoding(
         return None
 
     try:
-        ids = [int(value) for value in tokenizer(context + text).input_ids]
+        ids = [
+            int(value)
+            for value in tokenizer(
+                context + text, add_special_tokens=add_special_tokens
+            ).input_ids
+        ]
     except (AttributeError, KeyError, TypeError, ValueError):
         return None
     if not ids:
@@ -84,7 +94,7 @@ def _split_by_decoding(
         try:
             return decode(
                 ids[start:end],
-                skip_special_tokens=True,
+                skip_special_tokens=add_special_tokens,
                 clean_up_tokenization_spaces=False,
             )
         except (NotImplementedError, TypeError, ValueError):
@@ -92,8 +102,9 @@ def _split_by_decoding(
 
     specials = set(getattr(tokenizer, "all_special_ids", None) or ())
     stop = len(ids)
-    while stop and ids[stop - 1] in specials:
-        stop -= 1
+    if add_special_tokens:
+        while stop and ids[stop - 1] in specials:
+            stop -= 1
 
     def within_context(end: int) -> bool:
         prefix = spoken(0, end)
@@ -129,7 +140,9 @@ def _split_by_decoding(
     return ids[:split], ids[split:stop]
 
 
-def split_context_and_text(tokenizer, context: str, text: str) -> tuple[list[int], list[int]]:
+def split_context_and_text(
+    tokenizer, context: str, text: str, *, add_special_tokens: bool = True
+) -> tuple[list[int], list[int]]:
     """Tokenize ``context + text`` as one passage, then split at the seam.
 
     Encoding the two halves separately can give a different sequence from
@@ -150,6 +163,10 @@ def split_context_and_text(tokenizer, context: str, text: str) -> tuple[list[int
     score depends on them, and scoring them would report a ``</s>`` the reader
     never pasted.
 
+    ``add_special_tokens=False`` is for a context that already carries its own
+    special tokens — a chat template renders its own BOS and role markers — so
+    the tokenizer must not prepend a second one.
+
     Slow tokenizers cannot report offsets, so the seam is instead located by
     decoding a growing prefix of the one joint encoding, and only the halves
     that decode back to the passage verbatim are used. Encoding each half on
@@ -159,7 +176,11 @@ def split_context_and_text(tokenizer, context: str, text: str) -> tuple[list[int
 
     if getattr(tokenizer, "is_fast", False):
         try:
-            encoded = tokenizer(context + text, return_offsets_mapping=True)
+            encoded = tokenizer(
+                context + text,
+                return_offsets_mapping=True,
+                add_special_tokens=add_special_tokens,
+            )
             ids = [int(value) for value in encoded["input_ids"]]
             offsets = list(encoded["offset_mapping"])
         except (NotImplementedError, KeyError, TypeError, ValueError):
@@ -182,12 +203,19 @@ def split_context_and_text(tokenizer, context: str, text: str) -> tuple[list[int
                 stop -= 1
             return ids[:split], ids[split:stop]
 
-    halves = _split_by_decoding(tokenizer, context, text)
+    halves = _split_by_decoding(
+        tokenizer, context, text, add_special_tokens=add_special_tokens
+    )
     if halves is not None:
         return halves
 
     return (
-        [int(value) for value in tokenizer(context).input_ids],
+        [
+            int(value)
+            for value in tokenizer(
+                context, add_special_tokens=add_special_tokens
+            ).input_ids
+        ],
         [int(value) for value in tokenizer(text, add_special_tokens=False).input_ids],
     )
 
@@ -202,8 +230,14 @@ def encode_for_scoring(
     """Turn a context and the text to score into their two token runs.
 
     A context that carries actual words is wrapped in the chat template when
-    the caller asks for it: the template ends in the generation prompt, so the
-    seam falls on a special token boundary and the two halves cannot merge.
+    the caller asks for it. The template is rendered to **text** and handed to
+    :func:`split_context_and_text` like any other context, because the seam it
+    leaves is not protected: a generation prompt ends in ordinary characters
+    after its last special token — a newline behind ``<|im_start|>assistant``,
+    a bare ``<think>``, a trailing space — and those merge with the start of the
+    reply just as any other seam does. Encoding the halves apart would report
+    ranks for a first reply token the model never sees. The template renders
+    its own special tokens, so the tokenizer is told not to add a second BOS.
 
     Everything else goes through :func:`split_context_and_text` with the
     context **verbatim**, whitespace included. A context of a single space is a
@@ -216,19 +250,15 @@ def encode_for_scoring(
 
     template = getattr(tokenizer, "chat_template", None)
     if context.strip() and use_chat_template and template:
-        context_ids = tokenizer.apply_chat_template(
+        rendered = tokenizer.apply_chat_template(
             [{"role": "user", "content": context}],
             add_generation_prompt=True,
-            tokenize=True,
+            tokenize=False,
         )
-        if context_ids and isinstance(context_ids[0], (list, tuple)):
-            context_ids = context_ids[0]
-        return (
-            [int(value) for value in context_ids],
-            [
-                int(value)
-                for value in tokenizer(text, add_special_tokens=False).input_ids
-            ],
+        if not isinstance(rendered, str):
+            rendered = rendered[0]
+        return split_context_and_text(
+            tokenizer, rendered, text, add_special_tokens=False
         )
 
     return split_context_and_text(tokenizer, context, text)

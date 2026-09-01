@@ -44,10 +44,12 @@ class FakeTokenizer:
         is_fast: bool = True,
         trailing_specials: int = 0,
         chat_template: str | None = None,
+        generation_prompt: str = "<|assistant|>",
     ):
         self.is_fast = is_fast
         self.trailing_specials = trailing_specials
         self.chat_template = chat_template
+        self.generation_prompt = generation_prompt
         self.vocab: dict[str, int] = {"<s>": 0, "</s>": 1, "<|user|>": 2, "<|assistant|>": 3}
         self.all_special_ids = list(self.vocab.values())
 
@@ -82,12 +84,25 @@ class FakeTokenizer:
 
 
     def apply_chat_template(self, messages, add_generation_prompt=False, tokenize=True):
-        ids = [self.vocab["<|user|>"]]
-        for message in messages:
-            ids.extend(self._id(match.group()) for match in re.finditer(r"\s+|\S+", message["content"]))
+        """Render the turn as text, the way a real template does.
+
+        The generation prompt is the interesting part: it ends in whatever
+        characters the template writes after its last special token, and by
+        default that is nothing at all, so the marker abuts the reply and the
+        two merge into one token.
+        """
+
+        rendered = "<|user|> " + " ".join(
+            message["content"] for message in messages
+        )
         if add_generation_prompt:
-            ids.append(self.vocab["<|assistant|>"])
-        return ids
+            rendered += " " + self.generation_prompt
+        if not tokenize:
+            return rendered
+        return [
+            int(value)
+            for value in self(rendered, add_special_tokens=False).input_ids
+        ]
 
 
 class EatsTheLeadingSpace(FakeTokenizer):
@@ -249,6 +264,29 @@ class ScoringEncodeTests(unittest.TestCase):
         )
 
     def test_a_real_context_uses_the_chat_template(self):
+        # The generation prompt is followed by a space here, so the seam
+        # cannot merge and the halves come out exactly as the template
+        # tokenizes them.
+        tokenizer = FakeTokenizer(
+            chat_template="{{ messages }}", generation_prompt="<|assistant|> "
+        )
+        context_ids, text_ids = encode_for_scoring(
+            tokenizer, "bar", context="hello", use_chat_template=True
+        )
+
+        self.assertEqual(
+            context_ids,
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": "hello"}], add_generation_prompt=True
+            ),
+        )
+        self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+
+    def test_a_chat_template_seam_is_tokenized_as_one_passage(self):
+        # Most templates end in ordinary characters after their last special
+        # token, so the marker and the first reply token merge. Encoding the
+        # rendered prompt and the reply apart would report ranks for a first
+        # token the model never sees.
         tokenizer = FakeTokenizer(chat_template="{{ messages }}")
         context_ids, text_ids = encode_for_scoring(
             tokenizer, "bar", context="hello", use_chat_template=True
@@ -258,11 +296,42 @@ class ScoringEncodeTests(unittest.TestCase):
             context_ids,
             [
                 tokenizer.vocab["<|user|>"],
+                tokenizer.vocab[" "],
                 tokenizer.vocab["hello"],
-                tokenizer.vocab["<|assistant|>"],
+                tokenizer.vocab[" "],
             ],
         )
-        self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+        self.assertEqual(text_ids, [tokenizer.vocab["<|assistant|>bar"]])
+
+    def test_a_slow_tokenizer_splits_the_chat_template_seam_too(self):
+        # No offsets, so the seam is found by decoding; the specials the
+        # template rendered have to survive that decode to round trip.
+        tokenizer = FakeTokenizer(is_fast=False, chat_template="{{ messages }}")
+        context_ids, text_ids = encode_for_scoring(
+            tokenizer, "bar", context="hello", use_chat_template=True
+        )
+
+        self.assertEqual(
+            context_ids,
+            [
+                tokenizer.vocab["<|user|>"],
+                tokenizer.vocab[" "],
+                tokenizer.vocab["hello"],
+                tokenizer.vocab[" "],
+            ],
+        )
+        self.assertEqual(text_ids, [tokenizer.vocab["<|assistant|>bar"]])
+
+    def test_the_chat_template_is_not_given_a_second_beginning_token(self):
+        # The template renders its own opening special; asking the tokenizer
+        # to add one as well would prepend a second <s> the model never sees.
+        tokenizer = FakeTokenizer(chat_template="{{ messages }}")
+        context_ids, _ = encode_for_scoring(
+            tokenizer, "bar", context="hello", use_chat_template=True
+        )
+
+        self.assertNotIn(tokenizer.vocab["<s>"], context_ids)
+        self.assertEqual(context_ids[0], tokenizer.vocab["<|user|>"])
 
     def test_a_whitespace_only_context_skips_the_chat_template(self):
         # Pure whitespace is not a turn worth wrapping in a user message, but
