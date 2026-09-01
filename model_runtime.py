@@ -16,7 +16,20 @@ from token_metrics import (
     build_metric,
     normalize_log_probabilities,
     sampling_probabilities,
+    unscored_metric,
 )
+
+
+# Prefill runs in chunks so a long prompt never materializes a
+# sequence-length by vocabulary logit tensor all at once.
+PREFILL_CHUNK_SIZE = 128
+
+# Scoring every prompt token costs one softmax over the vocabulary each, so
+# only the most recent stretch of a very long prompt is measured.
+PROMPT_SCORE_LIMIT = 1024
+
+# Refuse to score a wall of pasted text rather than appearing to hang.
+SCORE_TOKEN_LIMIT = 4096
 
 
 MODEL_ID_PATTERN = re.compile(
@@ -36,6 +49,16 @@ def validate_model_id(model_id: str) -> str:
 @dataclass(frozen=True)
 class GenerationUpdate:
     text: str
+    metrics: list[dict]
+    prompt_metrics: list[dict]
+    prompt_note: str = ""
+
+
+@dataclass(frozen=True)
+class ScoredText:
+    """Per-token measurements for text the model did not generate."""
+
+    context_metrics: list[dict]
     metrics: list[dict]
 
 
@@ -124,34 +147,61 @@ class ModelManager:
             if torch.backends.mps.is_available():
                 torch.mps.empty_cache()
 
-    def _prompt_inputs(self, messages: list[dict]):
-        import torch
+    def _prompt_token_ids(self, messages: list[dict]) -> list[int]:
+        """Token ids for a chat prompt, including the generation prompt."""
 
         assert self.tokenizer is not None
-        assert self.model is not None
         tokenizer = self.tokenizer
 
         if tokenizer.chat_template:
-            inputs = tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
-                return_tensors="pt",
+            encoded = tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=True
             )
         else:
             transcript = "\n".join(
                 f"{message['role'].title()}: {message['content']}"
                 for message in messages
             )
-            inputs = tokenizer(f"{transcript}\nAssistant:", return_tensors="pt")
+            encoded = tokenizer(f"{transcript}\nAssistant:").input_ids
 
-        device = next(self.model.parameters()).device
-        return {
-            name: tensor.to(device)
-            for name, tensor in inputs.items()
-            if torch.is_tensor(tensor)
-        }
+        if encoded and isinstance(encoded[0], (list, tuple)):
+            encoded = encoded[0]
+        return [int(value) for value in encoded]
+
+    def _decode_token(self, token_id: int) -> str:
+        assert self.tokenizer is not None
+        return self.tokenizer.decode(
+            [int(token_id)],
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+
+    def _token_fallback(self, token_id: int) -> str:
+        assert self.tokenizer is not None
+        return self.tokenizer.convert_ids_to_tokens(int(token_id)) or str(token_id)
+
+    def _describe_token(
+        self,
+        *,
+        position: int,
+        token_id: int,
+        raw_log_probabilities: np.ndarray,
+        sampled_probabilities: np.ndarray,
+        segment: str,
+    ) -> dict:
+        metric: TokenMetric = build_metric(
+            position=position,
+            token_id=token_id,
+            token_text=self._decode_token(token_id),
+            fallback_text=self._token_fallback(token_id),
+            raw_log_probabilities=raw_log_probabilities,
+            sampled_probabilities=sampled_probabilities,
+            decode_token=lambda candidate_id: (
+                self._decode_token(candidate_id) or self._token_fallback(candidate_id)
+            ),
+            segment=segment,
+        )
+        return metric.to_dict()
 
     def _stop_token_ids(self) -> set[int]:
         assert self.model is not None
@@ -167,6 +217,87 @@ class ModelManager:
                 values.update(int(value) for value in candidate)
         return values
 
+    def _prefill(
+        self,
+        token_ids: list[int],
+        *,
+        segments: list[str],
+        positions: list[int],
+        score_from: int,
+        collect: bool,
+    ):
+        """Run the model over ``token_ids`` a chunk at a time.
+
+        Returns the per-token metrics, the key-value cache, and the log
+        probabilities that predict whatever comes after the sequence. Every
+        token except the first is measured against the distribution the model
+        held one step earlier, so the same pass that warms the cache also
+        explains the prompt.
+        """
+
+        import torch
+
+        assert self.model is not None
+        model = self.model
+        device = next(model.parameters()).device
+        metrics: list[dict] = []
+        past_key_values = None
+        carry: np.ndarray | None = None
+        total = len(token_ids)
+
+        for start in range(0, total, PREFILL_CHUNK_SIZE):
+            end = min(start + PREFILL_CHUNK_SIZE, total)
+            chunk = torch.tensor(
+                [token_ids[start:end]], dtype=torch.long, device=device
+            )
+            outputs = model(
+                input_ids=chunk,
+                attention_mask=torch.ones((1, end), dtype=torch.long, device=device),
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+            past_key_values = outputs.past_key_values
+            logits = outputs.logits[0]
+
+            if collect:
+                for index in range(start, end):
+                    token_id = token_ids[index]
+                    if index == 0 or index < score_from:
+                        metrics.append(
+                            unscored_metric(
+                                position=positions[index],
+                                token_id=token_id,
+                                token_text=self._decode_token(token_id),
+                                fallback_text=self._token_fallback(token_id),
+                                segment=segments[index],
+                            ).to_dict()
+                        )
+                        continue
+                    log_probs = (
+                        carry
+                        if index == start
+                        else normalize_log_probabilities(
+                            logits[index - start - 1].detach().float().cpu().numpy()
+                        )
+                    )
+                    assert log_probs is not None
+                    metrics.append(
+                        self._describe_token(
+                            position=positions[index],
+                            token_id=token_id,
+                            raw_log_probabilities=log_probs,
+                            sampled_probabilities=np.exp(log_probs),
+                            segment=segments[index],
+                        )
+                    )
+
+            carry = normalize_log_probabilities(
+                logits[end - start - 1].detach().float().cpu().numpy()
+            )
+            del outputs, logits
+
+        return metrics, past_key_values, carry
+
     def generate(
         self,
         messages: list[dict],
@@ -176,6 +307,7 @@ class ModelManager:
         top_k: int,
         max_new_tokens: int,
         seed: int,
+        analyze_prompt: bool = True,
     ) -> Iterator[GenerationUpdate]:
         import torch
 
@@ -187,22 +319,34 @@ class ModelManager:
             assert self.tokenizer is not None
             model = self.model
             tokenizer = self.tokenizer
-            inputs = self._prompt_inputs(messages)
-            attention_mask = inputs.get("attention_mask")
+            device = next(model.parameters()).device
+
+            prompt_ids = self._prompt_token_ids(messages)
+            score_from = (
+                max(1, len(prompt_ids) - PROMPT_SCORE_LIMIT) if analyze_prompt else 0
+            )
+            prompt_metrics, past_key_values, raw_log_probs = self._prefill(
+                prompt_ids,
+                segments=["prompt"] * len(prompt_ids),
+                positions=list(range(1, len(prompt_ids) + 1)),
+                score_from=score_from,
+                collect=analyze_prompt,
+            )
+            prompt_note = ""
+            if analyze_prompt and score_from > 1:
+                prompt_note = (
+                    f"Only the most recent {PROMPT_SCORE_LIMIT:,} of "
+                    f"{len(prompt_ids):,} prompt tokens were scored."
+                )
+
             rng = np.random.default_rng(int(seed))
             generated_ids: list[int] = []
             metrics: list[dict] = []
             stop_ids = self._stop_token_ids()
-            past_key_values = None
-            current_inputs = inputs
+            limit = int(max_new_tokens)
 
-            for position in range(1, int(max_new_tokens) + 1):
-                outputs = model(
-                    **current_inputs, past_key_values=past_key_values, use_cache=True
-                )
-                past_key_values = outputs.past_key_values
-                raw_logits = outputs.logits[0, -1].float().cpu().numpy()
-                raw_log_probs = normalize_log_probabilities(raw_logits)
+            for position in range(1, limit + 1):
+                assert raw_log_probs is not None
                 sampled_probs = sampling_probabilities(
                     raw_log_probs,
                     temperature=float(temperature),
@@ -216,58 +360,106 @@ class ModelManager:
                     token_id = int(rng.choice(sampled_probs.size, p=sampled_probs))
 
                 generated_ids.append(token_id)
-                token_text = tokenizer.decode(
-                    [token_id],
-                    skip_special_tokens=False,
-                    clean_up_tokenization_spaces=False,
+                metrics.append(
+                    self._describe_token(
+                        position=position,
+                        token_id=token_id,
+                        raw_log_probabilities=raw_log_probs,
+                        sampled_probabilities=sampled_probs,
+                        segment="response",
+                    )
                 )
-                fallback = tokenizer.convert_ids_to_tokens(token_id) or str(token_id)
-
-                metric: TokenMetric = build_metric(
-                    position=position,
-                    token_id=token_id,
-                    token_text=token_text,
-                    fallback_text=fallback,
-                    raw_log_probabilities=raw_log_probs,
-                    sampled_probabilities=sampled_probs,
-                    decode_token=lambda candidate_id: (
-                        tokenizer.decode(
-                            [candidate_id],
-                            skip_special_tokens=False,
-                            clean_up_tokenization_spaces=False,
-                        )
-                        or (
-                            tokenizer.convert_ids_to_tokens(candidate_id)
-                            or str(candidate_id)
-                        )
-                    ),
-                )
-                metrics.append(metric.to_dict())
-
                 text = tokenizer.decode(
                     generated_ids,
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=False,
                 )
-                yield GenerationUpdate(text=text, metrics=list(metrics))
+                yield GenerationUpdate(
+                    text=text,
+                    metrics=list(metrics),
+                    prompt_metrics=prompt_metrics,
+                    prompt_note=prompt_note,
+                )
 
-                if token_id in stop_ids:
+                if token_id in stop_ids or position == limit:
                     break
 
-                device = next(model.parameters()).device
-                next_token = torch.tensor([[token_id]], dtype=torch.long, device=device)
-                if attention_mask is not None:
-                    attention_mask = torch.cat(
-                        [
-                            attention_mask,
-                            torch.ones(
-                                (attention_mask.shape[0], 1),
-                                dtype=attention_mask.dtype,
-                                device=attention_mask.device,
-                            ),
-                        ],
-                        dim=-1,
+                outputs = model(
+                    input_ids=torch.tensor(
+                        [[token_id]], dtype=torch.long, device=device
+                    ),
+                    attention_mask=torch.ones(
+                        (1, len(prompt_ids) + position), dtype=torch.long, device=device
+                    ),
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+                past_key_values = outputs.past_key_values
+                raw_log_probs = normalize_log_probabilities(
+                    outputs.logits[0, -1].detach().float().cpu().numpy()
+                )
+
+    def score_text(
+        self,
+        text: str,
+        *,
+        context: str = "",
+        use_chat_template: bool = False,
+    ) -> ScoredText:
+        """Measure text the model did not write, in one pass over the tokens."""
+
+        import torch
+
+        with self._lock, torch.inference_mode():
+            if not self.loaded:
+                raise RuntimeError("Download and load a model before scoring text.")
+
+            assert self.tokenizer is not None
+            tokenizer = self.tokenizer
+            if not text.strip():
+                raise ValueError("Enter some text to score.")
+
+            if context.strip():
+                if use_chat_template and tokenizer.chat_template:
+                    context_ids = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": context}],
+                        add_generation_prompt=True,
+                        tokenize=True,
                     )
-                current_inputs = {"input_ids": next_token}
-                if attention_mask is not None:
-                    current_inputs["attention_mask"] = attention_mask
+                    if context_ids and isinstance(context_ids[0], (list, tuple)):
+                        context_ids = context_ids[0]
+                else:
+                    context_ids = tokenizer(context).input_ids
+            else:
+                context_ids = tokenizer("").input_ids
+
+            context_ids = [int(value) for value in context_ids]
+            text_ids = [
+                int(value) for value in tokenizer(text, add_special_tokens=False).input_ids
+            ]
+            if not text_ids:
+                raise ValueError("That text did not produce any tokens.")
+
+            token_ids = context_ids + text_ids
+            if len(token_ids) > SCORE_TOKEN_LIMIT:
+                raise ValueError(
+                    f"That is {len(token_ids):,} tokens, above the {SCORE_TOKEN_LIMIT:,} "
+                    "token limit for scoring. Score it in smaller pieces."
+                )
+
+            metrics, _, _ = self._prefill(
+                token_ids,
+                segments=["prompt"] * len(context_ids) + ["response"] * len(text_ids),
+                positions=list(range(1, len(context_ids) + 1))
+                + list(range(1, len(text_ids) + 1)),
+                score_from=1,
+                collect=True,
+            )
+            return ScoredText(
+                context_metrics=[
+                    metric for metric in metrics if metric["segment"] == "prompt"
+                ],
+                metrics=[
+                    metric for metric in metrics if metric["segment"] == "response"
+                ],
+            )
