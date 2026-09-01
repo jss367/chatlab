@@ -102,6 +102,48 @@ def split_context_and_text(tokenizer, context: str, text: str) -> tuple[list[int
     )
 
 
+def encode_for_scoring(
+    tokenizer,
+    text: str,
+    *,
+    context: str = "",
+    use_chat_template: bool = False,
+) -> tuple[list[int], list[int]]:
+    """Turn a context and the text to score into their two token runs.
+
+    A context that carries actual words is wrapped in the chat template when
+    the caller asks for it: the template ends in the generation prompt, so the
+    seam falls on a special token boundary and the two halves cannot merge.
+
+    Everything else goes through :func:`split_context_and_text` with the
+    context **verbatim**, whitespace included. A context of a single space is a
+    real choice — it decides which token the text begins with under BPE — so
+    stripping it would report ranks for a passage the reader never wrote. The
+    template path is the one exception: a message of pure whitespace is not a
+    turn worth wrapping, so it falls through to the plain path, where the
+    whitespace is still scored as the text's leading context.
+    """
+
+    template = getattr(tokenizer, "chat_template", None)
+    if context.strip() and use_chat_template and template:
+        context_ids = tokenizer.apply_chat_template(
+            [{"role": "user", "content": context}],
+            add_generation_prompt=True,
+            tokenize=True,
+        )
+        if context_ids and isinstance(context_ids[0], (list, tuple)):
+            context_ids = context_ids[0]
+        return (
+            [int(value) for value in context_ids],
+            [
+                int(value)
+                for value in tokenizer(text, add_special_tokens=False).input_ids
+            ],
+        )
+
+    return split_context_and_text(tokenizer, context, text)
+
+
 @dataclass(frozen=True)
 class GenerationUpdate:
     text: str
@@ -475,25 +517,9 @@ class ModelManager:
             if not text.strip():
                 raise ValueError("Enter some text to score.")
 
-            if context.strip() and use_chat_template and tokenizer.chat_template:
-                # The template ends in the generation prompt, so the seam falls
-                # on a special token boundary and the two halves cannot merge.
-                context_ids = tokenizer.apply_chat_template(
-                    [{"role": "user", "content": context}],
-                    add_generation_prompt=True,
-                    tokenize=True,
-                )
-                if context_ids and isinstance(context_ids[0], (list, tuple)):
-                    context_ids = context_ids[0]
-                context_ids = [int(value) for value in context_ids]
-                text_ids = [
-                    int(value)
-                    for value in tokenizer(text, add_special_tokens=False).input_ids
-                ]
-            else:
-                context_ids, text_ids = split_context_and_text(
-                    tokenizer, context if context.strip() else "", text
-                )
+            context_ids, text_ids = encode_for_scoring(
+                tokenizer, text, context=context, use_chat_template=use_chat_template
+            )
 
             if not text_ids:
                 raise ValueError("That text did not produce any tokens.")

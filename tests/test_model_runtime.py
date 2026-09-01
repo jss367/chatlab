@@ -1,7 +1,11 @@
 import re
 import unittest
 
-from model_runtime import split_context_and_text, validate_model_id
+from model_runtime import (
+    encode_for_scoring,
+    split_context_and_text,
+    validate_model_id,
+)
 
 
 class ModelIdTests(unittest.TestCase):
@@ -33,10 +37,17 @@ class FakeTokenizer:
     differ from ``tokenize(a + b)`` whenever the seam lands mid-run.
     """
 
-    def __init__(self, *, is_fast: bool = True, trailing_specials: int = 0):
+    def __init__(
+        self,
+        *,
+        is_fast: bool = True,
+        trailing_specials: int = 0,
+        chat_template: str | None = None,
+    ):
         self.is_fast = is_fast
         self.trailing_specials = trailing_specials
-        self.vocab: dict[str, int] = {"<s>": 0, "</s>": 1}
+        self.chat_template = chat_template
+        self.vocab: dict[str, int] = {"<s>": 0, "</s>": 1, "<|user|>": 2, "<|assistant|>": 3}
 
     def _id(self, piece: str) -> int:
         return self.vocab.setdefault(piece, len(self.vocab))
@@ -58,6 +69,15 @@ class FakeTokenizer:
         if return_offsets_mapping:
             encoding["offset_mapping"] = offsets
         return encoding
+
+
+    def apply_chat_template(self, messages, add_generation_prompt=False, tokenize=True):
+        ids = [self.vocab["<|user|>"]]
+        for message in messages:
+            ids.extend(self._id(match.group()) for match in re.finditer(r"\s+|\S+", message["content"]))
+        if add_generation_prompt:
+            ids.append(self.vocab["<|assistant|>"])
+        return ids
 
 
 class ContextSplitTests(unittest.TestCase):
@@ -111,11 +131,64 @@ class ContextSplitTests(unittest.TestCase):
         self.assertEqual(context_ids, [0])
         self.assertEqual(text_ids, [tokenizer.vocab["foobar"]])
 
+    def test_a_whitespace_only_context_keeps_its_token(self):
+        tokenizer = FakeTokenizer()
+        context_ids, text_ids = split_context_and_text(tokenizer, " ", "bar")
+
+        # A lone space is what makes the text start with a leading-space token,
+        # so it has to survive into the scored passage.
+        self.assertEqual(context_ids, [0, tokenizer.vocab[" "]])
+        self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+
     def test_slow_tokenizers_fall_back_to_encoding_each_half(self):
         tokenizer = FakeTokenizer(is_fast=False)
         context_ids, text_ids = split_context_and_text(tokenizer, "foo", "bar")
 
         self.assertEqual(context_ids, [0, tokenizer.vocab["foo"]])
+        self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+
+
+class ScoringEncodeTests(unittest.TestCase):
+    def test_a_whitespace_only_context_is_scored_not_discarded(self):
+        tokenizer = FakeTokenizer()
+        context_ids, text_ids = encode_for_scoring(tokenizer, "bar", context=" ")
+
+        self.assertEqual(context_ids, [0, tokenizer.vocab[" "]])
+        self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+
+    def test_an_empty_context_is_unchanged(self):
+        tokenizer = FakeTokenizer()
+
+        self.assertEqual(
+            encode_for_scoring(tokenizer, "bar", context=""),
+            split_context_and_text(tokenizer, "", "bar"),
+        )
+
+    def test_a_real_context_uses_the_chat_template(self):
+        tokenizer = FakeTokenizer(chat_template="{{ messages }}")
+        context_ids, text_ids = encode_for_scoring(
+            tokenizer, "bar", context="hello", use_chat_template=True
+        )
+
+        self.assertEqual(
+            context_ids,
+            [
+                tokenizer.vocab["<|user|>"],
+                tokenizer.vocab["hello"],
+                tokenizer.vocab["<|assistant|>"],
+            ],
+        )
+        self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+
+    def test_a_whitespace_only_context_skips_the_chat_template(self):
+        # Pure whitespace is not a turn worth wrapping in a user message, but
+        # it still belongs in front of the text, so the plain path scores it.
+        tokenizer = FakeTokenizer(chat_template="{{ messages }}")
+        context_ids, text_ids = encode_for_scoring(
+            tokenizer, "bar", context=" ", use_chat_template=True
+        )
+
+        self.assertEqual(context_ids, [0, tokenizer.vocab[" "]])
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
 
 
