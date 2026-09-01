@@ -69,12 +69,13 @@ def validate_model_id(model_id: str) -> str:
 class SplitPassage(NamedTuple):
     """A passage's two token runs, and whether the seam between them is sure.
 
-    ``seam_verified`` is false only where the ids were not taken from one
-    joint encoding: the last-resort path that encodes each half alone, for a
-    tokenizer that reports no offsets and whose ``decode`` cannot say where
-    the seam fell. The scores that come back are then off by at most the one
-    token that spans the seam, and the caller is expected to say so rather
-    than present them as exact.
+    ``seam_verified`` is false where the boundary between the two runs is a
+    guess: a tokenizer that reports no offsets and whose ``decode`` cannot
+    say where the seam fell leaves nothing to confirm the position with. The
+    ids are still cut from the one encoding of the whole passage, so every
+    distribution measured from them is the passage's own; what is in doubt is
+    which side of the boundary a token was counted on, and the caller is
+    expected to say so rather than present the division as exact.
 
     ``chat_template_missing`` is set only where the caller asked for the
     context to be wrapped as a chat turn and the tokenizer had no template to
@@ -143,46 +144,56 @@ def score_token_limit(model) -> int:
     return SCORE_TOKEN_LIMIT if window is None else min(SCORE_TOKEN_LIMIT, window)
 
 
-def _split_by_decoding(
-    tokenizer, context: str, text: str, *, add_special_tokens: bool = True
-) -> tuple[list[int], list[int]] | None:
-    """Locate the seam in one joint encoding by decoding it back to text.
+def _joint_ids(tokenizer, passage: str, *, add_special_tokens: bool = True) -> list[int] | None:
+    """The one encoding of ``passage``, or ``None`` where it cannot be had.
+
+    Every seam decision below is a cut in this list, so the ids that end up
+    scored are the passage's own whichever decision was reachable.
+    """
+
+    try:
+        return [
+            int(value)
+            for value in tokenizer(
+                passage, add_special_tokens=add_special_tokens
+            ).input_ids
+        ]
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def _seam_by_decoding(
+    tokenizer,
+    ids: list[int],
+    stop: int,
+    context: str,
+    text: str,
+    *,
+    add_special_tokens: bool = True,
+) -> int | None:
+    """Where the seam falls in ``ids``, when decoding can prove where it fell.
 
     A tokenizer without offsets can still be asked what a run of ids says, so
     the passage is still encoded once and the seam is found afterwards: the
     context keeps the longest run of leading tokens that decodes to a prefix
     of ``context``, and the token after it — the one that straddles the seam,
     if any — starts the scored text, exactly as it does when offsets are
-    available. Trailing special tokens are dropped for the same reason they
-    are there.
+    available.
 
     ``add_special_tokens=False`` says the passage already spells out every
     special token it wants — a rendered chat template does — so decoding has
-    to keep them to round trip, and nothing was appended for the trailing
-    sweep to drop.
+    to keep them to round trip.
 
     The split is returned only when the two halves decode back to the passage
     verbatim. A ``decode`` that does not round trip — a byte-level merge cut
     mid-character, a normalizer that rewrites whitespace, a SentencePiece
     model that eats a leading space — would otherwise move the seam by a
-    token and score part of the context, so those cases say so with ``None``
-    instead of guessing.
+    token and score part of the context, so those cases say ``None`` and
+    leave the placement to :func:`_guess_seam`.
     """
 
     decode = getattr(tokenizer, "decode", None)
     if decode is None:
-        return None
-
-    try:
-        ids = [
-            int(value)
-            for value in tokenizer(
-                context + text, add_special_tokens=add_special_tokens
-            ).input_ids
-        ]
-    except (AttributeError, KeyError, TypeError, ValueError):
-        return None
-    if not ids:
         return None
 
     def spoken(start: int, end: int) -> str | None:
@@ -194,12 +205,6 @@ def _split_by_decoding(
             )
         except (NotImplementedError, TypeError, ValueError):
             return None
-
-    specials = set(getattr(tokenizer, "all_special_ids", None) or ())
-    stop = len(ids)
-    if add_special_tokens:
-        while stop and ids[stop - 1] in specials:
-            stop -= 1
 
     def within_context(end: int) -> bool:
         prefix = spoken(0, end)
@@ -232,7 +237,77 @@ def _split_by_decoding(
     if head is None or tail is None or head + tail != context + text:
         return None
 
-    return ids[:split], ids[split:stop]
+    return split
+
+
+def _guess_seam(
+    tokenizer,
+    ids: list[int],
+    stop: int,
+    context: str,
+    text: str,
+    *,
+    add_special_tokens: bool = True,
+) -> int:
+    """The best guess at the seam in ``ids``, for a decode that proved nothing.
+
+    The context is encoded a second time, alone, and its ordinary tokens are
+    counted. How many tokens a tokenizer spends on a string is steady even
+    where its ``decode`` is not, so that count says how far into the joint
+    encoding the context reaches. Special tokens are counted on neither side:
+    what a post-processor wrapped the lone context in says nothing about the
+    joint passage, while the specials standing in ``ids`` before the first
+    ordinary token of the text are the passage's own opening and belong with
+    the context.
+
+    The token the count lands on goes to the scored text whenever there is
+    text to score, because a seam this hazy is exactly the case where that
+    token merged across it.
+
+    The answer is a cut in the joint encoding either way, so the ids are the
+    passage's own and the guesswork is confined to which side of the boundary
+    one token is counted on.
+    """
+
+    specials = set(getattr(tokenizer, "all_special_ids", None) or ())
+    alone = _joint_ids(tokenizer, context, add_special_tokens=add_special_tokens) or ()
+    wanted = sum(1 for value in alone if value not in specials)
+
+    split, seen = 0, 0
+    for index, value in enumerate(ids[:stop]):
+        ordinary = value not in specials
+        if ordinary and seen >= wanted:
+            break
+        seen += int(ordinary)
+        split = index + 1
+
+    if text and split >= stop:
+        split = max(stop - 1, 0)
+    return split
+
+
+def _encode_halves_apart(
+    tokenizer, context: str, text: str, *, add_special_tokens: bool = True
+) -> SplitPassage:
+    """Encode the halves separately, for a passage that will not encode whole.
+
+    This is the one path whose ids are not a cut of a single encoding, and it
+    runs only where the tokenizer refused the passage outright. Neither half
+    is post-processed: asking for specials here is what lets a closing EOS or
+    SEP land between the context and the text, where the scored text would
+    read as what follows the end of a passage rather than what follows the
+    context. The opening token the model does expect is prepended by name
+    instead, so nothing can be appended in the seam's way.
+    """
+
+    def ids_for(part: str) -> list[int]:
+        return list(_joint_ids(tokenizer, part, add_special_tokens=False) or ())
+
+    context_ids = ids_for(context)
+    opening = getattr(tokenizer, "bos_token_id", None) if add_special_tokens else None
+    if opening is not None:
+        context_ids.insert(0, int(opening))
+    return SplitPassage(context_ids, ids_for(text), seam_verified=not context)
 
 
 def split_context_and_text(
@@ -262,14 +337,13 @@ def split_context_and_text(
     special tokens — a chat template renders its own BOS and role markers — so
     the tokenizer must not prepend a second one.
 
-    Slow tokenizers cannot report offsets, so the seam is instead located by
-    decoding a growing prefix of the one joint encoding, and only the halves
-    that decode back to the passage verbatim are used. Encoding each half on
-    its own is the last resort, for a tokenizer whose ``decode`` cannot say
-    where the seam fell. Those ids can differ from the joint encoding by the
-    one token that spans the seam, so that path clears ``seam_verified`` and
-    the caller reports the numbers as approximate rather than dropping a
-    feature the reader asked for.
+    Offsets say where the seam fell; a slow tokenizer's ``decode`` can prove
+    it; and where neither can, the passage is still encoded once and cut at
+    the position :func:`_guess_seam` counts out, with ``seam_verified``
+    cleared. That keeps the scored ids the passage's own in every case that
+    can be encoded at all, so no distribution is ever taken from a sequence
+    the reader did not write; what an unverified seam leaves in doubt is only
+    which side of the boundary a single token was counted on.
     """
 
     if getattr(tokenizer, "is_fast", False):
@@ -301,43 +375,35 @@ def split_context_and_text(
                 stop -= 1
             return SplitPassage(ids[:split], ids[split:stop])
 
-    halves = _split_by_decoding(
-        tokenizer, context, text, add_special_tokens=add_special_tokens
-    )
-    if halves is not None:
-        return SplitPassage(*halves)
+    ids = _joint_ids(tokenizer, context + text, add_special_tokens=add_special_tokens)
+    if not ids:
+        return _encode_halves_apart(
+            tokenizer, context, text, add_special_tokens=add_special_tokens
+        )
 
-    # Last resort. With no context there is no seam for a merge to cross —
-    # the joint encoding is the text's own, plus whatever specials the
-    # tokenizer prepends — so those ids are exact. A context with characters
-    # in it is the case that cannot be checked, and it says so.
-    context_ids = [
-        int(value)
-        for value in tokenizer(context, add_special_tokens=add_special_tokens).input_ids
-    ]
-    # A post-processor closes the context with EOS or SEP, and encoding the
-    # halves apart would leave that closing token sitting between them: the
-    # text would be scored as what follows the end of a passage rather than
-    # what follows the context. Nothing was appended when the caller spells
-    # out its own specials, so only sweep when the tokenizer added them.
-    #
-    # Only specials standing after the context's own tokens were appended. An
-    # empty context encodes to nothing but the prepended BOS, which is last
-    # only because it is also first — dropping it would score the text as if
-    # the passage never began, so a run of specials with no content in front
-    # of it is left alone.
+    # Trailing special tokens are dropped for the same reason they are there
+    # under the offsets path: they close the passage off after the last token
+    # the reader wrote.
+    stop = len(ids)
     if add_special_tokens:
         specials = set(getattr(tokenizer, "all_special_ids", None) or ())
-        content = [
-            index for index, value in enumerate(context_ids) if value not in specials
-        ]
-        if content:
-            del context_ids[content[-1] + 1 :]
+        while stop and ids[stop - 1] in specials:
+            stop -= 1
 
+    split = _seam_by_decoding(
+        tokenizer, ids, stop, context, text, add_special_tokens=add_special_tokens
+    )
+    verified = split is not None
+    if split is None:
+        split = _guess_seam(
+            tokenizer, ids, stop, context, text, add_special_tokens=add_special_tokens
+        )
+
+    # With no context there is no seam for a merge to cross — the joint
+    # encoding is the text's own, plus whatever specials the tokenizer
+    # prepends — so the cut in front of the first ordinary token is exact.
     return SplitPassage(
-        context_ids,
-        [int(value) for value in tokenizer(text, add_special_tokens=False).input_ids],
-        seam_verified=not context,
+        ids[:split], ids[split:stop], seam_verified=verified or not context
     )
 
 

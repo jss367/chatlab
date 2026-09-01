@@ -220,16 +220,18 @@ class ContextSplitTests(unittest.TestCase):
         )
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
 
-    def test_a_decode_that_does_not_round_trip_falls_back(self):
+    def test_a_decode_that_does_not_round_trip_still_cuts_one_encoding(self):
         # SentencePiece eats the space that opens a sequence, so decoding the
-        # leading run of tokens no longer says what the context said. Rather
-        # than move the seam by a token and score part of the context, the
-        # split gives up and each half is encoded on its own.
+        # leading run of tokens no longer says what the context said. The
+        # position cannot be confirmed, but the joint encoding is still the
+        # sequence the passage produces, so it is cut rather than abandoned:
+        # "foo" and "bar" merged, and that merged token is what gets scored.
         tokenizer = EatsTheLeadingSpace(is_fast=False)
-        context_ids, text_ids, *_ = split_context_and_text(tokenizer, " foo", "bar")
+        split = split_context_and_text(tokenizer, " foo", "bar")
 
-        self.assertEqual(context_ids, [0, tokenizer.vocab[" "], tokenizer.vocab["foo"]])
-        self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+        self.assertEqual(split.context_ids, [0, tokenizer.vocab[" "]])
+        self.assertEqual(split.text_ids, [tokenizer.vocab["foobar"]])
+        self.assertFalse(split.seam_verified)
 
     def test_a_seam_stranded_mid_character_falls_back(self):
         # The halves still concatenate to the passage here, so only the token
@@ -273,13 +275,18 @@ class ContextSplitTests(unittest.TestCase):
 
         self.assertTrue(split.seam_verified)
 
-    def test_a_tokenizer_that_cannot_decode_falls_back(self):
+    def test_a_tokenizer_that_cannot_decode_still_cuts_one_encoding(self):
+        # Nothing here can say where the seam fell, so the cut is counted out
+        # instead. The ids stay the joint encoding's own, which is the whole
+        # point: "foobar" is the token the passage produces, and encoding the
+        # halves apart would have scored a "bar" the model never sees.
         tokenizer = FakeTokenizer(is_fast=False)
         tokenizer.decode = None
-        context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo", "bar")
+        split = split_context_and_text(tokenizer, "foo", "bar")
 
-        self.assertEqual(context_ids, [0, tokenizer.vocab["foo"]])
-        self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+        self.assertEqual(split.context_ids, [0])
+        self.assertEqual(split.text_ids, [tokenizer.vocab["foobar"]])
+        self.assertFalse(split.seam_verified)
 
 
 class ScoringEncodeTests(unittest.TestCase):
@@ -616,67 +623,102 @@ class ScoreTextGuardTests(unittest.TestCase):
 class NeverRoundTrips(FakeTokenizer):
     """Declines both joint paths: no offsets, and a decode that says nothing true.
 
-    That combination is the only way to reach the last-resort split, so it is
-    the only way to test what that split builds.
+    That combination is the only way to reach a seam nobody can confirm, so it
+    is the only way to test what the split makes of one.
     """
 
     def decode(self, ids, skip_special_tokens=False, **kwargs) -> str:
         return " nope"
 
 
-class LastResortTrailingSpecialTests(unittest.TestCase):
-    """The fallback that encodes the halves apart still has to build a passage.
+class RefusesTheWholePassage(FakeTokenizer):
+    """Encodes either half, but raises on the passage the two make together.
 
-    A post-processor closes the context with ``</s>``. Left in place, the
-    scored text would follow the end of a passage rather than the context.
+    The one case with no joint encoding to cut, and so the one case where the
+    halves still have to be encoded apart.
     """
 
-    def tokenizer(self):
-        # Slow, so there are no offsets; the leading space is eaten, so the
-        # decoded seam cannot be verified either. Both joint paths decline.
-        return EatsTheLeadingSpace(is_fast=False, trailing_specials=1)
+    bos_token_id = 0
 
-    def test_the_closing_special_does_not_land_between_the_halves(self):
-        tokenizer = self.tokenizer()
-        closing = tokenizer.vocab["</s>"]
+    def __init__(self, passage: str, **kwargs):
+        super().__init__(**kwargs)
+        self.passage = passage
 
-        split = split_context_and_text(tokenizer, "The capital of", " France")
+    def __call__(self, text, **kwargs):
+        if text == self.passage:
+            raise ValueError("this tokenizer will not encode that")
+        return super().__call__(text, **kwargs)
 
-        self.assertNotIn(closing, split.context_ids)
-        self.assertFalse(split.seam_verified)
 
-    def test_an_empty_context_is_not_closed_off_either(self):
-        # This half claims to be exact, so a stray closing token here would be
-        # wrong while reporting itself as certain.
-        tokenizer = self.tokenizer()
-        closing = tokenizer.vocab["</s>"]
+class UnverifiedSeamTests(unittest.TestCase):
+    """A seam nobody could confirm is still a cut in the passage's own ids.
 
-        split = split_context_and_text(tokenizer, "", "France")
+    Encoding the two halves apart is what let a post-processor's closing
+    ``</s>`` land between them, and what let a token merged across the seam be
+    replaced by two the passage never produces. Cutting one joint encoding can
+    do neither: only the boundary's position is a guess.
+    """
 
-        self.assertNotIn(closing, split.context_ids)
-        self.assertTrue(split.seam_verified)
-
-    def test_the_opening_special_survives_the_sweep(self):
-        # An empty context is nothing but its prepended BOS, which is the last
-        # id only because it is also the first. Sweeping it off would score the
-        # text as if the passage never began — while claiming to be exact.
-        tokenizer = NeverRoundTrips(is_fast=False, trailing_specials=0)
-        opening = tokenizer.vocab["<s>"]
-
-        split = split_context_and_text(tokenizer, "", "France")
-
-        self.assertEqual(split.context_ids, [opening])
-        self.assertTrue(split.seam_verified)
-
-    def test_a_closing_special_still_goes_when_there_is_content(self):
+    def test_an_unverified_split_is_still_the_joint_encoding(self):
         tokenizer = NeverRoundTrips(is_fast=False, trailing_specials=1)
-        opening = tokenizer.vocab["<s>"]
-        closing = tokenizer.vocab["</s>"]
+        joint = [
+            int(value) for value in tokenizer("The capital ofFrance").input_ids
+        ]
+
+        split = split_context_and_text(tokenizer, "The capital of", "France")
+
+        # Every scored id comes out of that one encoding, closing special
+        # aside, so no distribution is taken from a sequence the reader did
+        # not write — including the token "of" and "France" merged into.
+        self.assertFalse(split.seam_verified)
+        self.assertEqual(split.context_ids + split.text_ids, joint[:-1])
+        self.assertEqual(split.text_ids, [tokenizer.vocab["ofFrance"]])
+
+    def test_an_empty_context_never_gains_a_closing_token(self):
+        # A post-processor that answers "" with an opening *and* a closing
+        # special would otherwise put that closer between the halves, and the
+        # text would be scored as what follows the end of a passage.
+        tokenizer = NeverRoundTrips(is_fast=False, trailing_specials=1)
+
+        split = split_context_and_text(tokenizer, "", "France")
+
+        self.assertEqual(split.context_ids, [tokenizer.vocab["<s>"]])
+        self.assertEqual(split.text_ids, [tokenizer.vocab["France"]])
+        self.assertTrue(split.seam_verified)
+
+    def test_the_opening_special_survives_and_the_closing_one_does_not(self):
+        tokenizer = EatsTheLeadingSpace(is_fast=False, trailing_specials=1)
 
         split = split_context_and_text(tokenizer, "The capital of", " France")
 
-        self.assertEqual(split.context_ids[0], opening)
-        self.assertNotIn(closing, split.context_ids)
+        self.assertFalse(split.seam_verified)
+        self.assertEqual(split.context_ids[0], tokenizer.vocab["<s>"])
+        self.assertNotIn(tokenizer.vocab["</s>"], split.context_ids)
+        self.assertNotIn(tokenizer.vocab["</s>"], split.text_ids)
+
+    def test_the_guess_leaves_the_text_something_to_score(self):
+        # The context's tokens account for the whole passage when the seam
+        # token merged across it, and scoring nothing at all would refuse the
+        # passage outright. That token is the text's.
+        tokenizer = NeverRoundTrips(is_fast=False)
+
+        split = split_context_and_text(tokenizer, "foo", "bar")
+
+        self.assertEqual(split.text_ids, [tokenizer.vocab["foobar"]])
+
+    def test_a_passage_that_will_not_encode_uses_the_halves_apart(self):
+        # No joint encoding exists to cut here. Neither half is
+        # post-processed, so nothing can be appended into the seam; the
+        # opening token the model expects is put in front by name.
+        tokenizer = RefusesTheWholePassage("foobar", trailing_specials=1)
+
+        split = split_context_and_text(tokenizer, "foo", "bar")
+
+        self.assertEqual(
+            split.context_ids, [tokenizer.vocab["<s>"], tokenizer.vocab["foo"]]
+        )
+        self.assertEqual(split.text_ids, [tokenizer.vocab["bar"]])
+        self.assertFalse(split.seam_verified)
 
 
 if __name__ == "__main__":

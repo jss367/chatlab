@@ -29,14 +29,16 @@ CHART_EVERY = 16
 
 SELECT_HINT = "Select a token to inspect it."
 
-# This tokenizer offers neither offsets nor a decode that round trips, so the
-# context and the text had to be encoded apart and the token spanning the seam
-# may not be the one the whole passage produces. Everything after it is
-# unaffected, so the numbers are worth showing — just not as exact ones.
+# This tokenizer offers neither offsets nor a decode that round trips, so
+# where the context ends had to be counted out rather than confirmed. The
+# scored tokens are still the whole passage's own single encoding, so every
+# probability is exact; what is uncertain is where the line between the two
+# halves was drawn, and a line a token out moves that token between the two
+# tables and the summary figures they feed.
 SEAM_CAVEAT = (
-    "Approximate: this tokenizer could not confirm where the context ends, "
-    "so the first scored token may differ from the one the full passage "
-    "produces."
+    "Approximate split: this tokenizer could not confirm where the context "
+    "ends, so the boundary between it and the scored text may sit a token "
+    "off. Every probability shown is the full passage's own either way."
 )
 
 # The chat-message box was ticked for a model that ships no chat template, so
