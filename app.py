@@ -28,6 +28,7 @@ from conversation import (
     user_index_at_or_before,
 )
 from model_runtime import (
+    MODEL_WEIGHTS,
     PROMPT_SCORE_LIMIT,
     CacheStatus,
     ModelManager,
@@ -82,12 +83,27 @@ def status_card(title: str, detail: str, tone: str = "neutral") -> str:
     return f"### {icon} {title}\n\n{detail}"
 
 
+def describe_missing(status: CacheStatus) -> str:
+    """``config.json and the model weights are missing``, for a card."""
+
+    names = [
+        "the model weights" if name == MODEL_WEIGHTS else f"`{name}`"
+        for name in status.missing_files
+    ]
+    if len(names) > 3:
+        names = names[:2] + [f"{len(names) - 2} more weight files"]
+    if len(names) == 1:
+        return f"{names[0]} {'are' if names[0] == 'the model weights' else 'is'} missing"
+    return f"{', '.join(names[:-1])} and {names[-1]} are missing"
+
+
 def describe_cache(model_id: str, status: CacheStatus) -> tuple[str, str]:
     """Title and detail for the card shown while a download starts.
 
-    The three cases a reader can tell apart from the outside - nothing on
-    disk, a cut-off download, and a finished one - each get their own
-    wording, so "Downloading" never hides that the files were already here.
+    The cases a reader can tell apart from the outside - nothing on disk, a
+    cut-off download, a cache holding only some of the files, and a finished
+    one - each get their own wording, so "Downloading" never hides that the
+    files were already here.
     """
 
     name = f"`{model_id.strip()}`"
@@ -98,6 +114,13 @@ def describe_cache(model_id: str, status: CacheStatus) -> tuple[str, str]:
             f"{name} was cut off part way: {status.partial_files} weight "
             f"{files} ({format_bytes(status.partial_bytes)}) are only partly "
             "on disk. Only the missing bytes are fetched.",
+        )
+    if status.missing_files:
+        return (
+            "Resuming download",
+            f"{name} is only partly on disk ({format_bytes(status.cached_bytes)} "
+            f"cached): {describe_missing(status)}. Only the missing files are "
+            "fetched.",
         )
     if status.present:
         return (
@@ -193,6 +216,15 @@ def load_cached_model(model_id: str):
             "Download incomplete",
             f"{name} was cut off part way: {status.partial_files} weight {files} "
             f"({format_bytes(status.partial_bytes)}) are only partly on disk. "
+            "Use **Download and load** to fetch the rest.",
+            "error",
+        )
+        return
+    if status.missing_files:
+        yield status_card(
+            "Download incomplete",
+            f"{name} is only partly on disk ({format_bytes(status.cached_bytes)} "
+            f"cached): {describe_missing(status)}. "
             "Use **Download and load** to fetch the rest.",
             "error",
         )

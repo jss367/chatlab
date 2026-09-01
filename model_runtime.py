@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import re
 import threading
 import time
@@ -89,6 +90,15 @@ def validate_model_id(model_id: str) -> str:
     return cleaned
 
 
+# Stands in for the weight file names when a snapshot has none at all: without
+# an index or a weights file there is no way to know what the repo would ship.
+MODEL_WEIGHTS = "model weights"
+
+# A causal LM's weights come as one of these, or as the shards its index lists.
+WEIGHT_FILES = ("model.safetensors", "pytorch_model.bin")
+WEIGHT_INDEXES = ("model.safetensors.index.json", "pytorch_model.bin.index.json")
+
+
 @dataclass(frozen=True)
 class CacheStatus:
     """What the Hugging Face cache already holds for one model.
@@ -96,15 +106,23 @@ class CacheStatus:
     ``cached_bytes`` counts finished files; ``partial_files`` and
     ``partial_bytes`` count the ``.incomplete`` blobs a cut-off download
     left behind, which ``snapshot_download`` resumes rather than restarts.
+    ``missing_files`` names what the snapshot still lacks before the model
+    can load: a cache another tool filled with only the config and tokenizer,
+    or a download stopped between shards, has finished blobs but no model.
     """
 
     cached_bytes: int = 0
     partial_files: int = 0
     partial_bytes: int = 0
+    missing_files: tuple[str, ...] = ()
 
     @property
     def present(self) -> bool:
         return self.cached_bytes > 0 or self.partial_files > 0
+
+    @property
+    def complete(self) -> bool:
+        return self.present and not self.partial_files and not self.missing_files
 
     @property
     def total_bytes(self) -> int:
@@ -121,10 +139,57 @@ def cache_folder(model_id: str, cache_dir: Path | None = None) -> Path:
     return Path(cache_dir) / f"models--{validate_model_id(model_id).replace('/', '--')}"
 
 
+def snapshot_folder(folder: Path, revision: str = "main") -> Path | None:
+    """The snapshot an offline ``snapshot_download`` would hand back, if any.
+
+    Offline, ``huggingface_hub`` reads ``refs/<revision>`` for the commit and
+    returns ``snapshots/<commit>`` whether or not every file is in it.
+    """
+
+    ref = folder / "refs" / revision
+    if not ref.is_file():
+        return None
+    snapshot = folder / "snapshots" / ref.read_text().strip()
+    return snapshot if snapshot.is_dir() else None
+
+
+def missing_files(snapshot: Path | None) -> tuple[str, ...]:
+    """The files a snapshot needs before ``from_pretrained`` can load it.
+
+    Only the config and the weights are checked. Which tokenizer files a repo
+    ships varies too much to know from the outside, and a wrong "incomplete"
+    verdict on a good cache would be worse than a generic load error.
+    """
+
+    if snapshot is None:
+        return ("config.json", MODEL_WEIGHTS)
+    missing = []
+    if not (snapshot / "config.json").is_file():
+        missing.append("config.json")
+    if any((snapshot / name).is_file() for name in WEIGHT_FILES):
+        return tuple(missing)
+    for index_name in WEIGHT_INDEXES:
+        index = snapshot / index_name
+        if not index.is_file():
+            continue
+        try:
+            shards = set(json.loads(index.read_text())["weight_map"].values())
+        except (OSError, ValueError, KeyError, AttributeError):
+            missing.append(MODEL_WEIGHTS)
+            return tuple(missing)
+        missing.extend(
+            sorted(shard for shard in shards if not (snapshot / shard).is_file())
+        )
+        return tuple(missing)
+    missing.append(MODEL_WEIGHTS)
+    return tuple(missing)
+
+
 def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
     """Measure what is already on disk for ``model_id``, without touching the network."""
 
-    blobs = cache_folder(model_id, cache_dir) / "blobs"
+    folder = cache_folder(model_id, cache_dir)
+    blobs = folder / "blobs"
     if not blobs.is_dir():
         return CacheStatus()
     cached = partial_files = partial_bytes = 0
@@ -137,7 +202,11 @@ def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
             partial_bytes += size
         else:
             cached += size
-    return CacheStatus(cached, partial_files, partial_bytes)
+    if cached == 0 and partial_files == 0:
+        return CacheStatus()
+    return CacheStatus(
+        cached, partial_files, partial_bytes, missing_files(snapshot_folder(folder))
+    )
 
 
 def format_bytes(count: int) -> str:

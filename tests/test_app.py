@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 import app
-from model_runtime import PROMPT_SCORE_LIMIT, CacheStatus, ScoredText
+from model_runtime import MODEL_WEIGHTS, PROMPT_SCORE_LIMIT, CacheStatus, ScoredText
 from token_metrics import UNSCORED_BEYOND_LIMIT, build_metric, unscored_metric
 
 
@@ -212,6 +212,41 @@ class DownloadStatusTests(unittest.TestCase):
         self.assertIn("Download incomplete", cards[-1])
         self.assertIn("1 weight file (5 B)", cards[-1])
         self.assertIn("Download and load", cards[-1])
+
+    def test_load_cached_refuses_a_snapshot_without_weights(self):
+        """Config and tokenizer alone used to sail through to a shard-missing traceback."""
+
+        cards = self.run_handler(
+            app.load_cached_model,
+            [CacheStatus(cached_bytes=2_000_000, missing_files=(MODEL_WEIGHTS,))],
+        )
+
+        self.assertIn("Download incomplete", cards[-1])
+        self.assertIn("2.0 MB cached", cards[-1])
+        self.assertIn("the model weights are missing", cards[-1])
+        self.assertIn("Download and load", cards[-1])
+
+    def test_a_download_stopped_between_shards_is_announced_as_resumed(self):
+        shards = tuple(f"model-0000{i}-of-00006.safetensors" for i in range(2, 7))
+        before = CacheStatus(cached_bytes=3_000_000_000, missing_files=shards)
+        cards = self.run_handler(
+            app.download_model, [before, CacheStatus(cached_bytes=15_000_000_000)], ""
+        )
+
+        self.assertIn("Resuming download", cards[0])
+        self.assertIn(
+            "`model-00002-of-00006.safetensors`, `model-00003-of-00006.safetensors` "
+            "and 3 more weight files are missing",
+            cards[0],
+        )
+        self.assertNotIn("already in the Hugging Face cache", cards[0])
+        self.assertIn("Fetched the remaining 12.0 GB", cards[-1])
+
+    def test_a_single_missing_shard_is_named(self):
+        before = CacheStatus(cached_bytes=10, missing_files=("model.safetensors",))
+        cards = self.run_handler(app.load_cached_model, [before])
+
+        self.assertIn("`model.safetensors` is missing", cards[-1])
 
     def test_load_cached_explains_an_absent_model(self):
         cards = self.run_handler(app.load_cached_model, [CacheStatus()])
