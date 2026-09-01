@@ -536,21 +536,28 @@ def save_conversation(turns, system_prompt):
 
 
 def load_conversation(file_path):
+    """Replace the conversation with a saved one.
+
+    A failed load leaves every output alone, so a bad file cannot wipe the
+    conversation already on screen.
+    """
+
+    skipped = (gr.skip(),) * 5
     if not file_path:
-        return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), "No file chosen."
+        return (*skipped, "No file chosen.", gr.skip(), gr.skip())
     try:
         turns, system_prompt = from_json(Path(file_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         return (
-            gr.skip(),
-            gr.skip(),
-            gr.skip(),
-            gr.skip(),
-            gr.skip(),
+            *skipped,
             f"Could not load that file: {error}",
+            gr.skip(),
+            gr.skip(),
         )
 
     messages, _ = display_messages(turns)
+    # The selected token described a response from the conversation being
+    # replaced, so it goes with it, exactly as Clear and Undo reset it.
     return (
         messages,
         turns,
@@ -558,6 +565,8 @@ def load_conversation(file_path):
         [],
         [],
         f"Loaded {len(turns)} message{'s' if len(turns) != 1 else ''}.",
+        NO_TOKEN_SELECTED,
+        [],
     )
 
 
@@ -802,6 +811,8 @@ def build_app() -> gr.Blocks:
                 token_strip,
                 metrics_state,
                 generation_status,
+                token_detail,
+                alternatives,
             ],
         )
 

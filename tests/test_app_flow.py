@@ -379,14 +379,24 @@ class SaveLoadTests(unittest.TestCase):
         update, status = app.save_conversation(turns, "Be terse.")
         self.assertIn("Saved 2 messages", status)
 
-        messages, restored, system_prompt, strip, _metrics, load_status = (
-            app.load_conversation(update["value"])
-        )
+        (
+            messages,
+            restored,
+            system_prompt,
+            strip,
+            _metrics,
+            load_status,
+            detail,
+            alternatives,
+        ) = app.load_conversation(update["value"])
         self.assertEqual(restored, turns)
         self.assertEqual(system_prompt, "Be terse.")
         self.assertEqual(len(messages), 3)
         self.assertEqual(strip, [])
         self.assertIn("Loaded 2 messages", load_status)
+        # The previous conversation's selected token goes with it.
+        self.assertEqual(detail, app.NO_TOKEN_SELECTED)
+        self.assertEqual(alternatives, [])
 
     def test_saving_an_empty_conversation_is_refused(self):
         update, status = app.save_conversation([], "")
@@ -398,6 +408,17 @@ class SaveLoadTests(unittest.TestCase):
     ):
         result = app.load_conversation("/nonexistent/conversation.json")
         self.assertIn("Could not load that file", result[5])
+        # A failed load leaves the token panel alone rather than blanking it.
+        self.assertEqual(len(result), 8)
+        for index in (0, 1, 2, 3, 4, 6, 7):
+            self.assertIsInstance(result[index], gr.skip().__class__)
+
+    def test_loading_nothing_skips_every_output(self):
+        result = app.load_conversation(None)
+        self.assertEqual(result[5], "No file chosen.")
+        self.assertEqual(len(result), 8)
+        for index in (0, 1, 2, 3, 4, 6, 7):
+            self.assertIsInstance(result[index], gr.skip().__class__)
 
 
 if __name__ == "__main__":
