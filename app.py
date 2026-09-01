@@ -460,6 +460,12 @@ def undo_from(position: int | None, turns: list[dict] | None):
     """Drop the exchange starting at the user turn ``position``.
 
     The message goes back into the input box so it can be reworded and sent again.
+
+    Undo cancels a running generation (see ``cancels`` on its listeners), and a
+    cancelled ``generate_reply`` never reaches its final yield, so every path
+    here restores the Send button itself exactly as Clear and Load do. That
+    includes "There is nothing to undo.": the cancel fires on the click, not on
+    what this function decides afterwards.
     """
 
     turns = copy_turns(turns)
@@ -474,6 +480,7 @@ def undo_from(position: int | None, turns: list[dict] | None):
             "There is nothing to undo.",
             gr.skip(),
             gr.skip(),
+            *send_stop_buttons(False),
         )
 
     remaining = turns[:position]
@@ -489,6 +496,7 @@ def undo_from(position: int | None, turns: list[dict] | None):
         "Removed the last exchange.",
         NO_TOKEN_SELECTED,
         [],
+        *send_stop_buttons(False),
     )
 
 
@@ -770,6 +778,8 @@ def build_app() -> gr.Blocks:
             generation_status,
             token_detail,
             alternatives,
+            send_button,
+            stop_button,
         ]
 
         running = [
@@ -793,11 +803,14 @@ def build_app() -> gr.Blocks:
             cancels=running,
         )
 
-        undo_button.click(undo_last, conversation_state, undo_outputs)
-        chatbot.undo(undo_message, conversation_state, undo_outputs)
-        # Clearing has to stop the generator first: a surviving generate_reply
+        # Undo, Clear and Load all replace or truncate the conversation, so
+        # each has to stop the generator first: a surviving generate_reply
         # would write its own snapshot of the in-progress turns back into the
-        # chatbot and the state, resurrecting the conversation just cleared.
+        # chatbot and the state, resurrecting what was just removed. Send,
+        # Retry and Edit are exempt because they *are* the generation - they
+        # re-enter generate_reply, and they are what everything else cancels.
+        undo_button.click(undo_last, conversation_state, undo_outputs, cancels=running)
+        chatbot.undo(undo_message, conversation_state, undo_outputs, cancels=running)
         clear_button.click(
             clear_chat,
             outputs=[

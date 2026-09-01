@@ -1,3 +1,4 @@
+import inspect
 import unittest
 
 import gradio as gr
@@ -320,25 +321,38 @@ class UndoTests(unittest.TestCase):
             make_turn("assistant", "second"),
         ]
         result = app.undo_last(turns)
-        self.assertEqual(len(result), 8)
+        self.assertEqual(len(result), 10)
         self.assertEqual(result[0], "two")
         self.assertEqual([turn["content"] for turn in result[2]], ["one", "first"])
 
     def test_undo_clears_the_token_panel(self):
         turns = [make_turn("user", "one"), make_turn("assistant", "first")]
-        _prompt, _messages, _turns, strip, metrics, _status, detail, alts = (
-            app.undo_last(turns)
-        )
+        (
+            _prompt,
+            _messages,
+            _turns,
+            strip,
+            metrics,
+            _status,
+            detail,
+            alts,
+            send,
+            stop,
+        ) = app.undo_last(turns)
         self.assertEqual(strip, [])
         self.assertEqual(metrics, [])
         self.assertEqual(detail, app.NO_TOKEN_SELECTED)
         self.assertEqual(alts, [])
+        # Undo cancels the generator, which then never reaches its final yield.
+        self.assertEqual((send, stop), app.send_stop_buttons(False))
 
     def test_undo_with_nothing_to_remove_keeps_the_token_panel(self):
         result = app.undo_last([make_turn("assistant", "orphan")])
         self.assertEqual(result[5], "There is nothing to undo.")
         for index in (3, 4, 6, 7):
             self.assertEqual(result[index], gr.skip())
+        # The cancel fires on the click, so even this path must undo the swap.
+        self.assertEqual(result[8:], app.send_stop_buttons(False))
 
     def test_undo_on_an_empty_conversation(self):
         result = app.undo_last([])
@@ -452,18 +466,86 @@ class CancelWiringTests(unittest.TestCase):
 
     Otherwise the generator's next snapshot writes its private copy of the
     in-progress turns straight back over the new conversation.
+
+    The listeners are derived from the app rather than listed here, so a new
+    control that writes the conversation state fails this test until it is
+    wired up. The rule: a listener that writes the conversation state either
+    *is* a generation (Send, Retry, Edit - they re-enter generate_reply, and
+    they are the events everything else cancels) or it must cancel every one
+    of those generations.
     """
 
-    def test_clear_and_load_cancel_the_same_events_as_stop(self):
-        config = app.build_app().get_config_file()
-        cancels = [
-            tuple(dep["cancels"])
-            for dep in config["dependencies"]
-            if dep.get("cancels")
-        ]
-        self.assertEqual(len(cancels), 3, "Stop, Clear, and Load must all cancel")
-        self.assertEqual(len(set(cancels)), 1, "all three cancel the same events")
-        self.assertTrue(cancels[0], "the cancelled event list is not empty")
+    def setUp(self):
+        self.demo = app.build_app()
+
+    def named(self, name):
+        return next(
+            fn
+            for fn in self.demo.fns.values()
+            if getattr(fn.fn, "__name__", None) == name
+        )
+
+    def conversation_state(self):
+        """Stop reads exactly one thing: the conversation state."""
+
+        (state,) = self.named("stop_generation").inputs
+        return state
+
+    def writers(self):
+        """Every listener that writes the conversation state, by index."""
+
+        state = self.conversation_state()
+        return {index: fn for index, fn in self.demo.fns.items() if state in fn.outputs}
+
+    def cancels_of(self, fn):
+        """A ``cancels=`` argument becomes a companion event on the same target."""
+
+        return {
+            index
+            for other in self.demo.fns.values()
+            if other.targets == fn.targets
+            for index in other.cancels
+        }
+
+    def test_every_conversation_replacing_listener_cancels_generation(self):
+        writers = self.writers()
+        generations = {
+            index for index, fn in writers.items() if inspect.isgeneratorfunction(fn.fn)
+        }
+        self.assertTrue(generations, "no streaming handler writes the conversation")
+
+        replacers = {
+            index: fn for index, fn in writers.items() if index not in generations
+        }
+        self.assertTrue(replacers, "nothing replaces the conversation")
+
+        for index, fn in replacers.items():
+            name = getattr(fn.fn, "__name__", str(index))
+            with self.subTest(listener=name):
+                self.assertEqual(
+                    self.cancels_of(fn),
+                    generations,
+                    f"{name} must cancel every running generation",
+                )
+
+    def test_the_known_controls_are_all_covered(self):
+        # A sanity check on the derivation above: if one of these stops writing
+        # the conversation state, the rule silently stops guarding it.
+        names = {getattr(fn.fn, "__name__", None) for fn in self.writers().values()}
+        self.assertEqual(
+            names,
+            {
+                "chat",
+                "retry_last",
+                "retry_message",
+                "edit_message",
+                "stop_generation",
+                "undo_last",
+                "undo_message",
+                "clear_chat",
+                "load_conversation",
+            },
+        )
 
 
 if __name__ == "__main__":
