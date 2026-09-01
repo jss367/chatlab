@@ -8,6 +8,7 @@ import os
 import random
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import gradio as gr
 from gradio.utils import get_upload_folder
@@ -543,7 +544,11 @@ def save_conversation(turns, system_prompt):
     # conversation has to live inside its upload folder.
     directory = Path(get_upload_folder()) / "chatlab-conversations"
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"conversation-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    # The timestamp only resolves to the second, and every session shares this
+    # upload folder, so a random suffix keeps two saves from landing on the same
+    # path and silently overwriting each other's download.
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    path = directory / f"conversation-{stamp}-{uuid4().hex[:8]}.json"
     path.write_text(to_json(turns, system_prompt=system_prompt), encoding="utf-8")
     return (
         gr.update(value=str(path), visible=True),

@@ -436,6 +436,14 @@ class SaveLoadTests(unittest.TestCase):
         # Loading cancels any running generation, so Send must come back.
         self.assertEqual((send, stop), app.send_stop_buttons(False))
 
+    def test_two_saves_never_share_a_path(self):
+        # The timestamp only resolves to the second, and sessions share the
+        # upload folder, so the later write would silently overwrite the first.
+        turns = [make_turn("user", "hi")]
+        first, _ = app.save_conversation(turns, "")
+        second, _ = app.save_conversation(turns, "")
+        self.assertNotEqual(first["value"], second["value"])
+
     def test_saving_an_empty_conversation_is_refused(self):
         update, status = app.save_conversation([], "")
         self.assertFalse(update["visible"])
