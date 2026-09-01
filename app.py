@@ -157,6 +157,43 @@ def send_stop_buttons(busy: bool):
     return gr.update(visible=not busy), gr.update(visible=busy)
 
 
+def finalize_partial(turns: list[dict]) -> bool:
+    """Close out a half-written assistant turn, dropping it when it holds nothing.
+
+    Returns whether a partial response was worth keeping. Cancelling or failing
+    mid-stream can leave a turn whose reasoning block is still marked pending,
+    which would keep the accordion spinning for the rest of the session.
+    """
+
+    if not turns or turns[-1]["role"] != "assistant":
+        return False
+    if not (turns[-1].get("content") or turns[-1].get("reasoning")):
+        turns.pop()
+        return False
+    turns[-1]["reasoning_closed"] = True
+    return True
+
+
+def stop_generation(turns: list[dict] | None):
+    """Finish the turn that the cancelled generator left behind.
+
+    Gradio closes ``generate_reply`` at its last yield, so nothing else ever
+    finalizes that turn.
+    """
+
+    turns = copy_turns(turns)
+    kept = finalize_partial(turns)
+    messages, _ = display_messages(turns)
+    return (
+        messages,
+        turns,
+        *send_stop_buttons(False),
+        "Stopped. The partial response was kept."
+        if kept
+        else "Stopped before the model produced anything.",
+    )
+
+
 def resolve_seed(seed, randomize: bool) -> int:
     if randomize:
         return random.randrange(SEED_LIMIT)
@@ -260,8 +297,12 @@ def generate_reply(
                 status = generation_progress(len(metrics), started, used_seed)
                 yield snapshot(highlight, metrics, status)
     except Exception as error:
-        pending["content"] = f"Generation failed: {error}"
-        pending["reasoning_closed"] = True
+        # The diagnostic only goes to the status line. Storing it as the
+        # assistant turn would feed the failure back to the model next turn.
+        reasoning, answer, _ = split_reasoning(raw_text)
+        pending["reasoning"] = reasoning
+        pending["content"] = answer
+        finalize_partial(turns)
         yield snapshot(highlight, metrics, f"Generation failed: {error}", busy=False)
         return
 
@@ -665,11 +706,15 @@ def build_app() -> gr.Blocks:
         ]
 
         stop_button.click(
-            lambda: (
-                *send_stop_buttons(False),
-                "Stopped. The partial response was kept.",
-            ),
-            outputs=[send_button, stop_button, generation_status],
+            stop_generation,
+            inputs=conversation_state,
+            outputs=[
+                chatbot,
+                conversation_state,
+                send_button,
+                stop_button,
+                generation_status,
+            ],
             cancels=running,
         )
 

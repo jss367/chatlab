@@ -4,6 +4,7 @@ import gradio as gr
 
 import app
 from conversation import make_turn
+from model_runtime import GenerationUpdate
 from test_streaming import loaded_manager
 
 
@@ -143,6 +144,33 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(final[TURNS][1]["reasoning"], "revised")
         self.assertEqual(final[TURNS][1]["content"], "answer")
 
+    def test_a_failed_generation_stays_out_of_the_history(self):
+        class Exploding:
+            loaded = True
+
+            def generate(self, *_args, **_kwargs):
+                raise RuntimeError("out of memory")
+                yield  # pragma: no cover - makes this a generator
+
+        app.MANAGER = Exploding()
+        final = self.last(app.chat("hi", [], *SETTINGS))[-1]
+        self.assertEqual([turn["role"] for turn in final[TURNS]], ["user"])
+        self.assertIn("out of memory", final[STATUS])
+
+    def test_a_failure_after_some_tokens_keeps_them(self):
+        def failing(*_args, **_kwargs):
+            yield GenerationUpdate(text="<think>Hmm", metrics=[])
+            raise RuntimeError("gpu fell over")
+
+        app.MANAGER.generate = failing
+        final = self.last(app.chat("hi", [], *SETTINGS))[-1]
+        self.assertEqual([turn["role"] for turn in final[TURNS]], ["user", "assistant"])
+        reply = final[TURNS][1]
+        self.assertEqual(reply["reasoning"], "Hmm")
+        self.assertEqual(reply["content"], "")
+        self.assertTrue(reply["reasoning_closed"])
+        self.assertIn("gpu fell over", final[STATUS])
+
 
 class CancellationTests(unittest.TestCase):
     """What the Stop button does: Gradio closes the running generator."""
@@ -173,6 +201,28 @@ class CancellationTests(unittest.TestCase):
         self.assertEqual(frame[TURNS][0]["content"], "hi")
         self.assertTrue(frame[TURNS][1]["content"])
         self.assertGreater(len(frame[STRIP]), 0)
+
+    def test_stopping_inside_a_think_block_closes_the_reasoning(self):
+        app.MANAGER = loaded_manager([0, 2, 3], THINK_PIECES, THINK_EOS)
+        settings = dict(FIXED, max_new_tokens=8192)
+        stream = app.chat("hi", [], *settings.values())
+        next(stream)
+        frame = next(stream)
+        stream.close()
+
+        self.assertFalse(frame[TURNS][1]["reasoning_closed"])
+        messages, turns, _send, _stop, status = app.stop_generation(frame[TURNS])
+        self.assertTrue(turns[1]["reasoning_closed"])
+        thoughts = [m for m in messages if m.get("metadata", {}).get("title")]
+        self.assertEqual(thoughts[0]["metadata"]["status"], "done")
+        self.assertEqual(status, "Stopped. The partial response was kept.")
+
+    def test_stopping_before_any_token_drops_the_empty_turn(self):
+        turns = [make_turn("user", "hi"), make_turn("assistant", "")]
+        messages, remaining, _send, _stop, status = app.stop_generation(turns)
+        self.assertEqual([turn["role"] for turn in remaining], ["user"])
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(status, "Stopped before the model produced anything.")
 
 
 class UndoTests(unittest.TestCase):
