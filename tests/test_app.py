@@ -52,8 +52,9 @@ class StubManager:
 
     loaded = True
 
-    def __init__(self, seam_verified: bool):
+    def __init__(self, seam_verified: bool = True, chat_template_missing: bool = False):
         self.seam_verified = seam_verified
+        self.chat_template_missing = chat_template_missing
 
     def score_text(self, text, *, context="", use_chat_template=False):
         log_probs = np.log(np.array([0.75, 0.25]))
@@ -67,16 +68,19 @@ class StubManager:
             decode_token=str,
         ).to_dict()
         return ScoredText(
-            context_metrics=[], metrics=[metric], seam_verified=self.seam_verified
+            context_metrics=[],
+            metrics=[metric],
+            seam_verified=self.seam_verified,
+            chat_template_missing=self.chat_template_missing,
         )
 
 
 class ScoreStatusTests(unittest.TestCase):
     """What the Score text status line promises about the numbers above it."""
 
-    def status(self, seam_verified: bool) -> str:
+    def status(self, seam_verified: bool = True, chat_template_missing: bool = False) -> str:
         original = app.MANAGER
-        app.MANAGER = StubManager(seam_verified)
+        app.MANAGER = StubManager(seam_verified, chat_template_missing)
         try:
             return app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE)[7]
         finally:
@@ -87,6 +91,7 @@ class ScoreStatusTests(unittest.TestCase):
 
         self.assertIn("Scored 1 tokens", status)
         self.assertNotIn("Approximate", status)
+        self.assertNotIn(app.TEMPLATE_CAVEAT, status)
 
     def test_an_unverifiable_seam_is_called_out(self):
         # The split had to encode the context and the text apart, so the first
@@ -97,6 +102,26 @@ class ScoreStatusTests(unittest.TestCase):
 
         self.assertIn("Scored 1 tokens", status)
         self.assertIn(app.SEAM_CAVEAT, status)
+        self.assertNotIn(app.TEMPLATE_CAVEAT, status)
+
+    def test_a_missing_chat_template_is_called_out(self):
+        # The reader ticked a box the model could not honour. The numbers are
+        # exact for what was scored, so they are shown; what they are exact
+        # about is the part that has to be said out loud.
+        status = self.status(chat_template_missing=True)
+
+        self.assertIn("Scored 1 tokens", status)
+        self.assertIn(app.TEMPLATE_CAVEAT, status)
+        self.assertNotIn(app.SEAM_CAVEAT, status)
+
+    def test_both_caveats_read_as_two_sentences(self):
+        # A tokenizer can fail both ways at once, and the line has to stay
+        # readable: the count and perplexity first, then which passage was
+        # scored, then how sure its first token is.
+        status = self.status(seam_verified=False, chat_template_missing=True)
+
+        self.assertTrue(status.startswith("Scored 1 tokens. Perplexity"))
+        self.assertTrue(status.endswith(f"{app.TEMPLATE_CAVEAT} {app.SEAM_CAVEAT}"))
 
 
 if __name__ == "__main__":

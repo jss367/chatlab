@@ -66,11 +66,18 @@ class SplitPassage(NamedTuple):
     the seam fell. The scores that come back are then off by at most the one
     token that spans the seam, and the caller is expected to say so rather
     than present them as exact.
+
+    ``chat_template_missing`` is set only where the caller asked for the
+    context to be wrapped as a chat turn and the tokenizer had no template to
+    wrap it in. The numbers are exact either way — they measure the plain
+    passage the reader typed — but they answer a different question than the
+    one the request implied, so the caller is expected to say which.
     """
 
     context_ids: list[int]
     text_ids: list[int]
     seam_verified: bool = True
+    chat_template_missing: bool = False
 
 
 def model_position_limit(model) -> int | None:
@@ -333,10 +340,23 @@ def encode_for_scoring(
     template path is the one exception: a message of pure whitespace is not a
     turn worth wrapping, so it falls through to the plain path, where the
     whitespace is still scored as the text's leading context.
+
+    A tokenizer with no chat template at all — GPT-2, say — also falls through
+    to the plain path, and ``chat_template_missing`` says so. Scoring is not
+    refused over it: the plain concatenation is exactly the characters the
+    reader typed, and its probabilities are exact measurements of that
+    passage, just not of a chat turn. Nor is the ``Role: content`` transcript
+    that chat generation falls back to used here. Generation has to invent
+    some framing to get a reply at all; scoring does not, and that transcript
+    is no more the model's own format than the raw context is, so it would
+    substitute an invention for the reader's own words and still need this
+    same caveat. What the reader gets instead is the passage they wrote, and
+    a sentence saying the turn was not applied.
     """
 
     template = getattr(tokenizer, "chat_template", None)
-    if context.strip() and use_chat_template and template:
+    wants_template = bool(context.strip()) and use_chat_template
+    if wants_template and template:
         rendered = tokenizer.apply_chat_template(
             [{"role": "user", "content": context}],
             add_generation_prompt=True,
@@ -348,7 +368,9 @@ def encode_for_scoring(
             tokenizer, rendered, text, add_special_tokens=False
         )
 
-    return split_context_and_text(tokenizer, context, text)
+    return split_context_and_text(tokenizer, context, text)._replace(
+        chat_template_missing=wants_template
+    )
 
 
 @dataclass(frozen=True)
@@ -363,14 +385,16 @@ class GenerationUpdate:
 class ScoredText:
     """Per-token measurements for text the model did not generate.
 
-    ``seam_verified`` carries :class:`SplitPassage`'s answer through to the
-    interface, which says so rather than presenting approximate numbers as
-    exact.
+    ``seam_verified`` and ``chat_template_missing`` carry
+    :class:`SplitPassage`'s answers through to the interface, which says so
+    rather than presenting approximate numbers as exact, or numbers for a
+    plain passage as numbers for a chat turn.
     """
 
     context_metrics: list[dict]
     metrics: list[dict]
     seam_verified: bool = True
+    chat_template_missing: bool = False
 
 
 class ModelManager:
@@ -740,9 +764,10 @@ class ModelManager:
             if not text:
                 raise ValueError("Enter some text to score.")
 
-            context_ids, text_ids, seam_verified = encode_for_scoring(
+            split = encode_for_scoring(
                 tokenizer, text, context=context, use_chat_template=use_chat_template
             )
+            context_ids, text_ids = split.context_ids, split.text_ids
 
             if not text_ids:
                 raise ValueError("That text did not produce any tokens.")
@@ -775,5 +800,6 @@ class ModelManager:
                 metrics=[
                     metric for metric in metrics if metric["segment"] == "response"
                 ],
-                seam_verified=seam_verified,
+                seam_verified=split.seam_verified,
+                chat_template_missing=split.chat_template_missing,
             )

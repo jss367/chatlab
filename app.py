@@ -39,6 +39,15 @@ SEAM_CAVEAT = (
     "produces."
 )
 
+# The chat-message box was ticked for a model that ships no chat template, so
+# there was no turn to wrap the context in. The numbers are exact — they are
+# the plain passage's own — but they are not the framing the box promised, and
+# the difference is the reader's to know about.
+TEMPLATE_CAVEAT = (
+    "Plain text, not a chat turn: this model has no chat template, so the "
+    "context was measured as ordinary characters in front of the text."
+)
+
 
 def status_card(title: str, detail: str, tone: str = "neutral") -> str:
     icon = {"success": "●", "error": "●", "working": "◌"}.get(tone, "○")
@@ -340,6 +349,11 @@ def score_text(
         f"Scored {summary['token_count']:,} tokens. "
         f"Perplexity {summary['perplexity']:,.1f}."
     )
+    # What was scored comes before how exactly it was scored: the template
+    # caveat says which passage the numbers describe, the seam caveat says how
+    # sure their first token is.
+    if result.chat_template_missing:
+        status = f"{status} {TEMPLATE_CAVEAT}"
     if not result.seam_verified:
         status = f"{status} {SEAM_CAVEAT}"
     return (
@@ -502,7 +516,11 @@ def build_app() -> gr.Blocks:
                         use_chat_template = gr.Checkbox(
                             value=False,
                             label="Treat the context as a chat message",
-                            info="Wraps the context in the model's chat template, so the scored text is measured as a reply.",
+                            info=(
+                                "Wraps the context in the model's chat template, so the "
+                                "scored text is measured as a reply. Models without a "
+                                "chat template score the context as plain text, and say so."
+                            ),
                         )
                         score_input = gr.Textbox(
                             label="Text to score",
