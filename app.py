@@ -263,7 +263,15 @@ def generate_reply(
     pending["reasoning_closed"] = True
     turns.append(pending)
 
-    def snapshot(highlight, metrics, status, busy=True):
+    def snapshot(highlight, metrics, status, busy=True, reset_details=False):
+        """One frame of the stream.
+
+        ``reset_details`` belongs to the first frame only. That frame empties
+        the strip, so a token selected in the previous response is gone and its
+        probabilities must go with it. Later frames only append to the strip, so
+        a token picked mid-stream stays valid and its details are left alone.
+        """
+
         messages, _ = display_messages(turns)
         return (
             prompt_text,
@@ -274,11 +282,11 @@ def generate_reply(
             status,
             used_seed,
             *send_stop_buttons(busy),
-            gr.skip(),
-            gr.skip(),
+            NO_TOKEN_SELECTED if reset_details else gr.skip(),
+            [] if reset_details else gr.skip(),
         )
 
-    yield snapshot([], [], "Generating…")
+    yield snapshot([], [], "Generating…", reset_details=True)
 
     started = time.monotonic()
     raw_text = ""

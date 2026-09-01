@@ -148,6 +148,26 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(final[DETAIL], app.NO_TOKEN_SELECTED)
         self.assertEqual(final[ALTS], [])
 
+    def test_a_new_response_resets_the_selected_token_details(self):
+        # The first frame empties the strip, so the token the user had selected
+        # in the previous response no longer exists and its probabilities must
+        # not stay on screen beside a strip that no longer contains it.
+        frames = self.last(app.chat("hi", [], *SETTINGS))
+        self.assertEqual(frames[0][STRIP], [])
+        self.assertEqual(frames[0][DETAIL], app.NO_TOKEN_SELECTED)
+        self.assertEqual(frames[0][ALTS], [])
+        # Later frames only append to the strip, so a token picked mid-stream
+        # stays valid and its details are left alone.
+        for frame in frames[1:]:
+            self.assertEqual(frame[DETAIL], gr.skip())
+            self.assertEqual(frame[ALTS], gr.skip())
+
+    def test_a_retry_resets_the_selected_token_details(self):
+        turns = [make_turn("user", "one"), make_turn("assistant", "stale")]
+        frames = self.last(app.retry_last("", turns, *SETTINGS))
+        self.assertEqual(frames[0][DETAIL], app.NO_TOKEN_SELECTED)
+        self.assertEqual(frames[0][ALTS], [])
+
     def test_a_refused_send_keeps_the_token_diagnostics(self):
         # gr.skip() leaves the previous response's panel on screen.
         final = self.last(app.chat("   ", [], *SETTINGS))[-1]
