@@ -33,6 +33,14 @@ PROMPT_SCORE_LIMIT = 1024
 # Refuse to score a wall of pasted text rather than appearing to hang.
 SCORE_TOKEN_LIMIT = 4096
 
+# Where a config keeps the length of its position table, newest name first.
+POSITION_LIMIT_ATTRIBUTES = ("max_position_embeddings", "n_positions", "n_ctx")
+
+# A window shorter than this is a mislabeled config rather than a real limit —
+# no passage worth scoring would fit — so it is ignored in favour of the flat
+# application cap.
+MIN_MODEL_POSITION_LIMIT = 16
+
 
 MODEL_ID_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$"
@@ -46,6 +54,60 @@ def validate_model_id(model_id: str) -> str:
             "Enter a Hugging Face model ID in the form organization/model-name."
         )
     return cleaned
+
+
+def model_position_limit(model) -> int | None:
+    """How many positions ``model`` says it has embeddings for, if it says.
+
+    A model with a learned position table has one row per position and nothing
+    past the last, so a longer sequence indexes off the end of it: on CPU that
+    is an ``IndexError`` raised deep inside the forward pass, and on a device
+    that does not bounds-check its gathers it is silently wrong numbers. GPT-2
+    is the everyday example, with 1,024 positions against an application cap
+    four times that.
+
+    The model's own config is the authority. A tokenizer's ``model_max_length``
+    is not consulted: it is routinely a sentinel or a stale copy of a limit the
+    weights do not share, and trusting it would refuse passages that work.
+
+    A config that does not say, or says something too short or too broken to be
+    a real window, returns ``None`` so the caller keeps the flat cap rather than
+    blocking a model that would have run.
+    """
+
+    config = getattr(model, "config", None)
+    if config is None:
+        return None
+
+    # Multimodal configs keep the language model's window one level down, and
+    # that inner window is the one the scored tokens are laid out against.
+    try:
+        config = config.get_text_config() or config
+    except (AttributeError, TypeError, ValueError):
+        pass
+
+    for name in POSITION_LIMIT_ATTRIBUTES:
+        value = getattr(config, name, None)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            limit = int(value)
+        except (TypeError, ValueError):
+            continue
+        if limit >= MIN_MODEL_POSITION_LIMIT:
+            return limit
+    return None
+
+
+def score_token_limit(model) -> int:
+    """The most tokens ``model`` can be asked to score in one pass.
+
+    ``SCORE_TOKEN_LIMIT`` keeps the application responsive; the model's own
+    context window keeps the request runnable. The tighter of the two wins.
+    """
+
+    window = model_position_limit(model)
+    return SCORE_TOKEN_LIMIT if window is None else min(SCORE_TOKEN_LIMIT, window)
 
 
 def _split_by_decoding(
@@ -655,10 +717,16 @@ class ModelManager:
                 raise ValueError("That text did not produce any tokens.")
 
             token_ids = context_ids + text_ids
-            if len(token_ids) > SCORE_TOKEN_LIMIT:
+            limit = score_token_limit(self.model)
+            if len(token_ids) > limit:
+                ceiling = (
+                    f"the {limit:,} token limit for scoring"
+                    if limit >= SCORE_TOKEN_LIMIT
+                    else f"the {limit:,} positions this model can attend to"
+                )
                 raise ValueError(
-                    f"That is {len(token_ids):,} tokens, above the {SCORE_TOKEN_LIMIT:,} "
-                    "token limit for scoring. Score it in smaller pieces."
+                    f"That is {len(token_ids):,} tokens, above {ceiling}. "
+                    "Score it in smaller pieces."
                 )
 
             metrics, _, _ = self._prefill(

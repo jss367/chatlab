@@ -2,8 +2,11 @@ import re
 import unittest
 
 from model_runtime import (
+    MIN_MODEL_POSITION_LIMIT,
+    SCORE_TOKEN_LIMIT,
     ModelManager,
     encode_for_scoring,
+    score_token_limit,
     split_context_and_text,
     validate_model_id,
 )
@@ -345,6 +348,66 @@ class ScoringEncodeTests(unittest.TestCase):
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
 
 
+class Config:
+    """The one thing ``score_token_limit`` reads off a loaded model."""
+
+    def __init__(self, **attributes):
+        self.__dict__.update(attributes)
+
+    def get_text_config(self):
+        return self
+
+
+class Model:
+    def __init__(self, config=None):
+        self.config = config
+
+
+class ScoreTokenLimitTests(unittest.TestCase):
+    """The scoring cap, worked out without running a forward pass."""
+
+    def test_a_short_context_window_caps_the_flat_limit(self):
+        # GPT-2 has 1,024 position embeddings; feeding it more indexes off the
+        # end of that table instead of raising anything a reader can act on.
+        limit = score_token_limit(Model(Config(max_position_embeddings=1024)))
+
+        self.assertEqual(limit, 1024)
+
+    def test_a_long_context_window_leaves_the_flat_limit_alone(self):
+        limit = score_token_limit(Model(Config(max_position_embeddings=131072)))
+
+        self.assertEqual(limit, SCORE_TOKEN_LIMIT)
+
+    def test_an_older_config_spelling_is_read_too(self):
+        limit = score_token_limit(Model(Config(n_positions=512)))
+
+        self.assertEqual(limit, 512)
+
+    def test_a_config_that_does_not_say_keeps_the_flat_limit(self):
+        # A model that carries no position table — or one whose config simply
+        # does not name its window — would otherwise be blocked outright.
+        for model in (Model(), Model(Config()), object()):
+            with self.subTest(model=model):
+                self.assertEqual(score_token_limit(model), SCORE_TOKEN_LIMIT)
+
+    def test_an_absurd_window_keeps_the_flat_limit(self):
+        # None of these can be a real window, and honouring them would refuse
+        # every passage on a model that would have run fine.
+        for value in (0, -1, "lots", None, True, MIN_MODEL_POSITION_LIMIT - 1):
+            with self.subTest(value=value):
+                model = Model(Config(max_position_embeddings=value))
+                self.assertEqual(score_token_limit(model), SCORE_TOKEN_LIMIT)
+
+    def test_a_multimodal_config_uses_its_language_window(self):
+        # The scored tokens are laid out against the text tower, so its window
+        # is the one that matters.
+        text = Config(max_position_embeddings=2048)
+        wrapper = Config(max_position_embeddings=131072)
+        wrapper.get_text_config = lambda: text
+
+        self.assertEqual(score_token_limit(Model(wrapper)), 2048)
+
+
 class ScoreTextGuardTests(unittest.TestCase):
     """What ``score_text`` refuses, decided before any tensor is built."""
 
@@ -385,6 +448,29 @@ class ScoreTextGuardTests(unittest.TestCase):
         )
         self.assertEqual(len(result.metrics), 1)
         self.assertTrue(result.metrics[0]["scored"])
+
+    def test_a_passage_past_the_model_window_is_refused_by_name(self):
+        # The flat cap is not the only ceiling: a model with a shorter
+        # position table has to say so here, because saying it after the fact
+        # means an IndexError from inside the forward pass.
+        manager = self.manager()
+        manager.model = Model(Config(max_position_embeddings=32))
+
+        with self.assertRaises(ValueError) as caught:
+            manager.score_text(" ".join(str(number) for number in range(64)))
+
+        self.assertIn("32 positions", str(caught.exception))
+        self.assertEqual(self.prefilled, [])
+
+    def test_a_roomy_model_still_refuses_at_the_flat_limit(self):
+        manager = self.manager()
+        manager.model = Model(Config(max_position_embeddings=131072))
+
+        with self.assertRaises(ValueError) as caught:
+            manager.score_text(" ".join(str(number) for number in range(4096)))
+
+        self.assertIn(f"{SCORE_TOKEN_LIMIT:,} token limit", str(caught.exception))
+        self.assertEqual(self.prefilled, [])
 
     def test_text_that_tokenizes_to_nothing_still_says_so(self):
         # The narrowed guard hands this case to the ``text_ids`` check, which
