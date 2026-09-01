@@ -333,6 +333,46 @@ class UndoTests(unittest.TestCase):
         self.assertEqual(result[2], [])
 
 
+class ClearCancelsGenerationTests(unittest.TestCase):
+    """Clear has to stop the generator before it empties the conversation.
+
+    A surviving ``generate_reply`` owns a private copy of the in-progress turns
+    and writes it back to the chatbot and the state on its next yield, which
+    would resurrect the conversation that was just cleared.
+    """
+
+    def cancelled_by(self, demo, name):
+        """Event indices that the listener triggering ``name`` cancels."""
+
+        trigger = next(
+            fn.targets[0]
+            for fn in demo.fns.values()
+            if getattr(fn.fn, "__name__", None) == name
+        )
+        return {
+            index
+            for fn in demo.fns.values()
+            if fn.targets == [trigger]
+            for index in fn.cancels
+        }
+
+    def test_clear_cancels_the_same_events_as_stop(self):
+        demo = app.build_app()
+        stopped = self.cancelled_by(demo, "stop_generation")
+        self.assertTrue(stopped, "Stop no longer cancels the running generators")
+        self.assertEqual(self.cancelled_by(demo, "clear_chat"), stopped)
+
+    def test_clear_restores_the_send_button(self):
+        # Cancelling means generate_reply never reaches its final yield, so
+        # Clear has to swap the buttons back itself.
+        result = app.clear_chat()
+        self.assertEqual(len(result), 9)
+        self.assertEqual(result[5], gr.update(visible=True))
+        self.assertEqual(result[6], gr.update(visible=False))
+        self.assertEqual(result[7], app.NO_TOKEN_SELECTED)
+        self.assertEqual(result[8], [])
+
+
 class SaveLoadTests(unittest.TestCase):
     def test_save_then_load_round_trips(self):
         turns = [make_turn("user", "hi"), make_turn("assistant", "there", "thought")]

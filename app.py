@@ -497,13 +497,21 @@ def undo_message(event: gr.UndoData, turns):
 
 
 def clear_chat():
+    """Empty everything the conversation owns.
+
+    Clear cancels a running generation (see ``cancels`` on its listener), and a
+    cancelled ``generate_reply`` never reaches its final yield, so this has to
+    restore the Send button itself exactly as Stop does.
+    """
+
     return (
         [],
         [],
         [],
         [],
         "Conversation cleared.",
-        "Select a generated token to inspect it.",
+        *send_stop_buttons(False),
+        NO_TOKEN_SELECTED,
         [],
     )
 
@@ -760,6 +768,9 @@ def build_app() -> gr.Blocks:
 
         undo_button.click(undo_last, conversation_state, undo_outputs)
         chatbot.undo(undo_message, conversation_state, undo_outputs)
+        # Clearing has to stop the generator first: a surviving generate_reply
+        # would write its own snapshot of the in-progress turns back into the
+        # chatbot and the state, resurrecting the conversation just cleared.
         clear_button.click(
             clear_chat,
             outputs=[
@@ -768,9 +779,12 @@ def build_app() -> gr.Blocks:
                 token_strip,
                 metrics_state,
                 generation_status,
+                send_button,
+                stop_button,
                 token_detail,
                 alternatives,
             ],
+            cancels=running,
         )
 
         save_button.click(
