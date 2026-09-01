@@ -46,6 +46,49 @@ def validate_model_id(model_id: str) -> str:
     return cleaned
 
 
+def split_context_and_text(tokenizer, context: str, text: str) -> tuple[list[int], list[int]]:
+    """Tokenize ``context + text`` as one passage, then split at the seam.
+
+    Encoding the two halves separately can give a different sequence from
+    encoding the passage the reader actually sees: BPE and SentencePiece merge
+    across the seam, and a leading space or start-of-string rule can change the
+    first scored token. Scoring the concatenation of two independent encodings
+    would therefore report ranks for a sequence the text never produces.
+
+    A token that straddles the seam covers characters from both halves; it is
+    counted as part of the scored text, so every character of ``text`` is
+    covered by a token that gets measured. Special tokens carry an empty
+    ``(0, 0)`` span and so stay on the context side.
+
+    Slow tokenizers cannot report offsets, so those fall back to encoding each
+    half on its own.
+    """
+
+    if getattr(tokenizer, "is_fast", False):
+        try:
+            encoded = tokenizer(context + text, return_offsets_mapping=True)
+            ids = [int(value) for value in encoded["input_ids"]]
+            offsets = list(encoded["offset_mapping"])
+        except (NotImplementedError, KeyError, TypeError, ValueError):
+            ids, offsets = [], []
+        if ids and len(offsets) == len(ids):
+            seam = len(context)
+            split = next(
+                (
+                    index
+                    for index, (_, end) in enumerate(offsets)
+                    if int(end) > seam
+                ),
+                len(ids),
+            )
+            return ids[:split], ids[split:]
+
+    return (
+        [int(value) for value in tokenizer(context).input_ids],
+        [int(value) for value in tokenizer(text, add_special_tokens=False).input_ids],
+    )
+
+
 @dataclass(frozen=True)
 class GenerationUpdate:
     text: str
@@ -419,24 +462,26 @@ class ModelManager:
             if not text.strip():
                 raise ValueError("Enter some text to score.")
 
-            if context.strip():
-                if use_chat_template and tokenizer.chat_template:
-                    context_ids = tokenizer.apply_chat_template(
-                        [{"role": "user", "content": context}],
-                        add_generation_prompt=True,
-                        tokenize=True,
-                    )
-                    if context_ids and isinstance(context_ids[0], (list, tuple)):
-                        context_ids = context_ids[0]
-                else:
-                    context_ids = tokenizer(context).input_ids
+            if context.strip() and use_chat_template and tokenizer.chat_template:
+                # The template ends in the generation prompt, so the seam falls
+                # on a special token boundary and the two halves cannot merge.
+                context_ids = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": context}],
+                    add_generation_prompt=True,
+                    tokenize=True,
+                )
+                if context_ids and isinstance(context_ids[0], (list, tuple)):
+                    context_ids = context_ids[0]
+                context_ids = [int(value) for value in context_ids]
+                text_ids = [
+                    int(value)
+                    for value in tokenizer(text, add_special_tokens=False).input_ids
+                ]
             else:
-                context_ids = tokenizer("").input_ids
+                context_ids, text_ids = split_context_and_text(
+                    tokenizer, context if context.strip() else "", text
+                )
 
-            context_ids = [int(value) for value in context_ids]
-            text_ids = [
-                int(value) for value in tokenizer(text, add_special_tokens=False).input_ids
-            ]
             if not text_ids:
                 raise ValueError("That text did not produce any tokens.")
 
