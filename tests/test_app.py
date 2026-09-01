@@ -1,4 +1,6 @@
+import time
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -128,3 +130,165 @@ class ScoreStatusTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DownloadCardTests(unittest.TestCase):
+    """What the model panel says while a download runs, and after."""
+
+    def setUp(self):
+        self.original = app.MANAGER
+        self.original_poll = app.DOWNLOAD_POLL_SECONDS
+        app.DOWNLOAD_POLL_SECONDS = 0.01
+        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.addCleanup(setattr, app, "DOWNLOAD_POLL_SECONDS", self.original_poll)
+
+    def test_bytes_are_shown_in_decimal_units(self):
+        self.assertEqual(app.format_bytes(512), "512 B")
+        self.assertEqual(app.format_bytes(1_500_000), "1.5 MB")
+        self.assertEqual(app.format_bytes(14_600_000_000), "14.6 GB")
+
+    def test_durations_read_as_estimates(self):
+        self.assertEqual(app.describe_duration(30), "under a minute")
+        self.assertEqual(app.describe_duration(60), "about 1 minute")
+        self.assertEqual(app.describe_duration(4 * 60 + 20), "about 4 minutes")
+        self.assertEqual(app.describe_duration(3600 + 10 * 60), "about 1 hour 10 minutes")
+
+    def test_the_detail_shows_progress_speed_and_time_left(self):
+        snap = app.DownloadSnapshot(
+            files_done=14, files_total=17, bytes_done=4_000_000_000, bytes_total=16_000_000_000
+        )
+
+        detail = app.download_detail("org/model", snap, rate=50_000_000)
+
+        self.assertIn("25%", detail)
+        self.assertIn("4.0 GB of 16.0 GB", detail)
+        self.assertIn("14 of 17 files", detail)
+        self.assertIn("50.0 MB/s", detail)
+        self.assertIn("about 4 minutes left", detail)
+        self.assertIn("█", detail)
+
+    def test_the_detail_explains_the_wait_before_the_file_list_arrives(self):
+        detail = app.download_detail("org/model", app.DownloadSnapshot(), rate=None)
+
+        self.assertIn("Asking Hugging Face", detail)
+        self.assertNotIn("%", detail)
+
+    def test_the_rate_meter_measures_from_the_first_bytes_not_from_zero(self):
+        clock = iter([0.0, 1.0, 2.0, 4.0])
+        meter = app.RateMeter(window=100.0, clock=lambda: next(clock))
+
+        self.assertIsNone(meter.rate(0))
+        # A resumed download credits everything already on disk at once.
+        self.assertIsNone(meter.rate(5_000_000_000))
+        self.assertIsNone(meter.rate(5_000_000_000), "no bytes moved yet")
+        self.assertAlmostEqual(meter.rate(5_000_000_300), 100.0)
+
+    def test_the_download_card_updates_until_the_download_ends(self):
+        class Manager:
+            active_downloads = {}
+
+            def download(self, model_id, token, progress):
+                bar = progress.bar_class()
+                files = bar(desc="Fetching 2 files", total=2)
+                rebuild = bar(desc="Reconstructing", total=0, unit="B")
+                rebuild.total = 100
+                for _ in range(2):
+                    time.sleep(0.03)
+                    rebuild.update(50)
+                    files.update(1)
+                return Path("/cache/snap")
+
+        app.MANAGER = Manager()
+
+        frames = list(app.download_model("org/model", ""))
+
+        self.assertIn("Downloading model", frames[0])
+        self.assertIn("Asking Hugging Face", frames[0])
+        self.assertTrue(
+            any("% " in frame or "%\n" in frame for frame in frames[1:-1]),
+            frames,
+        )
+        self.assertIn("Download complete", frames[-1])
+        self.assertIn("/cache/snap", frames[-1])
+        self.assertIn("Load cached", frames[-1])
+
+    def test_a_failed_download_is_reported_on_the_card(self):
+        class Manager:
+            active_downloads = {}
+
+            def download(self, model_id, token, progress):
+                raise OSError("no network")
+
+        app.MANAGER = Manager()
+
+        frames = list(app.download_model("org/model", ""))
+
+        self.assertIn("Download failed", frames[-1])
+        self.assertIn("no network", frames[-1])
+
+    def test_a_second_request_follows_the_download_already_running(self):
+        progress = app.DownloadProgress()
+        rebuild = progress.bar_class()(desc="Reconstructing", total=1000, unit="B")
+        rebuild.update(250)
+        progress.bar_class()(desc="Fetching 1 files", total=1)
+        calls = []
+
+        class Manager:
+            active_downloads = {"org/model": progress}
+
+            def download(self, model_id, token, progress):
+                calls.append(model_id)
+                return Path("/cache/snap")
+
+        app.MANAGER = Manager()
+        frames = []
+        for frame in app.download_model("org/model", ""):
+            frames.append(frame)
+            if len(frames) == 2:
+                # The other handler's download finishes.
+                app.MANAGER.active_downloads.clear()
+
+        self.assertIn("25%", frames[0])
+        self.assertEqual(calls, ["org/model"], "one quick pass over the cached files")
+        self.assertIn("Download complete", frames[-1])
+
+    def test_load_cached_while_downloading_points_at_the_running_download(self):
+        progress = app.DownloadProgress()
+        rebuild = progress.bar_class()(desc="Reconstructing", total=16_000_000_000, unit="B")
+        rebuild.update(4_000_000_000)
+
+        class Manager:
+            active_downloads = {"org/model": progress}
+
+        app.MANAGER = Manager()
+
+        frames = list(app.load_cached_model("org/model"))
+
+        self.assertEqual(len(frames), 1)
+        self.assertIn("Still downloading", frames[0])
+        self.assertIn("4.0 GB of 16.0 GB", frames[0])
+        self.assertIn("Download and load", frames[0])
+
+    def test_load_cached_on_a_partial_snapshot_says_how_to_finish_it(self):
+        class Manager:
+            active_downloads = {}
+
+            def find_cached(self, model_id):
+                raise app.IncompleteSnapshotError(
+                    "The cached snapshot for 'org/model' (revision 'main', commit abc) is "
+                    "incomplete: 3 file(s) are missing (model-00001-of-00003.safetensors, "
+                    "model-00002-of-00003.safetensors, model-00003-of-00003.safetensors). "
+                    "Outgoing traffic is disabled ('local_files_only=True'). Re-run the "
+                    "download with network access to complete the snapshot.",
+                    snapshot_path="/cache/snapshots/abc",
+                )
+
+        app.MANAGER = Manager()
+
+        frames = list(app.load_cached_model("org/model"))
+
+        self.assertIn("Download unfinished", frames[-1])
+        self.assertIn("3 files still missing", frames[-1])
+        self.assertIn("model-00003-of-00003.safetensors", frames[-1])
+        self.assertIn("Download and load", frames[-1])
+        self.assertNotIn("local_files_only", frames[-1])

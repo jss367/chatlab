@@ -977,3 +977,90 @@ class UnverifiedSeamTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DownloadProgressTests(unittest.TestCase):
+    """The silent tqdm hands ``snapshot_download`` reports what a reader needs."""
+
+    def bars(self):
+        # The three bars snapshot_download builds, with the arguments it uses.
+        from model_runtime import DownloadProgress
+
+        progress = DownloadProgress()
+        cls = progress.bar_class()
+        files = cls(desc="Fetching 3 files", total=3)
+        transfer = cls(
+            desc="Downloading bytes", total=0, initial=0, unit="B", unit_scale=True
+        )
+        rebuild = cls(
+            desc="Reconstructing (incomplete total...)", total=0, unit="B", unit_scale=True
+        )
+        return progress, files, transfer, rebuild
+
+    def test_nothing_is_started_before_the_file_list_arrives(self):
+        from model_runtime import DownloadProgress
+
+        snap = DownloadProgress().snapshot()
+
+        self.assertFalse(snap.started)
+        self.assertEqual(snap.fraction, 0.0)
+
+    def test_files_and_bytes_are_read_from_the_bars(self):
+        progress, files, transfer, rebuild = self.bars()
+        # Each file grows both byte totals as its size becomes known.
+        for bar in (transfer, rebuild):
+            bar.total = (bar.total or 0) + 1000
+        # A resumed file credits its on-disk bytes to reconstruction alone.
+        rebuild.update(400)
+        transfer.update(250)
+        rebuild.update(250)
+        files.update(1)
+
+        snap = progress.snapshot()
+
+        self.assertTrue(snap.started)
+        self.assertEqual((snap.files_done, snap.files_total), (1, 3))
+        self.assertEqual((snap.bytes_done, snap.bytes_total), (650, 1000))
+        self.assertAlmostEqual(snap.fraction, 0.65)
+
+    def test_the_bars_never_draw(self):
+        _, files, transfer, rebuild = self.bars()
+        for bar in (files, transfer, rebuild):
+            self.assertTrue(bar.disable)
+        # tqdm's context-manager protocol is what hf_thread_map drives.
+        with files as entered:
+            entered.update(1)
+        self.assertEqual(files.n, 1)
+
+    def test_the_manager_registers_the_download_while_it_runs(self):
+        from unittest import mock
+
+        manager = ModelManager()
+        seen = {}
+
+        def fake_snapshot_download(repo_id, token, tqdm_class):
+            seen["active"] = dict(manager.active_downloads)
+            tqdm_class(desc="Fetching 1 files", total=1).update(1)
+            return "/cache/snapshots/abc"
+
+        with mock.patch("huggingface_hub.snapshot_download", fake_snapshot_download):
+            path = manager.download(" org/model ", " tok ")
+
+        self.assertEqual(str(path), "/cache/snapshots/abc")
+        self.assertEqual(list(seen["active"]), ["org/model"])
+        self.assertEqual(seen["active"]["org/model"].snapshot().files_done, 1)
+        self.assertEqual(manager.active_downloads, {}, "cleared when the download ends")
+
+    def test_the_registration_is_cleared_when_the_download_fails(self):
+        from unittest import mock
+
+        manager = ModelManager()
+
+        def failing(**kwargs):
+            raise OSError("offline")
+
+        with mock.patch("huggingface_hub.snapshot_download", failing):
+            with self.assertRaises(OSError):
+                manager.download("org/model")
+
+        self.assertEqual(manager.active_downloads, {})

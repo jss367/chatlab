@@ -713,6 +713,96 @@ class ScoredText:
     chat_template_missing: bool = False
 
 
+class DownloadSnapshot(NamedTuple):
+    """One reading of a download: how many files and bytes are in, out of how many.
+
+    ``bytes_total`` covers only files that need fetching; a file already in the
+    cache finishes without ever reporting a size, so it counts in ``files_*``
+    alone.
+    """
+
+    files_done: int = 0
+    files_total: int = 0
+    bytes_done: int = 0
+    bytes_total: int = 0
+
+    @property
+    def started(self) -> bool:
+        """Whether the Hub has answered with the file list yet."""
+
+        return self.files_total > 0
+
+    @property
+    def fraction(self) -> float:
+        if self.bytes_total <= 0:
+            return 0.0
+        return min(1.0, self.bytes_done / self.bytes_total)
+
+
+class DownloadProgress:
+    """Live totals for one snapshot download, safe to read from another thread.
+
+    ``snapshot_download`` reports through tqdm rather than callbacks: one bar
+    over files advances as each finishes, and two byte bars (network transfer
+    and bytes reconstructed on disk) grow their ``total`` as each file learns
+    its size. :meth:`bar_class` gives it a silent tqdm that records those
+    numbers here instead of drawing them.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._bars: list = []
+
+    def bar_class(self) -> type:
+        """A tqdm class for ``snapshot_download(tqdm_class=...)`` that reports here."""
+
+        from huggingface_hub.utils import tqdm as hub_tqdm
+
+        progress = self
+
+        class RecordingBar(hub_tqdm):
+            def __init__(self, *args, **kwargs) -> None:
+                self.counts_bytes = kwargs.get("unit") == "B"
+                # A disabled bar never writes to the terminal, and tqdm's own
+                # update() drops the count on the floor for one, so it is kept
+                # here instead.
+                kwargs["disable"] = True
+                super().__init__(*args, **kwargs)
+                progress._register(self)
+
+            def update(self, n=1) -> None:
+                if n:
+                    with progress._lock:
+                        self.n += n
+
+        return RecordingBar
+
+    def _register(self, bar) -> None:
+        with self._lock:
+            self._bars.append(bar)
+
+    def snapshot(self) -> DownloadSnapshot:
+        with self._lock:
+            bars = list(self._bars)
+            files_done = files_total = 0
+            bytes_done = bytes_total = 0
+            for bar in bars:
+                count = int(bar.n or 0)
+                total = int(bar.total or 0)
+                if bar.counts_bytes:
+                    # Transfer and reconstruction count the same bytes from
+                    # the two ends of the pipe. Whichever is further along is
+                    # the truer picture: a resumed file's on-disk bytes are
+                    # credited to reconstruction only, and network bytes lead
+                    # the disk for the rest.
+                    bytes_done = max(bytes_done, count)
+                    bytes_total = max(bytes_total, total)
+                else:
+                    files_done += count
+                    files_total += total
+        return DownloadSnapshot(files_done, files_total, bytes_done, bytes_total)
+
+
 class ModelManager:
     """Own the single in-memory model used by the local application."""
 
@@ -722,6 +812,10 @@ class ModelManager:
         self.model_id: str | None = None
         self.local_path: Path | None = None
         self.device_name: str | None = None
+        # Downloads under way right now, by model ID, so a second request for
+        # the same model can follow the first instead of racing it for the
+        # same files.
+        self.active_downloads: dict[str, DownloadProgress] = {}
         self._lock = threading.RLock()
         # A separate, non-reentrant flag for "a generation is running right
         # now". The model lock cannot answer that question: it is reentrant
@@ -773,15 +867,48 @@ class ModelManager:
 
         self._generating.release()
 
-    def download(self, model_id: str, hf_token: str | None = None) -> Path:
+    def download(
+        self,
+        model_id: str,
+        hf_token: str | None = None,
+        progress: DownloadProgress | None = None,
+    ) -> Path:
+        """Fetch ``model_id`` into the Hugging Face cache and return its snapshot.
+
+        Blocks until the last byte; ``progress`` is how a caller on another
+        thread watches it happen. Files already cached are skipped, and a
+        partial file left by an interrupted download is resumed.
+        """
+
         from huggingface_hub import snapshot_download
 
         checked_id = validate_model_id(model_id)
-        path = snapshot_download(
-            repo_id=checked_id,
-            token=hf_token.strip() if hf_token and hf_token.strip() else None,
-        )
+        progress = progress or DownloadProgress()
+        self.active_downloads[checked_id] = progress
+        try:
+            path = snapshot_download(
+                repo_id=checked_id,
+                token=hf_token.strip() if hf_token and hf_token.strip() else None,
+                tqdm_class=progress.bar_class(),
+            )
+        finally:
+            if self.active_downloads.get(checked_id) is progress:
+                del self.active_downloads[checked_id]
         return Path(path)
+
+    def find_cached(self, model_id: str) -> Path:
+        """The complete local snapshot of ``model_id``, without going online.
+
+        Raises ``huggingface_hub.errors.IncompleteSnapshotError`` when the
+        snapshot folder exists but files are missing from it, which is what an
+        interrupted or still-running download leaves behind.
+        """
+
+        from huggingface_hub import snapshot_download
+
+        return Path(
+            snapshot_download(repo_id=validate_model_id(model_id), local_files_only=True)
+        )
 
     def load(self, model_id: str, local_path: Path) -> str:
         import torch
