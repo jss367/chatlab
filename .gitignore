@@ -1,4 +1,7 @@
 .venv/
+.desktop-venv/
 __pycache__/
 *.pyc
+build/
+dist/
 .conductor/settings.local.toml

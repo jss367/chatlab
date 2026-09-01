@@ -16,6 +16,24 @@ The default model is [`allenai/Olmo-3-7B-Think`](https://huggingface.co/allenai/
 
 ## Run it
 
+### As a macOS application
+
+Build the native desktop application on an Apple Silicon or Intel Mac:
+
+```bash
+./scripts/build_macos_app.sh
+```
+
+The finished application is `dist/ChatLab.app`. Open it directly or drag it to
+your Applications folder. ChatLab opens in its own native window and stops its
+local server when you quit. The app bundle contains Python and its runtime
+dependencies, so it does not need a separate Python installation.
+
+Model weights are intentionally not included in the application. Models are
+downloaded on first use and remain in the standard Hugging Face cache, which
+keeps the app bundle manageable and lets terminal and desktop launches reuse the
+same downloads.
+
 ### In Conductor
 
 Create a workspace for this repository. Its setup script creates the Python environment and installs the dependencies. Use the **olmo-token-explorer** action to start the app on the workspace's assigned port.
