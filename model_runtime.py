@@ -521,7 +521,12 @@ class ModelManager:
 
             assert self.tokenizer is not None
             tokenizer = self.tokenizer
-            if not text.strip():
+            # Whitespace is worth measuring: how expected a paragraph break or
+            # an indent was is a real question for a token explorer, and the
+            # tokenizer turns those characters into ordinary tokens. Only a
+            # genuinely empty box is rejected here; text that tokenizes to
+            # nothing is caught by the ``text_ids`` check below.
+            if not text:
                 raise ValueError("Enter some text to score.")
 
             context_ids, text_ids = encode_for_scoring(

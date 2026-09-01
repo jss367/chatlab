@@ -2,6 +2,7 @@ import re
 import unittest
 
 from model_runtime import (
+    ModelManager,
     encode_for_scoring,
     split_context_and_text,
     validate_model_id,
@@ -190,6 +191,65 @@ class ScoringEncodeTests(unittest.TestCase):
 
         self.assertEqual(context_ids, [0, tokenizer.vocab[" "]])
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
+
+
+class ScoreTextGuardTests(unittest.TestCase):
+    """What ``score_text`` refuses, decided before any tensor is built."""
+
+    def manager(self) -> ModelManager:
+        manager = ModelManager()
+        manager.model = object()
+        manager.tokenizer = FakeTokenizer()
+        self.prefilled: list[int] = []
+
+        def fake_prefill(token_ids, *, segments, positions, score_from, collect):
+            self.prefilled = list(token_ids)
+            return (
+                [
+                    {"segment": segment, "position": position, "scored": index >= score_from}
+                    for index, (segment, position) in enumerate(zip(segments, positions))
+                ],
+                None,
+                None,
+            )
+
+        manager._prefill = fake_prefill
+        return manager
+
+    def test_an_empty_box_is_rejected(self):
+        with self.assertRaises(ValueError) as caught:
+            self.manager().score_text("")
+
+        self.assertIn("Enter some text", str(caught.exception))
+
+    def test_whitespace_only_text_is_scored_not_rejected(self):
+        # How expected a paragraph break was is a real question to put to the
+        # model, and the tokenizer turns those newlines into ordinary tokens.
+        manager = self.manager()
+        result = manager.score_text("\n\n", context="the end.")
+
+        self.assertEqual(
+            self.prefilled[-1], manager.tokenizer.vocab["\n\n"]
+        )
+        self.assertEqual(len(result.metrics), 1)
+        self.assertTrue(result.metrics[0]["scored"])
+
+    def test_text_that_tokenizes_to_nothing_still_says_so(self):
+        # The narrowed guard hands this case to the ``text_ids`` check, which
+        # is the one that knows the tokenizer dropped the input.
+        class DropsEverything(FakeTokenizer):
+            def __call__(self, text, **kwargs):
+                encoding = Encoding(input_ids=[])
+                if kwargs.get("return_offsets_mapping"):
+                    encoding["offset_mapping"] = []
+                return encoding
+
+        manager = self.manager()
+        manager.tokenizer = DropsEverything()
+        with self.assertRaises(ValueError) as caught:
+            manager.score_text(" ")
+
+        self.assertIn("did not produce any tokens", str(caught.exception))
 
 
 if __name__ == "__main__":
