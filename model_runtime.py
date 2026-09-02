@@ -94,9 +94,13 @@ def validate_model_id(model_id: str) -> str:
 # an index or a weights file there is no way to know what the repo would ship.
 MODEL_WEIGHTS = "model weights"
 
-# A causal LM's weights come as one of these, or as the shards its index lists.
-WEIGHT_FILES = ("model.safetensors", "pytorch_model.bin")
-WEIGHT_INDEXES = ("model.safetensors.index.json", "pytorch_model.bin.index.json")
+# A causal LM's weights come as a single file or as the shards an index lists,
+# in one of these formats. ``from_pretrained`` looks for them in this order and
+# loads the first it finds, so a snapshot is judged by that format alone.
+WEIGHT_FORMATS = (
+    ("model.safetensors", "model.safetensors.index.json"),
+    ("pytorch_model.bin", "pytorch_model.bin.index.json"),
+)
 
 
 @dataclass(frozen=True)
@@ -171,9 +175,9 @@ def missing_files(snapshot: Path | None) -> tuple[str, ...]:
     missing = []
     if not (snapshot / "config.json").is_file():
         missing.append("config.json")
-    if any((snapshot / name).is_file() for name in WEIGHT_FILES):
-        return tuple(missing)
-    for index_name in WEIGHT_INDEXES:
+    for single, index_name in WEIGHT_FORMATS:
+        if (snapshot / single).is_file():
+            return tuple(missing)
         index = snapshot / index_name
         if not index.is_file():
             continue

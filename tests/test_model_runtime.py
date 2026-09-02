@@ -190,6 +190,36 @@ class CacheStatusTests(unittest.TestCase):
         self.assertEqual(status.missing_files, ("b.st",))
         self.assertEqual(status.partial_files, 1)
 
+    def test_safetensors_shards_are_judged_before_a_complete_bin_fallback(self):
+        """``from_pretrained`` loads the safetensors checkpoint when one is
+        there, so a finished ``pytorch_model.bin`` does not make up for a
+        safetensors shard that never arrived."""
+
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(
+                root,
+                {
+                    "config.json": b"{}",
+                    "pytorch_model.bin": b"x" * 100,
+                    "model.safetensors.index.json": self.shard_index("a.st", "b.st"),
+                    "a.st": b"x",
+                },
+            )
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertFalse(status.complete)
+        self.assertEqual(status.missing_files, ("b.st",))
+
+    def test_a_bin_only_repo_is_complete(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(
+                root, {"config.json": b"{}", "pytorch_model.bin": b"x" * 100}
+            )
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertTrue(status.complete)
+        self.assertEqual(status.missing_files, ())
+
     def test_partial_blobs_are_counted_apart_from_finished_ones(self):
         with tempfile.TemporaryDirectory() as root:
             blobs = self.folder(root)
