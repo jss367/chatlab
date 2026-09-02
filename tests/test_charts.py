@@ -87,3 +87,84 @@ class SummaryTileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def insight(layers=4, tokens=5, decided_at=2, attention=True):
+    # ``decided_at=None`` is a token the model never put first.
+    threshold = layers + 1 if decided_at is None else decided_at
+    rows = [
+        {
+            "layer": layer,
+            "probability": 0.1 if layer < threshold else 0.9,
+            "rank": 3 if layer < threshold else 1,
+            "entropy_bits": 2.0,
+            "top_id": 7 if layer < threshold else 3,
+            "top_text": " cat" if layer < threshold else " dog",
+            "top_probability": 0.5,
+        }
+        for layer in range(layers + 1)
+    ]
+    weights = []
+    if attention:
+        for layer in range(layers):
+            row = [0.1] * tokens
+            row[0] = 0.5
+            row[min(layer + 1, tokens - 1)] += 0.3
+            weights.append([value / sum(row) for value in row])
+    return {
+        "index": tokens,
+        "token_id": 3,
+        "token_text": " dog",
+        "layers": rows,
+        "tokens": [
+            {"index": i, "token_id": i, "text": f"t{i}" if i else "<s>", "fallback": "", "segment": "prompt" if i < 2 else "response"}
+            for i in range(tokens)
+        ],
+        "attention": weights,
+        "decided_at": decided_at,
+    }
+
+
+class LogitLensChartTests(unittest.TestCase):
+    def test_an_empty_insight_shows_the_hint(self):
+        self.assertEqual(charts.logit_lens_chart({}), charts.EMPTY_LENS)
+
+    def test_one_table_row_per_reading_and_the_deciding_layer_is_named(self):
+        svg = charts.logit_lens_chart(insight(layers=4, decided_at=2))
+        self.assertEqual(svg.count("<tr"), 1 + 5)
+        self.assertIn("first choice from layer 2", svg)
+        self.assertIn("embeddings", svg)
+        self.assertIn("output (layer 4)", svg)
+        self.assertIn("&#x27; cat&#x27;", svg)
+
+    def test_a_token_never_chosen_says_so(self):
+        svg = charts.logit_lens_chart(insight(decided_at=None))
+        self.assertIn("never the first choice", svg)
+
+
+class AttentionStripTests(unittest.TestCase):
+    def test_a_span_per_visible_token_plus_the_predicted_one(self):
+        html = charts.attention_strip(insight(tokens=5), 0)
+        self.assertEqual(html.count('class="attn-token'), 6)
+        self.assertEqual(html.count("attn-query"), 1)
+        self.assertEqual(html.count("attn-predicted"), 1)
+        self.assertIn("mean of all layers", html)
+        self.assertIn("The first token takes 42%", html)
+
+    def test_a_single_layer_can_be_picked(self):
+        html = charts.attention_strip(insight(tokens=5, layers=4), 3)
+        self.assertIn("layer 3", html)
+        self.assertNotIn("mean of all layers", html)
+
+    def test_weights_average_over_layers_when_no_layer_is_picked(self):
+        data = insight(tokens=5, layers=4)
+        mean = charts.attention_weights(data, 0)
+        self.assertEqual(len(mean), 5)
+        self.assertAlmostEqual(sum(mean), 1.0)
+        self.assertEqual(charts.attention_weights(data, 2), data["attention"][1])
+        self.assertEqual(charts.attention_weights(data, 99), mean)
+
+    def test_a_model_without_weights_is_explained(self):
+        html = charts.attention_strip(insight(attention=False), 0)
+        self.assertIn("did not return attention", html)
+        self.assertEqual(charts.attention_strip({}, 0), charts.EMPTY_ATTENTION)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import json
 import re
@@ -20,6 +21,7 @@ from token_metrics import (
     UNSCORED_FIRST_TOKEN,
     TokenMetric,
     build_metric,
+    entropy_bits,
     normalize_log_probabilities,
     sampling_probabilities,
     unscored_metric,
@@ -768,6 +770,14 @@ class GenerationUpdate:
     answer has to be told.
     """
 
+    prompt_ids: tuple[int, ...] = ()
+    """Every prompt token, measured or not.
+
+    :meth:`ModelManager.inspect` needs the whole sequence the response was
+    generated from, and ``prompt_metrics`` only holds the tokens the reader
+    chose to measure.
+    """
+
 
 class IncrementalDecoder:
     """Decode a growing token stream without re-decoding it from the start.
@@ -858,6 +868,50 @@ class ScoredText:
     metrics: list[dict]
     seam_verified: bool = True
     chat_template_missing: bool = False
+    context_ids: tuple[int, ...] = ()
+
+
+# The final norm of a decoder stack, under the names the common architectures
+# give it. Llama, OLMo, Mistral and Qwen say ``norm``; GPT-2 says ``ln_f``;
+# OPT and BLOOM say ``final_layer_norm``; Mamba says ``norm_f``.
+FINAL_NORM_ATTRIBUTES = ("norm", "final_layer_norm", "ln_f", "final_norm", "norm_f")
+
+
+@dataclass(frozen=True)
+class TokenInsight:
+    """What every layer predicted for one token, and where the model looked.
+
+    ``layers`` has one row per residual-stream reading, from the embeddings
+    (layer 0) to the model's real output (the last row). Each intermediate
+    reading is passed through the final norm and the unembedding, the logit
+    lens: it says what the model would have answered had it stopped there.
+    ``decided_at`` is the first layer from which the token stayed the model's
+    first choice, or ``None`` when it never was.
+
+    ``attention`` is head-averaged, one row per decoder layer, one column per
+    token the query could see, and it is empty when the model cannot return
+    attention weights. The query is the token *before* the inspected one: that
+    is the position whose output predicted it.
+    """
+
+    index: int
+    token_id: int
+    token_text: str
+    layers: list[dict]
+    tokens: list[dict]
+    attention: list[list[float]]
+    decided_at: int | None
+
+    def to_dict(self) -> dict:
+        return {
+            "index": self.index,
+            "token_id": self.token_id,
+            "token_text": self.token_text,
+            "layers": [dict(row) for row in self.layers],
+            "tokens": [dict(token) for token in self.tokens],
+            "attention": [list(row) for row in self.attention],
+            "decided_at": self.decided_at,
+        }
 
 
 class DownloadSnapshot(NamedTuple):
@@ -1516,6 +1570,7 @@ class ModelManager:
                     prompt_metrics=prompt_metrics,
                     prompt_note=prompt_note,
                     reasoning_prefilled=reasoning_prefilled,
+                    prompt_ids=tuple(prompt_ids),
                 )
                 if forced[-1] in stop_ids:
                     return
@@ -1555,6 +1610,7 @@ class ModelManager:
                         prompt_metrics=prompt_metrics,
                         prompt_note=prompt_note,
                         reasoning_prefilled=reasoning_prefilled,
+                        prompt_ids=tuple(prompt_ids),
                     )
 
                 if stopping:
@@ -1637,4 +1693,161 @@ class ModelManager:
                 ],
                 seam_verified=split.seam_verified,
                 chat_template_missing=split.chat_template_missing,
+                context_ids=tuple(context_ids),
+            )
+
+    @contextlib.contextmanager
+    def _eager_attention(self):
+        """Run the model with attention that reports its weights.
+
+        Fused kernels (SDPA, flash) never materialize the attention matrix, so
+        a model loaded with one of them returns no weights. Eager attention is
+        slower, so it is switched on for a single inspection step and switched
+        back afterwards.
+        """
+
+        model = self.model
+        switch = getattr(model, "set_attn_implementation", None)
+        current = getattr(getattr(model, "config", None), "_attn_implementation", None)
+        if switch is None or current in (None, "eager"):
+            yield
+            return
+        switch("eager")
+        try:
+            yield
+        finally:
+            switch(current)
+
+    def _final_norm(self):
+        import torch
+
+        base = getattr(self.model, "base_model", self.model)
+        for name in FINAL_NORM_ATTRIBUTES:
+            module = getattr(base, name, None)
+            if isinstance(module, torch.nn.Module):
+                return module
+        return None
+
+    def _lens_row(self, layer: int, logits, token_id: int) -> dict:
+        log_probs = normalize_log_probabilities(
+            logits.detach().float().cpu().numpy()
+        )
+        token_log_prob = float(log_probs[token_id])
+        top_id = int(np.argmax(log_probs))
+        return {
+            "layer": layer,
+            "probability": float(np.exp(token_log_prob)),
+            "rank": int(np.count_nonzero(log_probs > token_log_prob)) + 1,
+            "entropy_bits": entropy_bits(log_probs),
+            "top_id": top_id,
+            "top_text": self._decode_token(top_id) or self._token_fallback(top_id),
+            "top_probability": float(np.exp(log_probs[top_id])),
+        }
+
+    def inspect(
+        self, token_ids: Sequence[int], index: int, *, context_count: int = 0
+    ) -> TokenInsight:
+        """Explain the prediction of ``token_ids[index]`` layer by layer.
+
+        The sequence up to the token before ``index`` is run through the model
+        again, then that token is fed in alone with the hidden states and
+        attention weights switched on. Its output is the distribution that
+        predicted the inspected token, so the final row of the logit lens
+        matches the probabilities the strip already shows, and its attention
+        row says which earlier tokens went into that prediction.
+
+        ``context_count`` is how many leading tokens are prompt or context
+        rather than response, purely for labelling.
+        """
+
+        import torch
+
+        with self._lock, torch.inference_mode():
+            if not self.loaded:
+                raise RuntimeError("Download and load a model before inspecting a token.")
+            ids = [int(value) for value in token_ids]
+            if not 1 <= index < len(ids):
+                raise ValueError(
+                    "Nothing came before this token, so the model never predicted it."
+                )
+
+            assert self.model is not None
+            model = self.model
+            device = next(model.parameters()).device
+            token_id = ids[index]
+
+            past_key_values = None
+            if index > 1:
+                # Collect nothing: only the cache is wanted.
+                _, past_key_values, _ = self._prefill(
+                    ids[: index - 1],
+                    segments=[""] * (index - 1),
+                    positions=list(range(index - 1)),
+                    score_from=index,
+                    collect_from=index,
+                )
+
+            with self._eager_attention():
+                outputs = model(
+                    input_ids=torch.tensor(
+                        [[ids[index - 1]]], dtype=torch.long, device=device
+                    ),
+                    attention_mask=torch.ones((1, index), dtype=torch.long, device=device),
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                    output_hidden_states=True,
+                    output_attentions=True,
+                )
+
+            hidden_states = tuple(outputs.hidden_states or ())
+            norm = self._final_norm()
+            head = model.get_output_embeddings()
+            layers: list[dict] = []
+            # The last hidden state is what the model's own head reads, so its
+            # row is the real output; the earlier ones are read through the
+            # final norm as though the stack had ended there.
+            for layer, state in enumerate(hidden_states[:-1]):
+                vector = state[0, -1]
+                if norm is not None:
+                    vector = norm(vector.unsqueeze(0)).squeeze(0)
+                layers.append(self._lens_row(layer, head(vector), token_id))
+            layers.append(
+                self._lens_row(
+                    max(len(hidden_states) - 1, 0), outputs.logits[0, -1], token_id
+                )
+            )
+
+            decided_at: int | None = None
+            for row in reversed(layers):
+                if row["rank"] != 1:
+                    break
+                decided_at = row["layer"]
+
+            attention: list[list[float]] = []
+            weights = tuple(outputs.attentions or ())
+            if weights and all(layer is not None for layer in weights):
+                attention = [
+                    layer[0, :, -1, :].detach().float().mean(dim=0).cpu().tolist()
+                    for layer in weights
+                ]
+
+            tokens = [
+                {
+                    "index": position,
+                    "token_id": ids[position],
+                    "text": self._decode_token(ids[position]),
+                    "fallback": self._token_fallback(ids[position]),
+                    "segment": "prompt" if position < context_count else "response",
+                }
+                for position in range(index)
+            ]
+            del outputs, past_key_values
+            return TokenInsight(
+                index=index,
+                token_id=token_id,
+                token_text=self._decode_token(token_id) or self._token_fallback(token_id),
+                layers=layers,
+                tokens=tokens,
+                attention=attention,
+                decided_at=decided_at,
             )

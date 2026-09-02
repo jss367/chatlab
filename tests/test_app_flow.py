@@ -13,7 +13,7 @@ from conversation import (
     model_messages,
     new_forks,
 )
-from model_runtime import GenerationUpdate
+from model_runtime import GenerationUpdate, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
 
 from test_streaming import loaded_manager
@@ -57,6 +57,7 @@ SETTINGS = tuple(FIXED.values())
     SURPRISE,
     TRACE,
     BRANCH_SOURCE,
+    CONTEXT_IDS,
 ) = range(len(app.CHAT_OUTPUT_NAMES))
 CHAT_OUTPUTS = len(app.CHAT_OUTPUT_NAMES)
 
@@ -1955,3 +1956,187 @@ class CancelWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LayerInspectionTests(unittest.TestCase):
+    """The logit lens and attention panel behind the Inspect layers button."""
+
+    def setUp(self):
+        self.original = app.MANAGER
+        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.calls = []
+
+        def fake_inspect(sequence, index, *, context_count=0):
+            self.calls.append((list(sequence), index, context_count))
+            return TokenInsight(
+                index=index,
+                token_id=sequence[index],
+                token_text="x",
+                layers=[
+                    {"layer": layer, "probability": 0.5, "rank": 1, "entropy_bits": 1.0,
+                     "top_id": 1, "top_text": "x", "top_probability": 0.5}
+                    for layer in range(3)
+                ],
+                tokens=[
+                    {"index": i, "token_id": t, "text": "t", "fallback": "", "segment": "prompt"}
+                    for i, t in enumerate(sequence[:index])
+                ],
+                attention=[[1.0 / index] * index for _ in range(2)],
+                decided_at=0,
+            )
+
+        app.MANAGER.inspect = fake_inspect
+
+    def finished(self):
+        """The final frame, with the context ids the stream published earlier.
+
+        The ids are published once, on the first frame that carries tokens, and
+        every later frame skips them; in the browser the state keeps them, so
+        the test carries them forward the same way.
+        """
+
+        frames = list(app.chat("hi", [], *SETTINGS))
+        final = list(frames[-1])
+        for slot in (PROMPT_METRICS, CONTEXT_IDS):
+            final[slot] = next(
+                frame[slot] for frame in reversed(frames) if isinstance(frame[slot], tuple)
+            )
+        return final
+
+    def test_the_prompt_ids_are_published_with_the_strip(self):
+        frames = list(app.chat("hi", [], *SETTINGS))
+        self.assertEqual(frames[0][CONTEXT_IDS], (frames[0][METRICS][0], []))
+        stamp, ids = frames[1][CONTEXT_IDS]
+        self.assertEqual(stamp, frames[1][METRICS][0])
+        self.assertEqual(ids, [0])
+        # Later frames leave the ids alone: the prompt never changes mid-stream.
+        self.assertEqual(frames[-1][CONTEXT_IDS], gr.skip())
+
+    def test_scored_text_publishes_its_context_ids(self):
+        result = app.score_text("", "Hello", False, DEFAULT_COLOR_SCALE)
+        stamp, ids = result[10]
+        self.assertEqual(stamp, result[1][0])
+        self.assertEqual(ids, [])
+
+    def test_a_response_token_is_inspected_in_its_full_sequence(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(1))
+        self.assertEqual(target, {"generation": final[METRICS][0], "strip": "response", "index": 1})
+
+        lens, attention, slider, insight, status = app.inspect_layers(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(self.calls, [([0, 2, 3, THINK_EOS], 2, 1)])
+        self.assertIn("logit-lens", lens)
+        self.assertIn("attention-view", attention)
+        self.assertEqual(slider, gr.update(maximum=2, value=0))
+        self.assertEqual(insight["index"], 2)
+        self.assertIn("Token 2", status)
+
+    def test_the_first_prompt_token_is_refused_without_a_pass(self):
+        final = self.finished()
+        target = app.remember_inspect_target("prompt")(final[PROMPT_METRICS], select(0))
+        self.assertEqual(target["strip"], "prompt")
+        *_, status = app.inspect_layers(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(status, app.INSPECT_FIRST)
+        self.assertEqual(self.calls, [])
+
+    def test_a_prompt_token_is_inspected_at_its_own_position(self):
+        final = self.finished()
+        # Pretend the prompt had two tokens, so the second one can be inspected.
+        stamp, _ids = final[CONTEXT_IDS]
+        context = (stamp, [0, 1])
+        prompt_metrics = (stamp, [{"token_id": 0}, {"token_id": 1}])
+        target = app.remember_inspect_target("prompt")(prompt_metrics, select(1))
+        *_, status = app.inspect_layers(target, final[METRICS], prompt_metrics, context, 0)
+        self.assertEqual(self.calls, [([0, 1, 2, 3, THINK_EOS], 1, 2)])
+        self.assertIn("Prompt token 2", status)
+
+    def test_a_prompt_strip_that_disagrees_with_the_ids_is_refused(self):
+        final = self.finished()
+        stamp, _ids = final[CONTEXT_IDS]
+        prompt_metrics = (stamp, [{"token_id": 5}])
+        target = app.remember_inspect_target("prompt")(prompt_metrics, select(0))
+        *_, status = app.inspect_layers(
+            target, final[METRICS], prompt_metrics, (stamp, [0, 1]), 0
+        )
+        self.assertEqual(status, app.INSPECT_GONE)
+
+    def test_a_failed_pass_is_reported(self):
+        final = self.finished()
+
+        def refuse(*_args, **_kwargs):
+            raise RuntimeError("out of memory")
+
+        app.MANAGER.inspect = refuse
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        lens, *_rest, status = app.inspect_layers(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(lens, gr.skip())
+        self.assertEqual(status, "Could not inspect that token: out of memory")
+
+    def test_the_slider_keeps_its_layer_when_it_still_exists(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        _lens, attention, slider, *_ = app.inspect_layers(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 2
+        )
+        self.assertEqual(slider, gr.update(maximum=2, value=2))
+        self.assertIn("layer 2", attention)
+        _lens, _attention, slider, *_ = app.inspect_layers(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 9
+        )
+        self.assertEqual(slider, gr.update(maximum=2, value=2))
+
+    def test_a_target_from_a_replaced_strip_is_refused(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        later = self.finished()
+        *_rest, status = app.inspect_layers(
+            target, later[METRICS], later[PROMPT_METRICS], later[CONTEXT_IDS], 0
+        )
+        self.assertEqual(status, app.INSPECT_HINT)
+        self.assertEqual(self.calls, [])
+        self.assertIsNone(app.remember_inspect_target("response")(final[METRICS], select(0)))
+
+    def test_a_running_generation_is_not_interrupted(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        self.assertTrue(app.MANAGER.reserve_generation())
+        try:
+            *_rest, status = app.inspect_layers(
+                target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+            )
+        finally:
+            app.MANAGER.release_generation()
+        self.assertEqual(status, app.INSPECT_BUSY)
+        self.assertEqual(self.calls, [])
+
+    def test_nothing_selected_gives_the_hint(self):
+        final = self.finished()
+        *_rest, status = app.inspect_layers(
+            None, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(status, app.INSPECT_HINT)
+
+    def test_the_panel_resets_only_when_it_shows_something(self):
+        self.assertEqual(app.reset_inspection(None), (gr.skip(),) * 4)
+        lens, attention, insight, status = app.reset_inspection({"index": 1})
+        self.assertEqual(lens, charts.EMPTY_LENS)
+        self.assertEqual(attention, charts.EMPTY_ATTENTION)
+        self.assertIsNone(insight)
+        self.assertEqual(status, app.INSPECT_HINT)
+
+    def test_repainting_another_layer_needs_no_new_pass(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        *_lens, _attention, _slider, insight, _status = app.inspect_layers(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertIn("layer 1", app.render_attention(insight, 1))
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(app.render_attention(None, 1), gr.skip())
