@@ -97,30 +97,41 @@ def describe_missing(status: CacheStatus) -> str:
     return f"{', '.join(names[:-1])} and {names[-1]} are missing"
 
 
+def describe_on_disk(status: CacheStatus) -> str:
+    """``2.0 GB cached, 1 file (300 MB) partly downloaded``, for a card.
+
+    A partial blob is not called a weight file: the hub keeps one blob folder
+    per repo, so from outside it could be any file of any revision.
+    """
+
+    cached = f"{format_bytes(status.cached_bytes)} cached"
+    if not status.partial_files:
+        return cached
+    files = "file" if status.partial_files == 1 else "files"
+    return (
+        f"{cached}, {status.partial_files} {files} "
+        f"({format_bytes(status.partial_bytes)}) partly downloaded"
+    )
+
+
 def describe_cache(model_id: str, status: CacheStatus) -> tuple[str, str]:
     """Title and detail for the card shown while a download starts.
 
     The cases a reader can tell apart from the outside - nothing on disk, a
-    cut-off download, a cache holding only some of the files, and a finished
-    one - each get their own wording, so "Downloading" never hides that the
-    files were already here.
+    snapshot still short of files (whether a download was cut off or another
+    tool fetched only part of the repo), and a finished one - each get their
+    own wording, so "Downloading" never hides that the files were already
+    here. Which files are missing is the verdict; ``.incomplete`` blobs are
+    reported as a size only, since the hub's blob folder is shared across
+    revisions and a stray partial need not belong to this snapshot.
     """
 
     name = f"`{model_id.strip()}`"
-    if status.partial_files:
-        files = "file" if status.partial_files == 1 else "files"
-        return (
-            "Resuming download",
-            f"{name} was cut off part way: {status.partial_files} weight "
-            f"{files} ({format_bytes(status.partial_bytes)}) are only partly "
-            "on disk. Only the missing bytes are fetched.",
-        )
     if status.missing_files:
         return (
             "Resuming download",
-            f"{name} is only partly on disk ({format_bytes(status.cached_bytes)} "
-            f"cached): {describe_missing(status)}. Only the missing files are "
-            "fetched.",
+            f"{name} is only partly on disk ({describe_on_disk(status)}): "
+            f"{describe_missing(status)}. Only the missing bytes are fetched.",
         )
     if status.present:
         return (
@@ -210,21 +221,11 @@ def load_cached_model(model_id: str):
     except ValueError as error:
         yield status_card("Could not load cached model", html.escape(str(error)), "error")
         return
-    if status.partial_files:
-        files = "file" if status.partial_files == 1 else "files"
-        yield status_card(
-            "Download incomplete",
-            f"{name} was cut off part way: {status.partial_files} weight {files} "
-            f"({format_bytes(status.partial_bytes)}) are only partly on disk. "
-            "Use **Download and load** to fetch the rest.",
-            "error",
-        )
-        return
     if status.missing_files:
         yield status_card(
             "Download incomplete",
-            f"{name} is only partly on disk ({format_bytes(status.cached_bytes)} "
-            f"cached): {describe_missing(status)}. "
+            f"{name} is only partly on disk ({describe_on_disk(status)}): "
+            f"{describe_missing(status)}. "
             "Use **Download and load** to fetch the rest.",
             "error",
         )

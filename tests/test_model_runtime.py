@@ -151,6 +151,45 @@ class CacheStatusTests(unittest.TestCase):
         self.assertTrue(status.present)
         self.assertEqual(status.missing_files, ("config.json", MODEL_WEIGHTS))
 
+    def test_a_stray_partial_blob_does_not_unmake_a_complete_snapshot(self):
+        """The blob folder is shared by every revision, so a leftover from
+        another one, or from a file the model never loads, says nothing about
+        whether ``main`` can load."""
+
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(
+                root, {"config.json": b"{}", "model.safetensors": b"x" * 100}
+            )
+            blobs = snapshot.parents[1] / "blobs"
+            (blobs / "other.1234.incomplete").write_bytes(b"x" * 40)
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertTrue(status.complete)
+        self.assertEqual(status.missing_files, ())
+        self.assertEqual(status.partial_files, 1)
+        self.assertEqual(status.partial_bytes, 40)
+
+    def test_a_partial_blob_the_snapshot_needs_shows_up_as_missing(self):
+        """The hub links a file into the snapshot only once it has finished,
+        so the shard still downloading is caught by name, not by its blob."""
+
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(
+                root,
+                {
+                    "config.json": b"{}",
+                    "model.safetensors.index.json": self.shard_index("a.st", "b.st"),
+                    "a.st": b"x",
+                },
+            )
+            blobs = snapshot.parents[1] / "blobs"
+            (blobs / "bblob.incomplete").write_bytes(b"x" * 5)
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertFalse(status.complete)
+        self.assertEqual(status.missing_files, ("b.st",))
+        self.assertEqual(status.partial_files, 1)
+
     def test_partial_blobs_are_counted_apart_from_finished_ones(self):
         with tempfile.TemporaryDirectory() as root:
             blobs = self.folder(root)

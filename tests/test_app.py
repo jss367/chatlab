@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -178,15 +179,30 @@ class DownloadStatusTests(unittest.TestCase):
         cards = self.run_handler(
             app.download_model,
             [
-                CacheStatus(cached_bytes=10, partial_files=3, partial_bytes=3_000_000_000),
+                CacheStatus(
+                    cached_bytes=10,
+                    partial_files=3,
+                    partial_bytes=3_000_000_000,
+                    missing_files=(MODEL_WEIGHTS,),
+                ),
                 CacheStatus(cached_bytes=15_000_000_010),
             ],
             "",
         )
 
         self.assertIn("Resuming download", cards[0])
-        self.assertIn("3 weight files (3.0 GB)", cards[0])
+        self.assertIn("3 files (3.0 GB) partly downloaded", cards[0])
+        self.assertNotIn("weight files (", cards[0])
         self.assertIn("Fetched the remaining 12.0 GB", cards[-1])
+
+    def test_a_stray_partial_blob_beside_a_complete_cache_is_not_a_resume(self):
+        """A leftover from another revision changes nothing about ``main``."""
+
+        cached = CacheStatus(cached_bytes=15_000_000_000, partial_files=1, partial_bytes=5)
+        cards = self.run_handler(app.download_model, [cached, cached], "")
+
+        self.assertIn("already in the Hugging Face cache", cards[0])
+        self.assertNotIn("Resuming", cards[0])
 
     def test_a_complete_cache_reports_that_nothing_was_fetched(self):
         cached = CacheStatus(cached_bytes=15_000_000_000)
@@ -206,12 +222,35 @@ class DownloadStatusTests(unittest.TestCase):
     def test_load_cached_refuses_a_cut_off_download(self):
         cards = self.run_handler(
             app.load_cached_model,
-            [CacheStatus(cached_bytes=10, partial_files=1, partial_bytes=5)],
+            [
+                CacheStatus(
+                    cached_bytes=10,
+                    partial_files=1,
+                    partial_bytes=5,
+                    missing_files=("model-00002-of-00002.safetensors",),
+                )
+            ],
         )
 
         self.assertIn("Download incomplete", cards[-1])
-        self.assertIn("1 weight file (5 B)", cards[-1])
+        self.assertIn("1 file (5 B) partly downloaded", cards[-1])
+        self.assertIn("`model-00002-of-00002.safetensors` is missing", cards[-1])
         self.assertIn("Download and load", cards[-1])
+
+    def test_load_cached_loads_a_complete_snapshot_beside_a_stray_partial_blob(self):
+        """Only what the ``main`` snapshot lacks can refuse a load; a partial
+        blob left by another revision, or by a file the model never reads,
+        used to be mistaken for a cut-off download."""
+
+        snapshot = "/cache/models--allenai--Olmo-3-7B-Think/snapshots/abc"
+        with mock.patch("huggingface_hub.snapshot_download", return_value=snapshot):
+            cards = self.run_handler(
+                app.load_cached_model,
+                [CacheStatus(cached_bytes=15_000_000_000, partial_files=1, partial_bytes=5)],
+            )
+
+        self.assertNotIn("Download incomplete", "".join(cards))
+        self.assertIn("Model ready", cards[-1])
 
     def test_load_cached_refuses_a_snapshot_without_weights(self):
         """Config and tokenizer alone used to sail through to a shard-missing traceback."""

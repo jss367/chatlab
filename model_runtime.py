@@ -103,12 +103,17 @@ WEIGHT_INDEXES = ("model.safetensors.index.json", "pytorch_model.bin.index.json"
 class CacheStatus:
     """What the Hugging Face cache already holds for one model.
 
-    ``cached_bytes`` counts finished files; ``partial_files`` and
-    ``partial_bytes`` count the ``.incomplete`` blobs a cut-off download
-    left behind, which ``snapshot_download`` resumes rather than restarts.
-    ``missing_files`` names what the snapshot still lacks before the model
-    can load: a cache another tool filled with only the config and tokenizer,
-    or a download stopped between shards, has finished blobs but no model.
+    ``missing_files`` names what the ``main`` snapshot still lacks before the
+    model can load, and is the one verdict on that: a cache another tool
+    filled with only the config and tokenizer, or a download stopped between
+    shards, has finished blobs but no model. ``cached_bytes`` counts finished
+    files; ``partial_files`` and ``partial_bytes`` count the ``.incomplete``
+    blobs a cut-off download left behind, which ``snapshot_download`` resumes
+    rather than restarts. Those are a size estimate, not a verdict: the blob
+    folder is shared by every revision of the repo, so a stray partial may
+    belong to another revision or to a file the model never loads, and a
+    partial the snapshot does need already shows up in ``missing_files``,
+    since the hub links a file into the snapshot only once it has finished.
     """
 
     cached_bytes: int = 0
@@ -122,7 +127,7 @@ class CacheStatus:
 
     @property
     def complete(self) -> bool:
-        return self.present and not self.partial_files and not self.missing_files
+        return self.present and not self.missing_files
 
     @property
     def total_bytes(self) -> int:
