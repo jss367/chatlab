@@ -92,9 +92,21 @@ class UpdateFlow:
         self.bundle = bundle
         self._lock = threading.Lock()
         self.swapping = threading.Event()
-        # Returning False from a closing handler cancels the close, so the bundle
-        # swap cannot be interrupted by quitting; downloads still can be.
-        window.events.closing += lambda: not self.swapping.is_set()
+        self.cancel = threading.Event()
+        window.events.closing += self._on_closing
+
+    def _on_closing(self) -> bool:
+        """Quit cancels a download in flight but waits out the bundle swap.
+
+        Returning False from a closing handler makes pywebview keep the window
+        open, so the few seconds between parking the old bundle and moving the
+        new one in cannot be interrupted.
+        """
+
+        if self.swapping.is_set():
+            return False
+        self.cancel.set()
+        return True
 
     def check_in_background(self, *, interactive: bool) -> threading.Thread:
         """Run ``check`` on a non-daemon thread so quitting waits for an install."""
@@ -163,7 +175,11 @@ class UpdateFlow:
                     self.swapping.set(),
                     self._window_call("set_title", f"{WINDOW_TITLE} — installing update…"),
                 ),
+                cancelled=self.cancel.is_set,
             )
+        except updater.UpdateCancelled as error:
+            logging.info("%s", error)
+            return
         except updater.UpdateError as error:
             logging.error("Update failed: %s", error)
             self._window_call("set_title", WINDOW_TITLE)

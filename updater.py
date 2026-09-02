@@ -37,10 +37,15 @@ DOWNLOAD_CHUNK_BYTES = 1 << 20
 _VERSION_PATTERN = re.compile(r"^v?(\d+(?:\.\d+)*)$")
 
 ProgressCallback = Callable[[int, int | None], None]
+CancelCheck = Callable[[], bool]
 
 
 class UpdateError(RuntimeError):
     """Raised when an update cannot be checked, downloaded, or installed."""
+
+
+class UpdateCancelled(UpdateError):
+    """Raised when the caller asked to stop before the bundle swap began."""
 
 
 @dataclass(frozen=True)
@@ -141,8 +146,13 @@ def download_asset(
     release: ReleaseInfo,
     destination_dir: Path,
     progress: ProgressCallback | None = None,
+    cancelled: CancelCheck | None = None,
 ) -> Path:
-    """Stream the release zip to ``destination_dir`` and return its path."""
+    """Stream the release zip to ``destination_dir`` and return its path.
+
+    ``cancelled`` is polled between chunks; when it returns True the partial
+    file is removed and :class:`UpdateCancelled` is raised.
+    """
 
     destination_dir.mkdir(parents=True, exist_ok=True)
     target = destination_dir / release.asset_name
@@ -153,6 +163,8 @@ def download_asset(
             length_header = response.headers.get("Content-Length")
             total = int(length_header) if length_header else release.asset_size
             while True:
+                if cancelled is not None and cancelled():
+                    raise UpdateCancelled("Update cancelled during download.")
                 chunk = response.read(DOWNLOAD_CHUNK_BYTES)
                 if not chunk:
                     break
@@ -160,6 +172,9 @@ def download_asset(
                 received += len(chunk)
                 if progress is not None:
                     progress(received, total)
+    except UpdateCancelled:
+        target.unlink(missing_ok=True)
+        raise
     except Exception as error:  # noqa: BLE001
         target.unlink(missing_ok=True)
         raise UpdateError(f"Download failed: {error}") from error
@@ -228,11 +243,15 @@ def install_update(
     work_dir: Path | None = None,
     progress: ProgressCallback | None = None,
     before_swap: Callable[[], None] | None = None,
+    cancelled: CancelCheck | None = None,
 ) -> None:
     """Download, unpack, and swap in ``release``; the caller quits and relaunches.
 
-    ``before_swap`` runs once the new bundle is unpacked and about to replace the
-    old one, so the caller can hold off shutdown for the few seconds it takes.
+    ``cancelled`` is honoured during download and extraction and raises
+    :class:`UpdateCancelled`. ``before_swap`` runs once the new bundle is
+    unpacked and about to replace the old one, so the caller can hold off
+    shutdown for the few seconds the swap takes; cancellation is no longer
+    checked after that point.
     """
 
     if work_dir is None:
@@ -241,8 +260,10 @@ def install_update(
         except OSError:
             work_dir = Path(tempfile.mkdtemp(prefix="chatlab-update-"))
     try:
-        archive = download_asset(release, work_dir, progress)
+        archive = download_asset(release, work_dir, progress, cancelled)
         replacement = extract_bundle(archive, work_dir / "unpacked")
+        if cancelled is not None and cancelled():
+            raise UpdateCancelled("Update cancelled before installation.")
         if before_swap is not None:
             before_swap()
         parked = swap_bundle(bundle, replacement)

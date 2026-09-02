@@ -119,12 +119,40 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(extracted.name, "ChatLab.app")
         self.assertTrue((extracted / "Contents" / "link").is_symlink())
 
+    def test_download_stops_when_cancelled(self):
+        release = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", 30, "u")
+        chunks = iter([b"a" * 10, b"b" * 10, b"c" * 10, b""])
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.headers = {"Content-Length": "30"}
+        response.read.side_effect = lambda n: next(chunks)
+        seen = []
+        with mock.patch.object(updater, "urlopen", return_value=response):
+            with self.assertRaises(updater.UpdateCancelled):
+                updater.download_asset(
+                    release, self.root / "dl", progress=lambda r, t: seen.append(r), cancelled=lambda: len(seen) >= 2
+                )
+        self.assertEqual(seen, [10, 20])
+        self.assertFalse((self.root / "dl" / release.asset_name).exists())
+
+    def test_install_update_cancelled_after_extract_leaves_bundle_alone(self):
+        current = self.make_bundle("ChatLab.app", "old")
+        release = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", None, "u")
+        work = self.root / "work"
+        with mock.patch.object(updater, "download_asset", side_effect=lambda *a: work / "x.zip"), mock.patch.object(
+            updater, "extract_bundle", side_effect=lambda *a: self.make_bundle("work/unpacked/ChatLab.app", "new")
+        ):
+            with self.assertRaises(updater.UpdateCancelled):
+                updater.install_update(release, current, work_dir=work, cancelled=lambda: True)
+        self.assertEqual((current / "Contents" / "MacOS" / "ChatLab").read_text(), "old")
+        self.assertFalse(work.exists())
+
     def test_install_update_wires_the_steps(self):
         current = self.make_bundle("ChatLab.app", "old")
         release = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", None, "u")
         work = self.root / "work"
 
-        def fake_download(rel, dest, progress):
+        def fake_download(rel, dest, progress, cancelled=None):
             dest.mkdir(parents=True, exist_ok=True)
             progress(5, 10)
             return dest / rel.asset_name
