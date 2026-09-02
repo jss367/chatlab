@@ -1989,6 +1989,11 @@ class LayerInspectionTests(unittest.TestCase):
 
         app.MANAGER.inspect = fake_inspect
 
+    def inspect(self, *args):
+        """The last frame of the inspection handler, which streams like Send."""
+
+        return list(app.inspect_layers(*args))[-1]
+
     def finished(self):
         """The final frame, with the context ids the stream published earlier.
 
@@ -2025,7 +2030,7 @@ class LayerInspectionTests(unittest.TestCase):
         target = app.remember_inspect_target("response")(final[METRICS], select(1))
         self.assertEqual(target, {"generation": final[METRICS][0], "strip": "response", "index": 1})
 
-        lens, attention, slider, insight, status = app.inspect_layers(
+        lens, attention, slider, insight, status = self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
         self.assertEqual(self.calls, [([0, 2, 3, THINK_EOS], 2, 1)])
@@ -2045,7 +2050,7 @@ class LayerInspectionTests(unittest.TestCase):
 
         app.MANAGER.inspect = output_only
         target = app.remember_inspect_target("response")(final[METRICS], select(1))
-        lens, *_rest, status = app.inspect_layers(
+        lens, *_rest, status = self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
         self.assertIn("read through 0 layers", status)
@@ -2056,7 +2061,7 @@ class LayerInspectionTests(unittest.TestCase):
         final = self.finished()
         target = app.remember_inspect_target("prompt")(final[PROMPT_METRICS], select(0))
         self.assertEqual(target["strip"], "prompt")
-        *_, status = app.inspect_layers(
+        *_, status = self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
         self.assertEqual(status, app.INSPECT_FIRST)
@@ -2069,7 +2074,7 @@ class LayerInspectionTests(unittest.TestCase):
         context = (stamp, [0, 1])
         prompt_metrics = (stamp, [{"token_id": 0}, {"token_id": 1}])
         target = app.remember_inspect_target("prompt")(prompt_metrics, select(1))
-        *_, status = app.inspect_layers(target, final[METRICS], prompt_metrics, context, 0)
+        *_, status = self.inspect(target, final[METRICS], prompt_metrics, context, 0)
         self.assertEqual(self.calls, [([0, 1, 2, 3, THINK_EOS], 1, 2)])
         self.assertIn("Prompt token 2", status)
 
@@ -2078,7 +2083,7 @@ class LayerInspectionTests(unittest.TestCase):
         stamp, _ids = final[CONTEXT_IDS]
         prompt_metrics = (stamp, [{"token_id": 5}])
         target = app.remember_inspect_target("prompt")(prompt_metrics, select(0))
-        *_, status = app.inspect_layers(
+        *_, status = self.inspect(
             target, final[METRICS], prompt_metrics, (stamp, [0, 1]), 0
         )
         self.assertEqual(status, app.INSPECT_GONE)
@@ -2091,7 +2096,7 @@ class LayerInspectionTests(unittest.TestCase):
 
         app.MANAGER.inspect = refuse
         target = app.remember_inspect_target("response")(final[METRICS], select(0))
-        lens, *_rest, status = app.inspect_layers(
+        lens, *_rest, status = self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
         self.assertEqual(lens, gr.skip())
@@ -2100,12 +2105,12 @@ class LayerInspectionTests(unittest.TestCase):
     def test_the_slider_keeps_its_layer_when_it_still_exists(self):
         final = self.finished()
         target = app.remember_inspect_target("response")(final[METRICS], select(0))
-        _lens, attention, slider, *_ = app.inspect_layers(
+        _lens, attention, slider, *_ = self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 2
         )
         self.assertEqual(slider, gr.update(maximum=2, value=2))
         self.assertIn("layer 2", attention)
-        _lens, _attention, slider, *_ = app.inspect_layers(
+        _lens, _attention, slider, *_ = self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 9
         )
         self.assertEqual(slider, gr.update(maximum=2, value=2))
@@ -2114,7 +2119,7 @@ class LayerInspectionTests(unittest.TestCase):
         final = self.finished()
         target = app.remember_inspect_target("response")(final[METRICS], select(0))
         later = self.finished()
-        *_rest, status = app.inspect_layers(
+        *_rest, status = self.inspect(
             target, later[METRICS], later[PROMPT_METRICS], later[CONTEXT_IDS], 0
         )
         self.assertEqual(status, app.INSPECT_HINT)
@@ -2126,7 +2131,7 @@ class LayerInspectionTests(unittest.TestCase):
         target = app.remember_inspect_target("response")(final[METRICS], select(0))
         self.assertTrue(app.MANAGER.reserve_generation())
         try:
-            *_rest, status = app.inspect_layers(
+            *_rest, status = self.inspect(
                 target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
             )
         finally:
@@ -2144,7 +2149,7 @@ class LayerInspectionTests(unittest.TestCase):
             return self.fake(sequence, index, context_count=context_count)
 
         self.fake, app.MANAGER.inspect = app.MANAGER.inspect, observe
-        app.inspect_layers(
+        self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
         self.assertEqual(seen, [True])
@@ -2154,9 +2159,42 @@ class LayerInspectionTests(unittest.TestCase):
             raise RuntimeError("boom")
 
         app.MANAGER.inspect = fail
-        app.inspect_layers(
+        self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_the_slot_is_held_until_the_readout_has_been_delivered(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        frames = app.inspect_layers(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        first = next(frames)
+        # Gradio resumes the generator only once the browser has this frame,
+        # so a Send arriving in the meantime still finds the slot taken.
+        self.assertIn("logit-lens", first[0])
+        self.assertTrue(app.MANAGER.busy)
+        self.assertEqual(list(frames), [])
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_a_readout_delivered_after_the_strips_were_replaced_is_taken_down(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        frames = app.inspect_layers(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        next(frames)
+        # Clear does not take the slot; it mints a stamp while the frame is
+        # in flight, and its reset lands before the readout does.
+        app.new_metrics_generation()
+        lens, attention, slider, insight, status = next(frames)
+        self.assertEqual(lens, charts.EMPTY_LENS)
+        self.assertEqual(attention, charts.EMPTY_ATTENTION)
+        self.assertEqual(slider, gr.skip())
+        self.assertIsNone(insight)
+        self.assertEqual(status, app.INSPECT_GONE)
+        self.assertEqual(list(frames), [])
         self.assertFalse(app.MANAGER.busy)
 
     def test_a_strip_replaced_during_the_pass_is_not_described(self):
@@ -2171,7 +2209,7 @@ class LayerInspectionTests(unittest.TestCase):
             return original(sequence, index, context_count=context_count)
 
         app.MANAGER.inspect = replace_strips
-        lens, *_rest, insight, status = app.inspect_layers(
+        lens, *_rest, insight, status = self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
         self.assertEqual(lens, gr.skip())
@@ -2180,7 +2218,7 @@ class LayerInspectionTests(unittest.TestCase):
 
     def test_nothing_selected_gives_the_hint(self):
         final = self.finished()
-        *_rest, status = app.inspect_layers(
+        *_rest, status = self.inspect(
             None, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
         self.assertEqual(status, app.INSPECT_HINT)
@@ -2196,7 +2234,7 @@ class LayerInspectionTests(unittest.TestCase):
     def test_repainting_another_layer_needs_no_new_pass(self):
         final = self.finished()
         target = app.remember_inspect_target("response")(final[METRICS], select(0))
-        *_lens, _attention, _slider, insight, _status = app.inspect_layers(
+        *_lens, _attention, _slider, insight, _status = self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
         self.assertIn("layer 1", app.render_attention(insight, 1))

@@ -1983,19 +1983,32 @@ def inspect_layers(
     The model's input is rebuilt from the prompt ids published with the
     response and the token ids in the response metrics, so the pass sees
     exactly the sequence the token was generated from.
+
+    This is a generator for the same reason generate_reply() is: Gradio does
+    not resume a streaming handler until the browser has been sent the frame
+    it yielded. The generation slot is therefore held not just for the pass
+    but until the readout is on screen, so Send, Retry and Branch cannot
+    slip in between the two and have the readout land on top of their
+    reset. Paths that replace the strips without taking the slot - Clear,
+    Undo, Load, a fork switch, Score text - are caught by the stamp instead:
+    it is checked before the frame goes out and again once it has arrived,
+    and a readout for a token that is gone is taken back down.
     """
 
     skip = gr.skip()
     refused = (skip, skip, skip, skip)
     if not target or target.get("generation") != _metrics_generation:
-        return (*refused, INSPECT_HINT)
+        yield (*refused, INSPECT_HINT)
+        return
     generation, metrics = metrics_state
     _prompt_generation, prompt_metrics = prompt_metrics_state
     context_generation, context_ids = context_state
     if generation != target["generation"] or context_generation != generation:
-        return (*refused, INSPECT_GONE)
+        yield (*refused, INSPECT_GONE)
+        return
     if not MANAGER.loaded:
-        return (*refused, "Download and load a model first.")
+        yield (*refused, "Download and load a model first.")
+        return
 
     context_ids = [int(value) for value in context_ids]
     position = int(target["index"])
@@ -2005,58 +2018,62 @@ def inspect_layers(
             or position >= len(context_ids)
             or int(prompt_metrics[position]["token_id"]) != context_ids[position]
         ):
-            return (*refused, INSPECT_GONE)
+            yield (*refused, INSPECT_GONE)
+            return
         index = position
     else:
         if position >= len(metrics):
-            return (*refused, INSPECT_GONE)
+            yield (*refused, INSPECT_GONE)
+            return
         index = len(context_ids) + position
     if index == 0:
-        return (*refused, INSPECT_FIRST)
+        yield (*refused, INSPECT_FIRST)
+        return
     sequence = context_ids + [int(metric["token_id"]) for metric in metrics]
 
-    # The pass holds the generation slot, so Send, Retry and Branch refuse
-    # while it runs instead of replacing the strips underneath it. Checking
-    # MANAGER.busy and then inspecting would leave a gap between the two in
-    # which a generation could start, reset the panel, and then have the
-    # stale readout published over its reset.
     if not MANAGER.reserve_generation():
-        return (*refused, INSPECT_BUSY)
-    started = time.monotonic()
+        yield (*refused, INSPECT_BUSY)
+        return
     try:
-        insight = MANAGER.inspect(
-            sequence, index, context_count=len(context_ids)
-        ).to_dict()
-    except Exception as error:
-        return (*refused, f"Could not inspect that token: {error}")
+        started = time.monotonic()
+        try:
+            insight = MANAGER.inspect(
+                sequence, index, context_count=len(context_ids)
+            ).to_dict()
+        except Exception as error:
+            yield (*refused, f"Could not inspect that token: {error}")
+            return
+        if target["generation"] != _metrics_generation:
+            yield (*refused, INSPECT_GONE)
+            return
+
+        layer_count = len(insight["attention"])
+        layer = min(max(int(layer or 0), 0), layer_count)
+        where = "Prompt token" if target["strip"] == "prompt" else "Token"
+        shown = html.escape(repr(insight["token_text"]))
+        read = len(insight["layers"]) - 1
+        status = (
+            f"{where} {position + 1}: `{shown}`, read through {read} "
+            f"layers in {time.monotonic() - started:.1f}s."
+        )
+        if not read:
+            status = f"{status} {INSPECT_OUTPUT_ONLY}"
+        if not layer_count:
+            status = f"{status} This model did not return attention weights."
+        yield (
+            charts.logit_lens_chart(insight),
+            charts.attention_strip(insight, layer),
+            gr.update(maximum=max(layer_count, 1), value=layer),
+            insight,
+            status,
+        )
+        # Resumed once the browser has the frame above. If the strips were
+        # replaced while it was in flight, their reset was applied first and
+        # the readout now sits on top of it, so take it back down.
+        if target["generation"] != _metrics_generation:
+            yield (charts.EMPTY_LENS, charts.EMPTY_ATTENTION, skip, None, INSPECT_GONE)
     finally:
         MANAGER.release_generation()
-    # A path that does not take the slot - Clear, Undo, Load, a fork switch,
-    # Score text - can still have replaced the strips during the pass. Their
-    # new stamp says so, and the readout is for a token that is gone.
-    if target["generation"] != _metrics_generation:
-        return (*refused, INSPECT_GONE)
-
-    layer_count = len(insight["attention"])
-    layer = min(max(int(layer or 0), 0), layer_count)
-    where = "Prompt token" if target["strip"] == "prompt" else "Token"
-    shown = html.escape(repr(insight["token_text"]))
-    read = len(insight["layers"]) - 1
-    status = (
-        f"{where} {position + 1}: `{shown}`, read through {read} "
-        f"layers in {time.monotonic() - started:.1f}s."
-    )
-    if not read:
-        status = f"{status} {INSPECT_OUTPUT_ONLY}"
-    if not layer_count:
-        status = f"{status} This model did not return attention weights."
-    return (
-        charts.logit_lens_chart(insight),
-        charts.attention_strip(insight, layer),
-        gr.update(maximum=max(layer_count, 1), value=layer),
-        insight,
-        status,
-    )
 
 
 def render_attention(insight: dict | None, layer):

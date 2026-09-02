@@ -48,6 +48,9 @@ class FakeLensModel(torch.nn.Module):
         # A transform the config does not declare, to stand in for an
         # architecture the lens does not know how to read.
         self.undeclared_scale: float | None = None
+        # Layers with a sliding window return weights for their last few keys
+        # only, the way a sliding-window cache does.
+        self.sliding_layers: dict[int, int] = {}
 
     def set_attn_implementation(self, name: str) -> None:
         self.attn_calls.append(name)
@@ -100,7 +103,15 @@ class FakeLensModel(torch.nn.Module):
                 weights[..., min(self.focus, keys - 1)] += 0.4
             else:
                 weights[..., 0] += 0.4
-            attentions = tuple(weights.clone() for _ in range(self.layers))
+            attentions = tuple(
+                torch.full(
+                    (1, self.heads, length, min(keys, self.sliding_layers[layer])),
+                    1.0 / min(keys, self.sliding_layers[layer]),
+                )
+                if layer in self.sliding_layers
+                else weights.clone()
+                for layer in range(self.layers)
+            )
         return SimpleNamespace(
             logits=logits,
             past_key_values=None,
@@ -212,6 +223,16 @@ class InspectTests(unittest.TestCase):
         self.assertEqual([token["segment"] for token in insight.tokens], ["prompt", "response", "response", "response"])
         self.assertEqual([token["token_id"] for token in insight.tokens], [0, 1, 2, 3])
         self.assertEqual(insight.tokens[1]["text"], " world")
+
+    def test_a_sliding_window_layer_is_aligned_on_the_keys_it_saw(self):
+        manager = lens_manager([1, 2, 3, 4, 5], layers=3, focus=1)
+        manager.model.sliding_layers = {1: 2}
+        insight = manager.inspect([0, 1, 2, 3, 4], 4)
+
+        self.assertEqual([len(row) for row in insight.attention], [4, 4, 4])
+        # The window covered the last two keys, so the first two got nothing.
+        self.assertEqual(insight.attention[1], [0.0, 0.0, 0.5, 0.5])
+        self.assertAlmostEqual(insight.attention[0][0], 0.6, places=5)
 
     def test_attention_is_read_with_eager_kernels_and_switched_back(self):
         manager = lens_manager([1, 2, 3])

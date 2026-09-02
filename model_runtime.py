@@ -895,8 +895,9 @@ class TokenInsight:
     or ``None`` when it never was.
 
     ``attention`` is head-averaged, one row per decoder layer, one column per
-    token the query could see, and it is empty when the model cannot return
-    attention weights. The query is the token *before* the inspected one: that
+    token before the inspected one, and it is empty when the model cannot
+    return attention weights. A sliding-window layer sees only the most
+    recent tokens; the columns for the rest hold zero. The query is the token *before* the inspected one: that
     is the position whose output predicted it.
     """
 
@@ -1880,10 +1881,14 @@ class ModelManager:
             attention: list[list[float]] = []
             weights = tuple(outputs.attentions or ())
             if weights and all(layer is not None for layer in weights):
-                attention = [
-                    layer[0, :, -1, :].detach().float().mean(dim=0).cpu().tolist()
-                    for layer in weights
-                ]
+                for layer in weights:
+                    row = layer[0, :, -1, :].detach().float().mean(dim=0).cpu().tolist()
+                    # A sliding-window layer keeps only its most recent keys,
+                    # so a short row describes the end of the sequence. Align
+                    # it on the right; the keys the layer could not see get a
+                    # weight of zero, which is what it gave them.
+                    row = row[-index:]
+                    attention.append([0.0] * (index - len(row)) + row)
 
             tokens = [
                 {
