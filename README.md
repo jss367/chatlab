@@ -16,6 +16,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Perplexity, mean surprise, and a surprise trace for each response
 - Full metric-trace export as JSON or CSV
 - A system prompt, plus temperature, top-p, top-k, seed, and response-length controls
+- Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
 - Enter sends a message and Shift+Enter starts a new line, with a setting to swap them
@@ -63,7 +64,7 @@ On macOS or Linux:
 ./run.sh
 ```
 
-The first run creates an isolated Python environment and installs the dependencies. The app then opens in your browser. Paste a Hugging Face model ID into **Model setup** and choose **Download and load**.
+The first run creates an isolated Python environment and installs the dependencies. The app then opens in your browser. Under **Model setup**, choose a downloaded model or paste a Hugging Face model ID and choose **Download and load**.
 
 To install manually:
 
@@ -74,7 +75,7 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Model files use the standard Hugging Face cache. By default this is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
+Model files use the standard Hugging Face cache. Chatlab lists complete downloads and resumable partial downloads under **Downloaded models**. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
 
 ## Working with a conversation
 
@@ -82,6 +83,21 @@ Model files use the standard Hugging Face cache. By default this is under `~/.ca
 - **Retry** regenerates the last reply. Because **🎲 New seed each response** is on by default, a retry actually explores a different sample; turn it off to lock the seed and reproduce a response exactly. The seed field always shows the seed that produced the response on screen.
 - Hovering a message in the transcript gives per-message retry, edit, and undo. Editing one of your messages truncates the conversation there and generates a new reply; editing a reply just corrects it in place. **↩️ Undo last** removes the last exchange and puts your message back in the input box.
 - **💾 Save conversation** writes a JSON file containing every turn, its reasoning block, and the system prompt, along with the model and token counts behind each reply. **📂 Load conversation** restores it.
+
+### Assistant prefill
+
+Enter text in **Assistant prefill (optional)** to force every new reply to begin
+with those words. Chatlab measures the prefilled tokens against the model's own
+distribution, then resumes sampling after them. **Maximum new tokens** counts
+only the tokens sampled after the prefill, so the prefix does not reduce the
+requested continuation length.
+
+For a reasoning model whose chat template already opens a `<think>` block,
+Chatlab closes that block before replaying the prefill. The supplied text
+therefore appears as the visible answer rather than hidden reasoning. Clear the
+field to return to ordinary generation. JSON metric exports record the supplied
+text as `assistant_prefill` and the replayed token count as
+`forced_prefix_tokens`.
 
 ## Branching from a token
 
@@ -128,7 +144,7 @@ Attention weights need the model's eager attention kernel, which is switched on 
 
 Text the model wraps in `<think>` tags is pulled out of the reply and shown as a collapsible **Reasoning** section, so the answer stays readable while the trace stays available.
 
-By default that reasoning is **not** sent back to the model on the next turn. Think models are trained to produce a fresh reasoning block each time, so replaying old ones spends context and tends to degrade the next answer. Enable **Send previous reasoning back to the model** under *System prompt and reasoning* if you want the older behavior.
+By default that reasoning is **not** sent back to the model on the next turn. Think models are trained to produce a fresh reasoning block each time, so replaying old ones spends context and tends to degrade the next answer. Enable **Send previous reasoning back to the model** under *System prompt, reasoning, and prefill* if you want the older behavior.
 
 ## Reading the visualization
 

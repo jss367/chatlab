@@ -15,7 +15,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from conversation import THINK_OPEN
+from conversation import THINK_CLOSE, THINK_OPEN
 from token_metrics import (
     UNSCORED_BEYOND_LIMIT,
     UNSCORED_FIRST_TOKEN,
@@ -139,6 +139,14 @@ class CacheStatus:
         return self.cached_bytes + self.partial_bytes
 
 
+@dataclass(frozen=True)
+class CachedModel:
+    """One Hugging Face model repository found in the local disk cache."""
+
+    model_id: str
+    status: CacheStatus
+
+
 def cache_folder(model_id: str, cache_dir: Path | None = None) -> Path:
     """The ``models--org--name`` folder ``huggingface_hub`` keeps a model in."""
 
@@ -183,8 +191,13 @@ def missing_files(snapshot: Path | None) -> tuple[str, ...]:
         if not index.is_file():
             continue
         try:
-            shards = set(json.loads(index.read_text())["weight_map"].values())
-        except (OSError, ValueError, KeyError, AttributeError):
+            weight_map = json.loads(index.read_text())["weight_map"]
+            if not isinstance(weight_map, dict) or not weight_map:
+                raise ValueError("weight_map must be a non-empty object")
+            shards = set(weight_map.values())
+            if not all(isinstance(shard, str) and shard for shard in shards):
+                raise TypeError("weight_map values must be file names")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             missing.append(MODEL_WEIGHTS)
             return tuple(missing)
         missing.extend(
@@ -223,6 +236,48 @@ def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
     if cached == 0 and partial_files == 0:
         return CacheStatus()
     return CacheStatus(cached, partial_files, partial_bytes, missing_files(snapshot))
+
+
+def cached_models(cache_dir: Path | None = None) -> tuple[CachedModel, ...]:
+    """List model repositories that have files in the Hugging Face cache.
+
+    Hugging Face encodes ``owner/name`` as ``models--owner--name``. Splitting
+    only at the first separator preserves a model name that itself contains a
+    double hyphen. Cache entries without an owner cannot be selected in
+    Chatlab, whose model field deliberately accepts full repository IDs only.
+    """
+
+    if cache_dir is None:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        cache_dir = Path(HF_HUB_CACHE)
+    root = Path(cache_dir)
+    try:
+        folders = tuple(root.iterdir())
+    except OSError:
+        return ()
+
+    found = []
+    for folder in folders:
+        if not folder.is_dir() or not folder.name.startswith("models--"):
+            continue
+        owner, separator, name = folder.name.removeprefix("models--").partition("--")
+        if not separator:
+            continue
+        model_id = f"{owner}/{name}"
+        try:
+            status = cache_status(model_id, root)
+        except (OSError, ValueError):
+            continue
+        if status.present:
+            found.append(CachedModel(model_id, status))
+
+    return tuple(
+        sorted(
+            found,
+            key=lambda model: (not model.status.complete, model.model_id.casefold()),
+        )
+    )
 
 
 def format_bytes(count: int) -> str:
@@ -770,6 +825,12 @@ class GenerationUpdate:
     answer has to be told.
     """
 
+    forced_prefix_tokens: int = 0
+    """How many leading response tokens were replayed instead of sampled."""
+
+    literal_prefill_text: str = ""
+    """Decoded prefix whose reader-supplied portion must remain literal."""
+
     prompt_ids: tuple[int, ...] = ()
     """Every prompt token, measured or not.
 
@@ -806,6 +867,14 @@ class IncrementalDecoder:
     def text(self) -> str:
         return self._settled + self._pending
 
+    @property
+    def stable_text(self) -> str:
+        """Decoded text excluding an incomplete multi-token character suffix."""
+
+        if self._pending.endswith(REPLACEMENT_CHARACTER):
+            return self._settled + self._pending.rstrip(REPLACEMENT_CHARACTER)
+        return self.text
+
     def _decode(self, token_ids: list[int]) -> str:
         return self._tokenizer.decode(
             token_ids,
@@ -836,8 +905,8 @@ class IncrementalDecoder:
         self._printed = len(self._decode(self._cache))
         self._pending = ""
 
-    def push(self, token_id: int) -> None:
-        if token_id in self._skip_ids:
+    def push(self, token_id: int, *, force_visible: bool = False) -> None:
+        if token_id in self._skip_ids and not force_visible:
             return
         self._cache.append(token_id)
         decoded = self._decode(self._cache)
@@ -1301,6 +1370,42 @@ class ModelManager:
             encoded = encoded[0]
         return [int(value) for value in encoded], prefilled
 
+    def _response_prefix_ids(self, text: str, *, close_reasoning: bool) -> list[int]:
+        """Encode a reader-supplied answer prefix without tokenizer wrappers.
+
+        A reasoning model's generation prompt can already end in ``<think>``.
+        In that case the supplied text is meant to begin the visible answer,
+        so replay a closing marker before it. The marker remains part of the
+        measured response prefix, exactly as it would if the model emitted it.
+        """
+
+        assert self.tokenizer is not None
+        if not text:
+            return []
+        raw = f"{THINK_CLOSE}\n\n{text}" if close_reasoning else text
+        encoded = self.tokenizer(raw, add_special_tokens=False)
+        if isinstance(encoded, Mapping):
+            encoded = encoded["input_ids"]
+        elif hasattr(encoded, "input_ids"):
+            encoded = encoded.input_ids
+        if hasattr(encoded, "tolist"):
+            encoded = encoded.tolist()
+        if encoded and isinstance(encoded[0], (list, tuple)):
+            encoded = encoded[0]
+        token_ids = [int(value) for value in encoded]
+        if not token_ids:
+            raise ValueError("The assistant prefill did not produce any tokens.")
+        decoded = self.tokenizer.decode(
+            token_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+        if decoded != raw:
+            raise ValueError(
+                "The assistant prefill cannot be represented exactly by this tokenizer."
+            )
+        return token_ids
+
     def _decode_token(self, token_id: int) -> str:
         assert self.tokenizer is not None
         return self.tokenizer.decode(
@@ -1480,6 +1585,8 @@ class ModelManager:
         seed: int,
         analyze_prompt: bool = True,
         forced_ids: Sequence[int] = (),
+        answer_prefill: str = "",
+        literal_prefill_tokens: int = 0,
     ) -> Iterator[GenerationUpdate]:
         """Stream a reply to ``messages``, one batch of tokens at a time.
 
@@ -1490,7 +1597,11 @@ class ModelManager:
         token the model would never have chosen shows up with the rank and
         surprise it really had. ``max_new_tokens`` counts the tokens sampled
         after the prefix, so a branch made late in a long response still gets
-        room to continue.
+        room to continue. ``answer_prefill`` does the same for arbitrary text;
+        when the chat template has opened a reasoning block, it closes that
+        block first so the reader's text begins the visible answer.
+        ``literal_prefill_tokens`` carries that protected boundary through a
+        later branch replay.
         """
 
         # The application reserves the slot before it publishes its first
@@ -1515,6 +1626,8 @@ class ModelManager:
                 seed=seed,
                 analyze_prompt=analyze_prompt,
                 forced_ids=forced_ids,
+                answer_prefill=answer_prefill,
+                literal_prefill_tokens=literal_prefill_tokens,
             )
         finally:
             if reserved:
@@ -1531,6 +1644,8 @@ class ModelManager:
         seed: int,
         analyze_prompt: bool = True,
         forced_ids: Sequence[int] = (),
+        answer_prefill: str = "",
+        literal_prefill_tokens: int = 0,
     ) -> Iterator[GenerationUpdate]:
         import torch
 
@@ -1547,12 +1662,28 @@ class ModelManager:
             prompt_ids, reasoning_prefilled = self._prompt_token_ids(messages)
             stop_ids = self._stop_token_ids()
 
-            # A stop token inside the prefix ends the response there, exactly
-            # as it did when the model first produced it; whatever the reader
-            # kept after it was never part of the response the model sees.
+            if forced_ids and answer_prefill:
+                raise ValueError(
+                    "A token branch and an assistant prefill cannot be applied together."
+                )
+
             forced = [int(value) for value in forced_ids]
+            if answer_prefill:
+                forced = self._response_prefix_ids(
+                    answer_prefill, close_reasoning=reasoning_prefilled
+                )
+                literal_prefill_tokens = len(forced)
+            else:
+                literal_prefill_tokens = max(
+                    0, min(int(literal_prefill_tokens), len(forced))
+                )
+
+            # A sampled stop token replayed by a branch still ends the old
+            # response where it originally ended. A stop token the reader
+            # typed literally into an assistant prefill is ordinary prefix
+            # content instead: keep it visible and continue after it.
             for index, token_id in enumerate(forced):
-                if token_id in stop_ids:
+                if token_id in stop_ids and index >= literal_prefill_tokens:
                     forced = forced[: index + 1]
                     break
 
@@ -1585,6 +1716,8 @@ class ModelManager:
             metrics: list[dict] = [
                 metric for metric in prefilled_metrics if metric["segment"] == "response"
             ]
+            for metric in metrics[:literal_prefill_tokens]:
+                metric["literal_prefill"] = True
             prompt_note = ""
             if analyze_prompt and score_from > 1:
                 prompt_note = (
@@ -1594,8 +1727,17 @@ class ModelManager:
 
             rng = np.random.default_rng(int(seed))
             decoder = IncrementalDecoder(tokenizer, self._hidden_token_ids())
-            for token_id in forced:
-                decoder.push(token_id)
+            literal_prefill_text = ""
+            for index, token_id in enumerate(forced):
+                decoder.push(
+                    token_id, force_visible=index < literal_prefill_tokens
+                )
+                if index + 1 == literal_prefill_tokens:
+                    # A branch can stop inside a byte-level token sequence for
+                    # one character. The replacement-character suffix will be
+                    # rewritten when the next token arrives, so it cannot be a
+                    # durable prefix for the application's literal-tag guard.
+                    literal_prefill_text = decoder.stable_text
             limit = len(forced) + int(max_new_tokens)
             pending_tokens = 0
             last_yield = time.monotonic()
@@ -1607,9 +1749,14 @@ class ModelManager:
                     prompt_metrics=prompt_metrics,
                     prompt_note=prompt_note,
                     reasoning_prefilled=reasoning_prefilled,
+                    forced_prefix_tokens=len(forced),
+                    literal_prefill_text=literal_prefill_text,
                     prompt_ids=tuple(prompt_ids),
                 )
-                if forced[-1] in stop_ids:
+                if (
+                    forced[-1] in stop_ids
+                    and len(forced) > literal_prefill_tokens
+                ):
                     return
 
             for position in range(len(forced) + 1, limit + 1):
@@ -1647,6 +1794,8 @@ class ModelManager:
                         prompt_metrics=prompt_metrics,
                         prompt_note=prompt_note,
                         reasoning_prefilled=reasoning_prefilled,
+                        forced_prefix_tokens=len(forced),
+                        literal_prefill_text=literal_prefill_text,
                         prompt_ids=tuple(prompt_ids),
                     )
 
