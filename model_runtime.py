@@ -1742,6 +1742,34 @@ class ModelManager:
                     return module
         return None
 
+    def _read_head(self, vector):
+        """Turn a normed residual vector into logits the way the model does.
+
+        Some causal-LM heads post-process the unembedding: Gemma 2 and 3
+        soft-cap logits with ``tanh``, Granite divides by ``logits_scaling``,
+        Cohere multiplies by ``logit_scale``. An intermediate reading that
+        skipped them would describe a distribution the model never emits, so
+        they are applied here. :meth:`inspect` checks the result against the
+        model's own output for the final layer, which catches a transform
+        this list does not know about.
+        """
+
+        import torch
+
+        model = self.model
+        logits = model.get_output_embeddings()(vector)
+        config = getattr(model, "config", None)
+        scale = getattr(config, "logit_scale", None)
+        if scale:
+            logits = logits * scale
+        scaling = getattr(config, "logits_scaling", None)
+        if scaling:
+            logits = logits / scaling
+        softcap = getattr(config, "final_logit_softcapping", None)
+        if softcap:
+            logits = torch.tanh(logits / softcap) * softcap
+        return logits
+
     def _lens_row(self, layer: int, logits, token_id: int) -> dict:
         log_probs = normalize_log_probabilities(
             logits.detach().float().cpu().numpy()
@@ -1814,23 +1842,33 @@ class ModelManager:
                 )
 
             hidden_states = tuple(outputs.hidden_states or ())
+            final_logits = outputs.logits[0, -1]
             norm = self._final_norm()
-            head = model.get_output_embeddings()
             layers: list[dict] = []
             # The last hidden state is what the model's own head reads, so its
             # row is the real output; the earlier ones are read through the
             # final norm as though the stack had ended there. Without the norm
             # those readings would be off by a rescaling the head never sees,
             # so a model whose norm cannot be found shows its output alone
-            # rather than intermediate rows that look right and are not.
-            if norm is not None:
+            # rather than intermediate rows that look right and are not. The
+            # same goes for a head that post-processes its logits in a way
+            # _read_head() does not replicate: reading the final hidden state
+            # (already normed) through it must reproduce the model's output,
+            # or the intermediate rows are not trustworthy either.
+            readable = norm is not None and bool(hidden_states)
+            if readable:
+                replayed = self._read_head(hidden_states[-1][0, -1]).detach().float()
+                readable = torch.allclose(
+                    replayed, final_logits.detach().float(), rtol=1e-2, atol=1e-2
+                )
+            if readable:
                 for layer, state in enumerate(hidden_states[:-1]):
                     vector = norm(state[0, -1].unsqueeze(0)).squeeze(0)
-                    layers.append(self._lens_row(layer, head(vector), token_id))
+                    layers.append(
+                        self._lens_row(layer, self._read_head(vector), token_id)
+                    )
             layers.append(
-                self._lens_row(
-                    max(len(hidden_states) - 1, 0), outputs.logits[0, -1], token_id
-                )
+                self._lens_row(max(len(hidden_states) - 1, 0), final_logits, token_id)
             )
 
             decided_at: int | None = None

@@ -45,6 +45,9 @@ class FakeLensModel(torch.nn.Module):
         self.base_model = SimpleNamespace(norm=torch.nn.Identity())
         self.attn_calls: list[str] = []
         self.return_attentions = True
+        # A transform the config does not declare, to stand in for an
+        # architecture the lens does not know how to read.
+        self.undeclared_scale: float | None = None
 
     def set_attn_implementation(self, name: str) -> None:
         self.attn_calls.append(name)
@@ -80,6 +83,15 @@ class FakeLensModel(torch.nn.Module):
             for layer in range(self.layers + 1)
         )
         logits = self.head(hidden[-1])
+        if self.config.__dict__.get("logit_scale"):
+            logits = logits * self.config.logit_scale
+        if self.config.__dict__.get("logits_scaling"):
+            logits = logits / self.config.logits_scaling
+        if self.config.__dict__.get("final_logit_softcapping"):
+            cap = self.config.final_logit_softcapping
+            logits = torch.tanh(logits / cap) * cap
+        if self.undeclared_scale:
+            logits = logits * self.undeclared_scale
         attentions = None
         if output_attentions and self.return_attentions:
             weights = torch.full((1, self.heads, length, keys), 0.0)
@@ -145,6 +157,41 @@ class InspectTests(unittest.TestCase):
         self.assertEqual(insight.layers[0]["rank"], 1)
         self.assertEqual(insight.decided_at, 4)
         self.assertEqual(len(insight.attention), 4)
+
+    def test_a_soft_capped_head_is_read_the_way_the_model_reads_it(self):
+        # Gemma 2 and 3 squash logits with tanh before the softmax. A one-hot
+        # +-20 hidden state capped at 2 gives the top token 1/(1 + 8e^-4).
+        manager = lens_manager([1, 2, 3, 4, 5], decide_layer=2, early=3)
+        manager.model.config.final_logit_softcapping = 2.0
+        insight = manager.inspect([0, 1, 2, 3, 4], 2)
+        self.assertEqual(len(insight.layers), 5)
+        expected = 1 / (1 + 8 * np.exp(-4.0))
+        for row in insight.layers:
+            self.assertAlmostEqual(row["top_probability"], expected, places=3)
+        self.assertEqual(insight.decided_at, 2)
+
+    def test_scaled_heads_are_read_the_way_the_model_reads_them(self):
+        for name, value in (("logits_scaling", 4.0), ("logit_scale", 0.25)):
+            with self.subTest(name=name):
+                # Granite divides, Cohere multiplies; both leave +-5 logits.
+                manager = lens_manager([1, 2, 3, 4, 5], decide_layer=2, early=3)
+                setattr(manager.model.config, name, value)
+                insight = manager.inspect([0, 1, 2, 3, 4], 2)
+                self.assertEqual(len(insight.layers), 5)
+                expected = 1 / (1 + 8 * np.exp(-10.0))
+                for row in insight.layers:
+                    self.assertAlmostEqual(row["top_probability"], expected, places=4)
+
+    def test_a_head_transform_the_lens_cannot_replicate_shows_only_the_output(self):
+        manager = lens_manager([1, 2, 3, 4, 5], decide_layer=2, early=3)
+        manager.model.undeclared_scale = 0.1
+        insight = manager.inspect([0, 1, 2, 3, 4], 2)
+        self.assertEqual([row["layer"] for row in insight.layers], [4])
+        self.assertEqual(insight.layers[0]["rank"], 1)
+        # The output row is still the model's own, transform included.
+        self.assertAlmostEqual(
+            insight.layers[0]["top_probability"], 1 / (1 + 8 * np.exp(-4.0)), places=3
+        )
 
     def test_a_token_never_chosen_has_no_deciding_layer(self):
         manager = lens_manager([1, 2, 3], decide_layer=1)

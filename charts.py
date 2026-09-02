@@ -317,7 +317,8 @@ def logit_lens_chart(insight: dict) -> str:
     if output_only:
         chart = (
             '<div class="viz-note">Only the output is shown: this model\'s '
-            "intermediate layers could not be read through its final norm.</div>"
+            "intermediate layers could not be read the way it reads its own "
+            "output.</div>"
         )
     else:
         chart = (

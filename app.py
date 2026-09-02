@@ -1945,7 +1945,7 @@ INSPECT_GONE = "That token is no longer on screen. Click one and try again."
 INSPECT_FIRST = "Nothing came before this token, so the model never predicted it."
 INSPECT_OUTPUT_ONLY = (
     "Only the output is shown: this model's intermediate layers could not be "
-    "read through its final norm."
+    "read the way it reads its own output."
 )
 
 
