@@ -5,10 +5,12 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import gradio as gr
 
 import app
+import model_runtime
 from model_runtime import (
     MODEL_WEIGHTS,
     CachedModel,
@@ -65,6 +67,31 @@ class CachedModelListTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             self.assertEqual(list_cached_models(Path(root) / "missing"), [])
             self.assertEqual(list_cached_models(Path(root)), [])
+
+    def test_a_cache_that_cannot_be_read_lists_nothing(self):
+        # ``is_dir`` can pass while the enumeration itself is refused.
+        with tempfile.TemporaryDirectory() as root:
+            lay_out(root, OLMO, {"config.json": b"{}", "model.safetensors": b"x"})
+            with mock.patch.object(
+                Path, "iterdir", side_effect=PermissionError(13, "Permission denied")
+            ):
+                self.assertEqual(list_cached_models(Path(root)), [])
+
+    def test_a_folder_that_fails_partway_leaves_the_others_listed(self):
+        with tempfile.TemporaryDirectory() as root:
+            lay_out(root, OLMO, {"config.json": b"{}", "model.safetensors": b"x"})
+            broken = lay_out(root, "org/broken", {"config.json": b"{}"})
+            newest_write = model_runtime._newest_write
+
+            def refuse_one(folder, snapshot):
+                if folder == broken:
+                    raise OSError(5, "Input/output error")
+                return newest_write(folder, snapshot)
+
+            with mock.patch.object(model_runtime, "_newest_write", refuse_one):
+                listed = [entry.model_id for entry in list_cached_models(Path(root))]
+
+        self.assertEqual(listed, [OLMO])
 
     def test_a_complete_model_is_listed_with_its_details(self):
         with tempfile.TemporaryDirectory() as root:

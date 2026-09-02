@@ -334,46 +334,61 @@ def list_cached_models(cache_dir: Path | None = None) -> list[CachedModel]:
 
     Reads only the disk. Folders whose name is not a model ID (the hub keeps
     datasets and spaces beside models, and other tools leave their own
-    folders) and models with nothing on disk are left out.
+    folders) and models with nothing on disk are left out. A cache that is
+    not there, or that cannot be read, is an empty inventory rather than an
+    error, and a folder that fails partway through is left out of it: the
+    pane rescans after every model action, so it must never be taken down by
+    a permission or a drive that has gone away.
     """
 
     root = cache_root(cache_dir)
-    if not root.is_dir():
+    try:
+        folders = list(root.iterdir())
+    except OSError:
         return []
     models: list[CachedModel] = []
-    for folder in root.iterdir():
-        if not folder.is_dir() or not folder.name.startswith(MODEL_FOLDER_PREFIX):
-            continue
-        organization, _, name = folder.name[len(MODEL_FOLDER_PREFIX) :].partition("--")
+    for folder in folders:
         try:
-            model_id = validate_model_id(f"{organization}/{name}")
-            status = cache_status(model_id, root)
-        except (ValueError, OSError):
+            model = _cached_model(folder, root)
+        except OSError:
             continue
-        if not status.present:
-            continue
-        snapshot = snapshot_folder(folder)
-        commit = snapshot.name if snapshot is not None else None
-        files = (
-            sum(1 for entry in snapshot.rglob("*") if entry.is_file())
-            if snapshot is not None
-            else 0
-        )
-        architecture, dtype = _read_config(snapshot)
-        models.append(
-            CachedModel(
-                model_id=model_id,
-                status=status,
-                files=files,
-                commit=commit,
-                updated=_newest_write(folder, snapshot),
-                architecture=architecture,
-                dtype=dtype,
-                path=folder,
-            )
-        )
+        if model is not None:
+            models.append(model)
     models.sort(key=lambda entry: (-(entry.updated or 0), entry.model_id))
     return models
+
+
+def _cached_model(folder: Path, root: Path) -> CachedModel | None:
+    """The inventory entry for one cache folder, or None if it holds no model."""
+
+    if not folder.is_dir() or not folder.name.startswith(MODEL_FOLDER_PREFIX):
+        return None
+    organization, _, name = folder.name[len(MODEL_FOLDER_PREFIX) :].partition("--")
+    try:
+        model_id = validate_model_id(f"{organization}/{name}")
+    except ValueError:
+        return None
+    status = cache_status(model_id, root)
+    if not status.present:
+        return None
+    snapshot = snapshot_folder(folder)
+    commit = snapshot.name if snapshot is not None else None
+    files = (
+        sum(1 for entry in snapshot.rglob("*") if entry.is_file())
+        if snapshot is not None
+        else 0
+    )
+    architecture, dtype = _read_config(snapshot)
+    return CachedModel(
+        model_id=model_id,
+        status=status,
+        files=files,
+        commit=commit,
+        updated=_newest_write(folder, snapshot),
+        architecture=architecture,
+        dtype=dtype,
+        path=folder,
+    )
 
 
 # How many hub search results are shown. The hub sorts them by downloads, so
