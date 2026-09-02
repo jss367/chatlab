@@ -7,10 +7,14 @@ import logging
 import multiprocessing
 import socket
 import sys
+import threading
+import webbrowser
 from pathlib import Path
 from urllib.request import urlopen
 
+import updater
 from app import build_app
+from version import __version__
 
 
 APP_NAME = "ChatLab"
@@ -80,18 +84,185 @@ def smoke_test() -> int:
         demo.close(verbose=False)
 
 
+class UpdateFlow:
+    """Check GitHub Releases and, with the user's consent, replace the app."""
+
+    def __init__(self, window, bundle: Path | None) -> None:
+        self.window = window
+        self.bundle = bundle
+        self._lock = threading.Lock()
+        # ``swapping`` and ``cancel`` only change under ``_phase_lock`` so a quit
+        # and the start of the swap cannot both win.
+        self._phase_lock = threading.Lock()
+        self.swapping = threading.Event()
+        self.cancel = threading.Event()
+        window.events.closing += self._on_closing
+
+    def _on_closing(self) -> bool:
+        """Quit cancels a download in flight but waits out the bundle swap.
+
+        Returning False from a closing handler makes pywebview keep the window
+        open, so the few seconds between parking the old bundle and moving the
+        new one in cannot be interrupted.
+        """
+
+        with self._phase_lock:
+            if self.swapping.is_set():
+                return False
+            self.cancel.set()
+            return True
+
+    def _begin_swap(self) -> bool:
+        """Enter the protected swap phase unless a quit already cancelled us."""
+
+        with self._phase_lock:
+            if self.cancel.is_set():
+                return False
+            self.swapping.set()
+        self._window_call("set_title", f"{WINDOW_TITLE} — installing update…")
+        return True
+
+    def check_in_background(self, *, interactive: bool) -> threading.Thread:
+        """Run ``check`` on a daemon thread so a quit can abandon it.
+
+        Everything before the swap (release lookup, checksum fetch, download,
+        extraction) is safe to drop mid-flight. The swap itself is protected by
+        ``_on_closing`` refusing to close and ``wait_for_swap`` joining on exit.
+        """
+
+        with self._phase_lock:
+            current = getattr(self, "_worker", None)
+            if current is not None and current.is_alive():
+                busy = True
+            else:
+                busy = False
+                current = threading.Thread(
+                    target=self.check, kwargs={"interactive": interactive}, daemon=True
+                )
+                self._worker = current
+                current.start()
+        if busy and interactive:
+            self._window_call(
+                "create_confirmation_dialog", "ChatLab", "An update check or download is already running."
+            )
+        return current
+
+    def wait_for_swap(self, timeout: float = 300, grace: float = 3.0) -> None:
+        """Called on the way out: forbid new swaps, then wait for the worker.
+
+        A worker in the swap is waited for in full. Any other worker gets
+        ``grace`` seconds to notice the cancel, stop ``ditto``, and delete its
+        staging directory; one stalled in a network read is abandoned and its
+        directory is swept on the next launch by ``remove_stale_work_dirs``.
+        """
+
+        with self._phase_lock:
+            self.cancel.set()
+            swapping = self.swapping.is_set()
+        worker = getattr(self, "_worker", None)
+        if worker is None or not worker.is_alive():
+            return
+        if swapping:
+            logging.info("Waiting for the update swap to finish before exiting")
+            worker.join(timeout)
+        else:
+            worker.join(grace)
+            if worker.is_alive():
+                logging.info("Abandoning a stalled update worker; staging is swept on next launch")
+
+    def _window_call(self, method: str, *args):
+        """Call a window method, tolerating a window the user already closed."""
+
+        try:
+            return getattr(self.window, method)(*args)
+        except Exception as error:  # noqa: BLE001 - window is gone; log and carry on
+            logging.info("Window call %s skipped: %s", method, error)
+            return None
+
+    def check(self, *, interactive: bool) -> None:
+        """Look for a newer release; ``interactive`` reports "up to date" too."""
+
+        if self.bundle is None:
+            logging.info("Not running from an app bundle; skipping update check")
+            return
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
+            release = updater.check_for_update()
+        except updater.UpdateError as error:
+            logging.warning("%s", error)
+            if interactive and self._window_call(
+                "create_confirmation_dialog", "ChatLab", f"{error}\n\nOpen the releases page?"
+            ):
+                webbrowser.open(updater.RELEASES_PAGE_URL)
+            return
+        else:
+            if release is None:
+                logging.info("ChatLab %s is up to date", __version__)
+                if interactive:
+                    self._window_call(
+                        "create_confirmation_dialog",
+                        "ChatLab",
+                        f"ChatLab {__version__} is the latest version.",
+                    )
+                return
+            self._offer(release)
+        finally:
+            self._lock.release()
+
+    def _offer(self, release: updater.ReleaseInfo) -> None:
+        accepted = self._window_call(
+            "create_confirmation_dialog",
+            "Update available",
+            f"ChatLab {release.version} is available (you have {__version__}).\n\n"
+            "Download and install it now? ChatLab will restart when it finishes.",
+        )
+        if not accepted:
+            return
+        try:
+            updater.install_update(
+                release,
+                self.bundle,
+                progress=self._report_progress,
+                begin_swap=self._begin_swap,
+                cancelled=self.cancel.is_set,
+            )
+        except updater.UpdateCancelled as error:
+            logging.info("%s", error)
+            return
+        except updater.UpdateError as error:
+            logging.error("Update failed: %s", error)
+            self._window_call("set_title", WINDOW_TITLE)
+            self._window_call("create_confirmation_dialog", "Update failed", str(error))
+            return
+        finally:
+            self.swapping.clear()
+        logging.info("Relaunching ChatLab %s", release.version)
+        updater.relaunch(self.bundle)
+        self._window_call("destroy")
+
+    def _report_progress(self, received: int, total: int | None) -> None:
+        if total:
+            self._window_call("set_title", f"{WINDOW_TITLE} — downloading update {received * 100 // total}%")
+        else:
+            self._window_call("set_title", f"{WINDOW_TITLE} — downloading update ({received >> 20} MB)")
+
+
 def run_desktop() -> int:
     """Open ChatLab in a native WebKit window until the user quits."""
 
     import webview
+    from webview.menu import Menu, MenuAction
 
     support_directory = app_support_directory()
     support_directory.mkdir(parents=True, exist_ok=True)
+    bundle = updater.running_app_bundle()
     demo, local_url = start_local_server()
-    logging.info("Started ChatLab at %s", local_url)
+    logging.info("Started ChatLab %s at %s", __version__, local_url)
+    flow: UpdateFlow | None = None
 
     try:
-        webview.create_window(
+        window = webview.create_window(
             WINDOW_TITLE,
             local_url,
             width=1440,
@@ -101,12 +272,37 @@ def run_desktop() -> int:
             text_select=True,
             zoomable=True,
         )
+        flow = UpdateFlow(window, bundle)
+
+        def after_startup() -> None:
+            # Runs once the native window is up, so a release that fails to
+            # start still has the previous bundle parked beside it.
+            if bundle is not None:
+                updater.remove_previous_bundles(bundle)
+                updater.remove_stale_work_dirs(bundle)
+            flow.check_in_background(interactive=False)
+
         webview.start(
+            func=after_startup,
             gui="cocoa",
             private_mode=False,
             storage_path=str(support_directory / "WebKit"),
+            menu=[
+                Menu(
+                    "Help",
+                    [
+                        MenuAction(
+                            "Check for Updates…",
+                            lambda: flow.check_in_background(interactive=True),
+                        ),
+                        MenuAction("ChatLab Releases", lambda: webbrowser.open(updater.RELEASES_PAGE_URL)),
+                    ],
+                )
+            ],
         )
     finally:
+        if flow is not None:
+            flow.wait_for_swap()
         logging.info("Stopping ChatLab")
         demo.close(verbose=False)
     return 0
@@ -119,6 +315,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="start the local server, verify it responds, and exit",
     )
+    parser.add_argument("--version", action="version", version=f"ChatLab {__version__}")
     return parser.parse_args(argv)
 
 
