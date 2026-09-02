@@ -25,6 +25,7 @@ from conversation import (
     copy_forks,
     copy_turns,
     display_messages,
+    forget_measurements,
     fork_at,
     from_json,
     last_user_index,
@@ -1409,7 +1410,9 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
         try:
             turns[position] = edited_turn
             # The ranks and probabilities on screen describe the text the model
-            # generated, not what the user just typed over it.
+            # generated, not what the user just typed over it - and so do the
+            # token counts the reply and everything after it were tagged with.
+            turns = forget_measurements(turns, position)
             yield idle_state(
                 prompt_text,
                 turns,

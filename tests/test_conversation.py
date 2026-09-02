@@ -12,6 +12,7 @@ from conversation import (
     copy_forks,
     describe_branch,
     display_messages,
+    forget_measurements,
     fork_at,
     from_json,
     last_user_index,
@@ -373,6 +374,29 @@ class ConversationListTests(unittest.TestCase):
         self.assertEqual(
             describe_branch(turns)["models"], ["org-a/model", "other", "org-b/model"]
         )
+
+    def test_rewriting_a_reply_forgets_what_its_counts_measured(self):
+        turns = [
+            make_turn("user", "one"),
+            measured("first", prompt=10, generated=5),
+            make_turn("user", "two"),
+            measured("second", prompt=30, generated=7),
+            make_turn("user", "three"),
+            measured("third", prompt=50, generated=9),
+        ]
+        result = forget_measurements(turns, 3)
+        # The edited reply's counts measured text that is gone; its model stays.
+        self.assertEqual(set(result[3]), {"role", "content", "reasoning", "model"})
+        # A later reply's prompt held the old text; its own text did not change.
+        self.assertNotIn("prompt_tokens", result[5])
+        self.assertEqual(result[5]["generated_tokens"], 9)
+        self.assertEqual(result[5]["model"], "allenai/Olmo-3-7B-Think")
+        # Earlier replies are untouched, and the size falls back to the last.
+        self.assertEqual(result[1], turns[1])
+        self.assertEqual(describe_branch(result)["tokens"], 15)
+        # The input was not mutated.
+        self.assertEqual(turns[3]["prompt_tokens"], 30)
+        self.assertEqual(turns[5]["prompt_tokens"], 50)
 
     def test_the_label_of_an_empty_conversation(self):
         self.assertEqual(branch_label(MAIN_BRANCH, []), "Main\nNo messages yet")

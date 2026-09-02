@@ -17,8 +17,9 @@ conversations can say which model answered and how big the exchange was:
 ``prompt_tokens`` is every token the model was given for that reply - the
 system prompt, the transcript so far and the template around them - and
 ``generated_tokens`` is every token it produced, reasoning included. A turn
-that was typed, loaded from an older file, or never finished measuring may
-carry none of these, and the list says so rather than guessing.
+that was typed, rewritten by hand, loaded from an older file, or never
+finished measuring may carry none of these, and the list says so rather than
+guessing.
 """
 
 from __future__ import annotations
@@ -289,6 +290,29 @@ def fork_at(
     if turns[position]["role"] == "user":
         return turns[:position], turns[position].get("content") or ""
     return turns[: position + 1], None
+
+
+def forget_measurements(turns: list[dict] | None, position: int) -> list[dict]:
+    """The turns after the reply at ``position`` was rewritten by hand.
+
+    The counts on a generated reply describe the text the model produced, and
+    an edit replaces that text. The edited reply loses both of its counts.
+    Every later reply keeps ``generated_tokens`` - its own text is untouched -
+    but loses ``prompt_tokens``, which measured a transcript that no longer
+    exists. ``model`` stays throughout: rewording an answer does not change
+    who gave it. The list then falls back to the last reply measured before
+    the edit, the newest size that is still true.
+    """
+
+    turns = copy_turns(turns)
+    for index in range(max(position, 0), len(turns)):
+        turn = turns[index]
+        if turn["role"] != "assistant":
+            continue
+        turn.pop("prompt_tokens", None)
+        if index == position:
+            turn.pop("generated_tokens", None)
+    return turns
 
 
 # ------------------------------------------------------- conversation list

@@ -207,6 +207,41 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(final[DETAIL], app.NO_TOKEN_SELECTED)
         self.assertEqual(final[ALTS], [])
 
+    def test_editing_an_assistant_message_forgets_its_token_counts(self):
+        # The counts describe the generated text, which the edit replaced; a
+        # later reply's prompt count measured the transcript before the edit.
+        # The model that answered is still the model that answered.
+        turns = [
+            make_turn("user", "one"),
+            make_turn("assistant", "first"),
+            make_turn("user", "two"),
+            make_turn("assistant", "second"),
+            make_turn("user", "three"),
+            make_turn("assistant", "third"),
+        ]
+        for turn, prompt, generated in (
+            (turns[1], 10, 5),
+            (turns[3], 30, 7),
+            (turns[5], 50, 9),
+        ):
+            turn.update(
+                model="org/alpha", prompt_tokens=prompt, generated_tokens=generated
+            )
+        event = gr.EditData(
+            None, {"index": 3, "previous_value": "second", "value": "fixed"}
+        )
+        final = self.last(app.edit_message(event, "", turns, *SETTINGS))[-1]
+        edited, later = final[TURNS][3], final[TURNS][5]
+        self.assertEqual(edited["content"], "fixed")
+        self.assertEqual(set(edited), {"role", "content", "reasoning", "model"})
+        self.assertNotIn("prompt_tokens", later)
+        self.assertEqual(later["generated_tokens"], 9)
+        self.assertEqual(final[TURNS][1]["prompt_tokens"], 10)
+        self.assertEqual(
+            app.branch_choices(new_forks(), final[TURNS])[0][0],
+            "Main · one\nalpha · 15 tokens",
+        )
+
     def test_a_new_response_resets_the_selected_token_details(self):
         # The first frame empties the strip, so the token the user had selected
         # in the previous response no longer exists and its probabilities must
