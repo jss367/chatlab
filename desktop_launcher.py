@@ -130,12 +130,22 @@ class UpdateFlow:
         ``_on_closing`` refusing to close and ``wait_for_swap`` joining on exit.
         """
 
-        worker = threading.Thread(
-            target=self.check, kwargs={"interactive": interactive}, daemon=True
-        )
-        self._worker = worker
-        worker.start()
-        return worker
+        with self._phase_lock:
+            current = getattr(self, "_worker", None)
+            if current is not None and current.is_alive():
+                busy = True
+            else:
+                busy = False
+                current = threading.Thread(
+                    target=self.check, kwargs={"interactive": interactive}, daemon=True
+                )
+                self._worker = current
+                current.start()
+        if busy and interactive:
+            self._window_call(
+                "create_confirmation_dialog", "ChatLab", "An update check or download is already running."
+            )
+        return current
 
     def wait_for_swap(self, timeout: float = 300, grace: float = 3.0) -> None:
         """Called on the way out: forbid new swaps, then wait for the worker.
