@@ -2140,6 +2140,32 @@ class ConversationListTests(unittest.TestCase):
         self.assertEqual(reply["prompt_tokens"], len(prompt_ids))
         self.assertGreater(reply["prompt_tokens"], 0)
 
+    def test_the_reply_names_the_model_that_held_the_lock(self):
+        # Loading is not refused while a reply is pending, and the generator
+        # takes the model lock only when it is first resumed, so a load that
+        # lands in the round trip the opening frame costs is the model that
+        # generates. The reply has to say so: a stamp taken on the way in
+        # would name the model that was swapped out.
+        frames = app.chat("hi", [], *SETTINGS)
+        opening = next(frames)
+        self.assertEqual(opening[TURNS][-1]["role"], "assistant")
+        self.assertNotIn("model", opening[TURNS][-1])
+        # What load() leaves behind, minus the weights: the fakes stand in for
+        # both models.
+        app.MANAGER.model_id = "other/model"
+        app.MANAGER.load_count += 1
+        rest = list(frames)
+        reply = rest[-1][TURNS][-1]
+        self.assertEqual(reply["model"], "other/model")
+        self.assertEqual(rest[-1][TRACE]["model_id"], "other/model")
+        _stamp, _ids, load = next(
+            frame[CONTEXT_IDS]
+            for frame in rest
+            if isinstance(frame[CONTEXT_IDS], tuple) and frame[CONTEXT_IDS][1]
+        )
+        self.assertEqual(load, "other/model#1")
+        self.assertEqual(load, app.MANAGER.load_id)
+
     def test_the_counts_grow_with_the_stream(self):
         # A reply stopped part way keeps the count it had reached, since every
         # frame publishes the turn with the tokens so far.

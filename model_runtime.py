@@ -839,6 +839,17 @@ class GenerationUpdate:
     chose to measure.
     """
 
+    model_id: str | None = None
+    load_id: str | None = None
+    """Which weights produced this update, read under the model lock.
+
+    A caller that looks at the manager instead can be wrong: a load may land
+    between the caller's look and the moment the generator takes the lock,
+    and a caller that saw a model change would have to do without a stamp.
+    ``load_id`` is what :meth:`ModelManager.inspect` checks against; see
+    :attr:`ModelManager.load_id`.
+    """
+
 
 class IncrementalDecoder:
     """Decode a growing token stream without re-decoding it from the start.
@@ -1657,6 +1668,11 @@ class ModelManager:
             assert self.tokenizer is not None
             model = self.model
             tokenizer = self.tokenizer
+            # Read here, under the lock, alongside the weights: this is the
+            # only place the two are guaranteed to agree, which is what makes
+            # the stamp on each update worth trusting.
+            model_id = self.model_id
+            load_id = self.load_id
             device = next(model.parameters()).device
 
             prompt_ids, reasoning_prefilled = self._prompt_token_ids(messages)
@@ -1752,6 +1768,8 @@ class ModelManager:
                     forced_prefix_tokens=len(forced),
                     literal_prefill_text=literal_prefill_text,
                     prompt_ids=tuple(prompt_ids),
+                    model_id=model_id,
+                    load_id=load_id,
                 )
                 if (
                     forced[-1] in stop_ids
@@ -1797,6 +1815,8 @@ class ModelManager:
                         forced_prefix_tokens=len(forced),
                         literal_prefill_text=literal_prefill_text,
                         prompt_ids=tuple(prompt_ids),
+                        model_id=model_id,
+                        load_id=load_id,
                     )
 
                 if stopping:

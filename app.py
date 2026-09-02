@@ -1142,11 +1142,13 @@ def _stream_reply(
 
     pending = make_turn("assistant", "", "")
     pending["reasoning_closed"] = True
-    # Where this reply came from, for the conversation list: the model is
-    # known now, and the token counts are filled in as the stream arrives so
-    # a stopped or failed reply still says how far it got.
-    if MANAGER.model_id:
-        pending["model"] = MANAGER.model_id
+    # Where this reply came from, for the conversation list. The model is
+    # stamped from the first update rather than read off MANAGER here: the
+    # generator does not take the model lock until it is first resumed, and
+    # a load can land in the round trip the opening frame costs. Only the
+    # update knows which weights it came from. The token counts are filled
+    # in as the stream arrives so a stopped or failed reply still says how
+    # far it got.
     turns.append(pending)
 
     def snapshot(
@@ -1280,6 +1282,8 @@ def _stream_reply(
                 prompt_panel = None
                 context_ids = gr.skip()
                 if first:
+                    if update.model_id:
+                        pending["model"] = update.model_id
                     # Every prompt token is measured before the first response
                     # token exists, so this is published once and never
                     # changes. It shares the response strip's stamp: the two
@@ -1297,7 +1301,7 @@ def _stream_reply(
                     context_ids = (
                         generation,
                         [int(v) for v in update.prompt_ids],
-                        MANAGER.load_id,
+                        update.load_id,
                     )
                 yield snapshot(
                     highlight,
@@ -1376,7 +1380,7 @@ def _stream_reply(
         sampling["assistant_prefill"] = assistant_prefill
     trace = (
         build_trace(
-            model_id=MANAGER.model_id,
+            model_id=pending.get("model"),
             messages=request,
             response=raw_text,
             sampling=sampling,
