@@ -1,6 +1,9 @@
 accelerate>=1.2
 gradio>=5.20,<6
-huggingface-hub>=0.28
+# 1.1 is the first release whose snapshot_download reports byte progress
+# through the caller's tqdm_class; the download card shows only file counts
+# on anything older.
+huggingface-hub>=1.1
 numpy>=1.26
 torch>=2.5
 transformers>=4.57,<6

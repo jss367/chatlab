@@ -1,3 +1,4 @@
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -5,7 +6,12 @@ from pathlib import Path
 import numpy as np
 
 import app
-from model_runtime import PROMPT_SCORE_LIMIT, ScoredText
+from model_runtime import (
+    PROMPT_SCORE_LIMIT,
+    DownloadProgress,
+    ModelManager,
+    ScoredText,
+)
 from token_metrics import UNSCORED_BEYOND_LIMIT, build_metric, unscored_metric
 
 
@@ -132,6 +138,24 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class FakeDownloads(ModelManager):
+    """A manager that keeps the real download bookkeeping around a fake fetch."""
+
+    def fetch(self, model_id, token, progress):
+        raise NotImplementedError
+
+    def download(self, model_id, token=None, progress=None):
+        progress = progress or DownloadProgress()
+        try:
+            with self._downloads_lock:
+                self.active_downloads.setdefault(model_id, progress)
+            return self.fetch(model_id, token, progress)
+        finally:
+            with self._downloads_lock:
+                if self.active_downloads.get(model_id) is progress:
+                    del self.active_downloads[model_id]
+
+
 class DownloadCardTests(unittest.TestCase):
     """What the model panel says while a download runs, and after."""
 
@@ -184,10 +208,12 @@ class DownloadCardTests(unittest.TestCase):
         self.assertAlmostEqual(meter.rate(5_000_000_300), 100.0)
 
     def test_the_download_card_updates_until_the_download_ends(self):
-        class Manager:
-            active_downloads = {}
+        # The Hub's answer arrives only once the first card has been shown.
+        file_list_arrives = threading.Event()
 
-            def download(self, model_id, token, progress):
+        class Manager(FakeDownloads):
+            def fetch(self, model_id, token, progress):
+                file_list_arrives.wait(5)
                 bar = progress.bar_class()
                 files = bar(desc="Fetching 2 files", total=2)
                 rebuild = bar(desc="Reconstructing", total=0, unit="B")
@@ -200,7 +226,10 @@ class DownloadCardTests(unittest.TestCase):
 
         app.MANAGER = Manager()
 
-        frames = list(app.download_model("org/model", ""))
+        cards = app.download_model("org/model", "")
+        first = next(cards)
+        file_list_arrives.set()
+        frames = [first, *cards]
 
         self.assertIn("Downloading model", frames[0])
         self.assertIn("Asking Hugging Face", frames[0])
@@ -213,10 +242,8 @@ class DownloadCardTests(unittest.TestCase):
         self.assertIn("Load cached", frames[-1])
 
     def test_a_failed_download_is_reported_on_the_card(self):
-        class Manager:
-            active_downloads = {}
-
-            def download(self, model_id, token, progress):
+        class Manager(FakeDownloads):
+            def fetch(self, model_id, token, progress):
                 raise OSError("no network")
 
         app.MANAGER = Manager()
@@ -225,22 +252,22 @@ class DownloadCardTests(unittest.TestCase):
 
         self.assertIn("Download failed", frames[-1])
         self.assertIn("no network", frames[-1])
+        self.assertEqual(app.MANAGER.active_downloads, {})
 
     def test_a_second_request_follows_the_download_already_running(self):
-        progress = app.DownloadProgress()
+        progress = DownloadProgress()
         rebuild = progress.bar_class()(desc="Reconstructing", total=1000, unit="B")
         rebuild.update(250)
         progress.bar_class()(desc="Fetching 1 files", total=1)
         calls = []
 
-        class Manager:
-            active_downloads = {"org/model": progress}
-
-            def download(self, model_id, token, progress):
+        class Manager(FakeDownloads):
+            def fetch(self, model_id, token, progress):
                 calls.append(model_id)
                 return Path("/cache/snap")
 
         app.MANAGER = Manager()
+        app.MANAGER.active_downloads["org/model"] = progress
         frames = []
         for frame in app.download_model("org/model", ""):
             frames.append(frame)
@@ -252,8 +279,53 @@ class DownloadCardTests(unittest.TestCase):
         self.assertEqual(calls, ["org/model"], "one quick pass over the cached files")
         self.assertIn("Download complete", frames[-1])
 
+    def test_two_handlers_starting_together_share_one_download(self):
+        # Download and "Download and load" clicked in the same instant: both
+        # handlers reach stream_download before either worker has started.
+        started = threading.Event()
+        finish = threading.Event()
+        calls = []
+
+        class Manager(FakeDownloads):
+            def fetch(self, model_id, token, progress):
+                calls.append(model_id)
+                started.set()
+                finish.wait(5)
+                return Path("/cache/snap")
+
+            def load(self, model_id, local_path):
+                return "cpu"
+
+        app.MANAGER = Manager()
+        first = app.download_model("org/model", "")
+        second = app.download_and_load_model("org/model", "")
+
+        self.assertIn("Downloading model", next(first))
+        self.assertTrue(started.wait(5))
+        self.assertIn("Downloading model", next(second))
+        self.assertEqual(calls, ["org/model"], "the second handler follows the first")
+
+        finish.set()
+        self.assertIn("Download complete", list(first)[-1])
+        # The follower's own pass over the now-cached files is its second call.
+        self.assertIn("Model ready", list(second)[-1])
+        self.assertEqual(calls, ["org/model", "org/model"])
+
+    def test_the_card_refuses_a_malformed_model_id_before_downloading(self):
+        class Manager(FakeDownloads):
+            def fetch(self, model_id, token, progress):
+                raise AssertionError("should not be reached")
+
+        app.MANAGER = Manager()
+
+        frames = list(app.download_model("not a model id", ""))
+
+        self.assertIn("Download failed", frames[-1])
+        self.assertIn("organization/model-name", frames[-1])
+        self.assertEqual(app.MANAGER.active_downloads, {})
+
     def test_load_cached_while_downloading_points_at_the_running_download(self):
-        progress = app.DownloadProgress()
+        progress = DownloadProgress()
         rebuild = progress.bar_class()(desc="Reconstructing", total=16_000_000_000, unit="B")
         rebuild.update(4_000_000_000)
 

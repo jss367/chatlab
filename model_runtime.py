@@ -747,6 +747,14 @@ class DownloadProgress:
     and bytes reconstructed on disk) grow their ``total`` as each file learns
     its size. :meth:`bar_class` gives it a silent tqdm that records those
     numbers here instead of drawing them.
+
+    The byte bars belong to the snapshot, not to its files: since
+    huggingface_hub 1.1 every per-file download feeds them through an internal
+    aggregating stand-in, so the ``tqdm_class`` handed to ``snapshot_download``
+    only ever sees the file bar and those snapshot-wide byte bars (one of them
+    before 1.23, which added the transfer bar). That is why byte totals below
+    are read as a maximum across byte bars rather than a sum: they are two
+    views of the same bytes.
     """
 
     def __init__(self) -> None:
@@ -816,6 +824,10 @@ class ModelManager:
         # the same model can follow the first instead of racing it for the
         # same files.
         self.active_downloads: dict[str, DownloadProgress] = {}
+        # Guards active_downloads, so that "is anyone fetching this?" and "then
+        # I am" happen as one step: two handlers asking at the same instant
+        # must come away with one download between them, not one each.
+        self._downloads_lock = threading.Lock()
         self._lock = threading.RLock()
         # A separate, non-reentrant flag for "a generation is running right
         # now". The model lock cannot answer that question: it is reentrant
@@ -878,23 +890,55 @@ class ModelManager:
         Blocks until the last byte; ``progress`` is how a caller on another
         thread watches it happen. Files already cached are skipped, and a
         partial file left by an interrupted download is resumed.
-        """
 
-        from huggingface_hub import snapshot_download
+        ``progress`` is listed in :attr:`active_downloads` for as long as this
+        runs. A caller that already listed it through :meth:`reserve_download`
+        keeps that entry; one that did not gets it added here, unless another
+        download of the same model is already listed, which is left alone.
+        """
 
         checked_id = validate_model_id(model_id)
         progress = progress or DownloadProgress()
-        self.active_downloads[checked_id] = progress
         try:
+            with self._downloads_lock:
+                self.active_downloads.setdefault(checked_id, progress)
+            from huggingface_hub import snapshot_download
+
             path = snapshot_download(
                 repo_id=checked_id,
                 token=hf_token.strip() if hf_token and hf_token.strip() else None,
                 tqdm_class=progress.bar_class(),
             )
         finally:
-            if self.active_downloads.get(checked_id) is progress:
-                del self.active_downloads[checked_id]
+            with self._downloads_lock:
+                if self.active_downloads.get(checked_id) is progress:
+                    del self.active_downloads[checked_id]
         return Path(path)
+
+    def reserve_download(self, model_id: str) -> tuple[DownloadProgress, bool]:
+        """Claim ``model_id`` for a new download, or point at the one running.
+
+        Returns ``(progress, reserved)``. When ``reserved`` is true the caller
+        owns the download: it must pass ``progress`` to :meth:`download`, whose
+        ``finally`` removes the entry. When false, another caller is fetching
+        the model and ``progress`` is theirs to watch.
+
+        The lookup and the reservation are one atomic step. Checking
+        :attr:`active_downloads` and then starting a worker is not: the worker
+        registers itself only once it reaches :meth:`download`, and two
+        handlers (say **Download** and **Download and load**) clicked together
+        would both find the table empty in that gap and fetch the same files
+        twice.
+        """
+
+        checked_id = validate_model_id(model_id)
+        with self._downloads_lock:
+            running = self.active_downloads.get(checked_id)
+            if running is not None:
+                return running, False
+            progress = DownloadProgress()
+            self.active_downloads[checked_id] = progress
+            return progress, True
 
     def find_cached(self, model_id: str) -> Path:
         """The complete local snapshot of ``model_id``, without going online.

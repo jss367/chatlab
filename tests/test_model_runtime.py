@@ -1064,3 +1064,73 @@ class DownloadProgressTests(unittest.TestCase):
                 manager.download("org/model")
 
         self.assertEqual(manager.active_downloads, {})
+
+    def test_a_reservation_is_kept_by_the_download_and_cleared_after_it(self):
+        from unittest import mock
+
+        manager = ModelManager()
+        progress, reserved = manager.reserve_download(" org/model ")
+        self.assertTrue(reserved)
+        self.assertIs(manager.active_downloads["org/model"], progress)
+        seen = {}
+
+        def fake_snapshot_download(repo_id, token, tqdm_class):
+            seen["active"] = dict(manager.active_downloads)
+            return "/cache/snapshots/abc"
+
+        with mock.patch("huggingface_hub.snapshot_download", fake_snapshot_download):
+            manager.download("org/model", None, progress)
+
+        self.assertIs(seen["active"]["org/model"], progress, "not replaced")
+        self.assertEqual(manager.active_downloads, {})
+
+    def test_a_second_reservation_points_at_the_running_download(self):
+        manager = ModelManager()
+        first, reserved_first = manager.reserve_download("org/model")
+
+        second, reserved_second = manager.reserve_download("org/model")
+
+        self.assertTrue(reserved_first)
+        self.assertFalse(reserved_second)
+        self.assertIs(second, first)
+
+    def test_simultaneous_reservations_yield_one_download(self):
+        import threading
+
+        manager = ModelManager()
+        gate = threading.Barrier(8)
+        results = []
+
+        def race():
+            gate.wait()
+            results.append(manager.reserve_download("org/model"))
+
+        threads = [threading.Thread(target=race) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(sum(reserved for _, reserved in results), 1)
+        self.assertEqual(len({id(progress) for progress, _ in results}), 1)
+
+    def test_a_download_leaves_another_download_of_the_same_model_listed(self):
+        from unittest import mock
+
+        from model_runtime import DownloadProgress
+
+        manager = ModelManager()
+        running, _ = manager.reserve_download("org/model")
+
+        with mock.patch("huggingface_hub.snapshot_download", lambda **kw: "/cache/x"):
+            manager.download("org/model", None, DownloadProgress())
+
+        self.assertIs(manager.active_downloads["org/model"], running)
+
+    def test_a_malformed_model_id_is_refused_without_a_reservation(self):
+        manager = ModelManager()
+
+        with self.assertRaises(ValueError):
+            manager.reserve_download("not a model id")
+
+        self.assertEqual(manager.active_downloads, {})

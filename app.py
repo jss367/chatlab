@@ -31,7 +31,6 @@ from conversation import (
 )
 from model_runtime import (
     PROMPT_SCORE_LIMIT,
-    DownloadProgress,
     DownloadSnapshot,
     ModelManager,
 )
@@ -191,11 +190,13 @@ def stream_download(model_id: str, hf_token: str):
     """
 
     cleaned = model_id.strip()
-    followed = MANAGER.active_downloads.get(cleaned)
-    if followed is not None:
+    # Reserved before the worker exists: the reservation is what stops a
+    # second handler, arriving in the same instant, from starting its own.
+    progress, reserved = MANAGER.reserve_download(cleaned)
+    if not reserved:
         meter = RateMeter()
-        while MANAGER.active_downloads.get(cleaned) is followed:
-            snap = followed.snapshot()
+        while MANAGER.active_downloads.get(cleaned) is progress:
+            snap = progress.snapshot()
             yield status_card(
                 "Downloading model",
                 download_detail(cleaned, snap, meter.rate(snap.bytes_done)),
@@ -206,7 +207,6 @@ def stream_download(model_id: str, hf_token: str):
         # either returns at once or resumes where it stopped.
         return (yield from stream_download(model_id, hf_token))
 
-    progress = DownloadProgress()
     outcome: dict = {}
 
     def work() -> None:
