@@ -461,6 +461,19 @@ class ForcedPrefixTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot be applied together"):
             self.updates(manager, [0], answer_prefill="Hello")
 
+    def test_a_prefill_that_the_tokenizer_normalizes_is_rejected(self):
+        class NormalizingTokenizer(FakeTokenizer):
+            def __call__(self, text, **kwargs):
+                if kwargs.get("add_special_tokens") is False:
+                    return Encoding(input_ids=[0])
+                return super().__call__(text, **kwargs)
+
+        manager = loaded_manager([0, EOS_ID])
+        manager.tokenizer = NormalizingTokenizer()
+
+        with self.assertRaisesRegex(ValueError, "represented exactly"):
+            self.updates(manager, [], answer_prefill="  Hello")
+
 
 class ChatTemplateTokenizer(FakeTokenizer):
     """A tokenizer whose chat template can pre-fill the opening <think> tag."""

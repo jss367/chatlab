@@ -1395,6 +1395,15 @@ class ModelManager:
         token_ids = [int(value) for value in encoded]
         if not token_ids:
             raise ValueError("The assistant prefill did not produce any tokens.")
+        decoded = self.tokenizer.decode(
+            token_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+        if decoded != raw:
+            raise ValueError(
+                "The assistant prefill cannot be represented exactly by this tokenizer."
+            )
         return token_ids
 
     def _decode_token(self, token_id: int) -> str:
