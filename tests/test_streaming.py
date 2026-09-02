@@ -622,6 +622,48 @@ class ReplacementEncodingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "hidden special token"):
             manager.encode_replacement(kept, "<pad>")
 
+    def test_a_long_rejected_replacement_decodes_only_boundary_candidates(self):
+        class CountingNormalizingTokenizer:
+            """One token per character, with ``z`` normalized to ``x``."""
+
+            chat_template = None
+            eos_token_id = None
+            all_special_ids = []
+            is_fast = False
+
+            def __init__(self):
+                self.decode_calls = 0
+                self.decoded_ids = 0
+
+            def __call__(self, text, **_kwargs):
+                return Encoding(
+                    input_ids=[0 if character == "a" else 1 for character in text]
+                )
+
+            def decode(self, token_ids, **_kwargs):
+                self.decode_calls += 1
+                self.decoded_ids += len(token_ids)
+                return "".join(
+                    "a" if int(token_id) == 0 else "x" for token_id in token_ids
+                )
+
+            def convert_ids_to_tokens(self, token_id):
+                return ("a", "x")[int(token_id)]
+
+        manager = loaded_manager([0], pieces=["a", "x"], eos_id=None)
+        tokenizer = CountingNormalizingTokenizer()
+        manager.tokenizer = tokenizer
+        replacement = "a" * 4095 + "z"
+
+        with self.assertRaisesRegex(ValueError, "exactly at this position"):
+            manager.encode_replacement([0], replacement)
+
+        # The old exhaustive suffix loop made 4,098 decodes and visited more
+        # than eight million token ids here. Boundary discovery plus exact
+        # validation stays linear in the pasted text instead.
+        self.assertLessEqual(tokenizer.decode_calls, 20)
+        self.assertLess(tokenizer.decoded_ids, len(replacement) * 6)
+
     def test_a_tokenizer_with_the_space_inside_the_token_is_unchanged(self):
         manager = loaded_manager([0])
         self.assertEqual(manager.encode_replacement([0], " world"), [1])

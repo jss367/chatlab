@@ -1419,13 +1419,23 @@ class ModelManager:
         # the token normally wants the text. A context-sensitive tokenizer can
         # instead need a suffix of the joint encoding. The model may have
         # sampled a noncanonical spelling of ``kept_text``, so the joint
-        # encoding need not begin with ``kept`` even though one of its suffixes
-        # can follow those unchanged ids exactly. Try the old prefix-aligned
-        # tail first to preserve its tokenization, then the remaining suffixes
-        # from shortest to longest. There are at most ``len(joint)`` of them,
-        # and every one still has to pass the exact in-context decode below.
+        # encoding need not begin with ``kept`` even though its boundary suffix
+        # can follow those unchanged ids exactly.
+        #
+        # Locate that suffix from the tokenizer's character offsets when they
+        # exist, or from the bounded seam search used by text scoring for a
+        # slow tokenizer. Trying every suffix looks harmless but is quadratic:
+        # each candidate decodes the whole kept prefix plus a progressively
+        # longer tail, all while the model lock is held. The seam can be off by
+        # one token when one piece crosses it, so validate the boundary and its
+        # two neighbours; this keeps candidate decoding strictly bounded while
+        # the final exact decode remains the authority.
         standalone = self._encode_plain(text)
-        joint = self._encode_plain(expected)
+        split = split_context_and_text(
+            self.tokenizer, kept_text, text, add_special_tokens=False
+        )
+        joint = split.context_ids + split.text_ids
+        boundary = len(split.context_ids)
 
         def candidates() -> Iterator[list[int]]:
             yield standalone
@@ -1435,7 +1445,12 @@ class ModelManager:
                 aligned = joint[aligned_start:]
                 if aligned != standalone:
                     yield aligned
-            for start in range(len(joint) - 1, -1, -1):
+            starts = {
+                start
+                for start in (boundary - 1, boundary, boundary + 1)
+                if 0 <= start < len(joint)
+            }
+            for start in sorted(starts, reverse=True):
                 candidate = joint[start:]
                 if start != aligned_start and candidate != standalone:
                     yield candidate
