@@ -306,6 +306,20 @@ def short_model_name(model_id: str) -> str:
     return model_id.rstrip("/").rsplit("/", 1)[-1] or model_id
 
 
+def _model_names(model_ids: list[str]) -> list[str]:
+    """Short names for distinct IDs, kept whole where shortening would merge two.
+
+    ``org-a/model`` and ``org-b/model`` are different models, and a tag that
+    says ``model`` for both would claim only one answered.
+    """
+
+    short = [short_model_name(model_id) for model_id in model_ids]
+    return [
+        name if short.count(name) == 1 else model_id
+        for model_id, name in zip(model_ids, short)
+    ]
+
+
 def branch_title(turns: list[dict] | None, limit: int = TITLE_LIMIT) -> str:
     """The first user message, flattened to one line and cut to ``limit``."""
 
@@ -321,8 +335,9 @@ def branch_title(turns: list[dict] | None, limit: int = TITLE_LIMIT) -> str:
 def describe_branch(turns: list[dict] | None) -> dict:
     """What the list says about one branch.
 
-    ``models`` are the short names of every model that answered, most recent
-    first and each once. ``tokens`` is the size of the conversation as the
+    ``models`` names every model that answered, most recent first and each
+    once: by short name, or by full ID when two organizations share a name.
+    ``tokens`` is the size of the conversation as the
     model last saw it - the prompt behind the latest measured reply plus that
     reply - or ``None`` when no reply carries a measurement. ``replies`` counts
     assistant turns, measured or not, so an unmeasured transcript can be told
@@ -339,10 +354,11 @@ def describe_branch(turns: list[dict] | None) -> dict:
         replies += 1
         model = turn.get("model")
         if isinstance(model, str) and model:
-            name = short_model_name(model)
-            if name in models:
-                models.remove(name)
-            models.insert(0, name)
+            # Deduplicate on the full ID; shortening comes last, once the set
+            # is known, so it can tell when two IDs would share a name.
+            if model in models:
+                models.remove(model)
+            models.insert(0, model)
         prompt_tokens = turn.get("prompt_tokens")
         generated = turn.get("generated_tokens")
         if isinstance(prompt_tokens, int) and isinstance(generated, int):
@@ -351,7 +367,7 @@ def describe_branch(turns: list[dict] | None) -> dict:
             tokens = prompt_tokens + generated
     return {
         "title": branch_title(turns),
-        "models": models,
+        "models": _model_names(models),
         "tokens": tokens,
         "replies": replies,
     }

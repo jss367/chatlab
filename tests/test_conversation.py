@@ -356,6 +356,24 @@ class ConversationListTests(unittest.TestCase):
         ]
         self.assertEqual(describe_branch(turns)["models"], ["alpha", "beta"])
 
+    def test_models_that_share_a_name_are_told_apart_by_their_full_ids(self):
+        # org-a/model and org-b/model are different models; shortening both to
+        # "model" would merge them into one entry. Only the colliding pair is
+        # spelled out in full - the third model keeps its short name.
+        turns = [
+            make_turn("user", "one"),
+            measured("a", model="org-a/model"),
+            make_turn("user", "two"),
+            measured("b", model="org-b/model"),
+            make_turn("user", "three"),
+            measured("c", model="org-c/other"),
+            make_turn("user", "four"),
+            measured("d", model="org-a/model"),
+        ]
+        self.assertEqual(
+            describe_branch(turns)["models"], ["org-a/model", "other", "org-b/model"]
+        )
+
     def test_the_label_of_an_empty_conversation(self):
         self.assertEqual(branch_label(MAIN_BRANCH, []), "Main\nNo messages yet")
 
