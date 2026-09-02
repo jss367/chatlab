@@ -143,6 +143,29 @@ class CacheStatusTests(unittest.TestCase):
         self.assertFalse(status.complete)
         self.assertEqual(status.missing_files, (MODEL_WEIGHTS,))
 
+    def test_a_snapshot_of_plain_files_and_no_blobs_is_complete(self):
+        """Where the cache sits on a filesystem without symlinks, the hub
+        moves each finished file into the snapshot and leaves ``blobs/``
+        empty or absent; the model is no less loadable for it."""
+
+        for blobs_dir in (True, False):
+            with self.subTest(blobs_dir=blobs_dir), tempfile.TemporaryDirectory() as root:
+                model = Path(root) / "models--allenai--Olmo-3-7B-Think"
+                if blobs_dir:
+                    (model / "blobs").mkdir(parents=True)
+                (model / "refs").mkdir(parents=True)
+                (model / "refs" / "main").write_text(self.COMMIT)
+                snapshot = model / "snapshots" / self.COMMIT
+                snapshot.mkdir(parents=True)
+                (snapshot / "config.json").write_bytes(b"{}")
+                (snapshot / "model.safetensors").write_bytes(b"x" * 100)
+                status = cache_status(self.MODEL, Path(root))
+
+                self.assertTrue(status.present)
+                self.assertTrue(status.complete)
+                self.assertEqual(status.missing_files, ())
+                self.assertEqual(status.cached_bytes, 102)
+
     def test_blobs_without_a_resolvable_snapshot_lack_everything(self):
         with tempfile.TemporaryDirectory() as root:
             (self.folder(root) / "abc").write_bytes(b"x" * 10)

@@ -198,24 +198,30 @@ def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
     """Measure what is already on disk for ``model_id``, without touching the network."""
 
     folder = cache_folder(model_id, cache_dir)
-    blobs = folder / "blobs"
-    if not blobs.is_dir():
-        return CacheStatus()
+    snapshot = snapshot_folder(folder)
     cached = partial_files = partial_bytes = 0
-    for blob in blobs.iterdir():
-        if not blob.is_file():
-            continue
-        size = blob.stat().st_size
-        if blob.name.endswith(".incomplete"):
-            partial_files += 1
-            partial_bytes += size
-        else:
-            cached += size
+    blobs = folder / "blobs"
+    if blobs.is_dir():
+        for blob in blobs.iterdir():
+            if not blob.is_file():
+                continue
+            size = blob.stat().st_size
+            if blob.name.endswith(".incomplete"):
+                partial_files += 1
+                partial_bytes += size
+            else:
+                cached += size
+    # On a filesystem without symlinks (an exFAT drive, say) the hub moves each
+    # finished file into the snapshot itself and leaves ``blobs/`` empty, so
+    # the snapshot's own regular files are cached bytes too. In the usual
+    # layout every entry there is a symlink and counts nothing twice.
+    if snapshot is not None:
+        for entry in snapshot.rglob("*"):
+            if entry.is_file() and not entry.is_symlink():
+                cached += entry.stat().st_size
     if cached == 0 and partial_files == 0:
         return CacheStatus()
-    return CacheStatus(
-        cached, partial_files, partial_bytes, missing_files(snapshot_folder(folder))
-    )
+    return CacheStatus(cached, partial_files, partial_bytes, missing_files(snapshot))
 
 
 def format_bytes(count: int) -> str:
