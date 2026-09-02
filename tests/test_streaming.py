@@ -97,9 +97,13 @@ class BytePieceTokenizer:
 
     chat_template = None
 
-    def __init__(self, pieces: list[bytes]):
+    def __init__(self, pieces: list[bytes], eos_id: int | None = None):
         self.pieces = pieces
-        self.all_special_ids: list[int] = []
+        self.eos_token_id = eos_id
+        self.all_special_ids = [] if eos_id is None else [eos_id]
+
+    def __call__(self, _text, **_kwargs):
+        return Encoding(input_ids=[0])
 
     def decode(self, token_ids, skip_special_tokens=False, **_kwargs):
         raw = b"".join(self.pieces[int(token_id)] for token_id in token_ids)
@@ -204,6 +208,20 @@ class IncrementalDecoderTests(unittest.TestCase):
         # The fake really is context-sensitive: half an emoji does not decode.
         self.assertIn("\ufffd", tokenizer.decode([1, 2]))
         self.assertEqual(tokenizer.decode([1, 2, 3, 4]), emoji)
+
+    def test_stable_text_excludes_an_incomplete_character_suffix(self):
+        pieces = [b"<think>", b"\xf0", b"\x9f", b"\x92", b"\xbe"]
+        decoder = IncrementalDecoder(BytePieceTokenizer(pieces))
+        decoder.push(0)
+        decoder.push(1)
+
+        self.assertEqual(decoder.text, "<think>\ufffd")
+        self.assertEqual(decoder.stable_text, "<think>")
+
+        for token_id in (2, 3, 4):
+            decoder.push(token_id)
+        self.assertEqual(decoder.text, "<think>\U0001f4be")
+        self.assertEqual(decoder.stable_text, decoder.text)
 
     def test_a_flush_keeps_the_word_boundary_space(self):
         """SentencePiece suppresses the leading space, so a flush must not restart."""
@@ -408,6 +426,35 @@ class ForcedPrefixTests(unittest.TestCase):
         self.assertEqual(updates[0].literal_prefill_text, "Hello<eos> world")
         self.assertEqual(updates[0].forced_prefix_tokens, 3)
         self.assertEqual(updates[-1].text, "Hello<eos> world!")
+
+    def test_a_branch_inside_a_multi_token_character_uses_a_stable_literal_prefix(self):
+        pieces = [
+            b"prompt",
+            b"<think>",
+            b"\xf0",
+            b"\x9f",
+            b"\x92",
+            b"\xbe",
+            b" continued",
+            b"<eos>",
+        ]
+        manager = ModelManager()
+        manager.tokenizer = BytePieceTokenizer(pieces, eos_id=7)
+        manager.model = FakeModel(
+            [0, 0, 3, 4, 5, 6, 7], vocab_size=len(pieces), eos_id=7
+        )
+        manager.model_id = "fake/model"
+
+        updates = self.updates(
+            manager,
+            [1, 2],
+            literal_prefill_tokens=2,
+            max_new_tokens=5,
+        )
+
+        self.assertEqual(updates[0].text, "<think>\ufffd")
+        self.assertEqual(updates[0].literal_prefill_text, "<think>")
+        self.assertEqual(updates[-1].text, "<think>\U0001f4be continued")
 
     def test_a_token_branch_and_text_prefill_are_mutually_exclusive(self):
         manager = loaded_manager([0, 1, EOS_ID])

@@ -458,6 +458,28 @@ class ChatFlowTests(unittest.TestCase):
 
 
 class AssistantPrefillSplittingTests(unittest.TestCase):
+    def test_reader_supplied_whitespace_is_preserved(self):
+        prefix = "  \n  code:  "
+        reasoning, answer, closed = app.split_response_text(
+            prefix + "continued", literal_prefill=prefix
+        )
+
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, "  \n  code:  continued")
+        self.assertTrue(closed)
+
+    def test_template_separator_is_trimmed_but_reader_whitespace_is_preserved(self):
+        prefix = "</think>\n\n  answer"
+        reasoning, answer, closed = app.split_response_text(
+            prefix + " continued",
+            literal_prefill=prefix,
+            reasoning_prefilled=True,
+        )
+
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, "  answer continued")
+        self.assertTrue(closed)
+
     def test_literal_tags_are_not_interpreted_as_reasoning(self):
         prefix = "Show <think>literal</think>: "
         reasoning, answer, closed = app.split_response_text(
@@ -501,6 +523,16 @@ class AssistantPrefillSplittingTests(unittest.TestCase):
 
         self.assertEqual(reasoning, "")
         self.assertEqual(answer, prefix)
+        self.assertTrue(closed)
+
+    def test_a_stable_prefix_protects_tags_after_a_partial_character_resolves(self):
+        reasoning, answer, closed = app.split_response_text(
+            "<think>\U0001f4be continued",
+            literal_prefill="<think>",
+        )
+
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, "<think>\U0001f4be continued")
         self.assertTrue(closed)
 
 

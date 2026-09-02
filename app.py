@@ -838,22 +838,42 @@ def split_response_text(
                 reasoning_prefilled=reasoning_prefilled,
             )
         literal_start = marker_at + len(THINK_CLOSE)
+        # _response_prefix_ids() inserts this separator between the template's
+        # closing reasoning marker and the reader's text. Leave it outside the
+        # protected span so split_reasoning() can continue trimming it while
+        # retaining whitespace the reader actually typed after it.
+        if literal_prefill.startswith("\n\n", literal_start):
+            literal_start += 2
 
     placeholder = "\0CHATLAB_LITERAL_LT\0"
-    while placeholder in text:
+    start = "\0CHATLAB_LITERAL_START\0"
+    end = "\0CHATLAB_LITERAL_END\0"
+    while placeholder in text or start in text or end in text:
         placeholder += "_"
+        start += "_"
+        end += "_"
     protected_prefix = (
         literal_prefill[:literal_start]
+        + start
         + literal_prefill[literal_start:].replace("<", placeholder)
+        + end
     )
     reasoning, answer, closed = split_reasoning(
         protected_prefix + text[len(literal_prefill) :],
         streaming=streaming,
         reasoning_prefilled=reasoning_prefilled,
     )
+
+    def restore(value: str) -> str:
+        return (
+            value.replace(placeholder, "<")
+            .replace(start, "")
+            .replace(end, "")
+        )
+
     return (
-        reasoning.replace(placeholder, "<"),
-        answer.replace(placeholder, "<"),
+        restore(reasoning),
+        restore(answer),
         closed,
     )
 

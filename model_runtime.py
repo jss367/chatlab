@@ -867,6 +867,14 @@ class IncrementalDecoder:
     def text(self) -> str:
         return self._settled + self._pending
 
+    @property
+    def stable_text(self) -> str:
+        """Decoded text excluding an incomplete multi-token character suffix."""
+
+        if self._pending.endswith(REPLACEMENT_CHARACTER):
+            return self._settled + self._pending.rstrip(REPLACEMENT_CHARACTER)
+        return self.text
+
     def _decode(self, token_ids: list[int]) -> str:
         return self._tokenizer.decode(
             token_ids,
@@ -1716,7 +1724,11 @@ class ModelManager:
                     token_id, force_visible=index < literal_prefill_tokens
                 )
                 if index + 1 == literal_prefill_tokens:
-                    literal_prefill_text = decoder.text
+                    # A branch can stop inside a byte-level token sequence for
+                    # one character. The replacement-character suffix will be
+                    # rewritten when the next token arrives, so it cannot be a
+                    # durable prefix for the application's literal-tag guard.
+                    literal_prefill_text = decoder.stable_text
             limit = len(forced) + int(max_new_tokens)
             pending_tokens = 0
             last_yield = time.monotonic()
