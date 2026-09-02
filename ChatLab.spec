@@ -71,7 +71,7 @@ app = BUNDLE(
     coll,
     name="ChatLab.app",
     icon=None,
-    bundle_identifier="build.chatlab.token-explorer",
+    bundle_identifier="build.chatlab.app",
     info_plist={
         "CFBundleDisplayName": "ChatLab",
         "CFBundleName": "ChatLab",
