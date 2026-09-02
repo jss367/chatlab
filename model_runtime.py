@@ -192,7 +192,7 @@ def missing_files(snapshot: Path | None) -> tuple[str, ...]:
             continue
         try:
             shards = set(json.loads(index.read_text())["weight_map"].values())
-        except (OSError, ValueError, KeyError, AttributeError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             missing.append(MODEL_WEIGHTS)
             return tuple(missing)
         missing.extend(

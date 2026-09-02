@@ -133,6 +133,20 @@ class CacheStatusTests(unittest.TestCase):
             ("model-00002-of-00003.safetensors", "model-00003-of-00003.safetensors"),
         )
 
+    def test_a_weight_index_with_the_wrong_json_shape_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(
+                root,
+                {
+                    "config.json": b"{}",
+                    "model.safetensors.index.json": b"[]",
+                },
+            )
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertFalse(status.complete)
+        self.assertEqual(status.missing_files, (MODEL_WEIGHTS,))
+
     def test_a_link_whose_blob_was_deleted_does_not_count_as_weights(self):
         with tempfile.TemporaryDirectory() as root:
             snapshot = self.snapshot(
