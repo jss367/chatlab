@@ -39,6 +39,7 @@ from model_runtime import (
     PROMPT_SCORE_LIMIT,
     CacheStatus,
     DownloadSnapshot,
+    ModelChanged,
     ModelManager,
     cache_status,
     format_bytes,
@@ -2022,6 +2023,8 @@ def inspect_layers(
     # nothing to a different tokenizer, so the ids carry the load that
     # produced them and only that load may explain them. The load, not the
     # model ID: re-downloading the same ID can bring in a newer snapshot.
+    # This is the early exit; the check that counts is the one inspect()
+    # makes under the model lock, since a load can land between here and it.
     if load_id != MANAGER.load_id:
         yield (*refused, INSPECT_MODEL_CHANGED)
         return
@@ -2054,8 +2057,11 @@ def inspect_layers(
         started = time.monotonic()
         try:
             insight = MANAGER.inspect(
-                sequence, index, context_count=len(context_ids)
+                sequence, index, context_count=len(context_ids), load_id=load_id
             ).to_dict()
+        except ModelChanged:
+            yield (*refused, INSPECT_MODEL_CHANGED)
+            return
         except Exception as error:
             yield (*refused, f"Could not inspect that token: {error}")
             return

@@ -881,6 +881,10 @@ FINAL_NORM_ATTRIBUTES = ("norm", "final_layer_norm", "ln_f", "final_norm", "norm
 FINAL_NORM_CONTAINERS = ("decoder", "transformer", "model", "language_model")
 
 
+class ModelChanged(RuntimeError):
+    """The weights in memory are not the ones the caller's tokens came from."""
+
+
 @dataclass(frozen=True)
 class TokenInsight:
     """What every layer predicted for one token, and where the model looked.
@@ -1807,7 +1811,12 @@ class ModelManager:
         }
 
     def inspect(
-        self, token_ids: Sequence[int], index: int, *, context_count: int = 0
+        self,
+        token_ids: Sequence[int],
+        index: int,
+        *,
+        context_count: int = 0,
+        load_id: str | None = None,
     ) -> TokenInsight:
         """Explain the prediction of ``token_ids[index]`` layer by layer.
 
@@ -1820,6 +1829,12 @@ class ModelManager:
 
         ``context_count`` is how many leading tokens are prompt or context
         rather than response, purely for labelling.
+
+        ``load_id`` names the load the tokens came from (see :attr:`load_id`).
+        It is compared under the model lock, so a load that started after the
+        caller looked and finished before this ran is still refused, with
+        :class:`ModelChanged`, rather than explaining the tokens with weights
+        and a tokenizer they never met.
         """
 
         import torch
@@ -1827,6 +1842,10 @@ class ModelManager:
         with self._lock, torch.inference_mode():
             if not self.loaded:
                 raise RuntimeError("Download and load a model before inspecting a token.")
+            if load_id is not None and load_id != self.load_id:
+                raise ModelChanged(
+                    "The model has been reloaded since these tokens were produced."
+                )
             ids = [int(value) for value in token_ids]
             if not 1 <= index < len(ids):
                 raise ValueError(

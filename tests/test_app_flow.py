@@ -14,7 +14,7 @@ from conversation import (
     model_messages,
     new_forks,
 )
-from model_runtime import GenerationUpdate, TokenInsight
+from model_runtime import GenerationUpdate, ModelChanged, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
 
 from test_streaming import loaded_manager
@@ -1969,9 +1969,11 @@ class LayerInspectionTests(unittest.TestCase):
         app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
         self.addCleanup(setattr, app, "MANAGER", self.original)
         self.calls = []
+        self.load_ids = []
 
-        def fake_inspect(sequence, index, *, context_count=0):
+        def fake_inspect(sequence, index, *, context_count=0, load_id=None):
             self.calls.append((list(sequence), index, context_count))
+            self.load_ids.append(load_id)
             return TokenInsight(
                 index=index,
                 token_id=sequence[index],
@@ -2040,6 +2042,8 @@ class LayerInspectionTests(unittest.TestCase):
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
         self.assertEqual(self.calls, [([0, 2, 3, THINK_EOS], 2, 1)])
+        # The load id goes along so the runtime can check it under its lock.
+        self.assertEqual(self.load_ids, [app.MANAGER.load_id])
         self.assertIn("logit-lens", lens)
         self.assertIn("attention-view", attention)
         self.assertEqual(slider, gr.update(maximum=2, value=0))
@@ -2050,7 +2054,7 @@ class LayerInspectionTests(unittest.TestCase):
         final = self.finished()
         real_inspect = app.MANAGER.inspect
 
-        def output_only(sequence, index, *, context_count=0):
+        def output_only(sequence, index, *, context_count=0, load_id=None):
             insight = real_inspect(sequence, index, context_count=context_count)
             return replace(insight, layers=insight.layers[-1:], decided_at=None)
 
@@ -2150,7 +2154,7 @@ class LayerInspectionTests(unittest.TestCase):
         target = app.remember_inspect_target("response")(final[METRICS], select(0))
         seen = []
 
-        def observe(sequence, index, *, context_count=0):
+        def observe(sequence, index, *, context_count=0, load_id=None):
             seen.append(app.MANAGER.busy)
             return self.fake(sequence, index, context_count=context_count)
 
@@ -2208,7 +2212,7 @@ class LayerInspectionTests(unittest.TestCase):
         target = app.remember_inspect_target("response")(final[METRICS], select(0))
         original = app.MANAGER.inspect
 
-        def replace_strips(sequence, index, *, context_count=0):
+        def replace_strips(sequence, index, *, context_count=0, load_id=None):
             # Clear, Undo and friends do not take the generation slot; they
             # mint a new stamp, which is what the handler has to notice.
             app.new_metrics_generation()
@@ -2233,6 +2237,20 @@ class LayerInspectionTests(unittest.TestCase):
         )
         self.assertEqual(status, app.INSPECT_MODEL_CHANGED)
         self.assertEqual(self.calls, [])
+
+    def test_a_load_that_lands_during_the_pass_is_reported(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+
+        def reloaded(*_args, **_kwargs):
+            raise ModelChanged("reloaded")
+
+        app.MANAGER.inspect = reloaded
+        lens, *_rest, status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(lens, gr.skip())
+        self.assertEqual(status, app.INSPECT_MODEL_CHANGED)
 
     def test_nothing_selected_gives_the_hint(self):
         final = self.finished()

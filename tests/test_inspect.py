@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from model_runtime import ModelManager, TokenInsight
+from model_runtime import ModelChanged, ModelManager, TokenInsight
 
 from test_streaming import EOS_ID, PIECES, FakeTokenizer
 
@@ -259,6 +259,15 @@ class InspectTests(unittest.TestCase):
             manager.inspect([0, 1, 2], 0)
         with self.assertRaises(ValueError):
             manager.inspect([0, 1, 2], 3)
+
+    def test_tokens_from_another_load_are_refused_under_the_lock(self):
+        manager = lens_manager([1, 2, 3])
+        insight = manager.inspect([0, 1, 2], 1, load_id=manager.load_id)
+        self.assertEqual(insight.token_id, 1)
+        with self.assertRaises(ModelChanged):
+            manager.inspect([0, 1, 2], 1, load_id="fake/lens#7")
+        # Callers that do not care pass nothing and are not checked.
+        manager.inspect([0, 1, 2], 1)
 
     def test_the_load_id_tells_one_load_of_a_model_from_the_next(self):
         manager = lens_manager([1, 2, 3])
