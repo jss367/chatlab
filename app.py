@@ -27,7 +27,14 @@ from conversation import (
     to_json,
     user_index_at_or_before,
 )
-from model_runtime import PROMPT_SCORE_LIMIT, ModelManager
+from model_runtime import (
+    MODEL_WEIGHTS,
+    PROMPT_SCORE_LIMIT,
+    CacheStatus,
+    ModelManager,
+    cache_status,
+    format_bytes,
+)
 from token_metrics import (
     COLOR_SCALES,
     DEFAULT_COLOR_SCALE,
@@ -76,13 +83,89 @@ def status_card(title: str, detail: str, tone: str = "neutral") -> str:
     return f"### {icon} {title}\n\n{detail}"
 
 
+def describe_missing(status: CacheStatus) -> str:
+    """``config.json and the model weights are missing``, for a card."""
+
+    names = [
+        "the model weights" if name == MODEL_WEIGHTS else f"`{name}`"
+        for name in status.missing_files
+    ]
+    if len(names) > 3:
+        names = names[:2] + [f"{len(names) - 2} more weight files"]
+    if len(names) == 1:
+        return f"{names[0]} {'are' if names[0] == 'the model weights' else 'is'} missing"
+    return f"{', '.join(names[:-1])} and {names[-1]} are missing"
+
+
+def describe_on_disk(status: CacheStatus) -> str:
+    """``2.0 GB cached, 1 file (300 MB) partly downloaded``, for a card.
+
+    A partial blob is not called a weight file: the hub keeps one blob folder
+    per repo, so from outside it could be any file of any revision.
+    """
+
+    cached = f"{format_bytes(status.cached_bytes)} cached"
+    if not status.partial_files:
+        return cached
+    files = "file" if status.partial_files == 1 else "files"
+    return (
+        f"{cached}, {status.partial_files} {files} "
+        f"({format_bytes(status.partial_bytes)}) partly downloaded"
+    )
+
+
+def describe_cache(model_id: str, status: CacheStatus) -> tuple[str, str]:
+    """Title and detail for the card shown while a download starts.
+
+    The cases a reader can tell apart from the outside - nothing on disk, a
+    snapshot still short of files (whether a download was cut off or another
+    tool fetched only part of the repo), and a finished one - each get their
+    own wording, so "Downloading" never hides that the files were already
+    here. Which files are missing is the verdict; ``.incomplete`` blobs are
+    reported as a size only, since the hub's blob folder is shared across
+    revisions and a stray partial need not belong to this snapshot.
+    """
+
+    name = f"`{model_id.strip()}`"
+    if status.missing_files:
+        return (
+            "Resuming download",
+            f"{name} is only partly on disk ({describe_on_disk(status)}): "
+            f"{describe_missing(status)}. Only the missing bytes are fetched.",
+        )
+    if status.present:
+        return (
+            "Checking cached model",
+            f"{name} is already in the Hugging Face cache "
+            f"({format_bytes(status.cached_bytes)}). Checking for missing or "
+            "updated files; nothing is downloaded twice.",
+        )
+    return (
+        "Downloading model",
+        f"Fetching {name} into the Hugging Face cache. Nothing is cached yet, "
+        "so this is a full download and may take a while.",
+    )
+
+
+def describe_fetched(before: CacheStatus, after: CacheStatus, elapsed: float) -> str:
+    fetched = after.total_bytes - before.total_bytes
+    if fetched <= 0:
+        return f"Already up to date; nothing new was fetched ({elapsed:.1f} seconds)."
+    if before.present:
+        return (
+            f"Fetched the remaining {format_bytes(fetched)} in {elapsed:.1f} seconds."
+        )
+    return f"Fetched {format_bytes(fetched)} in {elapsed:.1f} seconds."
+
+
 def download_model(model_id: str, hf_token: str):
     started = time.monotonic()
-    yield status_card(
-        "Downloading model",
-        f"Fetching `{model_id.strip()}` into the Hugging Face cache. Large models may take a while.",
-        "working",
-    )
+    try:
+        before = cache_status(model_id)
+    except ValueError as error:
+        yield status_card("Download failed", html.escape(str(error)), "error")
+        return
+    yield status_card(*describe_cache(model_id, before), "working")
     try:
         path = MANAGER.download(model_id, hf_token)
     except Exception as error:
@@ -90,25 +173,31 @@ def download_model(model_id: str, hf_token: str):
         return
 
     elapsed = time.monotonic() - started
+    fetched = describe_fetched(before, cache_status(model_id), elapsed)
     yield status_card(
         "Download complete",
-        f"Cached `{model_id.strip()}` in `{path}` ({elapsed:.1f} seconds). Use **Load model** when ready.",
+        f"{fetched} `{model_id.strip()}` is cached in `{path}`. "
+        "Use **Load cached** when ready.",
         "success",
     )
 
 
 def download_and_load_model(model_id: str, hf_token: str):
     started = time.monotonic()
-    yield status_card(
-        "Downloading model",
-        f"Fetching `{model_id.strip()}` into the Hugging Face cache. Existing files are reused.",
-        "working",
-    )
+    try:
+        before = cache_status(model_id)
+    except ValueError as error:
+        yield status_card("Model setup failed", html.escape(str(error)), "error")
+        return
+    yield status_card(*describe_cache(model_id, before), "working")
     try:
         path = MANAGER.download(model_id, hf_token)
+        fetched = describe_fetched(
+            before, cache_status(model_id), time.monotonic() - started
+        )
         yield status_card(
             "Loading model",
-            f"Downloaded `{model_id.strip()}`. Moving the weights onto the best available device…",
+            f"{fetched} Moving `{model_id.strip()}` onto the best available device…",
             "working",
         )
         device = MANAGER.load(model_id, path)
@@ -125,15 +214,38 @@ def download_and_load_model(model_id: str, hf_token: str):
 
 
 def load_cached_model(model_id: str):
-    yield status_card(
-        "Finding cached model", f"Looking for `{model_id.strip()}` locally…", "working"
-    )
+    name = f"`{model_id.strip()}`"
+    yield status_card("Finding cached model", f"Looking for {name} locally…", "working")
+    try:
+        status = cache_status(model_id)
+    except ValueError as error:
+        yield status_card("Could not load cached model", html.escape(str(error)), "error")
+        return
+    if status.missing_files:
+        yield status_card(
+            "Download incomplete",
+            f"{name} is only partly on disk ({describe_on_disk(status)}): "
+            f"{describe_missing(status)}. "
+            "Use **Download and load** to fetch the rest.",
+            "error",
+        )
+        return
+    if not status.present:
+        yield status_card(
+            "Not cached",
+            f"Nothing for {name} is in the Hugging Face cache. "
+            "Use **Download and load** to fetch it.",
+            "error",
+        )
+        return
     try:
         from huggingface_hub import snapshot_download
 
         path = Path(snapshot_download(repo_id=model_id.strip(), local_files_only=True))
         yield status_card(
-            "Loading model", f"Loading cached files from `{path}`…", "working"
+            "Loading model",
+            f"Loading {format_bytes(status.cached_bytes)} of cached files from `{path}`…",
+            "working",
         )
         device = MANAGER.load(model_id, path)
     except Exception as error:
@@ -142,7 +254,7 @@ def load_cached_model(model_id: str):
         )
         return
     yield status_card(
-        "Model ready", f"`{model_id.strip()}` is loaded on **{device}**.", "success"
+        "Model ready", f"{name} is loaded on **{device}**.", "success"
     )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import re
 import threading
 import time
@@ -87,6 +88,153 @@ def validate_model_id(model_id: str) -> str:
             "Enter a Hugging Face model ID in the form organization/model-name."
         )
     return cleaned
+
+
+# Stands in for the weight file names when a snapshot has none at all: without
+# an index or a weights file there is no way to know what the repo would ship.
+MODEL_WEIGHTS = "model weights"
+
+# A causal LM's weights come as a single file or as the shards an index lists,
+# in one of these formats. ``from_pretrained`` looks for them in this order and
+# loads the first it finds, so a snapshot is judged by that format alone.
+WEIGHT_FORMATS = (
+    ("model.safetensors", "model.safetensors.index.json"),
+    ("pytorch_model.bin", "pytorch_model.bin.index.json"),
+)
+
+
+@dataclass(frozen=True)
+class CacheStatus:
+    """What the Hugging Face cache already holds for one model.
+
+    ``missing_files`` names what the ``main`` snapshot still lacks before the
+    model can load, and is the one verdict on that: a cache another tool
+    filled with only the config and tokenizer, or a download stopped between
+    shards, has finished blobs but no model. ``cached_bytes`` counts finished
+    files; ``partial_files`` and ``partial_bytes`` count the ``.incomplete``
+    blobs a cut-off download left behind, which ``snapshot_download`` resumes
+    rather than restarts. Those are a size estimate, not a verdict: the blob
+    folder is shared by every revision of the repo, so a stray partial may
+    belong to another revision or to a file the model never loads, and a
+    partial the snapshot does need already shows up in ``missing_files``,
+    since the hub links a file into the snapshot only once it has finished.
+    """
+
+    cached_bytes: int = 0
+    partial_files: int = 0
+    partial_bytes: int = 0
+    missing_files: tuple[str, ...] = ()
+
+    @property
+    def present(self) -> bool:
+        return self.cached_bytes > 0 or self.partial_files > 0
+
+    @property
+    def complete(self) -> bool:
+        return self.present and not self.missing_files
+
+    @property
+    def total_bytes(self) -> int:
+        return self.cached_bytes + self.partial_bytes
+
+
+def cache_folder(model_id: str, cache_dir: Path | None = None) -> Path:
+    """The ``models--org--name`` folder ``huggingface_hub`` keeps a model in."""
+
+    if cache_dir is None:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        cache_dir = Path(HF_HUB_CACHE)
+    return Path(cache_dir) / f"models--{validate_model_id(model_id).replace('/', '--')}"
+
+
+def snapshot_folder(folder: Path, revision: str = "main") -> Path | None:
+    """The snapshot an offline ``snapshot_download`` would hand back, if any.
+
+    Offline, ``huggingface_hub`` reads ``refs/<revision>`` for the commit and
+    returns ``snapshots/<commit>`` whether or not every file is in it.
+    """
+
+    ref = folder / "refs" / revision
+    if not ref.is_file():
+        return None
+    snapshot = folder / "snapshots" / ref.read_text().strip()
+    return snapshot if snapshot.is_dir() else None
+
+
+def missing_files(snapshot: Path | None) -> tuple[str, ...]:
+    """The files a snapshot needs before ``from_pretrained`` can load it.
+
+    Only the config and the weights are checked. Which tokenizer files a repo
+    ships varies too much to know from the outside, and a wrong "incomplete"
+    verdict on a good cache would be worse than a generic load error.
+    """
+
+    if snapshot is None:
+        return ("config.json", MODEL_WEIGHTS)
+    missing = []
+    if not (snapshot / "config.json").is_file():
+        missing.append("config.json")
+    for single, index_name in WEIGHT_FORMATS:
+        if (snapshot / single).is_file():
+            return tuple(missing)
+        index = snapshot / index_name
+        if not index.is_file():
+            continue
+        try:
+            shards = set(json.loads(index.read_text())["weight_map"].values())
+        except (OSError, ValueError, KeyError, AttributeError):
+            missing.append(MODEL_WEIGHTS)
+            return tuple(missing)
+        missing.extend(
+            sorted(shard for shard in shards if not (snapshot / shard).is_file())
+        )
+        return tuple(missing)
+    missing.append(MODEL_WEIGHTS)
+    return tuple(missing)
+
+
+def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
+    """Measure what is already on disk for ``model_id``, without touching the network."""
+
+    folder = cache_folder(model_id, cache_dir)
+    snapshot = snapshot_folder(folder)
+    cached = partial_files = partial_bytes = 0
+    blobs = folder / "blobs"
+    if blobs.is_dir():
+        for blob in blobs.iterdir():
+            if not blob.is_file():
+                continue
+            size = blob.stat().st_size
+            if blob.name.endswith(".incomplete"):
+                partial_files += 1
+                partial_bytes += size
+            else:
+                cached += size
+    # On a filesystem without symlinks (an exFAT drive, say) the hub moves each
+    # finished file into the snapshot itself and leaves ``blobs/`` empty, so
+    # the snapshot's own regular files are cached bytes too. In the usual
+    # layout every entry there is a symlink and counts nothing twice.
+    if snapshot is not None:
+        for entry in snapshot.rglob("*"):
+            if entry.is_file() and not entry.is_symlink():
+                cached += entry.stat().st_size
+    if cached == 0 and partial_files == 0:
+        return CacheStatus()
+    return CacheStatus(cached, partial_files, partial_bytes, missing_files(snapshot))
+
+
+def format_bytes(count: int) -> str:
+    """Render a byte count the way a download dialog would: ``1.2 GB``."""
+
+    size = float(count)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1000 or unit == "GB":
+            break
+        size /= 1000
+    if unit == "B":
+        return f"{count} B"
+    return f"{size:.1f} {unit}" if size < 100 else f"{size:.0f} {unit}"
 
 
 class SplitPassage(NamedTuple):
