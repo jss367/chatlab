@@ -20,6 +20,7 @@ from gradio.utils import get_upload_folder
 import charts
 from conversation import (
     MAIN_BRANCH,
+    THINK_CLOSE,
     copy_forks,
     copy_turns,
     display_messages,
@@ -953,6 +954,79 @@ CHAT_OUTPUT_NAMES = (
 )
 
 
+def split_response_text(
+    text: str,
+    *,
+    literal_prefill: str = "",
+    streaming: bool = False,
+    reasoning_prefilled: bool = False,
+) -> tuple[str, str, bool]:
+    """Split reasoning without treating reader-supplied prefill tags as syntax.
+
+    The first runtime update for an assistant prefill contains only its forced
+    tokens. Remembering that decoded prefix lets the application protect every
+    ``<`` the reader supplied while leaving the automatic leading ``</think>``
+    visible to the reasoning parser. Tags sampled later by the model keep their
+    normal meaning.
+    """
+
+    if not literal_prefill or not text.startswith(literal_prefill):
+        return split_reasoning(
+            text,
+            streaming=streaming,
+            reasoning_prefilled=reasoning_prefilled,
+        )
+
+    literal_start = 0
+    if reasoning_prefilled:
+        marker_at = literal_prefill.find(THINK_CLOSE)
+        if marker_at < 0:
+            return split_reasoning(
+                text,
+                streaming=streaming,
+                reasoning_prefilled=reasoning_prefilled,
+            )
+        literal_start = marker_at + len(THINK_CLOSE)
+        # _response_prefix_ids() inserts this separator between the template's
+        # closing reasoning marker and the reader's text. Leave it outside the
+        # protected span so split_reasoning() can continue trimming it while
+        # retaining whitespace the reader actually typed after it.
+        if literal_prefill.startswith("\n\n", literal_start):
+            literal_start += 2
+
+    placeholder = "\0CHATLAB_LITERAL_LT\0"
+    start = "\0CHATLAB_LITERAL_START\0"
+    end = "\0CHATLAB_LITERAL_END\0"
+    while placeholder in text or start in text or end in text:
+        placeholder += "_"
+        start += "_"
+        end += "_"
+    protected_prefix = (
+        literal_prefill[:literal_start]
+        + start
+        + literal_prefill[literal_start:].replace("<", placeholder)
+        + end
+    )
+    reasoning, answer, closed = split_reasoning(
+        protected_prefix + text[len(literal_prefill) :],
+        streaming=streaming,
+        reasoning_prefilled=reasoning_prefilled,
+    )
+
+    def restore(value: str) -> str:
+        return (
+            value.replace(placeholder, "<")
+            .replace(start, "")
+            .replace(end, "")
+        )
+
+    return (
+        restore(reasoning),
+        restore(answer),
+        closed,
+    )
+
+
 def send_stop_buttons(busy: bool):
     """Swap the Send and Stop buttons for each other."""
 
@@ -1115,6 +1189,7 @@ def generate_reply(
     prompt_text: str,
     system_prompt: str,
     keep_reasoning: bool,
+    assistant_prefill: str,
     temperature: float,
     top_p: float,
     top_k: int,
@@ -1125,13 +1200,16 @@ def generate_reply(
     scale_name: str = DEFAULT_COLOR_SCALE,
     *,
     forced_ids: tuple[int, ...] = (),
+    literal_prefill_tokens: int = 0,
     branch_note: str = "",
 ):
     """Stream one assistant reply for ``turns``, which must end with a user turn.
 
-    ``forced_ids`` is a response prefix the model replays before it samples
-    anything: the tokens kept from an earlier response and the alternative
-    the reader picked. ``branch_note`` leads the status line while it streams.
+    ``assistant_prefill`` is arbitrary answer text the model replays before it
+    samples anything. ``forced_ids`` is the token-level version used by a
+    branch: the tokens kept from an earlier response and the alternative the
+    reader picked. A branch already contains any prefix that was on the old
+    response, so it takes precedence. ``branch_note`` leads the status line.
 
     The generation slot is reserved here, before the first frame is published,
     because this is the first moment a handler is committed to generating. The
@@ -1153,6 +1231,7 @@ def generate_reply(
             prompt_text,
             system_prompt,
             keep_reasoning,
+            assistant_prefill,
             temperature,
             top_p,
             top_k,
@@ -1162,6 +1241,7 @@ def generate_reply(
             analyze_prompt,
             scale_name,
             forced_ids=forced_ids,
+            literal_prefill_tokens=literal_prefill_tokens,
             branch_note=branch_note,
         )
     finally:
@@ -1177,6 +1257,7 @@ def _stream_reply(
     prompt_text: str,
     system_prompt: str,
     keep_reasoning: bool,
+    assistant_prefill: str,
     temperature: float,
     top_p: float,
     top_k: int,
@@ -1187,6 +1268,7 @@ def _stream_reply(
     scale_name: str = DEFAULT_COLOR_SCALE,
     *,
     forced_ids: tuple[int, ...] = (),
+    literal_prefill_tokens: int = 0,
     branch_note: str = "",
 ):
     """The body of generate_reply(), run with the generation slot held."""
@@ -1269,10 +1351,14 @@ def _stream_reply(
     # a different response was streaming in above it. The branch source goes
     # too: nothing is branchable until this response has finished or been
     # stopped, and the stamp would refuse it anyway.
+    applied_prefill = bool(assistant_prefill and not forced_ids)
+    stream_note = branch_note or (
+        "Assistant prefill applied." if applied_prefill else ""
+    )
     yield snapshot(
         strip_update([], scale_name, RESPONSE_STRIP_LABEL),
         [],
-        f"{branch_note} Generating…".strip(),
+        f"{stream_note} Generating…".strip(),
         reset_details=True,
         prompt_panel=(strip_update([], scale_name), (generation, []), ""),
         charts_panel=(charts.summary_tiles({}), charts.EMPTY_CHART),
@@ -1290,6 +1376,8 @@ def _stream_reply(
     metrics: list[dict] = []
     status = "The model produced no tokens."
     first = True
+    forced_prefix_tokens = 0
+    literal_prefill = ""
 
     stream = MANAGER.generate(
         request,
@@ -1300,6 +1388,8 @@ def _stream_reply(
         seed=used_seed,
         analyze_prompt=bool(analyze_prompt),
         forced_ids=tuple(int(value) for value in forced_ids),
+        answer_prefill=assistant_prefill if applied_prefill else "",
+        literal_prefill_tokens=literal_prefill_tokens,
     )
 
     try:
@@ -1309,8 +1399,14 @@ def _stream_reply(
             for update in stream:
                 raw_text = update.text
                 prefilled = update.reasoning_prefilled
-                reasoning, answer, closed = split_reasoning(
-                    raw_text, streaming=True, reasoning_prefilled=prefilled
+                forced_prefix_tokens = update.forced_prefix_tokens
+                if update.literal_prefill_text:
+                    literal_prefill = update.literal_prefill_text
+                reasoning, answer, closed = split_response_text(
+                    raw_text,
+                    literal_prefill=literal_prefill,
+                    streaming=True,
+                    reasoning_prefilled=prefilled,
                 )
                 pending["reasoning"] = reasoning
                 pending["content"] = answer
@@ -1318,8 +1414,8 @@ def _stream_reply(
                 highlight = strip_value(update.metrics, scale_name)
                 metrics = list(update.metrics)
                 status = generation_progress(len(metrics), started, used_seed)
-                if branch_note:
-                    status = f"{branch_note} {status}"
+                if stream_note:
+                    status = f"{stream_note} {status}"
                 prompt_panel = None
                 context_ids = gr.skip()
                 if first:
@@ -1362,7 +1458,11 @@ def _stream_reply(
         # assistant turn would feed the failure back to the model next turn.
         # The traceback goes to the log so the cause is recoverable.
         logger.exception("Generation failed")
-        reasoning, answer, _ = split_reasoning(raw_text, reasoning_prefilled=prefilled)
+        reasoning, answer, _ = split_response_text(
+            raw_text,
+            literal_prefill=literal_prefill,
+            reasoning_prefilled=prefilled,
+        )
         pending["reasoning"] = reasoning
         pending["content"] = answer
         kept = finalize_partial(turns)
@@ -1378,7 +1478,11 @@ def _stream_reply(
         )
         return
 
-    reasoning, answer, _ = split_reasoning(raw_text, reasoning_prefilled=prefilled)
+    reasoning, answer, _ = split_response_text(
+        raw_text,
+        literal_prefill=literal_prefill,
+        reasoning_prefilled=prefilled,
+    )
     pending["reasoning"] = reasoning
     pending["content"] = answer
     # A generation can succeed and still leave nothing renderable behind: the
@@ -1401,10 +1505,13 @@ def _stream_reply(
         "max_new_tokens": int(max_new_tokens),
         "seed": used_seed,
     }
-    if forced_ids:
+    if forced_prefix_tokens:
         # The first tokens of a branched response were replayed, not sampled,
-        # and a reader of the export needs to know how many.
-        sampling["forced_prefix_tokens"] = len(forced_ids)
+        # or came from an assistant prefill. A reader of the export needs to
+        # know how many.
+        sampling["forced_prefix_tokens"] = forced_prefix_tokens
+    if applied_prefill:
+        sampling["assistant_prefill"] = assistant_prefill
     trace = (
         build_trace(
             model_id=MANAGER.model_id,
@@ -1437,6 +1544,7 @@ def chat(
     turns: list[dict] | None,
     system_prompt: str,
     keep_reasoning: bool,
+    assistant_prefill: str,
     temperature: float,
     top_p: float,
     top_k: int,
@@ -1468,6 +1576,7 @@ def chat(
         "",
         system_prompt,
         keep_reasoning,
+        assistant_prefill,
         temperature,
         top_p,
         top_k,
@@ -1485,6 +1594,7 @@ def regenerate_from(
     turns: list[dict] | None,
     system_prompt: str,
     keep_reasoning: bool,
+    assistant_prefill: str,
     temperature: float,
     top_p: float,
     top_k: int,
@@ -1515,6 +1625,7 @@ def regenerate_from(
         prompt_text,
         system_prompt,
         keep_reasoning,
+        assistant_prefill,
         temperature,
         top_p,
         top_k,
@@ -1662,7 +1773,19 @@ def branch_from(
         yield idle_state(prompt_text, turns, BRANCH_HINT)
         return
     forced = (*kept, int(pick["token_id"]))
-    if pick["token_id"] == pick.get("original_id"):
+    literal_prefill_tokens = 0
+    for metric in metrics[: len(kept)]:
+        if not metric.get("literal_prefill"):
+            break
+        literal_prefill_tokens += 1
+    unchanged = pick["token_id"] == pick.get("original_id")
+    if (
+        unchanged
+        and literal_prefill_tokens == len(kept)
+        and metrics[len(kept)].get("literal_prefill")
+    ):
+        literal_prefill_tokens += 1
+    if unchanged:
         note = f"Resampling from token {at} ({pick['text']!r})."
     else:
         note = f"Branched at token {at}: {pick['text']!r} instead of {pick['original']!r}."
@@ -1672,6 +1795,7 @@ def branch_from(
         prompt_text,
         *settings,
         forced_ids=forced,
+        literal_prefill_tokens=literal_prefill_tokens,
         branch_note=note,
     )
 
@@ -2498,12 +2622,22 @@ def build_app() -> gr.Blocks:
                 search_results_state = gr.State({})
 
             gr.Markdown("## Settings")
-            with gr.Accordion("System prompt and reasoning", open=False):
+            with gr.Accordion("System prompt, reasoning, and prefill", open=False):
                 system_prompt = gr.Textbox(
                     label="System prompt",
                     placeholder="You are a careful assistant that answers concisely.",
                     lines=3,
                     info="Sent as a system message ahead of the conversation. Leave empty to use the model's default behavior.",
+                )
+                assistant_prefill = gr.Textbox(
+                    label="Assistant prefill (optional)",
+                    placeholder="Start every reply with these exact words…",
+                    lines=2,
+                    info=(
+                        "Replays this text as the start of each answer, then lets the "
+                        "model continue. For reasoning models, Chatlab closes the "
+                        "reasoning block first so this remains visible answer text."
+                    ),
                 )
                 keep_reasoning = gr.Checkbox(
                     value=False,
@@ -2749,6 +2883,7 @@ def build_app() -> gr.Blocks:
         settings_inputs = [
             system_prompt,
             keep_reasoning,
+            assistant_prefill,
             temperature,
             top_p,
             top_k,
