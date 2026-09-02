@@ -10,6 +10,7 @@ import app
 from model_runtime import (
     MODEL_WEIGHTS,
     PROMPT_SCORE_LIMIT,
+    CachedModel,
     CacheStatus,
     DownloadProgress,
     ModelManager,
@@ -23,6 +24,55 @@ class Selection:
 
     def __init__(self, index: int):
         self.index = index
+
+
+class CachedModelPickerTests(unittest.TestCase):
+    MODELS = (
+        CachedModel("org/ready", CacheStatus(cached_bytes=15_000_000_000)),
+        CachedModel(
+            "org/partial",
+            CacheStatus(
+                cached_bytes=2_000_000_000,
+                partial_files=1,
+                partial_bytes=500_000_000,
+                missing_files=(MODEL_WEIGHTS,),
+            ),
+        ),
+    )
+
+    def test_choices_show_download_size_and_completeness(self):
+        with mock.patch.object(app, "cached_models", return_value=self.MODELS):
+            choices = app.cached_model_choices()
+
+        self.assertEqual(
+            choices,
+            [
+                ("org/ready — 15.0 GB downloaded", "org/ready"),
+                ("org/partial — 2.5 GB on disk, incomplete", "org/partial"),
+            ],
+        )
+
+    def test_refresh_selects_the_typed_model_when_it_is_cached(self):
+        with mock.patch.object(app, "cached_models", return_value=self.MODELS):
+            update, note = app.refresh_cached_model_picker(" org/ready ")
+
+        self.assertEqual(update["value"], "org/ready")
+        self.assertEqual(update["choices"][0][1], "org/ready")
+        self.assertEqual(note, "Found **2** models in the local Hugging Face cache.")
+
+    def test_refresh_clears_a_stale_selection_without_erasing_the_text_field(self):
+        with mock.patch.object(app, "cached_models", return_value=()):
+            update, note = app.refresh_cached_model_picker("org/not-downloaded")
+
+        self.assertIsNone(update["value"])
+        self.assertEqual(update["choices"], [])
+        self.assertEqual(
+            note, "No downloaded models found in the local Hugging Face cache."
+        )
+
+    def test_selecting_a_downloaded_model_returns_its_repository_id(self):
+        self.assertEqual(app.select_cached_model("org/ready"), "org/ready")
+        self.assertEqual(app.select_cached_model(None), app.gr.skip())
 
 
 class InspectTokenTests(unittest.TestCase):
@@ -64,6 +114,8 @@ class StubManager:
     """A loaded manager that returns one scored token and nothing else."""
 
     loaded = True
+    model_id = "stub/model"
+    load_id = "stub/model#1"
 
     def __init__(self, seam_verified: bool = True, chat_template_missing: bool = False):
         self.seam_verified = seam_verified

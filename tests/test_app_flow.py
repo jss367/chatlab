@@ -1,5 +1,6 @@
 import inspect
 import unittest
+from dataclasses import replace
 
 import gradio as gr
 import numpy as np
@@ -13,7 +14,7 @@ from conversation import (
     model_messages,
     new_forks,
 )
-from model_runtime import GenerationUpdate
+from model_runtime import GenerationUpdate, ModelChanged, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
 
 from test_streaming import loaded_manager
@@ -58,6 +59,7 @@ SETTINGS = tuple(FIXED.values())
     SURPRISE,
     TRACE,
     BRANCH_SOURCE,
+    CONTEXT_IDS,
 ) = range(len(app.CHAT_OUTPUT_NAMES))
 CHAT_OUTPUTS = len(app.CHAT_OUTPUT_NAMES)
 
@@ -119,6 +121,16 @@ class ChatFlowTests(unittest.TestCase):
         self.assertIn("Assistant prefill applied", frames[0][STATUS])
         self.assertEqual(final[TRACE]["sampling"]["assistant_prefill"], "Hello")
         self.assertEqual(final[TRACE]["sampling"]["forced_prefix_tokens"], 1)
+
+    def test_literal_reasoning_tags_in_a_prefill_remain_visible(self):
+        app.MANAGER = loaded_manager(
+            [0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS
+        )
+        settings = dict(FIXED, assistant_prefill="<think>Hello</think>")
+        final = self.last(app.chat("hi", [], *settings.values()))[-1]
+
+        self.assertEqual(final[TURNS][1]["reasoning"], "")
+        self.assertEqual(final[TURNS][1]["content"], "<think>Hello</think> world")
 
     def test_the_stop_button_is_shown_while_streaming(self):
         frames = self.last(app.chat("hi", [], *SETTINGS))
@@ -373,6 +385,8 @@ class ChatFlowTests(unittest.TestCase):
         class Exploding:
             loaded = True
             busy = False
+            model_id = "fake/model"
+            load_id = "fake/model#1"
 
             def reserve_generation(self):
                 return True
@@ -441,6 +455,53 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(reply["content"], "")
         self.assertTrue(reply["reasoning_closed"])
         self.assertIn("gpu fell over", final[STATUS])
+
+
+class AssistantPrefillSplittingTests(unittest.TestCase):
+    def test_literal_tags_are_not_interpreted_as_reasoning(self):
+        prefix = "Show <think>literal</think>: "
+        reasoning, answer, closed = app.split_response_text(
+            prefix + "continued", literal_prefill=prefix
+        )
+
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, "Show <think>literal</think>: continued")
+        self.assertTrue(closed)
+
+    def test_template_close_stays_control_while_prefill_tags_stay_literal(self):
+        prefix = "</think>\n\nShow <think>literal</think>: "
+        reasoning, answer, closed = app.split_response_text(
+            prefix + "continued",
+            literal_prefill=prefix,
+            reasoning_prefilled=True,
+        )
+
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, "Show <think>literal</think>: continued")
+        self.assertTrue(closed)
+
+    def test_reasoning_sampled_after_the_prefill_keeps_its_meaning(self):
+        prefix = "Visible prefix: "
+        reasoning, answer, closed = app.split_response_text(
+            prefix + "<think>sampled reasoning</think>answer",
+            literal_prefill=prefix,
+        )
+
+        self.assertEqual(reasoning, "sampled reasoning")
+        self.assertEqual(answer, "Visible prefix: answer")
+        self.assertTrue(closed)
+
+    def test_a_partial_tag_in_a_streaming_prefill_remains_visible(self):
+        prefix = "Literal <thi"
+        reasoning, answer, closed = app.split_response_text(
+            prefix,
+            literal_prefill=prefix,
+            streaming=True,
+        )
+
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, prefix)
+        self.assertTrue(closed)
 
 
 class SeedTests(unittest.TestCase):
@@ -2002,3 +2063,320 @@ class MessageBoxKeysTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LayerInspectionTests(unittest.TestCase):
+    """The logit lens and attention panel behind the Inspect layers button."""
+
+    def setUp(self):
+        self.original = app.MANAGER
+        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.calls = []
+        self.load_ids = []
+
+        def fake_inspect(sequence, index, *, context_count=0, load_id=None):
+            self.calls.append((list(sequence), index, context_count))
+            self.load_ids.append(load_id)
+            return TokenInsight(
+                index=index,
+                token_id=sequence[index],
+                token_text="x",
+                layers=[
+                    {"layer": layer, "probability": 0.5, "rank": 1, "entropy_bits": 1.0,
+                     "top_id": 1, "top_text": "x", "top_probability": 0.5}
+                    for layer in range(3)
+                ],
+                tokens=[
+                    {"index": i, "token_id": t, "text": "t", "fallback": "", "segment": "prompt"}
+                    for i, t in enumerate(sequence[:index])
+                ],
+                attention=[[1.0 / index] * index for _ in range(2)],
+                decided_at=0,
+            )
+
+        app.MANAGER.inspect = fake_inspect
+
+    def inspect(self, *args):
+        """The last frame of the inspection handler, which streams like Send."""
+
+        return list(app.inspect_layers(*args))[-1]
+
+    def finished(self):
+        """The final frame, with the context ids the stream published earlier.
+
+        The ids are published once, on the first frame that carries tokens, and
+        every later frame skips them; in the browser the state keeps them, so
+        the test carries them forward the same way.
+        """
+
+        frames = list(app.chat("hi", [], *SETTINGS))
+        final = list(frames[-1])
+        for slot in (PROMPT_METRICS, CONTEXT_IDS):
+            final[slot] = next(
+                frame[slot] for frame in reversed(frames) if isinstance(frame[slot], tuple)
+            )
+        return final
+
+    def test_the_prompt_ids_are_published_with_the_strip(self):
+        frames = list(app.chat("hi", [], *SETTINGS))
+        self.assertEqual(
+            frames[0][CONTEXT_IDS], (frames[0][METRICS][0], [], "fake/model#0")
+        )
+        stamp, ids, load = frames[1][CONTEXT_IDS]
+        self.assertEqual(stamp, frames[1][METRICS][0])
+        self.assertEqual(ids, [0])
+        self.assertEqual(load, app.MANAGER.load_id)
+        # Later frames leave the ids alone: the prompt never changes mid-stream.
+        self.assertEqual(frames[-1][CONTEXT_IDS], gr.skip())
+
+    def test_scored_text_publishes_its_context_ids(self):
+        result = app.score_text("", "Hello", False, DEFAULT_COLOR_SCALE)
+        stamp, ids, load = result[10]
+        self.assertEqual(stamp, result[1][0])
+        self.assertEqual(ids, [])
+        self.assertEqual(load, app.MANAGER.load_id)
+
+    def test_a_response_token_is_inspected_in_its_full_sequence(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(1))
+        self.assertEqual(target, {"generation": final[METRICS][0], "strip": "response", "index": 1})
+
+        lens, attention, slider, insight, status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(self.calls, [([0, 2, 3, THINK_EOS], 2, 1)])
+        # The load id goes along so the runtime can check it under its lock.
+        self.assertEqual(self.load_ids, [app.MANAGER.load_id])
+        self.assertIn("logit-lens", lens)
+        self.assertIn("attention-view", attention)
+        self.assertEqual(slider, gr.update(maximum=2, value=0))
+        self.assertEqual(insight["index"], 2)
+        self.assertIn("Token 2", status)
+
+    def test_an_output_only_lens_says_why_in_the_status(self):
+        final = self.finished()
+        real_inspect = app.MANAGER.inspect
+
+        def output_only(sequence, index, *, context_count=0, load_id=None):
+            insight = real_inspect(sequence, index, context_count=context_count)
+            return replace(insight, layers=insight.layers[-1:], decided_at=None)
+
+        app.MANAGER.inspect = output_only
+        target = app.remember_inspect_target("response")(final[METRICS], select(1))
+        lens, *_rest, status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertIn("read through 0 layers", status)
+        self.assertIn(app.INSPECT_OUTPUT_ONLY, status)
+        self.assertNotIn("<svg", lens)
+
+    def test_the_first_prompt_token_is_refused_without_a_pass(self):
+        final = self.finished()
+        target = app.remember_inspect_target("prompt")(final[PROMPT_METRICS], select(0))
+        self.assertEqual(target["strip"], "prompt")
+        *_, status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(status, app.INSPECT_FIRST)
+        self.assertEqual(self.calls, [])
+
+    def test_a_prompt_token_is_inspected_at_its_own_position(self):
+        final = self.finished()
+        # Pretend the prompt had two tokens, so the second one can be inspected.
+        stamp, _ids, model = final[CONTEXT_IDS]
+        context = (stamp, [0, 1], model)
+        prompt_metrics = (stamp, [{"token_id": 0}, {"token_id": 1}])
+        target = app.remember_inspect_target("prompt")(prompt_metrics, select(1))
+        *_, status = self.inspect(target, final[METRICS], prompt_metrics, context, 0)
+        self.assertEqual(self.calls, [([0, 1, 2, 3, THINK_EOS], 1, 2)])
+        self.assertIn("Prompt token 2", status)
+
+    def test_a_prompt_strip_that_disagrees_with_the_ids_is_refused(self):
+        final = self.finished()
+        stamp, _ids, model = final[CONTEXT_IDS]
+        prompt_metrics = (stamp, [{"token_id": 5}])
+        target = app.remember_inspect_target("prompt")(prompt_metrics, select(0))
+        *_, status = self.inspect(
+            target, final[METRICS], prompt_metrics, (stamp, [0, 1], model), 0
+        )
+        self.assertEqual(status, app.INSPECT_GONE)
+
+    def test_a_failed_pass_is_reported(self):
+        final = self.finished()
+
+        def refuse(*_args, **_kwargs):
+            raise RuntimeError("out of memory")
+
+        app.MANAGER.inspect = refuse
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        lens, *_rest, status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(lens, gr.skip())
+        self.assertEqual(status, "Could not inspect that token: out of memory")
+
+    def test_the_slider_keeps_its_layer_when_it_still_exists(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        _lens, attention, slider, *_ = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 2
+        )
+        self.assertEqual(slider, gr.update(maximum=2, value=2))
+        self.assertIn("layer 2", attention)
+        _lens, _attention, slider, *_ = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 9
+        )
+        self.assertEqual(slider, gr.update(maximum=2, value=2))
+
+    def test_a_target_from_a_replaced_strip_is_refused(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        later = self.finished()
+        *_rest, status = self.inspect(
+            target, later[METRICS], later[PROMPT_METRICS], later[CONTEXT_IDS], 0
+        )
+        self.assertEqual(status, app.INSPECT_HINT)
+        self.assertEqual(self.calls, [])
+        self.assertIsNone(app.remember_inspect_target("response")(final[METRICS], select(0)))
+
+    def test_a_running_generation_is_not_interrupted(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        self.assertTrue(app.MANAGER.reserve_generation())
+        try:
+            *_rest, status = self.inspect(
+                target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+            )
+        finally:
+            app.MANAGER.release_generation()
+        self.assertEqual(status, app.INSPECT_BUSY)
+        self.assertEqual(self.calls, [])
+
+    def test_the_pass_holds_the_generation_slot_and_gives_it_back(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        seen = []
+
+        def observe(sequence, index, *, context_count=0, load_id=None):
+            seen.append(app.MANAGER.busy)
+            return self.fake(sequence, index, context_count=context_count)
+
+        self.fake, app.MANAGER.inspect = app.MANAGER.inspect, observe
+        self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(seen, [True])
+        self.assertFalse(app.MANAGER.busy)
+
+        def fail(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        app.MANAGER.inspect = fail
+        self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_the_slot_is_held_until_the_readout_has_been_delivered(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        frames = app.inspect_layers(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        first = next(frames)
+        # Gradio resumes the generator only once the browser has this frame,
+        # so a Send arriving in the meantime still finds the slot taken.
+        self.assertIn("logit-lens", first[0])
+        self.assertTrue(app.MANAGER.busy)
+        self.assertEqual(list(frames), [])
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_a_readout_delivered_after_the_strips_were_replaced_is_taken_down(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        frames = app.inspect_layers(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        next(frames)
+        # Clear does not take the slot; it mints a stamp while the frame is
+        # in flight, and its reset lands before the readout does.
+        app.new_metrics_generation()
+        lens, attention, slider, insight, status = next(frames)
+        self.assertEqual(lens, charts.EMPTY_LENS)
+        self.assertEqual(attention, charts.EMPTY_ATTENTION)
+        self.assertEqual(slider, gr.skip())
+        self.assertIsNone(insight)
+        self.assertEqual(status, app.INSPECT_GONE)
+        self.assertEqual(list(frames), [])
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_a_strip_replaced_during_the_pass_is_not_described(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        original = app.MANAGER.inspect
+
+        def replace_strips(sequence, index, *, context_count=0, load_id=None):
+            # Clear, Undo and friends do not take the generation slot; they
+            # mint a new stamp, which is what the handler has to notice.
+            app.new_metrics_generation()
+            return original(sequence, index, context_count=context_count)
+
+        app.MANAGER.inspect = replace_strips
+        lens, *_rest, insight, status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(lens, gr.skip())
+        self.assertEqual(insight, gr.skip())
+        self.assertEqual(status, app.INSPECT_GONE)
+
+    def test_tokens_from_an_earlier_load_are_not_explained_by_this_one(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        # Loading leaves the strips on screen. Re-downloading the same model
+        # ID can bring newer weights, so even a same-ID reload is a new load.
+        app.MANAGER.load_count += 1
+        *_rest, status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(status, app.INSPECT_MODEL_CHANGED)
+        self.assertEqual(self.calls, [])
+
+    def test_a_load_that_lands_during_the_pass_is_reported(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+
+        def reloaded(*_args, **_kwargs):
+            raise ModelChanged("reloaded")
+
+        app.MANAGER.inspect = reloaded
+        lens, *_rest, status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(lens, gr.skip())
+        self.assertEqual(status, app.INSPECT_MODEL_CHANGED)
+
+    def test_nothing_selected_gives_the_hint(self):
+        final = self.finished()
+        *_rest, status = self.inspect(
+            None, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(status, app.INSPECT_HINT)
+
+    def test_the_panel_resets_only_when_it_shows_something(self):
+        self.assertEqual(app.reset_inspection(None), (gr.skip(),) * 4)
+        lens, attention, insight, status = app.reset_inspection({"index": 1})
+        self.assertEqual(lens, charts.EMPTY_LENS)
+        self.assertEqual(attention, charts.EMPTY_ATTENTION)
+        self.assertIsNone(insight)
+        self.assertEqual(status, app.INSPECT_HINT)
+
+    def test_repainting_another_layer_needs_no_new_pass(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        *_lens, _attention, _slider, insight, _status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertIn("layer 1", app.render_attention(insight, 1))
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(app.render_attention(None, 1), gr.skip())

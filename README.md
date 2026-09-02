@@ -21,6 +21,8 @@ A local chat interface that shows what happened under the hood for every token, 
 - Enter sends a message and Shift+Enter starts a new line, with a setting to swap them
 - Branching a response from any token into one of the alternatives the model considered
 - Forking the conversation so the same transcript can be taken in several directions
+- A logit lens showing what every layer would have predicted for a token, and where it was decided
+- An attention view showing which earlier tokens the model looked at when predicting it
 - Apple Metal, NVIDIA CUDA, and CPU loading
 
 The default model is [`allenai/Olmo-3-7B-Think`](https://huggingface.co/allenai/Olmo-3-7B-Think). Its full weights require a download of roughly 15 GB. Other Hugging Face causal language models with built-in Transformers support can also work.
@@ -61,7 +63,7 @@ On macOS or Linux:
 ./run.sh
 ```
 
-The first run creates an isolated Python environment and installs the dependencies. The app then opens in your browser. Paste a Hugging Face model ID into **Model setup** and choose **Download and load**.
+The first run creates an isolated Python environment and installs the dependencies. The app then opens in your browser. Under **Model setup**, choose a downloaded model or paste a Hugging Face model ID and choose **Download and load**.
 
 To install manually:
 
@@ -72,7 +74,7 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Model files use the standard Hugging Face cache. By default this is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
+Model files use the standard Hugging Face cache. Chatlab lists complete downloads and resumable partial downloads under **Downloaded models**. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
 
 ## Working with a conversation
 
@@ -117,6 +119,21 @@ Only a chat response can be branched. Prompt tokens and text measured in the **S
 Click a message before pressing Fork to fork at that point. Forking at a reply keeps the conversation through that reply, ready for a different next question. Forking at one of your own messages keeps what came before it and puts the message back in the input box so it can be reworded, the same shape **Undo** gives.
 
 Each fork has its own transcript, but the token panel describes only the response on screen: switching forks clears it until the next response. **💾 Save conversation** writes the fork on screen, and **🗑️ Clear** removes every fork.
+
+## Layers and attention
+
+The token panel says how likely a token was. **Layers and attention** says how the model got there.
+
+1. Click a token in **Response tokens** or **Prompt and context tokens**.
+2. Open **Layers and attention** and press **🔬 Inspect layers**.
+
+The model is run again over everything before the token, one extra pass. That costs a few seconds on a 7B model with a long context, which is why it is a button rather than something that happens on every click.
+
+**Logit lens.** The residual stream after each layer is read through the model's final norm and unembedding, as though the network had stopped there. The chart traces the probability of the chosen token from the embeddings to the output; the faint line is whatever each layer liked best. The table under it names that preferred token per layer, with the chosen token's rank and the distribution's entropy, and the caption says from which layer the chosen token stayed the first choice. The last row is the model's real output and matches the numbers in the token panel. Readings from early layers are approximate: the lens assumes every layer writes in the same basis the output reads, which is roughly true late in the stack and less so early. The final norm is looked up under the names the common architectures use, on the base model and one level down (OPT keeps it inside its decoder); a model whose norm cannot be found shows only the output row, since readings taken without it would be wrong rather than approximate. Heads that post-process their logits (Gemma's soft-capping, Granite's and Cohere's scaling) are replicated, and the reading of the final layer is checked against the model's real output before any intermediate row is shown; a mismatch also falls back to the output row alone.
+
+**Attention.** The prediction for a token is made at the position *before* it, so that earlier token is the query, drawn with a dashed outline. Every token it could see is shaded by how much attention it received, averaged over heads, and the strongest are listed underneath. The **Attention layer** slider picks one layer or, at 0, the mean of all of them; moving it repaints from the stored readout without another pass. A layer with a sliding window (most of OLMo 3's, and Mistral's) sees only the most recent tokens, so the ones it could not see are shown with no weight. The first token of a sequence almost always takes a large share regardless of content (the attention sink), so shading is scaled to the strongest token after it and the sink's share is stated in words.
+
+Attention weights need the model's eager attention kernel, which is switched on for the inspection step only and switched back afterwards. A model that cannot return them still gets the logit lens. Only the first token of a sequence has nothing to show: nothing came before it.
 
 ## Reasoning blocks
 
