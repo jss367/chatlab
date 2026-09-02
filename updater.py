@@ -365,13 +365,32 @@ def remove_stale_work_dirs(bundle: Path) -> None:
                 shutil.rmtree(candidate, ignore_errors=True)
 
 
+def other_instances_running(process_name: str = "ChatLab") -> bool:
+    """Whether another ChatLab process is alive, possibly still using an old bundle."""
+
+    try:
+        result = subprocess.run(
+            ["pgrep", "-x", process_name], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return False
+    pids = {int(token) for token in result.stdout.split() if token.isdigit()}
+    pids.discard(os.getpid())
+    return bool(pids)
+
+
 def remove_previous_bundles(bundle: Path) -> None:
     """Delete bundles a prior update parked beside the running app.
 
     Only names ending in the timestamp ``swap_bundle`` writes are touched, so a
     hand-made ``ChatLab.app.previous-manual`` next to the app is left alone.
+    Nothing is removed while another ChatLab process is running, since it may
+    still be executing from the parked bundle; the next solo launch cleans up.
     """
 
+    if other_instances_running():
+        logger.info("Another ChatLab instance is running; leaving parked bundles in place")
+        return
     for stale in bundle.parent.glob(f"{bundle.name}{PREVIOUS_BUNDLE_MARKER}*"):
         if is_parked_bundle(stale, bundle):
             shutil.rmtree(stale, ignore_errors=True)

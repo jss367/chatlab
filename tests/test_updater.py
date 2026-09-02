@@ -116,11 +116,27 @@ class BundleTests(unittest.TestCase):
         manual = self.make_bundle("ChatLab.app.previous-manual", "keep")
         versioned = self.make_bundle("ChatLab.app.previous-0.1.0", "keep")
 
-        updater.remove_previous_bundles(current)
+        with mock.patch.object(updater, "other_instances_running", return_value=True):
+            updater.remove_previous_bundles(current)
+        self.assertTrue(parked.exists(), "parked bundle must survive while another instance runs")
+
+        with mock.patch.object(updater, "other_instances_running", return_value=False):
+            updater.remove_previous_bundles(current)
         self.assertFalse(parked.exists())
         self.assertTrue(current.exists())
         self.assertTrue(manual.exists())
         self.assertTrue(versioned.exists())
+
+    def test_other_instances_running_ignores_self_and_handles_missing_pgrep(self):
+        completed = lambda out: mock.Mock(stdout=out, returncode=0)  # noqa: E731
+        with mock.patch.object(updater.subprocess, "run", return_value=completed(f"{os.getpid()}\n")):
+            self.assertFalse(updater.other_instances_running())
+        with mock.patch.object(updater.subprocess, "run", return_value=completed(f"{os.getpid()}\n4242\n")):
+            self.assertTrue(updater.other_instances_running())
+        with mock.patch.object(updater.subprocess, "run", return_value=completed("")):
+            self.assertFalse(updater.other_instances_running())
+        with mock.patch.object(updater.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertFalse(updater.other_instances_running())
 
     def test_remove_stale_work_dirs_only_sweeps_dead_owners(self):
         current = self.make_bundle("ChatLab.app", "old")
