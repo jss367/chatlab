@@ -33,6 +33,7 @@ RELEASES_PAGE_URL = f"https://github.com/{GITHUB_REPO}/releases"
 LATEST_RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 USER_AGENT = f"ChatLab/{__version__} (+{RELEASES_PAGE_URL})"
 PREVIOUS_BUNDLE_MARKER = ".previous-"
+WORK_DIR_PREFIX = "chatlab-update-"
 REQUEST_TIMEOUT_SECONDS = 15
 DOWNLOAD_CHUNK_BYTES = 1 << 20
 
@@ -314,6 +315,20 @@ def is_parked_bundle(path: Path, bundle: Path) -> bool:
     return path.name.startswith(prefix) and path.name[len(prefix):].isdigit()
 
 
+def remove_stale_work_dirs(bundle: Path) -> None:
+    """Delete staging directories an interrupted update left behind.
+
+    ``install_update`` stages beside the app when it can and in the system
+    temporary directory otherwise, so both are swept. Run this once the app is
+    up, not while an update might be in progress.
+    """
+
+    for parent in {bundle.parent, Path(tempfile.gettempdir())}:
+        for stale in parent.glob(f"{WORK_DIR_PREFIX}*"):
+            if stale.is_dir():
+                shutil.rmtree(stale, ignore_errors=True)
+
+
 def remove_previous_bundles(bundle: Path) -> None:
     """Delete bundles a prior update parked beside the running app.
 
@@ -351,9 +366,9 @@ def install_update(
 
     if work_dir is None:
         try:
-            work_dir = Path(tempfile.mkdtemp(prefix="chatlab-update-", dir=bundle.parent))
+            work_dir = Path(tempfile.mkdtemp(prefix=WORK_DIR_PREFIX, dir=bundle.parent))
         except OSError:
-            work_dir = Path(tempfile.mkdtemp(prefix="chatlab-update-"))
+            work_dir = Path(tempfile.mkdtemp(prefix=WORK_DIR_PREFIX))
     try:
         archive = download_asset(release, work_dir, progress, cancelled)
         replacement = extract_bundle(archive, work_dir / "unpacked", cancelled)

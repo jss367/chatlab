@@ -137,16 +137,28 @@ class UpdateFlow:
         worker.start()
         return worker
 
-    def wait_for_swap(self, timeout: float = 300) -> None:
-        """Called on the way out: forbid new swaps, then wait for one in progress."""
+    def wait_for_swap(self, timeout: float = 300, grace: float = 3.0) -> None:
+        """Called on the way out: forbid new swaps, then wait for the worker.
+
+        A worker in the swap is waited for in full. Any other worker gets
+        ``grace`` seconds to notice the cancel, stop ``ditto``, and delete its
+        staging directory; one stalled in a network read is abandoned and its
+        directory is swept on the next launch by ``remove_stale_work_dirs``.
+        """
 
         with self._phase_lock:
             self.cancel.set()
             swapping = self.swapping.is_set()
         worker = getattr(self, "_worker", None)
-        if swapping and worker is not None and worker.is_alive():
+        if worker is None or not worker.is_alive():
+            return
+        if swapping:
             logging.info("Waiting for the update swap to finish before exiting")
             worker.join(timeout)
+        else:
+            worker.join(grace)
+            if worker.is_alive():
+                logging.info("Abandoning a stalled update worker; staging is swept on next launch")
 
     def _window_call(self, method: str, *args):
         """Call a window method, tolerating a window the user already closed."""
@@ -257,6 +269,7 @@ def run_desktop() -> int:
             # start still has the previous bundle parked beside it.
             if bundle is not None:
                 updater.remove_previous_bundles(bundle)
+                updater.remove_stale_work_dirs(bundle)
             flow.check_in_background(interactive=False)
 
         webview.start(

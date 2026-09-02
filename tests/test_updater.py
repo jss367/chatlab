@@ -121,6 +121,19 @@ class BundleTests(unittest.TestCase):
         self.assertTrue(manual.exists())
         self.assertTrue(versioned.exists())
 
+    def test_remove_stale_work_dirs_sweeps_beside_app_and_tempdir(self):
+        current = self.make_bundle("ChatLab.app", "old")
+        beside = self.root / "chatlab-update-abc"; beside.mkdir(); (beside / "big.zip").write_text("x")
+        tmp_root = self.root / "tmp"; tmp_root.mkdir()
+        in_tmp = tmp_root / "chatlab-update-def"; in_tmp.mkdir()
+        unrelated = self.root / "chatlab-updates.txt"; unrelated.write_text("keep")
+        with mock.patch.object(updater.tempfile, "gettempdir", return_value=str(tmp_root)):
+            updater.remove_stale_work_dirs(current)
+        self.assertFalse(beside.exists())
+        self.assertFalse(in_tmp.exists())
+        self.assertTrue(unrelated.exists())
+        self.assertTrue(current.exists())
+
     def test_swap_bundle_restores_old_after_partial_copy(self):
         current = self.make_bundle("ChatLab.app", "old")
         replacement = self.make_bundle("staging/ChatLab.app", "new")
