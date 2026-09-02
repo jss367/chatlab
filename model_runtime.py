@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import gc
+import json
 import re
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -15,15 +16,14 @@ import numpy as np
 
 from conversation import THINK_OPEN
 from token_metrics import (
-    TokenMetric,
     UNSCORED_BEYOND_LIMIT,
     UNSCORED_FIRST_TOKEN,
+    TokenMetric,
     build_metric,
     normalize_log_probabilities,
     sampling_probabilities,
     unscored_metric,
 )
-
 
 # Prefill runs in chunks so a long prompt never materializes a
 # sequence-length by vocabulary logit tensor all at once.
@@ -87,6 +87,153 @@ def validate_model_id(model_id: str) -> str:
             "Enter a Hugging Face model ID in the form organization/model-name."
         )
     return cleaned
+
+
+# Stands in for the weight file names when a snapshot has none at all: without
+# an index or a weights file there is no way to know what the repo would ship.
+MODEL_WEIGHTS = "model weights"
+
+# A causal LM's weights come as a single file or as the shards an index lists,
+# in one of these formats. ``from_pretrained`` looks for them in this order and
+# loads the first it finds, so a snapshot is judged by that format alone.
+WEIGHT_FORMATS = (
+    ("model.safetensors", "model.safetensors.index.json"),
+    ("pytorch_model.bin", "pytorch_model.bin.index.json"),
+)
+
+
+@dataclass(frozen=True)
+class CacheStatus:
+    """What the Hugging Face cache already holds for one model.
+
+    ``missing_files`` names what the ``main`` snapshot still lacks before the
+    model can load, and is the one verdict on that: a cache another tool
+    filled with only the config and tokenizer, or a download stopped between
+    shards, has finished blobs but no model. ``cached_bytes`` counts finished
+    files; ``partial_files`` and ``partial_bytes`` count the ``.incomplete``
+    blobs a cut-off download left behind, which ``snapshot_download`` resumes
+    rather than restarts. Those are a size estimate, not a verdict: the blob
+    folder is shared by every revision of the repo, so a stray partial may
+    belong to another revision or to a file the model never loads, and a
+    partial the snapshot does need already shows up in ``missing_files``,
+    since the hub links a file into the snapshot only once it has finished.
+    """
+
+    cached_bytes: int = 0
+    partial_files: int = 0
+    partial_bytes: int = 0
+    missing_files: tuple[str, ...] = ()
+
+    @property
+    def present(self) -> bool:
+        return self.cached_bytes > 0 or self.partial_files > 0
+
+    @property
+    def complete(self) -> bool:
+        return self.present and not self.missing_files
+
+    @property
+    def total_bytes(self) -> int:
+        return self.cached_bytes + self.partial_bytes
+
+
+def cache_folder(model_id: str, cache_dir: Path | None = None) -> Path:
+    """The ``models--org--name`` folder ``huggingface_hub`` keeps a model in."""
+
+    if cache_dir is None:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        cache_dir = Path(HF_HUB_CACHE)
+    return Path(cache_dir) / f"models--{validate_model_id(model_id).replace('/', '--')}"
+
+
+def snapshot_folder(folder: Path, revision: str = "main") -> Path | None:
+    """The snapshot an offline ``snapshot_download`` would hand back, if any.
+
+    Offline, ``huggingface_hub`` reads ``refs/<revision>`` for the commit and
+    returns ``snapshots/<commit>`` whether or not every file is in it.
+    """
+
+    ref = folder / "refs" / revision
+    if not ref.is_file():
+        return None
+    snapshot = folder / "snapshots" / ref.read_text().strip()
+    return snapshot if snapshot.is_dir() else None
+
+
+def missing_files(snapshot: Path | None) -> tuple[str, ...]:
+    """The files a snapshot needs before ``from_pretrained`` can load it.
+
+    Only the config and the weights are checked. Which tokenizer files a repo
+    ships varies too much to know from the outside, and a wrong "incomplete"
+    verdict on a good cache would be worse than a generic load error.
+    """
+
+    if snapshot is None:
+        return ("config.json", MODEL_WEIGHTS)
+    missing = []
+    if not (snapshot / "config.json").is_file():
+        missing.append("config.json")
+    for single, index_name in WEIGHT_FORMATS:
+        if (snapshot / single).is_file():
+            return tuple(missing)
+        index = snapshot / index_name
+        if not index.is_file():
+            continue
+        try:
+            shards = set(json.loads(index.read_text())["weight_map"].values())
+        except (OSError, ValueError, KeyError, AttributeError):
+            missing.append(MODEL_WEIGHTS)
+            return tuple(missing)
+        missing.extend(
+            sorted(shard for shard in shards if not (snapshot / shard).is_file())
+        )
+        return tuple(missing)
+    missing.append(MODEL_WEIGHTS)
+    return tuple(missing)
+
+
+def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
+    """Measure what is already on disk for ``model_id``, without touching the network."""
+
+    folder = cache_folder(model_id, cache_dir)
+    snapshot = snapshot_folder(folder)
+    cached = partial_files = partial_bytes = 0
+    blobs = folder / "blobs"
+    if blobs.is_dir():
+        for blob in blobs.iterdir():
+            if not blob.is_file():
+                continue
+            size = blob.stat().st_size
+            if blob.name.endswith(".incomplete"):
+                partial_files += 1
+                partial_bytes += size
+            else:
+                cached += size
+    # On a filesystem without symlinks (an exFAT drive, say) the hub moves each
+    # finished file into the snapshot itself and leaves ``blobs/`` empty, so
+    # the snapshot's own regular files are cached bytes too. In the usual
+    # layout every entry there is a symlink and counts nothing twice.
+    if snapshot is not None:
+        for entry in snapshot.rglob("*"):
+            if entry.is_file() and not entry.is_symlink():
+                cached += entry.stat().st_size
+    if cached == 0 and partial_files == 0:
+        return CacheStatus()
+    return CacheStatus(cached, partial_files, partial_bytes, missing_files(snapshot))
+
+
+def format_bytes(count: int) -> str:
+    """Render a byte count the way a download dialog would: ``1.2 GB``."""
+
+    size = float(count)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1000 or unit == "GB":
+            break
+        size /= 1000
+    if unit == "B":
+        return f"{count} B"
+    return f"{size:.1f} {unit}" if size < 100 else f"{size:.0f} {unit}"
 
 
 class SplitPassage(NamedTuple):
@@ -1131,7 +1278,8 @@ class ModelManager:
         segments: list[str],
         positions: list[int],
         score_from: int,
-        collect: bool,
+        collect_from: int = 0,
+        sample: Callable[[np.ndarray], np.ndarray] | None = None,
     ):
         """Run the model over ``token_ids`` a chunk at a time.
 
@@ -1140,6 +1288,16 @@ class ModelManager:
         token except the first is measured against the distribution the model
         held one step earlier, so the same pass that warms the cache also
         explains the prompt.
+
+        Tokens before ``collect_from`` get no metric at all, which is how a
+        prompt the reader chose not to measure stays out of the results while
+        the response tokens that follow it are still described. Tokens from
+        there up to ``score_from`` are recorded but left unscored.
+
+        ``sample`` turns raw log probabilities into the distribution the
+        sampler would have drawn from. It is applied to ``"response"`` tokens
+        only, so a response prefix that is replayed rather than sampled still
+        reports the sampling probability and shift it would have had.
         """
 
         import torch
@@ -1166,42 +1324,46 @@ class ModelManager:
             past_key_values = outputs.past_key_values
             logits = outputs.logits[0]
 
-            if collect:
-                for index in range(start, end):
-                    token_id = token_ids[index]
-                    if index == 0 or index < score_from:
-                        metrics.append(
-                            unscored_metric(
-                                position=positions[index],
-                                token_id=token_id,
-                                token_text=self._decode_token(token_id),
-                                fallback_text=self._token_fallback(token_id),
-                                segment=segments[index],
-                                reason=(
-                                    UNSCORED_FIRST_TOKEN
-                                    if index == 0
-                                    else UNSCORED_BEYOND_LIMIT
-                                ),
-                            ).to_dict()
-                        )
-                        continue
-                    log_probs = (
-                        carry
-                        if index == start
-                        else normalize_log_probabilities(
-                            logits[index - start - 1].detach().float().cpu().numpy()
-                        )
-                    )
-                    assert log_probs is not None
+            for index in range(max(start, collect_from), end):
+                token_id = token_ids[index]
+                if index == 0 or index < score_from:
                     metrics.append(
-                        self._describe_token(
+                        unscored_metric(
                             position=positions[index],
                             token_id=token_id,
-                            raw_log_probabilities=log_probs,
-                            sampled_probabilities=np.exp(log_probs),
+                            token_text=self._decode_token(token_id),
+                            fallback_text=self._token_fallback(token_id),
                             segment=segments[index],
-                        )
+                            reason=(
+                                UNSCORED_FIRST_TOKEN
+                                if index == 0
+                                else UNSCORED_BEYOND_LIMIT
+                            ),
+                        ).to_dict()
                     )
+                    continue
+                log_probs = (
+                    carry
+                    if index == start
+                    else normalize_log_probabilities(
+                        logits[index - start - 1].detach().float().cpu().numpy()
+                    )
+                )
+                assert log_probs is not None
+                sampled = (
+                    sample(log_probs)
+                    if sample is not None and segments[index] == "response"
+                    else np.exp(log_probs)
+                )
+                metrics.append(
+                    self._describe_token(
+                        position=positions[index],
+                        token_id=token_id,
+                        raw_log_probabilities=log_probs,
+                        sampled_probabilities=sampled,
+                        segment=segments[index],
+                    )
+                )
 
             carry = normalize_log_probabilities(
                 logits[end - start - 1].detach().float().cpu().numpy()
@@ -1220,7 +1382,20 @@ class ModelManager:
         max_new_tokens: int,
         seed: int,
         analyze_prompt: bool = True,
+        forced_ids: Sequence[int] = (),
     ) -> Iterator[GenerationUpdate]:
+        """Stream a reply to ``messages``, one batch of tokens at a time.
+
+        ``forced_ids`` is a response prefix that is replayed instead of sampled:
+        the tokens the reader kept from an earlier response, ending in the
+        alternative they picked. Sampling resumes after it. Those tokens are
+        still measured against the model's own distribution, so a forced
+        token the model would never have chosen shows up with the rank and
+        surprise it really had. ``max_new_tokens`` counts the tokens sampled
+        after the prefix, so a branch made late in a long response still gets
+        room to continue.
+        """
+
         # The application reserves the slot before it publishes its first
         # frame, so by the time this body runs the reservation is normally
         # already held - on its behalf, not by it. Taking it again would
@@ -1242,6 +1417,7 @@ class ModelManager:
                 max_new_tokens=max_new_tokens,
                 seed=seed,
                 analyze_prompt=analyze_prompt,
+                forced_ids=forced_ids,
             )
         finally:
             if reserved:
@@ -1257,6 +1433,7 @@ class ModelManager:
         max_new_tokens: int,
         seed: int,
         analyze_prompt: bool = True,
+        forced_ids: Sequence[int] = (),
     ) -> Iterator[GenerationUpdate]:
         import torch
 
@@ -1271,16 +1448,46 @@ class ModelManager:
             device = next(model.parameters()).device
 
             prompt_ids, reasoning_prefilled = self._prompt_token_ids(messages)
+            stop_ids = self._stop_token_ids()
+
+            # A stop token inside the prefix ends the response there, exactly
+            # as it did when the model first produced it; whatever the reader
+            # kept after it was never part of the response the model sees.
+            forced = [int(value) for value in forced_ids]
+            for index, token_id in enumerate(forced):
+                if token_id in stop_ids:
+                    forced = forced[: index + 1]
+                    break
+
+            def sample(log_probs: np.ndarray) -> np.ndarray:
+                return sampling_probabilities(
+                    log_probs,
+                    temperature=float(temperature),
+                    top_p=float(top_p),
+                    top_k=int(top_k),
+                )
+
+            # The prompt and the replayed prefix go through the model in one
+            # chunked pass. Feeding the prefix back a token at a time would
+            # cost a full forward step for every token the reader kept.
             score_from = (
                 max(1, len(prompt_ids) - PROMPT_SCORE_LIMIT) if analyze_prompt else 0
             )
-            prompt_metrics, past_key_values, raw_log_probs = self._prefill(
-                prompt_ids,
-                segments=["prompt"] * len(prompt_ids),
-                positions=list(range(1, len(prompt_ids) + 1)),
+            prefilled_metrics, past_key_values, raw_log_probs = self._prefill(
+                prompt_ids + forced,
+                segments=["prompt"] * len(prompt_ids) + ["response"] * len(forced),
+                positions=list(range(1, len(prompt_ids) + 1))
+                + list(range(1, len(forced) + 1)),
                 score_from=score_from,
-                collect=analyze_prompt,
+                collect_from=0 if analyze_prompt else len(prompt_ids),
+                sample=sample,
             )
+            prompt_metrics = [
+                metric for metric in prefilled_metrics if metric["segment"] == "prompt"
+            ]
+            metrics: list[dict] = [
+                metric for metric in prefilled_metrics if metric["segment"] == "response"
+            ]
             prompt_note = ""
             if analyze_prompt and score_from > 1:
                 prompt_note = (
@@ -1289,21 +1496,27 @@ class ModelManager:
                 )
 
             rng = np.random.default_rng(int(seed))
-            metrics: list[dict] = []
-            stop_ids = self._stop_token_ids()
             decoder = IncrementalDecoder(tokenizer, self._hidden_token_ids())
-            limit = int(max_new_tokens)
+            for token_id in forced:
+                decoder.push(token_id)
+            limit = len(forced) + int(max_new_tokens)
             pending_tokens = 0
             last_yield = time.monotonic()
 
-            for position in range(1, limit + 1):
-                assert raw_log_probs is not None
-                sampled_probs = sampling_probabilities(
-                    raw_log_probs,
-                    temperature=float(temperature),
-                    top_p=float(top_p),
-                    top_k=int(top_k),
+            if forced:
+                yield GenerationUpdate(
+                    text=decoder.text,
+                    metrics=metrics,
+                    prompt_metrics=prompt_metrics,
+                    prompt_note=prompt_note,
+                    reasoning_prefilled=reasoning_prefilled,
                 )
+                if forced[-1] in stop_ids:
+                    return
+
+            for position in range(len(forced) + 1, limit + 1):
+                assert raw_log_probs is not None
+                sampled_probs = sample(raw_log_probs)
 
                 if temperature <= 0:
                     token_id = int(np.argmax(sampled_probs))
@@ -1408,7 +1621,6 @@ class ModelManager:
                 positions=list(range(1, len(context_ids) + 1))
                 + list(range(1, len(text_ids) + 1)),
                 score_from=1,
-                collect=True,
             )
             return ScoredText(
                 context_metrics=[

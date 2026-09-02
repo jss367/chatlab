@@ -6,7 +6,13 @@ import numpy as np
 
 import app
 import charts
-from conversation import display_messages, make_turn, model_messages
+from conversation import (
+    MAIN_BRANCH,
+    display_messages,
+    make_turn,
+    model_messages,
+    new_forks,
+)
 from model_runtime import GenerationUpdate
 from token_metrics import DEFAULT_COLOR_SCALE
 
@@ -50,6 +56,7 @@ SETTINGS = tuple(FIXED.values())
     SUMMARY,
     SURPRISE,
     TRACE,
+    BRANCH_SOURCE,
 ) = range(len(app.CHAT_OUTPUT_NAMES))
 CHAT_OUTPUTS = len(app.CHAT_OUTPUT_NAMES)
 
@@ -57,7 +64,8 @@ CHAT_OUTPUTS = len(app.CHAT_OUTPUT_NAMES)
 # the prompt strip and its state and note, the two charts, and the export.
 PANEL_OUTPUTS = 6
 UNDO_OUTPUTS = 10 + PANEL_OUTPUTS
-CLEAR_OUTPUTS = 9 + PANEL_OUTPUTS
+# Clear also resets the forks and their picker.
+CLEAR_OUTPUTS = 9 + PANEL_OUTPUTS + 2
 LOAD_OUTPUTS = 10 + PANEL_OUTPUTS
 
 
@@ -759,7 +767,9 @@ class CancellationTests(unittest.TestCase):
         stream.close()
 
         self.assertFalse(frame[TURNS][1]["reasoning_closed"])
-        messages, turns, _send, _stop, status = app.stop_generation(frame[TURNS])
+        messages, turns, _send, _stop, status, _source = app.stop_generation(
+            frame[TURNS]
+        )
         self.assertTrue(turns[1]["reasoning_closed"])
         thoughts = [m for m in messages if m.get("metadata", {}).get("title")]
         self.assertEqual(thoughts[0]["metadata"]["status"], "done")
@@ -767,7 +777,9 @@ class CancellationTests(unittest.TestCase):
 
     def test_stopping_before_any_token_drops_the_empty_turn(self):
         turns = [make_turn("user", "hi"), make_turn("assistant", "")]
-        messages, remaining, _send, _stop, status = app.stop_generation(turns)
+        messages, remaining, _send, _stop, status, _source = app.stop_generation(
+            turns
+        )
         self.assertEqual([turn["role"] for turn in remaining], ["user"])
         self.assertEqual(len(messages), 1)
         self.assertEqual(status, "Stopped before the model produced anything.")
@@ -1499,6 +1511,357 @@ class IdleRefusalButtonTests(unittest.TestCase):
         )
 
 
+# The fork handlers publish this tuple, in this order.
+(
+    FORK_PROMPT,
+    FORK_CHATBOT,
+    FORK_TURNS,
+    FORK_STATE,
+    FORK_PICKER,
+    FORK_STATUS,
+    FORK_SEND,
+    FORK_STOP,
+    FORK_STRIP,
+    FORK_METRICS,
+    FORK_DETAIL,
+    FORK_ALTS,
+    FORK_PROMPT_STRIP,
+    FORK_PROMPT_METRICS,
+    FORK_PROMPT_NOTE,
+    FORK_SUMMARY,
+    FORK_SURPRISE,
+    FORK_TRACE,
+) = range(18)
+
+
+def contents(turns):
+    return [turn["content"] for turn in turns]
+
+
+def cell(row):
+    """A click on one row of the alternatives table."""
+
+    return gr.SelectData(None, {"index": [row, 1], "value": "x"})
+
+
+class BranchFromTokenTests(unittest.TestCase):
+    """Replay a response up to a token, swap in an alternative, and continue."""
+
+    def setUp(self):
+        self.original = app.MANAGER
+        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, app, "MANAGER", self.original)
+
+    def respond(self):
+        return list(app.chat("hi", [], *SETTINGS))
+
+    def pick_alternative(self, final, strip_index=1, row=1):
+        """Click a response token, then a row of its alternatives."""
+
+        selected = app.remember_selection(final[METRICS], select(strip_index))
+        detail, pick = app.choose_alternative(
+            final[METRICS], selected, final[BRANCH_SOURCE], cell(row)
+        )
+        return detail, pick
+
+    def test_a_finished_response_is_branchable(self):
+        frames = self.respond()
+        self.assertIsNone(frames[0][BRANCH_SOURCE])
+        for frame in frames[1:-1]:
+            self.assertEqual(frame[BRANCH_SOURCE], gr.skip())
+        self.assertEqual(frames[-1][BRANCH_SOURCE], frames[-1][METRICS][0])
+
+    def test_a_response_token_is_remembered_for_the_table(self):
+        final = self.respond()[-1]
+        selected = app.remember_selection(final[METRICS], select(1))
+        self.assertEqual(selected, {"generation": final[METRICS][0], "index": 1})
+
+    def test_a_prompt_token_clears_the_remembered_position(self):
+        # Otherwise a click in the prompt token's table would pair its row with
+        # the response token remembered earlier.
+        frames = self.respond()
+        prompt_payload = frames[1][PROMPT_METRICS]
+        self.assertIsNone(app.remember_selection(prompt_payload, select(0)))
+
+    def test_choosing_an_alternative_readies_a_branch(self):
+        final = self.respond()[-1]
+        detail, pick = self.pick_alternative(final)
+        metric = metrics_of(final[METRICS])[1]
+        candidate = metric["top_candidates"][1]
+        self.assertIn("Branch ready", detail)
+        self.assertIn("Token 2", detail)
+        self.assertEqual(pick["position"], 2)
+        self.assertEqual(pick["token_id"], candidate["token_id"])
+        self.assertEqual(pick["original_id"], metric["token_id"])
+
+    def test_choosing_the_token_the_model_picked_offers_a_resample(self):
+        final = self.respond()[-1]
+        detail, pick = self.pick_alternative(final, row=0)
+        self.assertIn("fresh", detail)
+        self.assertEqual(pick["token_id"], pick["original_id"])
+
+    def test_a_strip_without_a_conversation_cannot_be_branched(self):
+        # Scored text draws the same strip and table, but there is no reply to
+        # replace; the branch source stamp is what says so.
+        final = self.respond()[-1]
+        selected = app.remember_selection(final[METRICS], select(1))
+        detail, pick = app.choose_alternative(final[METRICS], selected, None, cell(1))
+        self.assertIn(app.BRANCH_UNAVAILABLE, detail)
+        self.assertIsNone(pick)
+
+    def test_a_row_without_a_remembered_token_does_nothing(self):
+        final = self.respond()[-1]
+        detail, pick = app.choose_alternative(
+            final[METRICS], None, final[BRANCH_SOURCE], cell(0)
+        )
+        self.assertEqual(detail, gr.skip())
+        self.assertIsNone(pick)
+
+    def test_branching_replays_the_prefix_and_continues(self):
+        final = self.respond()[-1]
+        _detail, pick = self.pick_alternative(final)
+        frames = list(
+            app.branch_from(
+                pick, final[BRANCH_SOURCE], final[METRICS], "", final[TURNS], *SETTINGS
+            )
+        )
+        for frame in frames:
+            self.assertEqual(len(frame), CHAT_OUTPUTS)
+        last = frames[-1]
+        metrics = metrics_of(last[METRICS])
+        original = metrics_of(final[METRICS])
+        # The kept token, then the alternative, then whatever the model added.
+        self.assertEqual(metrics[0]["token_id"], original[0]["token_id"])
+        self.assertEqual(metrics[1]["token_id"], pick["token_id"])
+        self.assertGreater(len(metrics), 2)
+        self.assertEqual([turn["role"] for turn in last[TURNS]], ["user", "assistant"])
+        self.assertIn("Branched at token 2", frames[0][STATUS])
+        self.assertIn("Branched at token 2", last[STATUS])
+        self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 2)
+        self.assertEqual(last[BRANCH_SOURCE], last[METRICS][0])
+
+    def test_the_branched_response_replaces_only_the_last_reply(self):
+        first = self.respond()[-1]
+        second = list(app.chat("again", first[TURNS], *SETTINGS))[-1]
+        _detail, pick = self.pick_alternative(second)
+        last = list(
+            app.branch_from(
+                pick, second[BRANCH_SOURCE], second[METRICS], "", second[TURNS], *SETTINGS
+            )
+        )[-1]
+        self.assertEqual(
+            [turn["content"] for turn in last[TURNS][:3]],
+            [turn["content"] for turn in second[TURNS][:3]],
+        )
+        self.assertEqual(len(last[TURNS]), 4)
+
+    def test_a_pick_made_against_a_replaced_strip_is_refused(self):
+        final = self.respond()[-1]
+        _detail, pick = self.pick_alternative(final)
+        fresh = self.respond()[-1]
+        frames = list(
+            app.branch_from(
+                pick, fresh[BRANCH_SOURCE], fresh[METRICS], "", fresh[TURNS], *SETTINGS
+            )
+        )
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][STATUS], app.BRANCH_HINT)
+        self.assertEqual(frames[0][TURNS], fresh[TURNS])
+
+    def test_branching_with_nothing_picked_explains_the_steps(self):
+        final = self.respond()[-1]
+        frames = list(
+            app.branch_from(
+                None, final[BRANCH_SOURCE], final[METRICS], "", final[TURNS], *SETTINGS
+            )
+        )
+        self.assertEqual(frames[0][STATUS], app.BRANCH_HINT)
+
+    def test_branching_is_refused_while_a_response_is_generating(self):
+        final = self.respond()[-1]
+        _detail, pick = self.pick_alternative(final)
+        self.assertTrue(app.MANAGER.reserve_generation())
+        try:
+            frames = list(
+                app.branch_from(
+                    pick, final[BRANCH_SOURCE], final[METRICS], "", final[TURNS], *SETTINGS
+                )
+            )
+        finally:
+            app.MANAGER.release_generation()
+        self.assertEqual(frames[0][STATUS], app.BUSY_STATUS)
+        self.assertEqual(frames[0][TURNS], gr.skip())
+
+    def test_a_stopped_response_is_branchable(self):
+        settings = dict(FIXED, max_new_tokens=8192)
+        stream = app.chat("hi", [], *settings.values())
+        next(stream)
+        frame = next(stream)
+        stream.close()
+        *_rest, source = app.stop_generation(frame[TURNS], frame[METRICS])
+        self.assertEqual(source, frame[METRICS][0])
+
+    def test_stopping_before_any_token_leaves_nothing_to_branch(self):
+        turns = [make_turn("user", "hi"), make_turn("assistant", "")]
+        *_rest, source = app.stop_generation(turns, app.empty_metrics())
+        self.assertIsNone(source)
+
+    def test_the_branch_button_is_wired_as_a_generation(self):
+        demo = app.build_app()
+        listener = next(
+            fn
+            for fn in demo.fns.values()
+            if getattr(fn.fn, "__name__", None) == "branch_from"
+        )
+        self.assertEqual(len(listener.inputs), 3 + 2 + len(SETTINGS))
+        self.assertEqual(len(listener.outputs), CHAT_OUTPUTS)
+
+
+class ForkTests(unittest.TestCase):
+    """Copy the transcript into a second fork and move between them."""
+
+    def setUp(self):
+        self.original = app.MANAGER
+        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, app, "MANAGER", self.original)
+
+    def turns(self):
+        return [
+            make_turn("user", "one"),
+            make_turn("assistant", "first"),
+            make_turn("user", "two"),
+            make_turn("assistant", "second"),
+        ]
+
+    def test_forking_copies_the_conversation_into_a_new_fork(self):
+        result = app.fork_conversation(self.turns(), new_forks(), None)
+        self.assertEqual(len(result), 18)
+        self.assertEqual(contents(result[FORK_TURNS]), contents(self.turns()))
+        self.assertEqual(result[FORK_STATE]["active"], "Fork 1")
+        self.assertEqual(
+            contents(result[FORK_STATE]["branches"][MAIN_BRANCH]),
+            contents(self.turns()),
+        )
+        self.assertEqual(result[FORK_PICKER]["choices"], [MAIN_BRANCH, "Fork 1"])
+        self.assertEqual(result[FORK_PICKER]["value"], "Fork 1")
+        self.assertIn("Copied", result[FORK_STATUS])
+        self.assertEqual(result[FORK_PROMPT], gr.skip())
+
+    def test_a_whole_copy_keeps_the_token_panel(self):
+        # The last reply is unchanged, so the strip still describes it.
+        result = app.fork_conversation(self.turns(), new_forks(), None)
+        for index in range(FORK_STRIP, FORK_TRACE + 1):
+            self.assertEqual(result[index], gr.skip())
+
+    def test_forking_at_a_user_message_hands_it_back(self):
+        selected = {"index": 2, "content": "two"}
+        result = app.fork_conversation(self.turns(), new_forks(), selected)
+        self.assertEqual([t["content"] for t in result[FORK_TURNS]], ["one", "first"])
+        self.assertEqual(result[FORK_PROMPT], "two")
+        self.assertIn("Forked at message 3", result[FORK_STATUS])
+
+    def test_forking_at_an_assistant_message_keeps_it(self):
+        selected = {"index": 1, "content": "first"}
+        result = app.fork_conversation(self.turns(), new_forks(), selected)
+        self.assertEqual([t["content"] for t in result[FORK_TURNS]], ["one", "first"])
+        self.assertEqual(result[FORK_PROMPT], gr.skip())
+
+    def test_a_truncated_fork_empties_the_token_panel(self):
+        selected = {"index": 1, "content": "first"}
+        result = app.fork_conversation(self.turns(), new_forks(), selected)
+        self.assertEqual(strip_of(result[FORK_STRIP]), [])
+        self.assertEqual(metrics_of(result[FORK_METRICS]), [])
+        self.assertEqual(result[FORK_DETAIL], app.NO_TOKEN_SELECTED)
+        self.assertEqual(result[FORK_TRACE], {})
+
+    def test_a_stale_selection_copies_the_whole_conversation(self):
+        # The message at that index is no longer the one that was clicked.
+        selected = {"index": 2, "content": "something else"}
+        result = app.fork_conversation(self.turns(), new_forks(), selected)
+        self.assertEqual(contents(result[FORK_TURNS]), contents(self.turns()))
+        self.assertIn("Copied", result[FORK_STATUS])
+
+    def test_a_selection_past_the_end_copies_the_whole_conversation(self):
+        result = app.fork_conversation(
+            self.turns(), new_forks(), {"index": 40, "content": "x"}
+        )
+        self.assertEqual(contents(result[FORK_TURNS]), contents(self.turns()))
+
+    def test_remembering_a_message_keeps_its_index_and_text(self):
+        event = gr.SelectData(None, {"index": 2, "value": "two"})
+        self.assertEqual(
+            app.remember_message(self.turns(), event), {"index": 2, "content": "two"}
+        )
+        gone = gr.SelectData(None, {"index": 9, "value": "x"})
+        self.assertIsNone(app.remember_message(self.turns(), gone))
+
+    def test_forking_closes_out_a_cancelled_reply(self):
+        turns = self.turns()
+        turns[-1]["reasoning"] = "half a thought"
+        turns[-1]["reasoning_closed"] = False
+        result = app.fork_conversation(turns, new_forks(), None)
+        self.assertTrue(result[FORK_TURNS][-1]["reasoning_closed"])
+        self.assertTrue(result[FORK_STATE]["branches"][MAIN_BRANCH][-1]["reasoning_closed"])
+        self.assertEqual(result[FORK_SEND], gr.update(visible=True))
+
+    def test_switching_puts_the_current_fork_away_and_brings_the_other_out(self):
+        forked = app.fork_conversation(self.turns(), new_forks(), None)
+        edited = forked[FORK_TURNS] + [make_turn("user", "three")]
+        result = app.switch_fork(MAIN_BRANCH, edited, forked[FORK_STATE])
+        self.assertEqual(contents(result[FORK_TURNS]), contents(self.turns()))
+        self.assertEqual(result[FORK_STATE]["active"], MAIN_BRANCH)
+        self.assertEqual(
+            contents(result[FORK_STATE]["branches"]["Fork 1"]), contents(edited)
+        )
+        self.assertEqual(result[FORK_PICKER]["value"], MAIN_BRANCH)
+        self.assertIn("Switched to Main", result[FORK_STATUS])
+        self.assertEqual(strip_of(result[FORK_STRIP]), [])
+
+    def test_switching_to_the_fork_already_on_screen_changes_nothing(self):
+        result = app.switch_fork(MAIN_BRANCH, self.turns(), new_forks())
+        self.assertEqual(contents(result[FORK_TURNS]), contents(self.turns()))
+        self.assertEqual(result[FORK_STATE], gr.skip())
+        self.assertIn("Already on", result[FORK_STATUS])
+
+    def test_switching_to_a_missing_fork_puts_the_picker_back(self):
+        result = app.switch_fork("Fork 7", self.turns(), new_forks())
+        self.assertEqual(result[FORK_PICKER]["value"], MAIN_BRANCH)
+        self.assertIn("no longer exists", result[FORK_STATUS])
+
+    def test_deleting_a_fork_returns_to_main(self):
+        forked = app.fork_conversation(self.turns(), new_forks(), None)
+        result = app.delete_fork(forked[FORK_TURNS], forked[FORK_STATE])
+        self.assertEqual(contents(result[FORK_TURNS]), contents(self.turns()))
+        self.assertEqual(list(result[FORK_STATE]["branches"]), [MAIN_BRANCH])
+        self.assertEqual(result[FORK_PICKER]["choices"], [MAIN_BRANCH])
+        self.assertIn("Deleted Fork 1", result[FORK_STATUS])
+
+    def test_the_main_conversation_cannot_be_deleted(self):
+        result = app.delete_fork(self.turns(), new_forks())
+        self.assertEqual(contents(result[FORK_TURNS]), contents(self.turns()))
+        self.assertIn("cannot be deleted", result[FORK_STATUS])
+
+    def test_fork_names_are_not_reused_while_taken(self):
+        first = app.fork_conversation(self.turns(), new_forks(), None)
+        second = app.fork_conversation(first[FORK_TURNS], first[FORK_STATE], None)
+        self.assertEqual(second[FORK_STATE]["active"], "Fork 2")
+        self.assertEqual(
+            list(second[FORK_STATE]["branches"]), [MAIN_BRANCH, "Fork 1", "Fork 2"]
+        )
+
+    def test_clear_resets_the_forks(self):
+        result = app.clear_chat()
+        self.assertEqual(len(result), CLEAR_OUTPUTS)
+        self.assertEqual(result[-2], new_forks())
+        self.assertEqual(result[-1]["choices"], [MAIN_BRANCH])
+
+    def test_a_forked_conversation_can_be_continued(self):
+        forked = app.fork_conversation(self.turns(), new_forks(), None)
+        last = list(app.chat("three", forked[FORK_TURNS], *SETTINGS))[-1]
+        self.assertEqual(len(last[TURNS]), 6)
+        self.assertEqual(last[TURNS][4]["content"], "three")
+
+
 class CancelWiringTests(unittest.TestCase):
     """Anything that replaces the conversation must cancel a running generation.
 
@@ -1524,9 +1887,9 @@ class CancelWiringTests(unittest.TestCase):
         )
 
     def conversation_state(self):
-        """Stop reads exactly one thing: the conversation state."""
+        """Stop reads the conversation state first, then the token metrics."""
 
-        (state,) = self.named("stop_generation").inputs
+        state, _metrics = self.named("stop_generation").inputs
         return state
 
     def writers(self):
@@ -1582,6 +1945,10 @@ class CancelWiringTests(unittest.TestCase):
                 "undo_message",
                 "clear_chat",
                 "load_conversation",
+                "branch_from",
+                "fork_conversation",
+                "switch_fork",
+                "delete_fork",
             },
         )
 

@@ -18,21 +18,30 @@ from gradio.utils import get_upload_folder
 
 import charts
 from conversation import (
+    MAIN_BRANCH,
+    copy_forks,
     copy_turns,
     display_messages,
+    fork_at,
     from_json,
     last_user_index,
     locate,
     make_turn,
     model_messages,
+    new_forks,
+    next_fork_name,
     split_reasoning,
     to_json,
     user_index_at_or_before,
 )
 from model_runtime import (
+    MODEL_WEIGHTS,
     PROMPT_SCORE_LIMIT,
+    CacheStatus,
     DownloadSnapshot,
     ModelManager,
+    cache_status,
+    format_bytes,
 )
 from token_metrics import (
     COLOR_SCALES,
@@ -42,7 +51,6 @@ from token_metrics import (
     summarize,
 )
 from trace_export import build_trace, write_trace_export
-
 
 try:
     from huggingface_hub.errors import IncompleteSnapshotError
@@ -98,17 +106,6 @@ TEMPLATE_CAVEAT = (
 def status_card(title: str, detail: str, tone: str = "neutral") -> str:
     icon = {"success": "●", "error": "●", "working": "◌"}.get(tone, "○")
     return f"### {icon} {title}\n\n{detail}"
-
-
-def format_bytes(count: float) -> str:
-    size = float(count)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1000 or unit == "TB":
-            break
-        size /= 1000
-    if unit == "B":
-        return f"{int(size)} B"
-    return f"{size:.1f} {unit}"
 
 
 def describe_duration(seconds: float) -> str:
@@ -231,8 +228,89 @@ def stream_download(model_id: str, hf_token: str):
     return outcome["path"]
 
 
+def describe_missing(status: CacheStatus) -> str:
+    """``config.json and the model weights are missing``, for a card."""
+
+    names = [
+        "the model weights" if name == MODEL_WEIGHTS else f"`{name}`"
+        for name in status.missing_files
+    ]
+    if len(names) > 3:
+        names = names[:2] + [f"{len(names) - 2} more weight files"]
+    if len(names) == 1:
+        return f"{names[0]} {'are' if names[0] == 'the model weights' else 'is'} missing"
+    return f"{', '.join(names[:-1])} and {names[-1]} are missing"
+
+
+def describe_on_disk(status: CacheStatus) -> str:
+    """``2.0 GB cached, 1 file (300 MB) partly downloaded``, for a card.
+
+    A partial blob is not called a weight file: the hub keeps one blob folder
+    per repo, so from outside it could be any file of any revision.
+    """
+
+    cached = f"{format_bytes(status.cached_bytes)} cached"
+    if not status.partial_files:
+        return cached
+    files = "file" if status.partial_files == 1 else "files"
+    return (
+        f"{cached}, {status.partial_files} {files} "
+        f"({format_bytes(status.partial_bytes)}) partly downloaded"
+    )
+
+
+def describe_cache(model_id: str, status: CacheStatus) -> tuple[str, str]:
+    """Title and detail for the card shown while a download starts.
+
+    The cases a reader can tell apart from the outside - nothing on disk, a
+    snapshot still short of files (whether a download was cut off or another
+    tool fetched only part of the repo), and a finished one - each get their
+    own wording, so "Downloading" never hides that the files were already
+    here. Which files are missing is the verdict; ``.incomplete`` blobs are
+    reported as a size only, since the hub's blob folder is shared across
+    revisions and a stray partial need not belong to this snapshot.
+    """
+
+    name = f"`{model_id.strip()}`"
+    if status.missing_files:
+        return (
+            "Resuming download",
+            f"{name} is only partly on disk ({describe_on_disk(status)}): "
+            f"{describe_missing(status)}. Only the missing bytes are fetched.",
+        )
+    if status.present:
+        return (
+            "Checking cached model",
+            f"{name} is already in the Hugging Face cache "
+            f"({format_bytes(status.cached_bytes)}). Checking for missing or "
+            "updated files; nothing is downloaded twice.",
+        )
+    return (
+        "Downloading model",
+        f"Fetching {name} into the Hugging Face cache. Nothing is cached yet, "
+        "so this is a full download and may take a while.",
+    )
+
+
+def describe_fetched(before: CacheStatus, after: CacheStatus, elapsed: float) -> str:
+    fetched = after.total_bytes - before.total_bytes
+    if fetched <= 0:
+        return f"Already up to date; nothing new was fetched ({elapsed:.1f} seconds)."
+    if before.present:
+        return (
+            f"Fetched the remaining {format_bytes(fetched)} in {elapsed:.1f} seconds."
+        )
+    return f"Fetched {format_bytes(fetched)} in {elapsed:.1f} seconds."
+
+
 def download_model(model_id: str, hf_token: str):
     started = time.monotonic()
+    try:
+        before = cache_status(model_id)
+    except ValueError as error:
+        yield status_card("Download failed", html.escape(str(error)), "error")
+        return
+    yield status_card(*describe_cache(model_id, before), "working")
     try:
         path = yield from stream_download(model_id, hf_token)
     except Exception as error:
@@ -240,9 +318,11 @@ def download_model(model_id: str, hf_token: str):
         return
 
     elapsed = time.monotonic() - started
+    fetched = describe_fetched(before, cache_status(model_id), elapsed)
     yield status_card(
         "Download complete",
-        f"Cached `{model_id.strip()}` in `{path}` ({elapsed:.1f} seconds). Use **Load cached** when ready.",
+        f"{fetched} `{model_id.strip()}` is cached in `{path}`. "
+        "Use **Load cached** when ready.",
         "success",
     )
 
@@ -250,10 +330,19 @@ def download_model(model_id: str, hf_token: str):
 def download_and_load_model(model_id: str, hf_token: str):
     started = time.monotonic()
     try:
+        before = cache_status(model_id)
+    except ValueError as error:
+        yield status_card("Model setup failed", html.escape(str(error)), "error")
+        return
+    yield status_card(*describe_cache(model_id, before), "working")
+    try:
         path = yield from stream_download(model_id, hf_token)
+        fetched = describe_fetched(
+            before, cache_status(model_id), time.monotonic() - started
+        )
         yield status_card(
             "Loading model",
-            f"Downloaded `{model_id.strip()}`. Moving the weights onto the best available device…",
+            f"{fetched} Moving `{model_id.strip()}` onto the best available device…",
             "working",
         )
         device = MANAGER.load(model_id, path)
@@ -305,13 +394,36 @@ def load_cached_model(model_id: str):
         )
         return
 
-    yield status_card(
-        "Finding cached model", f"Looking for `{cleaned}` locally…", "working"
-    )
+    name = f"`{cleaned}`"
+    yield status_card("Finding cached model", f"Looking for {name} locally…", "working")
+    try:
+        status = cache_status(cleaned)
+    except ValueError as error:
+        yield status_card("Could not load cached model", html.escape(str(error)), "error")
+        return
+    if status.missing_files:
+        yield status_card(
+            "Download incomplete",
+            f"{name} is only partly on disk ({describe_on_disk(status)}): "
+            f"{describe_missing(status)}. "
+            "Use **Download and load** to fetch the rest.",
+            "error",
+        )
+        return
+    if not status.present:
+        yield status_card(
+            "Not cached",
+            f"Nothing for {name} is in the Hugging Face cache. "
+            "Use **Download and load** to fetch it.",
+            "error",
+        )
+        return
     try:
         path = MANAGER.find_cached(cleaned)
         yield status_card(
-            "Loading model", f"Loading cached files from `{path}`…", "working"
+            "Loading model",
+            f"Loading {format_bytes(status.cached_bytes)} of cached files from `{path}`…",
+            "working",
         )
         device = MANAGER.load(cleaned, path)
     except IncompleteSnapshotError as error:
@@ -325,7 +437,7 @@ def load_cached_model(model_id: str):
         )
         return
     yield status_card(
-        "Model ready", f"`{cleaned}` is loaded on **{device}**.", "success"
+        "Model ready", f"{name} is loaded on **{device}**.", "success"
     )
 
 
@@ -442,13 +554,24 @@ def inspect_token(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
     if not metrics:
         return NO_TOKEN_SELECTED, []
 
+    try:
+        metric = metrics[event_index(event)]
+    except (IndexError, TypeError, ValueError):
+        return "That token is no longer available. Generate another response.", []
+    return describe_token(metric)
+
+
+def event_index(event: gr.SelectData) -> int:
+    """The row a select event landed on, whichever shape the component sends."""
+
     index = event.index
     if isinstance(index, (list, tuple)):
         index = index[0]
-    try:
-        metric = metrics[int(index)]
-    except (IndexError, TypeError, ValueError):
-        return "That token is no longer available. Generate another response.", []
+    return int(index)
+
+
+def describe_token(metric: dict) -> tuple[str, list[list]]:
+    """The detail panel and the alternatives table for one token."""
 
     token_repr = html.escape(repr(metric["text"]))
     where = "Prompt token" if metric["segment"] == "prompt" else "Token"
@@ -485,6 +608,102 @@ def inspect_token(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
         for candidate in metric["top_candidates"]
     ]
     return summary, rows
+
+
+# ---------------------------------------------------------- branch from token
+#
+# Branching replays a response up to one token, puts an alternative in that
+# token's place, and lets the model continue. It takes three clicks - a token
+# in the strip, a row in the alternatives table, the Branch button - and each
+# click leaves its choice in a gr.State stamped with the strip's generation
+# number. Every path that replaces the strip mints a new number, so a choice
+# made against a strip that is gone is refused rather than replayed onto the
+# wrong response.
+#
+# ``branch_source`` is the stamp of the last strip that came from a chat
+# response. Scored text draws the same strip and the same alternatives, but
+# there is no conversation to branch, so a stamp that does not match it is
+# refused too.
+
+BRANCH_HINT = (
+    "Click a response token, then one of its alternatives, then branch."
+)
+BRANCH_UNAVAILABLE = (
+    "🌱 Only a chat response can be branched. Scored text and prompt tokens "
+    "have no conversation to continue."
+)
+
+
+def remember_selection(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
+    """Keep the strip position a click landed on, for the alternatives table.
+
+    Only a scored response token is worth keeping. A prompt token, or one that
+    was never predicted, has no alternatives to branch into, and remembering
+    it would let a click in the table pair its row with the wrong token.
+    """
+
+    generation, metrics = metrics_state
+    if generation != _metrics_generation:
+        return None
+    try:
+        metric = metrics[event_index(event)]
+    except (IndexError, TypeError, ValueError):
+        return None
+    if metric.get("segment") != "response" or not metric.get("scored", True):
+        return None
+    return {"generation": generation, "index": event_index(event)}
+
+
+def branch_ready_text(pick: dict) -> str:
+    position = pick["position"]
+    chosen = html.escape(repr(pick["text"]))
+    original = html.escape(repr(pick["original"]))
+    if pick["token_id"] == pick["original_id"]:
+        return (
+            f"🌱 **Branch ready:** keep the response through token {position} "
+            f"(`{chosen}`) and let the model continue from there with a fresh "
+            "sample. Press **Branch from token**."
+        )
+    return (
+        f"🌱 **Branch ready:** keep the first {position - 1} token"
+        f"{'' if position == 2 else 's'}, put `{chosen}` where `{original}` was, "
+        "and let the model continue. Press **Branch from token**."
+    )
+
+
+def choose_alternative(
+    metrics_state: tuple[int, list[dict]],
+    selected_token: dict | None,
+    branch_source: int | None,
+    event: gr.SelectData,
+):
+    """Pair a row of the alternatives table with the token it belongs to."""
+
+    generation, metrics = metrics_state
+    if (
+        generation != _metrics_generation
+        or not selected_token
+        or selected_token.get("generation") != generation
+    ):
+        return gr.skip(), None
+    try:
+        metric = metrics[int(selected_token["index"])]
+        candidate = metric["top_candidates"][event_index(event)]
+    except (IndexError, KeyError, TypeError, ValueError):
+        return gr.skip(), None
+
+    summary, _rows = describe_token(metric)
+    if branch_source != generation:
+        return f"{summary}\n\n{BRANCH_UNAVAILABLE}", None
+    pick = {
+        "generation": generation,
+        "position": int(metric["position"]),
+        "token_id": int(candidate["token_id"]),
+        "text": candidate["text"],
+        "original_id": int(metric["token_id"]),
+        "original": metric["text"],
+    }
+    return f"{summary}\n\n{branch_ready_text(pick)}", pick
 
 
 def recolor(response_state, prompt_state, scale_name: str):
@@ -533,6 +752,7 @@ CHAT_OUTPUT_NAMES = (
     "summary",
     "surprise",
     "trace",
+    "branch_source",
 )
 
 
@@ -559,16 +779,20 @@ def finalize_partial(turns: list[dict]) -> bool:
     return True
 
 
-def stop_generation(turns: list[dict] | None):
+def stop_generation(
+    turns: list[dict] | None, metrics_state: tuple[int, list[dict]] = (0, [])
+):
     """Finish the turn that the cancelled generator left behind.
 
     Gradio closes ``generate_reply`` at its last yield, so nothing else ever
-    finalizes that turn.
+    finalizes that turn. A kept partial response is still a response: the
+    tokens on screen are the ones it is made of, so it can be branched from.
     """
 
     turns = copy_turns(turns)
     kept = finalize_partial(turns)
     messages, _ = display_messages(turns)
+    generation, metrics = metrics_state
     return (
         messages,
         turns,
@@ -576,6 +800,7 @@ def stop_generation(turns: list[dict] | None):
         "Stopped. The partial response was kept."
         if kept
         else "Stopped before the model produced anything.",
+        generation if kept and metrics else None,
     )
 
 
@@ -652,6 +877,7 @@ def idle_state(
         charts.summary_tiles({}) if clear_tokens else gr.skip(),
         charts.EMPTY_CHART if clear_tokens else gr.skip(),
         {} if clear_tokens else gr.skip(),
+        gr.skip(),
     )
 
 
@@ -699,8 +925,15 @@ def generate_reply(
     randomize_seed: bool,
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
+    *,
+    forced_ids: tuple[int, ...] = (),
+    branch_note: str = "",
 ):
     """Stream one assistant reply for ``turns``, which must end with a user turn.
+
+    ``forced_ids`` is a response prefix the model replays before it samples
+    anything: the tokens kept from an earlier response and the alternative
+    the reader picked. ``branch_note`` leads the status line while it streams.
 
     The generation slot is reserved here, before the first frame is published,
     because this is the first moment a handler is committed to generating. The
@@ -730,6 +963,8 @@ def generate_reply(
             randomize_seed,
             analyze_prompt,
             scale_name,
+            forced_ids=forced_ids,
+            branch_note=branch_note,
         )
     finally:
         # Every exit runs this: a finished stream, a failure, and - the one
@@ -752,6 +987,9 @@ def _stream_reply(
     randomize_seed: bool,
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
+    *,
+    forced_ids: tuple[int, ...] = (),
+    branch_note: str = "",
 ):
     """The body of generate_reply(), run with the generation slot held."""
 
@@ -780,6 +1018,7 @@ def _stream_reply(
         prompt_panel=None,
         charts_panel=None,
         trace=None,
+        branch_source=gr.skip(),
     ):
         """One frame of the stream.
 
@@ -818,19 +1057,23 @@ def _stream_reply(
             summary_panel,
             surprise_panel,
             gr.skip() if trace is None else trace,
+            branch_source,
         )
 
     # The opening frame empties everything the previous response left behind,
     # the export included: a trace kept here would still be downloadable while
-    # a different response was streaming in above it.
+    # a different response was streaming in above it. The branch source goes
+    # too: nothing is branchable until this response has finished or been
+    # stopped, and the stamp would refuse it anyway.
     yield snapshot(
         strip_update([], scale_name, RESPONSE_STRIP_LABEL),
         [],
-        "Generating…",
+        f"{branch_note} Generating…".strip(),
         reset_details=True,
         prompt_panel=(strip_update([], scale_name), (generation, []), ""),
         charts_panel=(charts.summary_tiles({}), charts.EMPTY_CHART),
         trace={},
+        branch_source=None,
     )
 
     started = time.monotonic()
@@ -851,6 +1094,7 @@ def _stream_reply(
         max_new_tokens=int(max_new_tokens),
         seed=used_seed,
         analyze_prompt=bool(analyze_prompt),
+        forced_ids=tuple(int(value) for value in forced_ids),
     )
 
     try:
@@ -869,6 +1113,8 @@ def _stream_reply(
                 highlight = strip_value(update.metrics, scale_name)
                 metrics = list(update.metrics)
                 status = generation_progress(len(metrics), started, used_seed)
+                if branch_note:
+                    status = f"{branch_note} {status}"
                 prompt_panel = None
                 if first:
                     # Every prompt token is measured before the first response
@@ -905,10 +1151,17 @@ def _stream_reply(
         reasoning, answer, _ = split_reasoning(raw_text, reasoning_prefilled=prefilled)
         pending["reasoning"] = reasoning
         pending["content"] = answer
-        finalize_partial(turns)
+        kept = finalize_partial(turns)
         # A failed response is not a response to export, so the trace the
-        # opening frame emptied stays empty.
-        yield snapshot(highlight, metrics, f"Generation failed: {error}", busy=False)
+        # opening frame emptied stays empty. What did arrive is still on
+        # screen, though, and can be branched from like a stopped response.
+        yield snapshot(
+            highlight,
+            metrics,
+            f"Generation failed: {error}",
+            busy=False,
+            branch_source=generation if kept and metrics else None,
+        )
         return
 
     reasoning, answer, _ = split_reasoning(raw_text, reasoning_prefilled=prefilled)
@@ -927,18 +1180,23 @@ def _stream_reply(
     # the user turn without a reply, which is the honest shape - no assistant
     # bubble is drawn, so both transcripts agree that no reply exists.
     kept = finalize_partial(turns)
+    sampling = {
+        "temperature": float(temperature),
+        "top_p": float(top_p),
+        "top_k": int(top_k),
+        "max_new_tokens": int(max_new_tokens),
+        "seed": used_seed,
+    }
+    if forced_ids:
+        # The first tokens of a branched response were replayed, not sampled,
+        # and a reader of the export needs to know how many.
+        sampling["forced_prefix_tokens"] = len(forced_ids)
     trace = (
         build_trace(
             model_id=MANAGER.model_id,
             messages=request,
             response=raw_text,
-            sampling={
-                "temperature": float(temperature),
-                "top_p": float(top_p),
-                "top_k": int(top_k),
-                "max_new_tokens": int(max_new_tokens),
-                "seed": used_seed,
-            },
+            sampling=sampling,
             metrics=metrics,
         )
         if kept and metrics
@@ -956,6 +1214,7 @@ def _stream_reply(
             charts.surprise_chart(metrics),
         ),
         trace=trace,
+        branch_source=generation if kept and metrics else None,
     )
 
 
@@ -1144,6 +1403,65 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
     yield from regenerate_from(position, prompt_text, turns, *settings)
 
 
+def branch_from(
+    pick: dict | None,
+    branch_source: int | None,
+    metrics_state: tuple[int, list[dict]],
+    prompt_text: str,
+    turns: list[dict] | None,
+    *settings,
+):
+    """Replay the last response up to the picked token, swap it, and continue.
+
+    The response being branched is always the last turn: every path that
+    changes the conversation under the strip re-stamps it, and the stamps
+    checked here have to agree with the live one, so a pick that survives the
+    checks was made against the reply on screen.
+    """
+
+    if MANAGER.busy:
+        yield busy_state()
+        return
+
+    turns = copy_turns(turns)
+    generation, metrics = metrics_state
+    if (
+        not pick
+        or pick.get("generation") != generation
+        or generation != _metrics_generation
+        or branch_source != generation
+    ):
+        yield idle_state(prompt_text, turns, BRANCH_HINT)
+        return
+
+    position = last_user_index(turns)
+    if position is None or turns[-1]["role"] != "assistant":
+        yield idle_state(prompt_text, turns, "There is no response to branch from.")
+        return
+    if not MANAGER.loaded:
+        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        return
+
+    at = int(pick["position"])
+    kept = [int(metric["token_id"]) for metric in metrics[: at - 1]]
+    if len(kept) != at - 1:
+        yield idle_state(prompt_text, turns, BRANCH_HINT)
+        return
+    forced = (*kept, int(pick["token_id"]))
+    if pick["token_id"] == pick.get("original_id"):
+        note = f"Resampling from token {at} ({pick['text']!r})."
+    else:
+        note = f"Branched at token {at}: {pick['text']!r} instead of {pick['original']!r}."
+
+    yield from generate_reply(
+        turns[: position + 1],
+        prompt_text,
+        *settings,
+        forced_ids=forced,
+        branch_note=note,
+    )
+
+
 def undo_from(
     position: int | None,
     turns: list[dict] | None,
@@ -1230,6 +1548,7 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
     strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
         scale_name
     )
+    forks = new_forks()
     return (
         [],
         [],
@@ -1245,6 +1564,210 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
         charts.summary_tiles({}),
         charts.EMPTY_CHART,
         {},
+        forks,
+        fork_picker_update(forks),
+    )
+
+
+# --------------------------------------------------------------------- forks
+
+
+def fork_picker_update(forks: dict):
+    return gr.update(choices=list(forks["branches"]), value=forks["active"])
+
+
+def remember_message(turns: list[dict] | None, event: gr.SelectData):
+    """Keep the chatbot message a click landed on, for the Fork button.
+
+    The content rides along so a click that has gone stale - the conversation
+    was edited or extended underneath it - is recognized when Fork is pressed,
+    instead of forking at whatever message now sits at that index.
+    """
+
+    try:
+        index = event_index(event)
+    except (TypeError, ValueError):
+        return None
+    if locate(turns, index) is None:
+        return None
+    return {"index": index, "content": event.value}
+
+
+def selected_turn(turns: list[dict], selected: dict | None) -> tuple[int, str] | None:
+    """The turn a remembered chatbot click still points at, if it still does."""
+
+    if not selected:
+        return None
+    found = locate(turns, selected.get("index"))
+    if found is None:
+        return None
+    messages, _ = display_messages(turns)
+    shown = messages[int(selected["index"])]["content"]
+    remembered = selected.get("content")
+    if isinstance(remembered, str) and remembered.strip() != str(shown).strip():
+        return None
+    return found
+
+
+def panel_reset(scale_name: str):
+    """Empty the token panel for a conversation that just changed underneath it."""
+
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
+        scale_name
+    )
+    return (
+        strip,
+        metrics,
+        NO_TOKEN_SELECTED,
+        [],
+        prompt_strip,
+        prompt_metrics,
+        prompt_note,
+        charts.summary_tiles({}),
+        charts.EMPTY_CHART,
+        {},
+    )
+
+
+PANEL_KEPT = (gr.skip(),) * 10
+
+
+def fork_refused(turns: list[dict], forks: dict, status: str):
+    """Change nothing but the picker, which goes back on the active fork.
+
+    Like every fork handler this runs after cancelling any generation (see the
+    ``cancels`` on its listeners), so it still has to restore the Send button
+    and close out the turn the cancelled generator left behind.
+    """
+
+    turns = copy_turns(turns)
+    finalize_partial(turns)
+    messages, _ = display_messages(turns)
+    return (
+        gr.skip(),
+        messages,
+        turns,
+        gr.skip(),
+        fork_picker_update(forks),
+        status,
+        *send_stop_buttons(False),
+        *PANEL_KEPT,
+    )
+
+
+def fork_conversation(
+    turns: list[dict] | None,
+    forks: dict | None,
+    selected: dict | None,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
+    """Copy the conversation into a new fork and switch to it.
+
+    With a message selected, the copy stops there (see ``fork_at``); otherwise
+    the whole transcript is copied. A whole copy keeps the token panel, since
+    the response it describes is still the last one on screen; a truncated
+    copy loses it, the response having gone with the cut.
+
+    Forking cancels a running generation, as Undo, Clear and Load do, so the
+    turn that generator left behind is closed out here before it is copied.
+    """
+
+    forks = copy_forks(forks)
+    turns = copy_turns(turns)
+    finalize_partial(turns)
+    forks["branches"][forks["active"]] = copy_turns(turns)
+    found = selected_turn(turns, selected)
+    forked, box_text = fork_at(turns, found)
+    name = next_fork_name(forks)
+    forks["branches"][name] = copy_turns(forked)
+    forks["active"] = name
+    messages, _ = display_messages(forked)
+
+    truncated = len(forked) < len(turns)
+    if truncated:
+        status = (
+            f"Forked at message {found[0] + 1} into {name}. "
+            "Send a message to take it somewhere else."
+        )
+    else:
+        status = (
+            f"Copied the conversation into {name}. Edit or undo a message, or "
+            "send a new one, to take it somewhere else."
+        )
+    return (
+        gr.skip() if box_text is None else box_text,
+        messages,
+        forked,
+        forks,
+        fork_picker_update(forks),
+        status,
+        *send_stop_buttons(False),
+        *(panel_reset(scale_name) if truncated else PANEL_KEPT),
+    )
+
+
+def switch_fork(
+    name: str | None,
+    turns: list[dict] | None,
+    forks: dict | None,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
+    """Put the conversation on screen away and bring another fork out."""
+
+    forks = copy_forks(forks)
+    if name not in forks["branches"]:
+        return fork_refused(turns, forks, "That fork no longer exists.")
+    if name == forks["active"]:
+        return fork_refused(turns, forks, f"Already on {name}.")
+
+    turns = copy_turns(turns)
+    finalize_partial(turns)
+    forks["branches"][forks["active"]] = turns
+    forks["active"] = name
+    target = copy_turns(forks["branches"][name])
+    messages, _ = display_messages(target)
+    count = len(target)
+    return (
+        gr.skip(),
+        messages,
+        target,
+        forks,
+        fork_picker_update(forks),
+        f"Switched to {name} ({count} message{'s' if count != 1 else ''}).",
+        *send_stop_buttons(False),
+        *panel_reset(scale_name),
+    )
+
+
+def delete_fork(
+    turns: list[dict] | None,
+    forks: dict | None,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
+    """Drop the active fork and go back to the main conversation."""
+
+    forks = copy_forks(forks)
+    name = forks["active"]
+    if name == MAIN_BRANCH:
+        return fork_refused(
+            turns,
+            forks,
+            "The main conversation cannot be deleted. Use Clear to empty it.",
+        )
+
+    del forks["branches"][name]
+    forks["active"] = MAIN_BRANCH
+    target = copy_turns(forks["branches"].setdefault(MAIN_BRANCH, []))
+    messages, _ = display_messages(target)
+    return (
+        gr.skip(),
+        messages,
+        target,
+        forks,
+        fork_picker_update(forks),
+        f"Deleted {name}. Back on {MAIN_BRANCH}.",
+        *send_stop_buttons(False),
+        *panel_reset(scale_name),
     )
 
 
@@ -1449,6 +1972,14 @@ def build_app() -> gr.Blocks:
         metrics_state = gr.State(empty_metrics())
         prompt_metrics_state = gr.State(empty_metrics())
         trace_state = gr.State({})
+        # Branching from a token: the stamp of the last chat response's strip,
+        # the strip position last clicked, and the alternative picked for it.
+        branch_source = gr.State(None)
+        selected_token = gr.State(None)
+        branch_pick = gr.State(None)
+        # Forking: the other transcripts, and the chatbot message last clicked.
+        forks_state = gr.State(new_forks())
+        selected_message = gr.State(None)
 
         gr.Markdown(
             "# Chatlab\nChat with an open model and see exactly how likely every generated token was.",
@@ -1534,6 +2065,20 @@ def build_app() -> gr.Blocks:
                             visible=False,
                             interactive=False,
                         )
+                        with gr.Row():
+                            fork_picker = gr.Dropdown(
+                                choices=[MAIN_BRANCH],
+                                value=MAIN_BRANCH,
+                                label="Conversation fork",
+                                info=(
+                                    "Fork copies the conversation so it can be taken "
+                                    "somewhere else. Click a message first to fork at "
+                                    "that point."
+                                ),
+                                scale=2,
+                            )
+                            fork_button = gr.Button("🌿 Fork")
+                            delete_fork_button = gr.Button("Delete fork")
                         generation_status = gr.Markdown("Ready.")
                         with gr.Accordion("Export full metric trace", open=False):
                             with gr.Row():
@@ -1608,7 +2153,15 @@ def build_app() -> gr.Blocks:
                     headers=["Token ID", "Token", "Raw probability"],
                     datatype=["number", "str", "number"],
                     interactive=False,
-                    label="Most likely alternatives",
+                    label="Most likely alternatives — click one to branch into it",
+                )
+                with gr.Row():
+                    branch_button = gr.Button("🌱 Branch from token", size="sm")
+                gr.Markdown(
+                    "Branching keeps the response up to the selected token, puts "
+                    "the alternative in its place, and lets the model continue "
+                    "from there.",
+                    elem_classes=["scale-caption"],
                 )
                 summary_panel = gr.HTML(charts.summary_tiles({}))
                 surprise_panel = gr.HTML(charts.EMPTY_CHART)
@@ -1695,6 +2248,7 @@ def build_app() -> gr.Blocks:
             summary_panel,
             surprise_panel,
             trace_state,
+            branch_source,
         ]
         undo_outputs = [
             prompt,
@@ -1721,17 +2275,23 @@ def build_app() -> gr.Blocks:
             retry_button.click(retry_last, chat_inputs, chat_outputs),
             chatbot.retry(retry_message, chat_inputs, chat_outputs),
             chatbot.edit(edit_message, chat_inputs, chat_outputs),
+            branch_button.click(
+                branch_from,
+                [branch_pick, branch_source, metrics_state, *chat_inputs],
+                chat_outputs,
+            ),
         ]
 
         stop_button.click(
             stop_generation,
-            inputs=conversation_state,
+            inputs=[conversation_state, metrics_state],
             outputs=[
                 chatbot,
                 conversation_state,
                 send_button,
                 stop_button,
                 generation_status,
+                branch_source,
             ],
             cancels=running,
         )
@@ -1779,7 +2339,53 @@ def build_app() -> gr.Blocks:
                 summary_panel,
                 surprise_panel,
                 trace_state,
+                forks_state,
+                fork_picker,
             ],
+            cancels=running,
+        )
+
+        # Forking, switching and deleting all replace the conversation, so they
+        # cancel a running generation for the same reason Undo does.
+        fork_outputs = [
+            prompt,
+            chatbot,
+            conversation_state,
+            forks_state,
+            fork_picker,
+            generation_status,
+            send_button,
+            stop_button,
+            token_strip,
+            metrics_state,
+            token_detail,
+            alternatives,
+            prompt_strip,
+            prompt_metrics_state,
+            prompt_note,
+            summary_panel,
+            surprise_panel,
+            trace_state,
+        ]
+        chatbot.select(remember_message, conversation_state, selected_message)
+        fork_button.click(
+            fork_conversation,
+            [conversation_state, forks_state, selected_message, color_scale],
+            fork_outputs,
+            cancels=running,
+        )
+        # .input rather than .change: the picker is also moved by the handlers
+        # above, and a .change listener would switch a second time on each.
+        fork_picker.input(
+            switch_fork,
+            [fork_picker, conversation_state, forks_state, color_scale],
+            fork_outputs,
+            cancels=running,
+        )
+        delete_fork_button.click(
+            delete_fork,
+            [conversation_state, forks_state, color_scale],
+            fork_outputs,
             cancels=running,
         )
 
@@ -1843,6 +2449,17 @@ def build_app() -> gr.Blocks:
             inspect_token,
             inputs=prompt_metrics_state,
             outputs=[token_detail, alternatives],
+        )
+        # A second listener on each strip keeps the clicked position for the
+        # alternatives table. The prompt strip's clicks always clear it: a
+        # prompt token cannot be branched, and a stale response position would
+        # otherwise pair with the prompt token's rows.
+        token_strip.select(remember_selection, metrics_state, selected_token)
+        prompt_strip.select(remember_selection, prompt_metrics_state, selected_token)
+        alternatives.select(
+            choose_alternative,
+            [metrics_state, selected_token, branch_source],
+            [token_detail, branch_pick],
         )
 
     return demo

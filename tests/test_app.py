@@ -2,12 +2,15 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
 import app
 from model_runtime import (
+    MODEL_WEIGHTS,
     PROMPT_SCORE_LIMIT,
+    CacheStatus,
     DownloadProgress,
     ModelManager,
     ScoredText,
@@ -134,10 +137,6 @@ class ScoreStatusTests(unittest.TestCase):
         self.assertTrue(status.endswith(f"{app.TEMPLATE_CAVEAT} {app.SEAM_CAVEAT}"))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class FakeDownloads(ModelManager):
     """A manager that keeps the real download bookkeeping around a fake fetch."""
 
@@ -228,11 +227,12 @@ class DownloadCardTests(unittest.TestCase):
 
         cards = app.download_model("org/model", "")
         first = next(cards)
+        waiting = next(cards)
         file_list_arrives.set()
-        frames = [first, *cards]
+        frames = [first, waiting, *cards]
 
         self.assertIn("Downloading model", frames[0])
-        self.assertIn("Asking Hugging Face", frames[0])
+        self.assertTrue(any("Asking Hugging Face" in frame for frame in frames[1:]))
         self.assertTrue(
             any("% " in frame or "%\n" in frame for frame in frames[1:-1]),
             frames,
@@ -275,7 +275,7 @@ class DownloadCardTests(unittest.TestCase):
                 # The other handler's download finishes.
                 app.MANAGER.active_downloads.clear()
 
-        self.assertIn("25%", frames[0])
+        self.assertIn("25%", frames[1])
         self.assertEqual(calls, ["org/model"], "one quick pass over the cached files")
         self.assertIn("Download complete", frames[-1])
 
@@ -301,7 +301,9 @@ class DownloadCardTests(unittest.TestCase):
         second = app.download_and_load_model("org/model", "")
 
         self.assertIn("Downloading model", next(first))
+        self.assertIn("Downloading model", next(first))
         self.assertTrue(started.wait(5))
+        self.assertIn("Downloading model", next(second))
         self.assertIn("Downloading model", next(second))
         self.assertEqual(calls, ["org/model"], "the second handler follows the first")
 
@@ -352,15 +354,197 @@ class DownloadCardTests(unittest.TestCase):
                     "model-00002-of-00003.safetensors, model-00003-of-00003.safetensors). "
                     "Outgoing traffic is disabled ('local_files_only=True'). Re-run the "
                     "download with network access to complete the snapshot.",
-                    snapshot_path="/cache/snapshots/abc",
+                    "/cache/snapshots/abc",
                 )
 
         app.MANAGER = Manager()
 
-        frames = list(app.load_cached_model("org/model"))
+        with mock.patch.object(
+            app, "cache_status", return_value=CacheStatus(cached_bytes=1)
+        ):
+            frames = list(app.load_cached_model("org/model"))
 
         self.assertIn("Download unfinished", frames[-1])
         self.assertIn("3 files still missing", frames[-1])
         self.assertIn("model-00003-of-00003.safetensors", frames[-1])
         self.assertIn("Download and load", frames[-1])
         self.assertNotIn("local_files_only", frames[-1])
+
+
+class DownloadManager(FakeDownloads):
+    """Stands in for the real manager: downloads succeed without a network."""
+
+    def __init__(self):
+        super().__init__()
+        self.downloads = 0
+
+    def fetch(self, model_id, hf_token, progress):
+        self.downloads += 1
+        return Path("/cache/models--allenai--Olmo-3-7B-Think/snapshots/abc")
+
+    def load(self, model_id, path):
+        return "mps"
+
+
+class DownloadStatusTests(unittest.TestCase):
+    """What the model card says about files that were already on disk.
+
+    The download itself never fetches anything twice; the point of these
+    cards is that the reader can tell that from the screen.
+    """
+
+    MODEL = "allenai/Olmo-3-7B-Think"
+
+    def run_handler(self, handler, statuses: list[CacheStatus], *args) -> list[str]:
+        remaining = list(statuses)
+        original_manager, original_status = app.MANAGER, app.cache_status
+        app.MANAGER = DownloadManager()
+        app.cache_status = lambda model_id: remaining.pop(0)
+        try:
+            return list(handler(self.MODEL, *args))
+        finally:
+            app.MANAGER, app.cache_status = original_manager, original_status
+
+    def test_a_first_download_is_announced_as_a_full_one(self):
+        cards = self.run_handler(
+            app.download_model,
+            [CacheStatus(), CacheStatus(cached_bytes=15_000_000_000)],
+            "",
+        )
+
+        self.assertIn("Nothing is cached yet", cards[0])
+        self.assertIn("Fetched 15.0 GB", cards[-1])
+        self.assertIn("Load cached", cards[-1])
+
+    def test_a_cut_off_download_is_announced_as_resumed(self):
+        cards = self.run_handler(
+            app.download_model,
+            [
+                CacheStatus(
+                    cached_bytes=10,
+                    partial_files=3,
+                    partial_bytes=3_000_000_000,
+                    missing_files=(MODEL_WEIGHTS,),
+                ),
+                CacheStatus(cached_bytes=15_000_000_010),
+            ],
+            "",
+        )
+
+        self.assertIn("Resuming download", cards[0])
+        self.assertIn("3 files (3.0 GB) partly downloaded", cards[0])
+        self.assertNotIn("weight files (", cards[0])
+        self.assertIn("Fetched the remaining 12.0 GB", cards[-1])
+
+    def test_a_stray_partial_blob_beside_a_complete_cache_is_not_a_resume(self):
+        """A leftover from another revision changes nothing about ``main``."""
+
+        cached = CacheStatus(cached_bytes=15_000_000_000, partial_files=1, partial_bytes=5)
+        cards = self.run_handler(app.download_model, [cached, cached], "")
+
+        self.assertIn("already in the Hugging Face cache", cards[0])
+        self.assertNotIn("Resuming", cards[0])
+
+    def test_a_complete_cache_reports_that_nothing_was_fetched(self):
+        cached = CacheStatus(cached_bytes=15_000_000_000)
+        cards = self.run_handler(app.download_model, [cached, cached], "")
+
+        self.assertIn("already in the Hugging Face cache", cards[0])
+        self.assertIn("nothing new was fetched", cards[-1])
+
+    def test_download_and_load_carries_the_same_wording(self):
+        cached = CacheStatus(cached_bytes=15_000_000_000)
+        cards = self.run_handler(app.download_and_load_model, [cached, cached], "")
+
+        self.assertIn("already in the Hugging Face cache", cards[0])
+        self.assertIn("nothing new was fetched", cards[1])
+        self.assertIn("Model ready", cards[-1])
+
+    def test_load_cached_refuses_a_cut_off_download(self):
+        cards = self.run_handler(
+            app.load_cached_model,
+            [
+                CacheStatus(
+                    cached_bytes=10,
+                    partial_files=1,
+                    partial_bytes=5,
+                    missing_files=("model-00002-of-00002.safetensors",),
+                )
+            ],
+        )
+
+        self.assertIn("Download incomplete", cards[-1])
+        self.assertIn("1 file (5 B) partly downloaded", cards[-1])
+        self.assertIn("`model-00002-of-00002.safetensors` is missing", cards[-1])
+        self.assertIn("Download and load", cards[-1])
+
+    def test_load_cached_loads_a_complete_snapshot_beside_a_stray_partial_blob(self):
+        """Only what the ``main`` snapshot lacks can refuse a load; a partial
+        blob left by another revision, or by a file the model never reads,
+        used to be mistaken for a cut-off download."""
+
+        snapshot = "/cache/models--allenai--Olmo-3-7B-Think/snapshots/abc"
+        with mock.patch("huggingface_hub.snapshot_download", return_value=snapshot):
+            cards = self.run_handler(
+                app.load_cached_model,
+                [CacheStatus(cached_bytes=15_000_000_000, partial_files=1, partial_bytes=5)],
+            )
+
+        self.assertNotIn("Download incomplete", "".join(cards))
+        self.assertIn("Model ready", cards[-1])
+
+    def test_load_cached_refuses_a_snapshot_without_weights(self):
+        """Config and tokenizer alone used to sail through to a shard-missing traceback."""
+
+        cards = self.run_handler(
+            app.load_cached_model,
+            [CacheStatus(cached_bytes=2_000_000, missing_files=(MODEL_WEIGHTS,))],
+        )
+
+        self.assertIn("Download incomplete", cards[-1])
+        self.assertIn("2.0 MB cached", cards[-1])
+        self.assertIn("the model weights are missing", cards[-1])
+        self.assertIn("Download and load", cards[-1])
+
+    def test_a_download_stopped_between_shards_is_announced_as_resumed(self):
+        shards = tuple(f"model-0000{i}-of-00006.safetensors" for i in range(2, 7))
+        before = CacheStatus(cached_bytes=3_000_000_000, missing_files=shards)
+        cards = self.run_handler(
+            app.download_model, [before, CacheStatus(cached_bytes=15_000_000_000)], ""
+        )
+
+        self.assertIn("Resuming download", cards[0])
+        self.assertIn(
+            "`model-00002-of-00006.safetensors`, `model-00003-of-00006.safetensors` "
+            "and 3 more weight files are missing",
+            cards[0],
+        )
+        self.assertNotIn("already in the Hugging Face cache", cards[0])
+        self.assertIn("Fetched the remaining 12.0 GB", cards[-1])
+
+    def test_a_single_missing_shard_is_named(self):
+        before = CacheStatus(cached_bytes=10, missing_files=("model.safetensors",))
+        cards = self.run_handler(app.load_cached_model, [before])
+
+        self.assertIn("`model.safetensors` is missing", cards[-1])
+
+    def test_load_cached_explains_an_absent_model(self):
+        cards = self.run_handler(app.load_cached_model, [CacheStatus()])
+
+        self.assertIn("Not cached", cards[-1])
+
+    def test_an_invalid_id_fails_before_anything_is_measured(self):
+        original = app.MANAGER
+        app.MANAGER = DownloadManager()
+        try:
+            cards = list(app.download_model("not-a-model-id", ""))
+        finally:
+            app.MANAGER = original
+
+        self.assertEqual(len(cards), 1)
+        self.assertIn("Download failed", cards[0])
+        self.assertIn("organization/model-name", cards[0])
+
+
+if __name__ == "__main__":
+    unittest.main()

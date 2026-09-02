@@ -1,11 +1,17 @@
+import json
 import re
+import tempfile
 import unittest
+from pathlib import Path
 
 from model_runtime import (
     MIN_MODEL_POSITION_LIMIT,
+    MODEL_WEIGHTS,
     SCORE_TOKEN_LIMIT,
     ModelManager,
+    cache_status,
     encode_for_scoring,
+    format_bytes,
     score_token_limit,
     split_context_and_text,
     validate_model_id,
@@ -24,6 +30,249 @@ class ModelIdTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     validate_model_id(value)
+
+
+class CacheStatusTests(unittest.TestCase):
+    """What the cache inspection reports for the states a model can be in."""
+
+    MODEL = "allenai/Olmo-3-7B-Think"
+    COMMIT = "d97e442d7cc678210054dbcc9b440894d62c89a4"
+
+    def folder(self, root: str) -> Path:
+        blobs = Path(root) / "models--allenai--Olmo-3-7B-Think" / "blobs"
+        blobs.mkdir(parents=True)
+        return blobs
+
+    def snapshot(self, root: str, files: dict[str, bytes]) -> Path:
+        """Lay files out the way ``huggingface_hub`` does: blobs plus symlinks."""
+
+        blobs = self.folder(root)
+        model = blobs.parent
+        (model / "refs").mkdir()
+        (model / "refs" / "main").write_text(self.COMMIT)
+        snapshot = model / "snapshots" / self.COMMIT
+        snapshot.mkdir(parents=True)
+        for index, (name, content) in enumerate(files.items()):
+            blob = blobs / f"blob{index}"
+            blob.write_bytes(content)
+            (snapshot / name).symlink_to(blob)
+        return snapshot
+
+    def shard_index(self, *shards: str) -> bytes:
+        weight_map = {f"layer.{i}.weight": shard for i, shard in enumerate(shards)}
+        return json.dumps({"metadata": {}, "weight_map": weight_map}).encode()
+
+    def test_an_unknown_model_is_absent(self):
+        with tempfile.TemporaryDirectory() as root:
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertFalse(status.present)
+        self.assertFalse(status.complete)
+        self.assertEqual(status.total_bytes, 0)
+
+    def test_a_single_weights_file_and_config_make_a_loadable_snapshot(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(
+                root, {"config.json": b"{}", "model.safetensors": b"x" * 100}
+            )
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertTrue(status.complete)
+        self.assertEqual(status.missing_files, ())
+        self.assertEqual(status.cached_bytes, 102)
+
+    def test_every_shard_the_index_names_makes_a_loadable_snapshot(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(
+                root,
+                {
+                    "config.json": b"{}",
+                    "model.safetensors.index.json": self.shard_index("a.st", "b.st"),
+                    "a.st": b"x",
+                    "b.st": b"x",
+                },
+            )
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertTrue(status.complete)
+
+    def test_config_and_tokenizer_alone_are_not_a_model(self):
+        """Another tool's ``AutoTokenizer`` call leaves finished blobs but no weights."""
+
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, {"config.json": b"{}", "tokenizer.json": b"{}"})
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertTrue(status.present)
+        self.assertFalse(status.complete)
+        self.assertEqual(status.partial_files, 0)
+        self.assertEqual(status.missing_files, (MODEL_WEIGHTS,))
+
+    def test_shards_the_index_names_but_the_snapshot_lacks_are_reported(self):
+        """A download stopped between shards leaves no ``.incomplete`` file."""
+
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(
+                root,
+                {
+                    "config.json": b"{}",
+                    "model.safetensors.index.json": self.shard_index(
+                        "model-00001-of-00003.safetensors",
+                        "model-00002-of-00003.safetensors",
+                        "model-00003-of-00003.safetensors",
+                    ),
+                    "model-00001-of-00003.safetensors": b"x" * 10,
+                },
+            )
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertFalse(status.complete)
+        self.assertEqual(
+            status.missing_files,
+            ("model-00002-of-00003.safetensors", "model-00003-of-00003.safetensors"),
+        )
+
+    def test_a_link_whose_blob_was_deleted_does_not_count_as_weights(self):
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(
+                root, {"config.json": b"{}", "model.safetensors": b"x" * 100}
+            )
+            (snapshot / "model.safetensors").resolve().unlink()
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertFalse(status.complete)
+        self.assertEqual(status.missing_files, (MODEL_WEIGHTS,))
+
+    def test_a_snapshot_of_plain_files_and_no_blobs_is_complete(self):
+        """Where the cache sits on a filesystem without symlinks, the hub
+        moves each finished file into the snapshot and leaves ``blobs/``
+        empty or absent; the model is no less loadable for it."""
+
+        for blobs_dir in (True, False):
+            with self.subTest(blobs_dir=blobs_dir), tempfile.TemporaryDirectory() as root:
+                model = Path(root) / "models--allenai--Olmo-3-7B-Think"
+                if blobs_dir:
+                    (model / "blobs").mkdir(parents=True)
+                (model / "refs").mkdir(parents=True)
+                (model / "refs" / "main").write_text(self.COMMIT)
+                snapshot = model / "snapshots" / self.COMMIT
+                snapshot.mkdir(parents=True)
+                (snapshot / "config.json").write_bytes(b"{}")
+                (snapshot / "model.safetensors").write_bytes(b"x" * 100)
+                status = cache_status(self.MODEL, Path(root))
+
+                self.assertTrue(status.present)
+                self.assertTrue(status.complete)
+                self.assertEqual(status.missing_files, ())
+                self.assertEqual(status.cached_bytes, 102)
+
+    def test_blobs_without_a_resolvable_snapshot_lack_everything(self):
+        with tempfile.TemporaryDirectory() as root:
+            (self.folder(root) / "abc").write_bytes(b"x" * 10)
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertTrue(status.present)
+        self.assertEqual(status.missing_files, ("config.json", MODEL_WEIGHTS))
+
+    def test_a_stray_partial_blob_does_not_unmake_a_complete_snapshot(self):
+        """The blob folder is shared by every revision, so a leftover from
+        another one, or from a file the model never loads, says nothing about
+        whether ``main`` can load."""
+
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(
+                root, {"config.json": b"{}", "model.safetensors": b"x" * 100}
+            )
+            blobs = snapshot.parents[1] / "blobs"
+            (blobs / "other.1234.incomplete").write_bytes(b"x" * 40)
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertTrue(status.complete)
+        self.assertEqual(status.missing_files, ())
+        self.assertEqual(status.partial_files, 1)
+        self.assertEqual(status.partial_bytes, 40)
+
+    def test_a_partial_blob_the_snapshot_needs_shows_up_as_missing(self):
+        """The hub links a file into the snapshot only once it has finished,
+        so the shard still downloading is caught by name, not by its blob."""
+
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(
+                root,
+                {
+                    "config.json": b"{}",
+                    "model.safetensors.index.json": self.shard_index("a.st", "b.st"),
+                    "a.st": b"x",
+                },
+            )
+            blobs = snapshot.parents[1] / "blobs"
+            (blobs / "bblob.incomplete").write_bytes(b"x" * 5)
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertFalse(status.complete)
+        self.assertEqual(status.missing_files, ("b.st",))
+        self.assertEqual(status.partial_files, 1)
+
+    def test_safetensors_shards_are_judged_before_a_complete_bin_fallback(self):
+        """``from_pretrained`` loads the safetensors checkpoint when one is
+        there, so a finished ``pytorch_model.bin`` does not make up for a
+        safetensors shard that never arrived."""
+
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(
+                root,
+                {
+                    "config.json": b"{}",
+                    "pytorch_model.bin": b"x" * 100,
+                    "model.safetensors.index.json": self.shard_index("a.st", "b.st"),
+                    "a.st": b"x",
+                },
+            )
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertFalse(status.complete)
+        self.assertEqual(status.missing_files, ("b.st",))
+
+    def test_a_bin_only_repo_is_complete(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(
+                root, {"config.json": b"{}", "pytorch_model.bin": b"x" * 100}
+            )
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertTrue(status.complete)
+        self.assertEqual(status.missing_files, ())
+
+    def test_partial_blobs_are_counted_apart_from_finished_ones(self):
+        with tempfile.TemporaryDirectory() as root:
+            blobs = self.folder(root)
+            (blobs / "abc").write_bytes(b"x" * 10)
+            (blobs / "def.1234.incomplete").write_bytes(b"x" * 100)
+            (blobs / "ghi.5678.incomplete").write_bytes(b"x" * 200)
+            status = cache_status("allenai/Olmo-3-7B-Think", Path(root))
+
+        self.assertTrue(status.present)
+        self.assertEqual(status.cached_bytes, 10)
+        self.assertEqual(status.partial_files, 2)
+        self.assertEqual(status.partial_bytes, 300)
+
+    def test_a_finished_download_has_no_partials(self):
+        with tempfile.TemporaryDirectory() as root:
+            (self.folder(root) / "abc").write_bytes(b"x" * 10)
+            status = cache_status("allenai/Olmo-3-7B-Think", Path(root))
+
+        self.assertEqual(status.partial_files, 0)
+        self.assertEqual(status.cached_bytes, 10)
+
+    def test_an_invalid_id_is_rejected_before_the_disk_is_read(self):
+        with self.assertRaises(ValueError):
+            cache_status("../escape", Path("/nonexistent"))
+
+    def test_byte_counts_read_like_a_download_dialog(self):
+        self.assertEqual(format_bytes(512), "512 B")
+        self.assertEqual(format_bytes(3_418_357_760), "3.4 GB")
+        self.assertEqual(format_bytes(146_800_640), "147 MB")
+        self.assertEqual(format_bytes(15_000_000_000), "15.0 GB")
 
 
 class Encoding(dict):
@@ -764,7 +1013,7 @@ class ScoreTextGuardTests(unittest.TestCase):
         manager.tokenizer = FakeTokenizer()
         self.prefilled: list[int] = []
 
-        def fake_prefill(token_ids, *, segments, positions, score_from, collect):
+        def fake_prefill(token_ids, *, segments, positions, score_from, **_options):
             self.prefilled = list(token_ids)
             return (
                 [
