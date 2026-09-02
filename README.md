@@ -19,7 +19,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - Enter sends a message and Shift+Enter starts a new line, with a setting to swap them
-- Branching a response from any token into one of the alternatives the model considered
+- Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
 - Forking the conversation so the same transcript can be taken in several directions
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
 - An attention view showing which earlier tokens the model looked at when predicting it
@@ -109,6 +109,10 @@ Every response token comes with the alternatives the model ranked highest. Branc
 The response is kept up to the token before the one you clicked, the alternative is put in its place, and the model continues from there under the current sampling settings. The branched response replaces the one on screen, so **Retry** and **Undo** work on it as usual. Choosing the token the model already picked resamples the rest of the response from that point, which is a way to see how much of what followed was chance.
 
 The replayed tokens are still measured against the model's own distribution, so a token the model would never have chosen shows its real rank and surprise. **Maximum new tokens** counts the tokens sampled after the branch point, so a branch made late in a long response still has room to finish. The JSON export records how many tokens were replayed as `forced_prefix_tokens`.
+
+### Branching with your own text
+
+The alternatives table only offers what the model ranked highly. To put anything else at a token position, click the token, type the replacement in **Or type your own replacement**, and press **✏️ Branch with text**. The typed text is tokenized as written (include a leading space if the word needs one), spliced in where the clicked token was, and the model continues from there. It can be one word or a whole sentence. Text the tokenizer cannot reproduce exactly is refused rather than approximated.
 
 Only a chat response can be branched. Prompt tokens and text measured in the **Score text** tab have no conversation to continue.
 

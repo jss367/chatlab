@@ -1370,7 +1370,27 @@ class ModelManager:
             encoded = encoded[0]
         return [int(value) for value in encoded], prefilled
 
-    def _response_prefix_ids(self, text: str, *, close_reasoning: bool) -> list[int]:
+    def encode_response_text(self, text: str) -> list[int]:
+        """Encode text the reader wants replayed mid-response, as a branch does.
+
+        The text stands in for one or more sampled tokens, so it is encoded
+        on its own: no special tokens, no reasoning marker, and it must
+        round-trip exactly or the branch would replay something else.
+        """
+
+        if not self.loaded:
+            raise RuntimeError("Download and load a model before branching.")
+        return self._response_prefix_ids(
+            text, close_reasoning=False, label="replacement text"
+        )
+
+    def _response_prefix_ids(
+        self,
+        text: str,
+        *,
+        close_reasoning: bool,
+        label: str = "assistant prefill",
+    ) -> list[int]:
         """Encode a reader-supplied answer prefix without tokenizer wrappers.
 
         A reasoning model's generation prompt can already end in ``<think>``.
@@ -1394,7 +1414,7 @@ class ModelManager:
             encoded = encoded[0]
         token_ids = [int(value) for value in encoded]
         if not token_ids:
-            raise ValueError("The assistant prefill did not produce any tokens.")
+            raise ValueError(f"The {label} did not produce any tokens.")
         decoded = self.tokenizer.decode(
             token_ids,
             skip_special_tokens=False,
@@ -1402,7 +1422,7 @@ class ModelManager:
         )
         if decoded != raw:
             raise ValueError(
-                "The assistant prefill cannot be represented exactly by this tokenizer."
+                f"The {label} cannot be represented exactly by this tokenizer."
             )
         return token_ids
 

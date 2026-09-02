@@ -1873,6 +1873,123 @@ class BranchFromTokenTests(unittest.TestCase):
         *_rest, source = app.stop_generation(turns, app.empty_metrics())
         self.assertIsNone(source)
 
+    def branch_text(self, final, text, strip_index=1):
+        selected = app.remember_selection(final[METRICS], select(strip_index))
+        return list(
+            app.branch_with_text(
+                selected,
+                final[BRANCH_SOURCE],
+                final[METRICS],
+                text,
+                "",
+                final[TURNS],
+                *SETTINGS,
+            )
+        )
+
+    def test_typed_text_replaces_the_clicked_token_and_continues(self):
+        final = self.respond()[-1]
+        original = metrics_of(final[METRICS])
+        frames = self.branch_text(final, "Hello")
+        for frame in frames:
+            self.assertEqual(len(frame), CHAT_OUTPUTS)
+        last = frames[-1]
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual(metrics[0]["token_id"], original[0]["token_id"])
+        self.assertEqual(metrics[1]["token_id"], 2)  # "Hello"
+        self.assertGreater(len(metrics), 2)
+        self.assertIn("Branched at token 2", frames[0][STATUS])
+        self.assertIn("'Hello'", last[STATUS])
+        self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 2)
+        self.assertTrue(last[TURNS][-1]["content"].startswith("HelloHello"))
+        self.assertEqual(last[BRANCH_SOURCE], last[METRICS][0])
+
+    def test_typed_text_may_span_several_tokens(self):
+        final = self.respond()[-1]
+        last = self.branch_text(final, "Hello world")[-1]
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual([m["token_id"] for m in metrics[:3]], [2, 2, 3])
+        self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 3)
+
+    def test_typed_text_needs_no_alternative_pick(self):
+        # The alternatives table is never touched; a clicked token is enough.
+        final = self.respond()[-1]
+        last = self.branch_text(final, " world", strip_index=0)[-1]
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual(metrics[0]["token_id"], 3)
+        self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 1)
+
+    def test_empty_text_asks_for_some(self):
+        final = self.respond()[-1]
+        frames = self.branch_text(final, "")
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_EMPTY)
+        self.assertEqual(frames[0][TURNS], final[TURNS])
+
+    def test_text_the_tokenizer_cannot_encode_is_refused(self):
+        final = self.respond()[-1]
+        frames = self.branch_text(final, "xyz")
+        self.assertEqual(len(frames), 1)
+        self.assertIn("xyz", frames[0][STATUS])
+        self.assertEqual(frames[0][TURNS], final[TURNS])
+
+    def test_typed_text_without_a_clicked_token_explains_the_steps(self):
+        final = self.respond()[-1]
+        frames = list(
+            app.branch_with_text(
+                None, final[BRANCH_SOURCE], final[METRICS], "Hello", "", final[TURNS], *SETTINGS
+            )
+        )
+        self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
+
+    def test_typed_text_against_a_replaced_strip_is_refused(self):
+        final = self.respond()[-1]
+        selected = app.remember_selection(final[METRICS], select(1))
+        fresh = self.respond()[-1]
+        frames = list(
+            app.branch_with_text(
+                selected, fresh[BRANCH_SOURCE], fresh[METRICS], "Hello", "", fresh[TURNS], *SETTINGS
+            )
+        )
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
+
+    def test_typed_text_keeps_literal_prefill_tags_before_it(self):
+        app.MANAGER = loaded_manager(
+            [0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS
+        )
+        settings = dict(FIXED, assistant_prefill="<think>Hello</think>")
+        original = list(app.chat("hi", [], *settings.values()))[-1]
+        selected = app.remember_selection(original[METRICS], select(3))
+        branched = list(
+            app.branch_with_text(
+                selected,
+                original[BRANCH_SOURCE],
+                original[METRICS],
+                "Hello",
+                "",
+                original[TURNS],
+                *settings.values(),
+            )
+        )[-1]
+        metrics = metrics_of(branched[METRICS])
+        self.assertTrue(all(m.get("literal_prefill") for m in metrics[:3]))
+        self.assertNotIn("literal_prefill", metrics[3])
+        self.assertEqual(metrics[3]["token_id"], 2)
+        self.assertTrue(
+            branched[TURNS][-1]["content"].startswith("<think>Hello</think>Hello")
+        )
+
+    def test_the_branch_text_button_is_wired_as_a_generation(self):
+        demo = app.build_app()
+        listener = next(
+            fn
+            for fn in demo.fns.values()
+            if getattr(fn.fn, "__name__", None) == "branch_with_text"
+        )
+        self.assertEqual(len(listener.inputs), 4 + 2 + len(SETTINGS))
+        self.assertEqual(len(listener.outputs), CHAT_OUTPUTS)
+
     def test_the_branch_button_is_wired_as_a_generation(self):
         demo = app.build_app()
         listener = next(
@@ -2113,6 +2230,7 @@ class CancelWiringTests(unittest.TestCase):
                 "clear_chat",
                 "load_conversation",
                 "branch_from",
+                "branch_with_text",
                 "fork_conversation",
                 "switch_fork",
                 "delete_fork",

@@ -676,6 +676,10 @@ def describe_token(metric: dict) -> tuple[str, list[list]]:
 BRANCH_HINT = (
     "Click a response token, then one of its alternatives, then branch."
 )
+BRANCH_TEXT_HINT = (
+    "Click a response token, type the text to put in its place, then branch."
+)
+BRANCH_TEXT_EMPTY = "Type the text that should replace the selected token first."
 BRANCH_UNAVAILABLE = (
     "🌱 Only a chat response can be branched. Scored text and prompt tokens "
     "have no conversation to continue."
@@ -1579,6 +1583,94 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
     yield from regenerate_from(position, prompt_text, turns, *settings)
 
 
+def literal_prefill_count(metrics: list[dict], kept: int) -> int:
+    """How many of the first ``kept`` tokens were typed as assistant prefill.
+
+    Those keep their literal-prefill protection when a branch replays them;
+    everything after the first sampled token is ordinary response content.
+    """
+
+    count = 0
+    for metric in metrics[:kept]:
+        if not metric.get("literal_prefill"):
+            break
+        count += 1
+    return count
+
+
+def branch_with_text(
+    selected_token: dict | None,
+    branch_source: int | None,
+    metrics_state: tuple[int, list[dict]],
+    replacement: str,
+    prompt_text: str,
+    turns: list[dict] | None,
+    *settings,
+):
+    """Replay the last response up to the clicked token, put typed text in its
+    place, and let the model continue.
+
+    The text is not limited to the model's own alternatives, so it is
+    tokenized on its own and must round-trip exactly. It is spliced in as
+    sampled content, so a stop token typed into it ends the response there,
+    the same as a stop token chosen from the alternatives table.
+    """
+
+    if MANAGER.busy:
+        yield busy_state()
+        return
+
+    turns = copy_turns(turns)
+    generation, metrics = metrics_state
+    if (
+        not selected_token
+        or selected_token.get("generation") != generation
+        or generation != _metrics_generation
+        or branch_source != generation
+    ):
+        yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
+        return
+    if not replacement:
+        yield idle_state(prompt_text, turns, BRANCH_TEXT_EMPTY)
+        return
+
+    position = last_user_index(turns)
+    if position is None or turns[-1]["role"] != "assistant":
+        yield idle_state(prompt_text, turns, "There is no response to branch from.")
+        return
+    if not MANAGER.loaded:
+        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        return
+
+    try:
+        metric = metrics[int(selected_token["index"])]
+    except (IndexError, TypeError, ValueError):
+        yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
+        return
+    at = int(metric["position"])
+    kept = [int(m["token_id"]) for m in metrics[: at - 1]]
+    if len(kept) != at - 1:
+        yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
+        return
+    try:
+        replacement_ids = MANAGER.encode_response_text(replacement)
+    except (ValueError, RuntimeError) as error:
+        yield idle_state(prompt_text, turns, f"🌱 {error}")
+        return
+
+    note = (
+        f"Branched at token {at}: {replacement!r} instead of {metric['text']!r}."
+    )
+    yield from generate_reply(
+        turns[: position + 1],
+        prompt_text,
+        *settings,
+        forced_ids=(*kept, *replacement_ids),
+        literal_prefill_tokens=literal_prefill_count(metrics, len(kept)),
+        branch_note=note,
+    )
+
+
 def branch_from(
     pick: dict | None,
     branch_source: int | None,
@@ -1624,11 +1716,7 @@ def branch_from(
         yield idle_state(prompt_text, turns, BRANCH_HINT)
         return
     forced = (*kept, int(pick["token_id"]))
-    literal_prefill_tokens = 0
-    for metric in metrics[: len(kept)]:
-        if not metric.get("literal_prefill"):
-            break
-        literal_prefill_tokens += 1
+    literal_prefill_tokens = literal_prefill_count(metrics, len(kept))
     unchanged = pick["token_id"] == pick.get("original_id")
     if (
         unchanged
@@ -2612,6 +2700,25 @@ def build_app() -> gr.Blocks:
                     "from there.",
                     elem_classes=["scale-caption"],
                 )
+                with gr.Row():
+                    branch_text = gr.Textbox(
+                        label="Or type your own replacement",
+                        placeholder=(
+                            "Text to put where the selected token was. Include a "
+                            "leading space if the word needs one."
+                        ),
+                        lines=1,
+                        scale=3,
+                    )
+                    branch_text_button = gr.Button(
+                        "✏️ Branch with text", size="sm", scale=0, min_width=160
+                    )
+                gr.Markdown(
+                    "The typed text replaces the selected token exactly as written, "
+                    "whether or not the model would ever have chosen it, and the "
+                    "model continues from there.",
+                    elem_classes=["scale-caption"],
+                )
                 with gr.Accordion("Layers and attention", open=False):
                     with gr.Row():
                         inspect_button = gr.Button(
@@ -2771,6 +2878,11 @@ def build_app() -> gr.Blocks:
             branch_button.click(
                 branch_from,
                 [branch_pick, branch_source, metrics_state, *chat_inputs],
+                chat_outputs,
+            ),
+            branch_text_button.click(
+                branch_with_text,
+                [selected_token, branch_source, metrics_state, branch_text, *chat_inputs],
                 chat_outputs,
             ),
         ]
