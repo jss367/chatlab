@@ -2134,6 +2134,50 @@ class LayerInspectionTests(unittest.TestCase):
         self.assertEqual(status, app.INSPECT_BUSY)
         self.assertEqual(self.calls, [])
 
+    def test_the_pass_holds_the_generation_slot_and_gives_it_back(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        seen = []
+
+        def observe(sequence, index, *, context_count=0):
+            seen.append(app.MANAGER.busy)
+            return self.fake(sequence, index, context_count=context_count)
+
+        self.fake, app.MANAGER.inspect = app.MANAGER.inspect, observe
+        app.inspect_layers(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(seen, [True])
+        self.assertFalse(app.MANAGER.busy)
+
+        def fail(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        app.MANAGER.inspect = fail
+        app.inspect_layers(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_a_strip_replaced_during_the_pass_is_not_described(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        original = app.MANAGER.inspect
+
+        def replace_strips(sequence, index, *, context_count=0):
+            # Clear, Undo and friends do not take the generation slot; they
+            # mint a new stamp, which is what the handler has to notice.
+            app.new_metrics_generation()
+            return original(sequence, index, context_count=context_count)
+
+        app.MANAGER.inspect = replace_strips
+        lens, *_rest, insight, status = app.inspect_layers(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertEqual(lens, gr.skip())
+        self.assertEqual(insight, gr.skip())
+        self.assertEqual(status, app.INSPECT_GONE)
+
     def test_nothing_selected_gives_the_hint(self):
         final = self.finished()
         *_rest, status = app.inspect_layers(

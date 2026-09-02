@@ -1996,8 +1996,6 @@ def inspect_layers(
         return (*refused, INSPECT_GONE)
     if not MANAGER.loaded:
         return (*refused, "Download and load a model first.")
-    if MANAGER.busy:
-        return (*refused, INSPECT_BUSY)
 
     context_ids = [int(value) for value in context_ids]
     position = int(target["index"])
@@ -2017,6 +2015,13 @@ def inspect_layers(
         return (*refused, INSPECT_FIRST)
     sequence = context_ids + [int(metric["token_id"]) for metric in metrics]
 
+    # The pass holds the generation slot, so Send, Retry and Branch refuse
+    # while it runs instead of replacing the strips underneath it. Checking
+    # MANAGER.busy and then inspecting would leave a gap between the two in
+    # which a generation could start, reset the panel, and then have the
+    # stale readout published over its reset.
+    if not MANAGER.reserve_generation():
+        return (*refused, INSPECT_BUSY)
     started = time.monotonic()
     try:
         insight = MANAGER.inspect(
@@ -2024,6 +2029,13 @@ def inspect_layers(
         ).to_dict()
     except Exception as error:
         return (*refused, f"Could not inspect that token: {error}")
+    finally:
+        MANAGER.release_generation()
+    # A path that does not take the slot - Clear, Undo, Load, a fork switch,
+    # Score text - can still have replaced the strips during the pass. Their
+    # new stamp says so, and the readout is for a token that is gone.
+    if target["generation"] != _metrics_generation:
+        return (*refused, INSPECT_GONE)
 
     layer_count = len(insight["attention"])
     layer = min(max(int(layer or 0), 0), layer_count)
