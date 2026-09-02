@@ -1943,6 +1943,10 @@ INSPECT_HINT = "Click a token above, then press **Inspect layers**."
 INSPECT_BUSY = "Wait for the response to finish before inspecting a token."
 INSPECT_GONE = "That token is no longer on screen. Click one and try again."
 INSPECT_FIRST = "Nothing came before this token, so the model never predicted it."
+INSPECT_OUTPUT_ONLY = (
+    "Only the output is shown: this model's intermediate layers could not be "
+    "read through its final norm."
+)
 
 
 def remember_inspect_target(strip: str):
@@ -2025,10 +2029,13 @@ def inspect_layers(
     layer = min(max(int(layer or 0), 0), layer_count)
     where = "Prompt token" if target["strip"] == "prompt" else "Token"
     shown = html.escape(repr(insight["token_text"]))
+    read = len(insight["layers"]) - 1
     status = (
-        f"{where} {position + 1}: `{shown}`, read through {len(insight['layers']) - 1} "
+        f"{where} {position + 1}: `{shown}`, read through {read} "
         f"layers in {time.monotonic() - started:.1f}s."
     )
+    if not read:
+        status = f"{status} {INSPECT_OUTPUT_ONLY}"
     if not layer_count:
         status = f"{status} This model did not return attention weights."
     return (

@@ -246,6 +246,9 @@ def logit_lens_chart(insight: dict) -> str:
 
     token = html.escape(repr(insight.get("token_text", "")))
     last = layers[-1]["layer"]
+    # A single row is the model's real output with nothing before it: the
+    # runtime found no final norm to read the intermediate layers through.
+    output_only = len(layers) == 1
     plot_width = _VIEW_WIDTH - _LENS_PAD_LEFT - _PAD_RIGHT
     plot_height = _LENS_HEIGHT - _PAD_TOP - _LENS_PAD_BOTTOM
     step = plot_width / max(1, len(layers) - 1)
@@ -311,25 +314,34 @@ def logit_lens_chart(insight: dict) -> str:
         f"<td>{row['entropy_bits']:.1f}</td></tr>"
         for row in layers
     )
+    if output_only:
+        chart = (
+            '<div class="viz-note">Only the output is shown: this model\'s '
+            "intermediate layers could not be read through its final norm.</div>"
+        )
+    else:
+        chart = (
+            f'<svg viewBox="0 0 {_VIEW_WIDTH:g} {_LENS_HEIGHT:g}" role="img" '
+            f'aria-label="Probability of the token after each layer">'
+            f"{gridlines}"
+            f'<path class="viz-line viz-line-faint" d="{top}" />'
+            f'<path class="viz-line" d="{actual}" />'
+            f"{marker}"
+            f'<line class="viz-axis" x1="{_LENS_PAD_LEFT}" x2="{_VIEW_WIDTH - _PAD_RIGHT}" '
+            f'y1="{y_at(0):.1f}" y2="{y_at(0):.1f}" />'
+            f'<text class="viz-tick" x="{_LENS_PAD_LEFT}" y="{_LENS_HEIGHT - 8:g}">embeddings</text>'
+            f'<text class="viz-tick" x="{_VIEW_WIDTH - _PAD_RIGHT}" y="{_LENS_HEIGHT - 8:g}" '
+            f'text-anchor="end">output ({_layer_name(last)})</text>'
+            f"{hover}</svg>"
+            '<div class="viz-note">Dark line: probability of the token that was chosen. '
+            "Faint line: probability of whatever each layer liked best. Intermediate "
+            "layers are read through the final norm and unembedding.</div>"
+        )
     return (
         '<figure class="viz-root" id="logit-lens">'
         f'<figcaption class="viz-title">Logit lens for <code>{token}</code>'
         f'<span class="viz-sub">{html.escape(verdict)}</span></figcaption>'
-        f'<svg viewBox="0 0 {_VIEW_WIDTH:g} {_LENS_HEIGHT:g}" role="img" '
-        f'aria-label="Probability of the token after each layer">'
-        f"{gridlines}"
-        f'<path class="viz-line viz-line-faint" d="{top}" />'
-        f'<path class="viz-line" d="{actual}" />'
-        f"{marker}"
-        f'<line class="viz-axis" x1="{_LENS_PAD_LEFT}" x2="{_VIEW_WIDTH - _PAD_RIGHT}" '
-        f'y1="{y_at(0):.1f}" y2="{y_at(0):.1f}" />'
-        f'<text class="viz-tick" x="{_LENS_PAD_LEFT}" y="{_LENS_HEIGHT - 8:g}">embeddings</text>'
-        f'<text class="viz-tick" x="{_VIEW_WIDTH - _PAD_RIGHT}" y="{_LENS_HEIGHT - 8:g}" '
-        f'text-anchor="end">output ({_layer_name(last)})</text>'
-        f"{hover}</svg>"
-        '<div class="viz-note">Dark line: probability of the token that was chosen. '
-        "Faint line: probability of whatever each layer liked best. Intermediate "
-        "layers are read through the final norm and unembedding.</div>"
+        f"{chart}"
         '<div class="viz-table-wrap"><table class="viz-table">'
         "<thead><tr><th>Layer</th><th>Would have said</th><th>Prob.</th>"
         "<th>Rank of chosen</th><th>Prob. of chosen</th><th>Entropy</th></tr></thead>"

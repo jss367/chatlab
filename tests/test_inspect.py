@@ -123,6 +123,29 @@ class InspectTests(unittest.TestCase):
         self.assertEqual(insight.decided_at, 2)
         self.assertAlmostEqual(insight.layers[-1]["probability"], 1.0, places=5)
 
+    def test_the_final_norm_is_found_one_level_down_in_the_decoder(self):
+        # OPT keeps its norm at ``base_model.decoder.final_layer_norm``.
+        manager = lens_manager([1, 2, 3, 4, 5], decide_layer=2, early=3)
+        norm = torch.nn.Identity()
+        manager.model.base_model = SimpleNamespace(
+            decoder=SimpleNamespace(final_layer_norm=norm)
+        )
+        self.assertIs(manager._final_norm(), norm)
+        insight = manager.inspect([0, 1, 2, 3, 4], 2)
+        self.assertEqual(len(insight.layers), 5)
+        self.assertEqual(insight.decided_at, 2)
+
+    def test_a_model_without_a_final_norm_shows_only_its_output(self):
+        # Intermediate rows read without the norm would be wrong, not approximate.
+        manager = lens_manager([1, 2, 3, 4, 5], decide_layer=2, early=3)
+        manager.model.base_model = SimpleNamespace(decoder=SimpleNamespace())
+        self.assertIsNone(manager._final_norm())
+        insight = manager.inspect([0, 1, 2, 3, 4], 2)
+        self.assertEqual([row["layer"] for row in insight.layers], [4])
+        self.assertEqual(insight.layers[0]["rank"], 1)
+        self.assertEqual(insight.decided_at, 4)
+        self.assertEqual(len(insight.attention), 4)
+
     def test_a_token_never_chosen_has_no_deciding_layer(self):
         manager = lens_manager([1, 2, 3], decide_layer=1)
         insight = manager.inspect([0, 1, 7], 2)

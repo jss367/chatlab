@@ -141,6 +141,17 @@ class LogitLensChartTests(unittest.TestCase):
         svg = charts.logit_lens_chart(insight(decided_at=None))
         self.assertIn("never the first choice", svg)
 
+    def test_an_output_only_insight_gets_the_table_but_no_line(self):
+        payload = insight(layers=4, decided_at=4)
+        payload["layers"] = payload["layers"][-1:]
+        html = charts.logit_lens_chart(payload)
+        self.assertIn("logit-lens", html)
+        self.assertNotIn("<svg", html)
+        self.assertNotIn("embeddings", html)
+        self.assertIn("Only the output is shown", html)
+        self.assertEqual(html.count("<tr"), 1 + 1)
+        self.assertIn("layer 4", html)
+
 
 class AttentionStripTests(unittest.TestCase):
     def test_a_span_per_visible_token_plus_the_predicted_one(self):

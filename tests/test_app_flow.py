@@ -1,5 +1,6 @@
 import inspect
 import unittest
+from dataclasses import replace
 
 import gradio as gr
 import numpy as np
@@ -2033,6 +2034,23 @@ class LayerInspectionTests(unittest.TestCase):
         self.assertEqual(slider, gr.update(maximum=2, value=0))
         self.assertEqual(insight["index"], 2)
         self.assertIn("Token 2", status)
+
+    def test_an_output_only_lens_says_why_in_the_status(self):
+        final = self.finished()
+        real_inspect = app.MANAGER.inspect
+
+        def output_only(sequence, index, *, context_count=0):
+            insight = real_inspect(sequence, index, context_count=context_count)
+            return replace(insight, layers=insight.layers[-1:], decided_at=None)
+
+        app.MANAGER.inspect = output_only
+        target = app.remember_inspect_target("response")(final[METRICS], select(1))
+        lens, *_rest, status = app.inspect_layers(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+        )
+        self.assertIn("read through 0 layers", status)
+        self.assertIn(app.INSPECT_OUTPUT_ONLY, status)
+        self.assertNotIn("<svg", lens)
 
     def test_the_first_prompt_token_is_refused_without_a_pass(self):
         final = self.finished()

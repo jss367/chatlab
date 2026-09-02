@@ -873,8 +873,12 @@ class ScoredText:
 
 # The final norm of a decoder stack, under the names the common architectures
 # give it. Llama, OLMo, Mistral and Qwen say ``norm``; GPT-2 says ``ln_f``;
-# OPT and BLOOM say ``final_layer_norm``; Mamba says ``norm_f``.
+# OPT and BLOOM say ``final_layer_norm``; Mamba says ``norm_f``. Some models
+# keep it one level down from the base model: OPT's ``OPTModel`` wraps a
+# ``decoder`` that owns the norm, and multimodal wrappers hold their text
+# stack as ``language_model``.
 FINAL_NORM_ATTRIBUTES = ("norm", "final_layer_norm", "ln_f", "final_norm", "norm_f")
+FINAL_NORM_CONTAINERS = ("decoder", "transformer", "model", "language_model")
 
 
 @dataclass(frozen=True)
@@ -885,8 +889,10 @@ class TokenInsight:
     (layer 0) to the model's real output (the last row). Each intermediate
     reading is passed through the final norm and the unembedding, the logit
     lens: it says what the model would have answered had it stopped there.
-    ``decided_at`` is the first layer from which the token stayed the model's
-    first choice, or ``None`` when it never was.
+    When the model's final norm cannot be found there is no honest way to
+    take those readings, so only the output row is present. ``decided_at``
+    is the first layer from which the token stayed the model's first choice,
+    or ``None`` when it never was.
 
     ``attention`` is head-averaged, one row per decoder layer, one column per
     token the query could see, and it is empty when the model cannot return
@@ -1719,13 +1725,21 @@ class ModelManager:
             switch(current)
 
     def _final_norm(self):
+        """The norm the LM head reads through, or ``None`` when none is found.
+
+        Looked up on the base model first, then one level down in the
+        containers some architectures wrap their decoder stack in.
+        """
+
         import torch
 
         base = getattr(self.model, "base_model", self.model)
-        for name in FINAL_NORM_ATTRIBUTES:
-            module = getattr(base, name, None)
-            if isinstance(module, torch.nn.Module):
-                return module
+        owners = [base] + [getattr(base, name, None) for name in FINAL_NORM_CONTAINERS]
+        for owner in owners:
+            for name in FINAL_NORM_ATTRIBUTES:
+                module = getattr(owner, name, None)
+                if isinstance(module, torch.nn.Module):
+                    return module
         return None
 
     def _lens_row(self, layer: int, logits, token_id: int) -> dict:
@@ -1805,12 +1819,14 @@ class ModelManager:
             layers: list[dict] = []
             # The last hidden state is what the model's own head reads, so its
             # row is the real output; the earlier ones are read through the
-            # final norm as though the stack had ended there.
-            for layer, state in enumerate(hidden_states[:-1]):
-                vector = state[0, -1]
-                if norm is not None:
-                    vector = norm(vector.unsqueeze(0)).squeeze(0)
-                layers.append(self._lens_row(layer, head(vector), token_id))
+            # final norm as though the stack had ended there. Without the norm
+            # those readings would be off by a rescaling the head never sees,
+            # so a model whose norm cannot be found shows its output alone
+            # rather than intermediate rows that look right and are not.
+            if norm is not None:
+                for layer, state in enumerate(hidden_states[:-1]):
+                    vector = norm(state[0, -1].unsqueeze(0)).squeeze(0)
+                    layers.append(self._lens_row(layer, head(vector), token_id))
             layers.append(
                 self._lens_row(
                     max(len(hidden_states) - 1, 0), outputs.logits[0, -1], token_id
