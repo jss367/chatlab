@@ -40,6 +40,7 @@ from model_runtime import (
     PROMPT_SCORE_LIMIT,
     CacheStatus,
     DownloadSnapshot,
+    ModelChanged,
     ModelManager,
     cache_status,
     cached_models,
@@ -799,6 +800,7 @@ CHAT_OUTPUT_NAMES = (
     "surprise",
     "trace",
     "branch_source",
+    "context_ids",
 )
 
 
@@ -923,6 +925,7 @@ def idle_state(
         charts.summary_tiles({}) if clear_tokens else gr.skip(),
         charts.EMPTY_CHART if clear_tokens else gr.skip(),
         {} if clear_tokens else gr.skip(),
+        gr.skip(),
         gr.skip(),
     )
 
@@ -1065,6 +1068,7 @@ def _stream_reply(
         charts_panel=None,
         trace=None,
         branch_source=gr.skip(),
+        context_ids=gr.skip(),
     ):
         """One frame of the stream.
 
@@ -1077,6 +1081,10 @@ def _stream_reply(
         prompt tokens are all measured before the first one is generated, so
         they are published once and never change; the charts redraw in batches
         because rebuilding an SVG per token is wasted work.
+
+        ``context_ids`` is every prompt token, stamped like the strips and
+        tagged with the model load that produced it, and is what the layer
+        inspector rebuilds the model's input from.
         """
 
         messages, _ = display_messages(turns)
@@ -1104,6 +1112,7 @@ def _stream_reply(
             surprise_panel,
             gr.skip() if trace is None else trace,
             branch_source,
+            context_ids,
         )
 
     # The opening frame empties everything the previous response left behind,
@@ -1120,6 +1129,7 @@ def _stream_reply(
         charts_panel=(charts.summary_tiles({}), charts.EMPTY_CHART),
         trace={},
         branch_source=None,
+        context_ids=(generation, [], MANAGER.load_id),
     )
 
     started = time.monotonic()
@@ -1162,6 +1172,7 @@ def _stream_reply(
                 if branch_note:
                     status = f"{branch_note} {status}"
                 prompt_panel = None
+                context_ids = gr.skip()
                 if first:
                     # Every prompt token is measured before the first response
                     # token exists, so this is published once and never
@@ -1176,11 +1187,17 @@ def _stream_reply(
                             len(prompt_metrics), update.prompt_note, "prompt"
                         ),
                     )
+                    context_ids = (
+                        generation,
+                        [int(v) for v in update.prompt_ids],
+                        MANAGER.load_id,
+                    )
                 yield snapshot(
                     highlight,
                     metrics,
                     status,
                     prompt_panel=prompt_panel,
+                    context_ids=context_ids,
                     charts_panel=(
                         (
                             charts.summary_tiles(summarize(metrics)),
@@ -1924,14 +1941,14 @@ def score_text(
 
     skip = gr.skip()
     if not MANAGER.loaded:
-        return (skip,) * 7 + ("Download and load a model first.", skip, skip)
+        return (skip,) * 7 + ("Download and load a model first.", skip, skip, skip)
 
     try:
         result = MANAGER.score_text(
             text, context=context or "", use_chat_template=bool(use_chat_template)
         )
     except Exception as error:
-        return (skip,) * 7 + (f"Could not score that text: {error}", skip, skip)
+        return (skip,) * 7 + (f"Could not score that text: {error}", skip, skip, skip)
 
     summary = summarize(result.metrics)
     status = (
@@ -1959,7 +1976,191 @@ def score_text(
         status,
         NO_TOKEN_SELECTED,
         [],
+        (generation, [int(value) for value in result.context_ids], MANAGER.load_id),
     )
+
+
+# ------------------------------------------------------- layers and attention
+#
+# The logit lens and the attention view cost a forward pass over everything
+# before the token, so they run on demand from a button rather than on every
+# click. The click leaves the strip position in ``inspect_target`` stamped
+# with the strip's generation number, exactly as branching does, and the
+# button refuses a target whose strip has since been replaced.
+
+INSPECT_HINT = "Click a token above, then press **Inspect layers**."
+INSPECT_BUSY = "Wait for the response to finish before inspecting a token."
+INSPECT_GONE = "That token is no longer on screen. Click one and try again."
+INSPECT_FIRST = "Nothing came before this token, so the model never predicted it."
+INSPECT_MODEL_CHANGED = (
+    "The model has been reloaded since these tokens were produced, so they "
+    "cannot be explained by the weights in memory. Generate or score again."
+)
+INSPECT_OUTPUT_ONLY = (
+    "Only the output is shown: this model's intermediate layers could not be "
+    "read the way it reads its own output."
+)
+
+
+def remember_inspect_target(strip: str):
+    """A select listener that keeps the clicked position for the inspector.
+
+    Unlike remember_selection(), every token counts: a prompt token has layers
+    and attention behind it just as a response token does. Only the first
+    token of a sequence has nothing to show, and inspect_layers() says so.
+    """
+
+    def remember(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
+        generation, metrics = metrics_state
+        if generation != _metrics_generation:
+            return None
+        try:
+            index = event_index(event)
+            metrics[index]
+        except (IndexError, TypeError, ValueError):
+            return None
+        return {"generation": generation, "strip": strip, "index": index}
+
+    return remember
+
+
+def inspect_layers(
+    target: dict | None,
+    metrics_state: tuple[int, list[dict]],
+    prompt_metrics_state: tuple[int, list[dict]],
+    context_state: tuple[int, list[int]],
+    layer,
+):
+    """Run the logit lens and attention readout for the clicked token.
+
+    The model's input is rebuilt from the prompt ids published with the
+    response and the token ids in the response metrics, so the pass sees
+    exactly the sequence the token was generated from.
+
+    This is a generator for the same reason generate_reply() is: Gradio does
+    not resume a streaming handler until the browser has been sent the frame
+    it yielded. The generation slot is therefore held not just for the pass
+    but until the readout is on screen, so Send, Retry and Branch cannot
+    slip in between the two and have the readout land on top of their
+    reset. Paths that replace the strips without taking the slot - Clear,
+    Undo, Load, a fork switch, Score text - are caught by the stamp instead:
+    it is checked before the frame goes out and again once it has arrived,
+    and a readout for a token that is gone is taken back down.
+    """
+
+    skip = gr.skip()
+    refused = (skip, skip, skip, skip)
+    if not target or target.get("generation") != _metrics_generation:
+        yield (*refused, INSPECT_HINT)
+        return
+    generation, metrics = metrics_state
+    _prompt_generation, prompt_metrics = prompt_metrics_state
+    context_generation, context_ids, load_id = context_state
+    if generation != target["generation"] or context_generation != generation:
+        yield (*refused, INSPECT_GONE)
+        return
+    if not MANAGER.loaded:
+        yield (*refused, "Download and load a model first.")
+        return
+    # Loading a model leaves the strips on screen, and their token ids mean
+    # nothing to a different tokenizer, so the ids carry the load that
+    # produced them and only that load may explain them. The load, not the
+    # model ID: re-downloading the same ID can bring in a newer snapshot.
+    # This is the early exit; the check that counts is the one inspect()
+    # makes under the model lock, since a load can land between here and it.
+    if load_id != MANAGER.load_id:
+        yield (*refused, INSPECT_MODEL_CHANGED)
+        return
+
+    context_ids = [int(value) for value in context_ids]
+    position = int(target["index"])
+    if target["strip"] == "prompt":
+        if (
+            position >= len(prompt_metrics)
+            or position >= len(context_ids)
+            or int(prompt_metrics[position]["token_id"]) != context_ids[position]
+        ):
+            yield (*refused, INSPECT_GONE)
+            return
+        index = position
+    else:
+        if position >= len(metrics):
+            yield (*refused, INSPECT_GONE)
+            return
+        index = len(context_ids) + position
+    if index == 0:
+        yield (*refused, INSPECT_FIRST)
+        return
+    sequence = context_ids + [int(metric["token_id"]) for metric in metrics]
+
+    if not MANAGER.reserve_generation():
+        yield (*refused, INSPECT_BUSY)
+        return
+    try:
+        started = time.monotonic()
+        try:
+            insight = MANAGER.inspect(
+                sequence, index, context_count=len(context_ids), load_id=load_id
+            ).to_dict()
+        except ModelChanged:
+            yield (*refused, INSPECT_MODEL_CHANGED)
+            return
+        except Exception as error:
+            yield (*refused, f"Could not inspect that token: {error}")
+            return
+        if target["generation"] != _metrics_generation:
+            yield (*refused, INSPECT_GONE)
+            return
+
+        layer_count = len(insight["attention"])
+        layer = min(max(int(layer or 0), 0), layer_count)
+        where = "Prompt token" if target["strip"] == "prompt" else "Token"
+        shown = html.escape(repr(insight["token_text"]))
+        read = len(insight["layers"]) - 1
+        status = (
+            f"{where} {position + 1}: `{shown}`, read through {read} "
+            f"layers in {time.monotonic() - started:.1f}s."
+        )
+        if not read:
+            status = f"{status} {INSPECT_OUTPUT_ONLY}"
+        if not layer_count:
+            status = f"{status} This model did not return attention weights."
+        yield (
+            charts.logit_lens_chart(insight),
+            charts.attention_strip(insight, layer),
+            gr.update(maximum=max(layer_count, 1), value=layer),
+            insight,
+            status,
+        )
+        # Resumed once the browser has the frame above. If the strips were
+        # replaced while it was in flight, their reset was applied first and
+        # the readout now sits on top of it, so take it back down.
+        if target["generation"] != _metrics_generation:
+            yield (charts.EMPTY_LENS, charts.EMPTY_ATTENTION, skip, None, INSPECT_GONE)
+    finally:
+        MANAGER.release_generation()
+
+
+def render_attention(insight: dict | None, layer):
+    """Repaint the attention strip for another layer without a new pass."""
+
+    if not insight:
+        return gr.skip()
+    return charts.attention_strip(insight, int(layer or 0))
+
+
+def reset_inspection(insight: dict | None):
+    """Empty the inspector when the strips it described are replaced.
+
+    Bound to the response metrics state, which every path that redraws the
+    strips writes. Streaming writes it on every frame too, so this skips
+    while there is nothing to clear rather than repainting an empty panel a
+    hundred times per response.
+    """
+
+    if insight is None:
+        return gr.skip(), gr.skip(), gr.skip(), gr.skip()
+    return charts.EMPTY_LENS, charts.EMPTY_ATTENTION, None, INSPECT_HINT
 
 
 CSS = """
@@ -2011,6 +2212,25 @@ CSS = """
 }
 .viz-value { color: var(--viz-ink); font-size: 1.25rem; line-height: 1.2; }
 .viz-label { color: var(--viz-muted); font-size: 0.72rem; text-transform: lowercase; }
+
+.viz-line-faint { stroke: var(--viz-band); stroke-width: 1.5; }
+.viz-marker { stroke: var(--viz-muted); stroke-width: 1; stroke-dasharray: 3 3; }
+.viz-table-wrap { max-height: 230px; overflow-y: auto; margin-top: 0.3rem; }
+.viz-table { width: 100%; font-size: 0.78rem; border-collapse: collapse; }
+.viz-table th, .viz-table td {
+  text-align: left; padding: 0.15rem 0.4rem; color: var(--viz-ink);
+  border-bottom: 1px solid var(--viz-grid); font-variant-numeric: tabular-nums;
+}
+.viz-table th {
+  color: var(--viz-muted); font-weight: 500; position: sticky; top: 0;
+  background: var(--body-background-fill);
+}
+.viz-hit-row td { font-weight: 600; }
+.attn-strip { line-height: 1.9; white-space: pre-wrap; word-break: break-word; }
+.attn-token { border-radius: 4px; padding: 0.05rem 0.1rem; margin: 0 1px; color: var(--body-text-color); }
+.attn-query { outline: 1.5px dashed var(--viz-muted); }
+.attn-predicted { outline: 1.5px solid var(--viz-ink); margin-left: 0.3rem; }
+.attn-top { font-size: 0.8rem; columns: 2; margin: 0.3rem 0 0; padding-left: 1.4rem; color: var(--viz-ink); }
 """
 
 
@@ -2054,6 +2274,11 @@ def build_app() -> gr.Blocks:
         # Forking: the other transcripts, and the chatbot message last clicked.
         forks_state = gr.State(new_forks())
         selected_message = gr.State(None)
+        # Layer inspection: the prompt ids behind the strips, the strip
+        # position last clicked, and the last readout for re-rendering.
+        context_ids_state = gr.State((*empty_metrics(), None))
+        inspect_target = gr.State(None)
+        insight_state = gr.State(None)
 
         gr.Markdown(
             "# Chatlab\nChat with an open model and see exactly how likely every generated token was.",
@@ -2253,6 +2478,24 @@ def build_app() -> gr.Blocks:
                     "from there.",
                     elem_classes=["scale-caption"],
                 )
+                with gr.Accordion("Layers and attention", open=False):
+                    with gr.Row():
+                        inspect_button = gr.Button(
+                            "🔬 Inspect layers", size="sm", scale=0, min_width=160
+                        )
+                        inspect_status = gr.Markdown(
+                            INSPECT_HINT, elem_classes=["scale-caption"]
+                        )
+                    lens_panel = gr.HTML(charts.EMPTY_LENS)
+                    attention_layer = gr.Slider(
+                        0,
+                        1,
+                        value=0,
+                        step=1,
+                        label="Attention layer",
+                        info="0 averages every layer. Release the slider to repaint.",
+                    )
+                    attention_panel = gr.HTML(charts.EMPTY_ATTENTION)
                 summary_panel = gr.HTML(charts.summary_tiles({}))
                 surprise_panel = gr.HTML(charts.EMPTY_CHART)
                 with gr.Accordion("Prompt and context tokens", open=False):
@@ -2363,6 +2606,7 @@ def build_app() -> gr.Blocks:
             surprise_panel,
             trace_state,
             branch_source,
+            context_ids_state,
         ]
         undo_outputs = [
             prompt,
@@ -2546,6 +2790,7 @@ def build_app() -> gr.Blocks:
                 score_status,
                 token_detail,
                 alternatives,
+                context_ids_state,
             ],
         )
         color_scale.change(
@@ -2575,6 +2820,34 @@ def build_app() -> gr.Blocks:
             [metrics_state, selected_token, branch_source],
             [token_detail, branch_pick],
         )
+
+        # Layer inspection. A third listener on each strip keeps the clicked
+        # position, the button does the forward pass, and the slider repaints
+        # the attention strip from the stored readout.
+        token_strip.select(
+            remember_inspect_target("response"), metrics_state, inspect_target
+        )
+        prompt_strip.select(
+            remember_inspect_target("prompt"), prompt_metrics_state, inspect_target
+        )
+        inspection_outputs = [lens_panel, attention_panel, insight_state, inspect_status]
+        inspect_button.click(
+            inspect_layers,
+            [
+                inspect_target,
+                metrics_state,
+                prompt_metrics_state,
+                context_ids_state,
+                attention_layer,
+            ],
+            [lens_panel, attention_panel, attention_layer, insight_state, inspect_status],
+        )
+        attention_layer.release(
+            render_attention, [insight_state, attention_layer], attention_panel
+        )
+        # Every path that redraws the strips writes the metrics state, so this
+        # is where a readout of a token that is no longer on screen goes away.
+        metrics_state.change(reset_inspection, insight_state, inspection_outputs)
 
         demo.load(
             refresh_cached_model_picker,

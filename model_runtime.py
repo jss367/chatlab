@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import json
 import re
@@ -20,6 +21,7 @@ from token_metrics import (
     UNSCORED_FIRST_TOKEN,
     TokenMetric,
     build_metric,
+    entropy_bits,
     normalize_log_probabilities,
     sampling_probabilities,
     unscored_metric,
@@ -818,6 +820,14 @@ class GenerationUpdate:
     answer has to be told.
     """
 
+    prompt_ids: tuple[int, ...] = ()
+    """Every prompt token, measured or not.
+
+    :meth:`ModelManager.inspect` needs the whole sequence the response was
+    generated from, and ``prompt_metrics`` only holds the tokens the reader
+    chose to measure.
+    """
+
 
 class IncrementalDecoder:
     """Decode a growing token stream without re-decoding it from the start.
@@ -908,6 +918,61 @@ class ScoredText:
     metrics: list[dict]
     seam_verified: bool = True
     chat_template_missing: bool = False
+    context_ids: tuple[int, ...] = ()
+
+
+# The final norm of a decoder stack, under the names the common architectures
+# give it. Llama, OLMo, Mistral and Qwen say ``norm``; GPT-2 says ``ln_f``;
+# OPT and BLOOM say ``final_layer_norm``; Mamba says ``norm_f``. Some models
+# keep it one level down from the base model: OPT's ``OPTModel`` wraps a
+# ``decoder`` that owns the norm, and multimodal wrappers hold their text
+# stack as ``language_model``.
+FINAL_NORM_ATTRIBUTES = ("norm", "final_layer_norm", "ln_f", "final_norm", "norm_f")
+FINAL_NORM_CONTAINERS = ("decoder", "transformer", "model", "language_model")
+
+
+class ModelChanged(RuntimeError):
+    """The weights in memory are not the ones the caller's tokens came from."""
+
+
+@dataclass(frozen=True)
+class TokenInsight:
+    """What every layer predicted for one token, and where the model looked.
+
+    ``layers`` has one row per residual-stream reading, from the embeddings
+    (layer 0) to the model's real output (the last row). Each intermediate
+    reading is passed through the final norm and the unembedding, the logit
+    lens: it says what the model would have answered had it stopped there.
+    When the model's final norm cannot be found there is no honest way to
+    take those readings, so only the output row is present. ``decided_at``
+    is the first layer from which the token stayed the model's first choice,
+    or ``None`` when it never was.
+
+    ``attention`` is head-averaged, one row per decoder layer, one column per
+    token before the inspected one, and it is empty when the model cannot
+    return attention weights. A sliding-window layer sees only the most
+    recent tokens; the columns for the rest hold zero. The query is the token *before* the inspected one: that
+    is the position whose output predicted it.
+    """
+
+    index: int
+    token_id: int
+    token_text: str
+    layers: list[dict]
+    tokens: list[dict]
+    attention: list[list[float]]
+    decided_at: int | None
+
+    def to_dict(self) -> dict:
+        return {
+            "index": self.index,
+            "token_id": self.token_id,
+            "token_text": self.token_text,
+            "layers": [dict(row) for row in self.layers],
+            "tokens": [dict(token) for token in self.tokens],
+            "attention": [list(row) for row in self.attention],
+            "decided_at": self.decided_at,
+        }
 
 
 class DownloadSnapshot(NamedTuple):
@@ -1026,6 +1091,10 @@ class ModelManager:
         self.model_id: str | None = None
         self.local_path: Path | None = None
         self.device_name: str | None = None
+        # Counts successful loads, so state produced under one set of weights
+        # can be told from state produced under the next even when both came
+        # from the same repository ID (a re-download at a newer revision).
+        self.load_count = 0
         # Downloads under way right now, by model ID, so a second request for
         # the same model can follow the first instead of racing it for the
         # same files.
@@ -1050,6 +1119,20 @@ class ModelManager:
     @property
     def loaded(self) -> bool:
         return self.model is not None and self.tokenizer is not None
+
+    @property
+    def load_id(self) -> str | None:
+        """Identify the weights in memory: the model ID plus which load this is.
+
+        Two loads of the same repository ID can hold different snapshots, so
+        anything that must be read back by the model that produced it is
+        stamped with this rather than the ID alone. ``None`` when nothing is
+        loaded.
+        """
+
+        if not self.loaded:
+            return None
+        return f"{self.model_id}#{self.load_count}"
 
     @property
     def busy(self) -> bool:
@@ -1209,6 +1292,7 @@ class ModelManager:
             self.model_id = validate_model_id(model_id)
             self.local_path = local_path
             self.device_name = device_name
+            self.load_count += 1
             return device_name
 
     def unload(self) -> None:
@@ -1573,6 +1657,7 @@ class ModelManager:
                     prompt_metrics=prompt_metrics,
                     prompt_note=prompt_note,
                     reasoning_prefilled=reasoning_prefilled,
+                    prompt_ids=tuple(prompt_ids),
                 )
                 if forced[-1] in stop_ids:
                     return
@@ -1612,6 +1697,7 @@ class ModelManager:
                         prompt_metrics=prompt_metrics,
                         prompt_note=prompt_note,
                         reasoning_prefilled=reasoning_prefilled,
+                        prompt_ids=tuple(prompt_ids),
                     )
 
                 if stopping:
@@ -1694,4 +1780,228 @@ class ModelManager:
                 ],
                 seam_verified=split.seam_verified,
                 chat_template_missing=split.chat_template_missing,
+                context_ids=tuple(context_ids),
+            )
+
+    @contextlib.contextmanager
+    def _eager_attention(self):
+        """Run the model with attention that reports its weights.
+
+        Fused kernels (SDPA, flash) never materialize the attention matrix, so
+        a model loaded with one of them returns no weights. Eager attention is
+        slower, so it is switched on for a single inspection step and switched
+        back afterwards.
+        """
+
+        model = self.model
+        switch = getattr(model, "set_attn_implementation", None)
+        current = getattr(getattr(model, "config", None), "_attn_implementation", None)
+        if switch is None or current in (None, "eager"):
+            yield
+            return
+        switch("eager")
+        try:
+            yield
+        finally:
+            switch(current)
+
+    def _final_norm(self):
+        """The norm the LM head reads through, or ``None`` when none is found.
+
+        Looked up on the base model first, then one level down in the
+        containers some architectures wrap their decoder stack in.
+        """
+
+        import torch
+
+        base = getattr(self.model, "base_model", self.model)
+        owners = [base] + [getattr(base, name, None) for name in FINAL_NORM_CONTAINERS]
+        for owner in owners:
+            for name in FINAL_NORM_ATTRIBUTES:
+                module = getattr(owner, name, None)
+                if isinstance(module, torch.nn.Module):
+                    return module
+        return None
+
+    def _read_head(self, vector):
+        """Turn a normed residual vector into logits the way the model does.
+
+        Some causal-LM heads post-process the unembedding: Gemma 2 and 3
+        soft-cap logits with ``tanh``, Granite divides by ``logits_scaling``,
+        Cohere multiplies by ``logit_scale``. An intermediate reading that
+        skipped them would describe a distribution the model never emits, so
+        they are applied here. :meth:`inspect` checks the result against the
+        model's own output for the final layer, which catches a transform
+        this list does not know about.
+        """
+
+        import torch
+
+        model = self.model
+        logits = model.get_output_embeddings()(vector)
+        config = getattr(model, "config", None)
+        scale = getattr(config, "logit_scale", None)
+        if scale:
+            logits = logits * scale
+        scaling = getattr(config, "logits_scaling", None)
+        if scaling:
+            logits = logits / scaling
+        softcap = getattr(config, "final_logit_softcapping", None)
+        if softcap:
+            logits = torch.tanh(logits / softcap) * softcap
+        return logits
+
+    def _lens_row(self, layer: int, logits, token_id: int) -> dict:
+        log_probs = normalize_log_probabilities(
+            logits.detach().float().cpu().numpy()
+        )
+        token_log_prob = float(log_probs[token_id])
+        top_id = int(np.argmax(log_probs))
+        return {
+            "layer": layer,
+            "probability": float(np.exp(token_log_prob)),
+            "rank": int(np.count_nonzero(log_probs > token_log_prob)) + 1,
+            "entropy_bits": entropy_bits(log_probs),
+            "top_id": top_id,
+            "top_text": self._decode_token(top_id) or self._token_fallback(top_id),
+            "top_probability": float(np.exp(log_probs[top_id])),
+        }
+
+    def inspect(
+        self,
+        token_ids: Sequence[int],
+        index: int,
+        *,
+        context_count: int = 0,
+        load_id: str | None = None,
+    ) -> TokenInsight:
+        """Explain the prediction of ``token_ids[index]`` layer by layer.
+
+        The sequence up to the token before ``index`` is run through the model
+        again, then that token is fed in alone with the hidden states and
+        attention weights switched on. Its output is the distribution that
+        predicted the inspected token, so the final row of the logit lens
+        matches the probabilities the strip already shows, and its attention
+        row says which earlier tokens went into that prediction.
+
+        ``context_count`` is how many leading tokens are prompt or context
+        rather than response, purely for labelling.
+
+        ``load_id`` names the load the tokens came from (see :attr:`load_id`).
+        It is compared under the model lock, so a load that started after the
+        caller looked and finished before this ran is still refused, with
+        :class:`ModelChanged`, rather than explaining the tokens with weights
+        and a tokenizer they never met.
+        """
+
+        import torch
+
+        with self._lock, torch.inference_mode():
+            if not self.loaded:
+                raise RuntimeError("Download and load a model before inspecting a token.")
+            if load_id is not None and load_id != self.load_id:
+                raise ModelChanged(
+                    "The model has been reloaded since these tokens were produced."
+                )
+            ids = [int(value) for value in token_ids]
+            if not 1 <= index < len(ids):
+                raise ValueError(
+                    "Nothing came before this token, so the model never predicted it."
+                )
+
+            assert self.model is not None
+            model = self.model
+            device = next(model.parameters()).device
+            token_id = ids[index]
+
+            past_key_values = None
+            if index > 1:
+                # Collect nothing: only the cache is wanted.
+                _, past_key_values, _ = self._prefill(
+                    ids[: index - 1],
+                    segments=[""] * (index - 1),
+                    positions=list(range(index - 1)),
+                    score_from=index,
+                    collect_from=index,
+                )
+
+            with self._eager_attention():
+                outputs = model(
+                    input_ids=torch.tensor(
+                        [[ids[index - 1]]], dtype=torch.long, device=device
+                    ),
+                    attention_mask=torch.ones((1, index), dtype=torch.long, device=device),
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                    output_hidden_states=True,
+                    output_attentions=True,
+                )
+
+            hidden_states = tuple(outputs.hidden_states or ())
+            final_logits = outputs.logits[0, -1]
+            norm = self._final_norm()
+            layers: list[dict] = []
+            # The last hidden state is what the model's own head reads, so its
+            # row is the real output; the earlier ones are read through the
+            # final norm as though the stack had ended there. Without the norm
+            # those readings would be off by a rescaling the head never sees,
+            # so a model whose norm cannot be found shows its output alone
+            # rather than intermediate rows that look right and are not. The
+            # same goes for a head that post-processes its logits in a way
+            # _read_head() does not replicate: reading the final hidden state
+            # (already normed) through it must reproduce the model's output,
+            # or the intermediate rows are not trustworthy either.
+            readable = norm is not None and bool(hidden_states)
+            if readable:
+                replayed = self._read_head(hidden_states[-1][0, -1]).detach().float()
+                readable = torch.allclose(
+                    replayed, final_logits.detach().float(), rtol=1e-2, atol=1e-2
+                )
+            if readable:
+                for layer, state in enumerate(hidden_states[:-1]):
+                    vector = norm(state[0, -1].unsqueeze(0)).squeeze(0)
+                    layers.append(
+                        self._lens_row(layer, self._read_head(vector), token_id)
+                    )
+            layers.append(
+                self._lens_row(max(len(hidden_states) - 1, 0), final_logits, token_id)
+            )
+
+            decided_at: int | None = None
+            for row in reversed(layers):
+                if row["rank"] != 1:
+                    break
+                decided_at = row["layer"]
+
+            attention: list[list[float]] = []
+            weights = tuple(outputs.attentions or ())
+            if weights and all(layer is not None for layer in weights):
+                for layer in weights:
+                    row = layer[0, :, -1, :].detach().float().mean(dim=0).cpu().tolist()
+                    # A sliding-window layer keeps only its most recent keys,
+                    # so a short row describes the end of the sequence. Align
+                    # it on the right; the keys the layer could not see get a
+                    # weight of zero, which is what it gave them.
+                    row = row[-index:]
+                    attention.append([0.0] * (index - len(row)) + row)
+
+            tokens = [
+                {
+                    "index": position,
+                    "token_id": ids[position],
+                    "text": self._decode_token(ids[position]),
+                    "fallback": self._token_fallback(ids[position]),
+                    "segment": "prompt" if position < context_count else "response",
+                }
+                for position in range(index)
+            ]
+            del outputs, past_key_values
+            return TokenInsight(
+                index=index,
+                token_id=token_id,
+                token_text=self._decode_token(token_id) or self._token_fallback(token_id),
+                layers=layers,
+                tokens=tokens,
+                attention=attention,
+                decided_at=decided_at,
             )
