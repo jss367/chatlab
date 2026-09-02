@@ -1032,6 +1032,30 @@ class DownloadProgressTests(unittest.TestCase):
             entered.update(1)
         self.assertEqual(files.n, 1)
 
+    def test_iterating_a_bar_counts_files(self):
+        # huggingface_hub before 1.25 hands the file bar to tqdm's thread_map,
+        # which (before tqdm 4.70) advances it by iterating ``tqdm_class(iterable)``.
+        # tqdm's disabled __iter__ would yield without counting.
+        from model_runtime import DownloadProgress
+
+        progress = DownloadProgress()
+        cls = progress.bar_class()
+        results = list(cls((name for name in ("a", "b", "c")), desc="Fetching 3 files", total=3))
+
+        self.assertEqual(results, ["a", "b", "c"])
+        snap = progress.snapshot()
+        self.assertEqual((snap.files_done, snap.files_total), (3, 3))
+
+    def test_iterating_a_sized_iterable_learns_its_total(self):
+        from model_runtime import DownloadProgress
+
+        progress = DownloadProgress()
+        bar = progress.bar_class()(["x", "y"], desc="Fetching 2 files")
+        consumed = list(bar)
+
+        self.assertEqual(consumed, ["x", "y"])
+        self.assertEqual((progress.snapshot().files_done, progress.snapshot().files_total), (2, 2))
+
     def test_the_manager_registers_the_download_while_it_runs(self):
         from unittest import mock
 

@@ -783,6 +783,15 @@ class DownloadProgress:
                     with progress._lock:
                         self.n += n
 
+            def __iter__(self):
+                # tqdm's own __iter__ skips counting for a disabled bar. Until
+                # huggingface_hub 1.25 the file bar is tqdm's thread_map, which
+                # (before tqdm 4.70) advances it by iterating rather than by
+                # update(), so count here.
+                for item in self.iterable:
+                    yield item
+                    self.update(1)
+
         return RecordingBar
 
     def _register(self, bar) -> None:
