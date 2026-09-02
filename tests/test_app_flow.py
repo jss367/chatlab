@@ -1673,7 +1673,10 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertIsNone(frames[0][BRANCH_SOURCE])
         for frame in frames[1:-1]:
             self.assertEqual(frame[BRANCH_SOURCE], gr.skip())
-        self.assertEqual(frames[-1][BRANCH_SOURCE], frames[-1][METRICS][0])
+        self.assertEqual(
+            frames[-1][BRANCH_SOURCE],
+            (frames[-1][METRICS][0], app.MANAGER.load_id),
+        )
 
     def test_a_response_token_is_remembered_for_the_table(self):
         final = self.respond()[-1]
@@ -1742,7 +1745,9 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertIn("Branched at token 2", frames[0][STATUS])
         self.assertIn("Branched at token 2", last[STATUS])
         self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 2)
-        self.assertEqual(last[BRANCH_SOURCE], last[METRICS][0])
+        self.assertEqual(
+            last[BRANCH_SOURCE], (last[METRICS][0], app.MANAGER.load_id)
+        )
 
     def test_branching_preserves_literal_assistant_prefill_tags(self):
         app.MANAGER = loaded_manager(
@@ -1782,7 +1787,7 @@ class BranchFromTokenTests(unittest.TestCase):
         original = list(app.chat("hi", [], *settings.values()))[-1]
         original_metrics = metrics_of(original[METRICS])
         pick = {
-            "generation": original[BRANCH_SOURCE],
+            "generation": original[METRICS][0],
             "position": 2,
             "token_id": THINK_EOS,
             "original_id": original_metrics[1]["token_id"],
@@ -1866,7 +1871,7 @@ class BranchFromTokenTests(unittest.TestCase):
         frame = next(stream)
         stream.close()
         *_rest, source = app.stop_generation(frame[TURNS], frame[METRICS])
-        self.assertEqual(source, frame[METRICS][0])
+        self.assertEqual(source, (frame[METRICS][0], app.MANAGER.load_id))
 
     def test_stopping_before_any_token_leaves_nothing_to_branch(self):
         turns = [make_turn("user", "hi"), make_turn("assistant", "")]
@@ -1902,7 +1907,9 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertIn("'Hello'", last[STATUS])
         self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 2)
         self.assertTrue(last[TURNS][-1]["content"].startswith("HelloHello"))
-        self.assertEqual(last[BRANCH_SOURCE], last[METRICS][0])
+        self.assertEqual(
+            last[BRANCH_SOURCE], (last[METRICS][0], app.MANAGER.load_id)
+        )
 
     def test_typed_text_may_span_several_tokens(self):
         final = self.respond()[-1]
@@ -1953,6 +1960,16 @@ class BranchFromTokenTests(unittest.TestCase):
         )
         self.assertEqual(len(frames), 1)
         self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
+
+    def test_typed_text_from_an_earlier_model_load_is_refused(self):
+        final = self.respond()[-1]
+        # Loading leaves the old response strip on screen, but its token IDs
+        # belong to the tokenizer that produced it, even for a same-ID reload.
+        app.MANAGER.load_count += 1
+        frames = self.branch_text(final, "Hello")
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
+        self.assertEqual(frames[0][TURNS], final[TURNS])
 
     def test_typed_text_keeps_literal_prefill_tags_before_it(self):
         app.MANAGER = loaded_manager(

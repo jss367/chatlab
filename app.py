@@ -668,10 +668,11 @@ def describe_token(metric: dict) -> tuple[str, list[list]]:
 # made against a strip that is gone is refused rather than replayed onto the
 # wrong response.
 #
-# ``branch_source`` is the stamp of the last strip that came from a chat
-# response. Scored text draws the same strip and the same alternatives, but
-# there is no conversation to branch, so a stamp that does not match it is
-# refused too.
+# ``branch_source`` is the stamp and model load of the last strip that came
+# from a chat response. Scored text draws the same strip and alternatives but
+# has no conversation to branch, while a reload leaves old token IDs on screen
+# that the new tokenizer must not read. Both cases are refused unless the
+# generation and load agree.
 
 BRANCH_HINT = (
     "Click a response token, then one of its alternatives, then branch."
@@ -726,7 +727,7 @@ def branch_ready_text(pick: dict) -> str:
 def choose_alternative(
     metrics_state: tuple[int, list[dict]],
     selected_token: dict | None,
-    branch_source: int | None,
+    branch_source: tuple[int, str | None] | None,
     event: gr.SelectData,
 ):
     """Pair a row of the alternatives table with the token it belongs to."""
@@ -745,7 +746,7 @@ def choose_alternative(
         return gr.skip(), None
 
     summary, _rows = describe_token(metric)
-    if branch_source != generation:
+    if branch_source != (generation, MANAGER.load_id):
         return f"{summary}\n\n{BRANCH_UNAVAILABLE}", None
     pick = {
         "generation": generation,
@@ -926,7 +927,7 @@ def stop_generation(
         "Stopped. The partial response was kept."
         if kept
         else "Stopped before the model produced anything.",
-        generation if kept and metrics else None,
+        (generation, MANAGER.load_id) if kept and metrics else None,
     )
 
 
@@ -1329,7 +1330,7 @@ def _stream_reply(
             metrics,
             f"Generation failed: {error}",
             busy=False,
-            branch_source=generation if kept and metrics else None,
+            branch_source=(generation, MANAGER.load_id) if kept and metrics else None,
         )
         return
 
@@ -1390,7 +1391,7 @@ def _stream_reply(
             charts.surprise_chart(metrics),
         ),
         trace=trace,
-        branch_source=generation if kept and metrics else None,
+        branch_source=(generation, MANAGER.load_id) if kept and metrics else None,
     )
 
 
@@ -1600,7 +1601,7 @@ def literal_prefill_count(metrics: list[dict], kept: int) -> int:
 
 def branch_with_text(
     selected_token: dict | None,
-    branch_source: int | None,
+    branch_source: tuple[int, str | None] | None,
     metrics_state: tuple[int, list[dict]],
     replacement: str,
     prompt_text: str,
@@ -1627,7 +1628,7 @@ def branch_with_text(
         not selected_token
         or selected_token.get("generation") != generation
         or generation != _metrics_generation
-        or branch_source != generation
+        or branch_source != (generation, MANAGER.load_id)
     ):
         yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
         return
@@ -1674,7 +1675,7 @@ def branch_with_text(
 
 def branch_from(
     pick: dict | None,
-    branch_source: int | None,
+    branch_source: tuple[int, str | None] | None,
     metrics_state: tuple[int, list[dict]],
     prompt_text: str,
     turns: list[dict] | None,
@@ -1698,7 +1699,7 @@ def branch_from(
         not pick
         or pick.get("generation") != generation
         or generation != _metrics_generation
-        or branch_source != generation
+        or branch_source != (generation, MANAGER.load_id)
     ):
         yield idle_state(prompt_text, turns, BRANCH_HINT)
         return

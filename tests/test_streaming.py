@@ -563,6 +563,17 @@ class ReplacementEncodingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "load a model"):
             ModelManager().encode_replacement([0], "Hello")
 
+    def test_a_hidden_non_stop_special_token_is_refused(self):
+        pieces = ["Hello", "<pad>", "<eos>"]
+        manager = loaded_manager([0], pieces, eos_id=2)
+        manager.tokenizer.all_special_ids = [1, 2]
+        with self.assertRaisesRegex(ValueError, "hidden special token"):
+            manager.encode_replacement([], "<pad>")
+
+    def test_a_stop_special_token_can_still_end_the_replacement(self):
+        manager = loaded_manager([0])
+        self.assertEqual(manager.encode_replacement([], "<eos>"), [EOS_ID])
+
 
 class ChatTemplateTokenizer(FakeTokenizer):
     """A tokenizer whose chat template can pre-fill the opening <think> tag."""

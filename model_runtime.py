@@ -1404,9 +1404,19 @@ class ModelManager:
             candidates.append(joint[len(kept) :])
         if not any(candidates):
             raise ValueError("The replacement text did not produce any tokens.")
+        hidden_ids = self._hidden_token_ids() - self._stop_token_ids()
+        matched_hidden = False
         for token_ids in candidates:
             if token_ids and self._decode_ids(kept + token_ids) == expected:
+                if hidden_ids.intersection(token_ids):
+                    matched_hidden = True
+                    continue
                 return token_ids
+        if matched_hidden:
+            raise ValueError(
+                "The replacement text contains a hidden special token and "
+                "cannot be displayed exactly."
+            )
         raise ValueError(
             "The replacement text cannot be inserted exactly at this position "
             "by this tokenizer."
