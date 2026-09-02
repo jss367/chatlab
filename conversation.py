@@ -8,6 +8,17 @@ straight to JSON:
 ``reasoning`` holds the text a Think model wrapped in ``<think>`` tags. It is
 kept beside the answer rather than inside it so the interface can collapse it
 and so the next request can deliberately include or drop it.
+
+A generated assistant turn also records where it came from, so the list of
+conversations can say which model answered and how big the exchange was:
+
+    {"model": str, "prompt_tokens": int, "generated_tokens": int}
+
+``prompt_tokens`` is every token the model was given for that reply - the
+system prompt, the transcript so far and the template around them - and
+``generated_tokens`` is every token it produced, reasoning included. A turn
+that was typed, loaded from an older file, or never finished measuring may
+carry none of these, and the list says so rather than guessing.
 """
 
 from __future__ import annotations
@@ -19,6 +30,14 @@ THINK_CLOSE = "</think>"
 REASONING_TITLE = "Reasoning"
 SAVE_FORMAT = "chatlab-conversation-1"
 MAIN_BRANCH = "Main"
+FORK_PREFIX = "Fork"
+CHAT_PREFIX = "Chat"
+
+# How much of a conversation's first message the list shows as its title.
+TITLE_LIMIT = 40
+
+# The per-turn provenance fields, and the type each must have in a saved file.
+TURN_ORIGIN_FIELDS = {"model": str, "prompt_tokens": int, "generated_tokens": int}
 
 _PARTIAL_TAGS = tuple(
     sorted(
@@ -235,13 +254,17 @@ def copy_forks(forks: dict | None) -> dict:
     }
 
 
-def next_fork_name(forks: dict) -> str:
-    """The first ``Fork N`` not already taken, so deleting one never renames another."""
+def next_branch_name(forks: dict, prefix: str) -> str:
+    """The first ``<prefix> N`` not already taken, so deleting one never renames another."""
 
     number = 1
-    while f"Fork {number}" in forks["branches"]:
+    while f"{prefix} {number}" in forks["branches"]:
         number += 1
-    return f"Fork {number}"
+    return f"{prefix} {number}"
+
+
+def next_fork_name(forks: dict) -> str:
+    return next_branch_name(forks, FORK_PREFIX)
 
 
 def fork_at(
@@ -268,18 +291,124 @@ def fork_at(
     return turns[: position + 1], None
 
 
+# ------------------------------------------------------- conversation list
+#
+# The pane beside the chat lists every branch. Each entry is two lines: the
+# branch's name and the start of its first message, then the model that
+# answered and how many tokens the conversation had come to. Everything here
+# is derived from the turns alone, so the list can be redrawn from state
+# whenever the state moves, streaming frames included.
+
+
+def short_model_name(model_id: str) -> str:
+    """``allenai/Olmo-3-7B-Think`` -> ``Olmo-3-7B-Think``: the org is noise in a tag."""
+
+    return model_id.rstrip("/").rsplit("/", 1)[-1] or model_id
+
+
+def branch_title(turns: list[dict] | None, limit: int = TITLE_LIMIT) -> str:
+    """The first user message, flattened to one line and cut to ``limit``."""
+
+    for turn in turns or []:
+        if turn["role"] == "user":
+            text = " ".join((turn.get("content") or "").split())
+            if len(text) > limit:
+                return text[: limit - 1].rstrip() + "…"
+            return text
+    return ""
+
+
+def describe_branch(turns: list[dict] | None) -> dict:
+    """What the list says about one branch.
+
+    ``models`` are the short names of every model that answered, most recent
+    first and each once. ``tokens`` is the size of the conversation as the
+    model last saw it - the prompt behind the latest measured reply plus that
+    reply - or ``None`` when no reply carries a measurement. ``replies`` counts
+    assistant turns, measured or not, so an unmeasured transcript can be told
+    from an empty one.
+    """
+
+    turns = turns or []
+    models: list[str] = []
+    tokens = None
+    replies = 0
+    for turn in turns:
+        if turn["role"] != "assistant":
+            continue
+        replies += 1
+        model = turn.get("model")
+        if isinstance(model, str) and model:
+            name = short_model_name(model)
+            if name in models:
+                models.remove(name)
+            models.insert(0, name)
+        prompt_tokens = turn.get("prompt_tokens")
+        generated = turn.get("generated_tokens")
+        if isinstance(prompt_tokens, int) and isinstance(generated, int):
+            # Later replies win: their prompt already contains everything
+            # before them, so the last one measured is the whole conversation.
+            tokens = prompt_tokens + generated
+    return {
+        "title": branch_title(turns),
+        "models": models,
+        "tokens": tokens,
+        "replies": replies,
+    }
+
+
+def branch_label(name: str, turns: list[dict] | None) -> str:
+    """The two-line entry the list shows for a branch."""
+
+    summary = describe_branch(turns)
+    head = f"{name} · {summary['title']}" if summary["title"] else name
+    if not summary["replies"]:
+        detail = "No replies yet" if summary["title"] else "No messages yet"
+    else:
+        parts = [" + ".join(summary["models"]) or "Model not recorded"]
+        if summary["tokens"] is not None:
+            parts.append(f"{summary['tokens']:,} tokens")
+        detail = " · ".join(parts)
+    return f"{head}\n{detail}"
+
+
+def branch_choices(forks: dict | None, turns: list[dict] | None) -> list[tuple[str, str]]:
+    """``(label, name)`` for every branch, the active one read from ``turns``.
+
+    The active branch's entry in ``forks`` is stale by design (see the forks
+    section above), so its turns come from the conversation state instead.
+    """
+
+    forks = forks or new_forks()
+    active = forks.get("active", MAIN_BRANCH)
+    choices = []
+    for name, stored in forks.get("branches", {}).items():
+        branch = turns if name == active else stored
+        choices.append((branch_label(name, branch), name))
+    return choices
+
+
+# --------------------------------------------------------------- save / load
+
+
 def to_json(turns: list[dict] | None, *, system_prompt: str = "") -> str:
+    entries = []
+    for turn in turns or []:
+        entry = {
+            "role": turn["role"],
+            "content": turn.get("content") or "",
+            "reasoning": turn.get("reasoning") or "",
+        }
+        for key, kind in TURN_ORIGIN_FIELDS.items():
+            value = turn.get(key)
+            # bool is an int to isinstance(), and a True here would be a bug.
+            if isinstance(value, kind) and not isinstance(value, bool):
+                entry[key] = value
+        entries.append(entry)
     payload = {
         "format": SAVE_FORMAT,
         "system_prompt": system_prompt or "",
-        "turns": [
-            {
-                "role": turn["role"],
-                "content": turn.get("content") or "",
-                "reasoning": turn.get("reasoning") or "",
-            }
-            for turn in (turns or [])
-        ],
+        "turns": entries,
     }
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
@@ -308,7 +437,17 @@ def from_json(payload: str) -> tuple[list[dict], str]:
         reasoning = entry.get("reasoning", "")
         if not isinstance(content, str) or not isinstance(reasoning, str):
             raise ValueError("Turn content and reasoning must be strings.")
-        turns.append(make_turn(role, content, reasoning))
+        turn = make_turn(role, content, reasoning)
+        for key, kind in TURN_ORIGIN_FIELDS.items():
+            if key not in entry:
+                continue
+            value = entry[key]
+            if not isinstance(value, kind) or isinstance(value, bool):
+                raise ValueError(f"Turn {key} must be a {kind.__name__}.")
+            if kind is int and value < 0:
+                raise ValueError(f"Turn {key} cannot be negative.")
+            turn[key] = value
+        turns.append(turn)
 
     system_prompt = data.get("system_prompt", "")
     if not isinstance(system_prompt, str):
