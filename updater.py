@@ -226,11 +226,23 @@ def swap_bundle(current: Path, replacement: Path) -> Path:
     return parked
 
 
+def is_parked_bundle(path: Path, bundle: Path) -> bool:
+    """Whether ``path`` has the exact ``<bundle>.previous-<unix timestamp>`` shape."""
+
+    prefix = f"{bundle.name}{PREVIOUS_BUNDLE_MARKER}"
+    return path.name.startswith(prefix) and path.name[len(prefix):].isdigit()
+
+
 def remove_previous_bundles(bundle: Path) -> None:
-    """Delete bundles a prior update parked beside the running app."""
+    """Delete bundles a prior update parked beside the running app.
+
+    Only names ending in the timestamp ``swap_bundle`` writes are touched, so a
+    hand-made ``ChatLab.app.previous-manual`` next to the app is left alone.
+    """
 
     for stale in bundle.parent.glob(f"{bundle.name}{PREVIOUS_BUNDLE_MARKER}*"):
-        shutil.rmtree(stale, ignore_errors=True)
+        if is_parked_bundle(stale, bundle):
+            shutil.rmtree(stale, ignore_errors=True)
 
 
 def relaunch(bundle: Path) -> None:
@@ -242,16 +254,16 @@ def install_update(
     bundle: Path,
     work_dir: Path | None = None,
     progress: ProgressCallback | None = None,
-    before_swap: Callable[[], None] | None = None,
+    begin_swap: Callable[[], bool] | None = None,
     cancelled: CancelCheck | None = None,
 ) -> None:
     """Download, unpack, and swap in ``release``; the caller quits and relaunches.
 
-    ``cancelled`` is honoured during download and extraction and raises
-    :class:`UpdateCancelled`. ``before_swap`` runs once the new bundle is
-    unpacked and about to replace the old one, so the caller can hold off
-    shutdown for the few seconds the swap takes; cancellation is no longer
-    checked after that point.
+    ``cancelled`` is polled during the download and raises
+    :class:`UpdateCancelled`. ``begin_swap`` is called once the new bundle is
+    unpacked; it must atomically decide whether to proceed (returning True and
+    holding off shutdown for the few seconds the swap takes) or report that
+    the update was cancelled (returning False). Nothing is checked after it.
     """
 
     if work_dir is None:
@@ -262,10 +274,11 @@ def install_update(
     try:
         archive = download_asset(release, work_dir, progress, cancelled)
         replacement = extract_bundle(archive, work_dir / "unpacked")
-        if cancelled is not None and cancelled():
+        if begin_swap is not None:
+            if not begin_swap():
+                raise UpdateCancelled("Update cancelled before installation.")
+        elif cancelled is not None and cancelled():
             raise UpdateCancelled("Update cancelled before installation.")
-        if before_swap is not None:
-            before_swap()
         parked = swap_bundle(bundle, replacement)
         logger.info("Installed ChatLab %s over %s (previous bundle at %s)", release.version, bundle, parked)
     finally:

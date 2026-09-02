@@ -91,6 +91,9 @@ class UpdateFlow:
         self.window = window
         self.bundle = bundle
         self._lock = threading.Lock()
+        # ``swapping`` and ``cancel`` only change under ``_phase_lock`` so a quit
+        # and the start of the swap cannot both win.
+        self._phase_lock = threading.Lock()
         self.swapping = threading.Event()
         self.cancel = threading.Event()
         window.events.closing += self._on_closing
@@ -103,9 +106,20 @@ class UpdateFlow:
         new one in cannot be interrupted.
         """
 
-        if self.swapping.is_set():
-            return False
-        self.cancel.set()
+        with self._phase_lock:
+            if self.swapping.is_set():
+                return False
+            self.cancel.set()
+            return True
+
+    def _begin_swap(self) -> bool:
+        """Enter the protected swap phase unless a quit already cancelled us."""
+
+        with self._phase_lock:
+            if self.cancel.is_set():
+                return False
+            self.swapping.set()
+        self._window_call("set_title", f"{WINDOW_TITLE} — installing update…")
         return True
 
     def check_in_background(self, *, interactive: bool) -> threading.Thread:
@@ -171,10 +185,7 @@ class UpdateFlow:
                 release,
                 self.bundle,
                 progress=self._report_progress,
-                before_swap=lambda: (
-                    self.swapping.set(),
-                    self._window_call("set_title", f"{WINDOW_TITLE} — installing update…"),
-                ),
+                begin_swap=self._begin_swap,
                 cancelled=self.cancel.is_set,
             )
         except updater.UpdateCancelled as error:

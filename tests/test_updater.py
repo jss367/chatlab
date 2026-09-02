@@ -86,9 +86,14 @@ class BundleTests(unittest.TestCase):
         self.assertTrue(parked.name.startswith("ChatLab.app.previous-"))
         self.assertEqual((parked / "Contents" / "MacOS" / "ChatLab").read_text(), "old")
 
+        manual = self.make_bundle("ChatLab.app.previous-manual", "keep")
+        versioned = self.make_bundle("ChatLab.app.previous-0.1.0", "keep")
+
         updater.remove_previous_bundles(current)
         self.assertFalse(parked.exists())
         self.assertTrue(current.exists())
+        self.assertTrue(manual.exists())
+        self.assertTrue(versioned.exists())
 
     def test_swap_bundle_restores_old_after_partial_copy(self):
         current = self.make_bundle("ChatLab.app", "old")
@@ -147,6 +152,17 @@ class BundleTests(unittest.TestCase):
         self.assertEqual((current / "Contents" / "MacOS" / "ChatLab").read_text(), "old")
         self.assertFalse(work.exists())
 
+    def test_install_update_respects_begin_swap_veto(self):
+        current = self.make_bundle("ChatLab.app", "old")
+        release = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", None, "u")
+        work = self.root / "work"
+        with mock.patch.object(updater, "download_asset", side_effect=lambda *a: work / "x.zip"), mock.patch.object(
+            updater, "extract_bundle", side_effect=lambda *a: self.make_bundle("work/unpacked/ChatLab.app", "new")
+        ):
+            with self.assertRaises(updater.UpdateCancelled):
+                updater.install_update(release, current, work_dir=work, begin_swap=lambda: False)
+        self.assertEqual((current / "Contents" / "MacOS" / "ChatLab").read_text(), "old")
+
     def test_install_update_wires_the_steps(self):
         current = self.make_bundle("ChatLab.app", "old")
         release = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", None, "u")
@@ -169,7 +185,7 @@ class BundleTests(unittest.TestCase):
                 current,
                 work_dir=work,
                 progress=lambda r, t: seen.append((r, t)),
-                before_swap=lambda: seen.append("swap"),
+                begin_swap=lambda: seen.append("swap") or True,
             )
 
         self.assertEqual(seen, [(5, 10), "swap"])
