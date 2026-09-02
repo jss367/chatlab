@@ -27,6 +27,7 @@ THINK_EOS = 4
 FIXED = {
     "system_prompt": "",
     "keep_reasoning": False,
+    "assistant_prefill": "",
     "temperature": 0.0,
     "top_p": 1.0,
     "top_k": 0,
@@ -110,6 +111,26 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(final[SEED], 42)
         self.assertIn("seed 42", final[STATUS])
         self.assertEqual(len(final[STRIP]), 3)
+
+    def test_an_assistant_prefill_starts_the_visible_answer(self):
+        settings = dict(FIXED, assistant_prefill="Hello")
+        frames = self.last(app.chat("hi", [], *settings.values()))
+        final = frames[-1]
+
+        self.assertEqual(final[TURNS][1]["content"], "Hello world")
+        self.assertIn("Assistant prefill applied", frames[0][STATUS])
+        self.assertEqual(final[TRACE]["sampling"]["assistant_prefill"], "Hello")
+        self.assertEqual(final[TRACE]["sampling"]["forced_prefix_tokens"], 1)
+
+    def test_literal_reasoning_tags_in_a_prefill_remain_visible(self):
+        app.MANAGER = loaded_manager(
+            [0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS
+        )
+        settings = dict(FIXED, assistant_prefill="<think>Hello</think>")
+        final = self.last(app.chat("hi", [], *settings.values()))[-1]
+
+        self.assertEqual(final[TURNS][1]["reasoning"], "")
+        self.assertEqual(final[TURNS][1]["content"], "<think>Hello</think> world")
 
     def test_the_stop_button_is_shown_while_streaming(self):
         frames = self.last(app.chat("hi", [], *SETTINGS))
@@ -434,6 +455,85 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(reply["content"], "")
         self.assertTrue(reply["reasoning_closed"])
         self.assertIn("gpu fell over", final[STATUS])
+
+
+class AssistantPrefillSplittingTests(unittest.TestCase):
+    def test_reader_supplied_whitespace_is_preserved(self):
+        prefix = "  \n  code:  "
+        reasoning, answer, closed = app.split_response_text(
+            prefix + "continued", literal_prefill=prefix
+        )
+
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, "  \n  code:  continued")
+        self.assertTrue(closed)
+
+    def test_template_separator_is_trimmed_but_reader_whitespace_is_preserved(self):
+        prefix = "</think>\n\n  answer"
+        reasoning, answer, closed = app.split_response_text(
+            prefix + " continued",
+            literal_prefill=prefix,
+            reasoning_prefilled=True,
+        )
+
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, "  answer continued")
+        self.assertTrue(closed)
+
+    def test_literal_tags_are_not_interpreted_as_reasoning(self):
+        prefix = "Show <think>literal</think>: "
+        reasoning, answer, closed = app.split_response_text(
+            prefix + "continued", literal_prefill=prefix
+        )
+
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, "Show <think>literal</think>: continued")
+        self.assertTrue(closed)
+
+    def test_template_close_stays_control_while_prefill_tags_stay_literal(self):
+        prefix = "</think>\n\nShow <think>literal</think>: "
+        reasoning, answer, closed = app.split_response_text(
+            prefix + "continued",
+            literal_prefill=prefix,
+            reasoning_prefilled=True,
+        )
+
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, "Show <think>literal</think>: continued")
+        self.assertTrue(closed)
+
+    def test_reasoning_sampled_after_the_prefill_keeps_its_meaning(self):
+        prefix = "Visible prefix: "
+        reasoning, answer, closed = app.split_response_text(
+            prefix + "<think>sampled reasoning</think>answer",
+            literal_prefill=prefix,
+        )
+
+        self.assertEqual(reasoning, "sampled reasoning")
+        self.assertEqual(answer, "Visible prefix: answer")
+        self.assertTrue(closed)
+
+    def test_a_partial_tag_in_a_streaming_prefill_remains_visible(self):
+        prefix = "Literal <thi"
+        reasoning, answer, closed = app.split_response_text(
+            prefix,
+            literal_prefill=prefix,
+            streaming=True,
+        )
+
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, prefix)
+        self.assertTrue(closed)
+
+    def test_a_stable_prefix_protects_tags_after_a_partial_character_resolves(self):
+        reasoning, answer, closed = app.split_response_text(
+            "<think>\U0001f4be continued",
+            literal_prefill="<think>",
+        )
+
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, "<think>\U0001f4be continued")
+        self.assertTrue(closed)
 
 
 class SeedTests(unittest.TestCase):
@@ -1644,6 +1744,69 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 2)
         self.assertEqual(last[BRANCH_SOURCE], last[METRICS][0])
 
+    def test_branching_preserves_literal_assistant_prefill_tags(self):
+        app.MANAGER = loaded_manager(
+            [0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS
+        )
+        settings = dict(FIXED, assistant_prefill="<think>Hello</think>")
+        original = list(app.chat("hi", [], *settings.values()))[-1]
+        _detail, pick = self.pick_alternative(original, strip_index=3, row=0)
+
+        branched = list(
+            app.branch_from(
+                pick,
+                original[BRANCH_SOURCE],
+                original[METRICS],
+                "",
+                original[TURNS],
+                *settings.values(),
+            )
+        )[-1]
+
+        self.assertEqual(branched[TURNS][-1]["reasoning"], "")
+        self.assertTrue(
+            branched[TURNS][-1]["content"].startswith("<think>Hello</think>")
+        )
+        self.assertTrue(
+            all(
+                metric.get("literal_prefill")
+                for metric in metrics_of(branched[METRICS])[:3]
+            )
+        )
+
+    def test_a_replacement_inside_the_prefill_is_not_literal(self):
+        app.MANAGER = loaded_manager(
+            [0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS
+        )
+        settings = dict(FIXED, assistant_prefill="<think>Hello</think>")
+        original = list(app.chat("hi", [], *settings.values()))[-1]
+        original_metrics = metrics_of(original[METRICS])
+        pick = {
+            "generation": original[BRANCH_SOURCE],
+            "position": 2,
+            "token_id": THINK_EOS,
+            "original_id": original_metrics[1]["token_id"],
+            "text": "<eos>",
+            "original": original_metrics[1]["text"],
+        }
+
+        branched = list(
+            app.branch_from(
+                pick,
+                original[BRANCH_SOURCE],
+                original[METRICS],
+                "",
+                original[TURNS],
+                *settings.values(),
+            )
+        )[-1]
+        branched_metrics = metrics_of(branched[METRICS])
+
+        self.assertEqual(branched[TURNS][-1]["content"], "<think>")
+        self.assertEqual([m["token_id"] for m in branched_metrics], [0, THINK_EOS])
+        self.assertTrue(branched_metrics[0]["literal_prefill"])
+        self.assertNotIn("literal_prefill", branched_metrics[1])
+
     def test_the_branched_response_replaces_only_the_last_reply(self):
         first = self.respond()[-1]
         second = list(app.chat("again", first[TURNS], *SETTINGS))[-1]
@@ -1981,6 +2144,16 @@ class MessageBoxKeysTests(unittest.TestCase):
         update = app.set_message_box_keys(True)
         self.assertEqual(update["lines"], 1)
         self.assertIn("Enter sends", update["placeholder"])
+
+    def test_the_assistant_prefill_control_explains_reasoning_models(self):
+        demo = app.build_app()
+        prefill = next(
+            c
+            for c in demo.blocks.values()
+            if isinstance(c, gr.Textbox) and c.label == "Assistant prefill (optional)"
+        )
+        self.assertEqual(prefill.value, None)
+        self.assertIn("closes the reasoning block", prefill.info)
 
 
 if __name__ == "__main__":
