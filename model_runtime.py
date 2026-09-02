@@ -238,6 +238,217 @@ def format_bytes(count: int) -> str:
     return f"{size:.1f} {unit}" if size < 100 else f"{size:.0f} {unit}"
 
 
+def format_count(count: int) -> str:
+    """Render a tally the way the hub's own pages do: ``1.2M``, ``45K``."""
+
+    size = float(count)
+    for unit in ("", "K", "M", "B"):
+        if size < 1000 or unit == "B":
+            break
+        size /= 1000
+    if unit == "":
+        return str(count)
+    return f"{size:.1f}{unit}" if size < 10 else f"{size:.0f}{unit}"
+
+
+MODEL_FOLDER_PREFIX = "models--"
+
+
+@dataclass(frozen=True)
+class CachedModel:
+    """One model the Hugging Face cache holds, and what is known of it offline.
+
+    ``status`` is the same verdict :func:`cache_status` gives, so a folder a
+    cut-off download left behind is listed with its missing files rather than
+    hidden. ``files`` counts what the ``main`` snapshot has so far; ``updated``
+    is the newest write among the model's files, as epoch seconds, which is
+    when it was last downloaded or resumed. ``architecture`` and ``dtype``
+    come from the snapshot's ``config.json`` and are absent when it is.
+    """
+
+    model_id: str
+    status: CacheStatus
+    files: int = 0
+    commit: str | None = None
+    updated: float | None = None
+    architecture: str | None = None
+    dtype: str | None = None
+    path: Path | None = None
+
+    @property
+    def size_bytes(self) -> int:
+        return self.status.total_bytes
+
+
+def _read_config(snapshot: Path | None) -> tuple[str | None, str | None]:
+    if snapshot is None:
+        return None, None
+    try:
+        config = json.loads((snapshot / "config.json").read_text())
+        architectures = config.get("architectures") or []
+        architecture = architectures[0] if architectures else None
+        dtype = config.get("dtype") or config.get("torch_dtype")
+    except (OSError, ValueError, AttributeError, TypeError, IndexError):
+        return None, None
+    return (
+        architecture if isinstance(architecture, str) else None,
+        dtype if isinstance(dtype, str) else None,
+    )
+
+
+def _newest_write(folder: Path, snapshot: Path | None) -> float | None:
+    newest: float | None = None
+    candidates = []
+    blobs = folder / "blobs"
+    if blobs.is_dir():
+        candidates.extend(blobs.iterdir())
+    if snapshot is not None:
+        candidates.extend(entry for entry in snapshot.rglob("*") if not entry.is_symlink())
+    for entry in candidates:
+        try:
+            if not entry.is_file():
+                continue
+            stamp = entry.stat().st_mtime
+        except OSError:
+            continue
+        if newest is None or stamp > newest:
+            newest = stamp
+    return newest
+
+
+def cache_root(cache_dir: Path | None = None) -> Path:
+    if cache_dir is None:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        cache_dir = Path(HF_HUB_CACHE)
+    return Path(cache_dir)
+
+
+def list_cached_models(cache_dir: Path | None = None) -> list[CachedModel]:
+    """Every model in the Hugging Face cache, newest download first.
+
+    Reads only the disk. Folders whose name is not a model ID (the hub keeps
+    datasets and spaces beside models, and other tools leave their own
+    folders) and models with nothing on disk are left out.
+    """
+
+    root = cache_root(cache_dir)
+    if not root.is_dir():
+        return []
+    models: list[CachedModel] = []
+    for folder in root.iterdir():
+        if not folder.is_dir() or not folder.name.startswith(MODEL_FOLDER_PREFIX):
+            continue
+        organization, _, name = folder.name[len(MODEL_FOLDER_PREFIX) :].partition("--")
+        try:
+            model_id = validate_model_id(f"{organization}/{name}")
+            status = cache_status(model_id, root)
+        except (ValueError, OSError):
+            continue
+        if not status.present:
+            continue
+        snapshot = snapshot_folder(folder)
+        commit = snapshot.name if snapshot is not None else None
+        files = (
+            sum(1 for entry in snapshot.rglob("*") if entry.is_file())
+            if snapshot is not None
+            else 0
+        )
+        architecture, dtype = _read_config(snapshot)
+        models.append(
+            CachedModel(
+                model_id=model_id,
+                status=status,
+                files=files,
+                commit=commit,
+                updated=_newest_write(folder, snapshot),
+                architecture=architecture,
+                dtype=dtype,
+                path=folder,
+            )
+        )
+    models.sort(key=lambda entry: (-(entry.updated or 0), entry.model_id))
+    return models
+
+
+# How many hub search results are shown. The hub sorts them by downloads, so
+# the ones a reader is likely to want come first, and a longer list would only
+# push the search box off the pane.
+SEARCH_LIMIT = 20
+
+
+@dataclass(frozen=True)
+class HubModel:
+    """What the hub says about one model, as much as a search result carries."""
+
+    model_id: str
+    parameters: int | None = None
+    downloads: int | None = None
+    likes: int | None = None
+    pipeline_tag: str | None = None
+    library: str | None = None
+    gated: bool | str = False
+    last_modified: str | None = None
+    license: str | None = None
+
+
+def search_hub_models(
+    query: str, hf_token: str | None = None, limit: int = SEARCH_LIMIT
+) -> list[HubModel]:
+    """Search the hub for text-generation models Transformers can load.
+
+    The filter is the one the application itself imposes: only causal
+    language models with built-in Transformers support load here, so results
+    from other libraries would be dead ends. Sorted by recent downloads.
+    """
+
+    from huggingface_hub import HfApi
+
+    cleaned = query.strip()
+    if not cleaned:
+        return []
+    token = hf_token.strip() if hf_token and hf_token.strip() else None
+    found = HfApi().list_models(
+        search=cleaned,
+        pipeline_tag="text-generation",
+        filter="transformers",
+        sort="downloads",
+        limit=limit,
+        expand=[
+            "downloads",
+            "likes",
+            "pipeline_tag",
+            "library_name",
+            "lastModified",
+            "safetensors",
+            "gated",
+            "tags",
+        ],
+        token=token,
+    )
+    results = []
+    for info in found:
+        safetensors = getattr(info, "safetensors", None)
+        parameters = getattr(safetensors, "total", None) if safetensors else None
+        tags = getattr(info, "tags", None) or []
+        licenses = [tag[len("license:") :] for tag in tags if tag.startswith("license:")]
+        modified = getattr(info, "last_modified", None)
+        results.append(
+            HubModel(
+                model_id=info.id,
+                parameters=parameters,
+                downloads=getattr(info, "downloads", None),
+                likes=getattr(info, "likes", None),
+                pipeline_tag=getattr(info, "pipeline_tag", None),
+                library=getattr(info, "library_name", None),
+                gated=getattr(info, "gated", False) or False,
+                last_modified=modified.date().isoformat() if modified else None,
+                license=licenses[0] if licenses else None,
+            )
+        )
+    return results
+
+
 class SplitPassage(NamedTuple):
     """A passage's two token runs, and whether the seam between them is sure.
 
