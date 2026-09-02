@@ -64,6 +64,8 @@ class StubManager:
     """A loaded manager that returns one scored token and nothing else."""
 
     loaded = True
+    model_id = "stub/model"
+    load_id = "stub/model#1"
 
     def __init__(self, seam_verified: bool = True, chat_template_missing: bool = False):
         self.seam_verified = seam_verified
