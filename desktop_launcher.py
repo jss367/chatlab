@@ -123,13 +123,30 @@ class UpdateFlow:
         return True
 
     def check_in_background(self, *, interactive: bool) -> threading.Thread:
-        """Run ``check`` on a non-daemon thread so quitting waits for an install."""
+        """Run ``check`` on a daemon thread so a quit can abandon it.
+
+        Everything before the swap (release lookup, checksum fetch, download,
+        extraction) is safe to drop mid-flight. The swap itself is protected by
+        ``_on_closing`` refusing to close and ``wait_for_swap`` joining on exit.
+        """
 
         worker = threading.Thread(
-            target=self.check, kwargs={"interactive": interactive}, daemon=False
+            target=self.check, kwargs={"interactive": interactive}, daemon=True
         )
+        self._worker = worker
         worker.start()
         return worker
+
+    def wait_for_swap(self, timeout: float = 300) -> None:
+        """Called on the way out: forbid new swaps, then wait for one in progress."""
+
+        with self._phase_lock:
+            self.cancel.set()
+            swapping = self.swapping.is_set()
+        worker = getattr(self, "_worker", None)
+        if swapping and worker is not None and worker.is_alive():
+            logging.info("Waiting for the update swap to finish before exiting")
+            worker.join(timeout)
 
     def _window_call(self, method: str, *args):
         """Call a window method, tolerating a window the user already closed."""
@@ -220,6 +237,7 @@ def run_desktop() -> int:
     bundle = updater.running_app_bundle()
     demo, local_url = start_local_server()
     logging.info("Started ChatLab %s at %s", __version__, local_url)
+    flow: UpdateFlow | None = None
 
     try:
         window = webview.create_window(
@@ -260,6 +278,8 @@ def run_desktop() -> int:
             ],
         )
     finally:
+        if flow is not None:
+            flow.wait_for_swap()
         logging.info("Stopping ChatLab")
         demo.close(verbose=False)
     return 0
