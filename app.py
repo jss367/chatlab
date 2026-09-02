@@ -6,8 +6,10 @@ import contextlib
 import html
 import os
 import random
+import re
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from uuid import uuid4
 
@@ -36,6 +38,7 @@ from model_runtime import (
     MODEL_WEIGHTS,
     PROMPT_SCORE_LIMIT,
     CacheStatus,
+    DownloadSnapshot,
     ModelManager,
     cache_status,
     format_bytes,
@@ -49,9 +52,26 @@ from token_metrics import (
 )
 from trace_export import build_trace, write_trace_export
 
+try:
+    from huggingface_hub.errors import IncompleteSnapshotError
+except ImportError:  # huggingface_hub before 1.x had no such check
+
+    class IncompleteSnapshotError(Exception):
+        pass
+
 
 DEFAULT_MODEL = "allenai/Olmo-3-7B-Think"
 MANAGER = ModelManager()
+
+# How often the download card is redrawn. Every frame is a message to the
+# browser, so this is a floor on chatter as much as a refresh rate.
+DOWNLOAD_POLL_SECONDS = 0.5
+
+# Transfer speed is averaged over this long, so a stall or a burst shows within
+# a breath but one slow chunk does not swing the time remaining.
+RATE_WINDOW_SECONDS = 15.0
+
+DOWNLOAD_BAR_WIDTH = 24
 SEED_LIMIT = 2**31 - 1
 NO_TOKEN_SELECTED = "Select a token to inspect it."
 
@@ -86,6 +106,131 @@ TEMPLATE_CAVEAT = (
 def status_card(title: str, detail: str, tone: str = "neutral") -> str:
     icon = {"success": "●", "error": "●", "working": "◌"}.get(tone, "○")
     return f"### {icon} {title}\n\n{detail}"
+
+
+def describe_duration(seconds: float) -> str:
+    if seconds < 60:
+        return "under a minute"
+    minutes = round(seconds / 60)
+    if minutes < 60:
+        return f"about {minutes} minute{'s' if minutes != 1 else ''}"
+    hours, minutes = divmod(minutes, 60)
+    text = f"about {hours} hour{'s' if hours != 1 else ''}"
+    if minutes:
+        text += f" {minutes} minute{'s' if minutes != 1 else ''}"
+    return text
+
+
+def progress_bar(fraction: float, width: int = DOWNLOAD_BAR_WIDTH) -> str:
+    filled = round(max(0.0, min(1.0, fraction)) * width)
+    return "█" * filled + "░" * (width - filled)
+
+
+class RateMeter:
+    """Bytes per second over the recent past, from readings taken as they come."""
+
+    def __init__(self, window: float = RATE_WINDOW_SECONDS, clock=time.monotonic):
+        self._samples: deque[tuple[float, int]] = deque()
+        self._window = window
+        self._clock = clock
+
+    def rate(self, bytes_done: int) -> float | None:
+        now = self._clock()
+        if self._samples and self._samples[-1][1] == 0:
+            # The first non-zero reading is the baseline. Until the byte bars
+            # exist nothing is counted, and a resumed download credits every
+            # byte already on disk at once, which is not transfer speed.
+            self._samples.clear()
+        self._samples.append((now, bytes_done))
+        while len(self._samples) > 2 and now - self._samples[1][0] >= self._window:
+            self._samples.popleft()
+        first_time, first_bytes = self._samples[0]
+        elapsed = now - first_time
+        if elapsed < 1.0 or bytes_done <= first_bytes:
+            return None
+        return (bytes_done - first_bytes) / elapsed
+
+
+def download_detail(model_id: str, snap: DownloadSnapshot, rate: float | None) -> str:
+    name = f"`{model_id}`"
+    if not snap.started:
+        return (
+            f"Asking Hugging Face which files {name} needs. "
+            "Files already in the cache are reused."
+        )
+    files = f"{snap.files_done} of {snap.files_total} files"
+    if snap.bytes_total == 0:
+        return f"Checking {name} against the cache: {files}."
+    percent = int(snap.fraction * 100)
+    figures = (
+        f"{format_bytes(snap.bytes_done)} of {format_bytes(snap.bytes_total)} · {files}"
+    )
+    if rate:
+        remaining = max(0, snap.bytes_total - snap.bytes_done)
+        figures += (
+            f" · {format_bytes(rate)}/s · {describe_duration(remaining / rate)} left"
+        )
+    return f"{name}\n\n`{progress_bar(snap.fraction)}` {percent}%\n\n{figures}"
+
+
+def stream_download(model_id: str, hf_token: str):
+    """Yield a status card every half second until ``model_id`` is on disk.
+
+    Returns the snapshot path, so a caller writes
+    ``path = yield from stream_download(...)``. A failed download raises here.
+
+    The download runs on its own thread: ``snapshot_download`` blocks until the
+    last byte, and a handler that blocked with it could show nothing past its
+    first frame. If this model is already being fetched (a handler whose
+    browser tab went away leaves its thread running), the card follows that
+    download rather than starting a second one to fight over the same files.
+    """
+
+    cleaned = model_id.strip()
+    # Reserved before the worker exists: the reservation is what stops a
+    # second handler, arriving in the same instant, from starting its own.
+    progress, reserved = MANAGER.reserve_download(cleaned)
+    if not reserved:
+        meter = RateMeter()
+        while MANAGER.active_downloads.get(cleaned) is progress:
+            snap = progress.snapshot()
+            yield status_card(
+                "Downloading model",
+                download_detail(cleaned, snap, meter.rate(snap.bytes_done)),
+                "working",
+            )
+            time.sleep(DOWNLOAD_POLL_SECONDS)
+        # Whatever that download left behind is now in the cache, so this pass
+        # either returns at once or resumes where it stopped.
+        return (yield from stream_download(model_id, hf_token))
+
+    outcome: dict = {}
+
+    def work() -> None:
+        try:
+            outcome["path"] = MANAGER.download(cleaned, hf_token, progress)
+        except BaseException as error:
+            outcome["error"] = error
+
+    worker = threading.Thread(target=work, name="chatlab-download", daemon=True)
+    try:
+        worker.start()
+    except BaseException:
+        # download() never ran, so its finally cannot release the reservation.
+        MANAGER.release_download(cleaned, progress)
+        raise
+    meter = RateMeter()
+    while worker.is_alive():
+        snap = progress.snapshot()
+        yield status_card(
+            "Downloading model",
+            download_detail(cleaned, snap, meter.rate(snap.bytes_done)),
+            "working",
+        )
+        worker.join(DOWNLOAD_POLL_SECONDS)
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["path"]
 
 
 def describe_missing(status: CacheStatus) -> str:
@@ -172,7 +317,7 @@ def download_model(model_id: str, hf_token: str):
         return
     yield status_card(*describe_cache(model_id, before), "working")
     try:
-        path = MANAGER.download(model_id, hf_token)
+        path = yield from stream_download(model_id, hf_token)
     except Exception as error:
         yield status_card("Download failed", html.escape(str(error)), "error")
         return
@@ -196,7 +341,7 @@ def download_and_load_model(model_id: str, hf_token: str):
         return
     yield status_card(*describe_cache(model_id, before), "working")
     try:
-        path = MANAGER.download(model_id, hf_token)
+        path = yield from stream_download(model_id, hf_token)
         fetched = describe_fetched(
             before, cache_status(model_id), time.monotonic() - started
         )
@@ -218,11 +363,46 @@ def download_and_load_model(model_id: str, hf_token: str):
     )
 
 
+MISSING_FILES_PATTERN = re.compile(r"(\d+) file\(s\) are missing \((.*?)\)\. ")
+
+
+def incomplete_snapshot_detail(model_id: str, error: Exception) -> str:
+    """Say what an unfinished download left behind and how to finish it."""
+
+    match = MISSING_FILES_PATTERN.search(str(error))
+    if match:
+        count, names = match.groups()
+        missing = f": {count} file{'s' if count != '1' else ''} still missing ({html.escape(names)})"
+    else:
+        missing = ""
+    return (
+        f"Only part of `{model_id}` is on disk{missing}. "
+        "Click **Download and load** to fetch the rest; the files already downloaded are kept."
+    )
+
+
 def load_cached_model(model_id: str):
-    name = f"`{model_id.strip()}`"
+    cleaned = model_id.strip()
+    active = MANAGER.active_downloads.get(cleaned)
+    if active is not None:
+        snap = active.snapshot()
+        progress = (
+            f"{format_bytes(snap.bytes_done)} of {format_bytes(snap.bytes_total)} so far"
+            if snap.bytes_total
+            else "just started"
+        )
+        yield status_card(
+            "Still downloading",
+            f"`{cleaned}` is not fully on disk yet ({progress}). "
+            "Click **Download and load** to follow the download and load the model when it finishes.",
+            "working",
+        )
+        return
+
+    name = f"`{cleaned}`"
     yield status_card("Finding cached model", f"Looking for {name} locally…", "working")
     try:
-        status = cache_status(model_id)
+        status = cache_status(cleaned)
     except ValueError as error:
         yield status_card("Could not load cached model", html.escape(str(error)), "error")
         return
@@ -244,15 +424,18 @@ def load_cached_model(model_id: str):
         )
         return
     try:
-        from huggingface_hub import snapshot_download
-
-        path = Path(snapshot_download(repo_id=model_id.strip(), local_files_only=True))
+        path = MANAGER.find_cached(cleaned)
         yield status_card(
             "Loading model",
             f"Loading {format_bytes(status.cached_bytes)} of cached files from `{path}`…",
             "working",
         )
-        device = MANAGER.load(model_id, path)
+        device = MANAGER.load(cleaned, path)
+    except IncompleteSnapshotError as error:
+        yield status_card(
+            "Download unfinished", incomplete_snapshot_detail(cleaned, error), "error"
+        )
+        return
     except Exception as error:
         yield status_card(
             "Could not load cached model", html.escape(str(error)), "error"

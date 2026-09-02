@@ -16,15 +16,14 @@ import numpy as np
 
 from conversation import THINK_OPEN
 from token_metrics import (
-    TokenMetric,
     UNSCORED_BEYOND_LIMIT,
     UNSCORED_FIRST_TOKEN,
+    TokenMetric,
     build_metric,
     normalize_log_probabilities,
     sampling_probabilities,
     unscored_metric,
 )
-
 
 # Prefill runs in chunks so a long prompt never materializes a
 # sequence-length by vocabulary logit tensor all at once.
@@ -861,6 +860,113 @@ class ScoredText:
     chat_template_missing: bool = False
 
 
+class DownloadSnapshot(NamedTuple):
+    """One reading of a download: how many files and bytes are in, out of how many.
+
+    ``bytes_total`` covers only files that need fetching; a file already in the
+    cache finishes without ever reporting a size, so it counts in ``files_*``
+    alone.
+    """
+
+    files_done: int = 0
+    files_total: int = 0
+    bytes_done: int = 0
+    bytes_total: int = 0
+
+    @property
+    def started(self) -> bool:
+        """Whether the Hub has answered with the file list yet."""
+
+        return self.files_total > 0
+
+    @property
+    def fraction(self) -> float:
+        if self.bytes_total <= 0:
+            return 0.0
+        return min(1.0, self.bytes_done / self.bytes_total)
+
+
+class DownloadProgress:
+    """Live totals for one snapshot download, safe to read from another thread.
+
+    ``snapshot_download`` reports through tqdm rather than callbacks: one bar
+    over files advances as each finishes, and two byte bars (network transfer
+    and bytes reconstructed on disk) grow their ``total`` as each file learns
+    its size. :meth:`bar_class` gives it a silent tqdm that records those
+    numbers here instead of drawing them.
+
+    The byte bars belong to the snapshot, not to its files: since
+    huggingface_hub 1.1 every per-file download feeds them through an internal
+    aggregating stand-in, so the ``tqdm_class`` handed to ``snapshot_download``
+    only ever sees the file bar and those snapshot-wide byte bars (one of them
+    before 1.23, which added the transfer bar). That is why byte totals below
+    are read as a maximum across byte bars rather than a sum: they are two
+    views of the same bytes.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._bars: list = []
+
+    def bar_class(self) -> type:
+        """A tqdm class for ``snapshot_download(tqdm_class=...)`` that reports here."""
+
+        from huggingface_hub.utils import tqdm as hub_tqdm
+
+        progress = self
+
+        class RecordingBar(hub_tqdm):
+            def __init__(self, *args, **kwargs) -> None:
+                self.counts_bytes = kwargs.get("unit") == "B"
+                # A disabled bar never writes to the terminal, and tqdm's own
+                # update() drops the count on the floor for one, so it is kept
+                # here instead.
+                kwargs["disable"] = True
+                super().__init__(*args, **kwargs)
+                progress._register(self)
+
+            def update(self, n=1) -> None:
+                if n:
+                    with progress._lock:
+                        self.n += n
+
+            def __iter__(self):
+                # tqdm's own __iter__ skips counting for a disabled bar. Until
+                # huggingface_hub 1.25 the file bar is tqdm's thread_map, which
+                # (before tqdm 4.70) advances it by iterating rather than by
+                # update(), so count here.
+                for item in self.iterable:
+                    yield item
+                    self.update(1)
+
+        return RecordingBar
+
+    def _register(self, bar) -> None:
+        with self._lock:
+            self._bars.append(bar)
+
+    def snapshot(self) -> DownloadSnapshot:
+        with self._lock:
+            bars = list(self._bars)
+            files_done = files_total = 0
+            bytes_done = bytes_total = 0
+            for bar in bars:
+                count = int(bar.n or 0)
+                total = int(bar.total or 0)
+                if bar.counts_bytes:
+                    # Transfer and reconstruction count the same bytes from
+                    # the two ends of the pipe. Whichever is further along is
+                    # the truer picture: a resumed file's on-disk bytes are
+                    # credited to reconstruction only, and network bytes lead
+                    # the disk for the rest.
+                    bytes_done = max(bytes_done, count)
+                    bytes_total = max(bytes_total, total)
+                else:
+                    files_done += count
+                    files_total += total
+        return DownloadSnapshot(files_done, files_total, bytes_done, bytes_total)
+
+
 class ModelManager:
     """Own the single in-memory model used by the local application."""
 
@@ -870,6 +976,14 @@ class ModelManager:
         self.model_id: str | None = None
         self.local_path: Path | None = None
         self.device_name: str | None = None
+        # Downloads under way right now, by model ID, so a second request for
+        # the same model can follow the first instead of racing it for the
+        # same files.
+        self.active_downloads: dict[str, DownloadProgress] = {}
+        # Guards active_downloads, so that "is anyone fetching this?" and "then
+        # I am" happen as one step: two handlers asking at the same instant
+        # must come away with one download between them, not one each.
+        self._downloads_lock = threading.Lock()
         self._lock = threading.RLock()
         # A separate, non-reentrant flag for "a generation is running right
         # now". The model lock cannot answer that question: it is reentrant
@@ -921,15 +1035,86 @@ class ModelManager:
 
         self._generating.release()
 
-    def download(self, model_id: str, hf_token: str | None = None) -> Path:
-        from huggingface_hub import snapshot_download
+    def download(
+        self,
+        model_id: str,
+        hf_token: str | None = None,
+        progress: DownloadProgress | None = None,
+    ) -> Path:
+        """Fetch ``model_id`` into the Hugging Face cache and return its snapshot.
+
+        Blocks until the last byte; ``progress`` is how a caller on another
+        thread watches it happen. Files already cached are skipped, and a
+        partial file left by an interrupted download is resumed.
+
+        ``progress`` is listed in :attr:`active_downloads` for as long as this
+        runs. A caller that already listed it through :meth:`reserve_download`
+        keeps that entry; one that did not gets it added here, unless another
+        download of the same model is already listed, which is left alone.
+        """
 
         checked_id = validate_model_id(model_id)
-        path = snapshot_download(
-            repo_id=checked_id,
-            token=hf_token.strip() if hf_token and hf_token.strip() else None,
-        )
+        progress = progress or DownloadProgress()
+        try:
+            with self._downloads_lock:
+                self.active_downloads.setdefault(checked_id, progress)
+            from huggingface_hub import snapshot_download
+
+            path = snapshot_download(
+                repo_id=checked_id,
+                token=hf_token.strip() if hf_token and hf_token.strip() else None,
+                tqdm_class=progress.bar_class(),
+            )
+        finally:
+            self.release_download(checked_id, progress)
         return Path(path)
+
+    def reserve_download(self, model_id: str) -> tuple[DownloadProgress, bool]:
+        """Claim ``model_id`` for a new download, or point at the one running.
+
+        Returns ``(progress, reserved)``. When ``reserved`` is true the caller
+        owns the download: it must pass ``progress`` to :meth:`download`, whose
+        ``finally`` removes the entry. When false, another caller is fetching
+        the model and ``progress`` is theirs to watch.
+
+        The lookup and the reservation are one atomic step. Checking
+        :attr:`active_downloads` and then starting a worker is not: the worker
+        registers itself only once it reaches :meth:`download`, and two
+        handlers (say **Download** and **Download and load**) clicked together
+        would both find the table empty in that gap and fetch the same files
+        twice.
+        """
+
+        checked_id = validate_model_id(model_id)
+        with self._downloads_lock:
+            running = self.active_downloads.get(checked_id)
+            if running is not None:
+                return running, False
+            progress = DownloadProgress()
+            self.active_downloads[checked_id] = progress
+            return progress, True
+
+    def release_download(self, model_id: str, progress: DownloadProgress) -> None:
+        """Remove ``progress`` only when it still owns ``model_id``'s entry."""
+
+        checked_id = validate_model_id(model_id)
+        with self._downloads_lock:
+            if self.active_downloads.get(checked_id) is progress:
+                del self.active_downloads[checked_id]
+
+    def find_cached(self, model_id: str) -> Path:
+        """The complete local snapshot of ``model_id``, without going online.
+
+        Raises ``huggingface_hub.errors.IncompleteSnapshotError`` when the
+        snapshot folder exists but files are missing from it, which is what an
+        interrupted or still-running download leaves behind.
+        """
+
+        from huggingface_hub import snapshot_download
+
+        return Path(
+            snapshot_download(repo_id=validate_model_id(model_id), local_files_only=True)
+        )
 
     def load(self, model_id: str, local_path: Path) -> str:
         import torch
