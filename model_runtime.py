@@ -183,8 +183,13 @@ def missing_files(snapshot: Path | None) -> tuple[str, ...]:
         if not index.is_file():
             continue
         try:
-            shards = set(json.loads(index.read_text())["weight_map"].values())
-        except (OSError, ValueError, KeyError, AttributeError):
+            weight_map = json.loads(index.read_text())["weight_map"]
+            if not isinstance(weight_map, dict) or not weight_map:
+                raise ValueError("weight_map must be a non-empty object")
+            shards = set(weight_map.values())
+            if not all(isinstance(shard, str) and shard for shard in shards):
+                raise TypeError("weight_map values must be file names")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             missing.append(MODEL_WEIGHTS)
             return tuple(missing)
         missing.extend(

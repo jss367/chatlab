@@ -2465,7 +2465,7 @@ def build_app() -> gr.Blocks:
             model_status = gr.Markdown(
                 status_card(
                     "No model loaded",
-                    "Enter a model ID, then download and load it. Files are kept in your normal Hugging Face cache.",
+                    "Choose a model under My Models, or enter a Hugging Face model ID to download one. Files are kept in your normal Hugging Face cache.",
                 ),
                 elem_id="model-status",
             )
@@ -3022,7 +3022,6 @@ def build_app() -> gr.Blocks:
         # Every path that redraws the strips writes the metrics state, so this
         # is where a readout of a token that is no longer on screen goes away.
         metrics_state.change(reset_inspection, insight_state, inspection_outputs)
-
     return demo
 
 

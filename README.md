@@ -74,7 +74,7 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Model files use the standard Hugging Face cache. By default this is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
+Model files use the standard Hugging Face cache. Chatlab lists complete downloads and resumable partial downloads under **My Models** in the side pane. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
 
 ## The side pane
 
