@@ -7,7 +7,7 @@ import torch
 
 import model_runtime
 from conversation import split_reasoning
-from model_runtime import IncrementalDecoder, ModelManager
+from model_runtime import IncrementalDecoder, ModelChanged, ModelManager
 
 
 PIECES = [
@@ -291,6 +291,27 @@ class GenerateStreamingTests(unittest.TestCase):
             updates.append((update.text, len(update.metrics)))
         return updates
 
+    def test_a_forced_prefix_from_an_earlier_load_is_refused_before_any_token(self):
+        manager = loaded_manager([0, 1, 2, EOS_ID])
+        stale = manager.load_id
+        manager.load_count += 1
+        stream = manager.generate(
+            [{"role": "user", "content": "hi"}],
+            temperature=0.0,
+            top_p=1.0,
+            top_k=0,
+            max_new_tokens=4,
+            seed=1,
+            forced_ids=[0],
+            load_id=stale,
+        )
+        with self.assertRaises(ModelChanged):
+            next(stream)
+        # The refusal released the slot it took, and the current load is
+        # still accepted.
+        self.assertFalse(manager.busy)
+        self.assertTrue(self.collect(manager, load_id=manager.load_id))
+
     def test_updates_are_batched(self):
         manager = loaded_manager([0, 1, 2, 4, 5, 6, 7, 2])
         updates = self.collect(manager, max_new_tokens=40)
@@ -573,6 +594,18 @@ class ReplacementEncodingTests(unittest.TestCase):
     def test_a_stop_special_token_can_still_end_the_replacement(self):
         manager = loaded_manager([0])
         self.assertEqual(manager.encode_replacement([], "<eos>"), [EOS_ID])
+
+    def test_kept_ids_from_an_earlier_load_are_refused_under_the_lock(self):
+        manager = loaded_manager([0])
+        stale = manager.load_id
+        self.assertEqual(manager.encode_replacement([0], " world", load_id=stale), [1])
+        # A same-ID reload is a new load: the kept ids belong to the old one.
+        manager.load_count += 1
+        with self.assertRaises(ModelChanged):
+            manager.encode_replacement([0], " world", load_id=stale)
+        self.assertEqual(
+            manager.encode_replacement([0], " world", load_id=manager.load_id), [1]
+        )
 
 
 class ChatTemplateTokenizer(FakeTokenizer):

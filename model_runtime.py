@@ -1370,7 +1370,9 @@ class ModelManager:
             encoded = encoded[0]
         return [int(value) for value in encoded], prefilled
 
-    def encode_replacement(self, kept_ids: Sequence[int], text: str) -> list[int]:
+    def encode_replacement(
+        self, kept_ids: Sequence[int], text: str, *, load_id: str | None = None
+    ) -> list[int]:
         """Encode text the reader wants replayed after ``kept_ids``, as a branch does.
 
         The text stands in for one or more sampled tokens, so it carries no
@@ -1382,10 +1384,27 @@ class ModelManager:
         The kept tokens plus the result must therefore decode to the kept text
         followed by exactly what was typed. The kept ids themselves are never
         re-tokenized; a branch preserves them token for token.
+
+        ``load_id`` names the load the kept tokens came from (see
+        :attr:`load_id`). It is compared under the model lock, and the encoding
+        itself runs under that same lock, so a load that lands between the
+        caller's own check and this call is refused with :class:`ModelChanged`
+        rather than answered with tokens from a tokenizer the kept ids never
+        met.
         """
 
-        if not self.loaded:
-            raise RuntimeError("Download and load a model before branching.")
+        with self._lock:
+            if not self.loaded:
+                raise RuntimeError("Download and load a model before branching.")
+            if load_id is not None and load_id != self.load_id:
+                raise ModelChanged(
+                    "The model has been reloaded since these tokens were produced."
+                )
+            return self._encode_replacement(kept_ids, text)
+
+    def _encode_replacement(self, kept_ids: Sequence[int], text: str) -> list[int]:
+        """The body of encode_replacement(), run with the model lock held."""
+
         assert self.tokenizer is not None
         kept = [int(value) for value in kept_ids]
         if not text:
@@ -1649,6 +1668,7 @@ class ModelManager:
         forced_ids: Sequence[int] = (),
         answer_prefill: str = "",
         literal_prefill_tokens: int = 0,
+        load_id: str | None = None,
     ) -> Iterator[GenerationUpdate]:
         """Stream a reply to ``messages``, one batch of tokens at a time.
 
@@ -1664,6 +1684,12 @@ class ModelManager:
         block first so the reader's text begins the visible answer.
         ``literal_prefill_tokens`` carries that protected boundary through a
         later branch replay.
+
+        ``load_id`` names the load ``forced_ids`` came from (see
+        :attr:`load_id`). It is compared under the model lock, before any token
+        is fed, so a load that finished after the caller looked is refused with
+        :class:`ModelChanged` rather than replaying one model's token IDs
+        through another.
         """
 
         # The application reserves the slot before it publishes its first
@@ -1690,6 +1716,7 @@ class ModelManager:
                 forced_ids=forced_ids,
                 answer_prefill=answer_prefill,
                 literal_prefill_tokens=literal_prefill_tokens,
+                load_id=load_id,
             )
         finally:
             if reserved:
@@ -1708,12 +1735,17 @@ class ModelManager:
         forced_ids: Sequence[int] = (),
         answer_prefill: str = "",
         literal_prefill_tokens: int = 0,
+        load_id: str | None = None,
     ) -> Iterator[GenerationUpdate]:
         import torch
 
         with self._lock, torch.inference_mode():
             if not self.loaded:
                 raise RuntimeError("Download and load a model before chatting.")
+            if load_id is not None and load_id != self.load_id:
+                raise ModelChanged(
+                    "The model has been reloaded since these tokens were produced."
+                )
 
             assert self.model is not None
             assert self.tokenizer is not None

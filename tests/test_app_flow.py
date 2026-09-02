@@ -1971,6 +1971,68 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
         self.assertEqual(frames[0][TURNS], final[TURNS])
 
+    def reload_before(self, method_name):
+        """Land a model load inside the branch handler, after its stamp check.
+
+        The handler compares ``branch_source`` against the live load first,
+        then calls the runtime; a load finishing in between passes that check
+        and must be caught by the runtime's own comparison under the model
+        lock. The wrapped method bumps the load count at the moment of the
+        call, which is exactly that window.
+        """
+
+        manager = app.MANAGER
+        real = getattr(manager, method_name)
+
+        def reloaded_first(*args, **kwargs):
+            manager.load_count += 1
+            return real(*args, **kwargs)
+
+        setattr(manager, method_name, reloaded_first)
+
+    def assertBranchRefusedByReload(self, frames, final):
+        last = frames[-1]
+        self.assertEqual(last[STATUS], app.BRANCH_MODEL_CHANGED)
+        self.assertEqual(last[TURNS], final[TURNS])
+        self.assertEqual(last[SEND], gr.update(visible=True))
+        self.assertEqual(last[STOP], gr.update(visible=False))
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_a_load_landing_before_the_encoding_leaves_the_conversation_alone(
+        self,
+    ):
+        final = self.respond()[-1]
+        self.reload_before("encode_replacement")
+        frames = self.branch_text(final, "Hello")
+        self.assertEqual(len(frames), 1)
+        self.assertBranchRefusedByReload(frames, final)
+
+    def test_a_load_landing_before_typed_replay_leaves_the_conversation_alone(
+        self,
+    ):
+        final = self.respond()[-1]
+        self.reload_before("generate")
+        frames = self.branch_text(final, "Hello")
+        # The opening "Generating…" frame is already out when the runtime
+        # refuses the replay, so a second frame takes the conversation back.
+        self.assertEqual(len(frames), 2)
+        self.assertIn("Generating", frames[0][STATUS])
+        self.assertBranchRefusedByReload(frames, final)
+
+    def test_a_load_landing_before_a_picked_replay_leaves_the_conversation_alone(
+        self,
+    ):
+        final = self.respond()[-1]
+        _detail, pick = self.pick_alternative(final)
+        self.reload_before("generate")
+        frames = list(
+            app.branch_from(
+                pick, final[BRANCH_SOURCE], final[METRICS], "", final[TURNS], *SETTINGS
+            )
+        )
+        self.assertEqual(len(frames), 2)
+        self.assertBranchRefusedByReload(frames, final)
+
     def test_typed_text_keeps_literal_prefill_tags_before_it(self):
         app.MANAGER = loaded_manager(
             [0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS

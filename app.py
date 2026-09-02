@@ -685,6 +685,11 @@ BRANCH_UNAVAILABLE = (
     "🌱 Only a chat response can be branched. Scored text and prompt tokens "
     "have no conversation to continue."
 )
+BRANCH_MODEL_CHANGED = (
+    "🌱 The model was reloaded before the branch could be replayed, so the "
+    "response's tokens no longer belong to the weights in memory. The "
+    "conversation was left as it was."
+)
 
 
 def remember_selection(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
@@ -1058,6 +1063,7 @@ def generate_reply(
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
     branch_note: str = "",
+    expected_load_id: str | None = None,
 ):
     """Stream one assistant reply for ``turns``, which must end with a user turn.
 
@@ -1066,6 +1072,13 @@ def generate_reply(
     branch: the tokens kept from an earlier response and the alternative the
     reader picked. A branch already contains any prefix that was on the old
     response, so it takes precedence. ``branch_note`` leads the status line.
+
+    ``expected_load_id`` is the model load ``forced_ids`` came from. Only a
+    branch passes it: the runtime compares it under the model lock and raises
+    ``ModelChanged`` if a load landed in between, and that exception is let
+    through to the branch handler, which alone still holds the conversation
+    the branch was about to replace. Ordinary chat has no such tokens and
+    generates with whatever is loaded.
 
     The generation slot is reserved here, before the first frame is published,
     because this is the first moment a handler is committed to generating. The
@@ -1099,6 +1112,7 @@ def generate_reply(
             forced_ids=forced_ids,
             literal_prefill_tokens=literal_prefill_tokens,
             branch_note=branch_note,
+            expected_load_id=expected_load_id,
         )
     finally:
         # Every exit runs this: a finished stream, a failure, and - the one
@@ -1126,6 +1140,7 @@ def _stream_reply(
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
     branch_note: str = "",
+    expected_load_id: str | None = None,
 ):
     """The body of generate_reply(), run with the generation slot held."""
 
@@ -1246,6 +1261,7 @@ def _stream_reply(
         forced_ids=tuple(int(value) for value in forced_ids),
         answer_prefill=assistant_prefill if applied_prefill else "",
         literal_prefill_tokens=literal_prefill_tokens,
+        load_id=expected_load_id,
     )
 
     try:
@@ -1309,6 +1325,13 @@ def _stream_reply(
                     ),
                 )
                 first = False
+    except ModelChanged:
+        # Raised on the first step, before any token, and only when a branch
+        # asked for the check. The opening frame is already out, but the turns
+        # here are the branch's replacement, not the conversation the reader
+        # was looking at; the branch handler still holds that and yields the
+        # correction. generate_reply() releases the slot on the way out.
+        raise
     except Exception as error:
         # The diagnostic only goes to the status line. Storing it as the
         # assistant turn would feed the failure back to the model next turn.
@@ -1654,8 +1677,18 @@ def branch_with_text(
     if len(kept) != at - 1:
         yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
         return
+    # The stamp check above is the fast path. The load it compared against can
+    # still change before the runtime takes the model lock, so the same load is
+    # handed down and compared again under that lock, for the encoding and for
+    # the replay alike; a mismatch there is ModelChanged.
+    _generation, expected_load = branch_source
     try:
-        replacement_ids = MANAGER.encode_replacement(kept, replacement)
+        replacement_ids = MANAGER.encode_replacement(
+            kept, replacement, load_id=expected_load
+        )
+    except ModelChanged:
+        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+        return
     except (ValueError, RuntimeError) as error:
         yield idle_state(prompt_text, turns, f"🌱 {error}")
         return
@@ -1663,14 +1696,19 @@ def branch_with_text(
     note = (
         f"Branched at token {at}: {replacement!r} instead of {metric['text']!r}."
     )
-    yield from generate_reply(
-        turns[: position + 1],
-        prompt_text,
-        *settings,
-        forced_ids=(*kept, *replacement_ids),
-        literal_prefill_tokens=literal_prefill_count(metrics, len(kept)),
-        branch_note=note,
-    )
+    try:
+        yield from generate_reply(
+            turns[: position + 1],
+            prompt_text,
+            *settings,
+            forced_ids=(*kept, *replacement_ids),
+            literal_prefill_tokens=literal_prefill_count(metrics, len(kept)),
+            branch_note=note,
+            expected_load_id=expected_load,
+        )
+    except ModelChanged:
+        # ``turns`` is still the whole conversation, old response included.
+        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
 
 
 def branch_from(
@@ -1731,14 +1769,22 @@ def branch_from(
     else:
         note = f"Branched at token {at}: {pick['text']!r} instead of {pick['original']!r}."
 
-    yield from generate_reply(
-        turns[: position + 1],
-        prompt_text,
-        *settings,
-        forced_ids=forced,
-        literal_prefill_tokens=literal_prefill_tokens,
-        branch_note=note,
-    )
+    # As in branch_with_text(): the stamp check above is the fast path, and the
+    # runtime compares the same load again under the model lock.
+    _generation, expected_load = branch_source
+    try:
+        yield from generate_reply(
+            turns[: position + 1],
+            prompt_text,
+            *settings,
+            forced_ids=forced,
+            literal_prefill_tokens=literal_prefill_tokens,
+            branch_note=note,
+            expected_load_id=expected_load,
+        )
+    except ModelChanged:
+        # ``turns`` is still the whole conversation, old response included.
+        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
 
 
 def undo_from(
