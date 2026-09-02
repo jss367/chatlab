@@ -385,6 +385,19 @@ class ModelSearchPaneTests(unittest.TestCase):
 
         self.assertIn("Partly cached", detail)
 
+    def test_an_unreadable_cache_leaves_the_result_uncached(self):
+        def refuse(model_id):
+            raise PermissionError(13, "Permission denied")
+
+        app.cache_status = refuse
+        _, _, state = app.search_models("olmo", "")
+
+        box, detail = app.select_search_result(INSTRUCT.model_id, state)
+
+        self.assertEqual(box["value"], INSTRUCT.model_id)
+        self.assertNotIn("cached", detail)
+        self.assertIn("Download and load", detail)
+
     def test_choosing_nothing_leaves_the_id_box_alone(self):
         self.assertEqual(
             app.select_search_result(None, {}), (gr.skip(), app.NO_RESULT_SELECTED)

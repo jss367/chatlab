@@ -592,9 +592,11 @@ def describe_hub_model(result: HubModel) -> str:
         facts.append(
             ("Gated", "accept its terms on Hugging Face and enter a token first")
         )
+    # A cache that cannot be read (a permission, a drive that has gone away)
+    # is simply nothing on disk: the search succeeded, so the pick must too.
     try:
         cached = cache_status(result.model_id)
-    except ValueError:
+    except (OSError, ValueError):
         cached = CacheStatus()
     if cached.complete:
         facts.append(("Already cached", f"{describe_on_disk(cached)}, ready to load"))
