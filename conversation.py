@@ -18,6 +18,7 @@ THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
 REASONING_TITLE = "Reasoning"
 SAVE_FORMAT = "chatlab-conversation-1"
+MAIN_BRANCH = "Main"
 
 _PARTIAL_TAGS = tuple(
     sorted(
@@ -203,6 +204,68 @@ def model_messages(
         messages.append({"role": turn["role"], "content": content})
 
     return messages
+
+
+# ------------------------------------------------------------------- forks
+#
+# A fork is a second copy of the transcript that can be taken somewhere else.
+# The forks live beside the conversation as a plain dictionary so they fit in a
+# ``gr.State``:
+#
+#     {"active": name, "branches": {name: [turns...], ...}}
+#
+# Only the *inactive* branches are current in ``branches``: the active one is
+# whatever the conversation state holds, and its entry is refreshed whenever
+# the reader forks or switches away. Keeping the live turns in one place means
+# every existing handler - send, retry, edit, undo - stays unaware of forks.
+
+
+def new_forks() -> dict:
+    return {"active": MAIN_BRANCH, "branches": {MAIN_BRANCH: []}}
+
+
+def copy_forks(forks: dict | None) -> dict:
+    forks = forks or new_forks()
+    return {
+        "active": forks.get("active", MAIN_BRANCH),
+        "branches": {
+            name: copy_turns(turns) for name, turns in forks.get("branches", {}).items()
+        }
+        or {MAIN_BRANCH: []},
+    }
+
+
+def next_fork_name(forks: dict) -> str:
+    """The first ``Fork N`` not already taken, so deleting one never renames another."""
+
+    number = 1
+    while f"Fork {number}" in forks["branches"]:
+        number += 1
+    return f"Fork {number}"
+
+
+def fork_at(
+    turns: list[dict] | None, found: tuple[int, str] | None
+) -> tuple[list[dict], str | None]:
+    """The turns a fork starts with, and the text that goes back into the box.
+
+    ``found`` is the ``(turn index, part)`` the reader clicked, or ``None`` to
+    copy the whole conversation. An assistant message keeps everything through
+    its turn, so the fork is ready for a different next question. A user
+    message keeps what came before it and hands its own text back, so the
+    fork can start with a reworded version of that question - the same shape
+    Undo gives.
+    """
+
+    turns = copy_turns(turns)
+    if found is None:
+        return turns, None
+    position, _part = found
+    if not 0 <= position < len(turns):
+        return turns, None
+    if turns[position]["role"] == "user":
+        return turns[:position], turns[position].get("content") or ""
+    return turns[: position + 1], None
 
 
 def to_json(turns: list[dict] | None, *, system_prompt: str = "") -> str:
