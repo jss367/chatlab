@@ -254,6 +254,17 @@ class DownloadCardTests(unittest.TestCase):
         self.assertIn("no network", frames[-1])
         self.assertEqual(app.MANAGER.active_downloads, {})
 
+    def test_a_worker_that_cannot_start_releases_its_reservation(self):
+        app.MANAGER = ModelManager()
+
+        with mock.patch.object(
+            threading.Thread, "start", side_effect=RuntimeError("no threads")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no threads"):
+                list(app.stream_download("org/model", ""))
+
+        self.assertEqual(app.MANAGER.active_downloads, {})
+
     def test_a_second_request_follows_the_download_already_running(self):
         progress = DownloadProgress()
         rebuild = progress.bar_class()(desc="Reconstructing", total=1000, unit="B")

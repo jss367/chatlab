@@ -213,7 +213,12 @@ def stream_download(model_id: str, hf_token: str):
             outcome["error"] = error
 
     worker = threading.Thread(target=work, name="chatlab-download", daemon=True)
-    worker.start()
+    try:
+        worker.start()
+    except BaseException:
+        # download() never ran, so its finally cannot release the reservation.
+        MANAGER.release_download(cleaned, progress)
+        raise
     meter = RateMeter()
     while worker.is_alive():
         snap = progress.snapshot()

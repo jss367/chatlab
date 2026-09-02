@@ -1066,9 +1066,7 @@ class ModelManager:
                 tqdm_class=progress.bar_class(),
             )
         finally:
-            with self._downloads_lock:
-                if self.active_downloads.get(checked_id) is progress:
-                    del self.active_downloads[checked_id]
+            self.release_download(checked_id, progress)
         return Path(path)
 
     def reserve_download(self, model_id: str) -> tuple[DownloadProgress, bool]:
@@ -1095,6 +1093,14 @@ class ModelManager:
             progress = DownloadProgress()
             self.active_downloads[checked_id] = progress
             return progress, True
+
+    def release_download(self, model_id: str, progress: DownloadProgress) -> None:
+        """Remove ``progress`` only when it still owns ``model_id``'s entry."""
+
+        checked_id = validate_model_id(model_id)
+        with self._downloads_lock:
+            if self.active_downloads.get(checked_id) is progress:
+                del self.active_downloads[checked_id]
 
     def find_cached(self, model_id: str) -> Path:
         """The complete local snapshot of ``model_id``, without going online.
