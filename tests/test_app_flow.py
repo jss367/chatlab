@@ -2053,6 +2053,98 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertIn("Generating", frames[0][STATUS])
         self.assertBranchRefusedByReload(frames, final)
 
+    def record_encodings(self, seen):
+        """Wrap encode_replacement() to note whether the slot is held at the call."""
+
+        real = app.MANAGER.encode_replacement
+
+        def observe(*args, **kwargs):
+            seen.append(app.MANAGER.busy)
+            return real(*args, **kwargs)
+
+        app.MANAGER.encode_replacement = observe
+
+    def test_typed_text_is_refused_while_a_response_is_generating(self):
+        final = self.respond()[-1]
+        encodings = []
+        self.record_encodings(encodings)
+        self.assertTrue(app.MANAGER.reserve_generation())
+        try:
+            frames = self.branch_text(final, "Hello")
+        finally:
+            app.MANAGER.release_generation()
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][STATUS], app.BUSY_STATUS)
+        self.assertEqual(frames[0][TURNS], gr.skip())
+        # The encoding waits on the model lock, which the running generation
+        # is holding. A refused branch must not queue behind it: it would
+        # resume once that generation finished and replay its stale snapshot.
+        self.assertEqual(encodings, [])
+
+    def test_typed_text_takes_the_slot_before_it_encodes(self):
+        """The reservation comes first, not after the encoding.
+
+        encode_replacement() blocks on the model lock. With only a busy check
+        ahead of it, a Send starting in between would hold that lock for its
+        whole generation, and the branch would then replay the conversation it
+        was handed at click time over the newer one.
+        """
+
+        final = self.respond()[-1]
+        encodings = []
+        self.record_encodings(encodings)
+        frames = self.branch_text(final, "Hello")
+        self.assertEqual(encodings, [True])
+        self.assertNotEqual(frames[-1][STATUS], app.BUSY_STATUS)
+        self.assertTrue(frames[-1][TURNS][-1]["content"].startswith("Hello"))
+        self.assertFalse(app.MANAGER.busy, "the slot must not leak")
+
+    def test_typed_text_against_a_strip_replaced_as_the_slot_is_taken_is_refused(
+        self,
+    ):
+        """A generation finishing between the click and the reservation.
+
+        Its final frame re-stamped the strip. The stamps are compared only once
+        the slot is owned, so the comparison reads the strip the replacement
+        would actually land on.
+        """
+
+        final = self.respond()[-1]
+        manager = app.MANAGER
+        real = manager.reserve_generation
+
+        def replace_strips_first():
+            app.new_metrics_generation()
+            return real()
+
+        manager.reserve_generation = replace_strips_first
+        encodings = []
+        self.record_encodings(encodings)
+        frames = self.branch_text(final, "Hello")
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
+        self.assertEqual(frames[0][TURNS], final[TURNS])
+        self.assertEqual(encodings, [])
+        self.assertFalse(manager.busy, "a refusal must give the slot back")
+
+    def test_a_cancelled_typed_branch_releases_the_slot(self):
+        final = self.respond()[-1]
+        selected = app.remember_selection(final[METRICS], select(1))
+        stream = app.branch_with_text(
+            selected,
+            final[BRANCH_SOURCE],
+            final[METRICS],
+            "Hello",
+            "",
+            final[TURNS],
+            *SETTINGS,
+        )
+        first = next(stream)
+        self.assertIn("Generating", first[STATUS])
+        self.assertTrue(app.MANAGER.busy)
+        stream.close()
+        self.assertFalse(app.MANAGER.busy, "GeneratorExit must release the slot")
+
     def test_a_load_landing_before_a_picked_replay_leaves_the_conversation_alone(
         self,
     ):

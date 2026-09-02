@@ -1096,6 +1096,8 @@ def generate_reply(
     handler until it has serialized that frame and sent it to the browser. A
     second click arriving inside that round trip used to sail past a manager
     that looked idle and overwrite the conversation from its stale snapshot.
+    branch_with_text() has work to do before it can generate, so it takes the
+    slot itself and calls _stream_reply() directly.
     """
 
     if not MANAGER.reserve_generation():
@@ -1649,11 +1651,48 @@ def branch_with_text(
     to the kept text followed by exactly what was typed. It is spliced in as
     sampled content, so a stop token typed into it ends the response there,
     the same as a stop token chosen from the alternatives table.
+
+    Unlike the other handlers, this one takes the generation slot itself,
+    before it does anything, and holds it through the replay. The encoding
+    waits on the model lock, and a busy check ahead of it is not enough: a
+    Send that slipped in between would hold that lock for its whole
+    generation, and this handler would resume afterwards with the
+    conversation it was handed at click time and replay that stale response
+    onto the newer one. With the slot owned first, nothing can generate while
+    the encoding waits, and the stamp check below reads a strip that no
+    generation can replace under it.
     """
 
-    if MANAGER.busy:
+    if not MANAGER.reserve_generation():
         yield busy_state()
         return
+
+    try:
+        yield from _branch_with_text(
+            selected_token,
+            branch_source,
+            metrics_state,
+            replacement,
+            prompt_text,
+            turns,
+            *settings,
+        )
+    finally:
+        # As in generate_reply(): a finished stream, a refusal, a failure and
+        # a cancellation all pass through here, or the slot would stay taken.
+        MANAGER.release_generation()
+
+
+def _branch_with_text(
+    selected_token: dict | None,
+    branch_source: tuple[int, str | None] | None,
+    metrics_state: tuple[int, list[dict]],
+    replacement: str,
+    prompt_text: str,
+    turns: list[dict] | None,
+    *settings,
+):
+    """The body of branch_with_text(), run with the generation slot held."""
 
     turns = copy_turns(turns)
     generation, metrics = metrics_state
@@ -1707,7 +1746,8 @@ def branch_with_text(
         f"Branched at token {at}: {replacement!r} instead of {metric['text']!r}."
     )
     try:
-        yield from generate_reply(
+        # Not generate_reply(): the caller already holds the slot.
+        yield from _stream_reply(
             turns[: position + 1],
             prompt_text,
             *settings,
