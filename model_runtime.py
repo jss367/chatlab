@@ -815,6 +815,9 @@ class GenerationUpdate:
     metrics: list[dict]
     """Live list owned by the generator. Copy it before storing it anywhere."""
 
+    load_id: str
+    """The immutable model load that produced these token IDs."""
+
     prompt_metrics: list[dict] = field(default_factory=list)
     prompt_note: str = ""
     reasoning_prefilled: bool = False
@@ -1747,6 +1750,9 @@ class ModelManager:
                     "The model has been reloaded since these tokens were produced."
                 )
 
+            producing_load_id = self.load_id
+            assert producing_load_id is not None
+
             assert self.model is not None
             assert self.tokenizer is not None
             model = self.model
@@ -1840,6 +1846,7 @@ class ModelManager:
                 yield GenerationUpdate(
                     text=decoder.text,
                     metrics=metrics,
+                    load_id=producing_load_id,
                     prompt_metrics=prompt_metrics,
                     prompt_note=prompt_note,
                     reasoning_prefilled=reasoning_prefilled,
@@ -1885,6 +1892,7 @@ class ModelManager:
                     yield GenerationUpdate(
                         text=decoder.text,
                         metrics=metrics,
+                        load_id=producing_load_id,
                         prompt_metrics=prompt_metrics,
                         prompt_note=prompt_note,
                         reasoning_prefilled=reasoning_prefilled,

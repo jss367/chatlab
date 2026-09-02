@@ -912,19 +912,25 @@ def finalize_partial(turns: list[dict]) -> bool:
 
 
 def stop_generation(
-    turns: list[dict] | None, metrics_state: tuple[int, list[dict]] = (0, [])
+    turns: list[dict] | None,
+    metrics_state: tuple[int, list[dict]] = (0, []),
+    context_state: tuple[int, list[int], str | None] = (0, [], None),
 ):
     """Finish the turn that the cancelled generator left behind.
 
     Gradio closes ``generate_reply`` at its last yield, so nothing else ever
     finalizes that turn. A kept partial response is still a response: the
     tokens on screen are the ones it is made of, so it can be branched from.
+    ``context_state`` carries the producing load captured while the model lock
+    was held; a waiting load may finish after cancellation but before this
+    handler runs, so consulting the manager here would mislabel the old IDs.
     """
 
     turns = copy_turns(turns)
     kept = finalize_partial(turns)
     messages, _ = display_messages(turns)
     generation, metrics = metrics_state
+    context_generation, _context_ids, producing_load_id = context_state
     return (
         messages,
         turns,
@@ -932,7 +938,9 @@ def stop_generation(
         "Stopped. The partial response was kept."
         if kept
         else "Stopped before the model produced anything.",
-        (generation, MANAGER.load_id) if kept and metrics else None,
+        (generation, producing_load_id)
+        if kept and metrics and context_generation == generation
+        else None,
     )
 
 
@@ -1249,6 +1257,7 @@ def _stream_reply(
     first = True
     forced_prefix_tokens = 0
     literal_prefill = ""
+    producing_load_id: str | None = None
 
     stream = MANAGER.generate(
         request,
@@ -1270,6 +1279,7 @@ def _stream_reply(
         with contextlib.closing(stream):
             for update in stream:
                 raw_text = update.text
+                producing_load_id = update.load_id
                 prefilled = update.reasoning_prefilled
                 forced_prefix_tokens = update.forced_prefix_tokens
                 if update.literal_prefill_text:
@@ -1307,7 +1317,7 @@ def _stream_reply(
                     context_ids = (
                         generation,
                         [int(v) for v in update.prompt_ids],
-                        MANAGER.load_id,
+                        update.load_id,
                     )
                 yield snapshot(
                     highlight,
@@ -1353,7 +1363,7 @@ def _stream_reply(
             metrics,
             f"Generation failed: {error}",
             busy=False,
-            branch_source=(generation, MANAGER.load_id) if kept and metrics else None,
+            branch_source=(generation, producing_load_id) if kept and metrics else None,
         )
         return
 
@@ -1414,7 +1424,7 @@ def _stream_reply(
             charts.surprise_chart(metrics),
         ),
         trace=trace,
-        branch_source=(generation, MANAGER.load_id) if kept and metrics else None,
+        branch_source=(generation, producing_load_id) if kept and metrics else None,
     )
 
 
@@ -2937,7 +2947,7 @@ def build_app() -> gr.Blocks:
 
         stop_button.click(
             stop_generation,
-            inputs=[conversation_state, metrics_state],
+            inputs=[conversation_state, metrics_state, context_ids_state],
             outputs=[
                 chatbot,
                 conversation_state,

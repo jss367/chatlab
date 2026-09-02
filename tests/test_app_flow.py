@@ -411,11 +411,13 @@ class ChatFlowTests(unittest.TestCase):
             yield GenerationUpdate(
                 text="Let me add two and two",
                 metrics=[],
+                load_id=app.MANAGER.load_id,
                 reasoning_prefilled=True,
             )
             yield GenerationUpdate(
                 text="Let me add two and two.</think>Four.",
                 metrics=[],
+                load_id=app.MANAGER.load_id,
                 reasoning_prefilled=True,
             )
 
@@ -435,7 +437,9 @@ class ChatFlowTests(unittest.TestCase):
 
     def test_a_plain_reply_never_streams_as_reasoning(self):
         def plain(*_args, **_kwargs):
-            yield GenerationUpdate(text="Four.", metrics=[])
+            yield GenerationUpdate(
+                text="Four.", metrics=[], load_id=app.MANAGER.load_id
+            )
 
         app.MANAGER.generate = plain
         final = self.last(app.chat("hi", [], *SETTINGS))[-1]
@@ -444,7 +448,9 @@ class ChatFlowTests(unittest.TestCase):
 
     def test_a_failure_after_some_tokens_keeps_them(self):
         def failing(*_args, **_kwargs):
-            yield GenerationUpdate(text="<think>Hmm", metrics=[])
+            yield GenerationUpdate(
+                text="<think>Hmm", metrics=[], load_id=app.MANAGER.load_id
+            )
             raise RuntimeError("gpu fell over")
 
         app.MANAGER.generate = failing
@@ -775,7 +781,9 @@ class AnalysisPanelTests(unittest.TestCase):
 
     def test_a_failed_response_is_not_exportable(self):
         def failing(*_args, **_kwargs):
-            yield GenerationUpdate(text="Hmm", metrics=[])
+            yield GenerationUpdate(
+                text="Hmm", metrics=[], load_id=app.MANAGER.load_id
+            )
             raise RuntimeError("gpu fell over")
 
         app.MANAGER.generate = failing
@@ -872,7 +880,7 @@ class CancellationTests(unittest.TestCase):
 
         self.assertFalse(frame[TURNS][1]["reasoning_closed"])
         messages, turns, _send, _stop, status, _source = app.stop_generation(
-            frame[TURNS]
+            frame[TURNS], frame[METRICS], frame[CONTEXT_IDS]
         )
         self.assertTrue(turns[1]["reasoning_closed"])
         thoughts = [m for m in messages if m.get("metadata", {}).get("title")]
@@ -1290,7 +1298,9 @@ class BusyFlagTests(unittest.TestCase):
         """
 
         def failing(*_args, **_kwargs):
-            yield GenerationUpdate(text="Hmm", metrics=[])
+            yield GenerationUpdate(
+                text="Hmm", metrics=[], load_id=app.MANAGER.load_id
+            )
             raise RuntimeError("gpu fell over")
 
         app.MANAGER.generate = failing
@@ -1678,6 +1688,26 @@ class BranchFromTokenTests(unittest.TestCase):
             (frames[-1][METRICS][0], app.MANAGER.load_id),
         )
 
+    def test_a_load_finishing_before_the_final_snapshot_cannot_claim_the_tokens(self):
+        manager = app.MANAGER
+        real_generate = manager.generate
+        producing_load_id = manager.load_id
+
+        def load_after_generation(*args, **kwargs):
+            yield from real_generate(*args, **kwargs)
+            # A load waiting on the model lock can finish as soon as the
+            # runtime generator exits, before _stream_reply builds its final
+            # branchable snapshot.
+            manager.load_count += 1
+
+        manager.generate = load_after_generation
+        final = self.respond()[-1]
+
+        self.assertNotEqual(manager.load_id, producing_load_id)
+        self.assertEqual(
+            final[BRANCH_SOURCE], (final[METRICS][0], producing_load_id)
+        )
+
     def test_a_response_token_is_remembered_for_the_table(self):
         final = self.respond()[-1]
         selected = app.remember_selection(final[METRICS], select(1))
@@ -1870,8 +1900,12 @@ class BranchFromTokenTests(unittest.TestCase):
         next(stream)
         frame = next(stream)
         stream.close()
-        *_rest, source = app.stop_generation(frame[TURNS], frame[METRICS])
-        self.assertEqual(source, (frame[METRICS][0], app.MANAGER.load_id))
+        producing_load_id = frame[CONTEXT_IDS][2]
+        app.MANAGER.load_count += 1
+        *_rest, source = app.stop_generation(
+            frame[TURNS], frame[METRICS], frame[CONTEXT_IDS]
+        )
+        self.assertEqual(source, (frame[METRICS][0], producing_load_id))
 
     def test_stopping_before_any_token_leaves_nothing_to_branch(self):
         turns = [make_turn("user", "hi"), make_turn("assistant", "")]
@@ -2277,9 +2311,9 @@ class CancelWiringTests(unittest.TestCase):
         )
 
     def conversation_state(self):
-        """Stop reads the conversation state first, then the token metrics."""
+        """Stop reads the conversation state first, then token provenance."""
 
-        state, _metrics = self.named("stop_generation").inputs
+        state, _metrics, _context = self.named("stop_generation").inputs
         return state
 
     def writers(self):
