@@ -16,6 +16,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Perplexity, mean surprise, and a surprise trace for each response
 - Full metric-trace export as JSON or CSV
 - A system prompt, plus temperature, top-p, top-k, seed, and response-length controls
+- Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - Enter sends a message and Shift+Enter starts a new line, with a setting to swap them
 - Branching a response from any token into one of the alternatives the model considered
@@ -80,6 +81,21 @@ Model files use the standard Hugging Face cache. By default this is under `~/.ca
 - Hovering a message in the transcript gives per-message retry, edit, and undo. Editing one of your messages truncates the conversation there and generates a new reply; editing a reply just corrects it in place. **↩️ Undo last** removes the last exchange and puts your message back in the input box.
 - **💾 Save conversation** writes a JSON file containing every turn, its reasoning block, and the system prompt. **📂 Load conversation** restores it.
 
+### Assistant prefill
+
+Enter text in **Assistant prefill (optional)** to force every new reply to begin
+with those words. Chatlab measures the prefilled tokens against the model's own
+distribution, then resumes sampling after them. **Maximum new tokens** counts
+only the tokens sampled after the prefill, so the prefix does not reduce the
+requested continuation length.
+
+For a reasoning model whose chat template already opens a `<think>` block,
+Chatlab closes that block before replaying the prefill. The supplied text
+therefore appears as the visible answer rather than hidden reasoning. Clear the
+field to return to ordinary generation. JSON metric exports record the supplied
+text as `assistant_prefill` and the replayed token count as
+`forced_prefix_tokens`.
+
 ## Branching from a token
 
 Every response token comes with the alternatives the model ranked highest. Branching lets you take one of them instead and see where the model goes from there.
@@ -106,7 +122,7 @@ Each fork has its own transcript, but the token panel describes only the respons
 
 Text the model wraps in `<think>` tags is pulled out of the reply and shown as a collapsible **Reasoning** section, so the answer stays readable while the trace stays available.
 
-By default that reasoning is **not** sent back to the model on the next turn. Think models are trained to produce a fresh reasoning block each time, so replaying old ones spends context and tends to degrade the next answer. Enable **Send previous reasoning back to the model** under *System prompt and reasoning* if you want the older behavior.
+By default that reasoning is **not** sent back to the model on the next turn. Think models are trained to produce a fresh reasoning block each time, so replaying old ones spends context and tends to degrade the next answer. Enable **Send previous reasoning back to the model** under *System prompt, reasoning, and prefill* if you want the older behavior.
 
 ## Reading the visualization
 

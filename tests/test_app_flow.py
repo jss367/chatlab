@@ -26,6 +26,7 @@ THINK_EOS = 4
 FIXED = {
     "system_prompt": "",
     "keep_reasoning": False,
+    "assistant_prefill": "",
     "temperature": 0.0,
     "top_p": 1.0,
     "top_k": 0,
@@ -108,6 +109,16 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(final[SEED], 42)
         self.assertIn("seed 42", final[STATUS])
         self.assertEqual(len(final[STRIP]), 3)
+
+    def test_an_assistant_prefill_starts_the_visible_answer(self):
+        settings = dict(FIXED, assistant_prefill="Hello")
+        frames = self.last(app.chat("hi", [], *settings.values()))
+        final = frames[-1]
+
+        self.assertEqual(final[TURNS][1]["content"], "Hello world")
+        self.assertIn("Assistant prefill applied", frames[0][STATUS])
+        self.assertEqual(final[TRACE]["sampling"]["assistant_prefill"], "Hello")
+        self.assertEqual(final[TRACE]["sampling"]["forced_prefix_tokens"], 1)
 
     def test_the_stop_button_is_shown_while_streaming(self):
         frames = self.last(app.chat("hi", [], *SETTINGS))
@@ -1977,6 +1988,16 @@ class MessageBoxKeysTests(unittest.TestCase):
         update = app.set_message_box_keys(True)
         self.assertEqual(update["lines"], 1)
         self.assertIn("Enter sends", update["placeholder"])
+
+    def test_the_assistant_prefill_control_explains_reasoning_models(self):
+        demo = app.build_app()
+        prefill = next(
+            c
+            for c in demo.blocks.values()
+            if isinstance(c, gr.Textbox) and c.label == "Assistant prefill (optional)"
+        )
+        self.assertEqual(prefill.value, None)
+        self.assertIn("closes the reasoning block", prefill.info)
 
 
 if __name__ == "__main__":

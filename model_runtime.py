@@ -14,7 +14,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from conversation import THINK_OPEN
+from conversation import THINK_CLOSE, THINK_OPEN
 from token_metrics import (
     UNSCORED_BEYOND_LIMIT,
     UNSCORED_FIRST_TOKEN,
@@ -768,6 +768,9 @@ class GenerationUpdate:
     answer has to be told.
     """
 
+    forced_prefix_tokens: int = 0
+    """How many leading response tokens were replayed instead of sampled."""
+
 
 class IncrementalDecoder:
     """Decode a growing token stream without re-decoding it from the start.
@@ -1217,6 +1220,33 @@ class ModelManager:
             encoded = encoded[0]
         return [int(value) for value in encoded], prefilled
 
+    def _response_prefix_ids(self, text: str, *, close_reasoning: bool) -> list[int]:
+        """Encode a reader-supplied answer prefix without tokenizer wrappers.
+
+        A reasoning model's generation prompt can already end in ``<think>``.
+        In that case the supplied text is meant to begin the visible answer,
+        so replay a closing marker before it. The marker remains part of the
+        measured response prefix, exactly as it would if the model emitted it.
+        """
+
+        assert self.tokenizer is not None
+        if not text:
+            return []
+        raw = f"{THINK_CLOSE}\n\n{text}" if close_reasoning else text
+        encoded = self.tokenizer(raw, add_special_tokens=False)
+        if isinstance(encoded, Mapping):
+            encoded = encoded["input_ids"]
+        elif hasattr(encoded, "input_ids"):
+            encoded = encoded.input_ids
+        if hasattr(encoded, "tolist"):
+            encoded = encoded.tolist()
+        if encoded and isinstance(encoded[0], (list, tuple)):
+            encoded = encoded[0]
+        token_ids = [int(value) for value in encoded]
+        if not token_ids:
+            raise ValueError("The assistant prefill did not produce any tokens.")
+        return token_ids
+
     def _decode_token(self, token_id: int) -> str:
         assert self.tokenizer is not None
         return self.tokenizer.decode(
@@ -1396,6 +1426,7 @@ class ModelManager:
         seed: int,
         analyze_prompt: bool = True,
         forced_ids: Sequence[int] = (),
+        answer_prefill: str = "",
     ) -> Iterator[GenerationUpdate]:
         """Stream a reply to ``messages``, one batch of tokens at a time.
 
@@ -1406,7 +1437,9 @@ class ModelManager:
         token the model would never have chosen shows up with the rank and
         surprise it really had. ``max_new_tokens`` counts the tokens sampled
         after the prefix, so a branch made late in a long response still gets
-        room to continue.
+        room to continue. ``answer_prefill`` does the same for arbitrary text;
+        when the chat template has opened a reasoning block, it closes that
+        block first so the reader's text begins the visible answer.
         """
 
         # The application reserves the slot before it publishes its first
@@ -1431,6 +1464,7 @@ class ModelManager:
                 seed=seed,
                 analyze_prompt=analyze_prompt,
                 forced_ids=forced_ids,
+                answer_prefill=answer_prefill,
             )
         finally:
             if reserved:
@@ -1447,6 +1481,7 @@ class ModelManager:
         seed: int,
         analyze_prompt: bool = True,
         forced_ids: Sequence[int] = (),
+        answer_prefill: str = "",
     ) -> Iterator[GenerationUpdate]:
         import torch
 
@@ -1463,10 +1498,19 @@ class ModelManager:
             prompt_ids, reasoning_prefilled = self._prompt_token_ids(messages)
             stop_ids = self._stop_token_ids()
 
+            if forced_ids and answer_prefill:
+                raise ValueError(
+                    "A token branch and an assistant prefill cannot be applied together."
+                )
+
             # A stop token inside the prefix ends the response there, exactly
             # as it did when the model first produced it; whatever the reader
             # kept after it was never part of the response the model sees.
             forced = [int(value) for value in forced_ids]
+            if answer_prefill:
+                forced = self._response_prefix_ids(
+                    answer_prefill, close_reasoning=reasoning_prefilled
+                )
             for index, token_id in enumerate(forced):
                 if token_id in stop_ids:
                     forced = forced[: index + 1]
@@ -1523,6 +1567,7 @@ class ModelManager:
                     prompt_metrics=prompt_metrics,
                     prompt_note=prompt_note,
                     reasoning_prefilled=reasoning_prefilled,
+                    forced_prefix_tokens=len(forced),
                 )
                 if forced[-1] in stop_ids:
                     return
@@ -1562,6 +1607,7 @@ class ModelManager:
                         prompt_metrics=prompt_metrics,
                         prompt_note=prompt_note,
                         reasoning_prefilled=reasoning_prefilled,
+                        forced_prefix_tokens=len(forced),
                     )
 
                 if stopping:
