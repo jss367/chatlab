@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import plistlib
 import shutil
 import subprocess
@@ -121,18 +122,47 @@ class BundleTests(unittest.TestCase):
         self.assertTrue(manual.exists())
         self.assertTrue(versioned.exists())
 
-    def test_remove_stale_work_dirs_sweeps_beside_app_and_tempdir(self):
+    def test_remove_stale_work_dirs_only_sweeps_dead_owners(self):
         current = self.make_bundle("ChatLab.app", "old")
-        beside = self.root / "chatlab-update-abc"; beside.mkdir(); (beside / "big.zip").write_text("x")
         tmp_root = self.root / "tmp"; tmp_root.mkdir()
-        in_tmp = tmp_root / "chatlab-update-def"; in_tmp.mkdir()
+
+        def staging(parent, name, owner):
+            path = parent / name; path.mkdir(); (path / "big.zip").write_text("x")
+            if owner is not None:
+                (path / updater.WORK_DIR_OWNER_FILE).write_text(owner)
+            return path
+
+        dead_pid = 2**22 - 7  # far above macOS's pid range, so never alive
+        dead_beside = staging(self.root, "chatlab-update-a", str(dead_pid))
+        dead_in_tmp = staging(tmp_root, "chatlab-update-b", str(dead_pid))
+        live_other = staging(self.root, "chatlab-update-c", str(os.getppid()))
+        ours = staging(self.root, "chatlab-update-d", str(os.getpid()))
+        unclaimed = staging(self.root, "chatlab-update-e", None)
+        garbage = staging(self.root, "chatlab-update-f", "not-a-pid")
         unrelated = self.root / "chatlab-updates.txt"; unrelated.write_text("keep")
+
         with mock.patch.object(updater.tempfile, "gettempdir", return_value=str(tmp_root)):
             updater.remove_stale_work_dirs(current)
-        self.assertFalse(beside.exists())
-        self.assertFalse(in_tmp.exists())
-        self.assertTrue(unrelated.exists())
-        self.assertTrue(current.exists())
+
+        self.assertFalse(dead_beside.exists())
+        self.assertFalse(dead_in_tmp.exists())
+        for kept in (live_other, ours, unclaimed, garbage, unrelated, current):
+            self.assertTrue(kept.exists(), kept)
+
+    def test_install_update_claims_its_work_dir(self):
+        current = self.make_bundle("ChatLab.app", "old")
+        work = self.root / "work"; work.mkdir()
+        seen = {}
+
+        def fake_download(rel, dest, progress, cancelled=None):
+            seen["owner"] = (dest / updater.WORK_DIR_OWNER_FILE).read_text()
+            raise updater.UpdateError("stop here")
+
+        with mock.patch.object(updater, "download_asset", side_effect=fake_download):
+            with self.assertRaises(updater.UpdateError):
+                updater.install_update(self.RELEASE, current, work_dir=work)
+        self.assertEqual(seen["owner"], str(os.getpid()))
+        self.assertFalse(work.exists())
 
     def test_swap_bundle_restores_old_after_partial_copy(self):
         current = self.make_bundle("ChatLab.app", "old")

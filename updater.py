@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import platform
 import plistlib
 import re
@@ -34,6 +35,7 @@ LATEST_RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/l
 USER_AGENT = f"ChatLab/{__version__} (+{RELEASES_PAGE_URL})"
 PREVIOUS_BUNDLE_MARKER = ".previous-"
 WORK_DIR_PREFIX = "chatlab-update-"
+WORK_DIR_OWNER_FILE = "owner.pid"
 REQUEST_TIMEOUT_SECONDS = 15
 DOWNLOAD_CHUNK_BYTES = 1 << 20
 
@@ -315,18 +317,52 @@ def is_parked_bundle(path: Path, bundle: Path) -> bool:
     return path.name.startswith(prefix) and path.name[len(prefix):].isdigit()
 
 
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def claim_work_dir(work_dir: Path) -> None:
+    """Mark ``work_dir`` as owned by this process so sweeps leave it alone."""
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / WORK_DIR_OWNER_FILE).write_text(str(os.getpid()))
+
+
+def is_abandoned_work_dir(path: Path) -> bool:
+    """Whether ``path`` is an updater staging dir whose owning process is gone.
+
+    Directories without an owner marker are not touched: they are either
+    unrelated or were created a moment ago and not yet claimed.
+    """
+
+    if not path.is_dir() or not path.name.startswith(WORK_DIR_PREFIX):
+        return False
+    try:
+        pid = int((path / WORK_DIR_OWNER_FILE).read_text().strip())
+    except (OSError, ValueError):
+        return False
+    return pid != os.getpid() and not _process_alive(pid)
+
+
 def remove_stale_work_dirs(bundle: Path) -> None:
     """Delete staging directories an interrupted update left behind.
 
     ``install_update`` stages beside the app when it can and in the system
-    temporary directory otherwise, so both are swept. Run this once the app is
-    up, not while an update might be in progress.
+    temporary directory otherwise, so both are swept. Only directories whose
+    recorded owner process is no longer running are removed, so a second
+    ChatLab instance mid-update keeps its files.
     """
 
     for parent in {bundle.parent, Path(tempfile.gettempdir())}:
-        for stale in parent.glob(f"{WORK_DIR_PREFIX}*"):
-            if stale.is_dir():
-                shutil.rmtree(stale, ignore_errors=True)
+        for candidate in parent.glob(f"{WORK_DIR_PREFIX}*"):
+            if is_abandoned_work_dir(candidate):
+                shutil.rmtree(candidate, ignore_errors=True)
 
 
 def remove_previous_bundles(bundle: Path) -> None:
@@ -370,6 +406,7 @@ def install_update(
         except OSError:
             work_dir = Path(tempfile.mkdtemp(prefix=WORK_DIR_PREFIX))
     try:
+        claim_work_dir(work_dir)
         archive = download_asset(release, work_dir, progress, cancelled)
         replacement = extract_bundle(archive, work_dir / "unpacked", cancelled)
         verify_bundle(replacement, release)
