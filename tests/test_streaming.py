@@ -591,9 +591,16 @@ class ReplacementEncodingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "hidden special token"):
             manager.encode_replacement([], "<pad>")
 
-    def test_a_stop_special_token_can_still_end_the_replacement(self):
+    def test_a_stop_special_token_before_the_end_is_refused(self):
         manager = loaded_manager([0])
-        self.assertEqual(manager.encode_replacement([], "<eos>"), [EOS_ID])
+        with self.assertRaisesRegex(ValueError, "stop token before its end"):
+            manager.encode_replacement([], "<eos>Hello")
+
+    def test_a_terminal_stop_special_token_can_still_end_the_replacement(self):
+        manager = loaded_manager([0])
+        self.assertEqual(
+            manager.encode_replacement([], "Hello<eos>"), [0, EOS_ID]
+        )
 
     def test_kept_ids_from_an_earlier_load_are_refused_under_the_lock(self):
         manager = loaded_manager([0])

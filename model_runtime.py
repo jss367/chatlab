@@ -1426,14 +1426,28 @@ class ModelManager:
             candidates.append(joint[len(kept) :])
         if not any(candidates):
             raise ValueError("The replacement text did not produce any tokens.")
-        hidden_ids = self._hidden_token_ids() - self._stop_token_ids()
+        stop_ids = self._stop_token_ids()
+        hidden_ids = self._hidden_token_ids() - stop_ids
+        matched_embedded_stop = False
         matched_hidden = False
         for token_ids in candidates:
             if token_ids and self._decode_ids(kept + token_ids) == expected:
+                # A terminal stop token deliberately ends the new response and
+                # stays hidden. One followed by more replacement tokens cannot
+                # be literal: generation stops there, so the visible suffix
+                # would silently disappear.
+                if stop_ids.intersection(token_ids[:-1]):
+                    matched_embedded_stop = True
+                    continue
                 if hidden_ids.intersection(token_ids):
                     matched_hidden = True
                     continue
                 return token_ids
+        if matched_embedded_stop:
+            raise ValueError(
+                "The replacement text contains a stop token before its end "
+                "and cannot be displayed exactly."
+            )
         if matched_hidden:
             raise ValueError(
                 "The replacement text contains a hidden special token and "
