@@ -2212,6 +2212,27 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertEqual([m["token_id"] for m in metrics[:2]], [0, 1])
         self.assertTrue(last[TURNS][-1]["content"].startswith("Hello world"))
 
+    def test_typed_text_follows_noncanonical_sentencepiece_tokens(self):
+        pieces = [
+            "\u2581Hello",
+            "\u2581Hel",
+            "lo",
+            "\u2581world",
+            "world",
+            "!",
+            "<eos>",
+        ]
+        eos = pieces.index("<eos>")
+        app.MANAGER = loaded_manager([1, 2, 5, eos], pieces, eos)
+        app.MANAGER.tokenizer = SentencePieceTokenizer(pieces, eos)
+        final = self.respond()[-1]
+        self.assertEqual(final[TURNS][-1]["content"], "Hello!")
+
+        last = self.branch_text(final, "world", strip_index=2)[-1]
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual([m["token_id"] for m in metrics[:3]], [1, 2, 4])
+        self.assertTrue(last[TURNS][-1]["content"].startswith("Helloworld"))
+
     def test_the_branch_text_button_is_wired_as_a_generation(self):
         demo = app.build_app()
         listener = next(

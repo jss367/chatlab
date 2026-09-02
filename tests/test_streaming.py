@@ -559,16 +559,68 @@ class ReplacementEncodingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly at this position"):
             manager.encode_replacement([pieces.index("\u2581Hello")], "world")
 
-    def test_the_kept_prefix_is_never_retokenized(self):
-        # The model sampled "Hello" as two pieces. Encoding the whole text
-        # would merge them into one, which would replace the kept tokens, so
-        # that encoding is not usable and the text is refused.
+    def test_a_joint_suffix_can_follow_noncanonical_kept_tokens(self):
+        # The model sampled "Hello" as two pieces, while encoding the whole
+        # text merges them into one. Its "world" suffix can still follow the
+        # original kept ids exactly; those ids must remain unchanged.
         pieces = ["\u2581Hello", "\u2581Hel", "lo", "\u2581world", "world", "<unk>", "<eos>"]
         manager = sentencepiece_manager(pieces)
         kept = [pieces.index("\u2581Hel"), pieces.index("lo")]
         self.assertEqual(manager.tokenizer.decode(kept), "Hello")
-        with self.assertRaisesRegex(ValueError, "exactly at this position"):
-            manager.encode_replacement(kept, "world")
+        ids, joined = self.decoded(manager, kept, "world")
+        self.assertEqual(ids, [pieces.index("world")])
+        self.assertEqual(joined, "Helloworld")
+
+    def test_a_joint_suffix_still_rejects_an_embedded_stop_token(self):
+        pieces = [
+            "\u2581Hello",
+            "\u2581Hel",
+            "lo",
+            "\u2581<eos>",
+            "<eos>",
+            "Hello",
+            "<unk>",
+        ]
+        manager = sentencepiece_manager(pieces)
+        kept = [pieces.index("\u2581Hel"), pieces.index("lo")]
+        with self.assertRaisesRegex(ValueError, "stop token before its end"):
+            manager.encode_replacement(kept, "<eos>Hello")
+
+    def test_a_joint_suffix_still_allows_a_terminal_stop_token(self):
+        pieces = [
+            "\u2581Hello",
+            "\u2581Hel",
+            "lo",
+            "\u2581world",
+            "world",
+            "<eos>",
+            "<unk>",
+        ]
+        manager = sentencepiece_manager(pieces)
+        kept = [pieces.index("\u2581Hel"), pieces.index("lo")]
+        self.assertEqual(
+            manager.encode_replacement(kept, "world<eos>"),
+            [pieces.index("world"), pieces.index("<eos>")],
+        )
+
+    def test_a_joint_suffix_still_rejects_a_hidden_special_token(self):
+        pieces = [
+            "\u2581Hello",
+            "\u2581Hel",
+            "lo",
+            "\u2581<pad>",
+            "<pad>",
+            "<eos>",
+            "<unk>",
+        ]
+        manager = sentencepiece_manager(pieces)
+        manager.tokenizer.all_special_ids = [
+            pieces.index("<pad>"),
+            pieces.index("<eos>"),
+        ]
+        kept = [pieces.index("\u2581Hel"), pieces.index("lo")]
+        with self.assertRaisesRegex(ValueError, "hidden special token"):
+            manager.encode_replacement(kept, "<pad>")
 
     def test_a_tokenizer_with_the_space_inside_the_token_is_unchanged(self):
         manager = loaded_manager([0])

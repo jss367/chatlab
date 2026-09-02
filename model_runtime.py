@@ -1415,22 +1415,38 @@ class ModelManager:
         kept_text = self._decode_ids(kept)
         expected = kept_text + text
 
-        # Two encodings can place the text: the text on its own, which is how
-        # a BPE tokenizer with the space inside the token wants it, and the
-        # tail of the text encoded together with the kept prefix, which is how
-        # a tokenizer that reads word boundaries from context wants it. The
-        # second is only usable when it leaves the kept prefix untouched.
-        candidates = [self._encode_plain(text)]
+        # The standalone encoding is how a BPE tokenizer with the space inside
+        # the token normally wants the text. A context-sensitive tokenizer can
+        # instead need a suffix of the joint encoding. The model may have
+        # sampled a noncanonical spelling of ``kept_text``, so the joint
+        # encoding need not begin with ``kept`` even though one of its suffixes
+        # can follow those unchanged ids exactly. Try the old prefix-aligned
+        # tail first to preserve its tokenization, then the remaining suffixes
+        # from shortest to longest. There are at most ``len(joint)`` of them,
+        # and every one still has to pass the exact in-context decode below.
+        standalone = self._encode_plain(text)
         joint = self._encode_plain(expected)
-        if len(joint) > len(kept) and joint[: len(kept)] == kept:
-            candidates.append(joint[len(kept) :])
-        if not any(candidates):
+
+        def candidates() -> Iterator[list[int]]:
+            yield standalone
+            aligned_start: int | None = None
+            if len(joint) > len(kept) and joint[: len(kept)] == kept:
+                aligned_start = len(kept)
+                aligned = joint[aligned_start:]
+                if aligned != standalone:
+                    yield aligned
+            for start in range(len(joint) - 1, -1, -1):
+                candidate = joint[start:]
+                if start != aligned_start and candidate != standalone:
+                    yield candidate
+
+        if not standalone and not joint:
             raise ValueError("The replacement text did not produce any tokens.")
         stop_ids = self._stop_token_ids()
         hidden_ids = self._hidden_token_ids() - stop_ids
         matched_embedded_stop = False
         matched_hidden = False
-        for token_ids in candidates:
+        for token_ids in candidates():
             if token_ids and self._decode_ids(kept + token_ids) == expected:
                 # A terminal stop token deliberately ends the new response and
                 # stays hidden. One followed by more replacement tokens cannot
