@@ -541,6 +541,32 @@ class AssistantPrefillSplittingTests(unittest.TestCase):
         self.assertEqual(answer, "<think>\U0001f4be continued")
         self.assertTrue(closed)
 
+    def test_a_literal_span_protects_reasoning_tags_after_sampled_text(self):
+        text = "sampled <think>typed</think><think>model</think>answer"
+        typed = "<think>typed</think>"
+        start = text.index(typed)
+
+        reasoning, answer, closed = app.split_response_text(
+            text,
+            literal_spans=((start, start + len(typed)),),
+        )
+
+        self.assertEqual(reasoning, "model")
+        self.assertEqual(answer, "sampled <think>typed</think>answer")
+        self.assertTrue(closed)
+
+    def test_a_partial_reasoning_tag_in_a_literal_span_streams_visibly(self):
+        text = "sampled <thi"
+        reasoning, answer, closed = app.split_response_text(
+            text,
+            literal_spans=((len("sampled "), len(text)),),
+            streaming=True,
+        )
+
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, text)
+        self.assertTrue(closed)
+
 
 class SeedTests(unittest.TestCase):
     """Whatever reaches resolve_seed(), NumPy has to accept the result.
@@ -2184,6 +2210,78 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertTrue(
             branched[TURNS][-1]["content"].startswith("<think>Hello</think>Hello")
         )
+
+    def marker_response(self):
+        pieces = ["Hello", " world", "<think>", "</think>", "<thi", "<eos>"]
+        eos = pieces.index("<eos>")
+        app.MANAGER = loaded_manager([0, 1, eos], pieces, eos)
+        return self.respond()[-1]
+
+    def test_typed_reasoning_markers_are_literal_replacement_text(self):
+        for replacement in ("<think>", "</think>", "<thi"):
+            with self.subTest(replacement=replacement):
+                final = self.marker_response()
+                last = self.branch_text(final, replacement)[-1]
+                reply = last[TURNS][-1]
+
+                self.assertEqual(reply["reasoning"], "")
+                self.assertTrue(reply["content"].startswith("Hello" + replacement))
+
+    def test_a_typed_reasoning_block_survives_default_context_and_save(self):
+        final = self.marker_response()
+        replacement = "<think>Hello</think>"
+        branched = self.branch_text(final, replacement)[-1]
+        reply = branched[TURNS][-1]
+
+        self.assertEqual(reply["reasoning"], "")
+        self.assertTrue(reply["content"].startswith("Hello" + replacement))
+        request = model_messages(branched[TURNS], include_reasoning=False)
+        self.assertIn(replacement, request[-1]["content"])
+
+        saved, _status = app.save_conversation(branched[TURNS], "")
+        loaded = app.load_conversation(saved["value"], [make_turn("user", "stale")])
+        self.assertIn(replacement, loaded[1][-1]["content"])
+        self.assertEqual(loaded[1][-1]["reasoning"], "")
+
+    def test_model_reasoning_after_a_literal_replacement_stays_semantic(self):
+        final = self.marker_response()
+        # The branch prefill has three input positions (prompt, kept token,
+        # replacement). Its next distribution emits a real reasoning block.
+        app.MANAGER.model.script = [0, 0, 2, 0, 3, 1, 5]
+        app.MANAGER.model.step = 0
+        last = self.branch_text(final, "</think>")[-1]
+        reply = last[TURNS][-1]
+
+        self.assertEqual(reply["reasoning"], "Hello")
+        self.assertEqual(reply["content"], "Hello</think> world")
+        default_context = model_messages(last[TURNS], include_reasoning=False)
+        self.assertEqual(default_context[-1]["content"], "Hello</think> world")
+
+    def test_literal_replacement_protection_survives_another_branch(self):
+        final = self.marker_response()
+        first = self.branch_text(final, "<think>Hello</think>")[-1]
+        # The first sampled token after the replacement is the fifth token.
+        second = self.branch_text(first, " world", strip_index=4)[-1]
+
+        self.assertTrue(
+            second[TURNS][-1]["content"].startswith(
+                "Hello<think>Hello</think> world"
+            )
+        )
+        self.assertEqual(second[TURNS][-1]["reasoning"], "")
+        metrics = metrics_of(second[METRICS])
+        self.assertTrue(all(metric.get("literal_text") for metric in metrics[1:5]))
+
+    def test_a_terminal_typed_stop_keeps_prior_reasoning_markers_literal(self):
+        final = self.marker_response()
+        replacement = "<think>Hello</think><eos>"
+        last = self.branch_text(final, replacement)[-1]
+
+        self.assertEqual(last[TURNS][-1]["content"], "Hello<think>Hello</think>")
+        self.assertEqual(last[TURNS][-1]["reasoning"], "")
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual(metrics[-1]["token_id"], app.MANAGER.tokenizer.eos_token_id)
+        self.assertTrue(all(metric.get("literal_text") for metric in metrics[1:]))
 
     def sentencepiece_response(self):
         """A response from a tokenizer that drops the first decoded space."""

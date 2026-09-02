@@ -398,6 +398,21 @@ class ForcedPrefixTests(unittest.TestCase):
         self.assertEqual([m["token_id"] for m in final.metrics], [0, 5, 2, EOS_ID])
         self.assertEqual([m["position"] for m in final.metrics], [1, 2, 3, 4])
 
+    def test_literal_replay_ranges_become_character_spans_and_metrics(self):
+        manager = loaded_manager([0, 1, 2, EOS_ID])
+        (first, *_rest) = self.updates(
+            manager,
+            [0, 5],
+            literal_text_ranges=((1, 2),),
+        )
+
+        self.assertEqual(
+            first.literal_text_spans,
+            ((len("Hello"), len("Hello are")),),
+        )
+        self.assertNotIn("literal_text", first.metrics[0])
+        self.assertTrue(first.metrics[1]["literal_text"])
+
     def test_the_prefix_is_measured_under_the_sampling_settings(self):
         manager = loaded_manager([0, 1, 2, EOS_ID])
         (first, *_rest) = self.updates(manager, [0, 5], temperature=0.0)

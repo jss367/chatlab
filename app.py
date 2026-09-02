@@ -819,41 +819,61 @@ def split_response_text(
     text: str,
     *,
     literal_prefill: str = "",
+    literal_spans: tuple[tuple[int, int], ...] = (),
     streaming: bool = False,
     reasoning_prefilled: bool = False,
 ) -> tuple[str, str, bool]:
-    """Split reasoning without treating reader-supplied prefill tags as syntax.
+    """Split reasoning without treating reader-supplied text as syntax.
 
     The first runtime update for an assistant prefill contains only its forced
     tokens. Remembering that decoded prefix lets the application protect every
     ``<`` the reader supplied while leaving the automatic leading ``</think>``
-    visible to the reasoning parser. Tags sampled later by the model keep their
-    normal meaning.
+    visible to the reasoning parser. ``literal_spans`` does the same for typed
+    branch replacements, which can occur after sampled tokens. Tags sampled
+    later by the model keep their normal meaning.
     """
 
-    if not literal_prefill or not text.startswith(literal_prefill):
+    protected_spans = [
+        (max(0, int(start_at)), min(len(text), int(end_at)))
+        for start_at, end_at in literal_spans
+        if int(start_at) < len(text) and int(end_at) > 0
+    ]
+    if literal_prefill and text.startswith(literal_prefill):
+        literal_start = 0
+        if reasoning_prefilled:
+            marker_at = literal_prefill.find(THINK_CLOSE)
+            if marker_at >= 0:
+                literal_start = marker_at + len(THINK_CLOSE)
+                # _response_prefix_ids() inserts this separator between the
+                # template's closing reasoning marker and the reader's text.
+                # Leave it outside protection so the parser trims it while
+                # retaining whitespace the reader actually typed after it.
+                if literal_prefill.startswith("\n\n", literal_start):
+                    literal_start += 2
+            else:
+                literal_start = len(literal_prefill)
+        if literal_start < len(literal_prefill):
+            protected_spans.append((literal_start, len(literal_prefill)))
+
+    protected_spans = sorted(
+        (start_at, end_at)
+        for start_at, end_at in protected_spans
+        if start_at < end_at
+    )
+    merged_spans: list[tuple[int, int]] = []
+    for start_at, end_at in protected_spans:
+        if merged_spans and start_at <= merged_spans[-1][1]:
+            old_start, old_end = merged_spans[-1]
+            merged_spans[-1] = (old_start, max(old_end, end_at))
+        else:
+            merged_spans.append((start_at, end_at))
+
+    if not merged_spans:
         return split_reasoning(
             text,
             streaming=streaming,
             reasoning_prefilled=reasoning_prefilled,
         )
-
-    literal_start = 0
-    if reasoning_prefilled:
-        marker_at = literal_prefill.find(THINK_CLOSE)
-        if marker_at < 0:
-            return split_reasoning(
-                text,
-                streaming=streaming,
-                reasoning_prefilled=reasoning_prefilled,
-            )
-        literal_start = marker_at + len(THINK_CLOSE)
-        # _response_prefix_ids() inserts this separator between the template's
-        # closing reasoning marker and the reader's text. Leave it outside the
-        # protected span so split_reasoning() can continue trimming it while
-        # retaining whitespace the reader actually typed after it.
-        if literal_prefill.startswith("\n\n", literal_start):
-            literal_start += 2
 
     placeholder = "\0CHATLAB_LITERAL_LT\0"
     start = "\0CHATLAB_LITERAL_START\0"
@@ -862,14 +882,17 @@ def split_response_text(
         placeholder += "_"
         start += "_"
         end += "_"
-    protected_prefix = (
-        literal_prefill[:literal_start]
-        + start
-        + literal_prefill[literal_start:].replace("<", placeholder)
-        + end
-    )
+    protected_parts: list[str] = []
+    cursor = 0
+    for start_at, end_at in merged_spans:
+        protected_parts.append(text[cursor:start_at])
+        protected_parts.append(start)
+        protected_parts.append(text[start_at:end_at].replace("<", placeholder))
+        protected_parts.append(end)
+        cursor = end_at
+    protected_parts.append(text[cursor:])
     reasoning, answer, closed = split_reasoning(
-        protected_prefix + text[len(literal_prefill) :],
+        "".join(protected_parts),
         streaming=streaming,
         reasoning_prefilled=reasoning_prefilled,
     )
@@ -1070,6 +1093,7 @@ def generate_reply(
     *,
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
+    literal_text_ranges: tuple[tuple[int, int], ...] = (),
     branch_note: str = "",
     expected_load_id: str | None = None,
 ):
@@ -1087,6 +1111,11 @@ def generate_reply(
     through to the branch handler, which alone still holds the conversation
     the branch was about to replace. Ordinary chat has no such tokens and
     generates with whatever is loaded.
+
+    ``literal_text_ranges`` marks reader-typed spans within ``forced_ids``.
+    They are kept separate from ``literal_prefill_tokens`` because a terminal
+    stop token typed into a branch must still end it even though reasoning
+    markers earlier in the same replacement remain visible prose.
 
     The generation slot is reserved here, before the first frame is published,
     because this is the first moment a handler is committed to generating. The
@@ -1121,6 +1150,7 @@ def generate_reply(
             scale_name,
             forced_ids=forced_ids,
             literal_prefill_tokens=literal_prefill_tokens,
+            literal_text_ranges=literal_text_ranges,
             branch_note=branch_note,
             expected_load_id=expected_load_id,
         )
@@ -1149,6 +1179,7 @@ def _stream_reply(
     *,
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
+    literal_text_ranges: tuple[tuple[int, int], ...] = (),
     branch_note: str = "",
     expected_load_id: str | None = None,
 ):
@@ -1259,6 +1290,7 @@ def _stream_reply(
     first = True
     forced_prefix_tokens = 0
     literal_prefill = ""
+    literal_spans: tuple[tuple[int, int], ...] = ()
     producing_load_id: str | None = None
 
     stream = MANAGER.generate(
@@ -1272,6 +1304,7 @@ def _stream_reply(
         forced_ids=tuple(int(value) for value in forced_ids),
         answer_prefill=assistant_prefill if applied_prefill else "",
         literal_prefill_tokens=literal_prefill_tokens,
+        literal_text_ranges=literal_text_ranges,
         load_id=expected_load_id,
     )
 
@@ -1286,9 +1319,12 @@ def _stream_reply(
                 forced_prefix_tokens = update.forced_prefix_tokens
                 if update.literal_prefill_text:
                     literal_prefill = update.literal_prefill_text
+                if update.literal_text_spans:
+                    literal_spans = update.literal_text_spans
                 reasoning, answer, closed = split_response_text(
                     raw_text,
                     literal_prefill=literal_prefill,
+                    literal_spans=literal_spans,
                     streaming=True,
                     reasoning_prefilled=prefilled,
                 )
@@ -1352,6 +1388,7 @@ def _stream_reply(
         reasoning, answer, _ = split_response_text(
             raw_text,
             literal_prefill=literal_prefill,
+            literal_spans=literal_spans,
             reasoning_prefilled=prefilled,
         )
         pending["reasoning"] = reasoning
@@ -1372,6 +1409,7 @@ def _stream_reply(
     reasoning, answer, _ = split_response_text(
         raw_text,
         literal_prefill=literal_prefill,
+        literal_spans=literal_spans,
         reasoning_prefilled=prefilled,
     )
     pending["reasoning"] = reasoning
@@ -1634,6 +1672,23 @@ def literal_prefill_count(metrics: list[dict], kept: int) -> int:
     return count
 
 
+def literal_text_ranges(metrics: list[dict], kept: int) -> tuple[tuple[int, int], ...]:
+    """Contiguous reader-supplied token ranges inside a replayed prefix."""
+
+    ranges: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, metric in enumerate(metrics[:kept]):
+        literal = metric.get("literal_text")
+        if literal and start is None:
+            start = index
+        elif not literal and start is not None:
+            ranges.append((start, index))
+            start = None
+    if start is not None:
+        ranges.append((start, min(kept, len(metrics))))
+    return tuple(ranges)
+
+
 def branch_with_text(
     selected_token: dict | None,
     branch_source: tuple[int, str | None] | None,
@@ -1747,12 +1802,17 @@ def _branch_with_text(
     )
     try:
         # Not generate_reply(): the caller already holds the slot.
+        replacement_start = len(kept)
         yield from _stream_reply(
             turns[: position + 1],
             prompt_text,
             *settings,
             forced_ids=(*kept, *replacement_ids),
             literal_prefill_tokens=literal_prefill_count(metrics, len(kept)),
+            literal_text_ranges=(
+                *literal_text_ranges(metrics, len(kept)),
+                (replacement_start, replacement_start + len(replacement_ids)),
+            ),
             branch_note=note,
             expected_load_id=expected_load,
         )
@@ -1829,6 +1889,9 @@ def branch_from(
             *settings,
             forced_ids=forced,
             literal_prefill_tokens=literal_prefill_tokens,
+            literal_text_ranges=literal_text_ranges(
+                metrics, len(forced) if unchanged else len(kept)
+            ),
             branch_note=note,
             expected_load_id=expected_load,
         )

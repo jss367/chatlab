@@ -834,6 +834,14 @@ class GenerationUpdate:
     literal_prefill_text: str = ""
     """Decoded prefix whose reader-supplied portion must remain literal."""
 
+    literal_text_spans: tuple[tuple[int, int], ...] = ()
+    """Character spans in ``text`` that the reader supplied literally.
+
+    Reasoning markers inside these spans are prose, not model control syntax.
+    The spans can be disjoint because a typed token-branch replacement may
+    follow sampled tokens, and they survive if that response is branched again.
+    """
+
     prompt_ids: tuple[int, ...] = ()
     """Every prompt token, measured or not.
 
@@ -1716,6 +1724,7 @@ class ModelManager:
         forced_ids: Sequence[int] = (),
         answer_prefill: str = "",
         literal_prefill_tokens: int = 0,
+        literal_text_ranges: Sequence[tuple[int, int]] = (),
         load_id: str | None = None,
     ) -> Iterator[GenerationUpdate]:
         """Stream a reply to ``messages``, one batch of tokens at a time.
@@ -1731,7 +1740,9 @@ class ModelManager:
         when the chat template has opened a reasoning block, it closes that
         block first so the reader's text begins the visible answer.
         ``literal_prefill_tokens`` carries that protected boundary through a
-        later branch replay.
+        later branch replay. ``literal_text_ranges`` identifies disjoint token
+        ranges typed into a branch so their reasoning markers remain ordinary
+        text; it deliberately does not change their stop-token behavior.
 
         ``load_id`` names the load ``forced_ids`` came from (see
         :attr:`load_id`). It is compared under the model lock, before any token
@@ -1764,6 +1775,7 @@ class ModelManager:
                 forced_ids=forced_ids,
                 answer_prefill=answer_prefill,
                 literal_prefill_tokens=literal_prefill_tokens,
+                literal_text_ranges=literal_text_ranges,
                 load_id=load_id,
             )
         finally:
@@ -1783,6 +1795,7 @@ class ModelManager:
         forced_ids: Sequence[int] = (),
         answer_prefill: str = "",
         literal_prefill_tokens: int = 0,
+        literal_text_ranges: Sequence[tuple[int, int]] = (),
         load_id: str | None = None,
     ) -> Iterator[GenerationUpdate]:
         import torch
@@ -1822,6 +1835,21 @@ class ModelManager:
                 literal_prefill_tokens = max(
                     0, min(int(literal_prefill_tokens), len(forced))
                 )
+
+            normalized_literal_ranges: list[tuple[int, int]] = []
+            for raw_start, raw_end in literal_text_ranges:
+                start = max(0, min(int(raw_start), len(forced)))
+                end = max(start, min(int(raw_end), len(forced)))
+                if start < end:
+                    normalized_literal_ranges.append((start, end))
+            normalized_literal_ranges.sort()
+            literal_ranges: list[tuple[int, int]] = []
+            for start, end in normalized_literal_ranges:
+                if literal_ranges and start <= literal_ranges[-1][1]:
+                    previous_start, previous_end = literal_ranges[-1]
+                    literal_ranges[-1] = (previous_start, max(previous_end, end))
+                else:
+                    literal_ranges.append((start, end))
 
             # A sampled stop token replayed by a branch still ends the old
             # response where it originally ended. A stop token the reader
@@ -1863,6 +1891,9 @@ class ModelManager:
             ]
             for metric in metrics[:literal_prefill_tokens]:
                 metric["literal_prefill"] = True
+            for start, end in literal_ranges:
+                for metric in metrics[start:end]:
+                    metric["literal_text"] = True
             prompt_note = ""
             if analyze_prompt and score_from > 1:
                 prompt_note = (
@@ -1873,16 +1904,43 @@ class ModelManager:
             rng = np.random.default_rng(int(seed))
             decoder = IncrementalDecoder(tokenizer, self._hidden_token_ids())
             literal_prefill_text = ""
+            literal_boundaries = {
+                boundary for span in literal_ranges for boundary in span
+            }
+            boundary_text = {0: ""}
             for index, token_id in enumerate(forced):
                 decoder.push(
                     token_id, force_visible=index < literal_prefill_tokens
                 )
+                if index + 1 in literal_boundaries:
+                    boundary_text[index + 1] = decoder.text
                 if index + 1 == literal_prefill_tokens:
                     # A branch can stop inside a byte-level token sequence for
                     # one character. The replacement-character suffix will be
                     # rewritten when the next token arrives, so it cannot be a
                     # durable prefix for the application's literal-tag guard.
                     literal_prefill_text = decoder.stable_text
+            forced_text = decoder.text
+
+            # A byte-level token boundary can land inside one Unicode
+            # character. Its temporary U+FFFD is rewritten when later bytes
+            # arrive, so use the longest prefix that is actually stable in the
+            # completed forced text. Ordinary word-piece boundaries take the
+            # fast path and keep their full decoded length.
+            def stable_length(at: int) -> int:
+                value = boundary_text.get(at, "")
+                if forced_text.startswith(value):
+                    return len(value)
+                for offset, (left, right) in enumerate(zip(value, forced_text)):
+                    if left != right:
+                        return offset
+                return min(len(value), len(forced_text))
+
+            literal_text_spans = tuple(
+                (stable_length(start), stable_length(end))
+                for start, end in literal_ranges
+                if stable_length(start) < stable_length(end)
+            )
             limit = len(forced) + int(max_new_tokens)
             pending_tokens = 0
             last_yield = time.monotonic()
@@ -1897,6 +1955,7 @@ class ModelManager:
                     reasoning_prefilled=reasoning_prefilled,
                     forced_prefix_tokens=len(forced),
                     literal_prefill_text=literal_prefill_text,
+                    literal_text_spans=literal_text_spans,
                     prompt_ids=tuple(prompt_ids),
                 )
                 if (
@@ -1943,6 +2002,7 @@ class ModelManager:
                         reasoning_prefilled=reasoning_prefilled,
                         forced_prefix_tokens=len(forced),
                         literal_prefill_text=literal_prefill_text,
+                        literal_text_spans=literal_text_spans,
                         prompt_ids=tuple(prompt_ids),
                     )
 
