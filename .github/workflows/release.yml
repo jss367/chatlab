@@ -18,6 +18,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Check the runner is Apple Silicon
+        run: |
+          if [ "$(uname -m)" != "arm64" ]; then
+            echo "Expected an arm64 runner (updater.expected_asset_name looks for ChatLab-macos-arm64.zip); got $(uname -m)." >&2
+            exit 1
+          fi
+
       - name: Check the tag matches version.py
         run: |
           expected="v$(python3 -c 'from version import __version__; print(__version__)')"

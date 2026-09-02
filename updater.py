@@ -203,6 +203,9 @@ def swap_bundle(current: Path, replacement: Path) -> Path:
     try:
         shutil.move(str(replacement), str(current))
     except OSError as error:
+        # A cross-volume move copies instead of renaming, so a failure can leave
+        # a partial bundle at ``current``; clear it before putting the old one back.
+        shutil.rmtree(current, ignore_errors=True)
         parked.rename(current)
         raise UpdateError(f"Could not install the update: {error}") from error
     return parked

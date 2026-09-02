@@ -90,6 +90,23 @@ class BundleTests(unittest.TestCase):
         self.assertFalse(parked.exists())
         self.assertTrue(current.exists())
 
+    def test_swap_bundle_restores_old_after_partial_copy(self):
+        current = self.make_bundle("ChatLab.app", "old")
+        replacement = self.make_bundle("staging/ChatLab.app", "new")
+
+        def partial_move(src, dst):
+            Path(dst).mkdir()
+            (Path(dst) / "half-written").write_text("x")
+            raise OSError("No space left on device")
+
+        with mock.patch.object(updater.shutil, "move", side_effect=partial_move):
+            with self.assertRaises(updater.UpdateError):
+                updater.swap_bundle(current, replacement)
+
+        self.assertEqual((current / "Contents" / "MacOS" / "ChatLab").read_text(), "old")
+        self.assertFalse((current / "half-written").exists())
+        self.assertEqual(list(self.root.glob("ChatLab.app.previous-*")), [])
+
     @unittest.skipUnless(shutil.which("ditto"), "ditto is macOS-only")
     def test_extract_bundle_keeps_symlinks(self):
         bundle = self.make_bundle("ChatLab.app", "bin")
