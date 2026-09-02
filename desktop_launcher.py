@@ -91,6 +91,28 @@ class UpdateFlow:
         self.window = window
         self.bundle = bundle
         self._lock = threading.Lock()
+        self.swapping = threading.Event()
+        # Returning False from a closing handler cancels the close, so the bundle
+        # swap cannot be interrupted by quitting; downloads still can be.
+        window.events.closing += lambda: not self.swapping.is_set()
+
+    def check_in_background(self, *, interactive: bool) -> threading.Thread:
+        """Run ``check`` on a non-daemon thread so quitting waits for an install."""
+
+        worker = threading.Thread(
+            target=self.check, kwargs={"interactive": interactive}, daemon=False
+        )
+        worker.start()
+        return worker
+
+    def _window_call(self, method: str, *args):
+        """Call a window method, tolerating a window the user already closed."""
+
+        try:
+            return getattr(self.window, method)(*args)
+        except Exception as error:  # noqa: BLE001 - window is gone; log and carry on
+            logging.info("Window call %s skipped: %s", method, error)
+            return None
 
     def check(self, *, interactive: bool) -> None:
         """Look for a newer release; ``interactive`` reports "up to date" too."""
@@ -104,8 +126,8 @@ class UpdateFlow:
             release = updater.check_for_update()
         except updater.UpdateError as error:
             logging.warning("%s", error)
-            if interactive and self.window.create_confirmation_dialog(
-                "ChatLab", f"{error}\n\nOpen the releases page?"
+            if interactive and self._window_call(
+                "create_confirmation_dialog", "ChatLab", f"{error}\n\nOpen the releases page?"
             ):
                 webbrowser.open(updater.RELEASES_PAGE_URL)
             return
@@ -113,8 +135,10 @@ class UpdateFlow:
             if release is None:
                 logging.info("ChatLab %s is up to date", __version__)
                 if interactive:
-                    self.window.create_confirmation_dialog(
-                        "ChatLab", f"ChatLab {__version__} is the latest version."
+                    self._window_call(
+                        "create_confirmation_dialog",
+                        "ChatLab",
+                        f"ChatLab {__version__} is the latest version.",
                     )
                 return
             self._offer(release)
@@ -122,7 +146,8 @@ class UpdateFlow:
             self._lock.release()
 
     def _offer(self, release: updater.ReleaseInfo) -> None:
-        accepted = self.window.create_confirmation_dialog(
+        accepted = self._window_call(
+            "create_confirmation_dialog",
             "Update available",
             f"ChatLab {release.version} is available (you have {__version__}).\n\n"
             "Download and install it now? ChatLab will restart when it finishes.",
@@ -130,21 +155,31 @@ class UpdateFlow:
         if not accepted:
             return
         try:
-            updater.install_update(release, self.bundle, progress=self._report_progress)
+            updater.install_update(
+                release,
+                self.bundle,
+                progress=self._report_progress,
+                before_swap=lambda: (
+                    self.swapping.set(),
+                    self._window_call("set_title", f"{WINDOW_TITLE} — installing update…"),
+                ),
+            )
         except updater.UpdateError as error:
             logging.error("Update failed: %s", error)
-            self.window.set_title(WINDOW_TITLE)
-            self.window.create_confirmation_dialog("Update failed", str(error))
+            self._window_call("set_title", WINDOW_TITLE)
+            self._window_call("create_confirmation_dialog", "Update failed", str(error))
             return
+        finally:
+            self.swapping.clear()
         logging.info("Relaunching ChatLab %s", release.version)
         updater.relaunch(self.bundle)
-        self.window.destroy()
+        self._window_call("destroy")
 
     def _report_progress(self, received: int, total: int | None) -> None:
         if total:
-            self.window.set_title(f"{WINDOW_TITLE} — downloading update {received * 100 // total}%")
+            self._window_call("set_title", f"{WINDOW_TITLE} — downloading update {received * 100 // total}%")
         else:
-            self.window.set_title(f"{WINDOW_TITLE} — downloading update ({received >> 20} MB)")
+            self._window_call("set_title", f"{WINDOW_TITLE} — downloading update ({received >> 20} MB)")
 
 
 def run_desktop() -> int:
@@ -174,7 +209,7 @@ def run_desktop() -> int:
         )
         flow = UpdateFlow(window, bundle)
         webview.start(
-            func=lambda: flow.check(interactive=False),
+            func=lambda: flow.check_in_background(interactive=False),
             gui="cocoa",
             private_mode=False,
             storage_path=str(support_directory / "WebKit"),
@@ -184,9 +219,7 @@ def run_desktop() -> int:
                     [
                         MenuAction(
                             "Check for Updates…",
-                            lambda: threading.Thread(
-                                target=flow.check, kwargs={"interactive": True}, daemon=True
-                            ).start(),
+                            lambda: flow.check_in_background(interactive=True),
                         ),
                         MenuAction("ChatLab Releases", lambda: webbrowser.open(updater.RELEASES_PAGE_URL)),
                     ],

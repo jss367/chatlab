@@ -227,8 +227,13 @@ def install_update(
     bundle: Path,
     work_dir: Path | None = None,
     progress: ProgressCallback | None = None,
+    before_swap: Callable[[], None] | None = None,
 ) -> None:
-    """Download, unpack, and swap in ``release``; the caller quits and relaunches."""
+    """Download, unpack, and swap in ``release``; the caller quits and relaunches.
+
+    ``before_swap`` runs once the new bundle is unpacked and about to replace the
+    old one, so the caller can hold off shutdown for the few seconds it takes.
+    """
 
     if work_dir is None:
         try:
@@ -238,6 +243,8 @@ def install_update(
     try:
         archive = download_asset(release, work_dir, progress)
         replacement = extract_bundle(archive, work_dir / "unpacked")
+        if before_swap is not None:
+            before_swap()
         parked = swap_bundle(bundle, replacement)
         logger.info("Installed ChatLab %s over %s (previous bundle at %s)", release.version, bundle, parked)
     finally:

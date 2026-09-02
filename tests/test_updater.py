@@ -136,9 +136,15 @@ class BundleTests(unittest.TestCase):
         with mock.patch.object(updater, "download_asset", side_effect=fake_download), mock.patch.object(
             updater, "extract_bundle", side_effect=fake_extract
         ):
-            updater.install_update(release, current, work_dir=work, progress=lambda r, t: seen.append((r, t)))
+            updater.install_update(
+                release,
+                current,
+                work_dir=work,
+                progress=lambda r, t: seen.append((r, t)),
+                before_swap=lambda: seen.append("swap"),
+            )
 
-        self.assertEqual(seen, [(5, 10)])
+        self.assertEqual(seen, [(5, 10), "swap"])
         self.assertEqual((current / "Contents" / "MacOS" / "ChatLab").read_text(), "new")
         self.assertFalse(work.exists())
 
