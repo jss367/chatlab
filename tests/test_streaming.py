@@ -398,6 +398,21 @@ class PrefilledReasoningTests(unittest.TestCase):
         _ids, prefilled = manager._prompt_token_ids([{"role": "user", "content": "hi"}])
         self.assertFalse(prefilled)
 
+    def test_a_batch_encoding_from_the_template_yields_ids(self):
+        # Transformers 5 returns a dict from apply_chat_template(tokenize=True).
+        class DictTemplateTokenizer(ChatTemplateTokenizer):
+            def apply_chat_template(self, messages, add_generation_prompt=True, **kwargs):
+                result = super().apply_chat_template(
+                    messages, add_generation_prompt, **kwargs
+                )
+                if isinstance(result, str):
+                    return result
+                return {"input_ids": result, "attention_mask": [1] * len(result)}
+
+        manager = self.manager(DictTemplateTokenizer("\nassistant: "))
+        ids, _prefilled = manager._prompt_token_ids([{"role": "user", "content": "hi"}])
+        self.assertEqual(ids, [0])
+
     def test_the_transcript_fallback_is_not_prefilled(self):
         manager = self.manager(FakeTokenizer())
         _ids, prefilled = manager._prompt_token_ids([{"role": "user", "content": "hi"}])

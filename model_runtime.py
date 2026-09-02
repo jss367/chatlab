@@ -7,7 +7,7 @@ import json
 import re
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -1206,6 +1206,13 @@ class ModelManager:
             )
             encoded = tokenizer(f"{transcript}\nAssistant:").input_ids
 
+        # Transformers 5 returns a BatchEncoding here by default; iterating
+        # that yields its keys, and int("input_ids") is the failure a user
+        # sees as "Generation failed".
+        if isinstance(encoded, Mapping):
+            encoded = encoded["input_ids"]
+        if hasattr(encoded, "tolist"):
+            encoded = encoded.tolist()
         if encoded and isinstance(encoded[0], (list, tuple)):
             encoded = encoded[0]
         return [int(value) for value in encoded], prefilled

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import html
+import logging
 import os
 import random
 import re
@@ -51,6 +52,8 @@ from token_metrics import (
     summarize,
 )
 from trace_export import build_trace, write_trace_export
+
+logger = logging.getLogger(__name__)
 
 try:
     from huggingface_hub.errors import IncompleteSnapshotError
@@ -1153,6 +1156,8 @@ def _stream_reply(
     except Exception as error:
         # The diagnostic only goes to the status line. Storing it as the
         # assistant turn would feed the failure back to the model next turn.
+        # The traceback goes to the log so the cause is recoverable.
+        logger.exception("Generation failed")
         reasoning, answer, _ = split_reasoning(raw_text, reasoning_prefilled=prefilled)
         pending["reasoning"] = reasoning
         pending["content"] = answer
@@ -2471,6 +2476,10 @@ def build_app() -> gr.Blocks:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     conductor_port = os.environ.get("CONDUCTOR_PORT")
     build_app().queue(default_concurrency_limit=1).launch(
         inbrowser=conductor_port is None,
