@@ -260,6 +260,13 @@ class InspectTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             manager.inspect([0, 1, 2], 3)
 
+    def test_the_load_id_tells_one_load_of_a_model_from_the_next(self):
+        manager = lens_manager([1, 2, 3])
+        self.assertEqual(manager.load_id, "fake/lens#0")
+        manager.load_count += 1
+        self.assertEqual(manager.load_id, "fake/lens#1")
+        self.assertIsNone(ModelManager().load_id)
+
     def test_an_unloaded_manager_is_refused(self):
         with self.assertRaises(RuntimeError):
             ModelManager().inspect([0, 1], 1)

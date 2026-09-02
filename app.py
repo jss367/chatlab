@@ -1041,7 +1041,7 @@ def _stream_reply(
         because rebuilding an SVG per token is wasted work.
 
         ``context_ids`` is every prompt token, stamped like the strips and
-        tagged with the model that produced it, and is what the layer
+        tagged with the model load that produced it, and is what the layer
         inspector rebuilds the model's input from.
         """
 
@@ -1087,7 +1087,7 @@ def _stream_reply(
         charts_panel=(charts.summary_tiles({}), charts.EMPTY_CHART),
         trace={},
         branch_source=None,
-        context_ids=(generation, [], MANAGER.model_id),
+        context_ids=(generation, [], MANAGER.load_id),
     )
 
     started = time.monotonic()
@@ -1148,7 +1148,7 @@ def _stream_reply(
                     context_ids = (
                         generation,
                         [int(v) for v in update.prompt_ids],
-                        MANAGER.model_id,
+                        MANAGER.load_id,
                     )
                 yield snapshot(
                     highlight,
@@ -1932,7 +1932,7 @@ def score_text(
         status,
         NO_TOKEN_SELECTED,
         [],
-        (generation, [int(value) for value in result.context_ids], MANAGER.model_id),
+        (generation, [int(value) for value in result.context_ids], MANAGER.load_id),
     )
 
 
@@ -1949,8 +1949,8 @@ INSPECT_BUSY = "Wait for the response to finish before inspecting a token."
 INSPECT_GONE = "That token is no longer on screen. Click one and try again."
 INSPECT_FIRST = "Nothing came before this token, so the model never predicted it."
 INSPECT_MODEL_CHANGED = (
-    "A different model is loaded now. These tokens belong to the model that "
-    "produced them, so generate or score again to inspect with this one."
+    "The model has been reloaded since these tokens were produced, so they "
+    "cannot be explained by the weights in memory. Generate or score again."
 )
 INSPECT_OUTPUT_ONLY = (
     "Only the output is shown: this model's intermediate layers could not be "
@@ -2011,7 +2011,7 @@ def inspect_layers(
         return
     generation, metrics = metrics_state
     _prompt_generation, prompt_metrics = prompt_metrics_state
-    context_generation, context_ids, model_id = context_state
+    context_generation, context_ids, load_id = context_state
     if generation != target["generation"] or context_generation != generation:
         yield (*refused, INSPECT_GONE)
         return
@@ -2019,9 +2019,10 @@ def inspect_layers(
         yield (*refused, "Download and load a model first.")
         return
     # Loading a model leaves the strips on screen, and their token ids mean
-    # nothing to a different tokenizer, so the ids carry the model that
-    # produced them and only that model may explain them.
-    if model_id != MANAGER.model_id:
+    # nothing to a different tokenizer, so the ids carry the load that
+    # produced them and only that load may explain them. The load, not the
+    # model ID: re-downloading the same ID can bring in a newer snapshot.
+    if load_id != MANAGER.load_id:
         yield (*refused, INSPECT_MODEL_CHANGED)
         return
 

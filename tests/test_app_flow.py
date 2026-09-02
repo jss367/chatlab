@@ -365,6 +365,7 @@ class ChatFlowTests(unittest.TestCase):
             loaded = True
             busy = False
             model_id = "fake/model"
+            load_id = "fake/model#1"
 
             def reserve_generation(self):
                 return True
@@ -2014,21 +2015,21 @@ class LayerInspectionTests(unittest.TestCase):
     def test_the_prompt_ids_are_published_with_the_strip(self):
         frames = list(app.chat("hi", [], *SETTINGS))
         self.assertEqual(
-            frames[0][CONTEXT_IDS], (frames[0][METRICS][0], [], "fake/model")
+            frames[0][CONTEXT_IDS], (frames[0][METRICS][0], [], "fake/model#0")
         )
-        stamp, ids, model = frames[1][CONTEXT_IDS]
+        stamp, ids, load = frames[1][CONTEXT_IDS]
         self.assertEqual(stamp, frames[1][METRICS][0])
         self.assertEqual(ids, [0])
-        self.assertEqual(model, "fake/model")
+        self.assertEqual(load, app.MANAGER.load_id)
         # Later frames leave the ids alone: the prompt never changes mid-stream.
         self.assertEqual(frames[-1][CONTEXT_IDS], gr.skip())
 
     def test_scored_text_publishes_its_context_ids(self):
         result = app.score_text("", "Hello", False, DEFAULT_COLOR_SCALE)
-        stamp, ids, model = result[10]
+        stamp, ids, load = result[10]
         self.assertEqual(stamp, result[1][0])
         self.assertEqual(ids, [])
-        self.assertEqual(model, "fake/model")
+        self.assertEqual(load, app.MANAGER.load_id)
 
     def test_a_response_token_is_inspected_in_its_full_sequence(self):
         final = self.finished()
@@ -2221,11 +2222,12 @@ class LayerInspectionTests(unittest.TestCase):
         self.assertEqual(insight, gr.skip())
         self.assertEqual(status, app.INSPECT_GONE)
 
-    def test_tokens_from_another_model_are_not_explained_by_this_one(self):
+    def test_tokens_from_an_earlier_load_are_not_explained_by_this_one(self):
         final = self.finished()
         target = app.remember_inspect_target("response")(final[METRICS], select(0))
-        # Loading leaves the strips on screen; only the model id moves.
-        app.MANAGER.model_id = "other/model"
+        # Loading leaves the strips on screen. Re-downloading the same model
+        # ID can bring newer weights, so even a same-ID reload is a new load.
+        app.MANAGER.load_count += 1
         *_rest, status = self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )

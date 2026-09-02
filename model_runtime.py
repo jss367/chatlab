@@ -1037,6 +1037,10 @@ class ModelManager:
         self.model_id: str | None = None
         self.local_path: Path | None = None
         self.device_name: str | None = None
+        # Counts successful loads, so state produced under one set of weights
+        # can be told from state produced under the next even when both came
+        # from the same repository ID (a re-download at a newer revision).
+        self.load_count = 0
         # Downloads under way right now, by model ID, so a second request for
         # the same model can follow the first instead of racing it for the
         # same files.
@@ -1061,6 +1065,20 @@ class ModelManager:
     @property
     def loaded(self) -> bool:
         return self.model is not None and self.tokenizer is not None
+
+    @property
+    def load_id(self) -> str | None:
+        """Identify the weights in memory: the model ID plus which load this is.
+
+        Two loads of the same repository ID can hold different snapshots, so
+        anything that must be read back by the model that produced it is
+        stamped with this rather than the ID alone. ``None`` when nothing is
+        loaded.
+        """
+
+        if not self.loaded:
+            return None
+        return f"{self.model_id}#{self.load_count}"
 
     @property
     def busy(self) -> bool:
@@ -1220,6 +1238,7 @@ class ModelManager:
             self.model_id = validate_model_id(model_id)
             self.local_path = local_path
             self.device_name = device_name
+            self.load_count += 1
             return device_name
 
     def unload(self) -> None:
