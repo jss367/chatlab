@@ -1605,11 +1605,18 @@ def branch_from(
         return
     forced = (*kept, int(pick["token_id"]))
     literal_prefill_tokens = 0
-    for metric in metrics[: len(forced)]:
+    for metric in metrics[: len(kept)]:
         if not metric.get("literal_prefill"):
             break
         literal_prefill_tokens += 1
-    if pick["token_id"] == pick.get("original_id"):
+    unchanged = pick["token_id"] == pick.get("original_id")
+    if (
+        unchanged
+        and literal_prefill_tokens == len(kept)
+        and metrics[len(kept)].get("literal_prefill")
+    ):
+        literal_prefill_tokens += 1
+    if unchanged:
         note = f"Resampling from token {at} ({pick['text']!r})."
     else:
         note = f"Branched at token {at}: {pick['text']!r} instead of {pick['original']!r}."

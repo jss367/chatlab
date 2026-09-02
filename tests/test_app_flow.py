@@ -1742,6 +1742,39 @@ class BranchFromTokenTests(unittest.TestCase):
             )
         )
 
+    def test_a_replacement_inside_the_prefill_is_not_literal(self):
+        app.MANAGER = loaded_manager(
+            [0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS
+        )
+        settings = dict(FIXED, assistant_prefill="<think>Hello</think>")
+        original = list(app.chat("hi", [], *settings.values()))[-1]
+        original_metrics = metrics_of(original[METRICS])
+        pick = {
+            "generation": original[BRANCH_SOURCE],
+            "position": 2,
+            "token_id": THINK_EOS,
+            "original_id": original_metrics[1]["token_id"],
+            "text": "<eos>",
+            "original": original_metrics[1]["text"],
+        }
+
+        branched = list(
+            app.branch_from(
+                pick,
+                original[BRANCH_SOURCE],
+                original[METRICS],
+                "",
+                original[TURNS],
+                *settings.values(),
+            )
+        )[-1]
+        branched_metrics = metrics_of(branched[METRICS])
+
+        self.assertEqual(branched[TURNS][-1]["content"], "<think>")
+        self.assertEqual([m["token_id"] for m in branched_metrics], [0, THINK_EOS])
+        self.assertTrue(branched_metrics[0]["literal_prefill"])
+        self.assertNotIn("literal_prefill", branched_metrics[1])
+
     def test_the_branched_response_replaces_only_the_last_reply(self):
         first = self.respond()[-1]
         second = list(app.chat("again", first[TURNS], *SETTINGS))[-1]
