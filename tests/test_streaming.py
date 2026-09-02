@@ -55,7 +55,7 @@ class FakeTokenizer:
                 (
                     (piece, index)
                     for index, piece in enumerate(self.pieces)
-                    if piece and index != self.eos_token_id
+                    if piece
                 ),
                 key=lambda item: len(item[0]),
                 reverse=True,
@@ -391,8 +391,23 @@ class ForcedPrefixTests(unittest.TestCase):
 
         self.assertEqual(updates[0].text, "Hello world")
         self.assertEqual(updates[0].forced_prefix_tokens, 2)
+        self.assertEqual(updates[0].literal_prefill_text, "Hello world")
         self.assertEqual([m["token_id"] for m in updates[0].metrics], [0, 1])
+        self.assertTrue(
+            all(m["literal_prefill"] for m in updates[0].metrics[:2])
+        )
         self.assertEqual(updates[-1].text, "Hello world!")
+
+    def test_a_literal_eos_in_answer_prefill_is_visible_and_does_not_stop(self):
+        manager = loaded_manager([0, EOS_ID, 1, 2, EOS_ID])
+        updates = self.updates(
+            manager, [], answer_prefill="Hello<eos> world", max_new_tokens=4
+        )
+
+        self.assertEqual(updates[0].text, "Hello<eos> world")
+        self.assertEqual(updates[0].literal_prefill_text, "Hello<eos> world")
+        self.assertEqual(updates[0].forced_prefix_tokens, 3)
+        self.assertEqual(updates[-1].text, "Hello<eos> world!")
 
     def test_a_token_branch_and_text_prefill_are_mutually_exclusive(self):
         manager = loaded_manager([0, 1, EOS_ID])
@@ -465,6 +480,10 @@ class PrefilledReasoningTests(unittest.TestCase):
 
         self.assertEqual(updates[0].text, "</think>\n\nThe answer")
         self.assertEqual(updates[0].forced_prefix_tokens, 2)
+        self.assertEqual(updates[0].literal_prefill_text, "</think>\n\nThe answer")
+        self.assertTrue(
+            all(m["literal_prefill"] for m in updates[0].metrics[:2])
+        )
         self.assertEqual(updates[-1].text, "</think>\n\nThe answer continues")
         reasoning, answer, closed = split_reasoning(
             updates[-1].text, reasoning_prefilled=True

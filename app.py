@@ -1031,6 +1031,7 @@ def generate_reply(
     scale_name: str = DEFAULT_COLOR_SCALE,
     *,
     forced_ids: tuple[int, ...] = (),
+    literal_prefill_tokens: int = 0,
     branch_note: str = "",
 ):
     """Stream one assistant reply for ``turns``, which must end with a user turn.
@@ -1071,6 +1072,7 @@ def generate_reply(
             analyze_prompt,
             scale_name,
             forced_ids=forced_ids,
+            literal_prefill_tokens=literal_prefill_tokens,
             branch_note=branch_note,
         )
     finally:
@@ -1097,6 +1099,7 @@ def _stream_reply(
     scale_name: str = DEFAULT_COLOR_SCALE,
     *,
     forced_ids: tuple[int, ...] = (),
+    literal_prefill_tokens: int = 0,
     branch_note: str = "",
 ):
     """The body of generate_reply(), run with the generation slot held."""
@@ -1217,6 +1220,7 @@ def _stream_reply(
         analyze_prompt=bool(analyze_prompt),
         forced_ids=tuple(int(value) for value in forced_ids),
         answer_prefill=assistant_prefill if applied_prefill else "",
+        literal_prefill_tokens=literal_prefill_tokens,
     )
 
     try:
@@ -1227,11 +1231,8 @@ def _stream_reply(
                 raw_text = update.text
                 prefilled = update.reasoning_prefilled
                 forced_prefix_tokens = update.forced_prefix_tokens
-                if applied_prefill and first:
-                    # A forced prefix is always published once before sampling,
-                    # so this frame identifies exactly which decoded characters
-                    # came from the reader rather than from the model.
-                    literal_prefill = raw_text
+                if update.literal_prefill_text:
+                    literal_prefill = update.literal_prefill_text
                 reasoning, answer, closed = split_response_text(
                     raw_text,
                     literal_prefill=literal_prefill,
@@ -1603,6 +1604,11 @@ def branch_from(
         yield idle_state(prompt_text, turns, BRANCH_HINT)
         return
     forced = (*kept, int(pick["token_id"]))
+    literal_prefill_tokens = 0
+    for metric in metrics[: len(forced)]:
+        if not metric.get("literal_prefill"):
+            break
+        literal_prefill_tokens += 1
     if pick["token_id"] == pick.get("original_id"):
         note = f"Resampling from token {at} ({pick['text']!r})."
     else:
@@ -1613,6 +1619,7 @@ def branch_from(
         prompt_text,
         *settings,
         forced_ids=forced,
+        literal_prefill_tokens=literal_prefill_tokens,
         branch_note=note,
     )
 

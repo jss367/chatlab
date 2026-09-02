@@ -1712,6 +1712,36 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 2)
         self.assertEqual(last[BRANCH_SOURCE], last[METRICS][0])
 
+    def test_branching_preserves_literal_assistant_prefill_tags(self):
+        app.MANAGER = loaded_manager(
+            [0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS
+        )
+        settings = dict(FIXED, assistant_prefill="<think>Hello</think>")
+        original = list(app.chat("hi", [], *settings.values()))[-1]
+        _detail, pick = self.pick_alternative(original, strip_index=3, row=0)
+
+        branched = list(
+            app.branch_from(
+                pick,
+                original[BRANCH_SOURCE],
+                original[METRICS],
+                "",
+                original[TURNS],
+                *settings.values(),
+            )
+        )[-1]
+
+        self.assertEqual(branched[TURNS][-1]["reasoning"], "")
+        self.assertTrue(
+            branched[TURNS][-1]["content"].startswith("<think>Hello</think>")
+        )
+        self.assertTrue(
+            all(
+                metric.get("literal_prefill")
+                for metric in metrics_of(branched[METRICS])[:3]
+            )
+        )
+
     def test_the_branched_response_replaces_only_the_last_reply(self):
         first = self.respond()[-1]
         second = list(app.chat("again", first[TURNS], *SETTINGS))[-1]
