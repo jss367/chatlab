@@ -143,6 +143,26 @@ class CachedModelListTests(unittest.TestCase):
         self.assertIsNone(entry.architecture)
         self.assertIsNone(entry.dtype)
 
+    def test_a_config_of_the_wrong_shape_leaves_the_architecture_unknown(self):
+        # Another repo's config.json can hold anything: an object where the
+        # list of architectures belongs, or no object at all. Neither may
+        # take the whole list down with it.
+        shapes = {
+            "object architectures": b'{"architectures": {"name": "X"}, "dtype": 1}',
+            "string architectures": b'{"architectures": "Olmo3ForCausalLM"}',
+            "not an object": b'["Olmo3ForCausalLM"]',
+        }
+        for name, config in shapes.items():
+            with self.subTest(shape=name), tempfile.TemporaryDirectory() as root:
+                lay_out(root, OLMO, {"config.json": config, "model.safetensors": b"x"})
+                lay_out(root, "org/other", {"config.json": self.CONFIG})
+                entries = {e.model_id: e for e in list_cached_models(Path(root))}
+
+                self.assertEqual(set(entries), {OLMO, "org/other"})
+                self.assertIsNone(entries[OLMO].architecture)
+                self.assertIsNone(entries[OLMO].dtype)
+                self.assertEqual(entries["org/other"].architecture, "Olmo3ForCausalLM")
+
     def test_the_newest_download_comes_first(self):
         with tempfile.TemporaryDirectory() as root:
             older = lay_out(root, "org/older", {"config.json": b"{}"})

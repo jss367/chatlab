@@ -288,13 +288,20 @@ class CachedModel:
 def _read_config(snapshot: Path | None) -> tuple[str | None, str | None]:
     if snapshot is None:
         return None, None
+    # The config is another repo's file, so nothing about its shape is
+    # trusted: a config that is not an object, or an ``architectures`` that is
+    # not a list, reads as an unknown architecture rather than an error.
     try:
         config = json.loads((snapshot / "config.json").read_text())
-        architectures = config.get("architectures") or []
-        architecture = architectures[0] if architectures else None
-        dtype = config.get("dtype") or config.get("torch_dtype")
-    except (OSError, ValueError, AttributeError, TypeError, IndexError):
+    except (OSError, ValueError):
         return None, None
+    if not isinstance(config, dict):
+        return None, None
+    architectures = config.get("architectures")
+    architecture = (
+        architectures[0] if isinstance(architectures, list) and architectures else None
+    )
+    dtype = config.get("dtype") or config.get("torch_dtype")
     return (
         architecture if isinstance(architecture, str) else None,
         dtype if isinstance(dtype, str) else None,
