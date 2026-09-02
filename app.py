@@ -1040,8 +1040,9 @@ def _stream_reply(
         they are published once and never change; the charts redraw in batches
         because rebuilding an SVG per token is wasted work.
 
-        ``context_ids`` is every prompt token, stamped like the strips, and is
-        what the layer inspector rebuilds the model's input from.
+        ``context_ids`` is every prompt token, stamped like the strips and
+        tagged with the model that produced it, and is what the layer
+        inspector rebuilds the model's input from.
         """
 
         messages, _ = display_messages(turns)
@@ -1086,7 +1087,7 @@ def _stream_reply(
         charts_panel=(charts.summary_tiles({}), charts.EMPTY_CHART),
         trace={},
         branch_source=None,
-        context_ids=(generation, []),
+        context_ids=(generation, [], MANAGER.model_id),
     )
 
     started = time.monotonic()
@@ -1144,7 +1145,11 @@ def _stream_reply(
                             len(prompt_metrics), update.prompt_note, "prompt"
                         ),
                     )
-                    context_ids = (generation, [int(v) for v in update.prompt_ids])
+                    context_ids = (
+                        generation,
+                        [int(v) for v in update.prompt_ids],
+                        MANAGER.model_id,
+                    )
                 yield snapshot(
                     highlight,
                     metrics,
@@ -1927,7 +1932,7 @@ def score_text(
         status,
         NO_TOKEN_SELECTED,
         [],
-        stamped([int(value) for value in result.context_ids], generation),
+        (generation, [int(value) for value in result.context_ids], MANAGER.model_id),
     )
 
 
@@ -1943,6 +1948,10 @@ INSPECT_HINT = "Click a token above, then press **Inspect layers**."
 INSPECT_BUSY = "Wait for the response to finish before inspecting a token."
 INSPECT_GONE = "That token is no longer on screen. Click one and try again."
 INSPECT_FIRST = "Nothing came before this token, so the model never predicted it."
+INSPECT_MODEL_CHANGED = (
+    "A different model is loaded now. These tokens belong to the model that "
+    "produced them, so generate or score again to inspect with this one."
+)
 INSPECT_OUTPUT_ONLY = (
     "Only the output is shown: this model's intermediate layers could not be "
     "read the way it reads its own output."
@@ -2002,12 +2011,18 @@ def inspect_layers(
         return
     generation, metrics = metrics_state
     _prompt_generation, prompt_metrics = prompt_metrics_state
-    context_generation, context_ids = context_state
+    context_generation, context_ids, model_id = context_state
     if generation != target["generation"] or context_generation != generation:
         yield (*refused, INSPECT_GONE)
         return
     if not MANAGER.loaded:
         yield (*refused, "Download and load a model first.")
+        return
+    # Loading a model leaves the strips on screen, and their token ids mean
+    # nothing to a different tokenizer, so the ids carry the model that
+    # produced them and only that model may explain them.
+    if model_id != MANAGER.model_id:
+        yield (*refused, INSPECT_MODEL_CHANGED)
         return
 
     context_ids = [int(value) for value in context_ids]
@@ -2185,7 +2200,7 @@ def build_app() -> gr.Blocks:
         selected_message = gr.State(None)
         # Layer inspection: the prompt ids behind the strips, the strip
         # position last clicked, and the last readout for re-rendering.
-        context_ids_state = gr.State(empty_metrics())
+        context_ids_state = gr.State((*empty_metrics(), None))
         inspect_target = gr.State(None)
         insight_state = gr.State(None)
 
