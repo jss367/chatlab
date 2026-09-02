@@ -137,6 +137,14 @@ class CacheStatus:
         return self.cached_bytes + self.partial_bytes
 
 
+@dataclass(frozen=True)
+class CachedModel:
+    """One Hugging Face model repository found in the local disk cache."""
+
+    model_id: str
+    status: CacheStatus
+
+
 def cache_folder(model_id: str, cache_dir: Path | None = None) -> Path:
     """The ``models--org--name`` folder ``huggingface_hub`` keeps a model in."""
 
@@ -221,6 +229,48 @@ def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
     if cached == 0 and partial_files == 0:
         return CacheStatus()
     return CacheStatus(cached, partial_files, partial_bytes, missing_files(snapshot))
+
+
+def cached_models(cache_dir: Path | None = None) -> tuple[CachedModel, ...]:
+    """List model repositories that have files in the Hugging Face cache.
+
+    Hugging Face encodes ``owner/name`` as ``models--owner--name``. Splitting
+    only at the first separator preserves a model name that itself contains a
+    double hyphen. Cache entries without an owner cannot be selected in
+    Chatlab, whose model field deliberately accepts full repository IDs only.
+    """
+
+    if cache_dir is None:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        cache_dir = Path(HF_HUB_CACHE)
+    root = Path(cache_dir)
+    try:
+        folders = tuple(root.iterdir())
+    except OSError:
+        return ()
+
+    found = []
+    for folder in folders:
+        if not folder.is_dir() or not folder.name.startswith("models--"):
+            continue
+        owner, separator, name = folder.name.removeprefix("models--").partition("--")
+        if not separator:
+            continue
+        model_id = f"{owner}/{name}"
+        try:
+            status = cache_status(model_id, root)
+        except (OSError, ValueError):
+            continue
+        if status.present:
+            found.append(CachedModel(model_id, status))
+
+    return tuple(
+        sorted(
+            found,
+            key=lambda model: (not model.status.complete, model.model_id.casefold()),
+        )
+    )
 
 
 def format_bytes(count: int) -> str:

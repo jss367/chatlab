@@ -42,6 +42,7 @@ from model_runtime import (
     DownloadSnapshot,
     ModelManager,
     cache_status,
+    cached_models,
     format_bytes,
 )
 from token_metrics import (
@@ -309,6 +310,43 @@ def describe_fetched(before: CacheStatus, after: CacheStatus, elapsed: float) ->
             f"Fetched the remaining {format_bytes(fetched)} in {elapsed:.1f} seconds."
         )
     return f"Fetched {format_bytes(fetched)} in {elapsed:.1f} seconds."
+
+
+def cached_model_choices() -> list[tuple[str, str]]:
+    """Dropdown labels and values for everything Chatlab finds on disk."""
+
+    choices = []
+    for model in cached_models():
+        status = model.status
+        if status.complete:
+            detail = f"{format_bytes(status.cached_bytes)} downloaded"
+        else:
+            detail = f"{format_bytes(status.total_bytes)} on disk, incomplete"
+        choices.append((f"{model.model_id} — {detail}", model.model_id))
+    return choices
+
+
+def refresh_cached_model_picker(model_id: str):
+    """Rescan the cache and keep the typed model selected when it is present."""
+
+    choices = cached_model_choices()
+    values = {value for _label, value in choices}
+    cleaned = model_id.strip()
+    count = len(choices)
+    note = (
+        f"Found **{count}** model{'s' if count != 1 else ''} in the local Hugging Face cache."
+        if choices
+        else "No downloaded models found in the local Hugging Face cache."
+    )
+    return gr.update(
+        choices=choices, value=cleaned if cleaned in values else None
+    ), note
+
+
+def select_cached_model(model_id: str | None):
+    """Copy a user-picked cached model into the editable repository-ID field."""
+
+    return model_id or gr.skip()
 
 
 def download_model(model_id: str, hf_token: str):
@@ -2025,6 +2063,23 @@ def build_app() -> gr.Blocks:
         with gr.Accordion("Model setup", open=True):
             with gr.Row():
                 with gr.Column(scale=3):
+                    with gr.Row():
+                        downloaded_models = gr.Dropdown(
+                            choices=[],
+                            label="Downloaded models",
+                            info=(
+                                "Complete and resumable partial downloads are shown here. "
+                                "Only causal language models are compatible with Chatlab."
+                            ),
+                            scale=4,
+                        )
+                        refresh_models_button = gr.Button(
+                            "Refresh", variant="secondary", scale=1
+                        )
+                    downloaded_models_note = gr.Markdown(
+                        "Checking the local Hugging Face cache…",
+                        elem_classes=["scale-caption"],
+                    )
                     model_id = gr.Textbox(
                         value=os.environ.get("OLMO_MODEL_ID", DEFAULT_MODEL),
                         label="Hugging Face model ID",
@@ -2047,7 +2102,7 @@ def build_app() -> gr.Blocks:
                     model_status = gr.Markdown(
                         status_card(
                             "No model loaded",
-                            "Enter a model ID, then download and load it. Files are kept in your normal Hugging Face cache.",
+                            "Choose a downloaded model, or enter a Hugging Face model ID to download one.",
                         ),
                         elem_id="model-status",
                     )
@@ -2248,9 +2303,27 @@ def build_app() -> gr.Blocks:
             elem_classes=["footer-note"],
         )
 
-        download_button.click(download_model, [model_id, hf_token], model_status)
-        download_load_button.click(
+        downloaded_models.input(select_cached_model, downloaded_models, model_id)
+        refresh_models_button.click(
+            refresh_cached_model_picker,
+            model_id,
+            [downloaded_models, downloaded_models_note],
+        )
+        download_event = download_button.click(
+            download_model, [model_id, hf_token], model_status
+        )
+        download_event.then(
+            refresh_cached_model_picker,
+            model_id,
+            [downloaded_models, downloaded_models_note],
+        )
+        download_load_event = download_load_button.click(
             download_and_load_model, [model_id, hf_token], model_status
+        )
+        download_load_event.then(
+            refresh_cached_model_picker,
+            model_id,
+            [downloaded_models, downloaded_models_note],
         )
         cached_button.click(load_cached_model, model_id, model_status)
         unload_button.click(unload_model, outputs=model_status)
@@ -2503,6 +2576,11 @@ def build_app() -> gr.Blocks:
             [token_detail, branch_pick],
         )
 
+        demo.load(
+            refresh_cached_model_picker,
+            model_id,
+            [downloaded_models, downloaded_models_note],
+        )
     return demo
 
 

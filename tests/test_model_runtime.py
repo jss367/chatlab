@@ -10,6 +10,7 @@ from model_runtime import (
     SCORE_TOKEN_LIMIT,
     ModelManager,
     cache_status,
+    cached_models,
     encode_for_scoring,
     format_bytes,
     score_token_limit,
@@ -273,6 +274,52 @@ class CacheStatusTests(unittest.TestCase):
         self.assertEqual(format_bytes(3_418_357_760), "3.4 GB")
         self.assertEqual(format_bytes(146_800_640), "147 MB")
         self.assertEqual(format_bytes(15_000_000_000), "15.0 GB")
+
+
+class CachedModelsTests(unittest.TestCase):
+    def make_cache_entry(
+        self, root: str, model_id: str, *, complete: bool
+    ) -> Path:
+        folder = Path(root) / f"models--{model_id.replace('/', '--')}"
+        blobs = folder / "blobs"
+        blobs.mkdir(parents=True)
+        (blobs / "cached-blob").write_bytes(b"cached")
+        if complete:
+            commit = "abc123"
+            (folder / "refs").mkdir()
+            (folder / "refs" / "main").write_text(commit)
+            snapshot = folder / "snapshots" / commit
+            snapshot.mkdir(parents=True)
+            (snapshot / "config.json").symlink_to(blobs / "cached-blob")
+            (snapshot / "model.safetensors").symlink_to(blobs / "cached-blob")
+        return folder
+
+    def test_lists_complete_and_resumable_model_caches(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.make_cache_entry(root, "org/complete--variant", complete=True)
+            self.make_cache_entry(root, "org/partial", complete=False)
+            inventory = cached_models(Path(root))
+
+        self.assertEqual(
+            [model.model_id for model in inventory],
+            ["org/complete--variant", "org/partial"],
+        )
+        self.assertTrue(inventory[0].status.complete)
+        self.assertFalse(inventory[1].status.complete)
+
+    def test_ignores_cache_entries_chatlab_cannot_select(self):
+        with tempfile.TemporaryDirectory() as root:
+            bare = Path(root) / "models--gpt2" / "blobs"
+            bare.mkdir(parents=True)
+            (bare / "cached-blob").write_bytes(b"cached")
+            (Path(root) / "datasets--org--corpus").mkdir()
+
+            self.assertEqual(cached_models(Path(root)), ())
+
+    def test_a_missing_cache_has_an_empty_inventory(self):
+        with tempfile.TemporaryDirectory() as root:
+            missing = Path(root) / "not-created"
+            self.assertEqual(cached_models(missing), ())
 
 
 class Encoding(dict):

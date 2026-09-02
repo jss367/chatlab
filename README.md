@@ -60,7 +60,7 @@ On macOS or Linux:
 ./run.sh
 ```
 
-The first run creates an isolated Python environment and installs the dependencies. The app then opens in your browser. Paste a Hugging Face model ID into **Model setup** and choose **Download and load**.
+The first run creates an isolated Python environment and installs the dependencies. The app then opens in your browser. Under **Model setup**, choose a downloaded model or paste a Hugging Face model ID and choose **Download and load**.
 
 To install manually:
 
@@ -71,7 +71,7 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Model files use the standard Hugging Face cache. By default this is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
+Model files use the standard Hugging Face cache. Chatlab lists complete downloads and resumable partial downloads under **Downloaded models**. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
 
 ## Working with a conversation
 
