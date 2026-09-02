@@ -1370,18 +1370,46 @@ class ModelManager:
             encoded = encoded[0]
         return [int(value) for value in encoded], prefilled
 
-    def encode_response_text(self, text: str) -> list[int]:
-        """Encode text the reader wants replayed mid-response, as a branch does.
+    def encode_replacement(self, kept_ids: Sequence[int], text: str) -> list[int]:
+        """Encode text the reader wants replayed after ``kept_ids``, as a branch does.
 
-        The text stands in for one or more sampled tokens, so it is encoded
-        on its own: no special tokens, no reasoning marker, and it must
-        round-trip exactly or the branch would replay something else.
+        The text stands in for one or more sampled tokens, so it carries no
+        special tokens and no reasoning marker. It is checked in place rather
+        than on its own because decoding is not always piecewise: SentencePiece
+        drops the word-boundary space from the first token of whatever it
+        decodes, so ``"world"`` round-trips alone yet reads ``" world"`` once it
+        follows ``"Hello"``, while a typed ``" world"`` gains a second space.
+        The kept tokens plus the result must therefore decode to the kept text
+        followed by exactly what was typed. The kept ids themselves are never
+        re-tokenized; a branch preserves them token for token.
         """
 
         if not self.loaded:
             raise RuntimeError("Download and load a model before branching.")
-        return self._response_prefix_ids(
-            text, close_reasoning=False, label="replacement text"
+        assert self.tokenizer is not None
+        kept = [int(value) for value in kept_ids]
+        if not text:
+            raise ValueError("The replacement text did not produce any tokens.")
+        kept_text = self._decode_ids(kept)
+        expected = kept_text + text
+
+        # Two encodings can place the text: the text on its own, which is how
+        # a BPE tokenizer with the space inside the token wants it, and the
+        # tail of the text encoded together with the kept prefix, which is how
+        # a tokenizer that reads word boundaries from context wants it. The
+        # second is only usable when it leaves the kept prefix untouched.
+        candidates = [self._encode_plain(text)]
+        joint = self._encode_plain(expected)
+        if len(joint) > len(kept) and joint[: len(kept)] == kept:
+            candidates.append(joint[len(kept) :])
+        if not any(candidates):
+            raise ValueError("The replacement text did not produce any tokens.")
+        for token_ids in candidates:
+            if token_ids and self._decode_ids(kept + token_ids) == expected:
+                return token_ids
+        raise ValueError(
+            "The replacement text cannot be inserted exactly at this position "
+            "by this tokenizer."
         )
 
     def _response_prefix_ids(
@@ -1403,7 +1431,20 @@ class ModelManager:
         if not text:
             return []
         raw = f"{THINK_CLOSE}\n\n{text}" if close_reasoning else text
-        encoded = self.tokenizer(raw, add_special_tokens=False)
+        token_ids = self._encode_plain(raw)
+        if not token_ids:
+            raise ValueError(f"The {label} did not produce any tokens.")
+        if self._decode_ids(token_ids) != raw:
+            raise ValueError(
+                f"The {label} cannot be represented exactly by this tokenizer."
+            )
+        return token_ids
+
+    def _encode_plain(self, text: str) -> list[int]:
+        """Token ids for ``text`` alone: no special tokens, no chat template."""
+
+        assert self.tokenizer is not None
+        encoded = self.tokenizer(text, add_special_tokens=False)
         if isinstance(encoded, Mapping):
             encoded = encoded["input_ids"]
         elif hasattr(encoded, "input_ids"):
@@ -1412,27 +1453,18 @@ class ModelManager:
             encoded = encoded.tolist()
         if encoded and isinstance(encoded[0], (list, tuple)):
             encoded = encoded[0]
-        token_ids = [int(value) for value in encoded]
-        if not token_ids:
-            raise ValueError(f"The {label} did not produce any tokens.")
-        decoded = self.tokenizer.decode(
-            token_ids,
-            skip_special_tokens=False,
-            clean_up_tokenization_spaces=False,
-        )
-        if decoded != raw:
-            raise ValueError(
-                f"The {label} cannot be represented exactly by this tokenizer."
-            )
-        return token_ids
+        return [int(value) for value in encoded]
 
-    def _decode_token(self, token_id: int) -> str:
+    def _decode_ids(self, token_ids: Sequence[int]) -> str:
         assert self.tokenizer is not None
         return self.tokenizer.decode(
-            [int(token_id)],
+            [int(value) for value in token_ids],
             skip_special_tokens=False,
             clean_up_tokenization_spaces=False,
         )
+
+    def _decode_token(self, token_id: int) -> str:
+        return self._decode_ids([token_id])
 
     def _token_fallback(self, token_id: int) -> str:
         assert self.tokenizer is not None

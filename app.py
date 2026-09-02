@@ -1611,7 +1611,8 @@ def branch_with_text(
     place, and let the model continue.
 
     The text is not limited to the model's own alternatives, so it is
-    tokenized on its own and must round-trip exactly. It is spliced in as
+    tokenized for this position: the kept tokens plus the result must decode
+    to the kept text followed by exactly what was typed. It is spliced in as
     sampled content, so a stop token typed into it ends the response there,
     the same as a stop token chosen from the alternatives table.
     """
@@ -1653,7 +1654,7 @@ def branch_with_text(
         yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
         return
     try:
-        replacement_ids = MANAGER.encode_response_text(replacement)
+        replacement_ids = MANAGER.encode_replacement(kept, replacement)
     except (ValueError, RuntimeError) as error:
         yield idle_state(prompt_text, turns, f"🌱 {error}")
         return

@@ -17,7 +17,7 @@ from conversation import (
 from model_runtime import GenerationUpdate, ModelChanged, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
 
-from test_streaming import loaded_manager
+from test_streaming import SentencePieceTokenizer, loaded_manager
 
 
 # "Hello" and " world" are the answer; the reasoning tags are their own tokens.
@@ -1979,6 +1979,33 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertTrue(
             branched[TURNS][-1]["content"].startswith("<think>Hello</think>Hello")
         )
+
+    def sentencepiece_response(self):
+        """A response from a tokenizer that drops the first decoded space."""
+
+        pieces = ["\u2581Hello", "\u2581world", "world", "\u2581", "!", "<eos>"]
+        eos = pieces.index("<eos>")
+        app.MANAGER = loaded_manager([0, 4, eos], pieces, eos)
+        app.MANAGER.tokenizer = SentencePieceTokenizer(pieces, eos)
+        final = self.respond()[-1]
+        self.assertEqual(final[TURNS][-1]["content"], "Hello!")
+        return final
+
+    def test_typed_text_without_a_space_stays_joined_under_sentencepiece(self):
+        # "world" round-trips on its own, but its piece would read " world"
+        # after "Hello"; the branch must use the piece that joins instead.
+        final = self.sentencepiece_response()
+        last = self.branch_text(final, "world")[-1]
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual([m["token_id"] for m in metrics[:2]], [0, 2])
+        self.assertTrue(last[TURNS][-1]["content"].startswith("Helloworld"))
+
+    def test_a_typed_leading_space_is_kept_once_under_sentencepiece(self):
+        final = self.sentencepiece_response()
+        last = self.branch_text(final, " world")[-1]
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual([m["token_id"] for m in metrics[:2]], [0, 1])
+        self.assertTrue(last[TURNS][-1]["content"].startswith("Hello world"))
 
     def test_the_branch_text_button_is_wired_as_a_generation(self):
         demo = app.build_app()

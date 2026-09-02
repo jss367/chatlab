@@ -70,6 +70,12 @@ class FakeTokenizer:
                     None,
                 )
                 if match is None:
+                    if "<unk>" in self.pieces:
+                        # Real vocabularies have an unknown piece; anything it
+                        # stands in for no longer decodes to what was typed.
+                        token_ids.append(self.pieces.index("<unk>"))
+                        remaining = remaining[1:]
+                        continue
                     raise ValueError(f"No fake token for {remaining!r}")
                 piece, index = match
                 token_ids.append(index)
@@ -113,21 +119,28 @@ class BytePieceTokenizer:
         return repr(self.pieces[int(token_id)])
 
 
-class SentencePieceTokenizer:
-    """A SentencePiece stand-in: the word-boundary space is dropped at the start."""
+class SentencePieceTokenizer(FakeTokenizer):
+    """A SentencePiece stand-in: the word-boundary space is dropped at the start.
 
-    chat_template = None
+    Encoding prepends the dummy-prefix marker and matches pieces greedily, so
+    a standalone word becomes its ``\u2581word`` piece just as SentencePiece
+    makes it. Decoding turns markers back into spaces and drops the first, so
+    that piece reads without a space on its own and with one after other
+    tokens: ``decode(a + b)`` is not ``decode(a) + decode(b)``.
+    """
 
-    def __init__(self, pieces: list[str]):
-        self.pieces = pieces
-        self.all_special_ids: list[int] = []
+    def __init__(self, pieces: list[str], eos_id: int | None = None):
+        super().__init__(pieces, eos_id)
+        self.all_special_ids = [] if eos_id is None else [eos_id]
 
-    def decode(self, token_ids, skip_special_tokens=False, **_kwargs):
-        text = "".join(self.pieces[int(token_id)] for token_id in token_ids)
+    def __call__(self, text, **kwargs):
+        if kwargs.get("add_special_tokens") is False:
+            text = "\u2581" + text.replace(" ", "\u2581")
+        return super().__call__(text, **kwargs)
+
+    def decode(self, token_ids, skip_special_tokens=False, **kwargs):
+        text = super().decode(token_ids, skip_special_tokens=skip_special_tokens, **kwargs)
         return text.replace("\u2581", " ").removeprefix(" ")
-
-    def convert_ids_to_tokens(self, token_id):
-        return self.pieces[int(token_id)]
 
 
 class FakeModel(torch.nn.Module):
@@ -473,6 +486,82 @@ class ForcedPrefixTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "represented exactly"):
             self.updates(manager, [], answer_prefill="  Hello")
+
+
+SP_PIECES = ["\u2581Hello", "\u2581world", "world", "\u2581", "!", "<unk>", "<eos>"]
+SP_HELLO, SP_SPACE_WORLD, SP_WORLD, SP_SPACE = 0, 1, 2, 3
+SP_EOS = SP_PIECES.index("<eos>")
+
+
+def sentencepiece_manager(pieces=SP_PIECES):
+    manager = loaded_manager([SP_HELLO], pieces, pieces.index("<eos>"))
+    manager.tokenizer = SentencePieceTokenizer(pieces, pieces.index("<eos>"))
+    return manager
+
+
+class ReplacementEncodingTests(unittest.TestCase):
+    """Typed branch text must read, after the kept tokens, exactly as typed.
+
+    A tokenizer that drops the word-boundary space from the first decoded
+    token makes the standalone round-trip check meaningless: ``"world"``
+    passes it and then gains a space once it follows ``"Hello"``, while the
+    typed ``" world"`` passes it and then carries two.
+    """
+
+    def decoded(self, manager, kept, text):
+        ids = manager.encode_replacement(kept, text)
+        return ids, manager.tokenizer.decode(list(kept) + ids)
+
+    def test_a_word_typed_without_a_space_does_not_gain_one(self):
+        manager = sentencepiece_manager()
+        ids, joined = self.decoded(manager, [SP_HELLO], "world")
+        self.assertEqual(ids, [SP_WORLD])
+        self.assertEqual(joined, "Helloworld")
+
+    def test_a_typed_leading_space_appears_once(self):
+        manager = sentencepiece_manager()
+        ids, joined = self.decoded(manager, [SP_HELLO], " world")
+        self.assertEqual(ids, [SP_SPACE_WORLD])
+        self.assertEqual(joined, "Hello world")
+
+    def test_the_first_response_token_has_no_context_to_read(self):
+        manager = sentencepiece_manager()
+        ids, joined = self.decoded(manager, [], "Hello")
+        self.assertEqual(ids, [SP_HELLO])
+        self.assertEqual(joined, "Hello")
+
+    def test_text_no_encoding_places_exactly_is_refused(self):
+        # Without a bare "world" piece nothing decodes to "Helloworld": alone
+        # the word gains a space, in context it falls to the unknown piece.
+        pieces = [piece for piece in SP_PIECES if piece != "world"]
+        manager = sentencepiece_manager(pieces)
+        with self.assertRaisesRegex(ValueError, "exactly at this position"):
+            manager.encode_replacement([pieces.index("\u2581Hello")], "world")
+
+    def test_the_kept_prefix_is_never_retokenized(self):
+        # The model sampled "Hello" as two pieces. Encoding the whole text
+        # would merge them into one, which would replace the kept tokens, so
+        # that encoding is not usable and the text is refused.
+        pieces = ["\u2581Hello", "\u2581Hel", "lo", "\u2581world", "world", "<unk>", "<eos>"]
+        manager = sentencepiece_manager(pieces)
+        kept = [pieces.index("\u2581Hel"), pieces.index("lo")]
+        self.assertEqual(manager.tokenizer.decode(kept), "Hello")
+        with self.assertRaisesRegex(ValueError, "exactly at this position"):
+            manager.encode_replacement(kept, "world")
+
+    def test_a_tokenizer_with_the_space_inside_the_token_is_unchanged(self):
+        manager = loaded_manager([0])
+        self.assertEqual(manager.encode_replacement([0], " world"), [1])
+        self.assertEqual(manager.encode_replacement([0], "!\nHow"), [2, 3, 4])
+
+    def test_empty_text_is_refused(self):
+        manager = loaded_manager([0])
+        with self.assertRaisesRegex(ValueError, "did not produce any tokens"):
+            manager.encode_replacement([0], "")
+
+    def test_an_unloaded_manager_refuses(self):
+        with self.assertRaisesRegex(RuntimeError, "load a model"):
+            ModelManager().encode_replacement([0], "Hello")
 
 
 class ChatTemplateTokenizer(FakeTokenizer):
