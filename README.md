@@ -140,10 +140,16 @@ The **Score text** tab measures text the model did not generate. Paste it, optio
    ```
 
 The `Release macOS app` workflow builds `ChatLab.app` on an Apple Silicon
-runner, smoke-tests it, and attaches `ChatLab-macos-arm64.zip` to a GitHub
-Release for that tag. It fails if the tag disagrees with `version.py` or the
-zip exceeds GitHub's 2 GB asset limit. Installed apps offer the release the
-next time they start.
+runner, smoke-tests it, and attaches `ChatLab-macos-arm64.zip` and its
+`.sha256` checksum to a GitHub Release for that tag. It fails if the tag
+disagrees with `version.py` or the zip exceeds GitHub's 2 GB asset limit.
+Installed apps offer the release the next time they start; the updater
+verifies the download against the published checksum and confirms the
+unpacked bundle is ChatLab at the release's version before installing it.
+
+The app is not code-signed or notarized, so the checksum only protects
+against a corrupted or tampered download in transit. Signing releases with a
+Developer ID is the step that would let clients verify who built them.
 
 ## Tests
 

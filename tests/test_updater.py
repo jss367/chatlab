@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import plistlib
 import shutil
 import subprocess
 import tempfile
@@ -34,6 +36,7 @@ class ReleaseSelectionTests(unittest.TestCase):
         "assets": [
             {"name": "ChatLab-macos-x86_64.zip", "browser_download_url": "https://x/intel.zip", "size": 1},
             {"name": "ChatLab-macos-arm64.zip", "browser_download_url": "https://x/arm.zip", "size": 2},
+            {"name": "ChatLab-macos-arm64.zip.sha256", "browser_download_url": "https://x/arm.zip.sha256", "size": 65},
         ],
     }
 
@@ -46,6 +49,8 @@ class ReleaseSelectionTests(unittest.TestCase):
         self.assertEqual(release.version, "0.3.0")
         self.assertEqual(release.asset_url, "https://x/arm.zip")
         self.assertEqual(release.asset_size, 2)
+        self.assertEqual(release.checksum_url, "https://x/arm.zip.sha256")
+        self.assertIsNone(updater.select_release(self.payload, "ChatLab-macos-x86_64.zip").checksum_url)
 
     def test_missing_asset_or_bad_tag_gives_none(self):
         self.assertIsNone(updater.select_release(self.payload, "ChatLab-macos-riscv.zip"))
@@ -65,11 +70,32 @@ class BundleTests(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, True)
 
-    def make_bundle(self, name: str, marker: str) -> Path:
+    def make_bundle(self, name: str, marker: str, version: str = "0.3.0", identifier: str | None = None) -> Path:
         bundle = self.root / name
         (bundle / "Contents" / "MacOS").mkdir(parents=True)
         (bundle / "Contents" / "MacOS" / "ChatLab").write_text(marker)
+        with (bundle / "Contents" / "Info.plist").open("wb") as handle:
+            plistlib.dump(
+                {
+                    "CFBundleIdentifier": identifier or updater.BUNDLE_IDENTIFIER,
+                    "CFBundleShortVersionString": version,
+                },
+                handle,
+            )
         return bundle
+
+    RELEASE = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", None, "u")
+
+    def test_verify_bundle_accepts_matching_and_rejects_others(self):
+        updater.verify_bundle(self.make_bundle("ok.app", "x"), self.RELEASE)
+        with self.assertRaisesRegex(updater.UpdateError, "identifies itself"):
+            updater.verify_bundle(self.make_bundle("other.app", "x", identifier="com.evil.app"), self.RELEASE)
+        with self.assertRaisesRegex(updater.UpdateError, "version 0.2.0"):
+            updater.verify_bundle(self.make_bundle("old.app", "x", version="0.2.0"), self.RELEASE)
+        broken = self.make_bundle("broken.app", "x")
+        (broken / "Contents" / "Info.plist").unlink()
+        with self.assertRaisesRegex(updater.UpdateError, "Info.plist"):
+            updater.verify_bundle(broken, self.RELEASE)
 
     def test_running_app_bundle_from_executable(self):
         bundle = self.make_bundle("ChatLab.app", "old")
@@ -124,15 +150,33 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(extracted.name, "ChatLab.app")
         self.assertTrue((extracted / "Contents" / "link").is_symlink())
 
-    def test_download_stops_when_cancelled(self):
-        release = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", 30, "u")
-        chunks = iter([b"a" * 10, b"b" * 10, b"c" * 10, b""])
+    @unittest.skipUnless(shutil.which("ditto"), "ditto is macOS-only")
+    def test_extract_bundle_can_be_cancelled(self):
+        bundle = self.make_bundle("ChatLab.app", "bin")
+        archive = self.root / "ChatLab-macos-arm64.zip"
+        subprocess.run(["ditto", "-c", "-k", "--keepParent", str(bundle), str(archive)], check=True)
+        real_popen = updater.subprocess.Popen
+        slow = lambda args, **kw: real_popen(["sleep", "30"], **kw)  # noqa: E731
+        with mock.patch.object(updater.subprocess, "Popen", side_effect=slow):
+            with self.assertRaises(updater.UpdateCancelled):
+                updater.extract_bundle(archive, self.root / "out", cancelled=lambda: True)
+
+    @staticmethod
+    def fake_response(chunks: list[bytes]):
+        chunks = iter(chunks + [b""])
         response = mock.MagicMock()
         response.__enter__.return_value = response
         response.headers = {"Content-Length": "30"}
         response.read.side_effect = lambda n: next(chunks)
+        return response
+
+    def test_download_stops_when_cancelled(self):
+        release = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", 30, "u")
+        response = self.fake_response([b"a" * 10, b"b" * 10, b"c" * 10])
         seen = []
-        with mock.patch.object(updater, "urlopen", return_value=response):
+        with mock.patch.object(updater, "fetch_checksum", return_value="0" * 64), mock.patch.object(
+            updater, "urlopen", return_value=response
+        ):
             with self.assertRaises(updater.UpdateCancelled):
                 updater.download_asset(
                     release, self.root / "dl", progress=lambda r, t: seen.append(r), cancelled=lambda: len(seen) >= 2
@@ -140,12 +184,41 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(seen, [10, 20])
         self.assertFalse((self.root / "dl" / release.asset_name).exists())
 
+    def test_download_verifies_checksum(self):
+        release = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", 30, "u")
+        body = b"a" * 10 + b"b" * 10 + b"c" * 10
+        good = hashlib.sha256(body).hexdigest()
+        with mock.patch.object(updater, "fetch_checksum", return_value=good), mock.patch.object(
+            updater, "urlopen", return_value=self.fake_response([body[:10], body[10:20], body[20:]])
+        ):
+            target = updater.download_asset(release, self.root / "dl")
+        self.assertEqual(target.read_bytes(), body)
+        with mock.patch.object(updater, "fetch_checksum", return_value="f" * 64), mock.patch.object(
+            updater, "urlopen", return_value=self.fake_response([body])
+        ):
+            with self.assertRaisesRegex(updater.UpdateError, "checksum"):
+                updater.download_asset(release, self.root / "dl2")
+        self.assertFalse((self.root / "dl2" / release.asset_name).exists())
+
+    def test_fetch_checksum_requires_published_digest(self):
+        with self.assertRaisesRegex(updater.UpdateError, "does not publish a checksum"):
+            updater.fetch_checksum(self.RELEASE)
+        release = updater.ReleaseInfo("0.3.0", "a.zip", "u", None, "r", checksum_url="https://x/a.zip.sha256")
+        response = mock.MagicMock(); response.__enter__.return_value = response
+        response.read.return_value = (" " + "ab" * 32 + "  a.zip\n").encode()
+        with mock.patch.object(updater, "urlopen", return_value=response):
+            self.assertEqual(updater.fetch_checksum(release), "ab" * 32)
+        response.read.return_value = b"not a digest"
+        with mock.patch.object(updater, "urlopen", return_value=response):
+            with self.assertRaisesRegex(updater.UpdateError, "not a SHA-256"):
+                updater.fetch_checksum(release)
+
     def test_install_update_cancelled_after_extract_leaves_bundle_alone(self):
         current = self.make_bundle("ChatLab.app", "old")
         release = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", None, "u")
         work = self.root / "work"
-        with mock.patch.object(updater, "download_asset", side_effect=lambda *a: work / "x.zip"), mock.patch.object(
-            updater, "extract_bundle", side_effect=lambda *a: self.make_bundle("work/unpacked/ChatLab.app", "new")
+        with mock.patch.object(updater, "download_asset", side_effect=lambda *a, **k: work / "x.zip"), mock.patch.object(
+            updater, "extract_bundle", side_effect=lambda *a, **k: self.make_bundle("work/unpacked/ChatLab.app", "new")
         ):
             with self.assertRaises(updater.UpdateCancelled):
                 updater.install_update(release, current, work_dir=work, cancelled=lambda: True)
@@ -156,8 +229,8 @@ class BundleTests(unittest.TestCase):
         current = self.make_bundle("ChatLab.app", "old")
         release = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", None, "u")
         work = self.root / "work"
-        with mock.patch.object(updater, "download_asset", side_effect=lambda *a: work / "x.zip"), mock.patch.object(
-            updater, "extract_bundle", side_effect=lambda *a: self.make_bundle("work/unpacked/ChatLab.app", "new")
+        with mock.patch.object(updater, "download_asset", side_effect=lambda *a, **k: work / "x.zip"), mock.patch.object(
+            updater, "extract_bundle", side_effect=lambda *a, **k: self.make_bundle("work/unpacked/ChatLab.app", "new")
         ):
             with self.assertRaises(updater.UpdateCancelled):
                 updater.install_update(release, current, work_dir=work, begin_swap=lambda: False)
@@ -173,7 +246,7 @@ class BundleTests(unittest.TestCase):
             progress(5, 10)
             return dest / rel.asset_name
 
-        def fake_extract(archive, dest):
+        def fake_extract(archive, dest, cancelled=None):
             return self.make_bundle("work/unpacked/ChatLab.app", "new")
 
         seen = []

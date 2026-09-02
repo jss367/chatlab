@@ -5,7 +5,7 @@ import sys
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 sys.path.insert(0, SPECPATH)
-from version import __version__  # noqa: E402
+from version import BUNDLE_IDENTIFIER, __version__  # noqa: E402
 
 
 datas = []
@@ -76,7 +76,7 @@ app = BUNDLE(
     coll,
     name="ChatLab.app",
     icon=None,
-    bundle_identifier="build.chatlab.token-explorer",
+    bundle_identifier=BUNDLE_IDENTIFIER,
     info_plist={
         "CFBundleDisplayName": "ChatLab",
         "CFBundleName": "ChatLab",

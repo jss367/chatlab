@@ -8,9 +8,11 @@ functions so they can be tested and so the launcher only has to orchestrate.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import platform
+import plistlib
 import re
 import shutil
 import subprocess
@@ -22,7 +24,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.request import Request, urlopen
 
-from version import __version__
+from version import BUNDLE_IDENTIFIER, __version__
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,7 @@ class ReleaseInfo:
     asset_url: str
     asset_size: int | None
     release_url: str
+    checksum_url: str | None = None
 
 
 def parse_version(text: str) -> tuple[int, ...] | None:
@@ -92,16 +95,23 @@ def select_release(payload: dict, asset_name: str) -> ReleaseInfo | None:
     tag = str(payload.get("tag_name", ""))
     if parse_version(tag) is None:
         return None
-    for asset in payload.get("assets", []):
-        if asset.get("name") == asset_name and asset.get("browser_download_url"):
-            return ReleaseInfo(
-                version=tag.lstrip("v"),
-                asset_name=asset_name,
-                asset_url=asset["browser_download_url"],
-                asset_size=asset.get("size"),
-                release_url=payload.get("html_url") or RELEASES_PAGE_URL,
-            )
-    return None
+    assets = {
+        asset.get("name"): asset
+        for asset in payload.get("assets", [])
+        if asset.get("browser_download_url")
+    }
+    asset = assets.get(asset_name)
+    if asset is None:
+        return None
+    checksum = assets.get(f"{asset_name}.sha256")
+    return ReleaseInfo(
+        version=tag.lstrip("v"),
+        asset_name=asset_name,
+        asset_url=asset["browser_download_url"],
+        asset_size=asset.get("size"),
+        release_url=payload.get("html_url") or RELEASES_PAGE_URL,
+        checksum_url=checksum["browser_download_url"] if checksum else None,
+    )
 
 
 def fetch_latest_release(api_url: str = LATEST_RELEASE_API_URL) -> dict:
@@ -142,22 +152,45 @@ def running_app_bundle(executable: str | None = None) -> Path | None:
     return bundle
 
 
+def fetch_checksum(release: ReleaseInfo) -> str:
+    """Return the published SHA-256 hex digest for the release asset."""
+
+    if release.checksum_url is None:
+        raise UpdateError(
+            f"Release {release.version} does not publish a checksum for {release.asset_name}."
+        )
+    request = Request(release.checksum_url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            text = response.read(1024).decode("ascii", "replace")
+    except Exception as error:  # noqa: BLE001
+        raise UpdateError(f"Could not fetch the release checksum: {error}") from error
+    digest = text.split()[0].lower() if text.split() else ""
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise UpdateError("The release checksum file is not a SHA-256 digest.")
+    return digest
+
+
 def download_asset(
     release: ReleaseInfo,
     destination_dir: Path,
     progress: ProgressCallback | None = None,
     cancelled: CancelCheck | None = None,
 ) -> Path:
-    """Stream the release zip to ``destination_dir`` and return its path.
+    """Stream the release zip to ``destination_dir``, verify it, and return its path.
 
-    ``cancelled`` is polled between chunks; when it returns True the partial
-    file is removed and :class:`UpdateCancelled` is raised.
+    The file is hashed as it arrives and must match the checksum the release
+    publishes beside it. ``cancelled`` is polled between chunks; when it
+    returns True the partial file is removed and :class:`UpdateCancelled` is
+    raised.
     """
 
+    expected_digest = fetch_checksum(release)
     destination_dir.mkdir(parents=True, exist_ok=True)
     target = destination_dir / release.asset_name
     request = Request(release.asset_url, headers={"User-Agent": USER_AGENT})
     received = 0
+    digest = hashlib.sha256()
     try:
         with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response, target.open("wb") as out:
             length_header = response.headers.get("Content-Length")
@@ -169,6 +202,7 @@ def download_asset(
                 if not chunk:
                     break
                 out.write(chunk)
+                digest.update(chunk)
                 received += len(chunk)
                 if progress is not None:
                     progress(received, total)
@@ -183,25 +217,72 @@ def download_asset(
         raise UpdateError(
             f"Download was {received} bytes but the release lists {release.asset_size}."
         )
+    if digest.hexdigest() != expected_digest:
+        target.unlink(missing_ok=True)
+        raise UpdateError("The downloaded update does not match the published checksum.")
     return target
 
 
-def extract_bundle(archive: Path, destination_dir: Path) -> Path:
-    """Unzip with ``ditto`` (which keeps symlinks and permissions) and return the ``.app``."""
+def extract_bundle(
+    archive: Path,
+    destination_dir: Path,
+    cancelled: CancelCheck | None = None,
+) -> Path:
+    """Unzip with ``ditto`` (which keeps symlinks and permissions) and return the ``.app``.
+
+    ``cancelled`` is polled while ``ditto`` runs; when it returns True the
+    child is terminated and :class:`UpdateCancelled` is raised.
+    """
 
     destination_dir.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
+    process = subprocess.Popen(
         ["ditto", "-x", "-k", str(archive), str(destination_dir)],
-        capture_output=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
     )
-    if result.returncode != 0:
-        raise UpdateError(f"Could not unpack the update: {result.stderr.strip()}")
+    try:
+        while True:
+            try:
+                _, stderr = process.communicate(timeout=0.25)
+                break
+            except subprocess.TimeoutExpired:
+                if cancelled is not None and cancelled():
+                    process.terminate()
+                    process.wait()
+                    raise UpdateCancelled("Update cancelled during extraction.")
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        raise
+    if process.returncode != 0:
+        raise UpdateError(f"Could not unpack the update: {(stderr or '').strip()}")
     bundles = sorted(destination_dir.glob("*.app"))
     if len(bundles) != 1:
         raise UpdateError(f"Expected one .app in the update, found {len(bundles)}.")
     return bundles[0]
+
+
+def verify_bundle(bundle: Path, release: ReleaseInfo) -> None:
+    """Refuse a bundle whose Info.plist is not ChatLab at the release's version."""
+
+    plist_path = bundle / "Contents" / "Info.plist"
+    try:
+        with plist_path.open("rb") as handle:
+            info = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException) as error:
+        raise UpdateError(f"The update has no readable Info.plist: {error}") from error
+    identifier = info.get("CFBundleIdentifier")
+    if identifier != BUNDLE_IDENTIFIER:
+        raise UpdateError(f"The update identifies itself as {identifier!r}, not ChatLab.")
+    version = str(info.get("CFBundleShortVersionString", ""))
+    if parse_version(version) != parse_version(release.version):
+        raise UpdateError(
+            f"The update is version {version or 'unknown'} but the release is {release.version}."
+        )
+    if not (bundle / "Contents" / "MacOS" / "ChatLab").is_file():
+        raise UpdateError("The update is missing its ChatLab executable.")
 
 
 def swap_bundle(current: Path, replacement: Path) -> Path:
@@ -259,9 +340,11 @@ def install_update(
 ) -> None:
     """Download, unpack, and swap in ``release``; the caller quits and relaunches.
 
-    ``cancelled`` is polled during the download and raises
-    :class:`UpdateCancelled`. ``begin_swap`` is called once the new bundle is
-    unpacked; it must atomically decide whether to proceed (returning True and
+    ``cancelled`` is polled during the download and extraction and raises
+    :class:`UpdateCancelled`. The downloaded archive must match the release's
+    published SHA-256 and the unpacked bundle must identify itself as ChatLab
+    at the release's version. ``begin_swap`` is called once the new bundle is
+    unpacked and verified; it must atomically decide whether to proceed (returning True and
     holding off shutdown for the few seconds the swap takes) or report that
     the update was cancelled (returning False). Nothing is checked after it.
     """
@@ -273,7 +356,8 @@ def install_update(
             work_dir = Path(tempfile.mkdtemp(prefix="chatlab-update-"))
     try:
         archive = download_asset(release, work_dir, progress, cancelled)
-        replacement = extract_bundle(archive, work_dir / "unpacked")
+        replacement = extract_bundle(archive, work_dir / "unpacked", cancelled)
+        verify_bundle(replacement, release)
         if begin_swap is not None:
             if not begin_swap():
                 raise UpdateCancelled("Update cancelled before installation.")

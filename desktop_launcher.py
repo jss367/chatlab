@@ -218,8 +218,6 @@ def run_desktop() -> int:
     support_directory = app_support_directory()
     support_directory.mkdir(parents=True, exist_ok=True)
     bundle = updater.running_app_bundle()
-    if bundle is not None:
-        updater.remove_previous_bundles(bundle)
     demo, local_url = start_local_server()
     logging.info("Started ChatLab %s at %s", __version__, local_url)
 
@@ -235,8 +233,16 @@ def run_desktop() -> int:
             zoomable=True,
         )
         flow = UpdateFlow(window, bundle)
+
+        def after_startup() -> None:
+            # Runs once the native window is up, so a release that fails to
+            # start still has the previous bundle parked beside it.
+            if bundle is not None:
+                updater.remove_previous_bundles(bundle)
+            flow.check_in_background(interactive=False)
+
         webview.start(
-            func=lambda: flow.check_in_background(interactive=False),
+            func=after_startup,
             gui="cocoa",
             private_mode=False,
             storage_path=str(support_directory / "WebKit"),
