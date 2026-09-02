@@ -133,19 +133,26 @@ class CacheStatusTests(unittest.TestCase):
             ("model-00002-of-00003.safetensors", "model-00003-of-00003.safetensors"),
         )
 
-    def test_a_weight_index_with_the_wrong_json_shape_is_incomplete(self):
-        with tempfile.TemporaryDirectory() as root:
-            self.snapshot(
-                root,
-                {
-                    "config.json": b"{}",
-                    "model.safetensors.index.json": b"[]",
-                },
-            )
-            status = cache_status(self.MODEL, Path(root))
+    def test_a_malformed_weight_index_is_incomplete(self):
+        malformed_indexes = (
+            b"[]",
+            b'{"weight_map": {}}',
+            b'{"weight_map": {"layer": null}}',
+            b'{"weight_map": {"layer": 42}}',
+        )
+        for index in malformed_indexes:
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as root:
+                self.snapshot(
+                    root,
+                    {
+                        "config.json": b"{}",
+                        "model.safetensors.index.json": index,
+                    },
+                )
+                status = cache_status(self.MODEL, Path(root))
 
-        self.assertFalse(status.complete)
-        self.assertEqual(status.missing_files, (MODEL_WEIGHTS,))
+            self.assertFalse(status.complete)
+            self.assertEqual(status.missing_files, (MODEL_WEIGHTS,))
 
     def test_a_link_whose_blob_was_deleted_does_not_count_as_weights(self):
         with tempfile.TemporaryDirectory() as root:
