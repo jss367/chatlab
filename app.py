@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import html
+import logging
 import os
 import random
 import re
@@ -51,6 +52,8 @@ from token_metrics import (
     summarize,
 )
 from trace_export import build_trace, write_trace_export
+
+logger = logging.getLogger(__name__)
 
 try:
     from huggingface_hub.errors import IncompleteSnapshotError
@@ -1153,6 +1156,8 @@ def _stream_reply(
     except Exception as error:
         # The diagnostic only goes to the status line. Storing it as the
         # assistant turn would feed the failure back to the model next turn.
+        # The traceback goes to the log so the cause is recoverable.
+        logger.exception("Generation failed")
         reasoning, answer, _ = split_reasoning(raw_text, reasoning_prefilled=prefilled)
         pending["reasoning"] = reasoning
         pending["content"] = answer
@@ -1971,6 +1976,32 @@ CSS = """
 """
 
 
+# Gradio's Textbox sends on Enter only when it is a single-line box, and on
+# Shift+Enter when it has more than one line, so the "Enter sends" preference
+# is expressed by choosing the box's starting height. The box grows to
+# MESSAGE_BOX_MAX_LINES either way.
+MESSAGE_BOX_MAX_LINES = 8
+
+
+def message_box_settings(enter_sends: bool) -> dict:
+    """Textbox settings that make Enter (or Shift+Enter) send the message."""
+    if enter_sends:
+        return {
+            "lines": 1,
+            "max_lines": MESSAGE_BOX_MAX_LINES,
+            "placeholder": "Ask OLMo something… Enter sends, Shift+Enter starts a new line.",
+        }
+    return {
+        "lines": 3,
+        "max_lines": MESSAGE_BOX_MAX_LINES,
+        "placeholder": "Ask OLMo something… Shift+Enter sends, Enter starts a new line.",
+    }
+
+
+def set_message_box_keys(enter_sends: bool):
+    return gr.update(**message_box_settings(enter_sends))
+
+
 def build_app() -> gr.Blocks:
     with gr.Blocks(title="Chatlab", css=CSS, theme=gr.themes.Soft()) as demo:
         conversation_state = gr.State([])
@@ -2047,8 +2078,7 @@ def build_app() -> gr.Blocks:
                         )
                         prompt = gr.Textbox(
                             label="Message",
-                            placeholder="Ask OLMo something…",
-                            lines=3,
+                            **message_box_settings(enter_sends=True),
                         )
                         with gr.Row():
                             send_button = gr.Button("Send", variant="primary")
@@ -2180,7 +2210,7 @@ def build_app() -> gr.Blocks:
                         elem_id="prompt-strip",
                     )
 
-        with gr.Accordion("Sampling and analysis controls", open=False):
+        with gr.Accordion("Sampling, analysis, and input controls", open=False):
             with gr.Row():
                 temperature = gr.Slider(0, 2, value=0.8, step=0.05, label="Temperature")
                 top_p = gr.Slider(0.05, 1, value=0.95, step=0.01, label="Top-p")
@@ -2206,6 +2236,11 @@ def build_app() -> gr.Blocks:
                     label="Measure prompt tokens",
                     info="Scores every prompt token during the same pass that warms the cache.",
                 )
+            enter_sends = gr.Checkbox(
+                value=True,
+                label="Enter sends the message",
+                info="Shift+Enter starts a new line. Turn off to swap the two.",
+            )
 
         gr.Markdown(
             "Rank and raw probability come from the unmodified model distribution. "
@@ -2219,6 +2254,7 @@ def build_app() -> gr.Blocks:
         )
         cached_button.click(load_cached_model, model_id, model_status)
         unload_button.click(unload_model, outputs=model_status)
+        enter_sends.change(set_message_box_keys, enter_sends, prompt)
 
         settings_inputs = [
             system_prompt,
@@ -2471,6 +2507,10 @@ def build_app() -> gr.Blocks:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     conductor_port = os.environ.get("CONDUCTOR_PORT")
     build_app().queue(default_concurrency_limit=1).launch(
         inbrowser=conductor_port is None,

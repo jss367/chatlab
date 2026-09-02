@@ -1953,5 +1953,31 @@ class CancelWiringTests(unittest.TestCase):
         )
 
 
+class MessageBoxKeysTests(unittest.TestCase):
+    """Enter sends by default; the checkbox swaps Enter and Shift+Enter."""
+
+    def test_enter_sends_by_default(self):
+        # Gradio's Textbox submits on Enter only when it is a single-line box.
+        demo = app.build_app()
+        prompt = next(
+            c for c in demo.blocks.values()
+            if isinstance(c, gr.Textbox) and c.label == "Message"
+        )
+        self.assertEqual(prompt.lines, 1)
+        self.assertEqual(prompt.max_lines, app.MESSAGE_BOX_MAX_LINES)
+        self.assertIn("Enter sends", prompt.placeholder)
+
+    def test_turning_the_setting_off_makes_shift_enter_send(self):
+        update = app.set_message_box_keys(False)
+        self.assertEqual(update["lines"], 3)
+        self.assertEqual(update["max_lines"], app.MESSAGE_BOX_MAX_LINES)
+        self.assertIn("Shift+Enter sends", update["placeholder"])
+
+    def test_turning_the_setting_back_on_restores_enter(self):
+        update = app.set_message_box_keys(True)
+        self.assertEqual(update["lines"], 1)
+        self.assertIn("Enter sends", update["placeholder"])
+
+
 if __name__ == "__main__":
     unittest.main()

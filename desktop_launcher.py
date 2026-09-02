@@ -18,7 +18,7 @@ from version import __version__
 
 
 APP_NAME = "ChatLab"
-WINDOW_TITLE = "ChatLab — OLMo Token Explorer"
+WINDOW_TITLE = "ChatLab"
 LOOPBACK_ADDRESS = "127.0.0.1"
 
 

@@ -17,6 +17,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Full metric-trace export as JSON or CSV
 - A system prompt, plus temperature, top-p, top-k, seed, and response-length controls
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
+- Enter sends a message and Shift+Enter starts a new line, with a setting to swap them
 - Branching a response from any token into one of the alternatives the model considered
 - Forking the conversation so the same transcript can be taken in several directions
 - Apple Metal, NVIDIA CUDA, and CPU loading
@@ -126,7 +127,7 @@ After a response finishes, open **Export full metric trace** under the conversat
 
 ## Prompt tokens and scoring text
 
-Every prompt token is measured against the distribution the model held one step earlier, during the same pass that fills the key-value cache, so it costs nothing extra to see how predictable your own prompt was. They appear under **Prompt and context tokens**; the first token has nothing before it, so it is left unscored. Turn the measurement off in **Sampling and analysis controls** if you do not want it, and note that only the most recent 1,024 tokens of a very long prompt are scored.
+Every prompt token is measured against the distribution the model held one step earlier, during the same pass that fills the key-value cache, so it costs nothing extra to see how predictable your own prompt was. They appear under **Prompt and context tokens**; the first token has nothing before it, so it is left unscored. Turn the measurement off in **Sampling, analysis, and input controls** if you do not want it, and note that only the most recent 1,024 tokens of a very long prompt are scored.
 
 The **Score text** tab measures text the model did not generate. Paste it, optionally give it context first, and one forward pass reports the same numbers for every token — useful for comparing two prompts, checking how memorized a passage is, or evaluating a response that came from somewhere else. Scoring is capped at 4,096 tokens per run.
 

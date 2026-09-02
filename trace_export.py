@@ -111,7 +111,7 @@ def write_trace_export(trace: dict, file_format: str) -> str | None:
     except KeyError as error:
         raise ValueError(f"Unsupported trace export format: {file_format}") from error
 
-    export_dir = Path(tempfile.mkdtemp(prefix="olmo-token-explorer-"))
+    export_dir = Path(tempfile.mkdtemp(prefix="chatlab-"))
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     filename = f"olmo-metric-trace-{timestamp}-{uuid.uuid4().hex[:8]}.{file_format}"
     path = export_dir / filename
