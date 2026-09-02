@@ -1,6 +1,11 @@
 """PyInstaller recipe for the ChatLab macOS application bundle."""
 
+import sys
+
 from PyInstaller.utils.hooks import collect_all, collect_submodules
+
+sys.path.insert(0, SPECPATH)
+from version import __version__  # noqa: E402
 
 
 datas = []
@@ -75,8 +80,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleDisplayName": "ChatLab",
         "CFBundleName": "ChatLab",
-        "CFBundleShortVersionString": "0.1.0",
-        "CFBundleVersion": "1",
+        "CFBundleShortVersionString": __version__,
+        "CFBundleVersion": __version__,
         "LSMinimumSystemVersion": "13.0",
         "NSHighResolutionCapable": True,
     },

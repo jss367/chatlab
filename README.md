@@ -38,6 +38,10 @@ your Applications folder. ChatLab opens in its own native window and stops its
 local server when you quit. The app bundle contains Python and its runtime
 dependencies, so it does not need a separate Python installation.
 
+The app checks GitHub Releases for a newer version when it starts, and
+**Help → Check for Updates…** does the same on demand. Accepting an update
+downloads the new bundle, swaps it into place, and relaunches ChatLab.
+
 Model weights are intentionally not included in the application. Models are
 downloaded on first use and remain in the standard Hugging Face cache, which
 keeps the app bundle manageable and lets terminal and desktop launches reuse the
@@ -125,6 +129,21 @@ After a response finishes, open **Export full metric trace** under the conversat
 Every prompt token is measured against the distribution the model held one step earlier, during the same pass that fills the key-value cache, so it costs nothing extra to see how predictable your own prompt was. They appear under **Prompt and context tokens**; the first token has nothing before it, so it is left unscored. Turn the measurement off in **Sampling and analysis controls** if you do not want it, and note that only the most recent 1,024 tokens of a very long prompt are scored.
 
 The **Score text** tab measures text the model did not generate. Paste it, optionally give it context first, and one forward pass reports the same numbers for every token — useful for comparing two prompts, checking how memorized a passage is, or evaluating a response that came from somewhere else. Scoring is capped at 4,096 tokens per run.
+
+## Releasing a new version
+
+1. Set the new number in `version.py` and merge it to `main`.
+2. Tag that commit and push the tag:
+
+   ```bash
+   git tag v0.2.0 && git push origin v0.2.0
+   ```
+
+The `Release macOS app` workflow builds `ChatLab.app` on an Apple Silicon
+runner, smoke-tests it, and attaches `ChatLab-macos-arm64.zip` to a GitHub
+Release for that tag. It fails if the tag disagrees with `version.py` or the
+zip exceeds GitHub's 2 GB asset limit. Installed apps offer the release the
+next time they start.
 
 ## Tests
 

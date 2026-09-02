@@ -1,0 +1,53 @@
+name: Release macOS app
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check the tag matches version.py
+        run: |
+          expected="v$(python3 -c 'from version import __version__; print(__version__)')"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match version.py ($expected)." >&2
+            exit 1
+          fi
+
+      - name: Build ChatLab.app
+        run: ./scripts/build_macos_app.sh
+
+      - name: Smoke test the bundle
+        run: dist/ChatLab.app/Contents/MacOS/ChatLab --smoke-test
+
+      - name: Zip the bundle
+        run: |
+          asset="ChatLab-macos-$(uname -m).zip"
+          ditto -c -k --sequesterRsrc --keepParent dist/ChatLab.app "$asset"
+          size=$(stat -f %z "$asset")
+          echo "$asset is $size bytes"
+          if [ "$size" -gt 2147483648 ]; then
+            echo "Asset exceeds GitHub's 2 GB release limit; the updater cannot use it." >&2
+            exit 1
+          fi
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$ASSET" \
+            --title "ChatLab $GITHUB_REF_NAME" \
+            --generate-notes
