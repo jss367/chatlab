@@ -38,6 +38,12 @@ PROMPT_SCORE_LIMIT = 1024
 # Refuse to score a wall of pasted text rather than appearing to hang.
 SCORE_TOKEN_LIMIT = 4096
 
+# Refuse a generation prefix large enough to make replay itself an
+# unexpectedly expensive operation. The response-length control already tops
+# out here, so a branch cannot paste an unbounded second response around that
+# control even when the model advertises a much larger context window.
+GENERATION_PREFILL_TOKEN_LIMIT = 8192
+
 # Where a config keeps the length of its position table, newest name first.
 # ``max_seq_len`` is MPT's and DBRX's spelling. RWKV's ``context_length`` is
 # deliberately absent: it is recurrent, so a longer sequence costs accuracy
@@ -492,12 +498,17 @@ class SplitPassage(NamedTuple):
     wrap it in. The numbers are exact either way — they measure the plain
     passage the reader typed — but they answer a different question than the
     one the request implied, so the caller is expected to say which.
+
+    ``decoded_prefix_end`` retains the best boundary found while inspecting a
+    slow tokenizer's decoded prefixes. It can locate a usable continuation
+    even when decoding that continuation alone cannot verify the scoring seam.
     """
 
     context_ids: list[int]
     text_ids: list[int]
     seam_verified: bool = True
     chat_template_missing: bool = False
+    decoded_prefix_end: int | None = None
 
 
 def model_position_limit(model) -> int | None:
@@ -554,6 +565,23 @@ def score_token_limit(model) -> int:
     return SCORE_TOKEN_LIMIT if window is None else min(SCORE_TOKEN_LIMIT, window)
 
 
+def generation_prefill_token_limit(model) -> int:
+    """The most prompt-plus-replayed tokens accepted by one generation.
+
+    A learned positional table is a hard correctness limit. The flat cap is a
+    separate application guard: typed branches can otherwise turn an
+    unrestricted textbox into an arbitrarily large scored prefill while the
+    model lock is held.
+    """
+
+    window = model_position_limit(model)
+    return (
+        GENERATION_PREFILL_TOKEN_LIMIT
+        if window is None
+        else min(GENERATION_PREFILL_TOKEN_LIMIT, window)
+    )
+
+
 def _joint_ids(tokenizer, passage: str, *, add_special_tokens: bool = True) -> list[int] | None:
     """The one encoding of ``passage``, or ``None`` where it cannot be had.
 
@@ -580,7 +608,7 @@ def _seam_by_decoding(
     text: str,
     *,
     add_special_tokens: bool = True,
-) -> int | None:
+) -> tuple[int | None, int | None]:
     """Where the seam falls in ``ids``, when decoding can prove where it fell.
 
     A tokenizer without offsets can still be asked what a run of ids says, so
@@ -594,17 +622,18 @@ def _seam_by_decoding(
     special token it wants — a rendered chat template does — so decoding has
     to keep them to round trip.
 
-    The split is returned only when the two halves decode back to the passage
-    verbatim. A ``decode`` that does not round trip — a byte-level merge cut
-    mid-character, a normalizer that rewrites whitespace, a SentencePiece
-    model that eats a leading space — would otherwise move the seam by a
-    token and score part of the context, so those cases say ``None`` and
-    leave the placement to :func:`_guess_seam`.
+    The first value is returned only when the two halves decode back to the
+    passage verbatim. The second retains the decoded-prefix boundary even when
+    it could not be verified. A ``decode`` that does not round trip — a
+    byte-level merge cut mid-character, a normalizer that rewrites whitespace,
+    a SentencePiece model that eats a leading space — would otherwise move the
+    seam by a token and score part of the context, so those cases say ``None``
+    and leave the placement to :func:`_guess_seam`.
     """
 
     decode = getattr(tokenizer, "decode", None)
     if decode is None:
-        return None
+        return None, None
 
     def spoken(start: int, end: int) -> str | None:
         try:
@@ -616,18 +645,7 @@ def _seam_by_decoding(
         except (NotImplementedError, TypeError, ValueError):
             return None
 
-    def within_context(end: int) -> bool:
-        prefix = spoken(0, end)
-        return prefix is not None and context.startswith(prefix)
-
-    low, high = 0, stop
-    while low < high:
-        middle = (low + high + 1) // 2
-        if within_context(middle):
-            low = middle
-        else:
-            high = middle - 1
-    split = low
+    split = _decoded_prefix_end(spoken, stop, context)
 
     # The token the split lands on has to reach the seam, because it is the
     # one that straddles it. A byte-level merge cut mid-character decodes to
@@ -639,15 +657,60 @@ def _seam_by_decoding(
     if split < stop:
         reaches = spoken(0, split + 1)
         if reaches is None or context.startswith(reaches):
-            return None
+            return None, split
         if not reaches.startswith(context):
-            return None
+            return None, split
 
     head, tail = spoken(0, split), spoken(split, stop)
     if head is None or tail is None or head + tail != context + text:
-        return None
+        return None, split
 
-    return split
+    return split, split
+
+
+def _decoded_prefix_end(
+    spoken: Callable[[int, int], str | None], stop: int, context: str
+) -> int:
+    """Find the longest decoded prefix that still lies within ``context``.
+
+    The result remains useful as a suffix candidate even when decoding the two
+    halves independently cannot verify a seam. Slow WordPiece tokenizers, for
+    example, expose a leading continuation piece literally when it is decoded
+    alone, while that same piece joins correctly after the kept token IDs.
+    """
+
+    def within_context(end: int) -> bool:
+        prefix = spoken(0, end)
+        if prefix is None:
+            return False
+        if context.startswith(prefix):
+            return True
+
+        # A slow byte-fallback tokenizer can expose an incomplete trailing
+        # UTF-8 sequence as one or more replacement characters. That prefix
+        # becomes valid again when subsequent byte tokens complete the
+        # character, so treating the intermediate spelling as outside the
+        # context would make the predicate non-monotonic and strand this
+        # bisection before the real boundary. Regard only *trailing* decoder
+        # replacements as provisional while the decoded text is still short
+        # of the context. Once it equals the context, any trailing replacement
+        # can be the first bytes of the replacement text and must not advance
+        # the boundary. The complete candidate is still required to reproduce
+        # the exact expected text by the caller.
+        repaired = prefix.rstrip(REPLACEMENT_CHARACTER)
+        if repaired == prefix or not context.startswith(repaired):
+            return False
+        remaining = context[len(repaired) :].lstrip(REPLACEMENT_CHARACTER)
+        return bool(remaining)
+
+    low, high = 0, stop
+    while low < high:
+        middle = (low + high + 1) // 2
+        if within_context(middle):
+            low = middle
+        else:
+            high = middle - 1
+    return low
 
 
 def _guess_seam(
@@ -915,7 +978,7 @@ def split_context_and_text(
     if add_special_tokens:
         stop = _end_of_written_text(tokenizer, context + text, ids)
 
-    split = _seam_by_decoding(
+    split, decoded_prefix_end = _seam_by_decoding(
         tokenizer, ids, stop, context, text, add_special_tokens=add_special_tokens
     )
     verified = split is not None
@@ -928,7 +991,10 @@ def split_context_and_text(
     # encoding is the text's own, plus whatever specials the tokenizer
     # prepends — so the cut in front of the first ordinary token is exact.
     return SplitPassage(
-        ids[:split], ids[split:stop], seam_verified=verified or not context
+        ids[:split],
+        ids[split:stop],
+        seam_verified=verified or not context,
+        decoded_prefix_end=decoded_prefix_end,
     )
 
 
@@ -998,6 +1064,9 @@ class GenerationUpdate:
     metrics: list[dict]
     """Live list owned by the generator. Copy it before storing it anywhere."""
 
+    load_id: str
+    """The immutable model load that produced these token IDs."""
+
     prompt_metrics: list[dict] = field(default_factory=list)
     prompt_note: str = ""
     reasoning_prefilled: bool = False
@@ -1014,6 +1083,14 @@ class GenerationUpdate:
     literal_prefill_text: str = ""
     """Decoded prefix whose reader-supplied portion must remain literal."""
 
+    literal_text_spans: tuple[tuple[int, int], ...] = ()
+    """Character spans in ``text`` that the reader supplied literally.
+
+    Reasoning markers inside these spans are prose, not model control syntax.
+    The spans can be disjoint because a typed token-branch replacement may
+    follow sampled tokens, and they survive if that response is branched again.
+    """
+
     prompt_ids: tuple[int, ...] = ()
     """Every prompt token, measured or not.
 
@@ -1023,7 +1100,6 @@ class GenerationUpdate:
     """
 
     model_id: str | None = None
-    load_id: str | None = None
     """Which weights produced this update, read under the model lock.
 
     A caller that looks at the manager instead can be wrong: a load may land
@@ -1573,7 +1649,249 @@ class ModelManager:
             encoded = encoded[0]
         return [int(value) for value in encoded], prefilled
 
-    def _response_prefix_ids(self, text: str, *, close_reasoning: bool) -> list[int]:
+    def encode_replacement(
+        self,
+        kept_ids: Sequence[int],
+        text: str,
+        *,
+        literal_prefill_tokens: int = 0,
+        load_id: str | None = None,
+    ) -> list[int]:
+        """Encode text the reader wants replayed after ``kept_ids``, as a branch does.
+
+        The text stands in for one or more sampled tokens, so it carries no
+        special tokens and no reasoning marker. It is checked in place rather
+        than on its own because decoding is not always piecewise: SentencePiece
+        drops the word-boundary space from the first token of whatever it
+        decodes, so ``"world"`` round-trips alone yet reads ``" world"`` once it
+        follows ``"Hello"``, while a typed ``" world"`` gains a second space.
+        The visible kept tokens plus the result must therefore decode to the
+        kept text followed by exactly what was typed. Hidden specials do not
+        supply decoder context, because the streaming decoder never caches
+        them; ``literal_prefill_tokens`` keeps reader-supplied assistant
+        prefill visible as before. The kept ids themselves are never
+        re-tokenized; a branch preserves them token for token.
+
+        ``load_id`` names the load the kept tokens came from (see
+        :attr:`load_id`). It is compared under the model lock, and the encoding
+        itself runs under that same lock, so a load that lands between the
+        caller's own check and this call is refused with :class:`ModelChanged`
+        rather than answered with tokens from a tokenizer the kept ids never
+        met.
+        """
+
+        with self._lock:
+            if not self.loaded:
+                raise RuntimeError("Download and load a model before branching.")
+            if load_id is not None and load_id != self.load_id:
+                raise ModelChanged(
+                    "The model has been reloaded since these tokens were produced."
+                )
+            return self._encode_replacement(
+                kept_ids, text, literal_prefill_tokens=literal_prefill_tokens
+            )
+
+    def _encode_replacement(
+        self,
+        kept_ids: Sequence[int],
+        text: str,
+        *,
+        literal_prefill_tokens: int = 0,
+    ) -> list[int]:
+        """The body of encode_replacement(), run with the model lock held."""
+
+        assert self.tokenizer is not None
+        kept = [int(value) for value in kept_ids]
+        if not text:
+            raise ValueError("The replacement text did not produce any tokens.")
+        hidden = self._hidden_token_ids()
+        literal_prefill_tokens = max(
+            0, min(int(literal_prefill_tokens), len(kept))
+        )
+        # IncrementalDecoder never puts a generated hidden special into its
+        # cache, so that ID cannot affect the context-sensitive boundary of
+        # what follows. Validate against precisely the IDs the visible decoder
+        # sees. Reader-supplied assistant-prefill tokens are the exception:
+        # replay forces those visible, including special-token spellings.
+        visible_kept = [
+            token_id
+            for index, token_id in enumerate(kept)
+            if index < literal_prefill_tokens or token_id not in hidden
+        ]
+        kept_text = self._decode_ids(visible_kept)
+        expected = kept_text + text
+
+        # The standalone encoding is how a BPE tokenizer with the space inside
+        # the token normally wants the text. A context-sensitive tokenizer can
+        # instead need a suffix of the joint encoding. The model may have
+        # sampled a noncanonical spelling of ``kept_text``, so the joint
+        # encoding need not begin with ``kept`` even though its boundary suffix
+        # can follow those unchanged ids exactly.
+        #
+        # Locate that suffix from the tokenizer's character offsets when they
+        # exist, or from the bounded seam search used by text scoring for a
+        # slow tokenizer. Trying every suffix looks harmless but is quadratic:
+        # each candidate decodes the whole kept prefix plus a progressively
+        # longer tail, all while the model lock is held. The seam can be off by
+        # one token when one piece crosses it, so validate the boundary and its
+        # two neighbours. If that seam was only guessed, also bisect decoded
+        # joint prefixes: a continuation token may not decode correctly by
+        # itself, but the prefix can still identify its exact start. Candidate
+        # decoding stays strictly bounded while the final exact decode remains
+        # the authority.
+        standalone = self._encode_plain(text)
+        split = split_context_and_text(
+            self.tokenizer, kept_text, text, add_special_tokens=False
+        )
+        joint = split.context_ids + split.text_ids
+        boundary = len(split.context_ids)
+
+        decoded_boundary = (
+            split.decoded_prefix_end if not split.seam_verified else None
+        )
+
+        def candidates() -> Iterator[list[int]]:
+            yield standalone
+            aligned_start: int | None = None
+            if (
+                len(joint) > len(visible_kept)
+                and joint[: len(visible_kept)] == visible_kept
+            ):
+                aligned_start = len(visible_kept)
+                aligned = joint[aligned_start:]
+                if aligned != standalone:
+                    yield aligned
+            starts = {
+                start
+                for start in (
+                    boundary - 1,
+                    boundary,
+                    boundary + 1,
+                    decoded_boundary,
+                )
+                if start is not None
+                if 0 <= start < len(joint)
+            }
+            for start in sorted(starts, reverse=True):
+                candidate = joint[start:]
+                if start != aligned_start and candidate != standalone:
+                    yield candidate
+
+        if not standalone and not joint:
+            raise ValueError("The replacement text did not produce any tokens.")
+        stop_ids = self._stop_token_ids()
+        hidden_ids = hidden - stop_ids
+        matched_embedded_stop = False
+        matched_hidden = False
+        for token_ids in candidates():
+            if token_ids and self._decode_ids(visible_kept + token_ids) == expected:
+                # A terminal stop token deliberately ends the new response and
+                # stays hidden. One followed by more replacement tokens cannot
+                # be literal: generation stops there, so the visible suffix
+                # would silently disappear.
+                if stop_ids.intersection(token_ids[:-1]):
+                    matched_embedded_stop = True
+                    continue
+                if hidden_ids.intersection(token_ids):
+                    matched_hidden = True
+                    continue
+                return token_ids
+        if matched_embedded_stop:
+            raise ValueError(
+                "The replacement text contains a stop token before its end "
+                "and cannot be displayed exactly."
+            )
+        if matched_hidden:
+            raise ValueError(
+                "The replacement text contains a hidden special token and "
+                "cannot be displayed exactly."
+            )
+        raise ValueError(
+            "The replacement text cannot be inserted exactly at this position "
+            "by this tokenizer."
+        )
+
+    def validate_generation_prefix(
+        self,
+        messages: list[dict],
+        forced_ids: Sequence[int],
+        *,
+        max_new_tokens: int,
+        load_id: str | None = None,
+    ) -> None:
+        """Refuse an oversized generation before a stream mutates UI state.
+
+        A typed branch calls this after encoding but before entering the reply
+        stream. The expected load is checked under the same model lock as the
+        prompt tokenization, so a concurrent reload cannot validate one
+        model's token IDs with another model's tokenizer. A learned-position
+        model also needs room to feed back all but the last requested sampled
+        token; the first comes from the prefill's final logits.
+        """
+
+        with self._lock:
+            if not self.loaded:
+                raise RuntimeError("Download and load a model before chatting.")
+            if load_id is not None and load_id != self.load_id:
+                raise ModelChanged(
+                    "The model has been reloaded since these tokens were produced."
+                )
+            prompt_ids, _reasoning_prefilled = self._prompt_token_ids(messages)
+            self._validate_generation_prefix_length(
+                prompt_ids,
+                forced_ids,
+                max_new_tokens=max_new_tokens,
+            )
+
+    def _validate_generation_prefix_length(
+        self,
+        prompt_ids: Sequence[int],
+        forced_ids: Sequence[int],
+        *,
+        max_new_tokens: int,
+    ) -> None:
+        """Check a tokenized generation and its continuation capacity."""
+
+        assert self.model is not None
+        total = len(prompt_ids) + len(forced_ids)
+        limit = generation_prefill_token_limit(self.model)
+        window = model_position_limit(self.model)
+        if total > limit:
+            ceiling = (
+                f"the {limit:,} positions this model can attend to"
+                if window is not None and window <= GENERATION_PREFILL_TOKEN_LIMIT
+                else (
+                    f"the {GENERATION_PREFILL_TOKEN_LIMIT:,} token limit for a "
+                    "generation prefix"
+                )
+            )
+            raise ValueError(
+                f"The prompt and replayed response are {total:,} tokens, above "
+                f"{ceiling}. Shorten the conversation or replacement."
+            )
+
+        stops_before_sampling = bool(
+            forced_ids and int(forced_ids[-1]) in self._stop_token_ids()
+        )
+        continuation_positions = (
+            0 if stops_before_sampling else max(0, int(max_new_tokens) - 1)
+        )
+        required = total + continuation_positions
+        if window is not None and required > window:
+            raise ValueError(
+                f"The prompt, replayed response, and requested continuation need "
+                f"{required:,} positions, above the {window:,} positions this model "
+                "can attend to. Shorten the conversation or replacement, or request "
+                "fewer new tokens."
+            )
+
+    def _response_prefix_ids(
+        self,
+        text: str,
+        *,
+        close_reasoning: bool,
+        label: str = "assistant prefill",
+    ) -> list[int]:
         """Encode a reader-supplied answer prefix without tokenizer wrappers.
 
         A reasoning model's generation prompt can already end in ``<think>``.
@@ -1586,7 +1904,20 @@ class ModelManager:
         if not text:
             return []
         raw = f"{THINK_CLOSE}\n\n{text}" if close_reasoning else text
-        encoded = self.tokenizer(raw, add_special_tokens=False)
+        token_ids = self._encode_plain(raw)
+        if not token_ids:
+            raise ValueError(f"The {label} did not produce any tokens.")
+        if self._decode_ids(token_ids) != raw:
+            raise ValueError(
+                f"The {label} cannot be represented exactly by this tokenizer."
+            )
+        return token_ids
+
+    def _encode_plain(self, text: str) -> list[int]:
+        """Token ids for ``text`` alone: no special tokens, no chat template."""
+
+        assert self.tokenizer is not None
+        encoded = self.tokenizer(text, add_special_tokens=False)
         if isinstance(encoded, Mapping):
             encoded = encoded["input_ids"]
         elif hasattr(encoded, "input_ids"):
@@ -1595,27 +1926,18 @@ class ModelManager:
             encoded = encoded.tolist()
         if encoded and isinstance(encoded[0], (list, tuple)):
             encoded = encoded[0]
-        token_ids = [int(value) for value in encoded]
-        if not token_ids:
-            raise ValueError("The assistant prefill did not produce any tokens.")
-        decoded = self.tokenizer.decode(
-            token_ids,
-            skip_special_tokens=False,
-            clean_up_tokenization_spaces=False,
-        )
-        if decoded != raw:
-            raise ValueError(
-                "The assistant prefill cannot be represented exactly by this tokenizer."
-            )
-        return token_ids
+        return [int(value) for value in encoded]
 
-    def _decode_token(self, token_id: int) -> str:
+    def _decode_ids(self, token_ids: Sequence[int]) -> str:
         assert self.tokenizer is not None
         return self.tokenizer.decode(
-            [int(token_id)],
+            [int(value) for value in token_ids],
             skip_special_tokens=False,
             clean_up_tokenization_spaces=False,
         )
+
+    def _decode_token(self, token_id: int) -> str:
+        return self._decode_ids([token_id])
 
     def _token_fallback(self, token_id: int) -> str:
         assert self.tokenizer is not None
@@ -1790,6 +2112,9 @@ class ModelManager:
         forced_ids: Sequence[int] = (),
         answer_prefill: str = "",
         literal_prefill_tokens: int = 0,
+        automatic_reasoning_close_tokens: int = 0,
+        literal_text_ranges: Sequence[tuple[int, int]] = (),
+        load_id: str | None = None,
     ) -> Iterator[GenerationUpdate]:
         """Stream a reply to ``messages``, one batch of tokens at a time.
 
@@ -1804,7 +2129,19 @@ class ModelManager:
         when the chat template has opened a reasoning block, it closes that
         block first so the reader's text begins the visible answer.
         ``literal_prefill_tokens`` carries that protected boundary through a
-        later branch replay.
+        later branch replay. ``literal_text_ranges`` identifies disjoint token
+        ranges typed into a branch so their reasoning markers remain ordinary
+        text; it deliberately does not change their stop-token behavior.
+        ``automatic_reasoning_close_tokens`` records the leading tokens that
+        close a template-supplied reasoning block. A later branch carries that
+        provenance forward so the application can keep the control boundary
+        from being replaced as though it were answer text.
+
+        ``load_id`` names the load ``forced_ids`` came from (see
+        :attr:`load_id`). It is compared under the model lock, before any token
+        is fed, so a load that finished after the caller looked is refused with
+        :class:`ModelChanged` rather than replaying one model's token IDs
+        through another.
         """
 
         # The application reserves the slot before it publishes its first
@@ -1831,6 +2168,9 @@ class ModelManager:
                 forced_ids=forced_ids,
                 answer_prefill=answer_prefill,
                 literal_prefill_tokens=literal_prefill_tokens,
+                automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
+                literal_text_ranges=literal_text_ranges,
+                load_id=load_id,
             )
         finally:
             if reserved:
@@ -1849,12 +2189,19 @@ class ModelManager:
         forced_ids: Sequence[int] = (),
         answer_prefill: str = "",
         literal_prefill_tokens: int = 0,
+        automatic_reasoning_close_tokens: int = 0,
+        literal_text_ranges: Sequence[tuple[int, int]] = (),
+        load_id: str | None = None,
     ) -> Iterator[GenerationUpdate]:
         import torch
 
         with self._lock, torch.inference_mode():
             if not self.loaded:
                 raise RuntimeError("Download and load a model before chatting.")
+            if load_id is not None and load_id != self.load_id:
+                raise ModelChanged(
+                    "The model has been reloaded since these tokens were produced."
+                )
 
             assert self.model is not None
             assert self.tokenizer is not None
@@ -1864,7 +2211,8 @@ class ModelManager:
             # only place the two are guaranteed to agree, which is what makes
             # the stamp on each update worth trusting.
             model_id = self.model_id
-            load_id = self.load_id
+            producing_load_id = self.load_id
+            assert producing_load_id is not None
             device = next(model.parameters()).device
 
             prompt_ids, reasoning_prefilled = self._prompt_token_ids(messages)
@@ -1881,10 +2229,33 @@ class ModelManager:
                     answer_prefill, close_reasoning=reasoning_prefilled
                 )
                 literal_prefill_tokens = len(forced)
+                automatic_reasoning_close_tokens = 0
             else:
                 literal_prefill_tokens = max(
                     0, min(int(literal_prefill_tokens), len(forced))
                 )
+                automatic_reasoning_close_tokens = max(
+                    0,
+                    min(
+                        int(automatic_reasoning_close_tokens),
+                        literal_prefill_tokens,
+                    ),
+                )
+
+            normalized_literal_ranges: list[tuple[int, int]] = []
+            for raw_start, raw_end in literal_text_ranges:
+                start = max(0, min(int(raw_start), len(forced)))
+                end = max(start, min(int(raw_end), len(forced)))
+                if start < end:
+                    normalized_literal_ranges.append((start, end))
+            normalized_literal_ranges.sort()
+            literal_ranges: list[tuple[int, int]] = []
+            for start, end in normalized_literal_ranges:
+                if literal_ranges and start <= literal_ranges[-1][1]:
+                    previous_start, previous_end = literal_ranges[-1]
+                    literal_ranges[-1] = (previous_start, max(previous_end, end))
+                else:
+                    literal_ranges.append((start, end))
 
             # A sampled stop token replayed by a branch still ends the old
             # response where it originally ended. A stop token the reader
@@ -1926,6 +2297,11 @@ class ModelManager:
             ]
             for metric in metrics[:literal_prefill_tokens]:
                 metric["literal_prefill"] = True
+            for metric in metrics[:automatic_reasoning_close_tokens]:
+                metric["automatic_reasoning_close"] = True
+            for start, end in literal_ranges:
+                for metric in metrics[start:end]:
+                    metric["literal_text"] = True
             prompt_note = ""
             if analyze_prompt and score_from > 1:
                 prompt_note = (
@@ -1936,16 +2312,56 @@ class ModelManager:
             rng = np.random.default_rng(int(seed))
             decoder = IncrementalDecoder(tokenizer, self._hidden_token_ids())
             literal_prefill_text = ""
+            literal_boundaries = {
+                boundary for span in literal_ranges for boundary in span
+            }
+            boundary_text = {0: ""}
             for index, token_id in enumerate(forced):
                 decoder.push(
                     token_id, force_visible=index < literal_prefill_tokens
                 )
+                if (
+                    answer_prefill
+                    and reasoning_prefilled
+                    and not automatic_reasoning_close_tokens
+                    and decoder.stable_text.startswith(f"{THINK_CLOSE}\n\n")
+                ):
+                    # The last token can straddle the boundary and include the
+                    # beginning of the reader's prefill. It still cannot be
+                    # replaced independently: doing so would remove part of
+                    # the close and leave the continuation inside reasoning.
+                    automatic_reasoning_close_tokens = index + 1
+                    for metric in metrics[:automatic_reasoning_close_tokens]:
+                        metric["automatic_reasoning_close"] = True
+                if index + 1 in literal_boundaries:
+                    boundary_text[index + 1] = decoder.text
                 if index + 1 == literal_prefill_tokens:
                     # A branch can stop inside a byte-level token sequence for
                     # one character. The replacement-character suffix will be
                     # rewritten when the next token arrives, so it cannot be a
                     # durable prefix for the application's literal-tag guard.
                     literal_prefill_text = decoder.stable_text
+            forced_text = decoder.text
+
+            # A byte-level token boundary can land inside one Unicode
+            # character. Its temporary U+FFFD is rewritten when later bytes
+            # arrive, so use the longest prefix that is actually stable in the
+            # completed forced text. Ordinary word-piece boundaries take the
+            # fast path and keep their full decoded length.
+            def stable_length(at: int) -> int:
+                value = boundary_text.get(at, "")
+                if forced_text.startswith(value):
+                    return len(value)
+                for offset, (left, right) in enumerate(zip(value, forced_text)):
+                    if left != right:
+                        return offset
+                return min(len(value), len(forced_text))
+
+            literal_text_spans = tuple(
+                (stable_length(start), stable_length(end))
+                for start, end in literal_ranges
+                if stable_length(start) < stable_length(end)
+            )
             limit = len(forced) + int(max_new_tokens)
             pending_tokens = 0
             last_yield = time.monotonic()
@@ -1954,14 +2370,15 @@ class ModelManager:
                 yield GenerationUpdate(
                     text=decoder.text,
                     metrics=metrics,
+                    load_id=producing_load_id,
                     prompt_metrics=prompt_metrics,
                     prompt_note=prompt_note,
                     reasoning_prefilled=reasoning_prefilled,
                     forced_prefix_tokens=len(forced),
                     literal_prefill_text=literal_prefill_text,
+                    literal_text_spans=literal_text_spans,
                     prompt_ids=tuple(prompt_ids),
                     model_id=model_id,
-                    load_id=load_id,
                 )
                 if (
                     forced[-1] in stop_ids
@@ -2001,14 +2418,15 @@ class ModelManager:
                     yield GenerationUpdate(
                         text=decoder.text,
                         metrics=metrics,
+                        load_id=producing_load_id,
                         prompt_metrics=prompt_metrics,
                         prompt_note=prompt_note,
                         reasoning_prefilled=reasoning_prefilled,
                         forced_prefix_tokens=len(forced),
                         literal_prefill_text=literal_prefill_text,
+                        literal_text_spans=literal_text_spans,
                         prompt_ids=tuple(prompt_ids),
                         model_id=model_id,
-                        load_id=load_id,
                     )
 
                 if stopping:

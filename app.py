@@ -823,17 +823,31 @@ def describe_token(metric: dict) -> tuple[str, list[list]]:
 # made against a strip that is gone is refused rather than replayed onto the
 # wrong response.
 #
-# ``branch_source`` is the stamp of the last strip that came from a chat
-# response. Scored text draws the same strip and the same alternatives, but
-# there is no conversation to branch, so a stamp that does not match it is
-# refused too.
+# ``branch_source`` is the stamp and model load of the last strip that came
+# from a chat response. Scored text draws the same strip and alternatives but
+# has no conversation to branch, while a reload leaves old token IDs on screen
+# that the new tokenizer must not read. Both cases are refused unless the
+# generation and load agree.
 
 BRANCH_HINT = (
     "Click a response token, then one of its alternatives, then branch."
 )
+BRANCH_TEXT_HINT = (
+    "Click a response token, type the text to put in its place, then branch."
+)
+BRANCH_TEXT_EMPTY = "Type the text that should replace the selected token first."
+BRANCH_REASONING_CLOSE = (
+    "🌱 That token is part of the automatic reasoning boundary. Branch from "
+    "the first answer token after it instead."
+)
 BRANCH_UNAVAILABLE = (
     "🌱 Only a chat response can be branched. Scored text and prompt tokens "
     "have no conversation to continue."
+)
+BRANCH_MODEL_CHANGED = (
+    "🌱 The model was reloaded before the branch could be replayed, so the "
+    "response's tokens no longer belong to the weights in memory. The "
+    "conversation was left as it was."
 )
 
 
@@ -877,7 +891,7 @@ def branch_ready_text(pick: dict) -> str:
 def choose_alternative(
     metrics_state: tuple[int, list[dict]],
     selected_token: dict | None,
-    branch_source: int | None,
+    branch_source: tuple[int, str | None] | None,
     event: gr.SelectData,
 ):
     """Pair a row of the alternatives table with the token it belongs to."""
@@ -896,7 +910,7 @@ def choose_alternative(
         return gr.skip(), None
 
     summary, _rows = describe_token(metric)
-    if branch_source != generation:
+    if branch_source != (generation, MANAGER.load_id):
         return f"{summary}\n\n{BRANCH_UNAVAILABLE}", None
     pick = {
         "generation": generation,
@@ -964,41 +978,61 @@ def split_response_text(
     text: str,
     *,
     literal_prefill: str = "",
+    literal_spans: tuple[tuple[int, int], ...] = (),
     streaming: bool = False,
     reasoning_prefilled: bool = False,
 ) -> tuple[str, str, bool]:
-    """Split reasoning without treating reader-supplied prefill tags as syntax.
+    """Split reasoning without treating reader-supplied text as syntax.
 
     The first runtime update for an assistant prefill contains only its forced
     tokens. Remembering that decoded prefix lets the application protect every
     ``<`` the reader supplied while leaving the automatic leading ``</think>``
-    visible to the reasoning parser. Tags sampled later by the model keep their
-    normal meaning.
+    visible to the reasoning parser. ``literal_spans`` does the same for typed
+    branch replacements, which can occur after sampled tokens. Tags sampled
+    later by the model keep their normal meaning.
     """
 
-    if not literal_prefill or not text.startswith(literal_prefill):
+    protected_spans = [
+        (max(0, int(start_at)), min(len(text), int(end_at)))
+        for start_at, end_at in literal_spans
+        if int(start_at) < len(text) and int(end_at) > 0
+    ]
+    if literal_prefill and text.startswith(literal_prefill):
+        literal_start = 0
+        if reasoning_prefilled:
+            marker_at = literal_prefill.find(THINK_CLOSE)
+            if marker_at >= 0:
+                literal_start = marker_at + len(THINK_CLOSE)
+                # _response_prefix_ids() inserts this separator between the
+                # template's closing reasoning marker and the reader's text.
+                # Leave it outside protection so the parser trims it while
+                # retaining whitespace the reader actually typed after it.
+                if literal_prefill.startswith("\n\n", literal_start):
+                    literal_start += 2
+            else:
+                literal_start = len(literal_prefill)
+        if literal_start < len(literal_prefill):
+            protected_spans.append((literal_start, len(literal_prefill)))
+
+    protected_spans = sorted(
+        (start_at, end_at)
+        for start_at, end_at in protected_spans
+        if start_at < end_at
+    )
+    merged_spans: list[tuple[int, int]] = []
+    for start_at, end_at in protected_spans:
+        if merged_spans and start_at <= merged_spans[-1][1]:
+            old_start, old_end = merged_spans[-1]
+            merged_spans[-1] = (old_start, max(old_end, end_at))
+        else:
+            merged_spans.append((start_at, end_at))
+
+    if not merged_spans:
         return split_reasoning(
             text,
             streaming=streaming,
             reasoning_prefilled=reasoning_prefilled,
         )
-
-    literal_start = 0
-    if reasoning_prefilled:
-        marker_at = literal_prefill.find(THINK_CLOSE)
-        if marker_at < 0:
-            return split_reasoning(
-                text,
-                streaming=streaming,
-                reasoning_prefilled=reasoning_prefilled,
-            )
-        literal_start = marker_at + len(THINK_CLOSE)
-        # _response_prefix_ids() inserts this separator between the template's
-        # closing reasoning marker and the reader's text. Leave it outside the
-        # protected span so split_reasoning() can continue trimming it while
-        # retaining whitespace the reader actually typed after it.
-        if literal_prefill.startswith("\n\n", literal_start):
-            literal_start += 2
 
     placeholder = "\0CHATLAB_LITERAL_LT\0"
     start = "\0CHATLAB_LITERAL_START\0"
@@ -1007,14 +1041,17 @@ def split_response_text(
         placeholder += "_"
         start += "_"
         end += "_"
-    protected_prefix = (
-        literal_prefill[:literal_start]
-        + start
-        + literal_prefill[literal_start:].replace("<", placeholder)
-        + end
-    )
+    protected_parts: list[str] = []
+    cursor = 0
+    for start_at, end_at in merged_spans:
+        protected_parts.append(text[cursor:start_at])
+        protected_parts.append(start)
+        protected_parts.append(text[start_at:end_at].replace("<", placeholder))
+        protected_parts.append(end)
+        cursor = end_at
+    protected_parts.append(text[cursor:])
     reasoning, answer, closed = split_reasoning(
-        protected_prefix + text[len(literal_prefill) :],
+        "".join(protected_parts),
         streaming=streaming,
         reasoning_prefilled=reasoning_prefilled,
     )
@@ -1057,19 +1094,25 @@ def finalize_partial(turns: list[dict]) -> bool:
 
 
 def stop_generation(
-    turns: list[dict] | None, metrics_state: tuple[int, list[dict]] = (0, [])
+    turns: list[dict] | None,
+    metrics_state: tuple[int, list[dict]] = (0, []),
+    context_state: tuple[int, list[int], str | None] = (0, [], None),
 ):
     """Finish the turn that the cancelled generator left behind.
 
     Gradio closes ``generate_reply`` at its last yield, so nothing else ever
     finalizes that turn. A kept partial response is still a response: the
     tokens on screen are the ones it is made of, so it can be branched from.
+    ``context_state`` carries the producing load captured while the model lock
+    was held; a waiting load may finish after cancellation but before this
+    handler runs, so consulting the manager here would mislabel the old IDs.
     """
 
     turns = copy_turns(turns)
     kept = finalize_partial(turns)
     messages, _ = display_messages(turns)
     generation, metrics = metrics_state
+    context_generation, _context_ids, producing_load_id = context_state
     return (
         messages,
         turns,
@@ -1077,7 +1120,9 @@ def stop_generation(
         "Stopped. The partial response was kept."
         if kept
         else "Stopped before the model produced anything.",
-        generation if kept and metrics else None,
+        (generation, producing_load_id)
+        if kept and metrics and context_generation == generation
+        else None,
     )
 
 
@@ -1207,7 +1252,10 @@ def generate_reply(
     *,
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
+    automatic_reasoning_close_tokens: int = 0,
+    literal_text_ranges: tuple[tuple[int, int], ...] = (),
     branch_note: str = "",
+    expected_load_id: str | None = None,
 ):
     """Stream one assistant reply for ``turns``, which must end with a user turn.
 
@@ -1217,6 +1265,22 @@ def generate_reply(
     reader picked. A branch already contains any prefix that was on the old
     response, so it takes precedence. ``branch_note`` leads the status line.
 
+    ``expected_load_id`` is the model load ``forced_ids`` came from. Only a
+    branch passes it: the runtime compares it under the model lock and raises
+    ``ModelChanged`` if a load landed in between, and that exception is let
+    through to the branch handler, which alone still holds the conversation
+    the branch was about to replace. Ordinary chat has no such tokens and
+    generates with whatever is loaded.
+
+    ``literal_text_ranges`` marks reader-typed spans within ``forced_ids``.
+    They are kept separate from ``literal_prefill_tokens`` because a terminal
+    stop token typed into a branch must still end it even though reasoning
+    markers earlier in the same replacement remain visible prose.
+
+    ``automatic_reasoning_close_tokens`` preserves the provenance of the
+    template close at the start of an assistant prefill, so later branches
+    cannot mistake those control tokens for replaceable answer text.
+
     The generation slot is reserved here, before the first frame is published,
     because this is the first moment a handler is committed to generating. The
     MANAGER.busy checks in chat(), regenerate_from() and edit_message() are an
@@ -1225,6 +1289,8 @@ def generate_reply(
     handler until it has serialized that frame and sent it to the browser. A
     second click arriving inside that round trip used to sail past a manager
     that looked idle and overwrite the conversation from its stale snapshot.
+    branch_with_text() has work to do before it can generate, so it takes the
+    slot itself and calls _stream_reply() directly.
     """
 
     if not MANAGER.reserve_generation():
@@ -1248,7 +1314,10 @@ def generate_reply(
             scale_name,
             forced_ids=forced_ids,
             literal_prefill_tokens=literal_prefill_tokens,
+            automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
+            literal_text_ranges=literal_text_ranges,
             branch_note=branch_note,
+            expected_load_id=expected_load_id,
         )
     finally:
         # Every exit runs this: a finished stream, a failure, and - the one
@@ -1275,7 +1344,10 @@ def _stream_reply(
     *,
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
+    automatic_reasoning_close_tokens: int = 0,
+    literal_text_ranges: tuple[tuple[int, int], ...] = (),
     branch_note: str = "",
+    expected_load_id: str | None = None,
 ):
     """The body of generate_reply(), run with the generation slot held."""
 
@@ -1391,6 +1463,8 @@ def _stream_reply(
     first = True
     forced_prefix_tokens = 0
     literal_prefill = ""
+    literal_spans: tuple[tuple[int, int], ...] = ()
+    producing_load_id: str | None = None
 
     stream = MANAGER.generate(
         request,
@@ -1403,6 +1477,9 @@ def _stream_reply(
         forced_ids=tuple(int(value) for value in forced_ids),
         answer_prefill=assistant_prefill if applied_prefill else "",
         literal_prefill_tokens=literal_prefill_tokens,
+        automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
+        literal_text_ranges=literal_text_ranges,
+        load_id=expected_load_id,
     )
 
     try:
@@ -1411,13 +1488,17 @@ def _stream_reply(
         with contextlib.closing(stream):
             for update in stream:
                 raw_text = update.text
+                producing_load_id = update.load_id
                 prefilled = update.reasoning_prefilled
                 forced_prefix_tokens = update.forced_prefix_tokens
                 if update.literal_prefill_text:
                     literal_prefill = update.literal_prefill_text
+                if update.literal_text_spans:
+                    literal_spans = update.literal_text_spans
                 reasoning, answer, closed = split_response_text(
                     raw_text,
                     literal_prefill=literal_prefill,
+                    literal_spans=literal_spans,
                     streaming=True,
                     reasoning_prefilled=prefilled,
                 )
@@ -1470,6 +1551,13 @@ def _stream_reply(
                     ),
                 )
                 first = False
+    except ModelChanged:
+        # Raised on the first step, before any token, and only when a branch
+        # asked for the check. The opening frame is already out, but the turns
+        # here are the branch's replacement, not the conversation the reader
+        # was looking at; the branch handler still holds that and yields the
+        # correction. generate_reply() releases the slot on the way out.
+        raise
     except Exception as error:
         # The diagnostic only goes to the status line. Storing it as the
         # assistant turn would feed the failure back to the model next turn.
@@ -1478,6 +1566,7 @@ def _stream_reply(
         reasoning, answer, _ = split_response_text(
             raw_text,
             literal_prefill=literal_prefill,
+            literal_spans=literal_spans,
             reasoning_prefilled=prefilled,
         )
         pending["reasoning"] = reasoning
@@ -1491,13 +1580,14 @@ def _stream_reply(
             metrics,
             f"Generation failed: {error}",
             busy=False,
-            branch_source=generation if kept and metrics else None,
+            branch_source=(generation, producing_load_id) if kept and metrics else None,
         )
         return
 
     reasoning, answer, _ = split_response_text(
         raw_text,
         literal_prefill=literal_prefill,
+        literal_spans=literal_spans,
         reasoning_prefilled=prefilled,
     )
     pending["reasoning"] = reasoning
@@ -1552,7 +1642,7 @@ def _stream_reply(
             charts.surprise_chart(metrics),
         ),
         trace=trace,
-        branch_source=generation if kept and metrics else None,
+        branch_source=(generation, producing_load_id) if kept and metrics else None,
     )
 
 
@@ -1747,9 +1837,206 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
     yield from regenerate_from(position, prompt_text, turns, *settings)
 
 
+def literal_prefill_count(metrics: list[dict], kept: int) -> int:
+    """How many of the first ``kept`` tokens were typed as assistant prefill.
+
+    Those keep their literal-prefill protection when a branch replays them;
+    everything after the first sampled token is ordinary response content.
+    """
+
+    count = 0
+    for metric in metrics[:kept]:
+        if not metric.get("literal_prefill"):
+            break
+        count += 1
+    return count
+
+
+def literal_text_ranges(metrics: list[dict], kept: int) -> tuple[tuple[int, int], ...]:
+    """Contiguous reader-supplied token ranges inside a replayed prefix."""
+
+    ranges: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, metric in enumerate(metrics[:kept]):
+        literal = metric.get("literal_text")
+        if literal and start is None:
+            start = index
+        elif not literal and start is not None:
+            ranges.append((start, index))
+            start = None
+    if start is not None:
+        ranges.append((start, min(kept, len(metrics))))
+    return tuple(ranges)
+
+
+def automatic_reasoning_close_count(metrics: list[dict], kept: int) -> int:
+    """Leading automatic ``</think>`` tokens preserved by a replay."""
+
+    count = 0
+    for metric in metrics[:kept]:
+        if not metric.get("automatic_reasoning_close"):
+            break
+        count += 1
+    return count
+
+
+def branch_with_text(
+    selected_token: dict | None,
+    branch_source: tuple[int, str | None] | None,
+    metrics_state: tuple[int, list[dict]],
+    replacement: str,
+    prompt_text: str,
+    turns: list[dict] | None,
+    *settings,
+):
+    """Replay the last response up to the clicked token, put typed text in its
+    place, and let the model continue.
+
+    The text is not limited to the model's own alternatives, so it is
+    tokenized for this position: the kept tokens plus the result must decode
+    to the kept text followed by exactly what was typed. It is spliced in as
+    sampled content, so a stop token typed into it ends the response there,
+    the same as a stop token chosen from the alternatives table.
+
+    Unlike the other handlers, this one takes the generation slot itself,
+    before it does anything, and holds it through the replay. The encoding
+    waits on the model lock, and a busy check ahead of it is not enough: a
+    Send that slipped in between would hold that lock for its whole
+    generation, and this handler would resume afterwards with the
+    conversation it was handed at click time and replay that stale response
+    onto the newer one. With the slot owned first, nothing can generate while
+    the encoding waits, and the stamp check below reads a strip that no
+    generation can replace under it.
+    """
+
+    if not MANAGER.reserve_generation():
+        yield busy_state()
+        return
+
+    try:
+        yield from _branch_with_text(
+            selected_token,
+            branch_source,
+            metrics_state,
+            replacement,
+            prompt_text,
+            turns,
+            *settings,
+        )
+    finally:
+        # As in generate_reply(): a finished stream, a refusal, a failure and
+        # a cancellation all pass through here, or the slot would stay taken.
+        MANAGER.release_generation()
+
+
+def _branch_with_text(
+    selected_token: dict | None,
+    branch_source: tuple[int, str | None] | None,
+    metrics_state: tuple[int, list[dict]],
+    replacement: str,
+    prompt_text: str,
+    turns: list[dict] | None,
+    *settings,
+):
+    """The body of branch_with_text(), run with the generation slot held."""
+
+    turns = copy_turns(turns)
+    generation, metrics = metrics_state
+    if (
+        not selected_token
+        or selected_token.get("generation") != generation
+        or generation != _metrics_generation
+        or branch_source != (generation, MANAGER.load_id)
+    ):
+        yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
+        return
+    if not replacement:
+        yield idle_state(prompt_text, turns, BRANCH_TEXT_EMPTY)
+        return
+
+    position = last_user_index(turns)
+    if position is None or turns[-1]["role"] != "assistant":
+        yield idle_state(prompt_text, turns, "There is no response to branch from.")
+        return
+    if not MANAGER.loaded:
+        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        return
+
+    try:
+        metric = metrics[int(selected_token["index"])]
+    except (IndexError, TypeError, ValueError):
+        yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
+        return
+    if metric.get("automatic_reasoning_close"):
+        yield idle_state(prompt_text, turns, BRANCH_REASONING_CLOSE)
+        return
+    at = int(metric["position"])
+    kept = [int(m["token_id"]) for m in metrics[: at - 1]]
+    if len(kept) != at - 1:
+        yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
+        return
+    # The stamp check above is the fast path. The load it compared against can
+    # still change before the runtime takes the model lock, so the same load is
+    # handed down and compared again under that lock, for the encoding and for
+    # the replay alike; a mismatch there is ModelChanged.
+    _generation, expected_load = branch_source
+    literal_prefill_tokens = literal_prefill_count(metrics, len(kept))
+    automatic_reasoning_close_tokens = automatic_reasoning_close_count(
+        metrics, len(kept)
+    )
+    try:
+        replacement_ids = MANAGER.encode_replacement(
+            kept,
+            replacement,
+            literal_prefill_tokens=literal_prefill_tokens,
+            load_id=expected_load,
+        )
+        branch_turns = turns[: position + 1]
+        MANAGER.validate_generation_prefix(
+            model_messages(
+                branch_turns,
+                system_prompt=settings[0],
+                include_reasoning=settings[1],
+            ),
+            (*kept, *replacement_ids),
+            max_new_tokens=int(settings[6]),
+            load_id=expected_load,
+        )
+    except ModelChanged:
+        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+        return
+    except (ValueError, RuntimeError) as error:
+        yield idle_state(prompt_text, turns, f"🌱 {error}")
+        return
+
+    note = (
+        f"Branched at token {at}: {replacement!r} instead of {metric['text']!r}."
+    )
+    try:
+        # Not generate_reply(): the caller already holds the slot.
+        replacement_start = len(kept)
+        yield from _stream_reply(
+            branch_turns,
+            prompt_text,
+            *settings,
+            forced_ids=(*kept, *replacement_ids),
+            literal_prefill_tokens=literal_prefill_tokens,
+            automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
+            literal_text_ranges=(
+                *literal_text_ranges(metrics, len(kept)),
+                (replacement_start, replacement_start + len(replacement_ids)),
+            ),
+            branch_note=note,
+            expected_load_id=expected_load,
+        )
+    except ModelChanged:
+        # ``turns`` is still the whole conversation, old response included.
+        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+
+
 def branch_from(
     pick: dict | None,
-    branch_source: int | None,
+    branch_source: tuple[int, str | None] | None,
     metrics_state: tuple[int, list[dict]],
     prompt_text: str,
     turns: list[dict] | None,
@@ -1773,7 +2060,7 @@ def branch_from(
         not pick
         or pick.get("generation") != generation
         or generation != _metrics_generation
-        or branch_source != generation
+        or branch_source != (generation, MANAGER.load_id)
     ):
         yield idle_state(prompt_text, turns, BRANCH_HINT)
         return
@@ -1786,17 +2073,26 @@ def branch_from(
         yield idle_state(prompt_text, turns, "Download and load a model first.")
         return
 
-    at = int(pick["position"])
+    try:
+        at = int(pick["position"])
+        selected_metric = metrics[at - 1]
+        if at < 1:
+            raise IndexError
+    except (IndexError, TypeError, ValueError):
+        yield idle_state(prompt_text, turns, BRANCH_HINT)
+        return
+    if selected_metric.get("automatic_reasoning_close"):
+        yield idle_state(prompt_text, turns, BRANCH_REASONING_CLOSE)
+        return
     kept = [int(metric["token_id"]) for metric in metrics[: at - 1]]
     if len(kept) != at - 1:
         yield idle_state(prompt_text, turns, BRANCH_HINT)
         return
     forced = (*kept, int(pick["token_id"]))
-    literal_prefill_tokens = 0
-    for metric in metrics[: len(kept)]:
-        if not metric.get("literal_prefill"):
-            break
-        literal_prefill_tokens += 1
+    literal_prefill_tokens = literal_prefill_count(metrics, len(kept))
+    automatic_reasoning_close_tokens = automatic_reasoning_close_count(
+        metrics, len(kept)
+    )
     unchanged = pick["token_id"] == pick.get("original_id")
     if (
         unchanged
@@ -1809,14 +2105,26 @@ def branch_from(
     else:
         note = f"Branched at token {at}: {pick['text']!r} instead of {pick['original']!r}."
 
-    yield from generate_reply(
-        turns[: position + 1],
-        prompt_text,
-        *settings,
-        forced_ids=forced,
-        literal_prefill_tokens=literal_prefill_tokens,
-        branch_note=note,
-    )
+    # As in branch_with_text(): the stamp check above is the fast path, and the
+    # runtime compares the same load again under the model lock.
+    _generation, expected_load = branch_source
+    try:
+        yield from generate_reply(
+            turns[: position + 1],
+            prompt_text,
+            *settings,
+            forced_ids=forced,
+            literal_prefill_tokens=literal_prefill_tokens,
+            automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
+            literal_text_ranges=literal_text_ranges(
+                metrics, len(forced) if unchanged else len(kept)
+            ),
+            branch_note=note,
+            expected_load_id=expected_load,
+        )
+    except ModelChanged:
+        # ``turns`` is still the whole conversation, old response included.
+        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
 
 
 def undo_from(
@@ -2913,6 +3221,25 @@ def build_app() -> gr.Blocks:
                     "from there.",
                     elem_classes=["scale-caption"],
                 )
+                with gr.Row():
+                    branch_text = gr.Textbox(
+                        label="Or type your own replacement",
+                        placeholder=(
+                            "Text to put where the selected token was. Include a "
+                            "leading space if the word needs one."
+                        ),
+                        lines=1,
+                        scale=3,
+                    )
+                    branch_text_button = gr.Button(
+                        "✏️ Branch with text", size="sm", scale=0, min_width=160
+                    )
+                gr.Markdown(
+                    "The typed text replaces the selected token exactly as written, "
+                    "whether or not the model would ever have chosen it, and the "
+                    "model continues from there.",
+                    elem_classes=["scale-caption"],
+                )
                 with gr.Accordion("Layers and attention", open=False):
                     with gr.Row():
                         inspect_button = gr.Button(
@@ -3047,11 +3374,16 @@ def build_app() -> gr.Blocks:
                 [branch_pick, branch_source, metrics_state, *chat_inputs],
                 chat_outputs,
             ),
+            branch_text_button.click(
+                branch_with_text,
+                [selected_token, branch_source, metrics_state, branch_text, *chat_inputs],
+                chat_outputs,
+            ),
         ]
 
         stop_button.click(
             stop_generation,
-            inputs=[conversation_state, metrics_state],
+            inputs=[conversation_state, metrics_state, context_ids_state],
             outputs=[
                 chatbot,
                 conversation_state,

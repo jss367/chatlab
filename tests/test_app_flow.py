@@ -7,6 +7,7 @@ import numpy as np
 
 import app
 import charts
+import model_runtime
 from conversation import (
     MAIN_BRANCH,
     display_messages,
@@ -17,7 +18,7 @@ from conversation import (
 from model_runtime import GenerationUpdate, ModelChanged, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
 
-from test_streaming import loaded_manager
+from test_streaming import ChatTemplateTokenizer, SentencePieceTokenizer, loaded_manager
 
 
 # "Hello" and " world" are the answer; the reasoning tags are their own tokens.
@@ -446,11 +447,13 @@ class ChatFlowTests(unittest.TestCase):
             yield GenerationUpdate(
                 text="Let me add two and two",
                 metrics=[],
+                load_id=app.MANAGER.load_id,
                 reasoning_prefilled=True,
             )
             yield GenerationUpdate(
                 text="Let me add two and two.</think>Four.",
                 metrics=[],
+                load_id=app.MANAGER.load_id,
                 reasoning_prefilled=True,
             )
 
@@ -470,7 +473,9 @@ class ChatFlowTests(unittest.TestCase):
 
     def test_a_plain_reply_never_streams_as_reasoning(self):
         def plain(*_args, **_kwargs):
-            yield GenerationUpdate(text="Four.", metrics=[])
+            yield GenerationUpdate(
+                text="Four.", metrics=[], load_id=app.MANAGER.load_id
+            )
 
         app.MANAGER.generate = plain
         final = self.last(app.chat("hi", [], *SETTINGS))[-1]
@@ -479,7 +484,9 @@ class ChatFlowTests(unittest.TestCase):
 
     def test_a_failure_after_some_tokens_keeps_them(self):
         def failing(*_args, **_kwargs):
-            yield GenerationUpdate(text="<think>Hmm", metrics=[])
+            yield GenerationUpdate(
+                text="<think>Hmm", metrics=[], load_id=app.MANAGER.load_id
+            )
             raise RuntimeError("gpu fell over")
 
         app.MANAGER.generate = failing
@@ -568,6 +575,32 @@ class AssistantPrefillSplittingTests(unittest.TestCase):
 
         self.assertEqual(reasoning, "")
         self.assertEqual(answer, "<think>\U0001f4be continued")
+        self.assertTrue(closed)
+
+    def test_a_literal_span_protects_reasoning_tags_after_sampled_text(self):
+        text = "sampled <think>typed</think><think>model</think>answer"
+        typed = "<think>typed</think>"
+        start = text.index(typed)
+
+        reasoning, answer, closed = app.split_response_text(
+            text,
+            literal_spans=((start, start + len(typed)),),
+        )
+
+        self.assertEqual(reasoning, "model")
+        self.assertEqual(answer, "sampled <think>typed</think>answer")
+        self.assertTrue(closed)
+
+    def test_a_partial_reasoning_tag_in_a_literal_span_streams_visibly(self):
+        text = "sampled <thi"
+        reasoning, answer, closed = app.split_response_text(
+            text,
+            literal_spans=((len("sampled "), len(text)),),
+            streaming=True,
+        )
+
+        self.assertEqual(reasoning, "")
+        self.assertEqual(answer, text)
         self.assertTrue(closed)
 
 
@@ -810,7 +843,9 @@ class AnalysisPanelTests(unittest.TestCase):
 
     def test_a_failed_response_is_not_exportable(self):
         def failing(*_args, **_kwargs):
-            yield GenerationUpdate(text="Hmm", metrics=[])
+            yield GenerationUpdate(
+                text="Hmm", metrics=[], load_id=app.MANAGER.load_id
+            )
             raise RuntimeError("gpu fell over")
 
         app.MANAGER.generate = failing
@@ -907,7 +942,7 @@ class CancellationTests(unittest.TestCase):
 
         self.assertFalse(frame[TURNS][1]["reasoning_closed"])
         messages, turns, _send, _stop, status, _source = app.stop_generation(
-            frame[TURNS]
+            frame[TURNS], frame[METRICS], frame[CONTEXT_IDS]
         )
         self.assertTrue(turns[1]["reasoning_closed"])
         thoughts = [m for m in messages if m.get("metadata", {}).get("title")]
@@ -1325,7 +1360,9 @@ class BusyFlagTests(unittest.TestCase):
         """
 
         def failing(*_args, **_kwargs):
-            yield GenerationUpdate(text="Hmm", metrics=[])
+            yield GenerationUpdate(
+                text="Hmm", metrics=[], load_id=app.MANAGER.load_id
+            )
             raise RuntimeError("gpu fell over")
 
         app.MANAGER.generate = failing
@@ -1718,7 +1755,30 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertIsNone(frames[0][BRANCH_SOURCE])
         for frame in frames[1:-1]:
             self.assertEqual(frame[BRANCH_SOURCE], gr.skip())
-        self.assertEqual(frames[-1][BRANCH_SOURCE], frames[-1][METRICS][0])
+        self.assertEqual(
+            frames[-1][BRANCH_SOURCE],
+            (frames[-1][METRICS][0], app.MANAGER.load_id),
+        )
+
+    def test_a_load_finishing_before_the_final_snapshot_cannot_claim_the_tokens(self):
+        manager = app.MANAGER
+        real_generate = manager.generate
+        producing_load_id = manager.load_id
+
+        def load_after_generation(*args, **kwargs):
+            yield from real_generate(*args, **kwargs)
+            # A load waiting on the model lock can finish as soon as the
+            # runtime generator exits, before _stream_reply builds its final
+            # branchable snapshot.
+            manager.load_count += 1
+
+        manager.generate = load_after_generation
+        final = self.respond()[-1]
+
+        self.assertNotEqual(manager.load_id, producing_load_id)
+        self.assertEqual(
+            final[BRANCH_SOURCE], (final[METRICS][0], producing_load_id)
+        )
 
     def test_a_response_token_is_remembered_for_the_table(self):
         final = self.respond()[-1]
@@ -1787,7 +1847,9 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertIn("Branched at token 2", frames[0][STATUS])
         self.assertIn("Branched at token 2", last[STATUS])
         self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 2)
-        self.assertEqual(last[BRANCH_SOURCE], last[METRICS][0])
+        self.assertEqual(
+            last[BRANCH_SOURCE], (last[METRICS][0], app.MANAGER.load_id)
+        )
 
     def test_branching_preserves_literal_assistant_prefill_tags(self):
         app.MANAGER = loaded_manager(
@@ -1827,7 +1889,7 @@ class BranchFromTokenTests(unittest.TestCase):
         original = list(app.chat("hi", [], *settings.values()))[-1]
         original_metrics = metrics_of(original[METRICS])
         pick = {
-            "generation": original[BRANCH_SOURCE],
+            "generation": original[METRICS][0],
             "position": 2,
             "token_id": THINK_EOS,
             "original_id": original_metrics[1]["token_id"],
@@ -1910,13 +1972,593 @@ class BranchFromTokenTests(unittest.TestCase):
         next(stream)
         frame = next(stream)
         stream.close()
-        *_rest, source = app.stop_generation(frame[TURNS], frame[METRICS])
-        self.assertEqual(source, frame[METRICS][0])
+        producing_load_id = frame[CONTEXT_IDS][2]
+        app.MANAGER.load_count += 1
+        *_rest, source = app.stop_generation(
+            frame[TURNS], frame[METRICS], frame[CONTEXT_IDS]
+        )
+        self.assertEqual(source, (frame[METRICS][0], producing_load_id))
 
     def test_stopping_before_any_token_leaves_nothing_to_branch(self):
         turns = [make_turn("user", "hi"), make_turn("assistant", "")]
         *_rest, source = app.stop_generation(turns, app.empty_metrics())
         self.assertIsNone(source)
+
+    def branch_text(self, final, text, strip_index=1):
+        selected = app.remember_selection(final[METRICS], select(strip_index))
+        return list(
+            app.branch_with_text(
+                selected,
+                final[BRANCH_SOURCE],
+                final[METRICS],
+                text,
+                "",
+                final[TURNS],
+                *SETTINGS,
+            )
+        )
+
+    def test_typed_text_replaces_the_clicked_token_and_continues(self):
+        final = self.respond()[-1]
+        original = metrics_of(final[METRICS])
+        frames = self.branch_text(final, "Hello")
+        for frame in frames:
+            self.assertEqual(len(frame), CHAT_OUTPUTS)
+        last = frames[-1]
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual(metrics[0]["token_id"], original[0]["token_id"])
+        self.assertEqual(metrics[1]["token_id"], 2)  # "Hello"
+        self.assertGreater(len(metrics), 2)
+        self.assertIn("Branched at token 2", frames[0][STATUS])
+        self.assertIn("'Hello'", last[STATUS])
+        self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 2)
+        self.assertTrue(last[TURNS][-1]["content"].startswith("HelloHello"))
+        self.assertEqual(
+            last[BRANCH_SOURCE], (last[METRICS][0], app.MANAGER.load_id)
+        )
+
+    def test_typed_text_may_span_several_tokens(self):
+        final = self.respond()[-1]
+        last = self.branch_text(final, "Hello world")[-1]
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual([m["token_id"] for m in metrics[:3]], [2, 2, 3])
+        self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 3)
+
+    def test_typed_text_needs_no_alternative_pick(self):
+        # The alternatives table is never touched; a clicked token is enough.
+        final = self.respond()[-1]
+        last = self.branch_text(final, " world", strip_index=0)[-1]
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual(metrics[0]["token_id"], 3)
+        self.assertTrue(last[TURNS][-1]["content"].startswith(" world"))
+        self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 1)
+
+    def test_whitespace_before_a_typed_terminal_stop_is_kept(self):
+        pieces = ["Hello", " ", "<eos>"]
+        eos = pieces.index("<eos>")
+        app.MANAGER = loaded_manager([0, eos], pieces, eos)
+        final = self.respond()[-1]
+
+        last = self.branch_text(final, " <eos>", strip_index=0)[-1]
+
+        self.assertEqual(last[TURNS][-1]["content"], " ")
+        self.assertEqual(last[TURNS][-1]["reasoning"], "")
+
+    def test_empty_text_asks_for_some(self):
+        final = self.respond()[-1]
+        frames = self.branch_text(final, "")
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_EMPTY)
+        self.assertEqual(frames[0][TURNS], final[TURNS])
+
+    def test_text_the_tokenizer_cannot_encode_is_refused(self):
+        final = self.respond()[-1]
+        frames = self.branch_text(final, "xyz")
+        self.assertEqual(len(frames), 1)
+        self.assertIn("xyz", frames[0][STATUS])
+        self.assertEqual(frames[0][TURNS], final[TURNS])
+
+    def test_typed_text_without_a_clicked_token_explains_the_steps(self):
+        final = self.respond()[-1]
+        frames = list(
+            app.branch_with_text(
+                None, final[BRANCH_SOURCE], final[METRICS], "Hello", "", final[TURNS], *SETTINGS
+            )
+        )
+        self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
+
+    def test_typed_text_against_a_replaced_strip_is_refused(self):
+        final = self.respond()[-1]
+        selected = app.remember_selection(final[METRICS], select(1))
+        fresh = self.respond()[-1]
+        frames = list(
+            app.branch_with_text(
+                selected, fresh[BRANCH_SOURCE], fresh[METRICS], "Hello", "", fresh[TURNS], *SETTINGS
+            )
+        )
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
+
+    def test_typed_text_from_an_earlier_model_load_is_refused(self):
+        final = self.respond()[-1]
+        # Loading leaves the old response strip on screen, but its token IDs
+        # belong to the tokenizer that produced it, even for a same-ID reload.
+        app.MANAGER.load_count += 1
+        frames = self.branch_text(final, "Hello")
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
+        self.assertEqual(frames[0][TURNS], final[TURNS])
+
+    def reload_before(self, method_name):
+        """Land a model load inside the branch handler, after its stamp check.
+
+        The handler compares ``branch_source`` against the live load first,
+        then calls the runtime; a load finishing in between passes that check
+        and must be caught by the runtime's own comparison under the model
+        lock. The wrapped method bumps the load count at the moment of the
+        call, which is exactly that window.
+        """
+
+        manager = app.MANAGER
+        real = getattr(manager, method_name)
+
+        def reloaded_first(*args, **kwargs):
+            manager.load_count += 1
+            return real(*args, **kwargs)
+
+        setattr(manager, method_name, reloaded_first)
+
+    def assertBranchRefusedByReload(self, frames, final):
+        last = frames[-1]
+        self.assertEqual(last[STATUS], app.BRANCH_MODEL_CHANGED)
+        self.assertEqual(last[TURNS], final[TURNS])
+        self.assertEqual(last[SEND], gr.update(visible=True))
+        self.assertEqual(last[STOP], gr.update(visible=False))
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_a_load_landing_before_the_encoding_leaves_the_conversation_alone(
+        self,
+    ):
+        final = self.respond()[-1]
+        self.reload_before("encode_replacement")
+        frames = self.branch_text(final, "Hello")
+        self.assertEqual(len(frames), 1)
+        self.assertBranchRefusedByReload(frames, final)
+
+    def test_a_load_landing_before_the_length_check_leaves_the_conversation_alone(
+        self,
+    ):
+        final = self.respond()[-1]
+        self.reload_before("validate_generation_prefix")
+        frames = self.branch_text(final, "Hello")
+        self.assertEqual(len(frames), 1)
+        self.assertBranchRefusedByReload(frames, final)
+
+    def test_a_load_landing_before_typed_replay_leaves_the_conversation_alone(
+        self,
+    ):
+        final = self.respond()[-1]
+        self.reload_before("generate")
+        frames = self.branch_text(final, "Hello")
+        # The opening "Generating…" frame is already out when the runtime
+        # refuses the replay, so a second frame takes the conversation back.
+        self.assertEqual(len(frames), 2)
+        self.assertIn("Generating", frames[0][STATUS])
+        self.assertBranchRefusedByReload(frames, final)
+
+    def record_encodings(self, seen):
+        """Wrap encode_replacement() to note whether the slot is held at the call."""
+
+        real = app.MANAGER.encode_replacement
+
+        def observe(*args, **kwargs):
+            seen.append(app.MANAGER.busy)
+            return real(*args, **kwargs)
+
+        app.MANAGER.encode_replacement = observe
+
+    def test_typed_text_is_refused_while_a_response_is_generating(self):
+        final = self.respond()[-1]
+        encodings = []
+        self.record_encodings(encodings)
+        self.assertTrue(app.MANAGER.reserve_generation())
+        try:
+            frames = self.branch_text(final, "Hello")
+        finally:
+            app.MANAGER.release_generation()
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][STATUS], app.BUSY_STATUS)
+        self.assertEqual(frames[0][TURNS], gr.skip())
+        # The encoding waits on the model lock, which the running generation
+        # is holding. A refused branch must not queue behind it: it would
+        # resume once that generation finished and replay its stale snapshot.
+        self.assertEqual(encodings, [])
+
+    def test_typed_text_takes_the_slot_before_it_encodes(self):
+        """The reservation comes first, not after the encoding.
+
+        encode_replacement() blocks on the model lock. With only a busy check
+        ahead of it, a Send starting in between would hold that lock for its
+        whole generation, and the branch would then replay the conversation it
+        was handed at click time over the newer one.
+        """
+
+        final = self.respond()[-1]
+        encodings = []
+        self.record_encodings(encodings)
+        frames = self.branch_text(final, "Hello")
+        self.assertEqual(encodings, [True])
+        self.assertNotEqual(frames[-1][STATUS], app.BUSY_STATUS)
+        self.assertTrue(frames[-1][TURNS][-1]["content"].startswith("Hello"))
+        self.assertFalse(app.MANAGER.busy, "the slot must not leak")
+
+    def test_typed_text_against_a_strip_replaced_as_the_slot_is_taken_is_refused(
+        self,
+    ):
+        """A generation finishing between the click and the reservation.
+
+        Its final frame re-stamped the strip. The stamps are compared only once
+        the slot is owned, so the comparison reads the strip the replacement
+        would actually land on.
+        """
+
+        final = self.respond()[-1]
+        manager = app.MANAGER
+        real = manager.reserve_generation
+
+        def replace_strips_first():
+            app.new_metrics_generation()
+            return real()
+
+        manager.reserve_generation = replace_strips_first
+        encodings = []
+        self.record_encodings(encodings)
+        frames = self.branch_text(final, "Hello")
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
+        self.assertEqual(frames[0][TURNS], final[TURNS])
+        self.assertEqual(encodings, [])
+        self.assertFalse(manager.busy, "a refusal must give the slot back")
+
+    def test_a_cancelled_typed_branch_releases_the_slot(self):
+        final = self.respond()[-1]
+        selected = app.remember_selection(final[METRICS], select(1))
+        stream = app.branch_with_text(
+            selected,
+            final[BRANCH_SOURCE],
+            final[METRICS],
+            "Hello",
+            "",
+            final[TURNS],
+            *SETTINGS,
+        )
+        first = next(stream)
+        self.assertIn("Generating", first[STATUS])
+        self.assertTrue(app.MANAGER.busy)
+        stream.close()
+        self.assertFalse(app.MANAGER.busy, "GeneratorExit must release the slot")
+
+    def test_a_load_landing_before_a_picked_replay_leaves_the_conversation_alone(
+        self,
+    ):
+        final = self.respond()[-1]
+        _detail, pick = self.pick_alternative(final)
+        self.reload_before("generate")
+        frames = list(
+            app.branch_from(
+                pick, final[BRANCH_SOURCE], final[METRICS], "", final[TURNS], *SETTINGS
+            )
+        )
+        self.assertEqual(len(frames), 2)
+        self.assertBranchRefusedByReload(frames, final)
+
+    def test_typed_text_keeps_literal_prefill_tags_before_it(self):
+        app.MANAGER = loaded_manager(
+            [0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS
+        )
+        settings = dict(FIXED, assistant_prefill="<think>Hello</think>")
+        original = list(app.chat("hi", [], *settings.values()))[-1]
+        selected = app.remember_selection(original[METRICS], select(3))
+        branched = list(
+            app.branch_with_text(
+                selected,
+                original[BRANCH_SOURCE],
+                original[METRICS],
+                "Hello",
+                "",
+                original[TURNS],
+                *settings.values(),
+            )
+        )[-1]
+        metrics = metrics_of(branched[METRICS])
+        self.assertTrue(all(m.get("literal_prefill") for m in metrics[:3]))
+        self.assertNotIn("literal_prefill", metrics[3])
+        self.assertEqual(metrics[3]["token_id"], 2)
+        self.assertTrue(
+            branched[TURNS][-1]["content"].startswith("<think>Hello</think>Hello")
+        )
+
+    def reasoning_prefill_response(self):
+        pieces = [
+            "</",
+            "think",
+            ">\n\n",
+            "Prefill",
+            " continued",
+            "Replacement",
+            " after",
+            "<eos>",
+        ]
+        eos = pieces.index("<eos>")
+        app.MANAGER = loaded_manager([0, 0, 0, 0, 4, eos], pieces, eos)
+        app.MANAGER.tokenizer = ChatTemplateTokenizer(
+            "\nassistant: <think>", pieces=pieces, eos_id=eos
+        )
+        settings = dict(FIXED, assistant_prefill="Prefill")
+        final = list(app.chat("hi", [], *settings.values()))[-1]
+        return final, settings
+
+    def test_typed_branch_refuses_the_automatic_reasoning_close(self):
+        original, settings = self.reasoning_prefill_response()
+        selected = app.remember_selection(original[METRICS], select(0))
+
+        frames = list(
+            app.branch_with_text(
+                selected,
+                original[BRANCH_SOURCE],
+                original[METRICS],
+                "Replacement",
+                "",
+                original[TURNS],
+                *settings.values(),
+            )
+        )
+
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][STATUS], app.BRANCH_REASONING_CLOSE)
+        self.assertEqual(frames[0][TURNS], original[TURNS])
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_typed_branch_after_the_reasoning_close_stays_in_default_context(self):
+        original, settings = self.reasoning_prefill_response()
+        metrics = metrics_of(original[METRICS])
+        self.assertTrue(all(m.get("automatic_reasoning_close") for m in metrics[:3]))
+        self.assertNotIn("automatic_reasoning_close", metrics[3])
+        selected = app.remember_selection(original[METRICS], select(3))
+        app.MANAGER.model.script = [0, 0, 0, 0, 6, 7]
+        app.MANAGER.model.step = 0
+
+        branched = list(
+            app.branch_with_text(
+                selected,
+                original[BRANCH_SOURCE],
+                original[METRICS],
+                "Replacement",
+                "",
+                original[TURNS],
+                *settings.values(),
+            )
+        )[-1]
+
+        reply = branched[TURNS][-1]
+        self.assertEqual(reply["reasoning"], "")
+        self.assertEqual(reply["content"], "Replacement after")
+        request = model_messages(branched[TURNS], include_reasoning=False)
+        self.assertEqual(request[-1]["content"], "Replacement after")
+        replayed = metrics_of(branched[METRICS])
+        self.assertTrue(
+            all(m.get("automatic_reasoning_close") for m in replayed[:3])
+        )
+
+    def marker_response(self):
+        pieces = ["Hello", " world", "<think>", "</think>", "<thi", "<eos>"]
+        eos = pieces.index("<eos>")
+        app.MANAGER = loaded_manager([0, 1, eos], pieces, eos)
+        return self.respond()[-1]
+
+    def test_typed_reasoning_markers_are_literal_replacement_text(self):
+        for replacement in ("<think>", "</think>", "<thi"):
+            with self.subTest(replacement=replacement):
+                final = self.marker_response()
+                last = self.branch_text(final, replacement)[-1]
+                reply = last[TURNS][-1]
+
+                self.assertEqual(reply["reasoning"], "")
+                self.assertTrue(reply["content"].startswith("Hello" + replacement))
+
+    def test_a_typed_reasoning_block_survives_default_context_and_save(self):
+        final = self.marker_response()
+        replacement = "<think>Hello</think>"
+        branched = self.branch_text(final, replacement)[-1]
+        reply = branched[TURNS][-1]
+
+        self.assertEqual(reply["reasoning"], "")
+        self.assertTrue(reply["content"].startswith("Hello" + replacement))
+        request = model_messages(branched[TURNS], include_reasoning=False)
+        self.assertIn(replacement, request[-1]["content"])
+
+        saved, _status = app.save_conversation(branched[TURNS], "")
+        loaded = app.load_conversation(saved["value"], [make_turn("user", "stale")])
+        self.assertIn(replacement, loaded[1][-1]["content"])
+        self.assertEqual(loaded[1][-1]["reasoning"], "")
+
+    def test_model_reasoning_after_a_literal_replacement_stays_semantic(self):
+        final = self.marker_response()
+        # The branch prefill has three input positions (prompt, kept token,
+        # replacement). Its next distribution emits a real reasoning block.
+        app.MANAGER.model.script = [0, 0, 2, 0, 3, 1, 5]
+        app.MANAGER.model.step = 0
+        last = self.branch_text(final, "</think>")[-1]
+        reply = last[TURNS][-1]
+
+        self.assertEqual(reply["reasoning"], "Hello")
+        self.assertEqual(reply["content"], "Hello</think> world")
+        default_context = model_messages(last[TURNS], include_reasoning=False)
+        self.assertEqual(default_context[-1]["content"], "Hello</think> world")
+
+    def test_literal_replacement_protection_survives_another_branch(self):
+        final = self.marker_response()
+        first = self.branch_text(final, "<think>Hello</think>")[-1]
+        # The first sampled token after the replacement is the fifth token.
+        second = self.branch_text(first, " world", strip_index=4)[-1]
+
+        self.assertTrue(
+            second[TURNS][-1]["content"].startswith(
+                "Hello<think>Hello</think> world"
+            )
+        )
+        self.assertEqual(second[TURNS][-1]["reasoning"], "")
+        metrics = metrics_of(second[METRICS])
+        self.assertTrue(all(metric.get("literal_text") for metric in metrics[1:5]))
+
+    def test_a_terminal_typed_stop_keeps_prior_reasoning_markers_literal(self):
+        final = self.marker_response()
+        replacement = "<think>Hello</think><eos>"
+        last = self.branch_text(final, replacement)[-1]
+
+        self.assertEqual(last[TURNS][-1]["content"], "Hello<think>Hello</think>")
+        self.assertEqual(last[TURNS][-1]["reasoning"], "")
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual(metrics[-1]["token_id"], app.MANAGER.tokenizer.eos_token_id)
+        self.assertTrue(all(metric.get("literal_text") for metric in metrics[1:]))
+
+    def sentencepiece_response(self):
+        """A response from a tokenizer that drops the first decoded space."""
+
+        pieces = ["\u2581Hello", "\u2581world", "world", "\u2581", "!", "<eos>"]
+        eos = pieces.index("<eos>")
+        app.MANAGER = loaded_manager([0, 4, eos], pieces, eos)
+        app.MANAGER.tokenizer = SentencePieceTokenizer(pieces, eos)
+        final = self.respond()[-1]
+        self.assertEqual(final[TURNS][-1]["content"], "Hello!")
+        return final
+
+    def test_typed_text_without_a_space_stays_joined_under_sentencepiece(self):
+        # "world" round-trips on its own, but its piece would read " world"
+        # after "Hello"; the branch must use the piece that joins instead.
+        final = self.sentencepiece_response()
+        last = self.branch_text(final, "world")[-1]
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual([m["token_id"] for m in metrics[:2]], [0, 2])
+        self.assertTrue(last[TURNS][-1]["content"].startswith("Helloworld"))
+
+    def test_a_typed_leading_space_is_kept_once_under_sentencepiece(self):
+        final = self.sentencepiece_response()
+        last = self.branch_text(final, " world")[-1]
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual([m["token_id"] for m in metrics[:2]], [0, 1])
+        self.assertTrue(last[TURNS][-1]["content"].startswith("Hello world"))
+
+    def test_a_hidden_kept_special_does_not_erase_a_typed_sentencepiece_space(self):
+        pieces = ["\u2581<pad>", "\u2581world", "world", "\u2581", "!", "<eos>"]
+        pad, space_world, _world, space, bang, eos = range(len(pieces))
+        app.MANAGER = loaded_manager([pad, bang, eos], pieces, eos)
+        app.MANAGER.tokenizer = SentencePieceTokenizer(pieces, eos)
+        app.MANAGER.tokenizer.all_special_ids = [pad, eos]
+        final = self.respond()[-1]
+        self.assertEqual(final[TURNS][-1]["content"], "!")
+
+        last = self.branch_text(final, " world", strip_index=1)[-1]
+
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual(
+            [m["token_id"] for m in metrics[:3]], [pad, space, space_world]
+        )
+        self.assertTrue(last[TURNS][-1]["content"].startswith(" world"))
+
+    def assert_oversized_typed_branch_is_refused(self, final, expected_status):
+        calls = []
+        real_generate = app.MANAGER.generate
+
+        def observe(*args, **kwargs):
+            calls.append(True)
+            return real_generate(*args, **kwargs)
+
+        app.MANAGER.generate = observe
+        frames = self.branch_text(final, "Hello" * 15)
+
+        self.assertEqual(
+            len(frames), 1, "no destructive opening frame was published"
+        )
+        self.assertIn(expected_status, frames[0][STATUS])
+        self.assertEqual(frames[0][TURNS], final[TURNS])
+        self.assertEqual(calls, [])
+        self.assertFalse(app.MANAGER.busy, "a refusal must give the slot back")
+
+    def test_a_replacement_past_the_model_window_preserves_the_old_response(self):
+        final = self.respond()[-1]
+        app.MANAGER.model.config = type(
+            "Config", (), {"max_position_embeddings": 16}
+        )()
+
+        self.assert_oversized_typed_branch_is_refused(final, "16 positions")
+
+    def test_a_replacement_that_leaves_too_little_room_preserves_the_old_response(self):
+        final = self.respond()[-1]
+        app.MANAGER.model.config = type(
+            "Config", (), {"max_position_embeddings": 16}
+        )()
+        calls = []
+        real_generate = app.MANAGER.generate
+
+        def observe(*args, **kwargs):
+            calls.append(True)
+            return real_generate(*args, **kwargs)
+
+        app.MANAGER.generate = observe
+        frames = self.branch_text(final, "Hello" * 8)
+
+        self.assertEqual(len(frames), 1)
+        self.assertIn("need 17 positions", frames[0][STATUS])
+        self.assertEqual(frames[0][TURNS], final[TURNS])
+        self.assertEqual(calls, [])
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_a_replacement_past_the_application_cap_preserves_the_old_response(self):
+        final = self.respond()[-1]
+        old_limit = model_runtime.GENERATION_PREFILL_TOKEN_LIMIT
+        model_runtime.GENERATION_PREFILL_TOKEN_LIMIT = 16
+        self.addCleanup(
+            setattr,
+            model_runtime,
+            "GENERATION_PREFILL_TOKEN_LIMIT",
+            old_limit,
+        )
+
+        self.assert_oversized_typed_branch_is_refused(
+            final, "16 token limit for a generation prefix"
+        )
+
+    def test_typed_text_follows_noncanonical_sentencepiece_tokens(self):
+        pieces = [
+            "\u2581Hello",
+            "\u2581Hel",
+            "lo",
+            "\u2581world",
+            "world",
+            "!",
+            "<eos>",
+        ]
+        eos = pieces.index("<eos>")
+        app.MANAGER = loaded_manager([1, 2, 5, eos], pieces, eos)
+        app.MANAGER.tokenizer = SentencePieceTokenizer(pieces, eos)
+        final = self.respond()[-1]
+        self.assertEqual(final[TURNS][-1]["content"], "Hello!")
+
+        last = self.branch_text(final, "world", strip_index=2)[-1]
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual([m["token_id"] for m in metrics[:3]], [1, 2, 4])
+        self.assertTrue(last[TURNS][-1]["content"].startswith("Helloworld"))
+
+    def test_the_branch_text_button_is_wired_as_a_generation(self):
+        demo = app.build_app()
+        listener = next(
+            fn
+            for fn in demo.fns.values()
+            if getattr(fn.fn, "__name__", None) == "branch_with_text"
+        )
+        self.assertEqual(len(listener.inputs), 4 + 2 + len(SETTINGS))
+        self.assertEqual(len(listener.outputs), CHAT_OUTPUTS)
 
     def test_the_branch_button_is_wired_as_a_generation(self):
         demo = app.build_app()
@@ -2248,7 +2890,7 @@ class ConversationListWiringTests(unittest.TestCase):
 
     def test_a_change_to_the_conversation_state_redraws_the_list(self):
         refresh = self.named("refresh_conversation_list")
-        state, _metrics = self.named("stop_generation").inputs
+        state, _metrics, _context = self.named("stop_generation").inputs
         self.assertEqual(refresh.targets, [(state._id, "change")])
         self.assertEqual(refresh.outputs, [self.conversation_list()])
 
@@ -2291,9 +2933,9 @@ class CancelWiringTests(unittest.TestCase):
         )
 
     def conversation_state(self):
-        """Stop reads the conversation state first, then the token metrics."""
+        """Stop reads the conversation state first, then token provenance."""
 
-        state, _metrics = self.named("stop_generation").inputs
+        state, _metrics, _context = self.named("stop_generation").inputs
         return state
 
     def writers(self):
@@ -2350,6 +2992,7 @@ class CancelWiringTests(unittest.TestCase):
                 "clear_chat",
                 "load_conversation",
                 "branch_from",
+                "branch_with_text",
                 "fork_conversation",
                 "switch_fork",
                 "delete_fork",

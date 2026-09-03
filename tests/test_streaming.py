@@ -7,7 +7,7 @@ import torch
 
 import model_runtime
 from conversation import split_reasoning
-from model_runtime import IncrementalDecoder, ModelManager
+from model_runtime import IncrementalDecoder, ModelChanged, ModelManager
 
 
 PIECES = [
@@ -70,6 +70,12 @@ class FakeTokenizer:
                     None,
                 )
                 if match is None:
+                    if "<unk>" in self.pieces:
+                        # Real vocabularies have an unknown piece; anything it
+                        # stands in for no longer decodes to what was typed.
+                        token_ids.append(self.pieces.index("<unk>"))
+                        remaining = remaining[1:]
+                        continue
                     raise ValueError(f"No fake token for {remaining!r}")
                 piece, index = match
                 token_ids.append(index)
@@ -113,21 +119,28 @@ class BytePieceTokenizer:
         return repr(self.pieces[int(token_id)])
 
 
-class SentencePieceTokenizer:
-    """A SentencePiece stand-in: the word-boundary space is dropped at the start."""
+class SentencePieceTokenizer(FakeTokenizer):
+    """A SentencePiece stand-in: the word-boundary space is dropped at the start.
 
-    chat_template = None
+    Encoding prepends the dummy-prefix marker and matches pieces greedily, so
+    a standalone word becomes its ``\u2581word`` piece just as SentencePiece
+    makes it. Decoding turns markers back into spaces and drops the first, so
+    that piece reads without a space on its own and with one after other
+    tokens: ``decode(a + b)`` is not ``decode(a) + decode(b)``.
+    """
 
-    def __init__(self, pieces: list[str]):
-        self.pieces = pieces
-        self.all_special_ids: list[int] = []
+    def __init__(self, pieces: list[str], eos_id: int | None = None):
+        super().__init__(pieces, eos_id)
+        self.all_special_ids = [] if eos_id is None else [eos_id]
 
-    def decode(self, token_ids, skip_special_tokens=False, **_kwargs):
-        text = "".join(self.pieces[int(token_id)] for token_id in token_ids)
+    def __call__(self, text, **kwargs):
+        if kwargs.get("add_special_tokens") is False:
+            text = "\u2581" + text.replace(" ", "\u2581")
+        return super().__call__(text, **kwargs)
+
+    def decode(self, token_ids, skip_special_tokens=False, **kwargs):
+        text = super().decode(token_ids, skip_special_tokens=skip_special_tokens, **kwargs)
         return text.replace("\u2581", " ").removeprefix(" ")
-
-    def convert_ids_to_tokens(self, token_id):
-        return self.pieces[int(token_id)]
 
 
 class FakeModel(torch.nn.Module):
@@ -278,6 +291,27 @@ class GenerateStreamingTests(unittest.TestCase):
             updates.append((update.text, len(update.metrics)))
         return updates
 
+    def test_a_forced_prefix_from_an_earlier_load_is_refused_before_any_token(self):
+        manager = loaded_manager([0, 1, 2, EOS_ID])
+        stale = manager.load_id
+        manager.load_count += 1
+        stream = manager.generate(
+            [{"role": "user", "content": "hi"}],
+            temperature=0.0,
+            top_p=1.0,
+            top_k=0,
+            max_new_tokens=4,
+            seed=1,
+            forced_ids=[0],
+            load_id=stale,
+        )
+        with self.assertRaises(ModelChanged):
+            next(stream)
+        # The refusal released the slot it took, and the current load is
+        # still accepted.
+        self.assertFalse(manager.busy)
+        self.assertTrue(self.collect(manager, load_id=manager.load_id))
+
     def test_updates_are_batched(self):
         manager = loaded_manager([0, 1, 2, 4, 5, 6, 7, 2])
         updates = self.collect(manager, max_new_tokens=40)
@@ -363,6 +397,21 @@ class ForcedPrefixTests(unittest.TestCase):
         self.assertEqual(final.text, "Hello are!")
         self.assertEqual([m["token_id"] for m in final.metrics], [0, 5, 2, EOS_ID])
         self.assertEqual([m["position"] for m in final.metrics], [1, 2, 3, 4])
+
+    def test_literal_replay_ranges_become_character_spans_and_metrics(self):
+        manager = loaded_manager([0, 1, 2, EOS_ID])
+        (first, *_rest) = self.updates(
+            manager,
+            [0, 5],
+            literal_text_ranges=((1, 2),),
+        )
+
+        self.assertEqual(
+            first.literal_text_spans,
+            ((len("Hello"), len("Hello are")),),
+        )
+        self.assertNotIn("literal_text", first.metrics[0])
+        self.assertTrue(first.metrics[1]["literal_text"])
 
     def test_the_prefix_is_measured_under_the_sampling_settings(self):
         manager = loaded_manager([0, 1, 2, EOS_ID])
@@ -475,6 +524,368 @@ class ForcedPrefixTests(unittest.TestCase):
             self.updates(manager, [], answer_prefill="  Hello")
 
 
+SP_PIECES = ["\u2581Hello", "\u2581world", "world", "\u2581", "!", "<unk>", "<eos>"]
+SP_HELLO, SP_SPACE_WORLD, SP_WORLD, SP_SPACE = 0, 1, 2, 3
+SP_EOS = SP_PIECES.index("<eos>")
+
+
+def sentencepiece_manager(pieces=SP_PIECES):
+    manager = loaded_manager([SP_HELLO], pieces, pieces.index("<eos>"))
+    manager.tokenizer = SentencePieceTokenizer(pieces, pieces.index("<eos>"))
+    return manager
+
+
+class ReplacementEncodingTests(unittest.TestCase):
+    """Typed branch text must read, after the kept tokens, exactly as typed.
+
+    A tokenizer that drops the word-boundary space from the first decoded
+    token makes the standalone round-trip check meaningless: ``"world"``
+    passes it and then gains a space once it follows ``"Hello"``, while the
+    typed ``" world"`` passes it and then carries two.
+    """
+
+    def decoded(self, manager, kept, text):
+        ids = manager.encode_replacement(kept, text)
+        return ids, manager.tokenizer.decode(list(kept) + ids)
+
+    def test_a_word_typed_without_a_space_does_not_gain_one(self):
+        manager = sentencepiece_manager()
+        ids, joined = self.decoded(manager, [SP_HELLO], "world")
+        self.assertEqual(ids, [SP_WORLD])
+        self.assertEqual(joined, "Helloworld")
+
+    def test_a_typed_leading_space_appears_once(self):
+        manager = sentencepiece_manager()
+        ids, joined = self.decoded(manager, [SP_HELLO], " world")
+        self.assertEqual(ids, [SP_SPACE_WORLD])
+        self.assertEqual(joined, "Hello world")
+
+    def test_a_hidden_kept_special_cannot_supply_sentencepiece_context(self):
+        # The raw decode sees <pad> before the leading-space piece, but the
+        # streaming decoder drops that token without putting it in its cache.
+        # Once hidden, the piece is first and SentencePiece drops its space.
+        # Encoding has to choose the two-piece spelling that keeps the typed
+        # leading space in the decoder's actual visible context.
+        pieces = ["\u2581<pad>", "\u2581world", "world", "\u2581", "!", "<eos>"]
+        pad, space_world, _world, space, _bang, eos = range(len(pieces))
+        manager = loaded_manager([0], pieces, eos)
+        manager.tokenizer = SentencePieceTokenizer(pieces, eos)
+        manager.tokenizer.all_special_ids = [pad, eos]
+        kept = [pad]
+
+        replacement = manager.encode_replacement(kept, " world")
+
+        self.assertEqual(kept, [pad], "the sampled prefix stays token-for-token")
+        self.assertEqual(replacement, [space, space_world])
+        decoder = IncrementalDecoder(manager.tokenizer, {pad, eos})
+        decoder.push(pad)
+        for token_id in replacement:
+            decoder.push(token_id)
+        self.assertEqual(decoder.text, " world")
+
+    def test_a_visible_prefill_special_still_supplies_sentencepiece_context(self):
+        # Assistant-prefill specials are intentionally forced visible during
+        # replay, so replacement validation must not hide those kept IDs.
+        pieces = ["\u2581<pad>", "\u2581world", "world", "\u2581", "<eos>"]
+        pad, space_world, _world, _space, eos = range(len(pieces))
+        manager = loaded_manager([0], pieces, eos)
+        manager.tokenizer = SentencePieceTokenizer(pieces, eos)
+        manager.tokenizer.all_special_ids = [pad, eos]
+
+        replacement = manager.encode_replacement(
+            [pad], " world", literal_prefill_tokens=1
+        )
+
+        self.assertEqual(replacement, [space_world])
+
+    def test_the_first_response_token_has_no_context_to_read(self):
+        manager = sentencepiece_manager()
+        ids, joined = self.decoded(manager, [], "Hello")
+        self.assertEqual(ids, [SP_HELLO])
+        self.assertEqual(joined, "Hello")
+
+    def test_text_no_encoding_places_exactly_is_refused(self):
+        # Without a bare "world" piece nothing decodes to "Helloworld": alone
+        # the word gains a space, in context it falls to the unknown piece.
+        pieces = [piece for piece in SP_PIECES if piece != "world"]
+        manager = sentencepiece_manager(pieces)
+        with self.assertRaisesRegex(ValueError, "exactly at this position"):
+            manager.encode_replacement([pieces.index("\u2581Hello")], "world")
+
+    def test_a_joint_suffix_can_follow_noncanonical_kept_tokens(self):
+        # The model sampled "Hello" as two pieces, while encoding the whole
+        # text merges them into one. Its "world" suffix can still follow the
+        # original kept ids exactly; those ids must remain unchanged.
+        pieces = ["\u2581Hello", "\u2581Hel", "lo", "\u2581world", "world", "<unk>", "<eos>"]
+        manager = sentencepiece_manager(pieces)
+        kept = [pieces.index("\u2581Hel"), pieces.index("lo")]
+        self.assertEqual(manager.tokenizer.decode(kept), "Hello")
+        ids, joined = self.decoded(manager, kept, "world")
+        self.assertEqual(ids, [pieces.index("world")])
+        self.assertEqual(joined, "Helloworld")
+
+    def test_a_slow_wordpiece_suffix_can_be_far_from_the_guessed_seam(self):
+        class SlowWordPieceTokenizer(FakeTokenizer):
+            """A kept word is one token, but the joint encoding uses three."""
+
+            is_fast = False
+
+            def __init__(self):
+                pieces = [
+                    "abcdefgh",
+                    "abc",
+                    "##de",
+                    "##fgh",
+                    "##ijkl",
+                    "ijkl",
+                ]
+                super().__init__(pieces, eos_id=None)
+                self.all_special_ids = []
+
+            def __call__(self, text, **_kwargs):
+                encoded = {
+                    "abcdefgh": [0],
+                    "abcdefghijkl": [1, 2, 3, 4],
+                    "ijkl": [5],
+                }
+                return Encoding(input_ids=encoded[text])
+
+            def decode(self, token_ids, **_kwargs):
+                tokens = [self.pieces[int(token_id)] for token_id in token_ids]
+                return " ".join(tokens).replace(" ##", "")
+
+        manager = loaded_manager([0], pieces=["unused"], eos_id=None)
+        manager.tokenizer = SlowWordPieceTokenizer()
+
+        replacement = manager.encode_replacement([0], "ijkl")
+
+        # _guess_seam counts the kept word's lone token and returns 1. The
+        # exact continuation starts at 3, beyond that guess and both adjacent
+        # candidates, and only becomes literal when it follows the kept token.
+        self.assertEqual(replacement, [4])
+        self.assertEqual(manager.tokenizer.decode([0, *replacement]), "abcdefghijkl")
+
+    def test_a_slow_byte_fallback_suffix_survives_an_incomplete_character(self):
+        class SlowByteFallbackTokenizer(BytePieceTokenizer):
+            """The context is one token alone and byte tokens in the joint text."""
+
+            is_fast = False
+
+            def __init__(self):
+                super().__init__(
+                    [
+                        "a💾".encode(),
+                        b"a",
+                        b"\xf0",
+                        b"\x9f",
+                        b"\x92",
+                        b"\xbe",
+                        b"Z",
+                        b" Z",
+                    ]
+                )
+
+            def __call__(self, text, **_kwargs):
+                encoded = {
+                    "a💾": [0],
+                    "a💾Z": [1, 2, 3, 4, 5, 6],
+                    "Z": [7],
+                }
+                return Encoding(input_ids=encoded[text])
+
+        manager = loaded_manager([0], pieces=["unused"], eos_id=None)
+        manager.tokenizer = SlowByteFallbackTokenizer()
+
+        replacement = manager.encode_replacement([0], "Z")
+
+        # Prefixes ending after ids 2-4 decode as ``a�``. The fifth id
+        # repairs the character and identifies the exact suffix at id 6,
+        # well beyond the context-token-count guess and its neighbours.
+        self.assertEqual(replacement, [6])
+        self.assertEqual(manager.tokenizer.decode([0, *replacement]), "a💾Z")
+
+    def test_replacement_bytes_do_not_extend_the_decoded_context_boundary(self):
+        class SlowContextualByteTokenizer(BytePieceTokenizer):
+            """Retokenizes kept text, while a standalone word carries a marker."""
+
+            is_fast = False
+
+            def __init__(self):
+                super().__init__(
+                    [
+                        b"abcdef",
+                        b"ab",
+                        b"cd",
+                        b"ef",
+                        b"\xf0",
+                        b"\x9f",
+                        b"\x92",
+                        b"\xbe",
+                        b" \xf0\x9f\x92\xbe",
+                    ]
+                )
+
+            def __call__(self, text, **_kwargs):
+                encoded = {
+                    "abcdef": [0],
+                    "abcdef💾": [1, 2, 3, 4, 5, 6, 7],
+                    "💾": [8],
+                }
+                return Encoding(input_ids=encoded[text])
+
+            def decode(self, token_ids, **_kwargs):
+                spoken = super().decode(token_ids, **_kwargs)
+                return spoken[1:] if spoken.startswith(" ") else spoken
+
+        manager = loaded_manager([0], pieces=["unused"], eos_id=None)
+        manager.tokenizer = SlowContextualByteTokenizer()
+
+        replacement = manager.encode_replacement([0], "💾")
+
+        # The first three replacement bytes each make the joint prefix read
+        # ``abcdef�``. They must not move the discovered boundary beyond the
+        # exact ``abcdef`` prefix, where the replacement's byte run begins.
+        self.assertEqual(replacement, [4, 5, 6, 7])
+        self.assertEqual(manager.tokenizer.decode([0, *replacement]), "abcdef💾")
+
+    def test_a_joint_suffix_still_rejects_an_embedded_stop_token(self):
+        pieces = [
+            "\u2581Hello",
+            "\u2581Hel",
+            "lo",
+            "\u2581<eos>",
+            "<eos>",
+            "Hello",
+            "<unk>",
+        ]
+        manager = sentencepiece_manager(pieces)
+        kept = [pieces.index("\u2581Hel"), pieces.index("lo")]
+        with self.assertRaisesRegex(ValueError, "stop token before its end"):
+            manager.encode_replacement(kept, "<eos>Hello")
+
+    def test_a_joint_suffix_still_allows_a_terminal_stop_token(self):
+        pieces = [
+            "\u2581Hello",
+            "\u2581Hel",
+            "lo",
+            "\u2581world",
+            "world",
+            "<eos>",
+            "<unk>",
+        ]
+        manager = sentencepiece_manager(pieces)
+        kept = [pieces.index("\u2581Hel"), pieces.index("lo")]
+        self.assertEqual(
+            manager.encode_replacement(kept, "world<eos>"),
+            [pieces.index("world"), pieces.index("<eos>")],
+        )
+
+    def test_a_joint_suffix_still_rejects_a_hidden_special_token(self):
+        pieces = [
+            "\u2581Hello",
+            "\u2581Hel",
+            "lo",
+            "\u2581<pad>",
+            "<pad>",
+            "<eos>",
+            "<unk>",
+        ]
+        manager = sentencepiece_manager(pieces)
+        manager.tokenizer.all_special_ids = [
+            pieces.index("<pad>"),
+            pieces.index("<eos>"),
+        ]
+        kept = [pieces.index("\u2581Hel"), pieces.index("lo")]
+        with self.assertRaisesRegex(ValueError, "hidden special token"):
+            manager.encode_replacement(kept, "<pad>")
+
+    def test_a_long_rejected_replacement_decodes_only_boundary_candidates(self):
+        class CountingNormalizingTokenizer:
+            """One token per character, with ``z`` normalized to ``x``."""
+
+            chat_template = None
+            eos_token_id = None
+            all_special_ids = []
+            is_fast = False
+
+            def __init__(self):
+                self.decode_calls = 0
+                self.decoded_ids = 0
+
+            def __call__(self, text, **_kwargs):
+                return Encoding(
+                    input_ids=[0 if character == "a" else 1 for character in text]
+                )
+
+            def decode(self, token_ids, **_kwargs):
+                self.decode_calls += 1
+                self.decoded_ids += len(token_ids)
+                return "".join(
+                    "a" if int(token_id) == 0 else "x" for token_id in token_ids
+                )
+
+            def convert_ids_to_tokens(self, token_id):
+                return ("a", "x")[int(token_id)]
+
+        manager = loaded_manager([0], pieces=["a", "x"], eos_id=None)
+        tokenizer = CountingNormalizingTokenizer()
+        manager.tokenizer = tokenizer
+        replacement = "a" * 4095 + "z"
+
+        with self.assertRaisesRegex(ValueError, "exactly at this position"):
+            manager.encode_replacement([0], replacement)
+
+        # The old exhaustive suffix loop made 4,098 decodes and visited more
+        # than eight million token ids here. Boundary discovery plus exact
+        # validation stays linear in the pasted text instead.
+        self.assertLessEqual(tokenizer.decode_calls, 20)
+        self.assertLess(tokenizer.decoded_ids, len(replacement) * 6)
+
+    def test_a_tokenizer_with_the_space_inside_the_token_is_unchanged(self):
+        manager = loaded_manager([0])
+        self.assertEqual(manager.encode_replacement([0], " world"), [1])
+        self.assertEqual(manager.encode_replacement([0], "!\nHow"), [2, 3, 4])
+
+    def test_empty_text_is_refused(self):
+        manager = loaded_manager([0])
+        with self.assertRaisesRegex(ValueError, "did not produce any tokens"):
+            manager.encode_replacement([0], "")
+
+    def test_an_unloaded_manager_refuses(self):
+        with self.assertRaisesRegex(RuntimeError, "load a model"):
+            ModelManager().encode_replacement([0], "Hello")
+
+    def test_a_hidden_non_stop_special_token_is_refused(self):
+        pieces = ["Hello", "<pad>", "<eos>"]
+        manager = loaded_manager([0], pieces, eos_id=2)
+        manager.tokenizer.all_special_ids = [1, 2]
+        with self.assertRaisesRegex(ValueError, "hidden special token"):
+            manager.encode_replacement([], "<pad>")
+
+    def test_a_stop_special_token_before_the_end_is_refused(self):
+        manager = loaded_manager([0])
+        with self.assertRaisesRegex(ValueError, "stop token before its end"):
+            manager.encode_replacement([], "<eos>Hello")
+
+    def test_a_terminal_stop_special_token_can_still_end_the_replacement(self):
+        manager = loaded_manager([0])
+        self.assertEqual(
+            manager.encode_replacement([], "Hello<eos>"), [0, EOS_ID]
+        )
+
+    def test_kept_ids_from_an_earlier_load_are_refused_under_the_lock(self):
+        manager = loaded_manager([0])
+        stale = manager.load_id
+        self.assertEqual(manager.encode_replacement([0], " world", load_id=stale), [1])
+        # A same-ID reload is a new load: the kept ids belong to the old one.
+        manager.load_count += 1
+        with self.assertRaises(ModelChanged):
+            manager.encode_replacement([0], " world", load_id=stale)
+        self.assertEqual(
+            manager.encode_replacement([0], " world", load_id=manager.load_id), [1]
+        )
+
+
 class ChatTemplateTokenizer(FakeTokenizer):
     """A tokenizer whose chat template can pre-fill the opening <think> tag."""
 
@@ -551,6 +962,42 @@ class PrefilledReasoningTests(unittest.TestCase):
         self.assertEqual(reasoning, "")
         self.assertEqual(answer, "The answer continues")
         self.assertTrue(closed)
+
+    def test_a_token_straddling_the_automatic_close_is_marked(self):
+        pieces = [
+            "prompt",
+            "</",
+            "think",
+            ">\n\nThe answer",
+            " continues",
+            "<eos>",
+        ]
+        tokenizer = ChatTemplateTokenizer(
+            "\nassistant: <think>", pieces=pieces, eos_id=5
+        )
+        manager = self.manager(tokenizer)
+        manager.model = FakeModel([0, 0, 0, 4, 5], vocab_size=len(pieces), eos_id=5)
+
+        updates = list(
+            manager.generate(
+                [{"role": "user", "content": "hi"}],
+                temperature=0.0,
+                top_p=1.0,
+                top_k=0,
+                max_new_tokens=4,
+                seed=1,
+                answer_prefill="The answer",
+            )
+        )
+
+        self.assertEqual(updates[0].text, "</think>\n\nThe answer")
+        self.assertTrue(
+            all(
+                metric.get("automatic_reasoning_close")
+                for metric in updates[0].metrics[:3]
+            )
+        )
+        self.assertIn("The answer", updates[0].metrics[2]["text"])
 
     def test_a_batch_encoding_from_the_template_yields_ids(self):
         # Transformers 5 returns a dict from apply_chat_template(tokenize=True).

@@ -21,7 +21,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
 - Enter sends a message and Shift+Enter starts a new line, with a setting to swap them
-- Branching a response from any token into one of the alternatives the model considered
+- Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
 - Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
 - An attention view showing which earlier tokens the model looked at when predicting it
@@ -120,6 +120,10 @@ Every response token comes with the alternatives the model ranked highest. Branc
 The response is kept up to the token before the one you clicked, the alternative is put in its place, and the model continues from there under the current sampling settings. The branched response replaces the one on screen, so **Retry** and **Undo** work on it as usual. Choosing the token the model already picked resamples the rest of the response from that point, which is a way to see how much of what followed was chance.
 
 The replayed tokens are still measured against the model's own distribution, so a token the model would never have chosen shows its real rank and surprise. **Maximum new tokens** counts the tokens sampled after the branch point, so a branch made late in a long response still has room to finish. The JSON export records how many tokens were replayed as `forced_prefix_tokens`.
+
+### Branching with your own text
+
+The alternatives table only offers what the model ranked highly. To put anything else at a token position, click the token, type the replacement in **Or type your own replacement**, and press **✏️ Branch with text**. The typed text is spliced in exactly as written where the clicked token was, and the model continues from there. Type the space yourself if the word needs one: the text is checked in place, after the tokens that are kept, so it reads the same whether the tokenizer keeps the word-boundary space inside the token (as BPE does) or drops it from the start of what it decodes (as SentencePiece does). It can be one word or a whole sentence. Text the tokenizer cannot reproduce exactly at that position is refused rather than approximated. The prompt and replayed response prefix together are capped at 8,192 tokens, or at the model's shorter positional limit; an oversized branch is refused without replacing the response on screen.
 
 Only a chat response can be branched. Prompt tokens and text measured in the **Score text** tab have no conversation to continue.
 
