@@ -2030,7 +2030,19 @@ class BranchFromTokenTests(unittest.TestCase):
         last = self.branch_text(final, " world", strip_index=0)[-1]
         metrics = metrics_of(last[METRICS])
         self.assertEqual(metrics[0]["token_id"], 3)
+        self.assertTrue(last[TURNS][-1]["content"].startswith(" world"))
         self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 1)
+
+    def test_whitespace_before_a_typed_terminal_stop_is_kept(self):
+        pieces = ["Hello", " ", "<eos>"]
+        eos = pieces.index("<eos>")
+        app.MANAGER = loaded_manager([0, eos], pieces, eos)
+        final = self.respond()[-1]
+
+        last = self.branch_text(final, " <eos>", strip_index=0)[-1]
+
+        self.assertEqual(last[TURNS][-1]["content"], " ")
+        self.assertEqual(last[TURNS][-1]["reasoning"], "")
 
     def test_empty_text_asks_for_some(self):
         final = self.respond()[-1]
@@ -2408,6 +2420,27 @@ class BranchFromTokenTests(unittest.TestCase):
         )()
 
         self.assert_oversized_typed_branch_is_refused(final, "16 positions")
+
+    def test_a_replacement_that_leaves_too_little_room_preserves_the_old_response(self):
+        final = self.respond()[-1]
+        app.MANAGER.model.config = type(
+            "Config", (), {"max_position_embeddings": 16}
+        )()
+        calls = []
+        real_generate = app.MANAGER.generate
+
+        def observe(*args, **kwargs):
+            calls.append(True)
+            return real_generate(*args, **kwargs)
+
+        app.MANAGER.generate = observe
+        frames = self.branch_text(final, "Hello" * 8)
+
+        self.assertEqual(len(frames), 1)
+        self.assertIn("need 17 positions", frames[0][STATUS])
+        self.assertEqual(frames[0][TURNS], final[TURNS])
+        self.assertEqual(calls, [])
+        self.assertFalse(app.MANAGER.busy)
 
     def test_a_replacement_past_the_application_cap_preserves_the_old_response(self):
         final = self.respond()[-1]

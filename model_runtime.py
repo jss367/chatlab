@@ -1577,14 +1577,17 @@ class ModelManager:
         messages: list[dict],
         forced_ids: Sequence[int],
         *,
+        max_new_tokens: int,
         load_id: str | None = None,
     ) -> None:
-        """Refuse an oversized prompt and replay before a stream mutates UI state.
+        """Refuse an oversized generation before a stream mutates UI state.
 
         A typed branch calls this after encoding but before entering the reply
         stream. The expected load is checked under the same model lock as the
         prompt tokenization, so a concurrent reload cannot validate one
-        model's token IDs with another model's tokenizer.
+        model's token IDs with another model's tokenizer. A learned-position
+        model also needs room to feed back all but the last requested sampled
+        token; the first comes from the prefill's final logits.
         """
 
         with self._lock:
@@ -1595,31 +1598,53 @@ class ModelManager:
                     "The model has been reloaded since these tokens were produced."
                 )
             prompt_ids, _reasoning_prefilled = self._prompt_token_ids(messages)
-            self._validate_generation_prefix_length(prompt_ids, forced_ids)
+            self._validate_generation_prefix_length(
+                prompt_ids,
+                forced_ids,
+                max_new_tokens=max_new_tokens,
+            )
 
     def _validate_generation_prefix_length(
-        self, prompt_ids: Sequence[int], forced_ids: Sequence[int]
+        self,
+        prompt_ids: Sequence[int],
+        forced_ids: Sequence[int],
+        *,
+        max_new_tokens: int,
     ) -> None:
-        """Check a tokenized generation prefix without running the model."""
+        """Check a tokenized generation and its continuation capacity."""
 
         assert self.model is not None
         total = len(prompt_ids) + len(forced_ids)
         limit = generation_prefill_token_limit(self.model)
-        if total <= limit:
-            return
         window = model_position_limit(self.model)
-        ceiling = (
-            f"the {limit:,} positions this model can attend to"
-            if window is not None and window <= GENERATION_PREFILL_TOKEN_LIMIT
-            else (
-                f"the {GENERATION_PREFILL_TOKEN_LIMIT:,} token limit for a "
-                "generation prefix"
+        if total > limit:
+            ceiling = (
+                f"the {limit:,} positions this model can attend to"
+                if window is not None and window <= GENERATION_PREFILL_TOKEN_LIMIT
+                else (
+                    f"the {GENERATION_PREFILL_TOKEN_LIMIT:,} token limit for a "
+                    "generation prefix"
+                )
             )
+            raise ValueError(
+                f"The prompt and replayed response are {total:,} tokens, above "
+                f"{ceiling}. Shorten the conversation or replacement."
+            )
+
+        stops_before_sampling = bool(
+            forced_ids and int(forced_ids[-1]) in self._stop_token_ids()
         )
-        raise ValueError(
-            f"The prompt and replayed response are {total:,} tokens, above {ceiling}. "
-            "Shorten the conversation or replacement."
+        continuation_positions = (
+            0 if stops_before_sampling else max(0, int(max_new_tokens) - 1)
         )
+        required = total + continuation_positions
+        if window is not None and required > window:
+            raise ValueError(
+                f"The prompt, replayed response, and requested continuation need "
+                f"{required:,} positions, above the {window:,} positions this model "
+                "can attend to. Shorten the conversation or replacement, or request "
+                "fewer new tokens."
+            )
 
     def _response_prefix_ids(
         self,

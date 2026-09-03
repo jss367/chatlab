@@ -1819,6 +1819,7 @@ def _branch_with_text(
                 include_reasoning=settings[1],
             ),
             (*kept, *replacement_ids),
+            max_new_tokens=int(settings[6]),
             load_id=expected_load,
         )
     except ModelChanged:
