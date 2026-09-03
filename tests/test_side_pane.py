@@ -504,6 +504,17 @@ class ManageMyModelsTests(unittest.TestCase):
         frames = list(app.redownload_my_model("org/partial", "tok"))
         self.assertEqual(frames, ["downloading org/partial with 'tok'"])
 
+    def test_the_loaded_model_is_not_redownloaded_under_itself(self):
+        # A newer revision on disk with the old weights in memory would be
+        # listed as loaded: the label goes by ID alone.
+        self.manager.model_id = OLMO
+
+        (card,) = list(app.redownload_my_model(OLMO, ""))
+
+        self.assertIn("Model in use", card)
+        self.assertIn("Unload", card)
+        self.assertFalse(card.startswith("downloading"), card)  # the fake never ran
+
     def test_redownload_with_nothing_selected_says_so(self):
         (card,) = list(app.redownload_my_model(None, ""))
         self.assertIn("Nothing to redownload", card)
