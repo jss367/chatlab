@@ -426,11 +426,72 @@ def sort_cached_models(models: list[CachedModel], order: str | None) -> list[Cac
     return sorted(models, key=key)
 
 
+
+
+class ModelInUse(RuntimeError):
+    """A cached model's files cannot be removed right now.
+
+    The subclasses say why, so the interface can tell the reader what to do:
+    unload the model, wait for its download, or wait for the model to go idle.
+    """
+
+
+class ModelLoaded(ModelInUse):
+    """The model is the one in memory."""
+
+
+class ModelDownloading(ModelInUse):
+    """A download of the model is under way, in this process or another."""
+
+
+class ModelBusy(ModelInUse):
+    """The model lock is held: a load, generation, scoring, or inspection is running."""
+
+
+def hub_lock_held(root: Path, folder_name: str) -> bool:
+    """Whether another process holds one of the hub's locks for this repo.
+
+    ``huggingface_hub`` takes a ``filelock`` on ``.locks/<repo>/<etag>.lock``
+    for each file it is writing, and Transformers loads through the same
+    library. Each lock is tried without waiting and let go at once: taking
+    one is the only way to ask, since a lock file exists whether or not
+    anyone holds it. A lock this process cannot open counts as held.
+    """
+
+    locks = root / ".locks" / folder_name
+    if not locks.is_dir():
+        return False
+    from filelock import FileLock, Timeout
+
+    for path in locks.iterdir():
+        if not path.is_file():
+            continue
+        lock = FileLock(str(path))
+        try:
+            lock.acquire(timeout=0)
+        except Timeout:
+            return True
+        except OSError:
+            return True
+        else:
+            lock.release()
+    return False
+
+
 def remove_cached_model(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
     """Delete everything the cache holds for ``model_id`` and say what was there.
 
-    Removes the model's ``models--org--name`` folder and the lock folder the
-    hub keeps beside it under ``.locks``, so a later download starts clean.
+    Removes the model's ``models--org--name`` folder. The lock folder the hub
+    keeps beside it under ``.locks`` is left alone, as the hub's own
+    ``delete_revisions`` leaves it: a process in another window may be
+    waiting on one of those files, and deleting a lock someone holds lets a
+    second writer in beside them. Before deleting, every lock in that folder
+    is tried: one held by another process means a download or load is
+    touching these files right now, and the removal is refused with
+    :class:`ModelDownloading` rather than pulling them out from under it.
+    The locks in this process are the manager's business, see
+    :meth:`ModelManager.remove`.
+
     Returns the :class:`CacheStatus` measured before deletion, which is the
     space freed. A model with nothing on disk raises ``FileNotFoundError``;
     a folder that cannot be deleted raises the ``OSError`` that stopped it,
@@ -442,9 +503,12 @@ def remove_cached_model(model_id: str, cache_dir: Path | None = None) -> CacheSt
     folder = cache_folder(checked_id, root)
     if not folder.is_dir():
         raise FileNotFoundError(f"Nothing for {checked_id} is in the cache at {root}.")
+    if hub_lock_held(root, folder.name):
+        raise ModelDownloading(
+            f"{checked_id} is being downloaded or loaded by another process."
+        )
     status = cache_status(checked_id, root)
     shutil.rmtree(folder)
-    shutil.rmtree(root / ".locks" / folder.name, ignore_errors=True)
     return status
 
 
@@ -1266,26 +1330,6 @@ FINAL_NORM_CONTAINERS = ("decoder", "transformer", "model", "language_model")
 
 class ModelChanged(RuntimeError):
     """The weights in memory are not the ones the caller's tokens came from."""
-
-
-class ModelInUse(RuntimeError):
-    """A cached model's files cannot be removed right now.
-
-    The subclasses say why, so the interface can tell the reader what to do:
-    unload the model, wait for its download, or wait for the model to go idle.
-    """
-
-
-class ModelLoaded(ModelInUse):
-    """The model is the one in memory."""
-
-
-class ModelDownloading(ModelInUse):
-    """A download of the model is under way."""
-
-
-class ModelBusy(ModelInUse):
-    """The model lock is held: a load, generation, scoring, or inspection is running."""
 
 
 @dataclass(frozen=True)

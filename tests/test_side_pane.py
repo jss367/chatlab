@@ -2,6 +2,8 @@
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -180,23 +182,61 @@ class CachedModelListTests(unittest.TestCase):
 class RemoveCachedModelTests(unittest.TestCase):
     """Removing a model deletes its folder and nothing else."""
 
-    def test_the_folder_and_its_lock_are_removed_and_the_size_reported(self):
+    def test_the_folder_is_removed_and_the_size_reported(self):
         with tempfile.TemporaryDirectory() as root:
             folder = lay_out(root, OLMO, {"config.json": b"{}", "model.safetensors": b"x" * 99})
             (folder / "blobs" / "shard.incomplete").write_bytes(b"y" * 10)
-            lock = Path(root) / ".locks" / folder.name
-            lock.mkdir(parents=True)
-            (lock / "blob.lock").write_text("")
             other = lay_out(root, "org/other", {"config.json": b"{}"})
 
             freed = remove_cached_model(OLMO, Path(root))
 
             self.assertFalse(folder.exists())
-            self.assertFalse(lock.exists())
             self.assertTrue(other.is_dir())
-            self.assertTrue((Path(root) / ".locks").is_dir())
         self.assertEqual(freed.total_bytes, 2 + 99 + 10)
         self.assertEqual(freed.partial_files, 1)
+
+    def test_the_hubs_lock_folder_is_left_for_other_processes(self):
+        # Released lock files are harmless; a deleted one that another
+        # process was waiting on would let two writers in.
+        with tempfile.TemporaryDirectory() as root:
+            folder = lay_out(root, OLMO, {"config.json": b"{}"})
+            lock = Path(root) / ".locks" / folder.name
+            lock.mkdir(parents=True)
+            (lock / "blob.lock").write_text("")
+
+            remove_cached_model(OLMO, Path(root))
+
+            self.assertFalse(folder.exists())
+            self.assertTrue((lock / "blob.lock").is_file())
+
+    def test_a_lock_held_by_another_process_refuses_the_removal(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = lay_out(root, OLMO, {"config.json": b"{}"})
+            lock_dir = Path(root) / ".locks" / folder.name
+            lock_dir.mkdir(parents=True)
+            # filelock is reentrant within a process, so the hold has to come
+            # from outside it, as the hub's would.
+            script = (
+                "import time\nfrom filelock import FileLock\n"
+                f"lock = FileLock({str(lock_dir / 'blob.lock')!r})\nlock.acquire()\n"
+                "print('held', flush=True)\ntime.sleep(30)"
+            )
+            other = subprocess.Popen(
+                [sys.executable, "-c", script], stdout=subprocess.PIPE, text=True
+            )
+            try:
+                self.assertEqual(other.stdout.readline().strip(), "held")
+                with self.assertRaises(model_runtime.ModelDownloading) as caught:
+                    remove_cached_model(OLMO, Path(root))
+                self.assertIn("another process", str(caught.exception))
+                self.assertTrue(folder.is_dir())
+            finally:
+                other.kill()
+                other.wait()
+
+            # Once the other process is gone the same lock file is no bar.
+            remove_cached_model(OLMO, Path(root))
+            self.assertFalse(folder.exists())
 
     def test_a_model_that_is_not_on_disk_is_refused(self):
         with tempfile.TemporaryDirectory() as root:
