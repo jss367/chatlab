@@ -685,6 +685,10 @@ BRANCH_TEXT_HINT = (
     "Click a response token, type the text to put in its place, then branch."
 )
 BRANCH_TEXT_EMPTY = "Type the text that should replace the selected token first."
+BRANCH_REASONING_CLOSE = (
+    "🌱 That token is part of the automatic reasoning boundary. Branch from "
+    "the first answer token after it instead."
+)
 BRANCH_UNAVAILABLE = (
     "🌱 Only a chat response can be branched. Scored text and prompt tokens "
     "have no conversation to continue."
@@ -1097,6 +1101,7 @@ def generate_reply(
     *,
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
+    automatic_reasoning_close_tokens: int = 0,
     literal_text_ranges: tuple[tuple[int, int], ...] = (),
     branch_note: str = "",
     expected_load_id: str | None = None,
@@ -1120,6 +1125,10 @@ def generate_reply(
     They are kept separate from ``literal_prefill_tokens`` because a terminal
     stop token typed into a branch must still end it even though reasoning
     markers earlier in the same replacement remain visible prose.
+
+    ``automatic_reasoning_close_tokens`` preserves the provenance of the
+    template close at the start of an assistant prefill, so later branches
+    cannot mistake those control tokens for replaceable answer text.
 
     The generation slot is reserved here, before the first frame is published,
     because this is the first moment a handler is committed to generating. The
@@ -1154,6 +1163,7 @@ def generate_reply(
             scale_name,
             forced_ids=forced_ids,
             literal_prefill_tokens=literal_prefill_tokens,
+            automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
             literal_text_ranges=literal_text_ranges,
             branch_note=branch_note,
             expected_load_id=expected_load_id,
@@ -1183,6 +1193,7 @@ def _stream_reply(
     *,
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
+    automatic_reasoning_close_tokens: int = 0,
     literal_text_ranges: tuple[tuple[int, int], ...] = (),
     branch_note: str = "",
     expected_load_id: str | None = None,
@@ -1315,6 +1326,7 @@ def _stream_reply(
         forced_ids=tuple(int(value) for value in forced_ids),
         answer_prefill=assistant_prefill if applied_prefill else "",
         literal_prefill_tokens=literal_prefill_tokens,
+        automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
         literal_text_ranges=literal_text_ranges,
         load_id=expected_load_id,
     )
@@ -1706,6 +1718,17 @@ def literal_text_ranges(metrics: list[dict], kept: int) -> tuple[tuple[int, int]
     return tuple(ranges)
 
 
+def automatic_reasoning_close_count(metrics: list[dict], kept: int) -> int:
+    """Leading automatic ``</think>`` tokens preserved by a replay."""
+
+    count = 0
+    for metric in metrics[:kept]:
+        if not metric.get("automatic_reasoning_close"):
+            break
+        count += 1
+    return count
+
+
 def branch_with_text(
     selected_token: dict | None,
     branch_source: tuple[int, str | None] | None,
@@ -1793,6 +1816,9 @@ def _branch_with_text(
     except (IndexError, TypeError, ValueError):
         yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
         return
+    if metric.get("automatic_reasoning_close"):
+        yield idle_state(prompt_text, turns, BRANCH_REASONING_CLOSE)
+        return
     at = int(metric["position"])
     kept = [int(m["token_id"]) for m in metrics[: at - 1]]
     if len(kept) != at - 1:
@@ -1804,6 +1830,9 @@ def _branch_with_text(
     # the replay alike; a mismatch there is ModelChanged.
     _generation, expected_load = branch_source
     literal_prefill_tokens = literal_prefill_count(metrics, len(kept))
+    automatic_reasoning_close_tokens = automatic_reasoning_close_count(
+        metrics, len(kept)
+    )
     try:
         replacement_ids = MANAGER.encode_replacement(
             kept,
@@ -1841,6 +1870,7 @@ def _branch_with_text(
             *settings,
             forced_ids=(*kept, *replacement_ids),
             literal_prefill_tokens=literal_prefill_tokens,
+            automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
             literal_text_ranges=(
                 *literal_text_ranges(metrics, len(kept)),
                 (replacement_start, replacement_start + len(replacement_ids)),
@@ -1892,13 +1922,26 @@ def branch_from(
         yield idle_state(prompt_text, turns, "Download and load a model first.")
         return
 
-    at = int(pick["position"])
+    try:
+        at = int(pick["position"])
+        selected_metric = metrics[at - 1]
+        if at < 1:
+            raise IndexError
+    except (IndexError, TypeError, ValueError):
+        yield idle_state(prompt_text, turns, BRANCH_HINT)
+        return
+    if selected_metric.get("automatic_reasoning_close"):
+        yield idle_state(prompt_text, turns, BRANCH_REASONING_CLOSE)
+        return
     kept = [int(metric["token_id"]) for metric in metrics[: at - 1]]
     if len(kept) != at - 1:
         yield idle_state(prompt_text, turns, BRANCH_HINT)
         return
     forced = (*kept, int(pick["token_id"]))
     literal_prefill_tokens = literal_prefill_count(metrics, len(kept))
+    automatic_reasoning_close_tokens = automatic_reasoning_close_count(
+        metrics, len(kept)
+    )
     unchanged = pick["token_id"] == pick.get("original_id")
     if (
         unchanged
@@ -1921,6 +1964,7 @@ def branch_from(
             *settings,
             forced_ids=forced,
             literal_prefill_tokens=literal_prefill_tokens,
+            automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
             literal_text_ranges=literal_text_ranges(
                 metrics, len(forced) if unchanged else len(kept)
             ),

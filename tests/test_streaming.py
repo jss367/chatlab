@@ -839,6 +839,42 @@ class PrefilledReasoningTests(unittest.TestCase):
         self.assertEqual(answer, "The answer continues")
         self.assertTrue(closed)
 
+    def test_a_token_straddling_the_automatic_close_is_marked(self):
+        pieces = [
+            "prompt",
+            "</",
+            "think",
+            ">\n\nThe answer",
+            " continues",
+            "<eos>",
+        ]
+        tokenizer = ChatTemplateTokenizer(
+            "\nassistant: <think>", pieces=pieces, eos_id=5
+        )
+        manager = self.manager(tokenizer)
+        manager.model = FakeModel([0, 0, 0, 4, 5], vocab_size=len(pieces), eos_id=5)
+
+        updates = list(
+            manager.generate(
+                [{"role": "user", "content": "hi"}],
+                temperature=0.0,
+                top_p=1.0,
+                top_k=0,
+                max_new_tokens=4,
+                seed=1,
+                answer_prefill="The answer",
+            )
+        )
+
+        self.assertEqual(updates[0].text, "</think>\n\nThe answer")
+        self.assertTrue(
+            all(
+                metric.get("automatic_reasoning_close")
+                for metric in updates[0].metrics[:3]
+            )
+        )
+        self.assertIn("The answer", updates[0].metrics[2]["text"])
+
     def test_a_batch_encoding_from_the_template_yields_ids(self):
         # Transformers 5 returns a dict from apply_chat_template(tokenize=True).
         class DictTemplateTokenizer(ChatTemplateTokenizer):

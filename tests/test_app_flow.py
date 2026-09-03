@@ -18,7 +18,7 @@ from conversation import (
 from model_runtime import GenerationUpdate, ModelChanged, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
 
-from test_streaming import SentencePieceTokenizer, loaded_manager
+from test_streaming import ChatTemplateTokenizer, SentencePieceTokenizer, loaded_manager
 
 
 # "Hello" and " world" are the answer; the reasoning tags are their own tokens.
@@ -2276,6 +2276,78 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertEqual(metrics[3]["token_id"], 2)
         self.assertTrue(
             branched[TURNS][-1]["content"].startswith("<think>Hello</think>Hello")
+        )
+
+    def reasoning_prefill_response(self):
+        pieces = [
+            "</",
+            "think",
+            ">\n\n",
+            "Prefill",
+            " continued",
+            "Replacement",
+            " after",
+            "<eos>",
+        ]
+        eos = pieces.index("<eos>")
+        app.MANAGER = loaded_manager([0, 0, 0, 0, 4, eos], pieces, eos)
+        app.MANAGER.tokenizer = ChatTemplateTokenizer(
+            "\nassistant: <think>", pieces=pieces, eos_id=eos
+        )
+        settings = dict(FIXED, assistant_prefill="Prefill")
+        final = list(app.chat("hi", [], *settings.values()))[-1]
+        return final, settings
+
+    def test_typed_branch_refuses_the_automatic_reasoning_close(self):
+        original, settings = self.reasoning_prefill_response()
+        selected = app.remember_selection(original[METRICS], select(0))
+
+        frames = list(
+            app.branch_with_text(
+                selected,
+                original[BRANCH_SOURCE],
+                original[METRICS],
+                "Replacement",
+                "",
+                original[TURNS],
+                *settings.values(),
+            )
+        )
+
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0][STATUS], app.BRANCH_REASONING_CLOSE)
+        self.assertEqual(frames[0][TURNS], original[TURNS])
+        self.assertFalse(app.MANAGER.busy)
+
+    def test_typed_branch_after_the_reasoning_close_stays_in_default_context(self):
+        original, settings = self.reasoning_prefill_response()
+        metrics = metrics_of(original[METRICS])
+        self.assertTrue(all(m.get("automatic_reasoning_close") for m in metrics[:3]))
+        self.assertNotIn("automatic_reasoning_close", metrics[3])
+        selected = app.remember_selection(original[METRICS], select(3))
+        app.MANAGER.model.script = [0, 0, 0, 0, 6, 7]
+        app.MANAGER.model.step = 0
+
+        branched = list(
+            app.branch_with_text(
+                selected,
+                original[BRANCH_SOURCE],
+                original[METRICS],
+                "Replacement",
+                "",
+                original[TURNS],
+                *settings.values(),
+            )
+        )[-1]
+
+        reply = branched[TURNS][-1]
+        self.assertEqual(reply["reasoning"], "")
+        self.assertEqual(reply["content"], "Replacement after")
+        request = model_messages(branched[TURNS], include_reasoning=False)
+        self.assertEqual(request[-1]["content"], "Replacement after")
+        replayed = metrics_of(branched[METRICS])
+        self.assertTrue(
+            all(m.get("automatic_reasoning_close") for m in replayed[:3])
         )
 
     def marker_response(self):

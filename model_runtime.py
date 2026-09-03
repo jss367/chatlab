@@ -1873,6 +1873,7 @@ class ModelManager:
         forced_ids: Sequence[int] = (),
         answer_prefill: str = "",
         literal_prefill_tokens: int = 0,
+        automatic_reasoning_close_tokens: int = 0,
         literal_text_ranges: Sequence[tuple[int, int]] = (),
         load_id: str | None = None,
     ) -> Iterator[GenerationUpdate]:
@@ -1892,6 +1893,10 @@ class ModelManager:
         later branch replay. ``literal_text_ranges`` identifies disjoint token
         ranges typed into a branch so their reasoning markers remain ordinary
         text; it deliberately does not change their stop-token behavior.
+        ``automatic_reasoning_close_tokens`` records the leading tokens that
+        close a template-supplied reasoning block. A later branch carries that
+        provenance forward so the application can keep the control boundary
+        from being replaced as though it were answer text.
 
         ``load_id`` names the load ``forced_ids`` came from (see
         :attr:`load_id`). It is compared under the model lock, before any token
@@ -1924,6 +1929,7 @@ class ModelManager:
                 forced_ids=forced_ids,
                 answer_prefill=answer_prefill,
                 literal_prefill_tokens=literal_prefill_tokens,
+                automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
                 literal_text_ranges=literal_text_ranges,
                 load_id=load_id,
             )
@@ -1944,6 +1950,7 @@ class ModelManager:
         forced_ids: Sequence[int] = (),
         answer_prefill: str = "",
         literal_prefill_tokens: int = 0,
+        automatic_reasoning_close_tokens: int = 0,
         literal_text_ranges: Sequence[tuple[int, int]] = (),
         load_id: str | None = None,
     ) -> Iterator[GenerationUpdate]:
@@ -1983,9 +1990,17 @@ class ModelManager:
                     answer_prefill, close_reasoning=reasoning_prefilled
                 )
                 literal_prefill_tokens = len(forced)
+                automatic_reasoning_close_tokens = 0
             else:
                 literal_prefill_tokens = max(
                     0, min(int(literal_prefill_tokens), len(forced))
+                )
+                automatic_reasoning_close_tokens = max(
+                    0,
+                    min(
+                        int(automatic_reasoning_close_tokens),
+                        literal_prefill_tokens,
+                    ),
                 )
 
             normalized_literal_ranges: list[tuple[int, int]] = []
@@ -2043,6 +2058,8 @@ class ModelManager:
             ]
             for metric in metrics[:literal_prefill_tokens]:
                 metric["literal_prefill"] = True
+            for metric in metrics[:automatic_reasoning_close_tokens]:
+                metric["automatic_reasoning_close"] = True
             for start, end in literal_ranges:
                 for metric in metrics[start:end]:
                     metric["literal_text"] = True
@@ -2064,6 +2081,19 @@ class ModelManager:
                 decoder.push(
                     token_id, force_visible=index < literal_prefill_tokens
                 )
+                if (
+                    answer_prefill
+                    and reasoning_prefilled
+                    and not automatic_reasoning_close_tokens
+                    and decoder.stable_text.startswith(f"{THINK_CLOSE}\n\n")
+                ):
+                    # The last token can straddle the boundary and include the
+                    # beginning of the reader's prefill. It still cannot be
+                    # replaced independently: doing so would remove part of
+                    # the close and leave the continuation inside reasoning.
+                    automatic_reasoning_close_tokens = index + 1
+                    for metric in metrics[:automatic_reasoning_close_tokens]:
+                        metric["automatic_reasoning_close"] = True
                 if index + 1 in literal_boundaries:
                     boundary_text[index + 1] = decoder.text
                 if index + 1 == literal_prefill_tokens:
