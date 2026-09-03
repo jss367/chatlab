@@ -704,6 +704,50 @@ class ReplacementEncodingTests(unittest.TestCase):
         self.assertEqual(replacement, [6])
         self.assertEqual(manager.tokenizer.decode([0, *replacement]), "a💾Z")
 
+    def test_replacement_bytes_do_not_extend_the_decoded_context_boundary(self):
+        class SlowContextualByteTokenizer(BytePieceTokenizer):
+            """Retokenizes kept text, while a standalone word carries a marker."""
+
+            is_fast = False
+
+            def __init__(self):
+                super().__init__(
+                    [
+                        b"abcdef",
+                        b"ab",
+                        b"cd",
+                        b"ef",
+                        b"\xf0",
+                        b"\x9f",
+                        b"\x92",
+                        b"\xbe",
+                        b" \xf0\x9f\x92\xbe",
+                    ]
+                )
+
+            def __call__(self, text, **_kwargs):
+                encoded = {
+                    "abcdef": [0],
+                    "abcdef💾": [1, 2, 3, 4, 5, 6, 7],
+                    "💾": [8],
+                }
+                return Encoding(input_ids=encoded[text])
+
+            def decode(self, token_ids, **_kwargs):
+                spoken = super().decode(token_ids, **_kwargs)
+                return spoken[1:] if spoken.startswith(" ") else spoken
+
+        manager = loaded_manager([0], pieces=["unused"], eos_id=None)
+        manager.tokenizer = SlowContextualByteTokenizer()
+
+        replacement = manager.encode_replacement([0], "💾")
+
+        # The first three replacement bytes each make the joint prefix read
+        # ``abcdef�``. They must not move the discovered boundary beyond the
+        # exact ``abcdef`` prefix, where the replacement's byte run begins.
+        self.assertEqual(replacement, [4, 5, 6, 7])
+        self.assertEqual(manager.tokenizer.decode([0, *replacement]), "abcdef💾")
+
     def test_a_joint_suffix_still_rejects_an_embedded_stop_token(self):
         pieces = [
             "\u2581Hello",

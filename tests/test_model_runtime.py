@@ -688,15 +688,16 @@ class ContextSplitTests(unittest.TestCase):
         self.assertEqual(split.text_ids, [tokenizer.vocab["foobar"]])
         self.assertFalse(split.seam_verified)
 
-    def test_a_seam_stranded_mid_character_falls_back(self):
-        # The halves still concatenate to the passage here, so only the token
-        # the split lands on gives the mistake away: it has to reach the seam,
-        # and a run of bytes cut inside a character does not.
+    def test_a_byte_level_seam_follows_the_complete_context_character(self):
+        # Intermediate prefixes end in U+FFFD while the context character is
+        # incomplete. Once it is complete, the exact boundary must win over
+        # equally provisional prefixes from the text's first character.
         tokenizer = CutsCharactersInHalf()
-        context_ids, text_ids, *_ = split_context_and_text(tokenizer, "日本語", "です")
+        split = split_context_and_text(tokenizer, "日本語", "です")
 
-        self.assertEqual(context_ids, list("日本語".encode()))
-        self.assertEqual(text_ids, list("です".encode()))
+        self.assertEqual(split.context_ids, list("日本語".encode()))
+        self.assertEqual(split.text_ids, list("です".encode()))
+        self.assertTrue(split.seam_verified)
 
     def test_a_checked_seam_reports_itself_as_verified(self):
         # Both the offsets path and the decoding path cut one joint encoding,
@@ -712,10 +713,7 @@ class ContextSplitTests(unittest.TestCase):
         # Encoding the halves apart is still better than refusing to score at
         # all — the numbers are off by at most the token spanning the seam —
         # but the caller has to be able to say the numbers are approximate.
-        cases = (
-            (EatsTheLeadingSpace(is_fast=False), " foo", "bar"),
-            (CutsCharactersInHalf(), "日本語", "です"),
-        )
+        cases = ((EatsTheLeadingSpace(is_fast=False), " foo", "bar"),)
         for tokenizer, context, text in cases:
             with self.subTest(tokenizer=type(tokenizer).__name__):
                 split = split_context_and_text(tokenizer, context, text)

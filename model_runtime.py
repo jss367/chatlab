@@ -509,10 +509,16 @@ def _decoded_prefix_end(
         # character, so treating the intermediate spelling as outside the
         # context would make the predicate non-monotonic and strand this
         # bisection before the real boundary. Regard only *trailing* decoder
-        # replacements as provisional; the complete candidate is still
-        # required to reproduce the exact expected text by the caller.
-        repaired = prefix.rstrip("\ufffd")
-        return repaired != prefix and context.startswith(repaired)
+        # replacements as provisional while the decoded text is still short
+        # of the context. Once it equals the context, any trailing replacement
+        # can be the first bytes of the replacement text and must not advance
+        # the boundary. The complete candidate is still required to reproduce
+        # the exact expected text by the caller.
+        repaired = prefix.rstrip(REPLACEMENT_CHARACTER)
+        if repaired == prefix or not context.startswith(repaired):
+            return False
+        remaining = context[len(repaired) :].lstrip(REPLACEMENT_CHARACTER)
+        return bool(remaining)
 
     low, high = 0, stop
     while low < high:
