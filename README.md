@@ -78,6 +78,24 @@ python app.py
 
 Model files use the standard Hugging Face cache. Chatlab lists complete downloads and resumable partial downloads under **My Models** on the Models page. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
 
+### Memory
+
+A model has to fit in memory with room to spare: the weights, the key-value
+cache that grows with every token of a conversation, the app itself, and the
+rest of the system all share it, and on Apple silicon the GPU draws from the
+same pool. Before reading any weights, Chatlab estimates the loaded size from
+the checkpoint and refuses a model that would not leave about 4 GB free,
+saying so in the status card instead of letting the machine page itself into a
+freeze. On CUDA the weights fill the graphics cards first and the rest is
+placed in the machine's own memory, so that check is made against the two
+together. On Apple Metal it also caps what PyTorch may allocate at Metal's
+recommended working set, so a conversation that outgrows the machine ends
+with an out-of-memory message rather than a frozen Mac. Set
+`CHATLAB_MPS_MEMORY_FRACTION` to move that cap (`1.0` is the default; PyTorch's
+own `PYTORCH_MPS_HIGH_WATERMARK_RATIO`, if set, takes precedence). The cache a
+response used is handed back when it finishes, so the process returns to the
+model's own size between requests.
+
 ## The pages
 
 A thin pane at the far left switches between three pages. **Chat** is the conversation, with the conversations pane beside it and the token panel to its right. **Models** is everything about which model is running. **Settings**, at the bottom of the pane, is how every reply is prompted, sampled, and measured.
