@@ -5,6 +5,7 @@ A local chat interface that shows what happened under the hood for every token, 
 ## What it includes
 
 - Hugging Face model download and cache controls
+- A side pane listing the models already downloaded, with a search of the Hugging Face Hub for more
 - A chat interface that collapses OLMo reasoning blocks into an expandable section
 - Live token-by-token generation with a **Stop** button
 - Exact raw vocabulary rank for each generated token
@@ -64,7 +65,7 @@ On macOS or Linux:
 ./run.sh
 ```
 
-The first run creates an isolated Python environment and installs the dependencies. The app then opens in your browser. Under **Model setup**, choose a downloaded model or paste a Hugging Face model ID and choose **Download and load**.
+The first run creates an isolated Python environment and installs the dependencies. The app then opens in your browser. Paste a Hugging Face model ID into the **Model** box in the side pane and choose **Download and load**, or pick one from **My Models** or **Model search** there.
 
 To install manually:
 
@@ -75,7 +76,16 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Model files use the standard Hugging Face cache. Chatlab lists complete downloads and resumable partial downloads under **Downloaded models**. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
+Model files use the standard Hugging Face cache. Chatlab lists complete downloads and resumable partial downloads under **My Models** in the side pane. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
+
+## The side pane
+
+Everything about which model is running, and how, sits in a pane to the left of the conversation. The arrow at its edge collapses it.
+
+- **Model** holds the model ID and token boxes and the download, load, and unload buttons, with the status card under them.
+- **My Models** lists every model in the Hugging Face cache, newest download first, with its size on disk. A model short of files is marked *incomplete*, and the one in memory *loaded*. Selecting one shows its file count, architecture and weight type from its `config.json`, revision, when it was last downloaded, and its folder, and puts its ID in the model box ready for **Load cached**. The list rescans after every download, load, and unload, and **Refresh** rescans it by hand.
+- **Model search** searches the Hub for text-generation models with Transformers support, most downloaded first. Each result shows its parameter count and recent downloads; selecting one adds its license, likes, last update, whether it is gated, and whether any of it is already on disk, and puts its ID in the model box ready for **Download and load**.
+- **Settings** holds the system prompt, assistant prefill, and reasoning options and the sampling, analysis, and input controls described below.
 
 ## Working with a conversation
 

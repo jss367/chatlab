@@ -43,13 +43,18 @@ from conversation import (
 from model_runtime import (
     MODEL_WEIGHTS,
     PROMPT_SCORE_LIMIT,
+    CachedModel,
     CacheStatus,
     DownloadSnapshot,
+    HubModel,
     ModelChanged,
     ModelManager,
+    cache_root,
     cache_status,
-    cached_models,
     format_bytes,
+    format_count,
+    list_cached_models,
+    search_hub_models,
 )
 from token_metrics import (
     COLOR_SCALES,
@@ -82,6 +87,9 @@ DOWNLOAD_POLL_SECONDS = 0.5
 RATE_WINDOW_SECONDS = 15.0
 
 DOWNLOAD_BAR_WIDTH = 24
+# The side pane's width in pixels: wide enough for a model ID and a slider
+# with its label, narrow enough to leave the conversation most of the screen.
+SIDE_PANE_WIDTH = 340
 SEED_LIMIT = 2**31 - 1
 NO_TOKEN_SELECTED = "Select a token to inspect it."
 
@@ -318,43 +326,6 @@ def describe_fetched(before: CacheStatus, after: CacheStatus, elapsed: float) ->
     return f"Fetched {format_bytes(fetched)} in {elapsed:.1f} seconds."
 
 
-def cached_model_choices() -> list[tuple[str, str]]:
-    """Dropdown labels and values for everything Chatlab finds on disk."""
-
-    choices = []
-    for model in cached_models():
-        status = model.status
-        if status.complete:
-            detail = f"{format_bytes(status.cached_bytes)} downloaded"
-        else:
-            detail = f"{format_bytes(status.total_bytes)} on disk, incomplete"
-        choices.append((f"{model.model_id} — {detail}", model.model_id))
-    return choices
-
-
-def refresh_cached_model_picker(model_id: str):
-    """Rescan the cache and keep the typed model selected when it is present."""
-
-    choices = cached_model_choices()
-    values = {value for _label, value in choices}
-    cleaned = model_id.strip()
-    count = len(choices)
-    note = (
-        f"Found **{count}** model{'s' if count != 1 else ''} in the local Hugging Face cache."
-        if choices
-        else "No downloaded models found in the local Hugging Face cache."
-    )
-    return gr.update(
-        choices=choices, value=cleaned if cleaned in values else None
-    ), note
-
-
-def select_cached_model(model_id: str | None):
-    """Copy a user-picked cached model into the editable repository-ID field."""
-
-    return model_id or gr.skip()
-
-
 def download_model(model_id: str, hf_token: str):
     started = time.monotonic()
     try:
@@ -498,6 +469,186 @@ def unload_model():
         return status_card("No model loaded", "There is nothing to unload.")
     MANAGER.unload()
     return status_card("Model unloaded", "Model memory has been released.", "success")
+
+
+# The side pane's model lists.
+NO_CACHED_MODEL_SELECTED = "Select a model to see its details and put it in the model ID box."
+SEARCH_HINT = (
+    "Search Hugging Face for text-generation models Transformers can load. "
+    "Selecting a result puts its ID in the model ID box; **Download and load** fetches it."
+)
+NO_RESULT_SELECTED = "Select a result to see its details."
+
+
+def format_timestamp(stamp: float | None) -> str:
+    if stamp is None:
+        return "unknown"
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(stamp))
+
+
+def cached_model_label(entry: CachedModel) -> str:
+    """``org/name · 15 GB``, flagged when it is loaded or short of files."""
+
+    label = f"{entry.model_id} · {format_bytes(entry.size_bytes)}"
+    if entry.status.missing_files:
+        label += " · incomplete"
+    if MANAGER.model_id == entry.model_id:
+        label += " · loaded"
+    return label
+
+
+def describe_cached_model(entry: CachedModel) -> str:
+    if MANAGER.model_id == entry.model_id:
+        verdict = f"**Loaded now** on {MANAGER.device_name}."
+    elif entry.status.missing_files:
+        verdict = (
+            f"**Incomplete:** {describe_missing(entry.status)}. "
+            "Use **Download and load** to fetch the rest."
+        )
+    else:
+        verdict = "**Ready to load.** Use **Load cached** to bring it into memory."
+    facts = [("On disk", describe_on_disk(entry.status))]
+    if entry.files:
+        facts.append(("Files", f"{entry.files} in the current snapshot"))
+    if entry.architecture:
+        model_type = entry.architecture
+        if entry.dtype:
+            model_type += f" ({entry.dtype})"
+        facts.append(("Architecture", model_type))
+    if entry.commit:
+        facts.append(("Revision", f"`{entry.commit[:7]}`"))
+    facts.append(("Updated", format_timestamp(entry.updated)))
+    if entry.path is not None:
+        facts.append(("Folder", f"`{entry.path}`"))
+    rows = "\n".join(f"- **{name}:** {value}" for name, value in facts)
+    return f"{verdict}\n\n{rows}"
+
+
+def my_models_summary(models: list[CachedModel]) -> str:
+    root = f"`{cache_root()}`"
+    if not models:
+        return (
+            f"No models in the Hugging Face cache yet ({root}). "
+            "Search for one under **Model search**."
+        )
+    total = format_bytes(sum(entry.size_bytes for entry in models))
+    count = f"{len(models)} model{'s' if len(models) != 1 else ''}"
+    return f"{count} · {total} on disk in {root}"
+
+
+def refresh_my_models(selected: str | None):
+    """Rescan the cache; keep the selection, or fall back to the loaded model."""
+
+    models = list_cached_models()
+    ids = [entry.model_id for entry in models]
+    if selected not in ids:
+        selected = MANAGER.model_id if MANAGER.model_id in ids else None
+    choices = [(cached_model_label(entry), entry.model_id) for entry in models]
+    if selected is None:
+        detail = NO_CACHED_MODEL_SELECTED if models else ""
+    else:
+        detail = describe_cached_model(
+            next(entry for entry in models if entry.model_id == selected)
+        )
+    return gr.update(choices=choices, value=selected), detail, my_models_summary(models)
+
+
+def select_my_model(selected: str | None):
+    """Put the chosen cached model in the ID box and describe it."""
+
+    if not selected:
+        return gr.skip(), NO_CACHED_MODEL_SELECTED
+    entry = next(
+        (entry for entry in list_cached_models() if entry.model_id == selected), None
+    )
+    if entry is None:
+        return gr.skip(), f"`{selected}` is no longer in the cache. Press **Refresh**."
+    return gr.update(value=selected), describe_cached_model(entry)
+
+
+def hub_model_label(result: HubModel) -> str:
+    parts = [result.model_id]
+    if result.parameters:
+        parts.append(f"{format_count(result.parameters)} params")
+    if result.downloads is not None:
+        parts.append(f"{format_count(result.downloads)} downloads")
+    return " · ".join(parts)
+
+
+def describe_hub_model(result: HubModel) -> str:
+    name = html.escape(result.model_id)
+    lines = [f"[{name} on Hugging Face](https://huggingface.co/{name})"]
+    facts = []
+    if result.parameters:
+        facts.append(("Parameters", format_count(result.parameters)))
+    counts = []
+    if result.downloads is not None:
+        counts.append(f"{format_count(result.downloads)} downloads in the last month")
+    if result.likes is not None:
+        counts.append(f"{format_count(result.likes)} likes")
+    if counts:
+        facts.append(("Popularity", " · ".join(counts)))
+    if result.license:
+        facts.append(("License", html.escape(result.license)))
+    if result.last_modified:
+        facts.append(("Updated", result.last_modified))
+    if result.gated:
+        facts.append(
+            ("Gated", "accept its terms on Hugging Face and enter a token first")
+        )
+    # A cache that cannot be read (a permission, a drive that has gone away)
+    # is simply nothing on disk: the search succeeded, so the pick must too.
+    try:
+        cached = cache_status(result.model_id)
+    except (OSError, ValueError):
+        cached = CacheStatus()
+    if cached.complete:
+        facts.append(("Already cached", f"{describe_on_disk(cached)}, ready to load"))
+    elif cached.present:
+        facts.append(("Partly cached", describe_on_disk(cached)))
+    lines.extend(f"- **{label}:** {value}" for label, value in facts)
+    lines.append("")
+    lines.append("Its ID is in the model ID box: use **Download and load** to fetch it.")
+    return "\n".join(lines)
+
+
+def search_models(query: str, hf_token: str):
+    """Search the hub and list the results; nothing is selected yet."""
+
+    cleared = gr.update(choices=[], value=None)
+    cleaned = query.strip()
+    if not cleaned:
+        return cleared, SEARCH_HINT, {}
+    try:
+        results = search_hub_models(cleaned, hf_token)
+    except Exception as error:
+        return (
+            cleared,
+            status_card("Search failed", html.escape(str(error)), "error"),
+            {},
+        )
+    if not results:
+        return (
+            cleared,
+            f"No text-generation models matched `{html.escape(cleaned)}`.",
+            {},
+        )
+    choices = [(hub_model_label(result), result.model_id) for result in results]
+    count = f"{len(results)} result{'s' if len(results) != 1 else ''}"
+    return (
+        gr.update(choices=choices, value=None),
+        f"{count}, most downloaded first. {NO_RESULT_SELECTED}",
+        {result.model_id: result for result in results},
+    )
+
+
+def select_search_result(selected: str | None, results: dict):
+    """Put the chosen search result in the ID box and describe it."""
+
+    result = results.get(selected) if selected else None
+    if result is None:
+        return gr.skip(), NO_RESULT_SELECTED
+    return gr.update(value=result.model_id), describe_hub_model(result)
 
 
 def resolve_scale(scale_name: str):
@@ -2676,6 +2827,14 @@ CSS = """
 #hero { padding: 0.5rem 0 0.2rem; }
 #hero h1 { font-size: 2.1rem; margin-bottom: 0.25rem; }
 #model-status { min-height: 128px; }
+/* The side pane is narrow, so its headings and lists are set tighter than the page's. */
+#side-pane .prose h2 { font-size: 1rem; margin: 0.7rem 0 0.1rem; }
+#side-pane .prose h3 { font-size: 0.95rem; margin-bottom: 0.2rem; }
+.model-list .wrap { flex-direction: column; align-items: stretch; gap: 0.2rem; }
+.model-list label { font-size: 0.82rem; line-height: 1.3; word-break: break-word; }
+.model-detail { font-size: 0.85rem; }
+.model-detail p, .model-detail ul, .model-detail li { margin: 0.15rem 0; }
+.model-detail code { word-break: break-all; }
 #token-strip { min-height: 150px; }
 #token-strip span, #prompt-strip span { cursor: pointer; border-radius: 5px; }
 /* Token fills are light in both themes, so their ink is pinned dark. */
@@ -2821,80 +2980,127 @@ def build_app() -> gr.Blocks:
                 elem_classes=["scale-caption"],
             )
 
+        # Model selection and generation settings belong opposite conversation
+        # navigation, leaving the page itself for the chat and token panels.
+        with gr.Sidebar(
+            label="Models and settings",
+            width=SIDE_PANE_WIDTH,
+            position="right",
+            elem_id="side-pane",
+        ):
+            gr.Markdown("## Model")
+            model_id = gr.Textbox(
+                value=os.environ.get("OLMO_MODEL_ID", DEFAULT_MODEL),
+                label="Hugging Face model ID",
+                placeholder="organization/model-name",
+                info="The default OLMo 3 7B model is about 15 GB in full precision.",
+            )
+            hf_token = gr.Textbox(
+                label="Hugging Face token (optional)",
+                type="password",
+                placeholder="Only needed for gated or private models",
+            )
+            with gr.Row():
+                download_load_button = gr.Button(
+                    "Download and load", variant="primary", size="sm"
+                )
+                download_button = gr.Button("Download only", size="sm")
+            with gr.Row():
+                cached_button = gr.Button("Load cached", size="sm")
+                unload_button = gr.Button("Unload", size="sm")
+            model_status = gr.Markdown(
+                status_card(
+                    "No model loaded",
+                    "Choose a model under My Models, or enter a Hugging Face model ID to download one. Files are kept in your normal Hugging Face cache.",
+                ),
+                elem_id="model-status",
+            )
+
+            with gr.Accordion("My Models", open=True):
+                my_models_summary = gr.Markdown("", elem_classes=["scale-caption"])
+                my_models = gr.Radio(
+                    choices=[],
+                    label="Downloaded models",
+                    show_label=False,
+                    elem_classes=["model-list"],
+                )
+                my_model_detail = gr.Markdown("", elem_classes=["model-detail"])
+                refresh_models_button = gr.Button("↻ Refresh", size="sm")
+
+            with gr.Accordion("Model search", open=False):
+                search_query = gr.Textbox(
+                    label="Search Hugging Face",
+                    placeholder="Model name, organization, or topic…",
+                    max_lines=1,
+                )
+                search_button = gr.Button("🔍 Search", size="sm")
+                search_results = gr.Radio(
+                    choices=[],
+                    label="Search results",
+                    show_label=False,
+                    elem_classes=["model-list"],
+                )
+                search_detail = gr.Markdown(SEARCH_HINT, elem_classes=["model-detail"])
+                search_results_state = gr.State({})
+
+            gr.Markdown("## Settings")
+            with gr.Accordion("System prompt, reasoning, and prefill", open=False):
+                system_prompt = gr.Textbox(
+                    label="System prompt",
+                    placeholder="You are a careful assistant that answers concisely.",
+                    lines=3,
+                    info="Sent as a system message ahead of the conversation. Leave empty to use the model's default behavior.",
+                )
+                assistant_prefill = gr.Textbox(
+                    label="Assistant prefill (optional)",
+                    placeholder="Start every reply with these exact words…",
+                    lines=2,
+                    info=(
+                        "Replays this text as the start of each answer, then lets the "
+                        "model continue. For reasoning models, Chatlab closes the "
+                        "reasoning block first so this remains visible answer text."
+                    ),
+                )
+                keep_reasoning = gr.Checkbox(
+                    value=False,
+                    label="Send previous reasoning back to the model",
+                    info="Off by default. Think models write a fresh reasoning block each turn, so replaying old ones burns context and usually hurts the next answer.",
+                )
+
+            with gr.Accordion("Sampling, analysis, and input controls", open=False):
+                temperature = gr.Slider(0, 2, value=0.8, step=0.05, label="Temperature")
+                top_p = gr.Slider(0.05, 1, value=0.95, step=0.01, label="Top-p")
+                top_k = gr.Slider(0, 200, value=50, step=1, label="Top-k (0 disables)")
+                max_new_tokens = gr.Slider(
+                    1, 8192, value=1024, step=1, label="Maximum new tokens"
+                )
+                seed = gr.Number(
+                    value=42,
+                    precision=0,
+                    minimum=0,
+                    label="Random seed",
+                    info="Updated after each response so you can reproduce it.",
+                )
+                randomize_seed = gr.Checkbox(
+                    value=True,
+                    label="🎲 New seed each response",
+                    info="Turn off to lock the seed and reproduce a response exactly.",
+                )
+                analyze_prompt = gr.Checkbox(
+                    value=True,
+                    label="Measure prompt tokens",
+                    info="Scores every prompt token during the same pass that warms the cache.",
+                )
+                enter_sends = gr.Checkbox(
+                    value=True,
+                    label="Enter sends the message",
+                    info="Shift+Enter starts a new line. Turn off to swap the two.",
+                )
+
         gr.Markdown(
             "# Chatlab\nChat with an open model and see exactly how likely every generated token was.",
             elem_id="hero",
         )
-
-        with gr.Accordion("Model setup", open=True):
-            with gr.Row():
-                with gr.Column(scale=3):
-                    with gr.Row():
-                        downloaded_models = gr.Dropdown(
-                            choices=[],
-                            label="Downloaded models",
-                            info=(
-                                "Complete and resumable partial downloads are shown here. "
-                                "Only causal language models are compatible with Chatlab."
-                            ),
-                            scale=4,
-                        )
-                        refresh_models_button = gr.Button(
-                            "Refresh", variant="secondary", scale=1
-                        )
-                    downloaded_models_note = gr.Markdown(
-                        "Checking the local Hugging Face cache…",
-                        elem_classes=["scale-caption"],
-                    )
-                    model_id = gr.Textbox(
-                        value=os.environ.get("OLMO_MODEL_ID", DEFAULT_MODEL),
-                        label="Hugging Face model ID",
-                        placeholder="organization/model-name",
-                        info="The default OLMo 3 7B model is about 15 GB in full precision.",
-                    )
-                    hf_token = gr.Textbox(
-                        label="Hugging Face token (optional)",
-                        type="password",
-                        placeholder="Only needed for gated or private models",
-                    )
-                    with gr.Row():
-                        download_load_button = gr.Button(
-                            "Download and load", variant="primary"
-                        )
-                        download_button = gr.Button("Download only")
-                        cached_button = gr.Button("Load cached")
-                        unload_button = gr.Button("Unload")
-                with gr.Column(scale=2):
-                    model_status = gr.Markdown(
-                        status_card(
-                            "No model loaded",
-                            "Choose a downloaded model, or enter a Hugging Face model ID to download one.",
-                        ),
-                        elem_id="model-status",
-                    )
-
-        with gr.Accordion("System prompt, reasoning, and prefill", open=False):
-            system_prompt = gr.Textbox(
-                label="System prompt",
-                placeholder="You are a careful assistant that answers concisely.",
-                lines=3,
-                info="Sent as a system message ahead of the conversation. Leave empty to use the model's default behavior.",
-            )
-            assistant_prefill = gr.Textbox(
-                label="Assistant prefill (optional)",
-                placeholder="Start every reply with these exact words…",
-                lines=2,
-                info=(
-                    "Replays this text as the start of each answer, then lets the "
-                    "model continue. For reasoning models, Chatlab closes the "
-                    "reasoning block first so this remains visible answer text."
-                ),
-            )
-            keep_reasoning = gr.Checkbox(
-                value=False,
-                label="Send previous reasoning back to the model",
-                info="Off by default. Think models write a fresh reasoning block each turn, so replaying old ones burns context and usually hurts the next answer.",
-            )
 
         with gr.Row(equal_height=True):
             with gr.Column(scale=3):
@@ -3064,68 +3270,41 @@ def build_app() -> gr.Blocks:
                         elem_id="prompt-strip",
                     )
 
-        with gr.Accordion("Sampling, analysis, and input controls", open=False):
-            with gr.Row():
-                temperature = gr.Slider(0, 2, value=0.8, step=0.05, label="Temperature")
-                top_p = gr.Slider(0.05, 1, value=0.95, step=0.01, label="Top-p")
-                top_k = gr.Slider(0, 200, value=50, step=1, label="Top-k (0 disables)")
-            with gr.Row():
-                max_new_tokens = gr.Slider(
-                    1, 8192, value=1024, step=1, label="Maximum new tokens"
-                )
-                seed = gr.Number(
-                    value=42,
-                    precision=0,
-                    minimum=0,
-                    label="Random seed",
-                    info="Updated after each response so you can reproduce it.",
-                )
-                randomize_seed = gr.Checkbox(
-                    value=True,
-                    label="🎲 New seed each response",
-                    info="Turn off to lock the seed and reproduce a response exactly.",
-                )
-                analyze_prompt = gr.Checkbox(
-                    value=True,
-                    label="Measure prompt tokens",
-                    info="Scores every prompt token during the same pass that warms the cache.",
-                )
-            enter_sends = gr.Checkbox(
-                value=True,
-                label="Enter sends the message",
-                info="Shift+Enter starts a new line. Turn off to swap the two.",
-            )
-
         gr.Markdown(
             "Rank and raw probability come from the unmodified model distribution. "
             "Sampling probability includes temperature, top-k, and top-p. Quantized models may produce slightly different ranks.",
             elem_classes=["footer-note"],
         )
 
-        downloaded_models.input(select_cached_model, downloaded_models, model_id)
-        refresh_models_button.click(
-            refresh_cached_model_picker,
-            model_id,
-            [downloaded_models, downloaded_models_note],
-        )
-        download_event = download_button.click(
+        # Every handler that can change what is on disk or in memory rescans
+        # the cache afterwards, so My Models never shows a stale list.
+        models_outputs = [my_models, my_model_detail, my_models_summary]
+        download_button.click(
             download_model, [model_id, hf_token], model_status
-        )
-        download_event.then(
-            refresh_cached_model_picker,
-            model_id,
-            [downloaded_models, downloaded_models_note],
-        )
-        download_load_event = download_load_button.click(
+        ).then(refresh_my_models, my_models, models_outputs)
+        download_load_button.click(
             download_and_load_model, [model_id, hf_token], model_status
+        ).then(refresh_my_models, my_models, models_outputs)
+        cached_button.click(load_cached_model, model_id, model_status).then(
+            refresh_my_models, my_models, models_outputs
         )
-        download_load_event.then(
-            refresh_cached_model_picker,
-            model_id,
-            [downloaded_models, downloaded_models_note],
+        unload_button.click(unload_model, outputs=model_status).then(
+            refresh_my_models, my_models, models_outputs
         )
-        cached_button.click(load_cached_model, model_id, model_status)
-        unload_button.click(unload_model, outputs=model_status)
+        refresh_models_button.click(refresh_my_models, my_models, models_outputs)
+        demo.load(refresh_my_models, my_models, models_outputs)
+        # .input rather than .change: the refresh above also sets the radio,
+        # and a .change listener would rewrite the model ID box on each rescan.
+        my_models.input(select_my_model, my_models, [model_id, my_model_detail])
+
+        search_outputs = [search_results, search_detail, search_results_state]
+        search_button.click(search_models, [search_query, hf_token], search_outputs)
+        search_query.submit(search_models, [search_query, hf_token], search_outputs)
+        search_results.input(
+            select_search_result,
+            [search_results, search_results_state],
+            [model_id, search_detail],
+        )
         enter_sends.change(set_message_box_keys, enter_sends, prompt)
 
         settings_inputs = [
@@ -3426,12 +3605,6 @@ def build_app() -> gr.Blocks:
         # Every path that redraws the strips writes the metrics state, so this
         # is where a readout of a token that is no longer on screen goes away.
         metrics_state.change(reset_inspection, insight_state, inspection_outputs)
-
-        demo.load(
-            refresh_cached_model_picker,
-            model_id,
-            [downloaded_models, downloaded_models_note],
-        )
     return demo
 
 
