@@ -89,7 +89,11 @@ RATE_WINDOW_SECONDS = 15.0
 DOWNLOAD_BAR_WIDTH = 24
 # The side pane's width in pixels: wide enough for a model ID and a slider
 # with its label, narrow enough to leave the conversation most of the screen.
-SIDE_PANE_WIDTH = 340
+# The thin pane at the far left picks the page; the conversations pane beside
+# it shows with Chat only.
+NAV_PANE_WIDTH = 88
+CONVERSATION_PANE_WIDTH = 340
+CHAT_PAGE, MODELS_PAGE, SETTINGS_PAGE = PAGES = ("Chat", "Models", "Settings")
 SEED_LIMIT = 2**31 - 1
 NO_TOKEN_SELECTED = "Select a token to inspect it."
 
@@ -2822,38 +2826,70 @@ def reset_inspection(insight: dict | None):
     return charts.EMPTY_LENS, charts.EMPTY_ATTENTION, None, INSPECT_HINT
 
 
-CSS = """
-.gradio-container { max-width: 1500px !important; }
-#hero { padding: 0.5rem 0 0.2rem; }
-#hero h1 { font-size: 2.1rem; margin-bottom: 0.25rem; }
-#model-status { min-height: 128px; }
-/* The side pane is narrow, so its headings and lists are set tighter than the page's. */
-#side-pane .prose h2 { font-size: 1rem; margin: 0.7rem 0 0.1rem; }
-#side-pane .prose h3 { font-size: 0.95rem; margin-bottom: 0.2rem; }
-.model-list .wrap { flex-direction: column; align-items: stretch; gap: 0.2rem; }
-.model-list label { font-size: 0.82rem; line-height: 1.3; word-break: break-word; }
-.model-detail { font-size: 0.85rem; }
-.model-detail p, .model-detail ul, .model-detail li { margin: 0.15rem 0; }
-.model-detail code { word-break: break-all; }
-#token-strip { min-height: 150px; }
-#token-strip span, #prompt-strip span { cursor: pointer; border-radius: 5px; }
+CSS = f"""
+.gradio-container {{ max-width: none !important; }}
+#hero, #models-hero, #settings-hero {{ padding: 0.5rem 0 0.2rem; }}
+#hero h1, #models-hero h1, #settings-hero h1 {{ font-size: 2.1rem; margin-bottom: 0.25rem; }}
+#model-status {{ min-height: 128px; }}
+
+/* The shell is one row: nav, conversations, page. It never wraps, and the two
+   panes keep their widths and stay put while the page scrolls. */
+#shell {{ flex-wrap: nowrap; align-items: stretch; }}
+#nav-pane, #conversation-pane {{
+  position: sticky; top: 0; align-self: flex-start; max-height: 100vh;
+}}
+#nav-pane {{
+  flex: 0 0 {NAV_PANE_WIDTH}px !important; min-width: {NAV_PANE_WIDTH}px !important;
+  height: 100vh; padding: 0.6rem 0.5rem 0.6rem 0;
+  border-right: 1px solid var(--border-color-primary);
+}}
+#conversation-pane {{
+  flex: 0 0 {CONVERSATION_PANE_WIDTH}px !important;
+  min-width: {CONVERSATION_PANE_WIDTH}px !important;
+  overflow-y: auto; padding-right: 0.5rem;
+  border-right: 1px solid var(--border-color-primary);
+}}
+/* The nav is a Radio drawn as a column of tiles. Its inputs are hidden, the
+   selected tile is filled, and the last tile (Settings) is pushed to the
+   bottom. */
+#nav-pane > *, #nav, #nav .wrap {{ height: 100%; }}
+#nav .wrap {{ flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 0.3rem; }}
+#nav label {{
+  justify-content: center; text-align: center; padding: 0.7rem 0.2rem;
+  font-size: 0.85rem; border-radius: 8px; box-shadow: none; border: none;
+  background: transparent;
+}}
+#nav label:hover {{ background: var(--background-fill-secondary); }}
+#nav label.selected {{
+  background: var(--block-background-fill); color: var(--body-text-color); font-weight: 600;
+  border: 1px solid var(--border-color-primary);
+}}
+#nav label:last-child {{ margin-top: auto; }}
+#nav label input {{ display: none; }}
+.model-list .wrap {{ flex-direction: column; align-items: stretch; gap: 0.2rem; }}
+.model-list label {{ font-size: 0.82rem; line-height: 1.3; word-break: break-word; }}
+.model-detail {{ font-size: 0.85rem; }}
+.model-detail p, .model-detail ul, .model-detail li {{ margin: 0.15rem 0; }}
+.model-detail code {{ word-break: break-all; }}
+#token-strip {{ min-height: 150px; }}
+#token-strip span, #prompt-strip span {{ cursor: pointer; border-radius: 5px; }}
 /* Token fills are light in both themes, so their ink is pinned dark. */
 #token-strip .textspan.hl, #prompt-strip .textspan.hl,
-#token-strip .category-label, #prompt-strip .category-label { color: #0b0b0b; }
-.footer-note { color: var(--body-text-color-subdued); font-size: 0.9rem; }
-.scale-caption { color: var(--body-text-color-subdued); font-size: 0.85rem; }
+#token-strip .category-label, #prompt-strip .category-label {{ color: #0b0b0b; }}
+.footer-note {{ color: var(--body-text-color-subdued); font-size: 0.9rem; }}
+.scale-caption {{ color: var(--body-text-color-subdued); font-size: 0.85rem; }}
 
 /* The conversation list is a Radio whose labels carry a line break: the
    name and title on the first line, the model and token count on the
    second. Stack the entries and let the break through. */
-#conversation-list .wrap { flex-direction: column; align-items: stretch; gap: 0.4rem; }
-#conversation-list label { align-items: flex-start; }
-#conversation-list label input { margin-top: 0.3rem; }
-#conversation-list label span {
+#conversation-list .wrap {{ flex-direction: column; align-items: stretch; gap: 0.4rem; }}
+#conversation-list label {{ align-items: flex-start; }}
+#conversation-list label input {{ margin-top: 0.3rem; }}
+#conversation-list label span {{
   white-space: pre-line; line-height: 1.35; overflow-wrap: anywhere;
-}
+}}
 
-.viz-root {
+.viz-root {{
   --viz-ink: #0b0b0b;
   --viz-muted: #898781;
   --viz-grid: #e1e0d9;
@@ -2862,52 +2898,52 @@ CSS = """
   --viz-band: #cde2fb;
   margin: 0;
   font-family: var(--font, system-ui, -apple-system, "Segoe UI", sans-serif);
-}
-.dark .viz-root {
+}}
+.dark .viz-root {{
   --viz-ink: #ffffff;
   --viz-muted: #898781;
   --viz-grid: #2c2c2a;
   --viz-axis: #383835;
   --viz-line: #3987e5;
   --viz-band: #1c5cab;
-}
-.viz-root svg { width: 100%; height: auto; display: block; }
-.viz-title { color: var(--viz-ink); font-size: 0.9rem; font-weight: 600; padding: 0 0 0.2rem; }
-.viz-sub { color: var(--viz-muted); font-weight: 400; font-size: 0.8rem; margin-left: 0.4rem; }
-.viz-grid { stroke: var(--viz-grid); stroke-width: 1; }
-.viz-axis { stroke: var(--viz-axis); stroke-width: 1; }
-.viz-band { fill: var(--viz-band); opacity: 0.55; stroke: none; }
-.viz-line { fill: none; stroke: var(--viz-line); stroke-width: 2; stroke-linejoin: round; }
-.viz-peak-dot { fill: var(--viz-line); stroke: var(--body-background-fill); stroke-width: 2; }
-.viz-peak-label, .viz-tick { fill: var(--viz-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
-.viz-hit { fill: transparent; }
-.viz-empty, .viz-note { color: var(--body-text-color-subdued); font-size: 0.85rem; padding: 0.4rem 0; }
-.viz-tiles { display: flex; flex-wrap: wrap; gap: 0.4rem; }
-.viz-tile {
+}}
+.viz-root svg {{ width: 100%; height: auto; display: block; }}
+.viz-title {{ color: var(--viz-ink); font-size: 0.9rem; font-weight: 600; padding: 0 0 0.2rem; }}
+.viz-sub {{ color: var(--viz-muted); font-weight: 400; font-size: 0.8rem; margin-left: 0.4rem; }}
+.viz-grid {{ stroke: var(--viz-grid); stroke-width: 1; }}
+.viz-axis {{ stroke: var(--viz-axis); stroke-width: 1; }}
+.viz-band {{ fill: var(--viz-band); opacity: 0.55; stroke: none; }}
+.viz-line {{ fill: none; stroke: var(--viz-line); stroke-width: 2; stroke-linejoin: round; }}
+.viz-peak-dot {{ fill: var(--viz-line); stroke: var(--body-background-fill); stroke-width: 2; }}
+.viz-peak-label, .viz-tick {{ fill: var(--viz-muted); font-size: 10px; font-variant-numeric: tabular-nums; }}
+.viz-hit {{ fill: transparent; }}
+.viz-empty, .viz-note {{ color: var(--body-text-color-subdued); font-size: 0.85rem; padding: 0.4rem 0; }}
+.viz-tiles {{ display: flex; flex-wrap: wrap; gap: 0.4rem; }}
+.viz-tile {{
   flex: 1 1 5.5rem; padding: 0.45rem 0.6rem; border-radius: 8px;
   background: var(--background-fill-secondary);
-}
-.viz-value { color: var(--viz-ink); font-size: 1.25rem; line-height: 1.2; }
-.viz-label { color: var(--viz-muted); font-size: 0.72rem; text-transform: lowercase; }
+}}
+.viz-value {{ color: var(--viz-ink); font-size: 1.25rem; line-height: 1.2; }}
+.viz-label {{ color: var(--viz-muted); font-size: 0.72rem; text-transform: lowercase; }}
 
-.viz-line-faint { stroke: var(--viz-band); stroke-width: 1.5; }
-.viz-marker { stroke: var(--viz-muted); stroke-width: 1; stroke-dasharray: 3 3; }
-.viz-table-wrap { max-height: 230px; overflow-y: auto; margin-top: 0.3rem; }
-.viz-table { width: 100%; font-size: 0.78rem; border-collapse: collapse; }
-.viz-table th, .viz-table td {
+.viz-line-faint {{ stroke: var(--viz-band); stroke-width: 1.5; }}
+.viz-marker {{ stroke: var(--viz-muted); stroke-width: 1; stroke-dasharray: 3 3; }}
+.viz-table-wrap {{ max-height: 230px; overflow-y: auto; margin-top: 0.3rem; }}
+.viz-table {{ width: 100%; font-size: 0.78rem; border-collapse: collapse; }}
+.viz-table th, .viz-table td {{
   text-align: left; padding: 0.15rem 0.4rem; color: var(--viz-ink);
   border-bottom: 1px solid var(--viz-grid); font-variant-numeric: tabular-nums;
-}
-.viz-table th {
+}}
+.viz-table th {{
   color: var(--viz-muted); font-weight: 500; position: sticky; top: 0;
   background: var(--body-background-fill);
-}
-.viz-hit-row td { font-weight: 600; }
-.attn-strip { line-height: 1.9; white-space: pre-wrap; word-break: break-word; }
-.attn-token { border-radius: 4px; padding: 0.05rem 0.1rem; margin: 0 1px; color: var(--body-text-color); }
-.attn-query { outline: 1.5px dashed var(--viz-muted); }
-.attn-predicted { outline: 1.5px solid var(--viz-ink); margin-left: 0.3rem; }
-.attn-top { font-size: 0.8rem; columns: 2; margin: 0.3rem 0 0; padding-left: 1.4rem; color: var(--viz-ink); }
+}}
+.viz-hit-row td {{ font-weight: 600; }}
+.attn-strip {{ line-height: 1.9; white-space: pre-wrap; word-break: break-word; }}
+.attn-token {{ border-radius: 4px; padding: 0.05rem 0.1rem; margin: 0 1px; color: var(--body-text-color); }}
+.attn-query {{ outline: 1.5px dashed var(--viz-muted); }}
+.attn-predicted {{ outline: 1.5px solid var(--viz-ink); margin-left: 0.3rem; }}
+.attn-top {{ font-size: 0.8rem; columns: 2; margin: 0.3rem 0 0; padding-left: 1.4rem; color: var(--viz-ink); }}
 """
 
 
@@ -2937,6 +2973,14 @@ def set_message_box_keys(enter_sends: bool):
     return gr.update(**message_box_settings(enter_sends))
 
 
+def show_page(page: str):
+    """Show the chosen page. The conversations pane comes and goes with Chat."""
+    return [
+        gr.update(visible=page == CHAT_PAGE),
+        *(gr.update(visible=page == name) for name in PAGES),
+    ]
+
+
 def build_app() -> gr.Blocks:
     with gr.Blocks(title="Chatlab", css=CSS, theme=gr.themes.Soft()) as demo:
         conversation_state = gr.State([])
@@ -2957,323 +3001,363 @@ def build_app() -> gr.Blocks:
         inspect_target = gr.State(None)
         insight_state = gr.State(None)
 
-        with gr.Sidebar(label="Conversations", width=340, elem_id="conversation-pane"):
-            gr.Markdown("## Conversations")
-            conversation_list = gr.Radio(
-                choices=branch_choices(new_forks(), []),
-                value=MAIN_BRANCH,
-                show_label=False,
-                elem_id="conversation-list",
-            )
-            with gr.Row():
-                # The pane is narrow, so the buttons give up their usual
-                # minimum width to share one row.
-                new_button = gr.Button("➕ New", size="sm", min_width=60)
-                fork_button = gr.Button("🌿 Fork", size="sm", min_width=60)
-                delete_fork_button = gr.Button("🗑️ Delete", size="sm", min_width=60)
-            gr.Markdown(
-                "Each entry names the model that replied and the size of the "
-                "conversation in tokens: the prompt behind its latest reply plus "
-                "the reply itself. New starts an empty chat. Fork copies the "
-                "conversation on screen; click a message first to fork at that "
-                "point.",
-                elem_classes=["scale-caption"],
-            )
-
-        # Model selection and generation settings belong opposite conversation
-        # navigation, leaving the page itself for the chat and token panels.
-        with gr.Sidebar(
-            label="Models and settings",
-            width=SIDE_PANE_WIDTH,
-            position="right",
-            elem_id="side-pane",
-        ):
-            gr.Markdown("## Model")
-            model_id = gr.Textbox(
-                value=os.environ.get("OLMO_MODEL_ID", DEFAULT_MODEL),
-                label="Hugging Face model ID",
-                placeholder="organization/model-name",
-                info="The default OLMo 3 7B model is about 15 GB in full precision.",
-            )
-            hf_token = gr.Textbox(
-                label="Hugging Face token (optional)",
-                type="password",
-                placeholder="Only needed for gated or private models",
-            )
-            with gr.Row():
-                download_load_button = gr.Button(
-                    "Download and load", variant="primary", size="sm"
-                )
-                download_button = gr.Button("Download only", size="sm")
-            with gr.Row():
-                cached_button = gr.Button("Load cached", size="sm")
-                unload_button = gr.Button("Unload", size="sm")
-            model_status = gr.Markdown(
-                status_card(
-                    "No model loaded",
-                    "Choose a model under My Models, or enter a Hugging Face model ID to download one. Files are kept in your normal Hugging Face cache.",
-                ),
-                elem_id="model-status",
-            )
-
-            with gr.Accordion("My Models", open=True):
-                my_models_summary = gr.Markdown("", elem_classes=["scale-caption"])
-                my_models = gr.Radio(
-                    choices=[],
-                    label="Downloaded models",
+        with gr.Row(elem_id="shell"):
+            # The thin pane at the far left picks the page: Chat, Models, or
+            # Settings. The stylesheet stacks the choices and pins Settings to
+            # the bottom.
+            with gr.Column(scale=0, min_width=NAV_PANE_WIDTH, elem_id="nav-pane"):
+                nav = gr.Radio(
+                    choices=list(PAGES),
+                    value=CHAT_PAGE,
                     show_label=False,
-                    elem_classes=["model-list"],
+                    container=False,
+                    elem_id="nav",
                 )
-                my_model_detail = gr.Markdown("", elem_classes=["model-detail"])
-                refresh_models_button = gr.Button("↻ Refresh", size="sm")
 
-            with gr.Accordion("Model search", open=False):
-                search_query = gr.Textbox(
-                    label="Search Hugging Face",
-                    placeholder="Model name, organization, or topic…",
-                    max_lines=1,
-                )
-                search_button = gr.Button("🔍 Search", size="sm")
-                search_results = gr.Radio(
-                    choices=[],
-                    label="Search results",
+            # The conversations pane sits beside the nav and shows with Chat only.
+            with gr.Column(
+                scale=0, min_width=CONVERSATION_PANE_WIDTH, elem_id="conversation-pane"
+            ) as conversation_pane:
+                gr.Markdown("## Conversations")
+                conversation_list = gr.Radio(
+                    choices=branch_choices(new_forks(), []),
+                    value=MAIN_BRANCH,
                     show_label=False,
-                    elem_classes=["model-list"],
+                    elem_id="conversation-list",
                 )
-                search_detail = gr.Markdown(SEARCH_HINT, elem_classes=["model-detail"])
-                search_results_state = gr.State({})
-
-            gr.Markdown("## Settings")
-            with gr.Accordion("System prompt, reasoning, and prefill", open=False):
-                system_prompt = gr.Textbox(
-                    label="System prompt",
-                    placeholder="You are a careful assistant that answers concisely.",
-                    lines=3,
-                    info="Sent as a system message ahead of the conversation. Leave empty to use the model's default behavior.",
-                )
-                assistant_prefill = gr.Textbox(
-                    label="Assistant prefill (optional)",
-                    placeholder="Start every reply with these exact words…",
-                    lines=2,
-                    info=(
-                        "Replays this text as the start of each answer, then lets the "
-                        "model continue. For reasoning models, Chatlab closes the "
-                        "reasoning block first so this remains visible answer text."
-                    ),
-                )
-                keep_reasoning = gr.Checkbox(
-                    value=False,
-                    label="Send previous reasoning back to the model",
-                    info="Off by default. Think models write a fresh reasoning block each turn, so replaying old ones burns context and usually hurts the next answer.",
+                with gr.Row():
+                    # The pane is narrow, so the buttons give up their usual
+                    # minimum width to share one row.
+                    new_button = gr.Button("➕ New", size="sm", min_width=60)
+                    fork_button = gr.Button("🌿 Fork", size="sm", min_width=60)
+                    delete_fork_button = gr.Button("🗑️ Delete", size="sm", min_width=60)
+                gr.Markdown(
+                    "Each entry names the model that replied and the size of the "
+                    "conversation in tokens: the prompt behind its latest reply plus "
+                    "the reply itself. New starts an empty chat. Fork copies the "
+                    "conversation on screen; click a message first to fork at that "
+                    "point.",
+                    elem_classes=["scale-caption"],
                 )
 
-            with gr.Accordion("Sampling, analysis, and input controls", open=False):
-                temperature = gr.Slider(0, 2, value=0.8, step=0.05, label="Temperature")
-                top_p = gr.Slider(0.05, 1, value=0.95, step=0.01, label="Top-p")
-                top_k = gr.Slider(0, 200, value=50, step=1, label="Top-k (0 disables)")
-                max_new_tokens = gr.Slider(
-                    1, 8192, value=1024, step=1, label="Maximum new tokens"
-                )
-                seed = gr.Number(
-                    value=42,
-                    precision=0,
-                    minimum=0,
-                    label="Random seed",
-                    info="Updated after each response so you can reproduce it.",
-                )
-                randomize_seed = gr.Checkbox(
-                    value=True,
-                    label="🎲 New seed each response",
-                    info="Turn off to lock the seed and reproduce a response exactly.",
-                )
-                analyze_prompt = gr.Checkbox(
-                    value=True,
-                    label="Measure prompt tokens",
-                    info="Scores every prompt token during the same pass that warms the cache.",
-                )
-                enter_sends = gr.Checkbox(
-                    value=True,
-                    label="Enter sends the message",
-                    info="Shift+Enter starts a new line. Turn off to swap the two.",
+            # The three pages share the rest of the width; one is visible at a
+            # time, chosen by the nav.
+            with gr.Column(scale=1, elem_id="chat-page") as chat_page:
+                gr.Markdown(
+                    "# Chatlab\nChat with an open model and see exactly how likely every generated token was.",
+                    elem_id="hero",
                 )
 
-        gr.Markdown(
-            "# Chatlab\nChat with an open model and see exactly how likely every generated token was.",
-            elem_id="hero",
-        )
+                with gr.Row(equal_height=True):
+                    with gr.Column(scale=3):
+                        with gr.Tabs():
+                            with gr.Tab("Chat"):
+                                chatbot = gr.Chatbot(
+                                    type="messages",
+                                    label="Conversation",
+                                    height=560,
+                                    editable="all",
+                                    placeholder="Load a model, then start a conversation.",
+                                )
+                                prompt = gr.Textbox(
+                                    label="Message",
+                                    **message_box_settings(enter_sends=True),
+                                )
+                                with gr.Row():
+                                    send_button = gr.Button("Send", variant="primary")
+                                    stop_button = gr.Button(
+                                        "Stop", variant="stop", visible=False
+                                    )
+                                    retry_button = gr.Button("🔁 Retry")
+                                    undo_button = gr.Button("↩️ Undo last")
+                                    clear_button = gr.Button("🗑️ Clear")
+                                with gr.Row():
+                                    save_button = gr.Button("💾 Save conversation")
+                                    load_upload = gr.UploadButton(
+                                        "📂 Load conversation",
+                                        file_types=[".json"],
+                                        type="filepath",
+                                    )
+                                saved_file = gr.File(
+                                    label="Saved conversation",
+                                    visible=False,
+                                    interactive=False,
+                                )
+                                generation_status = gr.Markdown("Ready.")
+                                with gr.Accordion("Export full metric trace", open=False):
+                                    with gr.Row():
+                                        gr.DownloadButton(
+                                            "Download JSON",
+                                            value=lambda trace: write_trace_export(
+                                                trace, "json"
+                                            ),
+                                            inputs=trace_state,
+                                            size="sm",
+                                        )
+                                        gr.DownloadButton(
+                                            "Download CSV",
+                                            value=lambda trace: write_trace_export(trace, "csv"),
+                                            inputs=trace_state,
+                                            size="sm",
+                                        )
+                                    gr.Markdown(
+                                        "Exports include every token metric and all recorded "
+                                        "alternatives for the latest completed response.",
+                                        elem_classes=["footer-note"],
+                                    )
 
-        with gr.Row(equal_height=True):
-            with gr.Column(scale=3):
-                with gr.Tabs():
-                    with gr.Tab("Chat"):
-                        chatbot = gr.Chatbot(
-                            type="messages",
-                            label="Conversation",
-                            height=560,
-                            editable="all",
-                            placeholder="Load a model, then start a conversation.",
-                        )
-                        prompt = gr.Textbox(
-                            label="Message",
-                            **message_box_settings(enter_sends=True),
-                        )
-                        with gr.Row():
-                            send_button = gr.Button("Send", variant="primary")
-                            stop_button = gr.Button(
-                                "Stop", variant="stop", visible=False
-                            )
-                            retry_button = gr.Button("🔁 Retry")
-                            undo_button = gr.Button("↩️ Undo last")
-                            clear_button = gr.Button("🗑️ Clear")
-                        with gr.Row():
-                            save_button = gr.Button("💾 Save conversation")
-                            load_upload = gr.UploadButton(
-                                "📂 Load conversation",
-                                file_types=[".json"],
-                                type="filepath",
-                            )
-                        saved_file = gr.File(
-                            label="Saved conversation",
-                            visible=False,
-                            interactive=False,
-                        )
-                        generation_status = gr.Markdown("Ready.")
-                        with gr.Accordion("Export full metric trace", open=False):
-                            with gr.Row():
-                                gr.DownloadButton(
-                                    "Download JSON",
-                                    value=lambda trace: write_trace_export(
-                                        trace, "json"
+                            with gr.Tab("Score text"):
+                                gr.Markdown(
+                                    "Measure text the model did not write. One forward pass "
+                                    "gives every token the same rank, probability, surprise, "
+                                    "and entropy the chat view shows."
+                                )
+                                score_context = gr.Textbox(
+                                    label="Context (optional)",
+                                    placeholder="Text that comes before the part you want scored.",
+                                    lines=3,
+                                )
+                                use_chat_template = gr.Checkbox(
+                                    value=False,
+                                    label="Treat the context as a chat message",
+                                    info=(
+                                        "Wraps the context in the model's chat template, so the "
+                                        "scored text is measured as a reply. Models without a "
+                                        "chat template score the context as plain text, and say so."
                                     ),
-                                    inputs=trace_state,
-                                    size="sm",
                                 )
-                                gr.DownloadButton(
-                                    "Download CSV",
-                                    value=lambda trace: write_trace_export(trace, "csv"),
-                                    inputs=trace_state,
-                                    size="sm",
+                                score_input = gr.Textbox(
+                                    label="Text to score",
+                                    placeholder="Paste the text you want measured…",
+                                    lines=8,
                                 )
-                            gr.Markdown(
-                                "Exports include every token metric and all recorded "
-                                "alternatives for the latest completed response.",
-                                elem_classes=["footer-note"],
+                                score_button = gr.Button("Score text", variant="primary")
+                                score_status = gr.Markdown("Nothing scored yet.")
+
+                    with gr.Column(scale=2):
+                        gr.Markdown("## Under the hood")
+                        color_scale = gr.Dropdown(
+                            choices=list(COLOR_SCALES),
+                            value=DEFAULT_COLOR_SCALE,
+                            label="Color tokens by",
+                        )
+                        scale_caption = gr.Markdown(
+                            COLOR_SCALES[DEFAULT_COLOR_SCALE].caption,
+                            elem_classes=["scale-caption"],
+                        )
+                        token_strip = gr.HighlightedText(
+                            label=RESPONSE_STRIP_LABEL,
+                            color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
+                            show_legend=True,
+                            combine_adjacent=False,
+                            elem_id="token-strip",
+                        )
+                        token_detail = gr.Markdown(NO_TOKEN_SELECTED)
+                        alternatives = gr.Dataframe(
+                            headers=["Token ID", "Token", "Raw probability"],
+                            datatype=["number", "str", "number"],
+                            interactive=False,
+                            label="Most likely alternatives — click one to branch into it",
+                        )
+                        with gr.Row():
+                            branch_button = gr.Button("🌱 Branch from token", size="sm")
+                        gr.Markdown(
+                            "Branching keeps the response up to the selected token, puts "
+                            "the alternative in its place, and lets the model continue "
+                            "from there.",
+                            elem_classes=["scale-caption"],
+                        )
+                        with gr.Row():
+                            branch_text = gr.Textbox(
+                                label="Or type your own replacement",
+                                placeholder=(
+                                    "Text to put where the selected token was. Include a "
+                                    "leading space if the word needs one."
+                                ),
+                                lines=1,
+                                scale=3,
+                            )
+                            branch_text_button = gr.Button(
+                                "✏️ Branch with text", size="sm", scale=0, min_width=160
+                            )
+                        gr.Markdown(
+                            "The typed text replaces the selected token exactly as written, "
+                            "whether or not the model would ever have chosen it, and the "
+                            "model continues from there.",
+                            elem_classes=["scale-caption"],
+                        )
+                        with gr.Accordion("Layers and attention", open=False):
+                            with gr.Row():
+                                inspect_button = gr.Button(
+                                    "🔬 Inspect layers", size="sm", scale=0, min_width=160
+                                )
+                                inspect_status = gr.Markdown(
+                                    INSPECT_HINT, elem_classes=["scale-caption"]
+                                )
+                            lens_panel = gr.HTML(charts.EMPTY_LENS)
+                            attention_layer = gr.Slider(
+                                0,
+                                1,
+                                value=0,
+                                step=1,
+                                label="Attention layer",
+                                info="0 averages every layer. Release the slider to repaint.",
+                            )
+                            attention_panel = gr.HTML(charts.EMPTY_ATTENTION)
+                        summary_panel = gr.HTML(charts.summary_tiles({}))
+                        surprise_panel = gr.HTML(charts.EMPTY_CHART)
+                        with gr.Accordion("Prompt and context tokens", open=False):
+                            prompt_note = gr.Markdown("", elem_classes=["scale-caption"])
+                            prompt_strip = gr.HighlightedText(
+                                label="Prompt tokens — click one",
+                                color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
+                                show_legend=True,
+                                combine_adjacent=False,
+                                elem_id="prompt-strip",
                             )
 
-                    with gr.Tab("Score text"):
-                        gr.Markdown(
-                            "Measure text the model did not write. One forward pass "
-                            "gives every token the same rank, probability, surprise, "
-                            "and entropy the chat view shows."
+                gr.Markdown(
+                    "Rank and raw probability come from the unmodified model distribution. "
+                    "Sampling probability includes temperature, top-k, and top-p. Quantized models may produce slightly different ranks.",
+                    elem_classes=["footer-note"],
+                )
+
+            with gr.Column(
+                scale=1, visible=False, elem_id="models-page"
+            ) as models_page:
+                gr.Markdown(
+                    "# Models\nDownload a model from Hugging Face, or load one "
+                    "already on disk. Files are kept in your normal Hugging Face cache.",
+                    elem_id="models-hero",
+                )
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("## Model")
+                        model_id = gr.Textbox(
+                            value=os.environ.get("OLMO_MODEL_ID", DEFAULT_MODEL),
+                            label="Hugging Face model ID",
+                            placeholder="organization/model-name",
+                            info="The default OLMo 3 7B model is about 15 GB in full precision.",
                         )
-                        score_context = gr.Textbox(
-                            label="Context (optional)",
-                            placeholder="Text that comes before the part you want scored.",
+                        hf_token = gr.Textbox(
+                            label="Hugging Face token (optional)",
+                            type="password",
+                            placeholder="Only needed for gated or private models",
+                        )
+                        with gr.Row():
+                            download_load_button = gr.Button(
+                                "Download and load", variant="primary", size="sm"
+                            )
+                            download_button = gr.Button("Download only", size="sm")
+                            cached_button = gr.Button("Load cached", size="sm")
+                            unload_button = gr.Button("Unload", size="sm")
+                        model_status = gr.Markdown(
+                            status_card(
+                                "No model loaded",
+                                "Choose a model under My Models, or enter a Hugging Face model ID to download one. Files are kept in your normal Hugging Face cache.",
+                            ),
+                            elem_id="model-status",
+                        )
+
+                        gr.Markdown("## Model search")
+                        with gr.Row():
+                            search_query = gr.Textbox(
+                                label="Search Hugging Face",
+                                placeholder="Model name, organization, or topic…",
+                                max_lines=1,
+                                scale=3,
+                            )
+                            search_button = gr.Button(
+                                "🔍 Search", size="sm", scale=0, min_width=120
+                            )
+                        search_results = gr.Radio(
+                            choices=[],
+                            label="Search results",
+                            show_label=False,
+                            elem_classes=["model-list"],
+                        )
+                        search_detail = gr.Markdown(SEARCH_HINT, elem_classes=["model-detail"])
+                        search_results_state = gr.State({})
+
+                    with gr.Column():
+                        gr.Markdown("## My Models")
+                        my_models_summary = gr.Markdown("", elem_classes=["scale-caption"])
+                        my_models = gr.Radio(
+                            choices=[],
+                            label="Downloaded models",
+                            show_label=False,
+                            elem_classes=["model-list"],
+                        )
+                        my_model_detail = gr.Markdown("", elem_classes=["model-detail"])
+                        refresh_models_button = gr.Button("↻ Refresh", size="sm")
+
+            with gr.Column(
+                scale=1, visible=False, elem_id="settings-page"
+            ) as settings_page:
+                gr.Markdown(
+                    "# Settings\nHow every reply is prompted, sampled, and measured.",
+                    elem_id="settings-hero",
+                )
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("## System prompt, reasoning, and prefill")
+                        system_prompt = gr.Textbox(
+                            label="System prompt",
+                            placeholder="You are a careful assistant that answers concisely.",
                             lines=3,
+                            info="Sent as a system message ahead of the conversation. Leave empty to use the model's default behavior.",
                         )
-                        use_chat_template = gr.Checkbox(
-                            value=False,
-                            label="Treat the context as a chat message",
+                        assistant_prefill = gr.Textbox(
+                            label="Assistant prefill (optional)",
+                            placeholder="Start every reply with these exact words…",
+                            lines=2,
                             info=(
-                                "Wraps the context in the model's chat template, so the "
-                                "scored text is measured as a reply. Models without a "
-                                "chat template score the context as plain text, and say so."
+                                "Replays this text as the start of each answer, then lets the "
+                                "model continue. For reasoning models, Chatlab closes the "
+                                "reasoning block first so this remains visible answer text."
                             ),
                         )
-                        score_input = gr.Textbox(
-                            label="Text to score",
-                            placeholder="Paste the text you want measured…",
-                            lines=8,
+                        keep_reasoning = gr.Checkbox(
+                            value=False,
+                            label="Send previous reasoning back to the model",
+                            info="Off by default. Think models write a fresh reasoning block each turn, so replaying old ones burns context and usually hurts the next answer.",
                         )
-                        score_button = gr.Button("Score text", variant="primary")
-                        score_status = gr.Markdown("Nothing scored yet.")
 
-            with gr.Column(scale=2):
-                gr.Markdown("## Under the hood")
-                color_scale = gr.Dropdown(
-                    choices=list(COLOR_SCALES),
-                    value=DEFAULT_COLOR_SCALE,
-                    label="Color tokens by",
-                )
-                scale_caption = gr.Markdown(
-                    COLOR_SCALES[DEFAULT_COLOR_SCALE].caption,
-                    elem_classes=["scale-caption"],
-                )
-                token_strip = gr.HighlightedText(
-                    label=RESPONSE_STRIP_LABEL,
-                    color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
-                    show_legend=True,
-                    combine_adjacent=False,
-                    elem_id="token-strip",
-                )
-                token_detail = gr.Markdown(NO_TOKEN_SELECTED)
-                alternatives = gr.Dataframe(
-                    headers=["Token ID", "Token", "Raw probability"],
-                    datatype=["number", "str", "number"],
-                    interactive=False,
-                    label="Most likely alternatives — click one to branch into it",
-                )
-                with gr.Row():
-                    branch_button = gr.Button("🌱 Branch from token", size="sm")
-                gr.Markdown(
-                    "Branching keeps the response up to the selected token, puts "
-                    "the alternative in its place, and lets the model continue "
-                    "from there.",
-                    elem_classes=["scale-caption"],
-                )
-                with gr.Row():
-                    branch_text = gr.Textbox(
-                        label="Or type your own replacement",
-                        placeholder=(
-                            "Text to put where the selected token was. Include a "
-                            "leading space if the word needs one."
-                        ),
-                        lines=1,
-                        scale=3,
-                    )
-                    branch_text_button = gr.Button(
-                        "✏️ Branch with text", size="sm", scale=0, min_width=160
-                    )
-                gr.Markdown(
-                    "The typed text replaces the selected token exactly as written, "
-                    "whether or not the model would ever have chosen it, and the "
-                    "model continues from there.",
-                    elem_classes=["scale-caption"],
-                )
-                with gr.Accordion("Layers and attention", open=False):
-                    with gr.Row():
-                        inspect_button = gr.Button(
-                            "🔬 Inspect layers", size="sm", scale=0, min_width=160
+                        gr.Markdown("## Input")
+                        enter_sends = gr.Checkbox(
+                            value=True,
+                            label="Enter sends the message",
+                            info="Shift+Enter starts a new line. Turn off to swap the two.",
                         )
-                        inspect_status = gr.Markdown(
-                            INSPECT_HINT, elem_classes=["scale-caption"]
-                        )
-                    lens_panel = gr.HTML(charts.EMPTY_LENS)
-                    attention_layer = gr.Slider(
-                        0,
-                        1,
-                        value=0,
-                        step=1,
-                        label="Attention layer",
-                        info="0 averages every layer. Release the slider to repaint.",
-                    )
-                    attention_panel = gr.HTML(charts.EMPTY_ATTENTION)
-                summary_panel = gr.HTML(charts.summary_tiles({}))
-                surprise_panel = gr.HTML(charts.EMPTY_CHART)
-                with gr.Accordion("Prompt and context tokens", open=False):
-                    prompt_note = gr.Markdown("", elem_classes=["scale-caption"])
-                    prompt_strip = gr.HighlightedText(
-                        label="Prompt tokens — click one",
-                        color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
-                        show_legend=True,
-                        combine_adjacent=False,
-                        elem_id="prompt-strip",
-                    )
 
-        gr.Markdown(
-            "Rank and raw probability come from the unmodified model distribution. "
-            "Sampling probability includes temperature, top-k, and top-p. Quantized models may produce slightly different ranks.",
-            elem_classes=["footer-note"],
+                    with gr.Column():
+                        gr.Markdown("## Sampling and analysis")
+                        temperature = gr.Slider(0, 2, value=0.8, step=0.05, label="Temperature")
+                        top_p = gr.Slider(0.05, 1, value=0.95, step=0.01, label="Top-p")
+                        top_k = gr.Slider(0, 200, value=50, step=1, label="Top-k (0 disables)")
+                        max_new_tokens = gr.Slider(
+                            1, 8192, value=1024, step=1, label="Maximum new tokens"
+                        )
+                        seed = gr.Number(
+                            value=42,
+                            precision=0,
+                            minimum=0,
+                            label="Random seed",
+                            info="Updated after each response so you can reproduce it.",
+                        )
+                        randomize_seed = gr.Checkbox(
+                            value=True,
+                            label="🎲 New seed each response",
+                            info="Turn off to lock the seed and reproduce a response exactly.",
+                        )
+                        analyze_prompt = gr.Checkbox(
+                            value=True,
+                            label="Measure prompt tokens",
+                            info="Scores every prompt token during the same pass that warms the cache.",
+                        )
+
+        nav.change(
+            show_page, nav, [conversation_pane, chat_page, models_page, settings_page]
         )
 
         # Every handler that can change what is on disk or in memory rescans
