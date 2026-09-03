@@ -6,6 +6,7 @@ import contextlib
 import gc
 import json
 import re
+import shutil
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -402,6 +403,49 @@ def _cached_model(folder: Path, root: Path) -> CachedModel | None:
         dtype=dtype,
         path=folder,
     )
+
+
+# The orders My Models can be listed in. "Newest first" is the scan's own
+# order; the rest re-sort the same entries, ties broken by ID so the list is
+# stable across rescans.
+MODEL_SORT_ORDERS = ("Newest first", "Name", "Largest first", "Smallest first")
+DEFAULT_MODEL_SORT = MODEL_SORT_ORDERS[0]
+
+_SORT_KEYS: dict[str, Callable[[CachedModel], tuple]] = {
+    "Newest first": lambda entry: (-(entry.updated or 0), entry.model_id),
+    "Name": lambda entry: (entry.model_id.lower(), entry.model_id),
+    "Largest first": lambda entry: (-entry.size_bytes, entry.model_id),
+    "Smallest first": lambda entry: (entry.size_bytes, entry.model_id),
+}
+
+
+def sort_cached_models(models: list[CachedModel], order: str | None) -> list[CachedModel]:
+    """``models`` in one of :data:`MODEL_SORT_ORDERS`; an unknown order is the default."""
+
+    key = _SORT_KEYS.get(order or "", _SORT_KEYS[DEFAULT_MODEL_SORT])
+    return sorted(models, key=key)
+
+
+def remove_cached_model(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
+    """Delete everything the cache holds for ``model_id`` and say what was there.
+
+    Removes the model's ``models--org--name`` folder and the lock folder the
+    hub keeps beside it under ``.locks``, so a later download starts clean.
+    Returns the :class:`CacheStatus` measured before deletion, which is the
+    space freed. A model with nothing on disk raises ``FileNotFoundError``;
+    a folder that cannot be deleted raises the ``OSError`` that stopped it,
+    with whatever was already removed gone.
+    """
+
+    checked_id = validate_model_id(model_id)
+    root = cache_root(cache_dir)
+    folder = cache_folder(checked_id, root)
+    if not folder.is_dir():
+        raise FileNotFoundError(f"Nothing for {checked_id} is in the cache at {root}.")
+    status = cache_status(checked_id, root)
+    shutil.rmtree(folder)
+    shutil.rmtree(root / ".locks" / folder.name, ignore_errors=True)
+    return status
 
 
 # How many hub search results are shown. The hub sorts them by downloads, so

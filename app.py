@@ -41,6 +41,8 @@ from conversation import (
     user_index_at_or_before,
 )
 from model_runtime import (
+    DEFAULT_MODEL_SORT,
+    MODEL_SORT_ORDERS,
     MODEL_WEIGHTS,
     PROMPT_SCORE_LIMIT,
     CachedModel,
@@ -54,7 +56,9 @@ from model_runtime import (
     format_bytes,
     format_count,
     list_cached_models,
+    remove_cached_model,
     search_hub_models,
+    sort_cached_models,
 )
 from token_metrics import (
     COLOR_SCALES,
@@ -536,10 +540,10 @@ def my_models_summary(models: list[CachedModel]) -> str:
     return f"{count} · {total} on disk in {root}"
 
 
-def refresh_my_models(selected: str | None):
+def refresh_my_models(selected: str | None, order: str | None = DEFAULT_MODEL_SORT):
     """Rescan the cache; keep the selection, or fall back to the loaded model."""
 
-    models = list_cached_models()
+    models = sort_cached_models(list_cached_models(), order)
     ids = [entry.model_id for entry in models]
     if selected not in ids:
         selected = MANAGER.model_id if MANAGER.model_id in ids else None
@@ -564,6 +568,101 @@ def select_my_model(selected: str | None):
     if entry is None:
         return gr.skip(), f"`{selected}` is no longer in the cache. Press **Refresh**."
     return gr.update(value=selected), describe_cached_model(entry)
+
+
+NO_MODEL_TO_MANAGE = "Select a model under **My Models** first."
+
+
+def redownload_my_model(selected: str | None, hf_token: str):
+    """Fetch whatever the chosen cached model still lacks.
+
+    ``snapshot_download`` skips finished files and resumes partial ones, so
+    for an incomplete model this fetches the rest, and for a complete one it
+    checks the hub for updated files. Remove the model first to start over.
+    """
+
+    if not selected:
+        yield status_card("Nothing to redownload", NO_MODEL_TO_MANAGE)
+        return
+    yield from download_model(selected, hf_token)
+
+
+def removal_refusal(selected: str | None) -> tuple[str, str] | None:
+    """Why ``selected`` cannot be removed right now, as a card, or None."""
+
+    if not selected:
+        return "Nothing to remove", NO_MODEL_TO_MANAGE
+    if MANAGER.model_id == selected:
+        return (
+            "Model in use",
+            f"`{selected}` is loaded in memory. **Unload** it before removing its files.",
+        )
+    if selected in MANAGER.active_downloads:
+        return (
+            "Still downloading",
+            f"`{selected}` is being downloaded. Wait for it to finish, then remove it.",
+        )
+    return None
+
+
+def ask_remove_my_model(selected: str | None):
+    """Show the confirmation for removing the chosen model, or say why not."""
+
+    refusal = removal_refusal(selected)
+    if refusal is not None:
+        return status_card(*refusal), gr.update(visible=False), ""
+    entry = next(
+        (entry for entry in list_cached_models() if entry.model_id == selected), None
+    )
+    if entry is None:
+        return (
+            status_card("Nothing to remove", f"`{selected}` is no longer in the cache."),
+            gr.update(visible=False),
+            "",
+        )
+    question = (
+        f"Remove `{selected}` ({format_bytes(entry.size_bytes)}) from disk? "
+        "This deletes its folder from the Hugging Face cache and cannot be undone."
+    )
+    return gr.skip(), gr.update(visible=True), question
+
+
+def remove_my_model(selected: str | None):
+    """Delete the chosen model's cache folder and report the space freed."""
+
+    hidden = gr.update(visible=False)
+    refusal = removal_refusal(selected)
+    if refusal is not None:
+        return status_card(*refusal), hidden
+    try:
+        freed = remove_cached_model(selected)
+    except FileNotFoundError:
+        return (
+            status_card("Nothing to remove", f"`{selected}` is no longer in the cache."),
+            hidden,
+        )
+    except (OSError, ValueError) as error:
+        return (
+            status_card(
+                "Could not remove model",
+                f"Removing `{selected}` failed: {html.escape(str(error))}",
+                "error",
+            ),
+            hidden,
+        )
+    return (
+        status_card(
+            "Model removed",
+            f"Removed `{selected}` from the Hugging Face cache, "
+            f"freeing {format_bytes(freed.total_bytes)}.",
+            "success",
+        ),
+        hidden,
+    )
+
+
+def hide_remove_confirm():
+    return gr.update(visible=False)
 
 
 def hub_model_label(result: HubModel) -> str:
@@ -2832,6 +2931,20 @@ CSS = """
 #side-pane .prose h3 { font-size: 0.95rem; margin-bottom: 0.2rem; }
 .model-list .wrap { flex-direction: column; align-items: stretch; gap: 0.2rem; }
 .model-list label { font-size: 0.82rem; line-height: 1.3; word-break: break-word; }
+/* Gradio stamps each option's text on its label as data-testid, which is the
+   only hook a Radio gives CSS. An incomplete model's label ends in
+   "· incomplete", so it is tinted amber in both themes. */
+.model-list label[data-testid*="· incomplete"] { border-color: #d97706; }
+.model-list label[data-testid*="· incomplete"]:not(.selected) {
+  background: rgba(217, 119, 6, 0.09);
+}
+.model-list label[data-testid*="· incomplete"] span { color: #b45309; }
+.dark .model-list label[data-testid*="· incomplete"] span { color: #fbbf24; }
+.model-sort label span { font-size: 0.8rem; }
+.remove-confirm {
+  border: 1px solid #d97706; border-radius: 8px; padding: 0.4rem 0.6rem;
+  background: rgba(217, 119, 6, 0.09);
+}
 .model-detail { font-size: 0.85rem; }
 .model-detail p, .model-detail ul, .model-detail li { margin: 0.15rem 0; }
 .model-detail code { word-break: break-all; }
@@ -3018,6 +3131,12 @@ def build_app() -> gr.Blocks:
 
             with gr.Accordion("My Models", open=True):
                 my_models_summary = gr.Markdown("", elem_classes=["scale-caption"])
+                sort_models = gr.Dropdown(
+                    choices=list(MODEL_SORT_ORDERS),
+                    value=DEFAULT_MODEL_SORT,
+                    label="Sort by",
+                    elem_classes=["model-sort"],
+                )
                 my_models = gr.Radio(
                     choices=[],
                     label="Downloaded models",
@@ -3025,7 +3144,17 @@ def build_app() -> gr.Blocks:
                     elem_classes=["model-list"],
                 )
                 my_model_detail = gr.Markdown("", elem_classes=["model-detail"])
-                refresh_models_button = gr.Button("↻ Refresh", size="sm")
+                with gr.Row():
+                    redownload_button = gr.Button("⬇️ Redownload", size="sm")
+                    remove_button = gr.Button("🗑️ Remove", size="sm")
+                    refresh_models_button = gr.Button("↻ Refresh", size="sm")
+                with gr.Column(visible=False, elem_classes=["remove-confirm"]) as remove_confirm:
+                    remove_question = gr.Markdown("", elem_classes=["model-detail"])
+                    with gr.Row():
+                        confirm_remove_button = gr.Button(
+                            "Remove from disk", variant="stop", size="sm"
+                        )
+                        cancel_remove_button = gr.Button("Cancel", size="sm")
 
             with gr.Accordion("Model search", open=False):
                 search_query = gr.Textbox(
@@ -3278,24 +3407,41 @@ def build_app() -> gr.Blocks:
 
         # Every handler that can change what is on disk or in memory rescans
         # the cache afterwards, so My Models never shows a stale list.
+        models_inputs = [my_models, sort_models]
         models_outputs = [my_models, my_model_detail, my_models_summary]
         download_button.click(
             download_model, [model_id, hf_token], model_status
-        ).then(refresh_my_models, my_models, models_outputs)
+        ).then(refresh_my_models, models_inputs, models_outputs)
         download_load_button.click(
             download_and_load_model, [model_id, hf_token], model_status
-        ).then(refresh_my_models, my_models, models_outputs)
+        ).then(refresh_my_models, models_inputs, models_outputs)
         cached_button.click(load_cached_model, model_id, model_status).then(
-            refresh_my_models, my_models, models_outputs
+            refresh_my_models, models_inputs, models_outputs
         )
         unload_button.click(unload_model, outputs=model_status).then(
-            refresh_my_models, my_models, models_outputs
+            refresh_my_models, models_inputs, models_outputs
         )
-        refresh_models_button.click(refresh_my_models, my_models, models_outputs)
-        demo.load(refresh_my_models, my_models, models_outputs)
+        refresh_models_button.click(refresh_my_models, models_inputs, models_outputs)
+        sort_models.input(refresh_my_models, models_inputs, models_outputs)
+        demo.load(refresh_my_models, models_inputs, models_outputs)
         # .input rather than .change: the refresh above also sets the radio,
         # and a .change listener would rewrite the model ID box on each rescan.
         my_models.input(select_my_model, my_models, [model_id, my_model_detail])
+        # A pending removal is about the model that was selected when it was
+        # asked for, so changing the selection withdraws it.
+        my_models.input(hide_remove_confirm, None, remove_confirm)
+        redownload_button.click(
+            redownload_my_model, [my_models, hf_token], model_status
+        ).then(refresh_my_models, models_inputs, models_outputs)
+        remove_button.click(
+            ask_remove_my_model,
+            my_models,
+            [model_status, remove_confirm, remove_question],
+        )
+        confirm_remove_button.click(
+            remove_my_model, my_models, [model_status, remove_confirm]
+        ).then(refresh_my_models, models_inputs, models_outputs)
+        cancel_remove_button.click(hide_remove_confirm, None, remove_confirm)
 
         search_outputs = [search_results, search_detail, search_results_state]
         search_button.click(search_models, [search_query, hf_token], search_outputs)

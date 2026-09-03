@@ -15,10 +15,13 @@ from model_runtime import (
     MODEL_WEIGHTS,
     CachedModel,
     CacheStatus,
+    DownloadProgress,
     HubModel,
     ModelManager,
     format_count,
     list_cached_models,
+    remove_cached_model,
+    sort_cached_models,
 )
 
 COMMIT = "d97e442d7cc678210054dbcc9b440894d62c89a4"
@@ -174,6 +177,39 @@ class CachedModelListTests(unittest.TestCase):
         self.assertEqual(listed, ["org/newer", "org/older"])
 
 
+class RemoveCachedModelTests(unittest.TestCase):
+    """Removing a model deletes its folder and nothing else."""
+
+    def test_the_folder_and_its_lock_are_removed_and_the_size_reported(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = lay_out(root, OLMO, {"config.json": b"{}", "model.safetensors": b"x" * 99})
+            (folder / "blobs" / "shard.incomplete").write_bytes(b"y" * 10)
+            lock = Path(root) / ".locks" / folder.name
+            lock.mkdir(parents=True)
+            (lock / "blob.lock").write_text("")
+            other = lay_out(root, "org/other", {"config.json": b"{}"})
+
+            freed = remove_cached_model(OLMO, Path(root))
+
+            self.assertFalse(folder.exists())
+            self.assertFalse(lock.exists())
+            self.assertTrue(other.is_dir())
+            self.assertTrue((Path(root) / ".locks").is_dir())
+        self.assertEqual(freed.total_bytes, 2 + 99 + 10)
+        self.assertEqual(freed.partial_files, 1)
+
+    def test_a_model_that_is_not_on_disk_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(FileNotFoundError):
+                remove_cached_model(OLMO, Path(root))
+
+    def test_a_malformed_id_is_refused_before_anything_is_touched(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(ValueError):
+                remove_cached_model("../../etc", Path(root))
+            self.assertEqual(list(Path(root).iterdir()), [])
+
+
 def cached(model_id: str, **overrides) -> CachedModel:
     fields = dict(
         model_id=model_id,
@@ -197,6 +233,43 @@ PARTIAL = cached(
     architecture=None,
     dtype=None,
 )
+
+
+class SortCachedModelsTests(unittest.TestCase):
+    OLD_SMALL = cached("zeta/old-small", updated=1.0, status=CacheStatus(cached_bytes=10))
+    NEW_LARGE = cached("Alpha/new-large", updated=3.0, status=CacheStatus(cached_bytes=300))
+    MID = cached("mid/model", updated=2.0, status=CacheStatus(cached_bytes=20))
+    MODELS = [OLD_SMALL, NEW_LARGE, MID]
+
+    def ids(self, order):
+        return [entry.model_id for entry in sort_cached_models(self.MODELS, order)]
+
+    def test_each_order_lists_the_models_its_way(self):
+        self.assertEqual(
+            self.ids("Newest first"), ["Alpha/new-large", "mid/model", "zeta/old-small"]
+        )
+        self.assertEqual(self.ids("Name"), ["Alpha/new-large", "mid/model", "zeta/old-small"])
+        self.assertEqual(
+            self.ids("Largest first"), ["Alpha/new-large", "mid/model", "zeta/old-small"]
+        )
+        self.assertEqual(
+            self.ids("Smallest first"), ["zeta/old-small", "mid/model", "Alpha/new-large"]
+        )
+
+    def test_name_order_ignores_case(self):
+        models = [cached("b/one"), cached("A/two"), cached("a/one")]
+        self.assertEqual(
+            [e.model_id for e in sort_cached_models(models, "Name")],
+            ["a/one", "A/two", "b/one"],
+        )
+
+    def test_an_unknown_order_falls_back_to_newest_first(self):
+        self.assertEqual(self.ids(None), self.ids("Newest first"))
+        self.assertEqual(self.ids("sideways"), self.ids("Newest first"))
+
+    def test_the_input_is_left_alone(self):
+        sort_cached_models(self.MODELS, "Name")
+        self.assertEqual(self.MODELS, [self.OLD_SMALL, self.NEW_LARGE, self.MID])
 
 
 class MyModelsPaneTests(unittest.TestCase):
@@ -230,6 +303,26 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertIn("2 models", summary)
         self.assertIn("15.0 GB", summary)
         self.assertIn("/cache", summary)
+
+    def test_the_list_follows_the_chosen_sort_order(self):
+        self.entries = [cached("b/big"), PARTIAL, cached("a/small", status=CacheStatus(cached_bytes=1))]
+
+        by_name, _, _ = app.refresh_my_models(None, "Name")
+        by_size, _, _ = app.refresh_my_models(None, "Largest first")
+        smallest, _, _ = app.refresh_my_models(None, "Smallest first")
+
+        self.assertEqual([v for _, v in by_name["choices"]], ["a/small", "b/big", "org/partial"])
+        self.assertEqual([v for _, v in by_size["choices"]], ["b/big", "org/partial", "a/small"])
+        self.assertEqual([v for _, v in smallest["choices"]], ["a/small", "org/partial", "b/big"])
+
+    def test_an_incomplete_label_ends_in_the_word_the_stylesheet_looks_for(self):
+        # The CSS tints options whose label carries "· incomplete", the only
+        # hook Gradio's Radio gives a stylesheet.
+        radio, _, _ = app.refresh_my_models(None)
+        labels = dict((v, k) for k, v in radio["choices"])
+        self.assertIn("· incomplete", labels["org/partial"])
+        self.assertNotIn("incomplete", labels[OLMO])
+        self.assertIn('[data-testid*="· incomplete"]', app.CSS)
 
     def test_a_refresh_keeps_the_selection(self):
         radio, detail, _ = app.refresh_my_models("org/partial")
@@ -283,6 +376,119 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertEqual(
             app.select_my_model(None), (gr.skip(), app.NO_CACHED_MODEL_SELECTED)
         )
+
+
+class ManageMyModelsTests(unittest.TestCase):
+    """Redownloading and removing a model from My Models."""
+
+    def setUp(self):
+        self.entries = [cached(OLMO), PARTIAL]
+        self.manager = ModelManager()
+        self.removed = []
+        originals = (
+            app.MANAGER, app.list_cached_models, app.remove_cached_model, app.download_model
+        )
+        app.MANAGER = self.manager
+        app.list_cached_models = lambda: list(self.entries)
+        app.remove_cached_model = self.remove
+        app.download_model = self.download
+        self.addCleanup(
+            lambda: setattr(app, "MANAGER", originals[0])
+            or setattr(app, "list_cached_models", originals[1])
+            or setattr(app, "remove_cached_model", originals[2])
+            or setattr(app, "download_model", originals[3])
+        )
+
+    def remove(self, model_id):
+        self.removed.append(model_id)
+        return PARTIAL.status
+
+    def download(self, model_id, hf_token):
+        yield f"downloading {model_id} with {hf_token!r}"
+
+    def test_redownload_resumes_the_selected_model(self):
+        frames = list(app.redownload_my_model("org/partial", "tok"))
+        self.assertEqual(frames, ["downloading org/partial with 'tok'"])
+
+    def test_redownload_with_nothing_selected_says_so(self):
+        (card,) = list(app.redownload_my_model(None, ""))
+        self.assertIn("Nothing to redownload", card)
+        self.assertIn("Select a model", card)
+
+    def test_asking_to_remove_shows_the_question_with_the_size(self):
+        status, confirm, question = app.ask_remove_my_model("org/partial")
+
+        self.assertEqual(status, gr.skip())
+        self.assertTrue(confirm["visible"])
+        self.assertIn("org/partial", question)
+        self.assertIn("150 B", question)
+        self.assertIn("cannot be undone", question)
+
+    def test_asking_with_nothing_selected_is_refused(self):
+        status, confirm, question = app.ask_remove_my_model(None)
+
+        self.assertIn("Nothing to remove", status)
+        self.assertFalse(confirm["visible"])
+        self.assertEqual(question, "")
+
+    def test_the_loaded_model_cannot_be_removed(self):
+        self.manager.model_id = OLMO
+
+        status, confirm, _ = app.ask_remove_my_model(OLMO)
+        self.assertIn("Unload", status)
+        self.assertFalse(confirm["visible"])
+
+        status, confirm = app.remove_my_model(OLMO)
+        self.assertIn("Unload", status)
+        self.assertFalse(confirm["visible"])
+        self.assertEqual(self.removed, [])
+
+    def test_a_model_being_downloaded_cannot_be_removed(self):
+        self.manager.active_downloads["org/partial"] = DownloadProgress()
+
+        status, confirm, _ = app.ask_remove_my_model("org/partial")
+        self.assertIn("Still downloading", status)
+        self.assertFalse(confirm["visible"])
+
+        status, _ = app.remove_my_model("org/partial")
+        self.assertIn("Still downloading", status)
+        self.assertEqual(self.removed, [])
+
+    def test_a_model_that_left_the_cache_is_reported_without_a_question(self):
+        status, confirm, _ = app.ask_remove_my_model("gone/model")
+
+        self.assertIn("no longer in the cache", status)
+        self.assertFalse(confirm["visible"])
+
+    def test_confirming_removes_the_model_and_reports_the_space_freed(self):
+        status, confirm = app.remove_my_model("org/partial")
+
+        self.assertEqual(self.removed, ["org/partial"])
+        self.assertIn("Model removed", status)
+        self.assertIn("org/partial", status)
+        self.assertIn("150 B", status)
+        self.assertFalse(confirm["visible"])
+
+    def test_a_removal_that_fails_is_reported(self):
+        def refuse(model_id):
+            raise PermissionError(13, "Permission denied: <blobs>")
+
+        app.remove_cached_model = refuse
+
+        status, confirm = app.remove_my_model("org/partial")
+
+        self.assertIn("Could not remove model", status)
+        self.assertIn("Permission denied: &lt;blobs&gt;", status)
+        self.assertFalse(confirm["visible"])
+
+    def test_a_model_gone_before_confirming_is_reported(self):
+        def gone(model_id):
+            raise FileNotFoundError(model_id)
+
+        app.remove_cached_model = gone
+
+        status, _ = app.remove_my_model("org/partial")
+        self.assertIn("no longer in the cache", status)
 
 
 INSTRUCT = HubModel(
@@ -435,6 +641,7 @@ class SidePaneLayoutTests(unittest.TestCase):
         "Hugging Face model ID",
         "Hugging Face token (optional)",
         "Downloaded models",
+        "Sort by",
         "Search Hugging Face",
         "Search results",
         "System prompt",
@@ -500,9 +707,24 @@ class SidePaneLayoutTests(unittest.TestCase):
         ]
 
     def test_every_model_change_rescans_the_cache(self):
-        # Download, download-and-load, load cached, unload, the refresh
-        # button, and the page load: each ends in a rescan.
-        self.assertEqual(len(self.listeners("refresh_my_models")), 6)
+        # Download, download-and-load, load cached, unload, redownload,
+        # confirmed removal, the refresh button, a new sort order, and the
+        # page load: each ends in a rescan.
+        self.assertEqual(len(self.listeners("refresh_my_models")), 9)
+
+    def test_removal_asks_before_deleting(self):
+        # The Remove button only opens the question; deleting is the
+        # confirm button's job, and choosing another model withdraws it.
+        (ask,) = self.listeners("ask_remove_my_model")
+        (remove,) = self.listeners("remove_my_model")
+        buttons = {
+            self.demo.blocks[block_id].value: fn
+            for fn in (ask, remove)
+            for block_id, _ in fn.targets
+        }
+        self.assertIs(buttons["🗑️ Remove"], ask)
+        self.assertIs(buttons["Remove from disk"], remove)
+        self.assertEqual(len(self.listeners("hide_remove_confirm")), 2)
 
     def test_choosing_a_model_writes_the_id_box(self):
         box = self.labelled("Hugging Face model ID")
