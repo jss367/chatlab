@@ -451,6 +451,26 @@ def cuda_memory(torch=None) -> tuple[int | None, int | None]:
     return total, free
 
 
+def _sum_known(*figures: int | None) -> int | None:
+    known = [figure for figure in figures if figure is not None]
+    return sum(known) if known else None
+
+
+def offload_pool(
+    gpu: tuple[int | None, int | None], host: tuple[int | None, int | None]
+) -> tuple[int | None, int | None]:
+    """Total and free memory a CUDA load can spread over: the cards plus the host.
+
+    ``device_map="auto"`` fills the graphics cards first and places whatever
+    is left on the CPU, so a model that outgrows the cards still loads when
+    the machine's own memory can hold the rest. A side that reports nothing
+    is left out of the sum rather than counted as empty; both ``None`` when
+    neither side answers.
+    """
+
+    return _sum_known(gpu[0], host[0]), _sum_known(gpu[1], host[1])
+
+
 def check_memory_for_load(
     model_id: str,
     estimated_bytes: int,
@@ -462,7 +482,8 @@ def check_memory_for_load(
     """Refuse a load that would not leave ``headroom`` beside the weights.
 
     ``pool`` names where the figures come from in the message: the machine's
-    own memory, or the GPU when the weights go there directly.
+    own memory, or the GPU plus the machine when the weights may spread over
+    both.
     """
 
     needed = estimated_bytes + headroom
@@ -1902,11 +1923,12 @@ class ModelManager:
     ) -> None:
         """Refuse a load that cannot fit, before any weight is read.
 
-        On CUDA the weights stream straight onto the graphics cards, so their
-        memory is what must fit; on Metal the GPU shares the machine's memory,
-        and on the CPU it is the machine's memory outright. A snapshot whose
-        weights cannot be measured is let through: the loader will give its
-        own, more specific error.
+        On CUDA the weights fill the graphics cards and ``device_map="auto"``
+        places the rest on the CPU, so the cards plus the machine's memory is
+        what must fit; on Metal the GPU shares the machine's memory, and on
+        the CPU it is the machine's memory outright. A snapshot whose weights
+        cannot be measured is let through: the loader will give its own, more
+        specific error.
         """
 
         weight_bytes = snapshot_weight_bytes(local_path)
@@ -1915,8 +1937,8 @@ class ModelManager:
         _architecture, checkpoint_dtype = _read_config(local_path)
         estimated = estimate_loaded_bytes(weight_bytes, checkpoint_dtype, load_dtype)
         if backend == "cuda":
-            total, available = cuda_memory()
-            pool = "the GPU"
+            total, available = offload_pool(cuda_memory(), system_memory())
+            pool = "the GPU plus this machine"
         else:
             total, available = system_memory()
             pool = "this machine"

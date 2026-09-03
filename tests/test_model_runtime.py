@@ -1652,19 +1652,46 @@ class MemoryGuardTests(unittest.TestCase):
         with self.assertRaises(InsufficientMemoryError):
             self._check_with(snapshot, "cpu", host=(2048, 2048), gpu=(None, None))
 
-    def test_a_cuda_load_is_judged_by_the_graphics_cards_not_the_host(self):
+    def test_the_offload_pool_is_the_cards_plus_the_host(self):
+        from model_runtime import offload_pool
+
+        gpu, host = (8 * self.GB, 6 * self.GB), (32 * self.GB, 20 * self.GB)
+        self.assertEqual(offload_pool(gpu, host), (40 * self.GB, 26 * self.GB))
+        # A side that reports nothing is left out, not counted as empty.
+        self.assertEqual(offload_pool(gpu, (None, None)), gpu)
+        self.assertEqual(offload_pool((None, None), host), host)
+        self.assertEqual(offload_pool((8 * self.GB, None), (None, 20 * self.GB)), (8 * self.GB, 20 * self.GB))
+        self.assertEqual(offload_pool((None, None), (None, None)), (None, None))
+
+    def test_a_cuda_model_larger_than_the_cards_may_spill_onto_the_host(self):
+        from model_runtime import InsufficientMemoryError, check_memory_for_load, offload_pool
+
+        # A 12 GB model on an 8 GB card: device_map="auto" puts the rest on
+        # the CPU, and a 32 GB host has room for it.
+        total, available = offload_pool((8 * self.GB, 8 * self.GB), (32 * self.GB, 28 * self.GB))
+        check_memory_for_load("org/mid", 12 * self.GB, total, available, pool="the GPU plus this machine")
+        # More than the two together can hold is still refused.
+        with self.assertRaises(InsufficientMemoryError) as caught:
+            check_memory_for_load("org/big", 44 * self.GB, total, available, pool="the GPU plus this machine")
+        self.assertIn("the GPU plus this machine has 40.0 GB in total", str(caught.exception))
+
+    def test_a_cuda_load_is_judged_by_the_cards_and_the_host_together(self):
         from model_runtime import InsufficientMemoryError
 
         # A few KB of weights plus the 4 GB of headroom: more than a 2 GB host
-        # can hold, but comfortable on 8 GB of graphics memory.
+        # can hold alone, but comfortable once 8 GB of graphics memory joins it.
         snapshot = self._snapshot({"model.safetensors": 4096})
         (snapshot / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
         host = (2 * self.GB, 1 * self.GB)
         self._check_with(snapshot, "cuda", host=host, gpu=(8 * self.GB, 8 * self.GB))
         with self.assertRaises(InsufficientMemoryError) as caught:
-            self._check_with(snapshot, "cuda", host=host, gpu=(4 * self.GB, 4 * self.GB))
-        self.assertIn("the GPU has 4.0 GB in total", str(caught.exception))
-        # Metal shares the machine's memory, so the host figures still rule.
+            self._check_with(snapshot, "cuda", host=host, gpu=(1 * self.GB, 1 * self.GB))
+        self.assertIn("the GPU plus this machine has 3.0 GB in total", str(caught.exception))
+        # Without a host figure the cards stand alone, and the other way round.
+        self._check_with(snapshot, "cuda", host=(None, None), gpu=(8 * self.GB, 8 * self.GB))
+        with self.assertRaises(InsufficientMemoryError):
+            self._check_with(snapshot, "cuda", host=host, gpu=(None, None))
+        # Metal shares the machine's memory, so the host figures alone rule.
         with self.assertRaises(InsufficientMemoryError):
             self._check_with(snapshot, "mps", host=host, gpu=(8 * self.GB, 8 * self.GB))
 
