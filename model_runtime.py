@@ -1133,11 +1133,15 @@ class ModelManager:
         # I am" happen as one step: two handlers asking at the same instant
         # must come away with one download between them, not one each.
         self._downloads_lock = threading.Lock()
-        self._lock = threading.RLock()
-        # A separate, non-reentrant flag for "a generation is running right
-        # now". The model lock cannot answer that question: it is reentrant
-        # (load() nests unload() inside it), so a test on the holding thread -
-        # and, more importantly, any future nested use - would see it as free.
+        # A generation holds this lock across streaming yields. Gradio may run
+        # the next step (or close the generator) on a different worker thread,
+        # so this cannot be an RLock: its owner check would reject that second
+        # thread's release and leave the model permanently wedged. A plain Lock
+        # still excludes loads, unloads, scoring, and inspection, but permits
+        # the worker that resumes the stream to release it.
+        self._lock = threading.Lock()
+        # A separate flag records "a generation is running right now" without
+        # making callers contend for the model lock just to ask.
         #
         # A plain Lock, deliberately: it is acquired and released by whichever
         # worker thread happens to be running the generator at the time, and
@@ -1284,7 +1288,7 @@ class ModelManager:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         with self._lock:
-            self.unload()
+            self._unload_locked(torch)
             tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
 
             if torch.cuda.is_available():
@@ -1329,16 +1333,21 @@ class ModelManager:
         import torch
 
         with self._lock:
-            self.model = None
-            self.tokenizer = None
-            self.model_id = None
-            self.local_path = None
-            self.device_name = None
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            if torch.backends.mps.is_available():
-                torch.mps.empty_cache()
+            self._unload_locked(torch)
+
+    def _unload_locked(self, torch) -> None:
+        """Clear the loaded model while the caller holds ``_lock``."""
+
+        self.model = None
+        self.tokenizer = None
+        self.model_id = None
+        self.local_path = None
+        self.device_name = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 
     def _prompt_token_ids(self, messages: list[dict]) -> tuple[list[int], bool]:
         """Token ids for a chat prompt, and whether it prefills ``<think>``.
