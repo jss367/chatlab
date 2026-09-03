@@ -210,6 +210,55 @@ class RemoveCachedModelTests(unittest.TestCase):
             self.assertEqual(list(Path(root).iterdir()), [])
 
 
+class ManagerRemoveTests(unittest.TestCase):
+    """The manager deletes a model only when nothing of its own is using it."""
+
+    def setUp(self):
+        self.root = tempfile.TemporaryDirectory()
+        self.addCleanup(self.root.cleanup)
+        self.folder = lay_out(
+            self.root.name, OLMO, {"config.json": b"{}", "model.safetensors": b"x" * 10}
+        )
+        self.manager = ModelManager()
+
+    def test_an_idle_model_is_removed_and_the_locks_released(self):
+        freed = self.manager.remove(OLMO, Path(self.root.name))
+
+        self.assertFalse(self.folder.exists())
+        self.assertEqual(freed.total_bytes, 12)
+        self.assertFalse(self.manager._lock.locked())
+        self.assertFalse(self.manager._downloads_lock.locked())
+
+    def test_the_loaded_model_is_refused(self):
+        self.manager.model_id = OLMO
+        with self.assertRaises(model_runtime.ModelLoaded):
+            self.manager.remove(OLMO, Path(self.root.name))
+        self.assertTrue(self.folder.is_dir())
+        self.assertFalse(self.manager._lock.locked())
+
+    def test_a_model_being_downloaded_is_refused(self):
+        self.manager.active_downloads[OLMO] = DownloadProgress()
+        with self.assertRaises(model_runtime.ModelDownloading):
+            self.manager.remove(OLMO, Path(self.root.name))
+        self.assertTrue(self.folder.is_dir())
+        self.assertFalse(self.manager._downloads_lock.locked())
+
+    def test_a_busy_manager_is_refused_without_waiting(self):
+        self.manager._lock.acquire()
+        self.addCleanup(self.manager._lock.release)
+        with self.assertRaises(model_runtime.ModelBusy):
+            self.manager.remove(OLMO, Path(self.root.name))
+        self.assertTrue(self.folder.is_dir())
+
+    def test_every_refusal_is_a_model_in_use(self):
+        for error in (model_runtime.ModelLoaded, model_runtime.ModelDownloading, model_runtime.ModelBusy):
+            self.assertTrue(issubclass(error, model_runtime.ModelInUse))
+
+    def test_a_malformed_id_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.manager.remove("nonsense", Path(self.root.name))
+
+
 def cached(model_id: str, **overrides) -> CachedModel:
     fields = dict(
         model_id=model_id,
@@ -386,20 +435,25 @@ class ManageMyModelsTests(unittest.TestCase):
         self.manager = ModelManager()
         self.removed = []
         originals = (
-            app.MANAGER, app.list_cached_models, app.remove_cached_model, app.download_model
+            app.MANAGER,
+            app.list_cached_models,
+            model_runtime.remove_cached_model,
+            app.download_model,
         )
         app.MANAGER = self.manager
         app.list_cached_models = lambda: list(self.entries)
-        app.remove_cached_model = self.remove
+        # The manager deletes through the module-level function, so that is
+        # what stands in: the manager's own checks stay real.
+        model_runtime.remove_cached_model = self.remove
         app.download_model = self.download
         self.addCleanup(
             lambda: setattr(app, "MANAGER", originals[0])
             or setattr(app, "list_cached_models", originals[1])
-            or setattr(app, "remove_cached_model", originals[2])
+            or setattr(model_runtime, "remove_cached_model", originals[2])
             or setattr(app, "download_model", originals[3])
         )
 
-    def remove(self, model_id):
+    def remove(self, model_id, cache_dir=None):
         self.removed.append(model_id)
         return PARTIAL.status
 
@@ -454,6 +508,19 @@ class ManageMyModelsTests(unittest.TestCase):
         self.assertIn("Still downloading", status)
         self.assertEqual(self.removed, [])
 
+    def test_a_model_busy_in_memory_cannot_be_removed(self):
+        # A load holds the model lock until ``from_pretrained`` returns, and
+        # ``model_id`` is only assigned after: the lock is the real guard.
+        self.manager._lock.acquire()
+        self.addCleanup(self.manager._lock.release)
+
+        status, confirm = app.remove_my_model("org/partial")
+
+        self.assertIn("Model busy", status)
+        self.assertIn("idle", status)
+        self.assertFalse(confirm["visible"])
+        self.assertEqual(self.removed, [])
+
     def test_a_model_that_left_the_cache_is_reported_without_a_question(self):
         status, confirm, _ = app.ask_remove_my_model("gone/model")
 
@@ -470,10 +537,10 @@ class ManageMyModelsTests(unittest.TestCase):
         self.assertFalse(confirm["visible"])
 
     def test_a_removal_that_fails_is_reported(self):
-        def refuse(model_id):
+        def refuse(model_id, cache_dir=None):
             raise PermissionError(13, "Permission denied: <blobs>")
 
-        app.remove_cached_model = refuse
+        model_runtime.remove_cached_model = refuse
 
         status, confirm = app.remove_my_model("org/partial")
 
@@ -482,10 +549,10 @@ class ManageMyModelsTests(unittest.TestCase):
         self.assertFalse(confirm["visible"])
 
     def test_a_model_gone_before_confirming_is_reported(self):
-        def gone(model_id):
+        def gone(model_id, cache_dir=None):
             raise FileNotFoundError(model_id)
 
-        app.remove_cached_model = gone
+        model_runtime.remove_cached_model = gone
 
         status, _ = app.remove_my_model("org/partial")
         self.assertIn("no longer in the cache", status)

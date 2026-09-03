@@ -49,14 +49,16 @@ from model_runtime import (
     CacheStatus,
     DownloadSnapshot,
     HubModel,
+    ModelBusy,
     ModelChanged,
+    ModelDownloading,
+    ModelLoaded,
     ModelManager,
     cache_root,
     cache_status,
     format_bytes,
     format_count,
     list_cached_models,
-    remove_cached_model,
     search_hub_models,
     sort_cached_models,
 )
@@ -587,21 +589,34 @@ def redownload_my_model(selected: str | None, hf_token: str):
     yield from download_model(selected, hf_token)
 
 
+def loaded_refusal(selected: str) -> tuple[str, str]:
+    return (
+        "Model in use",
+        f"`{selected}` is loaded in memory. **Unload** it before removing its files.",
+    )
+
+
+def downloading_refusal(selected: str) -> tuple[str, str]:
+    return (
+        "Still downloading",
+        f"`{selected}` is being downloaded. Wait for it to finish, then remove it.",
+    )
+
+
 def removal_refusal(selected: str | None) -> tuple[str, str] | None:
-    """Why ``selected`` cannot be removed right now, as a card, or None."""
+    """Why ``selected`` cannot be removed right now, as a card, or None.
+
+    An early answer for the confirmation step only. The deletion itself goes
+    through :meth:`ModelManager.remove`, which makes the same checks under
+    the manager's locks; this look is not atomic with anything.
+    """
 
     if not selected:
         return "Nothing to remove", NO_MODEL_TO_MANAGE
     if MANAGER.model_id == selected:
-        return (
-            "Model in use",
-            f"`{selected}` is loaded in memory. **Unload** it before removing its files.",
-        )
+        return loaded_refusal(selected)
     if selected in MANAGER.active_downloads:
-        return (
-            "Still downloading",
-            f"`{selected}` is being downloaded. Wait for it to finish, then remove it.",
-        )
+        return downloading_refusal(selected)
     return None
 
 
@@ -631,11 +646,23 @@ def remove_my_model(selected: str | None):
     """Delete the chosen model's cache folder and report the space freed."""
 
     hidden = gr.update(visible=False)
-    refusal = removal_refusal(selected)
-    if refusal is not None:
-        return status_card(*refusal), hidden
+    if not selected:
+        return status_card("Nothing to remove", NO_MODEL_TO_MANAGE), hidden
     try:
-        freed = remove_cached_model(selected)
+        freed = MANAGER.remove(selected)
+    except ModelLoaded:
+        return status_card(*loaded_refusal(selected)), hidden
+    except ModelDownloading:
+        return status_card(*downloading_refusal(selected)), hidden
+    except ModelBusy:
+        return (
+            status_card(
+                "Model busy",
+                f"`{selected}` cannot be removed while a model is loading, generating, "
+                "scoring, or being inspected. Try again when it is idle.",
+            ),
+            hidden,
+        )
     except FileNotFoundError:
         return (
             status_card("Nothing to remove", f"`{selected}` is no longer in the cache."),

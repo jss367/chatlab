@@ -1268,6 +1268,26 @@ class ModelChanged(RuntimeError):
     """The weights in memory are not the ones the caller's tokens came from."""
 
 
+class ModelInUse(RuntimeError):
+    """A cached model's files cannot be removed right now.
+
+    The subclasses say why, so the interface can tell the reader what to do:
+    unload the model, wait for its download, or wait for the model to go idle.
+    """
+
+
+class ModelLoaded(ModelInUse):
+    """The model is the one in memory."""
+
+
+class ModelDownloading(ModelInUse):
+    """A download of the model is under way."""
+
+
+class ModelBusy(ModelInUse):
+    """The model lock is held: a load, generation, scoring, or inspection is running."""
+
+
 @dataclass(frozen=True)
 class TokenInsight:
     """What every layer predicted for one token, and where the model looked.
@@ -1637,6 +1657,41 @@ class ModelManager:
 
         with self._lock:
             self._unload_locked(torch)
+
+    def remove(self, model_id: str, cache_dir: Path | None = None) -> CacheStatus:
+        """Delete ``model_id``'s cache folder, unless the manager is using it.
+
+        Removal is serialized with everything else that touches the files.
+        The model lock is taken for the whole deletion, so a load that is
+        still reading the folder (``model_id`` is assigned only once
+        ``from_pretrained`` returns) cannot have its files pulled from under
+        it, and no load can start until the folder is gone. The downloads
+        lock is held too, so a download cannot be reserved for the model
+        between the check and the deletion. Looking at ``model_id`` and
+        ``active_downloads`` first and deleting afterwards would leave exactly
+        that gap: the interface runs its handlers on several workers.
+
+        The model lock is never waited for. It is held across a whole
+        generation, and a handler blocked on it would tie up a worker for as
+        long as the reply takes, so a busy manager raises :class:`ModelBusy`
+        and the reader tries again when the model is idle.
+        """
+
+        checked_id = validate_model_id(model_id)
+        if not self._lock.acquire(blocking=False):
+            raise ModelBusy(
+                f"{checked_id} cannot be removed while a model is loading, "
+                "generating, scoring, or being inspected."
+            )
+        try:
+            if self.model_id == checked_id:
+                raise ModelLoaded(f"{checked_id} is loaded in memory.")
+            with self._downloads_lock:
+                if checked_id in self.active_downloads:
+                    raise ModelDownloading(f"{checked_id} is being downloaded.")
+                return remove_cached_model(checked_id, cache_dir)
+        finally:
+            self._lock.release()
 
     def _unload_locked(self, torch) -> None:
         """Clear the loaded model while the caller holds ``_lock``."""
