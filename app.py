@@ -445,6 +445,13 @@ def load_cached_model(model_id: str):
             "error",
         )
         return
+    if status.unsupported:
+        yield status_card(
+            "Unsupported model",
+            f"{name} is on disk ({describe_on_disk(status)}) but is {UNSUPPORTED_REASON}",
+            "error",
+        )
+        return
     try:
         path = MANAGER.find_cached(cleaned)
         yield status_card(
@@ -490,12 +497,22 @@ def format_timestamp(stamp: float | None) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(stamp))
 
 
+UNSUPPORTED_REASON = (
+    "not a Transformers language model: its files are all here, but its weights "
+    "are laid out for another framework (a diffusers pipeline, a CTranslate2 or "
+    "ONNX export, say) and there is no `model.safetensors` or `pytorch_model.bin` "
+    "at the top of the repo, so ChatLab cannot load it."
+)
+
+
 def cached_model_label(entry: CachedModel) -> str:
     """``org/name · 15 GB``, flagged when it is loaded or short of files."""
 
     label = f"{entry.model_id} · {format_bytes(entry.size_bytes)}"
     if entry.status.missing_files:
         label += " · incomplete"
+    elif entry.status.unsupported:
+        label += " · unsupported"
     if MANAGER.model_id == entry.model_id:
         label += " · loaded"
     return label
@@ -509,6 +526,8 @@ def describe_cached_model(entry: CachedModel) -> str:
             f"**Incomplete:** {describe_missing(entry.status)}. "
             "Use **Download and load** to fetch the rest."
         )
+    elif entry.status.unsupported:
+        verdict = f"**Unsupported:** {UNSUPPORTED_REASON}"
     else:
         verdict = "**Ready to load.** Use **Load cached** to bring it into memory."
     facts = [("On disk", describe_on_disk(entry.status))]
@@ -608,11 +627,21 @@ def describe_hub_model(result: HubModel) -> str:
         cached = CacheStatus()
     if cached.complete:
         facts.append(("Already cached", f"{describe_on_disk(cached)}, ready to load"))
+    elif cached.unsupported:
+        facts.append(
+            ("Already cached", f"{describe_on_disk(cached)}, but not a model ChatLab can load")
+        )
     elif cached.present:
         facts.append(("Partly cached", describe_on_disk(cached)))
     lines.extend(f"- **{label}:** {value}" for label, value in facts)
     lines.append("")
-    lines.append("Its ID is in the model ID box: use **Download and load** to fetch it.")
+    if cached.unsupported:
+        lines.append(
+            "Its ID is in the model ID box, but downloading again would fetch the "
+            "same files: this repo is not a Transformers language model."
+        )
+    else:
+        lines.append("Its ID is in the model ID box: use **Download and load** to fetch it.")
     return "\n".join(lines)
 
 

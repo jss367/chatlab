@@ -103,7 +103,7 @@ A thin pane at the far left switches between three pages. **Chat** is the conver
 ### Models
 
 - **Model** holds the model ID and token boxes and the download, load, and unload buttons, with the status card under them.
-- **My Models** lists every model in the Hugging Face cache, newest download first, with its size on disk. A model short of files is marked *incomplete*, and the one in memory *loaded*. Selecting one shows its file count, architecture and weight type from its `config.json`, revision, when it was last downloaded, and its folder, and puts its ID in the model box ready for **Load cached**. The list rescans after every download, load, and unload, and **Refresh** rescans it by hand.
+- **My Models** lists every model in the Hugging Face cache, newest download first, with its size on disk. A model short of files is marked *incomplete*, one that is whole but not a Transformers language model (a diffusers pipeline, a CTranslate2 or ONNX export) *unsupported*, and the one in memory *loaded*. Selecting one shows its file count, architecture and weight type from its `config.json`, revision, when it was last downloaded, and its folder, and puts its ID in the model box ready for **Load cached**. The list rescans after every download, load, and unload, and **Refresh** rescans it by hand.
 - **Model search** searches the Hub for text-generation models with Transformers support, most downloaded first. Each result shows its parameter count and recent downloads; selecting one adds its license, likes, last update, whether it is gated, and whether any of it is already on disk, and puts its ID in the model box ready for **Download and load**.
 
 ### Settings

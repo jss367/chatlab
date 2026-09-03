@@ -148,7 +148,10 @@ class CacheStatus:
     ``missing_files`` names what the ``main`` snapshot still lacks before the
     model can load, and is the one verdict on that: a cache another tool
     filled with only the config and tokenizer, or a download stopped between
-    shards, has finished blobs but no model. ``cached_bytes`` counts finished
+    shards, has finished blobs but no model. ``unsupported`` says the snapshot
+    is whole but is not a Transformers language model at all (a diffusers
+    pipeline, a CTranslate2 or ONNX export, a folder of SAE weights): nothing
+    is missing, ChatLab just cannot load it. ``cached_bytes`` counts finished
     files; ``partial_files`` and ``partial_bytes`` count the ``.incomplete``
     blobs a cut-off download left behind, which ``snapshot_download`` resumes
     rather than restarts. Those are a size estimate, not a verdict: the blob
@@ -162,6 +165,7 @@ class CacheStatus:
     partial_files: int = 0
     partial_bytes: int = 0
     missing_files: tuple[str, ...] = ()
+    unsupported: bool = False
 
     @property
     def present(self) -> bool:
@@ -169,7 +173,9 @@ class CacheStatus:
 
     @property
     def complete(self) -> bool:
-        return self.present and not self.missing_files
+        """Whole and loadable: on disk, nothing missing, and a model ChatLab runs."""
+
+        return self.present and not self.missing_files and not self.unsupported
 
     @property
     def total_bytes(self) -> int:
@@ -200,16 +206,109 @@ def snapshot_folder(folder: Path, revision: str = "main") -> Path | None:
     return snapshot if snapshot.is_dir() else None
 
 
-def missing_files(snapshot: Path | None) -> tuple[str, ...]:
-    """The files a snapshot needs before ``from_pretrained`` can load it.
+def is_transformers_config(path: Path) -> bool:
+    """Whether ``config.json`` describes a Transformers model.
 
-    Only the config and the weights are checked. Which tokenizer files a repo
-    ships varies too much to know from the outside, and a wrong "incomplete"
-    verdict on a good cache would be worse than a generic load error.
+    Every ``AutoConfig`` carries a ``model_type``; most also list
+    ``architectures``. A CTranslate2 export's ``config.json`` has neither, and
+    a diffusers pipeline has no root ``config.json`` at all.
+    """
+
+    try:
+        config = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(config, dict) and (
+        "model_type" in config or "architectures" in config
+    )
+
+
+# File endings that hold model weights in some framework or other. A file
+# with one of these where a Transformers checkpoint would not put it is the
+# positive evidence that a snapshot is a repo of another kind.
+WEIGHT_SUFFIXES = frozenset(
+    {".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".onnx", ".npz", ".gguf",
+     ".msgpack", ".h5", ".tflite", ".mlmodel"}
+)
+
+# Endings Transformers never loads from. Even a repo that keeps its source
+# ``config.json`` is not a Transformers checkpoint when these are all it has.
+FOREIGN_SUFFIXES = frozenset(
+    {".onnx", ".npz", ".gguf", ".tflite", ".mlmodel", ".h5", ".msgpack"}
+)
+
+SHARD_NAME = re.compile(r"-\d{5}-of-\d{5}\.(safetensors|bin)$")
+
+# What the Transformers ``Trainer`` leaves beside a checkpoint. These share
+# the weight suffixes but are not weights, so a download that has fetched
+# one of them before the config is still a Transformers repo mid-download.
+TRAINER_ARTIFACTS = re.compile(
+    r"^(training_args\.bin|optimizer\.pt|scheduler\.pt|scaler\.pt|rng_state(_\d+)?\.pth)$"
+)
+
+
+def foreign_weights(snapshot: Path, *, transformers_config: bool) -> bool:
+    """Whether the snapshot holds weights laid out for something other than Transformers.
+
+    A diffusers pipeline announces itself with ``model_index.json``. Otherwise
+    the evidence is a weight file where ``from_pretrained`` would never look:
+    at the root under a name that is not a checkpoint or a shard (CTranslate2's
+    ``model.bin``, an ``model.onnx``), or in a subfolder. When the root
+    ``config.json`` is a Transformers one, only a foreign format in a
+    subfolder counts, since such repos often ship extras like
+    ``original/consolidated.00.pth`` beside the checkpoint they are missing.
+    """
+
+    if (snapshot / "model_index.json").is_file():
+        return True
+    checkpoints = {name for pair in WEIGHT_FORMATS for name in pair}
+    for entry in snapshot.rglob("*"):
+        if not entry.is_file() or entry.suffix not in WEIGHT_SUFFIXES:
+            continue
+        if entry.parent == snapshot:
+            if (
+                entry.name in checkpoints
+                or SHARD_NAME.search(entry.name)
+                or TRAINER_ARTIFACTS.match(entry.name)
+            ):
+                continue
+            if transformers_config and entry.suffix not in FOREIGN_SUFFIXES:
+                continue
+            return True
+        if not transformers_config or entry.suffix in FOREIGN_SUFFIXES:
+            return True
+    return False
+
+
+def judge_snapshot(snapshot: Path | None) -> tuple[tuple[str, ...], bool]:
+    """``(missing_files, unsupported)`` for what the snapshot holds.
+
+    ``missing_files`` are the files ``from_pretrained`` needs before it can
+    load: only the config and the weights are checked, since which tokenizer
+    files a repo ships varies too much to know from the outside, and a wrong
+    "incomplete" verdict on a good cache would be worse than a generic load
+    error. A snapshot with no Transformers checkpoint at its root but weights
+    laid out for another framework (diffusers, CTranslate2, ONNX, SAE
+    weights) is not a cut-off download and is ``unsupported`` instead, with
+    nothing reported missing. Absence alone is never that verdict: a snapshot
+    holding only a tokenizer, or only a config, is incomplete.
     """
 
     if snapshot is None:
-        return ("config.json", MODEL_WEIGHTS)
+        return ("config.json", MODEL_WEIGHTS), False
+    has_checkpoint = any(
+        (snapshot / name).is_file() for pair in WEIGHT_FORMATS for name in pair
+    )
+    if not has_checkpoint and foreign_weights(
+        snapshot, transformers_config=is_transformers_config(snapshot / "config.json")
+    ):
+        return (), True
+    return missing_files(snapshot), False
+
+
+def missing_files(snapshot: Path) -> tuple[str, ...]:
+    """The files a snapshot needs before ``from_pretrained`` can load it."""
+
     missing = []
     if not (snapshot / "config.json").is_file():
         missing.append("config.json")
@@ -264,7 +363,8 @@ def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
                 cached += entry.stat().st_size
     if cached == 0 and partial_files == 0:
         return CacheStatus()
-    return CacheStatus(cached, partial_files, partial_bytes, missing_files(snapshot))
+    missing, unsupported = judge_snapshot(snapshot)
+    return CacheStatus(cached, partial_files, partial_bytes, missing, unsupported)
 
 
 def format_bytes(count: int) -> str:
