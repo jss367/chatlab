@@ -1,6 +1,7 @@
 import json
 import re
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -1596,31 +1597,80 @@ class MemoryGuardTests(unittest.TestCase):
 
         check_memory_for_load("org/any", 500 * self.GB, None, None)
 
-    def test_the_manager_refuses_before_reading_any_weight(self):
-        import model_runtime
-        from model_runtime import InsufficientMemoryError, ModelManager
+    def test_the_message_names_the_pool_the_figures_came_from(self):
+        from model_runtime import InsufficientMemoryError, check_memory_for_load
 
-        snapshot = self._snapshot({"model.safetensors": 4096})
-        (snapshot / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
-        original = model_runtime.system_memory
-        model_runtime.system_memory = lambda: (2048, 2048)
-        try:
-            with self.assertRaises(InsufficientMemoryError):
-                ModelManager._check_memory("org/model", snapshot, "float16")
-        finally:
-            model_runtime.system_memory = original
+        with self.assertRaises(InsufficientMemoryError) as caught:
+            check_memory_for_load("org/big", 30 * self.GB, 24 * self.GB, 24 * self.GB, pool="the GPU")
+        self.assertIn("and the GPU has 24.0 GB in total", str(caught.exception))
 
-    def test_an_unmeasurable_snapshot_is_left_to_the_loader(self):
+    @staticmethod
+    def _fake_torch(*figures, failing=False):
+        class Cuda:
+            @staticmethod
+            def device_count():
+                return len(figures)
+
+            @staticmethod
+            def mem_get_info(index):
+                if failing:
+                    raise RuntimeError("CUDA driver missing")
+                return figures[index]
+
+        return types.SimpleNamespace(cuda=Cuda)
+
+    def test_cuda_memory_is_summed_across_devices(self):
+        from model_runtime import cuda_memory
+
+        torch = self._fake_torch((10 * self.GB, 24 * self.GB), (20 * self.GB, 24 * self.GB))
+        self.assertEqual(cuda_memory(torch), (48 * self.GB, 30 * self.GB))
+
+    def test_cuda_memory_is_unknown_without_a_usable_device(self):
+        from model_runtime import cuda_memory
+
+        self.assertEqual(cuda_memory(self._fake_torch()), (None, None))
+        torch = self._fake_torch((1, 1), failing=True)
+        self.assertEqual(cuda_memory(torch), (None, None))
+
+    def _check_with(self, snapshot, backend, host, gpu):
         import model_runtime
         from model_runtime import ModelManager
 
-        snapshot = self._snapshot({"config.json": 2})
-        original = model_runtime.system_memory
-        model_runtime.system_memory = lambda: (1, 1)
+        saved = model_runtime.system_memory, model_runtime.cuda_memory
+        model_runtime.system_memory = lambda: host
+        model_runtime.cuda_memory = lambda torch=None: gpu
         try:
-            ModelManager._check_memory("org/model", snapshot, "float16")
+            ModelManager._check_memory("org/model", snapshot, "float16", backend)
         finally:
-            model_runtime.system_memory = original
+            model_runtime.system_memory, model_runtime.cuda_memory = saved
+
+    def test_the_manager_refuses_before_reading_any_weight(self):
+        from model_runtime import InsufficientMemoryError
+
+        snapshot = self._snapshot({"model.safetensors": 4096})
+        (snapshot / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
+        with self.assertRaises(InsufficientMemoryError):
+            self._check_with(snapshot, "cpu", host=(2048, 2048), gpu=(None, None))
+
+    def test_a_cuda_load_is_judged_by_the_graphics_cards_not_the_host(self):
+        from model_runtime import InsufficientMemoryError
+
+        # A few KB of weights plus the 4 GB of headroom: more than a 2 GB host
+        # can hold, but comfortable on 8 GB of graphics memory.
+        snapshot = self._snapshot({"model.safetensors": 4096})
+        (snapshot / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
+        host = (2 * self.GB, 1 * self.GB)
+        self._check_with(snapshot, "cuda", host=host, gpu=(8 * self.GB, 8 * self.GB))
+        with self.assertRaises(InsufficientMemoryError) as caught:
+            self._check_with(snapshot, "cuda", host=host, gpu=(4 * self.GB, 4 * self.GB))
+        self.assertIn("the GPU has 4.0 GB in total", str(caught.exception))
+        # Metal shares the machine's memory, so the host figures still rule.
+        with self.assertRaises(InsufficientMemoryError):
+            self._check_with(snapshot, "mps", host=host, gpu=(8 * self.GB, 8 * self.GB))
+
+    def test_an_unmeasurable_snapshot_is_left_to_the_loader(self):
+        snapshot = self._snapshot({"config.json": 2})
+        self._check_with(snapshot, "cpu", host=(1, 1), gpu=(1, 1))
 
 
 class MetalCapTests(unittest.TestCase):

@@ -86,7 +86,8 @@ rest of the system all share it, and on Apple silicon the GPU draws from the
 same pool. Before reading any weights, Chatlab estimates the loaded size from
 the checkpoint and refuses a model that would not leave about 4 GB free,
 saying so in the status card instead of letting the machine page itself into a
-freeze. On Apple Metal it also caps what PyTorch may allocate at Metal's
+freeze. On CUDA the weights go straight to the graphics cards, so that check
+is made against their memory rather than the machine's. On Apple Metal it also caps what PyTorch may allocate at Metal's
 recommended working set, so a conversation that outgrows the machine ends
 with an out-of-memory message rather than a frozen Mac. Set
 `CHATLAB_MPS_MEMORY_FRACTION` to move that cap (`1.0` is the default; PyTorch's

@@ -430,20 +430,46 @@ def format_memory(count: int) -> str:
     return f"{count / 1024**3:.1f} GB"
 
 
+def cuda_memory(torch=None) -> tuple[int | None, int | None]:
+    """Total and currently free CUDA memory in bytes, summed across devices.
+
+    ``device_map="auto"`` spreads a model over every visible device, so the
+    sum is the figure that matters. Both are ``None`` when no device answers.
+    """
+
+    if torch is None:
+        import torch
+    try:
+        count = int(torch.cuda.device_count())
+        figures = [torch.cuda.mem_get_info(index) for index in range(count)]
+    except (RuntimeError, AttributeError, ValueError, TypeError):
+        return None, None
+    if not figures:
+        return None, None
+    total = sum(int(device_total) for _free, device_total in figures)
+    free = sum(int(device_free) for device_free, _total in figures)
+    return total, free
+
+
 def check_memory_for_load(
     model_id: str,
     estimated_bytes: int,
     total: int | None,
     available: int | None,
     headroom: int = MEMORY_HEADROOM_BYTES,
+    pool: str = "this machine",
 ) -> None:
-    """Refuse a load that would not leave ``headroom`` beside the weights."""
+    """Refuse a load that would not leave ``headroom`` beside the weights.
+
+    ``pool`` names where the figures come from in the message: the machine's
+    own memory, or the GPU when the weights go there directly.
+    """
 
     needed = estimated_bytes + headroom
     if total is not None and needed > total:
         raise InsufficientMemoryError(
             f"{model_id} needs about {format_memory(estimated_bytes)} of memory plus "
-            f"{format_memory(headroom)} of working room, and this machine has "
+            f"{format_memory(headroom)} of working room, and {pool} has "
             f"{format_memory(total)} in total. Choose a smaller model."
         )
     if available is not None and needed > available:
@@ -1781,14 +1807,19 @@ class ModelManager:
         with self._lock:
             self._unload_locked(torch)
             if torch.cuda.is_available():
+                backend = "cuda"
                 dtype = (
                     torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
                 )
             elif torch.backends.mps.is_available():
+                backend = "mps"
                 dtype = torch.float16
             else:
+                backend = "cpu"
                 dtype = torch.float32
-            self._check_memory(model_id, local_path, str(dtype).replace("torch.", ""))
+            self._check_memory(
+                model_id, local_path, str(dtype).replace("torch.", ""), backend
+            )
             tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
 
             try:
@@ -1866,11 +1897,16 @@ class ModelManager:
             torch.mps.empty_cache()
 
     @staticmethod
-    def _check_memory(model_id: str, local_path: Path, load_dtype: str) -> None:
+    def _check_memory(
+        model_id: str, local_path: Path, load_dtype: str, backend: str
+    ) -> None:
         """Refuse a load that cannot fit, before any weight is read.
 
-        A snapshot whose weights cannot be measured is let through: the loader
-        will give its own, more specific error.
+        On CUDA the weights stream straight onto the graphics cards, so their
+        memory is what must fit; on Metal the GPU shares the machine's memory,
+        and on the CPU it is the machine's memory outright. A snapshot whose
+        weights cannot be measured is let through: the loader will give its
+        own, more specific error.
         """
 
         weight_bytes = snapshot_weight_bytes(local_path)
@@ -1878,8 +1914,15 @@ class ModelManager:
             return
         _architecture, checkpoint_dtype = _read_config(local_path)
         estimated = estimate_loaded_bytes(weight_bytes, checkpoint_dtype, load_dtype)
-        total, available = system_memory()
-        check_memory_for_load(validate_model_id(model_id), estimated, total, available)
+        if backend == "cuda":
+            total, available = cuda_memory()
+            pool = "the GPU"
+        else:
+            total, available = system_memory()
+            pool = "this machine"
+        check_memory_for_load(
+            validate_model_id(model_id), estimated, total, available, pool=pool
+        )
 
     @staticmethod
     def _cap_mps_memory(torch) -> None:
