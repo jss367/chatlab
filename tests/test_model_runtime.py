@@ -1,6 +1,7 @@
 import json
 import re
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -1516,3 +1517,339 @@ class DownloadProgressTests(unittest.TestCase):
             manager.reserve_download("not a model id")
 
         self.assertEqual(manager.active_downloads, {})
+
+
+class MemoryGuardTests(unittest.TestCase):
+    """A model is refused before any weight is read when it cannot fit."""
+
+    GB = 1024**3
+
+    def _snapshot(self, files: dict[str, int], index: dict | None = None) -> Path:
+        folder = Path(tempfile.mkdtemp())
+        for name, size in files.items():
+            (folder / name).write_bytes(b"\0" * size)
+        if index is not None:
+            (folder / "model.safetensors.index.json").write_text(json.dumps(index))
+        return folder
+
+    def test_a_single_weights_file_is_measured_by_its_size(self):
+        from model_runtime import snapshot_weight_bytes
+
+        snapshot = self._snapshot({"model.safetensors": 3000, "config.json": 10})
+        self.assertEqual(snapshot_weight_bytes(snapshot), 3000)
+
+    def test_shards_are_summed_once_each_however_often_the_index_names_them(self):
+        from model_runtime import snapshot_weight_bytes
+
+        snapshot = self._snapshot(
+            {"model-00001-of-00002.safetensors": 2000, "model-00002-of-00002.safetensors": 500},
+            index={"weight_map": {"a": "model-00001-of-00002.safetensors",
+                                  "b": "model-00001-of-00002.safetensors",
+                                  "c": "model-00002-of-00002.safetensors"}},
+        )
+        self.assertEqual(snapshot_weight_bytes(snapshot), 2500)
+
+    def test_a_snapshot_without_weights_cannot_be_measured(self):
+        from model_runtime import snapshot_weight_bytes
+
+        self.assertIsNone(snapshot_weight_bytes(self._snapshot({"config.json": 10})))
+
+    def test_an_index_naming_a_missing_shard_cannot_be_measured(self):
+        from model_runtime import snapshot_weight_bytes
+
+        snapshot = self._snapshot({}, index={"weight_map": {"a": "missing.safetensors"}})
+        self.assertIsNone(snapshot_weight_bytes(snapshot))
+
+    def test_the_estimate_follows_the_dtype_conversion(self):
+        from model_runtime import estimate_loaded_bytes
+
+        self.assertEqual(estimate_loaded_bytes(1000, "bfloat16", "float16"), 1000)
+        self.assertEqual(estimate_loaded_bytes(1000, "float32", "float16"), 500)
+        self.assertEqual(estimate_loaded_bytes(1000, "bfloat16", "float32"), 2000)
+        # Unknown on either side: assume the file's own size.
+        self.assertEqual(estimate_loaded_bytes(1000, None, "float16"), 1000)
+        self.assertEqual(estimate_loaded_bytes(1000, "int4", "float16"), 1000)
+
+    def test_a_model_larger_than_the_machine_is_refused(self):
+        from model_runtime import InsufficientMemoryError, check_memory_for_load
+
+        with self.assertRaises(InsufficientMemoryError) as caught:
+            check_memory_for_load("org/big", 54 * self.GB, 48 * self.GB, 40 * self.GB)
+        self.assertIn("this machine has 48.0 GB in total", str(caught.exception))
+        self.assertIn("54.0 GB", str(caught.exception))
+
+    def test_a_model_that_fits_the_machine_but_not_right_now_is_refused(self):
+        from model_runtime import InsufficientMemoryError, check_memory_for_load
+
+        with self.assertRaises(InsufficientMemoryError) as caught:
+            check_memory_for_load("org/mid", 30 * self.GB, 48 * self.GB, 20 * self.GB)
+        self.assertIn("only 20.0 GB is free right now", str(caught.exception))
+
+    def test_headroom_is_kept_beside_the_weights(self):
+        from model_runtime import InsufficientMemoryError, check_memory_for_load
+
+        check_memory_for_load("org/ok", 10 * self.GB, 48 * self.GB, 15 * self.GB, headroom=4 * self.GB)
+        with self.assertRaises(InsufficientMemoryError):
+            check_memory_for_load("org/ok", 12 * self.GB, 48 * self.GB, 15 * self.GB, headroom=4 * self.GB)
+
+    def test_unknown_memory_figures_let_the_load_through(self):
+        from model_runtime import check_memory_for_load
+
+        check_memory_for_load("org/any", 500 * self.GB, None, None)
+
+    def test_the_message_names_the_pool_the_figures_came_from(self):
+        from model_runtime import InsufficientMemoryError, check_memory_for_load
+
+        with self.assertRaises(InsufficientMemoryError) as caught:
+            check_memory_for_load("org/big", 30 * self.GB, 24 * self.GB, 24 * self.GB, pool="the GPU")
+        self.assertIn("and the GPU has 24.0 GB in total", str(caught.exception))
+
+    @staticmethod
+    def _fake_torch(*figures, failing=False):
+        class Cuda:
+            @staticmethod
+            def device_count():
+                return len(figures)
+
+            @staticmethod
+            def mem_get_info(index):
+                if failing:
+                    raise RuntimeError("CUDA driver missing")
+                return figures[index]
+
+        return types.SimpleNamespace(cuda=Cuda)
+
+    def test_cuda_memory_is_summed_across_devices(self):
+        from model_runtime import cuda_memory
+
+        torch = self._fake_torch((10 * self.GB, 24 * self.GB), (20 * self.GB, 24 * self.GB))
+        self.assertEqual(cuda_memory(torch), (48 * self.GB, 30 * self.GB))
+
+    def test_cuda_memory_is_unknown_without_a_usable_device(self):
+        from model_runtime import cuda_memory
+
+        self.assertEqual(cuda_memory(self._fake_torch()), (None, None))
+        torch = self._fake_torch((1, 1), failing=True)
+        self.assertEqual(cuda_memory(torch), (None, None))
+
+    def _check_with(self, snapshot, backend, host, gpu):
+        import model_runtime
+        from model_runtime import ModelManager
+
+        saved = model_runtime.system_memory, model_runtime.cuda_memory
+        model_runtime.system_memory = lambda: host
+        model_runtime.cuda_memory = lambda torch=None: gpu
+        try:
+            ModelManager._check_memory("org/model", snapshot, "float16", backend)
+        finally:
+            model_runtime.system_memory, model_runtime.cuda_memory = saved
+
+    def test_the_manager_refuses_before_reading_any_weight(self):
+        from model_runtime import InsufficientMemoryError
+
+        snapshot = self._snapshot({"model.safetensors": 4096})
+        (snapshot / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
+        with self.assertRaises(InsufficientMemoryError):
+            self._check_with(snapshot, "cpu", host=(2048, 2048), gpu=(None, None))
+
+    def test_the_offload_pool_is_the_cards_plus_the_host(self):
+        from model_runtime import offload_pool
+
+        gpu, host = (8 * self.GB, 6 * self.GB), (32 * self.GB, 20 * self.GB)
+        self.assertEqual(offload_pool(gpu, host), (40 * self.GB, 26 * self.GB))
+        # A side that reports nothing is left out, not counted as empty.
+        self.assertEqual(offload_pool(gpu, (None, None)), gpu)
+        self.assertEqual(offload_pool((None, None), host), host)
+        self.assertEqual(offload_pool((8 * self.GB, None), (None, 20 * self.GB)), (8 * self.GB, 20 * self.GB))
+        self.assertEqual(offload_pool((None, None), (None, None)), (None, None))
+
+    def test_a_cuda_model_larger_than_the_cards_may_spill_onto_the_host(self):
+        from model_runtime import InsufficientMemoryError, check_memory_for_load, offload_pool
+
+        # A 12 GB model on an 8 GB card: device_map="auto" puts the rest on
+        # the CPU, and a 32 GB host has room for it.
+        total, available = offload_pool((8 * self.GB, 8 * self.GB), (32 * self.GB, 28 * self.GB))
+        check_memory_for_load("org/mid", 12 * self.GB, total, available, pool="the GPU plus this machine")
+        # More than the two together can hold is still refused.
+        with self.assertRaises(InsufficientMemoryError) as caught:
+            check_memory_for_load("org/big", 44 * self.GB, total, available, pool="the GPU plus this machine")
+        self.assertIn("the GPU plus this machine has 40.0 GB in total", str(caught.exception))
+
+    def test_a_cuda_load_is_judged_by_the_cards_and_the_host_together(self):
+        from model_runtime import InsufficientMemoryError
+
+        # A few KB of weights plus the 4 GB of headroom: more than a 2 GB host
+        # can hold alone, but comfortable once 8 GB of graphics memory joins it.
+        snapshot = self._snapshot({"model.safetensors": 4096})
+        (snapshot / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
+        host = (2 * self.GB, 1 * self.GB)
+        self._check_with(snapshot, "cuda", host=host, gpu=(8 * self.GB, 8 * self.GB))
+        with self.assertRaises(InsufficientMemoryError) as caught:
+            self._check_with(snapshot, "cuda", host=host, gpu=(1 * self.GB, 1 * self.GB))
+        self.assertIn("the GPU plus this machine has 3.0 GB in total", str(caught.exception))
+        # Without a host figure the cards stand alone, and the other way round.
+        self._check_with(snapshot, "cuda", host=(None, None), gpu=(8 * self.GB, 8 * self.GB))
+        with self.assertRaises(InsufficientMemoryError):
+            self._check_with(snapshot, "cuda", host=host, gpu=(None, None))
+        # Metal shares the machine's memory, so the host figures alone rule.
+        with self.assertRaises(InsufficientMemoryError):
+            self._check_with(snapshot, "mps", host=host, gpu=(8 * self.GB, 8 * self.GB))
+
+    def test_an_unmeasurable_snapshot_is_left_to_the_loader(self):
+        snapshot = self._snapshot({"config.json": 2})
+        self._check_with(snapshot, "cpu", host=(1, 1), gpu=(1, 1))
+
+
+class MetalCapTests(unittest.TestCase):
+    def setUp(self):
+        import os
+
+        self.saved = {
+            key: os.environ.pop(key, None)
+            for key in ("CHATLAB_MPS_MEMORY_FRACTION", "PYTORCH_MPS_HIGH_WATERMARK_RATIO")
+        }
+
+    def tearDown(self):
+        import os
+
+        for key, value in self.saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_the_default_caps_at_the_recommended_working_set(self):
+        from model_runtime import DEFAULT_MPS_MEMORY_FRACTION, mps_memory_fraction
+
+        self.assertEqual(mps_memory_fraction(), DEFAULT_MPS_MEMORY_FRACTION)
+        self.assertEqual(DEFAULT_MPS_MEMORY_FRACTION, 1.0)
+
+    def test_the_environment_overrides_the_default(self):
+        import os
+
+        from model_runtime import mps_memory_fraction
+
+        os.environ["CHATLAB_MPS_MEMORY_FRACTION"] = "0.8"
+        self.assertEqual(mps_memory_fraction(), 0.8)
+
+    def test_a_value_pytorch_would_reject_leaves_the_allocator_alone(self):
+        import os
+
+        from model_runtime import mps_memory_fraction
+
+        for raw in ("0", "-1", "2.5"):
+            os.environ["CHATLAB_MPS_MEMORY_FRACTION"] = raw
+            self.assertIsNone(mps_memory_fraction(), raw)
+        os.environ["CHATLAB_MPS_MEMORY_FRACTION"] = "lots"
+        self.assertEqual(mps_memory_fraction(), 1.0)
+
+    def test_a_user_set_pytorch_watermark_stands(self):
+        import os
+
+        from model_runtime import mps_memory_fraction
+
+        os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+        self.assertIsNone(mps_memory_fraction())
+
+    def test_the_cap_is_applied_through_torch(self):
+        from types import SimpleNamespace
+
+        from model_runtime import ModelManager
+
+        applied = []
+        fake_torch = SimpleNamespace(mps=SimpleNamespace(set_per_process_memory_fraction=applied.append))
+        ModelManager._cap_mps_memory(fake_torch)
+        self.assertEqual(applied, [1.0])
+
+    def test_a_torch_without_the_setter_is_tolerated(self):
+        from types import SimpleNamespace
+
+        from model_runtime import ModelManager
+
+        ModelManager._cap_mps_memory(SimpleNamespace(mps=SimpleNamespace()))
+
+
+class OutOfMemoryTests(unittest.TestCase):
+    """A backend's out-of-memory failure reaches the caller as one readable error."""
+
+    def _manager(self):
+        from model_runtime import ModelManager
+
+        manager = ModelManager()
+        manager.model = object()
+        manager.tokenizer = FakeTokenizer()
+        manager.released = 0
+        manager._release_device_cache = lambda torch=None: setattr(
+            manager, "released", manager.released + 1
+        )
+        return manager
+
+    def test_backend_messages_are_recognised(self):
+        from model_runtime import OutOfMemoryError, is_out_of_memory_error
+
+        self.assertTrue(is_out_of_memory_error(RuntimeError(
+            "MPS backend out of memory (MPS allocated: 36.00 GB, other allocations: 1 KB, max allowed: 36.00 GB)."
+        )))
+        self.assertTrue(is_out_of_memory_error(RuntimeError("CUDA out of memory. Tried to allocate 2 GiB")))
+        self.assertTrue(is_out_of_memory_error(MemoryError()))
+        self.assertTrue(is_out_of_memory_error(OutOfMemoryError("x")))
+        self.assertFalse(is_out_of_memory_error(RuntimeError("shape mismatch")))
+
+    def test_a_generation_that_runs_out_of_memory_raises_one_error_and_frees_the_slot(self):
+        from model_runtime import OutOfMemoryError
+
+        manager = self._manager()
+
+        def failing(*_args, **_kwargs):
+            yield "first frame"
+            raise RuntimeError("MPS backend out of memory (MPS allocated: 36 GB). Tried to allocate 1 GB")
+
+        manager._generate = failing
+        stream = manager.generate([], temperature=1, top_p=1, top_k=0, max_new_tokens=1, seed=0)
+        self.assertEqual(next(stream), "first frame")
+        with self.assertRaises(OutOfMemoryError) as caught:
+            next(stream)
+        self.assertIn("ran out of memory", str(caught.exception))
+        self.assertIn("Shorten the conversation", str(caught.exception))
+        self.assertFalse(manager._generating.locked())
+        self.assertEqual(manager.released, 1)
+
+    def test_other_generation_failures_pass_through_unchanged(self):
+        manager = self._manager()
+
+        def failing(*_args, **_kwargs):
+            yield from ()
+            raise RuntimeError("shape mismatch")
+
+        manager._generate = failing
+        with self.assertRaises(RuntimeError) as caught:
+            list(manager.generate([], temperature=1, top_p=1, top_k=0, max_new_tokens=1, seed=0))
+        self.assertEqual(str(caught.exception), "shape mismatch")
+        self.assertEqual(manager.released, 1)
+
+    def test_a_finished_generation_hands_its_cache_back(self):
+        manager = self._manager()
+        manager._generate = lambda *a, **k: iter(["only frame"])
+        self.assertEqual(
+            list(manager.generate([], temperature=1, top_p=1, top_k=0, max_new_tokens=1, seed=0)),
+            ["only frame"],
+        )
+        self.assertEqual(manager.released, 1)
+
+    def test_scoring_and_inspection_translate_and_release_too(self):
+        from model_runtime import OutOfMemoryError
+
+        manager = self._manager()
+
+        def exploding_prefill(*_args, **_kwargs):
+            raise RuntimeError("MPS backend out of memory")
+
+        manager._prefill = exploding_prefill
+        with self.assertRaises(OutOfMemoryError):
+            manager.score_text("some text to score")
+        self.assertEqual(manager.released, 1)
+        manager.model = None
+        with self.assertRaises(RuntimeError) as caught:
+            manager.inspect([1, 2, 3], 2)
+        self.assertNotIsInstance(caught.exception, OutOfMemoryError)
+        self.assertEqual(manager.released, 2)
