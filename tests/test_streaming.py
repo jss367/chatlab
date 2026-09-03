@@ -665,6 +665,45 @@ class ReplacementEncodingTests(unittest.TestCase):
         self.assertEqual(replacement, [4])
         self.assertEqual(manager.tokenizer.decode([0, *replacement]), "abcdefghijkl")
 
+    def test_a_slow_byte_fallback_suffix_survives_an_incomplete_character(self):
+        class SlowByteFallbackTokenizer(BytePieceTokenizer):
+            """The context is one token alone and byte tokens in the joint text."""
+
+            is_fast = False
+
+            def __init__(self):
+                super().__init__(
+                    [
+                        "a💾".encode(),
+                        b"a",
+                        b"\xf0",
+                        b"\x9f",
+                        b"\x92",
+                        b"\xbe",
+                        b"Z",
+                        b" Z",
+                    ]
+                )
+
+            def __call__(self, text, **_kwargs):
+                encoded = {
+                    "a💾": [0],
+                    "a💾Z": [1, 2, 3, 4, 5, 6],
+                    "Z": [7],
+                }
+                return Encoding(input_ids=encoded[text])
+
+        manager = loaded_manager([0], pieces=["unused"], eos_id=None)
+        manager.tokenizer = SlowByteFallbackTokenizer()
+
+        replacement = manager.encode_replacement([0], "Z")
+
+        # Prefixes ending after ids 2-4 decode as ``a�``. The fifth id
+        # repairs the character and identifies the exact suffix at id 6,
+        # well beyond the context-token-count guess and its neighbours.
+        self.assertEqual(replacement, [6])
+        self.assertEqual(manager.tokenizer.decode([0, *replacement]), "a💾Z")
+
     def test_a_joint_suffix_still_rejects_an_embedded_stop_token(self):
         pieces = [
             "\u2581Hello",

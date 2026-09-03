@@ -498,7 +498,21 @@ def _decoded_prefix_end(
 
     def within_context(end: int) -> bool:
         prefix = spoken(0, end)
-        return prefix is not None and context.startswith(prefix)
+        if prefix is None:
+            return False
+        if context.startswith(prefix):
+            return True
+
+        # A slow byte-fallback tokenizer can expose an incomplete trailing
+        # UTF-8 sequence as one or more replacement characters. That prefix
+        # becomes valid again when subsequent byte tokens complete the
+        # character, so treating the intermediate spelling as outside the
+        # context would make the predicate non-monotonic and strand this
+        # bisection before the real boundary. Regard only *trailing* decoder
+        # replacements as provisional; the complete candidate is still
+        # required to reproduce the exact expected text by the caller.
+        repaired = prefix.rstrip("\ufffd")
+        return repaired != prefix and context.startswith(repaired)
 
     low, high = 0, stop
     while low < high:
