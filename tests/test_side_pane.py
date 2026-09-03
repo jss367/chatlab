@@ -470,41 +470,45 @@ class ManageMyModelsTests(unittest.TestCase):
         self.assertIn("Select a model", card)
 
     def test_asking_to_remove_shows_the_question_with_the_size(self):
-        status, confirm, question = app.ask_remove_my_model("org/partial")
+        status, confirm, question, pending = app.ask_remove_my_model("org/partial")
 
         self.assertEqual(status, gr.skip())
         self.assertTrue(confirm["visible"])
         self.assertIn("org/partial", question)
         self.assertIn("150 B", question)
         self.assertIn("cannot be undone", question)
+        self.assertEqual(pending, "org/partial")
 
     def test_asking_with_nothing_selected_is_refused(self):
-        status, confirm, question = app.ask_remove_my_model(None)
+        status, confirm, question, pending = app.ask_remove_my_model(None)
 
         self.assertIn("Nothing to remove", status)
         self.assertFalse(confirm["visible"])
         self.assertEqual(question, "")
+        self.assertIsNone(pending)
 
     def test_the_loaded_model_cannot_be_removed(self):
         self.manager.model_id = OLMO
 
-        status, confirm, _ = app.ask_remove_my_model(OLMO)
+        status, confirm, _, pending = app.ask_remove_my_model(OLMO)
         self.assertIn("Unload", status)
         self.assertFalse(confirm["visible"])
+        self.assertIsNone(pending)
 
-        status, confirm = app.remove_my_model(OLMO)
+        status, confirm, pending = app.remove_my_model(OLMO)
         self.assertIn("Unload", status)
         self.assertFalse(confirm["visible"])
+        self.assertIsNone(pending)
         self.assertEqual(self.removed, [])
 
     def test_a_model_being_downloaded_cannot_be_removed(self):
         self.manager.active_downloads["org/partial"] = DownloadProgress()
 
-        status, confirm, _ = app.ask_remove_my_model("org/partial")
+        status, confirm, _, _ = app.ask_remove_my_model("org/partial")
         self.assertIn("Still downloading", status)
         self.assertFalse(confirm["visible"])
 
-        status, _ = app.remove_my_model("org/partial")
+        status, _, _ = app.remove_my_model("org/partial")
         self.assertIn("Still downloading", status)
         self.assertEqual(self.removed, [])
 
@@ -514,7 +518,7 @@ class ManageMyModelsTests(unittest.TestCase):
         self.manager._lock.acquire()
         self.addCleanup(self.manager._lock.release)
 
-        status, confirm = app.remove_my_model("org/partial")
+        status, confirm, _ = app.remove_my_model("org/partial")
 
         self.assertIn("Model busy", status)
         self.assertIn("idle", status)
@@ -522,19 +526,36 @@ class ManageMyModelsTests(unittest.TestCase):
         self.assertEqual(self.removed, [])
 
     def test_a_model_that_left_the_cache_is_reported_without_a_question(self):
-        status, confirm, _ = app.ask_remove_my_model("gone/model")
+        status, confirm, _, pending = app.ask_remove_my_model("gone/model")
 
         self.assertIn("no longer in the cache", status)
         self.assertFalse(confirm["visible"])
+        self.assertIsNone(pending)
 
     def test_confirming_removes_the_model_and_reports_the_space_freed(self):
-        status, confirm = app.remove_my_model("org/partial")
+        status, confirm, pending = app.remove_my_model("org/partial")
 
         self.assertEqual(self.removed, ["org/partial"])
         self.assertIn("Model removed", status)
         self.assertIn("org/partial", status)
         self.assertIn("150 B", status)
         self.assertFalse(confirm["visible"])
+        self.assertIsNone(pending)
+
+    def test_confirming_with_no_pending_model_removes_nothing(self):
+        # The question was withdrawn (another model chosen, or Cancel) before
+        # the click landed: nothing is pending, so nothing is deleted.
+        status, confirm, pending = app.remove_my_model(None)
+
+        self.assertEqual(self.removed, [])
+        self.assertIn("Nothing to remove", status)
+        self.assertFalse(confirm["visible"])
+        self.assertIsNone(pending)
+
+    def test_withdrawing_the_question_forgets_the_model(self):
+        confirm, pending = app.hide_remove_confirm()
+        self.assertFalse(confirm["visible"])
+        self.assertIsNone(pending)
 
     def test_a_removal_that_fails_is_reported(self):
         def refuse(model_id, cache_dir=None):
@@ -542,11 +563,12 @@ class ManageMyModelsTests(unittest.TestCase):
 
         model_runtime.remove_cached_model = refuse
 
-        status, confirm = app.remove_my_model("org/partial")
+        status, confirm, pending = app.remove_my_model("org/partial")
 
         self.assertIn("Could not remove model", status)
         self.assertIn("Permission denied: &lt;blobs&gt;", status)
         self.assertFalse(confirm["visible"])
+        self.assertIsNone(pending)
 
     def test_a_model_gone_before_confirming_is_reported(self):
         def gone(model_id, cache_dir=None):
@@ -554,7 +576,7 @@ class ManageMyModelsTests(unittest.TestCase):
 
         model_runtime.remove_cached_model = gone
 
-        status, _ = app.remove_my_model("org/partial")
+        status, _, _ = app.remove_my_model("org/partial")
         self.assertIn("no longer in the cache", status)
 
 
@@ -792,6 +814,18 @@ class SidePaneLayoutTests(unittest.TestCase):
         self.assertIs(buttons["🗑️ Remove"], ask)
         self.assertIs(buttons["Remove from disk"], remove)
         self.assertEqual(len(self.listeners("hide_remove_confirm")), 2)
+
+    def test_the_confirm_button_deletes_the_model_the_question_named(self):
+        # The confirm handler reads the stored pending ID, not the radio, so
+        # a selection moved after the question opened cannot redirect it.
+        (ask,) = self.listeners("ask_remove_my_model")
+        (remove,) = self.listeners("remove_my_model")
+        radio = self.labelled("Downloaded models")
+        (pending,) = remove.inputs
+        self.assertIsInstance(pending, gr.State)
+        self.assertIsNot(pending, radio)
+        self.assertIn(pending, ask.outputs)
+        self.assertIn(pending, remove.outputs)
 
     def test_choosing_a_model_writes_the_id_box(self):
         box = self.labelled("Hugging Face model ID")

@@ -621,75 +621,96 @@ def removal_refusal(selected: str | None) -> tuple[str, str] | None:
 
 
 def ask_remove_my_model(selected: str | None):
-    """Show the confirmation for removing the chosen model, or say why not."""
+    """Show the confirmation for removing the chosen model, or say why not.
 
+    Returns the card, the confirmation's visibility, its question, and the
+    model the question is about. That last value is what the confirm button
+    deletes: the radio can be moved to another model in the moment between
+    a click on **Remove from disk** and the response that hides the panel,
+    and a deletion that read the live selection would then take the model
+    the reader never agreed to lose.
+    """
+
+    hidden = gr.update(visible=False)
     refusal = removal_refusal(selected)
     if refusal is not None:
-        return status_card(*refusal), gr.update(visible=False), ""
+        return status_card(*refusal), hidden, "", None
     entry = next(
         (entry for entry in list_cached_models() if entry.model_id == selected), None
     )
     if entry is None:
         return (
             status_card("Nothing to remove", f"`{selected}` is no longer in the cache."),
-            gr.update(visible=False),
+            hidden,
             "",
+            None,
         )
     question = (
         f"Remove `{selected}` ({format_bytes(entry.size_bytes)}) from disk? "
         "This deletes its folder from the Hugging Face cache and cannot be undone."
     )
-    return gr.skip(), gr.update(visible=True), question
+    return gr.skip(), gr.update(visible=True), question, selected
 
 
-def remove_my_model(selected: str | None):
-    """Delete the chosen model's cache folder and report the space freed."""
+def remove_my_model(pending: str | None):
+    """Delete the model the confirmation named and report the space freed.
+
+    ``pending`` is the ID :func:`ask_remove_my_model` stored, not the radio's
+    current value, so the model deleted is always the one the question
+    showed. The pending ID is cleared on every path.
+    """
 
     hidden = gr.update(visible=False)
-    if not selected:
-        return status_card("Nothing to remove", NO_MODEL_TO_MANAGE), hidden
+    if not pending:
+        return status_card("Nothing to remove", NO_MODEL_TO_MANAGE), hidden, None
     try:
-        freed = MANAGER.remove(selected)
+        freed = MANAGER.remove(pending)
     except ModelLoaded:
-        return status_card(*loaded_refusal(selected)), hidden
+        return status_card(*loaded_refusal(pending)), hidden, None
     except ModelDownloading:
-        return status_card(*downloading_refusal(selected)), hidden
+        return status_card(*downloading_refusal(pending)), hidden, None
     except ModelBusy:
         return (
             status_card(
                 "Model busy",
-                f"`{selected}` cannot be removed while a model is loading, generating, "
+                f"`{pending}` cannot be removed while a model is loading, generating, "
                 "scoring, or being inspected. Try again when it is idle.",
             ),
             hidden,
+            None,
         )
     except FileNotFoundError:
         return (
-            status_card("Nothing to remove", f"`{selected}` is no longer in the cache."),
+            status_card("Nothing to remove", f"`{pending}` is no longer in the cache."),
             hidden,
+            None,
         )
     except (OSError, ValueError) as error:
         return (
             status_card(
                 "Could not remove model",
-                f"Removing `{selected}` failed: {html.escape(str(error))}",
+                f"Removing `{pending}` failed: {html.escape(str(error))}",
                 "error",
             ),
             hidden,
+            None,
         )
     return (
         status_card(
             "Model removed",
-            f"Removed `{selected}` from the Hugging Face cache, "
+            f"Removed `{pending}` from the Hugging Face cache, "
             f"freeing {format_bytes(freed.total_bytes)}.",
             "success",
         ),
         hidden,
+        None,
     )
 
 
 def hide_remove_confirm():
-    return gr.update(visible=False)
+    """Withdraw a pending removal: hide the question and forget its model."""
+
+    return gr.update(visible=False), None
 
 
 def hub_model_label(result: HubModel) -> str:
@@ -3182,6 +3203,8 @@ def build_app() -> gr.Blocks:
                             "Remove from disk", variant="stop", size="sm"
                         )
                         cancel_remove_button = gr.Button("Cancel", size="sm")
+                # The model the open confirmation is about; None when closed.
+                pending_removal = gr.State(None)
 
             with gr.Accordion("Model search", open=False):
                 search_query = gr.Textbox(
@@ -3456,19 +3479,22 @@ def build_app() -> gr.Blocks:
         my_models.input(select_my_model, my_models, [model_id, my_model_detail])
         # A pending removal is about the model that was selected when it was
         # asked for, so changing the selection withdraws it.
-        my_models.input(hide_remove_confirm, None, remove_confirm)
+        confirm_outputs = [remove_confirm, pending_removal]
+        my_models.input(hide_remove_confirm, None, confirm_outputs)
         redownload_button.click(
             redownload_my_model, [my_models, hf_token], model_status
         ).then(refresh_my_models, models_inputs, models_outputs)
         remove_button.click(
             ask_remove_my_model,
             my_models,
-            [model_status, remove_confirm, remove_question],
+            [model_status, remove_confirm, remove_question, pending_removal],
         )
+        # The confirm button deletes the model the question named, never the
+        # radio's current value: see ask_remove_my_model.
         confirm_remove_button.click(
-            remove_my_model, my_models, [model_status, remove_confirm]
+            remove_my_model, pending_removal, [model_status, *confirm_outputs]
         ).then(refresh_my_models, models_inputs, models_outputs)
-        cancel_remove_button.click(hide_remove_confirm, None, remove_confirm)
+        cancel_remove_button.click(hide_remove_confirm, None, confirm_outputs)
 
         search_outputs = [search_results, search_detail, search_results_state]
         search_button.click(search_models, [search_query, hf_token], search_outputs)
