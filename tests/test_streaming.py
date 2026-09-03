@@ -560,6 +560,44 @@ class ReplacementEncodingTests(unittest.TestCase):
         self.assertEqual(ids, [SP_SPACE_WORLD])
         self.assertEqual(joined, "Hello world")
 
+    def test_a_hidden_kept_special_cannot_supply_sentencepiece_context(self):
+        # The raw decode sees <pad> before the leading-space piece, but the
+        # streaming decoder drops that token without putting it in its cache.
+        # Once hidden, the piece is first and SentencePiece drops its space.
+        # Encoding has to choose the two-piece spelling that keeps the typed
+        # leading space in the decoder's actual visible context.
+        pieces = ["\u2581<pad>", "\u2581world", "world", "\u2581", "!", "<eos>"]
+        pad, space_world, _world, space, _bang, eos = range(len(pieces))
+        manager = loaded_manager([0], pieces, eos)
+        manager.tokenizer = SentencePieceTokenizer(pieces, eos)
+        manager.tokenizer.all_special_ids = [pad, eos]
+        kept = [pad]
+
+        replacement = manager.encode_replacement(kept, " world")
+
+        self.assertEqual(kept, [pad], "the sampled prefix stays token-for-token")
+        self.assertEqual(replacement, [space, space_world])
+        decoder = IncrementalDecoder(manager.tokenizer, {pad, eos})
+        decoder.push(pad)
+        for token_id in replacement:
+            decoder.push(token_id)
+        self.assertEqual(decoder.text, " world")
+
+    def test_a_visible_prefill_special_still_supplies_sentencepiece_context(self):
+        # Assistant-prefill specials are intentionally forced visible during
+        # replay, so replacement validation must not hide those kept IDs.
+        pieces = ["\u2581<pad>", "\u2581world", "world", "\u2581", "<eos>"]
+        pad, space_world, _world, _space, eos = range(len(pieces))
+        manager = loaded_manager([0], pieces, eos)
+        manager.tokenizer = SentencePieceTokenizer(pieces, eos)
+        manager.tokenizer.all_special_ids = [pad, eos]
+
+        replacement = manager.encode_replacement(
+            [pad], " world", literal_prefill_tokens=1
+        )
+
+        self.assertEqual(replacement, [space_world])
+
     def test_the_first_response_token_has_no_context_to_read(self):
         manager = sentencepiece_manager()
         ids, joined = self.decoded(manager, [], "Hello")

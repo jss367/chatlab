@@ -1786,9 +1786,23 @@ def _branch_with_text(
     # handed down and compared again under that lock, for the encoding and for
     # the replay alike; a mismatch there is ModelChanged.
     _generation, expected_load = branch_source
+    literal_prefill_tokens = literal_prefill_count(metrics, len(kept))
     try:
         replacement_ids = MANAGER.encode_replacement(
-            kept, replacement, load_id=expected_load
+            kept,
+            replacement,
+            literal_prefill_tokens=literal_prefill_tokens,
+            load_id=expected_load,
+        )
+        branch_turns = turns[: position + 1]
+        MANAGER.validate_generation_prefix(
+            model_messages(
+                branch_turns,
+                system_prompt=settings[0],
+                include_reasoning=settings[1],
+            ),
+            (*kept, *replacement_ids),
+            load_id=expected_load,
         )
     except ModelChanged:
         yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
@@ -1804,11 +1818,11 @@ def _branch_with_text(
         # Not generate_reply(): the caller already holds the slot.
         replacement_start = len(kept)
         yield from _stream_reply(
-            turns[: position + 1],
+            branch_turns,
             prompt_text,
             *settings,
             forced_ids=(*kept, *replacement_ids),
-            literal_prefill_tokens=literal_prefill_count(metrics, len(kept)),
+            literal_prefill_tokens=literal_prefill_tokens,
             literal_text_ranges=(
                 *literal_text_ranges(metrics, len(kept)),
                 (replacement_start, replacement_start + len(replacement_ids)),

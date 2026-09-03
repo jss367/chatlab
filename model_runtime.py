@@ -38,6 +38,12 @@ PROMPT_SCORE_LIMIT = 1024
 # Refuse to score a wall of pasted text rather than appearing to hang.
 SCORE_TOKEN_LIMIT = 4096
 
+# Refuse a generation prefix large enough to make replay itself an
+# unexpectedly expensive operation. The response-length control already tops
+# out here, so a branch cannot paste an unbounded second response around that
+# control even when the model advertises a much larger context window.
+GENERATION_PREFILL_TOKEN_LIMIT = 8192
+
 # Where a config keeps the length of its position table, newest name first.
 # ``max_seq_len`` is MPT's and DBRX's spelling. RWKV's ``context_length`` is
 # deliberately absent: it is recurrent, so a longer sequence costs accuracy
@@ -369,6 +375,23 @@ def score_token_limit(model) -> int:
 
     window = model_position_limit(model)
     return SCORE_TOKEN_LIMIT if window is None else min(SCORE_TOKEN_LIMIT, window)
+
+
+def generation_prefill_token_limit(model) -> int:
+    """The most prompt-plus-replayed tokens accepted by one generation.
+
+    A learned positional table is a hard correctness limit. The flat cap is a
+    separate application guard: typed branches can otherwise turn an
+    unrestricted textbox into an arbitrarily large scored prefill while the
+    model lock is held.
+    """
+
+    window = model_position_limit(model)
+    return (
+        GENERATION_PREFILL_TOKEN_LIMIT
+        if window is None
+        else min(GENERATION_PREFILL_TOKEN_LIMIT, window)
+    )
 
 
 def _joint_ids(tokenizer, passage: str, *, add_special_tokens: bool = True) -> list[int] | None:
@@ -1382,7 +1405,12 @@ class ModelManager:
         return [int(value) for value in encoded], prefilled
 
     def encode_replacement(
-        self, kept_ids: Sequence[int], text: str, *, load_id: str | None = None
+        self,
+        kept_ids: Sequence[int],
+        text: str,
+        *,
+        literal_prefill_tokens: int = 0,
+        load_id: str | None = None,
     ) -> list[int]:
         """Encode text the reader wants replayed after ``kept_ids``, as a branch does.
 
@@ -1392,8 +1420,11 @@ class ModelManager:
         drops the word-boundary space from the first token of whatever it
         decodes, so ``"world"`` round-trips alone yet reads ``" world"`` once it
         follows ``"Hello"``, while a typed ``" world"`` gains a second space.
-        The kept tokens plus the result must therefore decode to the kept text
-        followed by exactly what was typed. The kept ids themselves are never
+        The visible kept tokens plus the result must therefore decode to the
+        kept text followed by exactly what was typed. Hidden specials do not
+        supply decoder context, because the streaming decoder never caches
+        them; ``literal_prefill_tokens`` keeps reader-supplied assistant
+        prefill visible as before. The kept ids themselves are never
         re-tokenized; a branch preserves them token for token.
 
         ``load_id`` names the load the kept tokens came from (see
@@ -1411,16 +1442,38 @@ class ModelManager:
                 raise ModelChanged(
                     "The model has been reloaded since these tokens were produced."
                 )
-            return self._encode_replacement(kept_ids, text)
+            return self._encode_replacement(
+                kept_ids, text, literal_prefill_tokens=literal_prefill_tokens
+            )
 
-    def _encode_replacement(self, kept_ids: Sequence[int], text: str) -> list[int]:
+    def _encode_replacement(
+        self,
+        kept_ids: Sequence[int],
+        text: str,
+        *,
+        literal_prefill_tokens: int = 0,
+    ) -> list[int]:
         """The body of encode_replacement(), run with the model lock held."""
 
         assert self.tokenizer is not None
         kept = [int(value) for value in kept_ids]
         if not text:
             raise ValueError("The replacement text did not produce any tokens.")
-        kept_text = self._decode_ids(kept)
+        hidden = self._hidden_token_ids()
+        literal_prefill_tokens = max(
+            0, min(int(literal_prefill_tokens), len(kept))
+        )
+        # IncrementalDecoder never puts a generated hidden special into its
+        # cache, so that ID cannot affect the context-sensitive boundary of
+        # what follows. Validate against precisely the IDs the visible decoder
+        # sees. Reader-supplied assistant-prefill tokens are the exception:
+        # replay forces those visible, including special-token spellings.
+        visible_kept = [
+            token_id
+            for index, token_id in enumerate(kept)
+            if index < literal_prefill_tokens or token_id not in hidden
+        ]
+        kept_text = self._decode_ids(visible_kept)
         expected = kept_text + text
 
         # The standalone encoding is how a BPE tokenizer with the space inside
@@ -1448,8 +1501,11 @@ class ModelManager:
         def candidates() -> Iterator[list[int]]:
             yield standalone
             aligned_start: int | None = None
-            if len(joint) > len(kept) and joint[: len(kept)] == kept:
-                aligned_start = len(kept)
+            if (
+                len(joint) > len(visible_kept)
+                and joint[: len(visible_kept)] == visible_kept
+            ):
+                aligned_start = len(visible_kept)
                 aligned = joint[aligned_start:]
                 if aligned != standalone:
                     yield aligned
@@ -1466,11 +1522,11 @@ class ModelManager:
         if not standalone and not joint:
             raise ValueError("The replacement text did not produce any tokens.")
         stop_ids = self._stop_token_ids()
-        hidden_ids = self._hidden_token_ids() - stop_ids
+        hidden_ids = hidden - stop_ids
         matched_embedded_stop = False
         matched_hidden = False
         for token_ids in candidates():
-            if token_ids and self._decode_ids(kept + token_ids) == expected:
+            if token_ids and self._decode_ids(visible_kept + token_ids) == expected:
                 # A terminal stop token deliberately ends the new response and
                 # stays hidden. One followed by more replacement tokens cannot
                 # be literal: generation stops there, so the visible suffix
@@ -1495,6 +1551,55 @@ class ModelManager:
         raise ValueError(
             "The replacement text cannot be inserted exactly at this position "
             "by this tokenizer."
+        )
+
+    def validate_generation_prefix(
+        self,
+        messages: list[dict],
+        forced_ids: Sequence[int],
+        *,
+        load_id: str | None = None,
+    ) -> None:
+        """Refuse an oversized prompt and replay before a stream mutates UI state.
+
+        A typed branch calls this after encoding but before entering the reply
+        stream. The expected load is checked under the same model lock as the
+        prompt tokenization, so a concurrent reload cannot validate one
+        model's token IDs with another model's tokenizer.
+        """
+
+        with self._lock:
+            if not self.loaded:
+                raise RuntimeError("Download and load a model before chatting.")
+            if load_id is not None and load_id != self.load_id:
+                raise ModelChanged(
+                    "The model has been reloaded since these tokens were produced."
+                )
+            prompt_ids, _reasoning_prefilled = self._prompt_token_ids(messages)
+            self._validate_generation_prefix_length(prompt_ids, forced_ids)
+
+    def _validate_generation_prefix_length(
+        self, prompt_ids: Sequence[int], forced_ids: Sequence[int]
+    ) -> None:
+        """Check a tokenized generation prefix without running the model."""
+
+        assert self.model is not None
+        total = len(prompt_ids) + len(forced_ids)
+        limit = generation_prefill_token_limit(self.model)
+        if total <= limit:
+            return
+        window = model_position_limit(self.model)
+        ceiling = (
+            f"the {limit:,} positions this model can attend to"
+            if window is not None and window <= GENERATION_PREFILL_TOKEN_LIMIT
+            else (
+                f"the {GENERATION_PREFILL_TOKEN_LIMIT:,} token limit for a "
+                "generation prefix"
+            )
+        )
+        raise ValueError(
+            f"The prompt and replayed response are {total:,} tokens, above {ceiling}. "
+            "Shorten the conversation or replacement."
         )
 
     def _response_prefix_ids(

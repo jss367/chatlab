@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from model_runtime import (
+    GENERATION_PREFILL_TOKEN_LIMIT,
     MIN_MODEL_POSITION_LIMIT,
     MODEL_WEIGHTS,
     SCORE_TOKEN_LIMIT,
@@ -13,6 +14,7 @@ from model_runtime import (
     cached_models,
     encode_for_scoring,
     format_bytes,
+    generation_prefill_token_limit,
     score_token_limit,
     split_context_and_text,
     validate_model_id,
@@ -1070,6 +1072,22 @@ class ScoreTokenLimitTests(unittest.TestCase):
         wrapper.get_text_config = lambda: text
 
         self.assertEqual(score_token_limit(Model(wrapper)), 2048)
+
+
+class GenerationPrefillTokenLimitTests(unittest.TestCase):
+    """Generation replay has both a model window and an application ceiling."""
+
+    def test_a_short_model_window_is_the_hard_limit(self):
+        model = Model(Config(max_position_embeddings=1024))
+
+        self.assertEqual(generation_prefill_token_limit(model), 1024)
+
+    def test_a_roomy_model_still_has_the_application_limit(self):
+        model = Model(Config(max_position_embeddings=131072))
+
+        self.assertEqual(
+            generation_prefill_token_limit(model), GENERATION_PREFILL_TOKEN_LIMIT
+        )
 
 
 class ScoreTextGuardTests(unittest.TestCase):

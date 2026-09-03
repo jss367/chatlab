@@ -7,6 +7,7 @@ import numpy as np
 
 import app
 import charts
+import model_runtime
 from conversation import (
     MAIN_BRANCH,
     display_messages,
@@ -2067,6 +2068,15 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertEqual(len(frames), 1)
         self.assertBranchRefusedByReload(frames, final)
 
+    def test_a_load_landing_before_the_length_check_leaves_the_conversation_alone(
+        self,
+    ):
+        final = self.respond()[-1]
+        self.reload_before("validate_generation_prefix")
+        frames = self.branch_text(final, "Hello")
+        self.assertEqual(len(frames), 1)
+        self.assertBranchRefusedByReload(frames, final)
+
     def test_a_load_landing_before_typed_replay_leaves_the_conversation_alone(
         self,
     ):
@@ -2309,6 +2319,65 @@ class BranchFromTokenTests(unittest.TestCase):
         metrics = metrics_of(last[METRICS])
         self.assertEqual([m["token_id"] for m in metrics[:2]], [0, 1])
         self.assertTrue(last[TURNS][-1]["content"].startswith("Hello world"))
+
+    def test_a_hidden_kept_special_does_not_erase_a_typed_sentencepiece_space(self):
+        pieces = ["\u2581<pad>", "\u2581world", "world", "\u2581", "!", "<eos>"]
+        pad, space_world, _world, space, bang, eos = range(len(pieces))
+        app.MANAGER = loaded_manager([pad, bang, eos], pieces, eos)
+        app.MANAGER.tokenizer = SentencePieceTokenizer(pieces, eos)
+        app.MANAGER.tokenizer.all_special_ids = [pad, eos]
+        final = self.respond()[-1]
+        self.assertEqual(final[TURNS][-1]["content"], "!")
+
+        last = self.branch_text(final, " world", strip_index=1)[-1]
+
+        metrics = metrics_of(last[METRICS])
+        self.assertEqual(
+            [m["token_id"] for m in metrics[:3]], [pad, space, space_world]
+        )
+        self.assertTrue(last[TURNS][-1]["content"].startswith(" world"))
+
+    def assert_oversized_typed_branch_is_refused(self, final, expected_status):
+        calls = []
+        real_generate = app.MANAGER.generate
+
+        def observe(*args, **kwargs):
+            calls.append(True)
+            return real_generate(*args, **kwargs)
+
+        app.MANAGER.generate = observe
+        frames = self.branch_text(final, "Hello" * 15)
+
+        self.assertEqual(
+            len(frames), 1, "no destructive opening frame was published"
+        )
+        self.assertIn(expected_status, frames[0][STATUS])
+        self.assertEqual(frames[0][TURNS], final[TURNS])
+        self.assertEqual(calls, [])
+        self.assertFalse(app.MANAGER.busy, "a refusal must give the slot back")
+
+    def test_a_replacement_past_the_model_window_preserves_the_old_response(self):
+        final = self.respond()[-1]
+        app.MANAGER.model.config = type(
+            "Config", (), {"max_position_embeddings": 16}
+        )()
+
+        self.assert_oversized_typed_branch_is_refused(final, "16 positions")
+
+    def test_a_replacement_past_the_application_cap_preserves_the_old_response(self):
+        final = self.respond()[-1]
+        old_limit = model_runtime.GENERATION_PREFILL_TOKEN_LIMIT
+        model_runtime.GENERATION_PREFILL_TOKEN_LIMIT = 16
+        self.addCleanup(
+            setattr,
+            model_runtime,
+            "GENERATION_PREFILL_TOKEN_LIMIT",
+            old_limit,
+        )
+
+        self.assert_oversized_typed_branch_is_refused(
+            final, "16 token limit for a generation prefix"
+        )
 
     def test_typed_text_follows_noncanonical_sentencepiece_tokens(self):
         pieces = [
