@@ -208,6 +208,13 @@ FOREIGN_SUFFIXES = frozenset(
 
 SHARD_NAME = re.compile(r"-\d{5}-of-\d{5}\.(safetensors|bin)$")
 
+# What the Transformers ``Trainer`` leaves beside a checkpoint. These share
+# the weight suffixes but are not weights, so a download that has fetched
+# one of them before the config is still a Transformers repo mid-download.
+TRAINER_ARTIFACTS = re.compile(
+    r"^(training_args\.bin|optimizer\.pt|scheduler\.pt|scaler\.pt|rng_state(_\d+)?\.pth)$"
+)
+
 
 def foreign_weights(snapshot: Path, *, transformers_config: bool) -> bool:
     """Whether the snapshot holds weights laid out for something other than Transformers.
@@ -228,7 +235,11 @@ def foreign_weights(snapshot: Path, *, transformers_config: bool) -> bool:
         if not entry.is_file() or entry.suffix not in WEIGHT_SUFFIXES:
             continue
         if entry.parent == snapshot:
-            if entry.name in checkpoints or SHARD_NAME.search(entry.name):
+            if (
+                entry.name in checkpoints
+                or SHARD_NAME.search(entry.name)
+                or TRAINER_ARTIFACTS.match(entry.name)
+            ):
                 continue
             if transformers_config and entry.suffix not in FOREIGN_SUFFIXES:
                 continue

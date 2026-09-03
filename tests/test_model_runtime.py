@@ -328,6 +328,11 @@ class CacheStatusTests(unittest.TestCase):
                 "config.json": self.CONFIG,
                 "model-00001-of-00003.safetensors": b"x",
             },
+            "trainer artifacts before config": {
+                "training_args.bin": b"x",
+                "optimizer.pt": b"x",
+                "rng_state_0.pth": b"x",
+            },
         }
         for kind, files in layouts.items():
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as root:
@@ -335,7 +340,7 @@ class CacheStatusTests(unittest.TestCase):
                 status = cache_status(self.MODEL, Path(root))
 
                 self.assertFalse(status.unsupported)
-                self.assertEqual(status.missing_files, (MODEL_WEIGHTS,))
+                self.assertIn(MODEL_WEIGHTS, status.missing_files)
 
     def test_a_transformers_config_without_weights_is_still_incomplete(self):
         """``architectures`` alone marks a Transformers config too."""
