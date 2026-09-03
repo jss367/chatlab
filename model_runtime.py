@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import gc
 import json
+import os
 import re
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -60,6 +64,33 @@ POSITION_LIMIT_ATTRIBUTES = (
 # no passage worth scoring would fit — so it is ignored in favour of the flat
 # application cap.
 MIN_MODEL_POSITION_LIMIT = 16
+
+# Memory kept back when deciding whether a model fits: the application, the
+# key-value cache a conversation grows, and the rest of the system all need
+# room beside the weights. On Apple silicon the GPU draws from the same pool,
+# so a model that "fits" with nothing to spare freezes the whole machine
+# instead of failing.
+MEMORY_HEADROOM_BYTES = 4 * 1024**3
+
+# Bytes per parameter for the dtypes a checkpoint or a load can use.
+DTYPE_BYTES = {
+    "float64": 8,
+    "float32": 4,
+    "float16": 2,
+    "bfloat16": 2,
+    "float8_e4m3fn": 1,
+    "float8_e5m2": 1,
+    "int8": 1,
+    "uint8": 1,
+}
+
+# Share of Metal's recommended working set that PyTorch may allocate before it
+# raises an out-of-memory error instead of letting macOS page the machine into
+# a freeze. PyTorch's own default is 1.7, well past physical memory.
+MPS_MEMORY_FRACTION_ENV = "CHATLAB_MPS_MEMORY_FRACTION"
+DEFAULT_MPS_MEMORY_FRACTION = 1.0
+# PyTorch reads this itself; when the user has set it, their choice stands.
+TORCH_MPS_WATERMARK_ENV = "PYTORCH_MPS_HIGH_WATERMARK_RATIO"
 
 
 # Streaming updates are batched so a long response does not re-serialize the
@@ -289,6 +320,207 @@ class CachedModel:
     @property
     def size_bytes(self) -> int:
         return self.status.total_bytes
+
+
+class InsufficientMemoryError(RuntimeError):
+    """A model would not fit in memory, judged before any weight is read."""
+
+
+class OutOfMemoryError(RuntimeError):
+    """The device ran out of memory partway through a run."""
+
+
+def snapshot_weight_bytes(snapshot: Path) -> int | None:
+    """Bytes of the weight files ``from_pretrained`` will read, or ``None``.
+
+    Follows the same format order as the loader, so a repo that ships both a
+    safetensors set and a legacy ``.bin`` set is measured by the one it loads.
+    """
+
+    for single, index_name in WEIGHT_FORMATS:
+        try:
+            if (snapshot / single).is_file():
+                return (snapshot / single).stat().st_size
+            index = snapshot / index_name
+            if not index.is_file():
+                continue
+            weight_map = json.loads(index.read_text())["weight_map"]
+            shards = {shard for shard in weight_map.values() if isinstance(shard, str)}
+            return sum((snapshot / shard).stat().st_size for shard in shards)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+    return None
+
+
+def estimate_loaded_bytes(
+    weight_bytes: int, checkpoint_dtype: str | None, load_dtype: str
+) -> int:
+    """Memory the weights take once loaded as ``load_dtype``.
+
+    A checkpoint is converted on the way in, so a float32 file loaded as
+    float16 halves and a bfloat16 file loaded on the CPU as float32 doubles. A
+    checkpoint whose dtype is unknown or unlisted is assumed to match.
+    """
+
+    stored = DTYPE_BYTES.get((checkpoint_dtype or "").lower())
+    loaded = DTYPE_BYTES.get(load_dtype.lower())
+    if stored is None or loaded is None:
+        return int(weight_bytes)
+    return int(weight_bytes * loaded / stored)
+
+
+def system_memory() -> tuple[int | None, int | None]:
+    """Total and currently available physical memory in bytes, where known.
+
+    macOS reports availability through ``memory_pressure``, which accounts for
+    compression and file cache the way the kernel does; ``vm_stat`` is the
+    fallback. Linux reads ``MemAvailable``. Either figure is ``None`` when
+    the platform offers nothing usable.
+    """
+
+    total: int | None = None
+    try:
+        total = int(os.sysconf("SC_PHYS_PAGES")) * int(os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, ValueError, OSError):
+        total = None
+    available: int | None = None
+    if sys.platform == "darwin":
+        available = _darwin_available_memory(total)
+    elif sys.platform.startswith("linux"):
+        try:
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                if line.startswith("MemAvailable:"):
+                    available = int(line.split()[1]) * 1024
+                    break
+        except (OSError, ValueError, IndexError):
+            available = None
+    return total, available
+
+
+def _run_quietly(command: list[str]) -> str:
+    try:
+        return subprocess.run(
+            command, capture_output=True, text=True, timeout=5, check=False
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _darwin_available_memory(total: int | None) -> int | None:
+    match = re.search(
+        r"System-wide memory free percentage:\s*(\d+)%", _run_quietly(["memory_pressure"])
+    )
+    if match and total is not None:
+        return total * int(match.group(1)) // 100
+    output = _run_quietly(["vm_stat"])
+    size = re.search(r"page size of (\d+) bytes", output)
+    if not size:
+        return None
+    pages = 0
+    for name in ("free", "inactive", "speculative", "purgeable"):
+        found = re.search(rf"Pages {name}:\s*(\d+)", output)
+        if found:
+            pages += int(found.group(1))
+    return pages * int(size.group(1)) if pages else None
+
+
+def format_memory(count: int) -> str:
+    """Render a memory size the way the machine's own specs do: ``48.0 GB``."""
+
+    return f"{count / 1024**3:.1f} GB"
+
+
+def check_memory_for_load(
+    model_id: str,
+    estimated_bytes: int,
+    total: int | None,
+    available: int | None,
+    headroom: int = MEMORY_HEADROOM_BYTES,
+) -> None:
+    """Refuse a load that would not leave ``headroom`` beside the weights."""
+
+    needed = estimated_bytes + headroom
+    if total is not None and needed > total:
+        raise InsufficientMemoryError(
+            f"{model_id} needs about {format_memory(estimated_bytes)} of memory plus "
+            f"{format_memory(headroom)} of working room, and this machine has "
+            f"{format_memory(total)} in total. Choose a smaller model."
+        )
+    if available is not None and needed > available:
+        raise InsufficientMemoryError(
+            f"{model_id} needs about {format_memory(estimated_bytes)} of memory plus "
+            f"{format_memory(headroom)} of working room, but only "
+            f"{format_memory(available)} is free right now. Close other "
+            "applications and try again."
+        )
+
+
+def mps_memory_fraction() -> float | None:
+    """The Metal allocation cap to apply, or ``None`` to leave PyTorch's own.
+
+    ``CHATLAB_MPS_MEMORY_FRACTION`` overrides the default; a value PyTorch
+    would reject, or a user-set ``PYTORCH_MPS_HIGH_WATERMARK_RATIO``, leaves
+    the allocator alone.
+    """
+
+    if os.environ.get(TORCH_MPS_WATERMARK_ENV):
+        return None
+    raw = os.environ.get(MPS_MEMORY_FRACTION_ENV)
+    if raw is None:
+        return DEFAULT_MPS_MEMORY_FRACTION
+    try:
+        fraction = float(raw)
+    except ValueError:
+        return DEFAULT_MPS_MEMORY_FRACTION
+    return fraction if 0 < fraction <= 2 else None
+
+
+def is_out_of_memory_error(error: BaseException) -> bool:
+    """Whether a backend raised for lack of device or host memory."""
+
+    if isinstance(error, (MemoryError, OutOfMemoryError)):
+        return True
+    text = str(error).lower()
+    return "out of memory" in text or "insufficient memory" in text
+
+
+def out_of_memory_message(error: BaseException) -> str:
+    """One readable sentence for a backend's out-of-memory failure."""
+
+    return (
+        "The model ran out of memory. Shorten the conversation or the text, "
+        "lower the response length, or load a smaller model. "
+        f"({str(error).splitlines()[0][:200]})"
+    )
+
+
+def _reraise_out_of_memory(error: BaseException) -> None:
+    """Re-raise a backend failure, as :class:`OutOfMemoryError` when that is what it was."""
+
+    if isinstance(error, OutOfMemoryError) or not is_out_of_memory_error(error):
+        raise error
+    raise OutOfMemoryError(out_of_memory_message(error)) from error
+
+
+def _guards_device_memory(method):
+    """Turn a run's out-of-memory failure into :class:`OutOfMemoryError`, and
+    hand cached device memory back after ``method``, whatever its outcome.
+
+    The caching allocator keeps every block a run freed, so a long prompt
+    stays paid for until the next one. Returning it after each run keeps the
+    process at the model's own size between requests.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except (RuntimeError, MemoryError) as error:
+            _reraise_out_of_memory(error)
+        finally:
+            self._release_device_cache()
+
+    return wrapper
 
 
 def _read_config(snapshot: Path | None) -> tuple[str | None, str | None]:
@@ -1548,36 +1780,53 @@ class ModelManager:
 
         with self._lock:
             self._unload_locked(torch)
-            tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
-
             if torch.cuda.is_available():
                 dtype = (
                     torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
                 )
-                model = AutoModelForCausalLM.from_pretrained(
-                    local_path,
-                    local_files_only=True,
-                    dtype=dtype,
-                    device_map="auto",
-                    low_cpu_mem_usage=True,
-                )
-                device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
             elif torch.backends.mps.is_available():
-                model = AutoModelForCausalLM.from_pretrained(
-                    local_path,
-                    local_files_only=True,
-                    dtype=torch.float16,
-                    low_cpu_mem_usage=True,
-                ).to("mps")
-                device_name = "Apple Metal (MPS)"
+                dtype = torch.float16
             else:
-                model = AutoModelForCausalLM.from_pretrained(
-                    local_path,
-                    local_files_only=True,
-                    dtype=torch.float32,
-                    low_cpu_mem_usage=True,
-                )
-                device_name = "CPU"
+                dtype = torch.float32
+            self._check_memory(model_id, local_path, str(dtype).replace("torch.", ""))
+            tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
+
+            try:
+                if torch.cuda.is_available():
+                    model = AutoModelForCausalLM.from_pretrained(
+                        local_path,
+                        local_files_only=True,
+                        dtype=dtype,
+                        device_map="auto",
+                        low_cpu_mem_usage=True,
+                    )
+                    device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
+                elif torch.backends.mps.is_available():
+                    self._cap_mps_memory(torch)
+                    model = AutoModelForCausalLM.from_pretrained(
+                        local_path,
+                        local_files_only=True,
+                        dtype=dtype,
+                        low_cpu_mem_usage=True,
+                    ).to("mps")
+                    device_name = "Apple Metal (MPS)"
+                else:
+                    model = AutoModelForCausalLM.from_pretrained(
+                        local_path,
+                        local_files_only=True,
+                        dtype=dtype,
+                        low_cpu_mem_usage=True,
+                    )
+                    device_name = "CPU"
+            except (RuntimeError, MemoryError) as error:
+                self._release_device_cache(torch)
+                if is_out_of_memory_error(error):
+                    raise OutOfMemoryError(
+                        f"{model_id.strip()} did not fit in memory. Close other "
+                        "applications or choose a smaller model. "
+                        f"({str(error).splitlines()[0][:200]})"
+                    ) from error
+                raise
 
             model.eval()
             self.model = model
@@ -1603,10 +1852,53 @@ class ModelManager:
         self.local_path = None
         self.device_name = None
         gc.collect()
+        self._release_device_cache(torch)
+
+    @staticmethod
+    def _release_device_cache(torch=None) -> None:
+        """Return the allocator's unused blocks to the device."""
+
+        if torch is None:
+            import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
+
+    @staticmethod
+    def _check_memory(model_id: str, local_path: Path, load_dtype: str) -> None:
+        """Refuse a load that cannot fit, before any weight is read.
+
+        A snapshot whose weights cannot be measured is let through: the loader
+        will give its own, more specific error.
+        """
+
+        weight_bytes = snapshot_weight_bytes(local_path)
+        if weight_bytes is None:
+            return
+        _architecture, checkpoint_dtype = _read_config(local_path)
+        estimated = estimate_loaded_bytes(weight_bytes, checkpoint_dtype, load_dtype)
+        total, available = system_memory()
+        check_memory_for_load(validate_model_id(model_id), estimated, total, available)
+
+    @staticmethod
+    def _cap_mps_memory(torch) -> None:
+        """Make Metal allocations fail past the recommended working set.
+
+        Unified memory means the GPU and everything else share one pool, and
+        PyTorch's default ceiling lies well beyond it. With the cap, a model
+        or conversation that outgrows the machine raises an error the
+        interface can show; without it, macOS pages until it freezes.
+        """
+
+        fraction = mps_memory_fraction()
+        setter = getattr(torch.mps, "set_per_process_memory_fraction", None)
+        if fraction is None or setter is None:
+            return
+        try:
+            setter(fraction)
+        except (RuntimeError, ValueError, TypeError):
+            pass
 
     def _prompt_token_ids(self, messages: list[dict]) -> tuple[list[int], bool]:
         """Token ids for a chat prompt, and whether it prefills ``<think>``.
@@ -2172,9 +2464,14 @@ class ModelManager:
                 literal_text_ranges=literal_text_ranges,
                 load_id=load_id,
             )
+        except (RuntimeError, MemoryError) as error:
+            _reraise_out_of_memory(error)
         finally:
             if reserved:
                 self.release_generation()
+            # The key-value cache of this response is the largest thing a run
+            # allocates; give it back rather than hold it until the next one.
+            self._release_device_cache()
 
     def _generate(
         self,
@@ -2447,6 +2744,7 @@ class ModelManager:
                     outputs.logits[0, -1].detach().float().cpu().numpy()
                 )
 
+    @_guards_device_memory
     def score_text(
         self,
         text: str,
@@ -2596,6 +2894,7 @@ class ModelManager:
             "top_probability": float(np.exp(log_probs[top_id])),
         }
 
+    @_guards_device_memory
     def inspect(
         self,
         token_ids: Sequence[int],
