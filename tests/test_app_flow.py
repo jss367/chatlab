@@ -2871,9 +2871,11 @@ class ConversationListWiringTests(unittest.TestCase):
             if isinstance(block, gr.Radio) and block.elem_id == "conversation-list"
         )
 
-    def test_the_list_lives_in_a_sidebar(self):
-        sidebar = next(
-            block for block in self.demo.blocks.values() if isinstance(block, gr.Sidebar)
+    def test_the_list_lives_in_the_conversations_pane(self):
+        pane = next(
+            block
+            for block in self.demo.blocks.values()
+            if isinstance(block, gr.Column) and block.elem_id == "conversation-pane"
         )
 
         def descendants(block):
@@ -2881,7 +2883,7 @@ class ConversationListWiringTests(unittest.TestCase):
                 yield child
                 yield from descendants(child)
 
-        self.assertIn(self.conversation_list(), list(descendants(sidebar)))
+        self.assertIn(self.conversation_list(), list(descendants(pane)))
 
     def test_the_list_starts_with_the_main_conversation(self):
         radio = self.conversation_list()

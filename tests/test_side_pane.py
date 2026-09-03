@@ -1,4 +1,4 @@
-"""The side pane: My Models, Model search, and where the settings live."""
+"""The Models page: My Models, Model search, and where the settings live."""
 
 import json
 import os
@@ -763,16 +763,19 @@ class ModelSearchPaneTests(unittest.TestCase):
         )
 
 
-class SidePaneLayoutTests(unittest.TestCase):
-    """The settings and model controls sit in the pane; the conversation does not."""
+class PageLayoutTests(unittest.TestCase):
+    """The nav picks a page: the model controls sit on Models, the settings on
+    Settings, and the conversation on Chat."""
 
-    IN_PANE = [
+    ON_MODELS_PAGE = [
         "Hugging Face model ID",
         "Hugging Face token (optional)",
         "Downloaded models",
         "Sort by",
         "Search Hugging Face",
         "Search results",
+    ]
+    ON_SETTINGS_PAGE = [
         "System prompt",
         "Send previous reasoning back to the model",
         "Temperature",
@@ -784,14 +787,16 @@ class SidePaneLayoutTests(unittest.TestCase):
         "Measure prompt tokens",
         "Enter sends the message",
     ]
-    ON_PAGE = ["Conversation", "Message", "Color tokens by", "Text to score"]
+    ON_CHAT_PAGE = ["Conversation", "Message", "Color tokens by", "Text to score"]
 
     def setUp(self):
         self.demo = app.build_app()
-        self.pane = next(
+
+    def by_id(self, elem_id):
+        return next(
             block
             for block in self.demo.blocks.values()
-            if isinstance(block, gr.Sidebar) and block.elem_id == "side-pane"
+            if getattr(block, "elem_id", None) == elem_id
         )
 
     def labelled(self, label):
@@ -803,30 +808,59 @@ class SidePaneLayoutTests(unittest.TestCase):
         self.assertEqual(len(matches), 1, label)
         return matches[0]
 
-    def in_pane(self, block) -> bool:
+    def within(self, block, container) -> bool:
         parent = getattr(block, "parent", None)
         while parent is not None:
-            if parent is self.pane:
+            if parent is container:
                 return True
             parent = getattr(parent, "parent", None)
         return False
 
-    def test_the_pane_holds_the_model_controls_and_settings(self):
-        for label in self.IN_PANE:
-            with self.subTest(label=label):
-                self.assertTrue(self.in_pane(self.labelled(label)))
+    def test_each_control_sits_on_its_page(self):
+        for page, labels in [
+            ("models-page", self.ON_MODELS_PAGE),
+            ("settings-page", self.ON_SETTINGS_PAGE),
+            ("chat-page", self.ON_CHAT_PAGE),
+        ]:
+            container = self.by_id(page)
+            for label in labels:
+                with self.subTest(page=page, label=label):
+                    self.assertTrue(self.within(self.labelled(label), container))
 
-    def test_the_conversation_stays_on_the_page(self):
-        for label in self.ON_PAGE:
-            with self.subTest(label=label):
-                self.assertFalse(self.in_pane(self.labelled(label)))
+    def test_the_nav_offers_the_three_pages_and_starts_on_chat(self):
+        nav = self.by_id("nav")
+        self.assertIsInstance(nav, gr.Radio)
+        self.assertEqual([value for _, value in nav.choices], ["Chat", "Models", "Settings"])
+        self.assertEqual(nav.value, "Chat")
+        self.assertTrue(self.within(nav, self.by_id("nav-pane")))
 
-    def test_the_pane_is_thin(self):
-        self.assertEqual(self.pane.width, app.SIDE_PANE_WIDTH)
-        self.assertLessEqual(app.SIDE_PANE_WIDTH, 360)
+    def test_the_nav_pane_is_thin(self):
+        self.assertLessEqual(app.NAV_PANE_WIDTH, 100)
+        self.assertEqual(self.by_id("nav-pane").min_width, app.NAV_PANE_WIDTH)
 
-    def test_the_pane_sits_opposite_conversation_navigation(self):
-        self.assertEqual(self.pane.position, "right")
+    def test_only_the_chat_page_starts_visible(self):
+        self.assertTrue(self.by_id("chat-page").visible)
+        self.assertTrue(self.by_id("conversation-pane").visible)
+        self.assertFalse(self.by_id("models-page").visible)
+        self.assertFalse(self.by_id("settings-page").visible)
+
+    def test_picking_a_page_shows_it_alone(self):
+        (listener,) = self.listeners("show_page")
+        self.assertEqual(listener.targets, [(self.by_id("nav")._id, "change")])
+        self.assertEqual(
+            listener.outputs,
+            [
+                self.by_id("conversation-pane"),
+                self.by_id("chat-page"),
+                self.by_id("models-page"),
+                self.by_id("settings-page"),
+            ],
+        )
+        shown = lambda page: [update["visible"] for update in app.show_page(page)]
+        # The conversations pane comes and goes with Chat.
+        self.assertEqual(shown("Chat"), [True, True, False, False])
+        self.assertEqual(shown("Models"), [False, False, True, False])
+        self.assertEqual(shown("Settings"), [False, False, False, True])
 
     def listeners(self, name):
         return [

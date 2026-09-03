@@ -5,7 +5,7 @@ A local chat interface that shows what happened under the hood for every token, 
 ## What it includes
 
 - Hugging Face model download and cache controls
-- A side pane listing the models already downloaded, with a search of the Hugging Face Hub for more
+- A Models page listing the models already downloaded, with a search of the Hugging Face Hub for more
 - A chat interface that collapses OLMo reasoning blocks into an expandable section
 - Live token-by-token generation with a **Stop** button
 - Exact raw vocabulary rank for each generated token
@@ -65,7 +65,7 @@ On macOS or Linux:
 ./run.sh
 ```
 
-The first run creates an isolated Python environment and installs the dependencies. The app then opens in your browser. Paste a Hugging Face model ID into the **Model** box in the side pane and choose **Download and load**, or pick one from **My Models** or **Model search** there.
+The first run creates an isolated Python environment and installs the dependencies. The app then opens in your browser. Open **Models** in the pane at the far left, paste a Hugging Face model ID into the **Model** box and choose **Download and load**, or pick one from **My Models** or **Model search** there.
 
 To install manually:
 
@@ -76,16 +76,21 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Model files use the standard Hugging Face cache. Chatlab lists complete downloads and resumable partial downloads under **My Models** in the side pane. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
+Model files use the standard Hugging Face cache. Chatlab lists complete downloads and resumable partial downloads under **My Models** on the Models page. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
 
-## The side pane
+## The pages
 
-Everything about which model is running, and how, sits in a pane to the left of the conversation. The arrow at its edge collapses it.
+A thin pane at the far left switches between three pages. **Chat** is the conversation, with the conversations pane beside it and the token panel to its right. **Models** is everything about which model is running. **Settings**, at the bottom of the pane, is how every reply is prompted, sampled, and measured.
+
+### Models
 
 - **Model** holds the model ID and token boxes and the download, load, and unload buttons, with the status card under them.
 - **My Models** lists every model in the Hugging Face cache with its size on disk. **Sort by** orders the list newest download first, by name, or by size in either direction. A model short of files is marked *incomplete* and tinted amber, and the one in memory *loaded*. Selecting one shows its file count, architecture and weight type from its `config.json`, revision, when it was last downloaded, and its folder, and puts its ID in the model box ready for **Load cached**. **Redownload** fetches whatever the selected model still lacks, resuming partial files rather than starting over; on a complete model it checks the Hub for updated files. **Remove** deletes the selected model's folder from the cache after a confirmation; a model that is loaded or still downloading has to be unloaded or finished first. The list rescans after every download, load, unload, and removal, and **Refresh** rescans it by hand.
 - **Model search** searches the Hub for text-generation models with Transformers support, most downloaded first. Each result shows its parameter count and recent downloads; selecting one adds its license, likes, last update, whether it is gated, and whether any of it is already on disk, and puts its ID in the model box ready for **Download and load**.
-- **Settings** holds the system prompt, assistant prefill, and reasoning options and the sampling, analysis, and input controls described below.
+
+### Settings
+
+The system prompt, assistant prefill, and reasoning options; the sampling, analysis, and input controls described below. Settings apply to the next reply on any conversation.
 
 ## Working with a conversation
 
@@ -129,7 +134,7 @@ Only a chat response can be branched. Prompt tokens and text measured in the **S
 
 ## The conversations pane
 
-The pane on the left lists every conversation. Each entry shows the conversation's name and the start of its first message, then the model that answered and how many tokens the conversation has come to. Click an entry to switch to it. The pane collapses with the arrow at its top.
+On the Chat page, the pane beside the nav lists every conversation. Each entry shows the conversation's name and the start of its first message, then the model that answered and how many tokens the conversation has come to. Click an entry to switch to it.
 
 The token count is the size of the conversation as the model last saw it: every token in the prompt behind the latest reply - system prompt, transcript, and chat template - plus every token of the reply, reasoning included. It updates as a reply streams, so a reply that is stopped part way shows how far it got. The count belongs to the reply the model generated, and a conversation loaded from an older file, or whose only replies were typed in by hand, says so instead of showing a number. A conversation answered by more than one model names each of them, most recent first.
 
