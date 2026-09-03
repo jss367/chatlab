@@ -323,6 +323,13 @@ PARTIAL = cached(
     dtype=None,
 )
 
+UNSUPPORTED = cached(
+    "runwayml/stable-diffusion-v1-5",
+    status=CacheStatus(cached_bytes=5_500_000_000, unsupported=True),
+    architecture=None,
+    dtype=None,
+)
+
 
 class SortCachedModelsTests(unittest.TestCase):
     OLD_SMALL = cached("zeta/old-small", updated=1.0, status=CacheStatus(cached_bytes=10))
@@ -412,6 +419,20 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertIn("· incomplete", labels["org/partial"])
         self.assertNotIn("incomplete", labels[OLMO])
         self.assertIn('[data-testid*="· incomplete"]', app.CSS)
+
+    def test_a_whole_repo_of_another_kind_is_listed_as_unsupported(self):
+        self.entries = [UNSUPPORTED]
+
+        radio, _, _ = app.refresh_my_models(None)
+        _, detail = app.select_my_model(UNSUPPORTED.model_id)
+
+        self.assertEqual(
+            radio["choices"][0][0], f"{UNSUPPORTED.model_id} · 5.5 GB · unsupported"
+        )
+        self.assertIn("Unsupported", detail)
+        self.assertIn("not a Transformers language model", detail)
+        self.assertNotIn("Incomplete", detail)
+        self.assertNotIn("Download and load", detail)
 
     def test_a_refresh_keeps_the_selection(self):
         radio, detail, _ = app.refresh_my_models("org/partial")
@@ -740,6 +761,19 @@ class ModelSearchPaneTests(unittest.TestCase):
 
         self.assertIn("Already cached", detail)
         self.assertIn("15.0 GB cached", detail)
+
+    def test_a_cached_result_of_another_kind_is_not_called_partly_cached(self):
+        app.cache_status = lambda model_id: CacheStatus(
+            cached_bytes=5_500_000_000, unsupported=True
+        )
+        _, _, state = app.search_models("olmo", "")
+
+        _, detail = app.select_search_result(INSTRUCT.model_id, state)
+
+        self.assertIn("Already cached", detail)
+        self.assertIn("not a model ChatLab can load", detail)
+        self.assertNotIn("Partly cached", detail)
+        self.assertNotIn("Download and load", detail)
 
     def test_a_partly_downloaded_result_says_so(self):
         app.cache_status = lambda model_id: CacheStatus(

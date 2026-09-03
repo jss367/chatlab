@@ -519,6 +519,17 @@ class DownloadStatusTests(unittest.TestCase):
         self.assertIn("the model weights are missing", cards[-1])
         self.assertIn("Download and load", cards[-1])
 
+    def test_load_cached_refuses_a_repo_of_another_kind(self):
+        cards = self.run_handler(
+            app.load_cached_model,
+            [CacheStatus(cached_bytes=5_500_000_000, unsupported=True)],
+        )
+
+        self.assertIn("Unsupported model", cards[-1])
+        self.assertIn("5.5 GB cached", cards[-1])
+        self.assertIn("not a Transformers language model", cards[-1])
+        self.assertNotIn("Download incomplete", cards[-1])
+
     def test_a_download_stopped_between_shards_is_announced_as_resumed(self):
         shards = tuple(f"model-0000{i}-of-00006.safetensors" for i in range(2, 7))
         before = CacheStatus(cached_bytes=3_000_000_000, missing_files=shards)
