@@ -427,6 +427,7 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertIn("Already cached", detail)
         self.assertIn("not a model ChatLab can load", detail)
         self.assertNotIn("Partly cached", detail)
+        self.assertNotIn("Download and load", detail)
 
     def test_a_partly_downloaded_result_says_so(self):
         app.cache_status = lambda model_id: CacheStatus(

@@ -631,7 +631,13 @@ def describe_hub_model(result: HubModel) -> str:
         facts.append(("Partly cached", describe_on_disk(cached)))
     lines.extend(f"- **{label}:** {value}" for label, value in facts)
     lines.append("")
-    lines.append("Its ID is in the model ID box: use **Download and load** to fetch it.")
+    if cached.unsupported:
+        lines.append(
+            "Its ID is in the model ID box, but downloading again would fetch the "
+            "same files: this repo is not a Transformers language model."
+        )
+    else:
+        lines.append("Its ID is in the model ID box: use **Download and load** to fetch it.")
     return "\n".join(lines)
 
 
