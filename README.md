@@ -18,9 +18,10 @@ A local chat interface that shows what happened under the hood for every token, 
 - A system prompt, plus temperature, top-p, top-k, seed, and response-length controls
 - Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
+- A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
 - Enter sends a message and Shift+Enter starts a new line, with a setting to swap them
 - Branching a response from any token into one of the alternatives the model considered
-- Forking the conversation so the same transcript can be taken in several directions
+- Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
 - An attention view showing which earlier tokens the model looked at when predicting it
 - Apple Metal, NVIDIA CUDA, and CPU loading
@@ -81,7 +82,7 @@ Model files use the standard Hugging Face cache. Chatlab lists complete download
 - **Stop** cancels the running generation and keeps whatever was produced so far.
 - **Retry** regenerates the last reply. Because **🎲 New seed each response** is on by default, a retry actually explores a different sample; turn it off to lock the seed and reproduce a response exactly. The seed field always shows the seed that produced the response on screen.
 - Hovering a message in the transcript gives per-message retry, edit, and undo. Editing one of your messages truncates the conversation there and generates a new reply; editing a reply just corrects it in place. **↩️ Undo last** removes the last exchange and puts your message back in the input box.
-- **💾 Save conversation** writes a JSON file containing every turn, its reasoning block, and the system prompt. **📂 Load conversation** restores it.
+- **💾 Save conversation** writes a JSON file containing every turn, its reasoning block, and the system prompt, along with the model and token counts behind each reply. **📂 Load conversation** restores it.
 
 ### Assistant prefill
 
@@ -112,13 +113,17 @@ The replayed tokens are still measured against the model's own distribution, so 
 
 Only a chat response can be branched. Prompt tokens and text measured in the **Score text** tab have no conversation to continue.
 
-## Forking the conversation
+## The conversations pane
 
-**🌿 Fork** copies the conversation into a new fork and switches to it, so you can ask something different without losing the original. The **Conversation fork** dropdown moves between forks, and **Delete fork** removes the one on screen.
+The pane on the left lists every conversation. Each entry shows the conversation's name and the start of its first message, then the model that answered and how many tokens the conversation has come to. Click an entry to switch to it. The pane collapses with the arrow at its top.
+
+The token count is the size of the conversation as the model last saw it: every token in the prompt behind the latest reply - system prompt, transcript, and chat template - plus every token of the reply, reasoning included. It updates as a reply streams, so a reply that is stopped part way shows how far it got. The count belongs to the reply the model generated, and a conversation loaded from an older file, or whose only replies were typed in by hand, says so instead of showing a number. A conversation answered by more than one model names each of them, most recent first.
+
+**➕ New** puts the conversation on screen away and starts an empty one. **🌿 Fork** copies the conversation into a new fork and switches to it, so you can ask something different without losing the original. **🗑️ Delete** removes the conversation on screen and returns to the main one, which cannot be deleted; **🗑️ Clear** under the chat empties it, and removes every other conversation with it.
 
 Click a message before pressing Fork to fork at that point. Forking at a reply keeps the conversation through that reply, ready for a different next question. Forking at one of your own messages keeps what came before it and puts the message back in the input box so it can be reworded, the same shape **Undo** gives.
 
-Each fork has its own transcript, but the token panel describes only the response on screen: switching forks clears it until the next response. **💾 Save conversation** writes the fork on screen, and **🗑️ Clear** removes every fork.
+Each conversation has its own transcript, but the token panel describes only the response on screen: switching conversations clears it until the next response. **💾 Save conversation** writes the conversation on screen.
 
 ## Layers and attention
 
