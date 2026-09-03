@@ -624,6 +624,47 @@ class ReplacementEncodingTests(unittest.TestCase):
         self.assertEqual(ids, [pieces.index("world")])
         self.assertEqual(joined, "Helloworld")
 
+    def test_a_slow_wordpiece_suffix_can_be_far_from_the_guessed_seam(self):
+        class SlowWordPieceTokenizer(FakeTokenizer):
+            """A kept word is one token, but the joint encoding uses three."""
+
+            is_fast = False
+
+            def __init__(self):
+                pieces = [
+                    "abcdefgh",
+                    "abc",
+                    "##de",
+                    "##fgh",
+                    "##ijkl",
+                    "ijkl",
+                ]
+                super().__init__(pieces, eos_id=None)
+                self.all_special_ids = []
+
+            def __call__(self, text, **_kwargs):
+                encoded = {
+                    "abcdefgh": [0],
+                    "abcdefghijkl": [1, 2, 3, 4],
+                    "ijkl": [5],
+                }
+                return Encoding(input_ids=encoded[text])
+
+            def decode(self, token_ids, **_kwargs):
+                tokens = [self.pieces[int(token_id)] for token_id in token_ids]
+                return " ".join(tokens).replace(" ##", "")
+
+        manager = loaded_manager([0], pieces=["unused"], eos_id=None)
+        manager.tokenizer = SlowWordPieceTokenizer()
+
+        replacement = manager.encode_replacement([0], "ijkl")
+
+        # _guess_seam counts the kept word's lone token and returns 1. The
+        # exact continuation starts at 3, beyond that guess and both adjacent
+        # candidates, and only becomes literal when it follows the kept token.
+        self.assertEqual(replacement, [4])
+        self.assertEqual(manager.tokenizer.decode([0, *replacement]), "abcdefghijkl")
+
     def test_a_joint_suffix_still_rejects_an_embedded_stop_token(self):
         pieces = [
             "\u2581Hello",

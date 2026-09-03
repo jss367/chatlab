@@ -315,12 +315,17 @@ class SplitPassage(NamedTuple):
     wrap it in. The numbers are exact either way — they measure the plain
     passage the reader typed — but they answer a different question than the
     one the request implied, so the caller is expected to say which.
+
+    ``decoded_prefix_end`` retains the best boundary found while inspecting a
+    slow tokenizer's decoded prefixes. It can locate a usable continuation
+    even when decoding that continuation alone cannot verify the scoring seam.
     """
 
     context_ids: list[int]
     text_ids: list[int]
     seam_verified: bool = True
     chat_template_missing: bool = False
+    decoded_prefix_end: int | None = None
 
 
 def model_position_limit(model) -> int | None:
@@ -420,7 +425,7 @@ def _seam_by_decoding(
     text: str,
     *,
     add_special_tokens: bool = True,
-) -> int | None:
+) -> tuple[int | None, int | None]:
     """Where the seam falls in ``ids``, when decoding can prove where it fell.
 
     A tokenizer without offsets can still be asked what a run of ids says, so
@@ -434,17 +439,18 @@ def _seam_by_decoding(
     special token it wants — a rendered chat template does — so decoding has
     to keep them to round trip.
 
-    The split is returned only when the two halves decode back to the passage
-    verbatim. A ``decode`` that does not round trip — a byte-level merge cut
-    mid-character, a normalizer that rewrites whitespace, a SentencePiece
-    model that eats a leading space — would otherwise move the seam by a
-    token and score part of the context, so those cases say ``None`` and
-    leave the placement to :func:`_guess_seam`.
+    The first value is returned only when the two halves decode back to the
+    passage verbatim. The second retains the decoded-prefix boundary even when
+    it could not be verified. A ``decode`` that does not round trip — a
+    byte-level merge cut mid-character, a normalizer that rewrites whitespace,
+    a SentencePiece model that eats a leading space — would otherwise move the
+    seam by a token and score part of the context, so those cases say ``None``
+    and leave the placement to :func:`_guess_seam`.
     """
 
     decode = getattr(tokenizer, "decode", None)
     if decode is None:
-        return None
+        return None, None
 
     def spoken(start: int, end: int) -> str | None:
         try:
@@ -455,6 +461,40 @@ def _seam_by_decoding(
             )
         except (NotImplementedError, TypeError, ValueError):
             return None
+
+    split = _decoded_prefix_end(spoken, stop, context)
+
+    # The token the split lands on has to reach the seam, because it is the
+    # one that straddles it. A byte-level merge cut mid-character decodes to
+    # a replacement character instead of the text, which strands the search
+    # early on a split whose halves still concatenate to the passage; that
+    # token would not reach the seam, and this is what catches it. A token
+    # that instead stops short of the seam belongs to the context, and means
+    # the search above did not find the longest run.
+    if split < stop:
+        reaches = spoken(0, split + 1)
+        if reaches is None or context.startswith(reaches):
+            return None, split
+        if not reaches.startswith(context):
+            return None, split
+
+    head, tail = spoken(0, split), spoken(split, stop)
+    if head is None or tail is None or head + tail != context + text:
+        return None, split
+
+    return split, split
+
+
+def _decoded_prefix_end(
+    spoken: Callable[[int, int], str | None], stop: int, context: str
+) -> int:
+    """Find the longest decoded prefix that still lies within ``context``.
+
+    The result remains useful as a suffix candidate even when decoding the two
+    halves independently cannot verify a seam. Slow WordPiece tokenizers, for
+    example, expose a leading continuation piece literally when it is decoded
+    alone, while that same piece joins correctly after the kept token IDs.
+    """
 
     def within_context(end: int) -> bool:
         prefix = spoken(0, end)
@@ -467,27 +507,7 @@ def _seam_by_decoding(
             low = middle
         else:
             high = middle - 1
-    split = low
-
-    # The token the split lands on has to reach the seam, because it is the
-    # one that straddles it. A byte-level merge cut mid-character decodes to
-    # a replacement character instead of the text, which strands the search
-    # early on a split whose halves still concatenate to the passage; that
-    # token would not reach the seam, and this is what catches it. A token
-    # that instead stops short of the seam belongs to the context, and means
-    # the search above did not find the longest run.
-    if split < stop:
-        reaches = spoken(0, split + 1)
-        if reaches is None or context.startswith(reaches):
-            return None
-        if not reaches.startswith(context):
-            return None
-
-    head, tail = spoken(0, split), spoken(split, stop)
-    if head is None or tail is None or head + tail != context + text:
-        return None
-
-    return split
+    return low
 
 
 def _guess_seam(
@@ -755,7 +775,7 @@ def split_context_and_text(
     if add_special_tokens:
         stop = _end_of_written_text(tokenizer, context + text, ids)
 
-    split = _seam_by_decoding(
+    split, decoded_prefix_end = _seam_by_decoding(
         tokenizer, ids, stop, context, text, add_special_tokens=add_special_tokens
     )
     verified = split is not None
@@ -768,7 +788,10 @@ def split_context_and_text(
     # encoding is the text's own, plus whatever specials the tokenizer
     # prepends — so the cut in front of the first ordinary token is exact.
     return SplitPassage(
-        ids[:split], ids[split:stop], seam_verified=verified or not context
+        ids[:split],
+        ids[split:stop],
+        seam_verified=verified or not context,
+        decoded_prefix_end=decoded_prefix_end,
     )
 
 
@@ -1508,14 +1531,21 @@ class ModelManager:
         # each candidate decodes the whole kept prefix plus a progressively
         # longer tail, all while the model lock is held. The seam can be off by
         # one token when one piece crosses it, so validate the boundary and its
-        # two neighbours; this keeps candidate decoding strictly bounded while
-        # the final exact decode remains the authority.
+        # two neighbours. If that seam was only guessed, also bisect decoded
+        # joint prefixes: a continuation token may not decode correctly by
+        # itself, but the prefix can still identify its exact start. Candidate
+        # decoding stays strictly bounded while the final exact decode remains
+        # the authority.
         standalone = self._encode_plain(text)
         split = split_context_and_text(
             self.tokenizer, kept_text, text, add_special_tokens=False
         )
         joint = split.context_ids + split.text_ids
         boundary = len(split.context_ids)
+
+        decoded_boundary = (
+            split.decoded_prefix_end if not split.seam_verified else None
+        )
 
         def candidates() -> Iterator[list[int]]:
             yield standalone
@@ -1530,7 +1560,13 @@ class ModelManager:
                     yield aligned
             starts = {
                 start
-                for start in (boundary - 1, boundary, boundary + 1)
+                for start in (
+                    boundary - 1,
+                    boundary,
+                    boundary + 1,
+                    decoded_boundary,
+                )
+                if start is not None
                 if 0 <= start < len(joint)
             }
             for start in sorted(starts, reverse=True):
