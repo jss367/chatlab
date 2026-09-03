@@ -117,7 +117,10 @@ class CacheStatus:
     ``missing_files`` names what the ``main`` snapshot still lacks before the
     model can load, and is the one verdict on that: a cache another tool
     filled with only the config and tokenizer, or a download stopped between
-    shards, has finished blobs but no model. ``cached_bytes`` counts finished
+    shards, has finished blobs but no model. ``unsupported`` says the snapshot
+    is whole but is not a Transformers language model at all (a diffusers
+    pipeline, a CTranslate2 or ONNX export, a folder of SAE weights): nothing
+    is missing, ChatLab just cannot load it. ``cached_bytes`` counts finished
     files; ``partial_files`` and ``partial_bytes`` count the ``.incomplete``
     blobs a cut-off download left behind, which ``snapshot_download`` resumes
     rather than restarts. Those are a size estimate, not a verdict: the blob
@@ -131,6 +134,7 @@ class CacheStatus:
     partial_files: int = 0
     partial_bytes: int = 0
     missing_files: tuple[str, ...] = ()
+    unsupported: bool = False
 
     @property
     def present(self) -> bool:
@@ -138,7 +142,9 @@ class CacheStatus:
 
     @property
     def complete(self) -> bool:
-        return self.present and not self.missing_files
+        """Whole and loadable: on disk, nothing missing, and a model ChatLab runs."""
+
+        return self.present and not self.missing_files and not self.unsupported
 
     @property
     def total_bytes(self) -> int:
@@ -169,16 +175,50 @@ def snapshot_folder(folder: Path, revision: str = "main") -> Path | None:
     return snapshot if snapshot.is_dir() else None
 
 
-def missing_files(snapshot: Path | None) -> tuple[str, ...]:
-    """The files a snapshot needs before ``from_pretrained`` can load it.
+def is_transformers_config(path: Path) -> bool:
+    """Whether ``config.json`` describes a Transformers model.
 
-    Only the config and the weights are checked. Which tokenizer files a repo
-    ships varies too much to know from the outside, and a wrong "incomplete"
-    verdict on a good cache would be worse than a generic load error.
+    Every ``AutoConfig`` carries a ``model_type``; most also list
+    ``architectures``. A CTranslate2 export's ``config.json`` has neither, and
+    a diffusers pipeline has no root ``config.json`` at all.
+    """
+
+    try:
+        config = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(config, dict) and (
+        "model_type" in config or "architectures" in config
+    )
+
+
+def judge_snapshot(snapshot: Path | None) -> tuple[tuple[str, ...], bool]:
+    """``(missing_files, unsupported)`` for what the snapshot holds.
+
+    ``missing_files`` are the files ``from_pretrained`` needs before it can
+    load: only the config and the weights are checked, since which tokenizer
+    files a repo ships varies too much to know from the outside, and a wrong
+    "incomplete" verdict on a good cache would be worse than a generic load
+    error. A snapshot with neither a Transformers ``config.json`` nor any
+    weights at its root is not a cut-off download but a repo of another kind
+    (diffusers, CTranslate2, ONNX, SAE weights), and is ``unsupported``
+    instead, with nothing reported missing.
     """
 
     if snapshot is None:
-        return ("config.json", MODEL_WEIGHTS)
+        return ("config.json", MODEL_WEIGHTS), False
+    config = snapshot / "config.json"
+    has_weights = any(
+        (snapshot / name).is_file() for pair in WEIGHT_FORMATS for name in pair
+    )
+    if not has_weights and not is_transformers_config(config):
+        return (), True
+    return missing_files(snapshot), False
+
+
+def missing_files(snapshot: Path) -> tuple[str, ...]:
+    """The files a snapshot needs before ``from_pretrained`` can load it."""
+
     missing = []
     if not (snapshot / "config.json").is_file():
         missing.append("config.json")
@@ -233,7 +273,8 @@ def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
                 cached += entry.stat().st_size
     if cached == 0 and partial_files == 0:
         return CacheStatus()
-    return CacheStatus(cached, partial_files, partial_bytes, missing_files(snapshot))
+    missing, unsupported = judge_snapshot(snapshot)
+    return CacheStatus(cached, partial_files, partial_bytes, missing, unsupported)
 
 
 def format_bytes(count: int) -> str:

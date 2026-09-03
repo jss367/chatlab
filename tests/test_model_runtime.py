@@ -40,6 +40,7 @@ class CacheStatusTests(unittest.TestCase):
 
     MODEL = "allenai/Olmo-3-7B-Think"
     COMMIT = "d97e442d7cc678210054dbcc9b440894d62c89a4"
+    CONFIG = b'{"model_type": "olmo3"}'
 
     def folder(self, root: str) -> Path:
         blobs = Path(root) / "models--allenai--Olmo-3-7B-Think" / "blobs"
@@ -76,20 +77,20 @@ class CacheStatusTests(unittest.TestCase):
     def test_a_single_weights_file_and_config_make_a_loadable_snapshot(self):
         with tempfile.TemporaryDirectory() as root:
             self.snapshot(
-                root, {"config.json": b"{}", "model.safetensors": b"x" * 100}
+                root, {"config.json": self.CONFIG, "model.safetensors": b"x" * 100}
             )
             status = cache_status(self.MODEL, Path(root))
 
         self.assertTrue(status.complete)
         self.assertEqual(status.missing_files, ())
-        self.assertEqual(status.cached_bytes, 102)
+        self.assertEqual(status.cached_bytes, 100 + len(self.CONFIG))
 
     def test_every_shard_the_index_names_makes_a_loadable_snapshot(self):
         with tempfile.TemporaryDirectory() as root:
             self.snapshot(
                 root,
                 {
-                    "config.json": b"{}",
+                    "config.json": self.CONFIG,
                     "model.safetensors.index.json": self.shard_index("a.st", "b.st"),
                     "a.st": b"x",
                     "b.st": b"x",
@@ -103,7 +104,7 @@ class CacheStatusTests(unittest.TestCase):
         """Another tool's ``AutoTokenizer`` call leaves finished blobs but no weights."""
 
         with tempfile.TemporaryDirectory() as root:
-            self.snapshot(root, {"config.json": b"{}", "tokenizer.json": b"{}"})
+            self.snapshot(root, {"config.json": self.CONFIG, "tokenizer.json": b"{}"})
             status = cache_status(self.MODEL, Path(root))
 
         self.assertTrue(status.present)
@@ -118,7 +119,7 @@ class CacheStatusTests(unittest.TestCase):
             self.snapshot(
                 root,
                 {
-                    "config.json": b"{}",
+                    "config.json": self.CONFIG,
                     "model.safetensors.index.json": self.shard_index(
                         "model-00001-of-00003.safetensors",
                         "model-00002-of-00003.safetensors",
@@ -147,7 +148,7 @@ class CacheStatusTests(unittest.TestCase):
                 self.snapshot(
                     root,
                     {
-                        "config.json": b"{}",
+                        "config.json": self.CONFIG,
                         "model.safetensors.index.json": index,
                     },
                 )
@@ -159,7 +160,7 @@ class CacheStatusTests(unittest.TestCase):
     def test_a_link_whose_blob_was_deleted_does_not_count_as_weights(self):
         with tempfile.TemporaryDirectory() as root:
             snapshot = self.snapshot(
-                root, {"config.json": b"{}", "model.safetensors": b"x" * 100}
+                root, {"config.json": self.CONFIG, "model.safetensors": b"x" * 100}
             )
             (snapshot / "model.safetensors").resolve().unlink()
             status = cache_status(self.MODEL, Path(root))
@@ -181,14 +182,14 @@ class CacheStatusTests(unittest.TestCase):
                 (model / "refs" / "main").write_text(self.COMMIT)
                 snapshot = model / "snapshots" / self.COMMIT
                 snapshot.mkdir(parents=True)
-                (snapshot / "config.json").write_bytes(b"{}")
+                (snapshot / "config.json").write_bytes(self.CONFIG)
                 (snapshot / "model.safetensors").write_bytes(b"x" * 100)
                 status = cache_status(self.MODEL, Path(root))
 
                 self.assertTrue(status.present)
                 self.assertTrue(status.complete)
                 self.assertEqual(status.missing_files, ())
-                self.assertEqual(status.cached_bytes, 102)
+                self.assertEqual(status.cached_bytes, 100 + len(self.CONFIG))
 
     def test_blobs_without_a_resolvable_snapshot_lack_everything(self):
         with tempfile.TemporaryDirectory() as root:
@@ -205,7 +206,7 @@ class CacheStatusTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             snapshot = self.snapshot(
-                root, {"config.json": b"{}", "model.safetensors": b"x" * 100}
+                root, {"config.json": self.CONFIG, "model.safetensors": b"x" * 100}
             )
             blobs = snapshot.parents[1] / "blobs"
             (blobs / "other.1234.incomplete").write_bytes(b"x" * 40)
@@ -224,7 +225,7 @@ class CacheStatusTests(unittest.TestCase):
             snapshot = self.snapshot(
                 root,
                 {
-                    "config.json": b"{}",
+                    "config.json": self.CONFIG,
                     "model.safetensors.index.json": self.shard_index("a.st", "b.st"),
                     "a.st": b"x",
                 },
@@ -246,7 +247,7 @@ class CacheStatusTests(unittest.TestCase):
             self.snapshot(
                 root,
                 {
-                    "config.json": b"{}",
+                    "config.json": self.CONFIG,
                     "pytorch_model.bin": b"x" * 100,
                     "model.safetensors.index.json": self.shard_index("a.st", "b.st"),
                     "a.st": b"x",
@@ -260,12 +261,55 @@ class CacheStatusTests(unittest.TestCase):
     def test_a_bin_only_repo_is_complete(self):
         with tempfile.TemporaryDirectory() as root:
             self.snapshot(
-                root, {"config.json": b"{}", "pytorch_model.bin": b"x" * 100}
+                root, {"config.json": self.CONFIG, "pytorch_model.bin": b"x" * 100}
             )
             status = cache_status(self.MODEL, Path(root))
 
         self.assertTrue(status.complete)
         self.assertEqual(status.missing_files, ())
+
+    def test_a_repo_of_another_kind_is_unsupported_rather_than_incomplete(self):
+        """A diffusers pipeline, a CTranslate2 export, or a folder of ONNX
+        models is whole on disk; it just is not something ChatLab loads."""
+
+        layouts = {
+            "diffusers": {"model_index.json": b"{}", "unet/config.json": b"{}"},
+            "ctranslate2": {"config.json": b'{"lang_ids": []}', "model.bin": b"x"},
+            "onnx bundle": {"sam2-small/model.onnx": b"x" * 10},
+        }
+        for kind, files in layouts.items():
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as root:
+                snapshot = self.snapshot(root, {k: v for k, v in files.items() if "/" not in k})
+                for name, content in files.items():
+                    if "/" in name:
+                        (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
+                        (snapshot / name).write_bytes(content)
+                status = cache_status(self.MODEL, Path(root))
+
+                self.assertTrue(status.present)
+                self.assertTrue(status.unsupported)
+                self.assertFalse(status.complete)
+                self.assertEqual(status.missing_files, ())
+
+    def test_a_transformers_config_without_weights_is_still_incomplete(self):
+        """``architectures`` alone marks a Transformers config too."""
+
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(
+                root, {"config.json": b'{"architectures": ["LlamaForCausalLM"]}'}
+            )
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertFalse(status.unsupported)
+        self.assertEqual(status.missing_files, (MODEL_WEIGHTS,))
+
+    def test_weights_with_an_unreadable_config_are_judged_by_the_weights(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, {"config.json": b"not json", "model.safetensors": b"x"})
+            status = cache_status(self.MODEL, Path(root))
+
+        self.assertFalse(status.unsupported)
+        self.assertTrue(status.complete)
 
     def test_partial_blobs_are_counted_apart_from_finished_ones(self):
         with tempfile.TemporaryDirectory() as root:
