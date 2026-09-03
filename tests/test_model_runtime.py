@@ -10,9 +10,9 @@ from model_runtime import (
     SCORE_TOKEN_LIMIT,
     ModelManager,
     cache_status,
-    cached_models,
     encode_for_scoring,
     format_bytes,
+    list_cached_models,
     score_token_limit,
     split_context_and_text,
     validate_model_id,
@@ -319,14 +319,14 @@ class CachedModelsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             self.make_cache_entry(root, "org/complete--variant", complete=True)
             self.make_cache_entry(root, "org/partial", complete=False)
-            inventory = cached_models(Path(root))
+            inventory = {
+                model.model_id: model for model in list_cached_models(Path(root))
+            }
 
-        self.assertEqual(
-            [model.model_id for model in inventory],
-            ["org/complete--variant", "org/partial"],
-        )
-        self.assertTrue(inventory[0].status.complete)
-        self.assertFalse(inventory[1].status.complete)
+        # The double hyphen inside the name survives the folder-name split.
+        self.assertEqual(set(inventory), {"org/complete--variant", "org/partial"})
+        self.assertTrue(inventory["org/complete--variant"].status.complete)
+        self.assertFalse(inventory["org/partial"].status.complete)
 
     def test_ignores_cache_entries_chatlab_cannot_select(self):
         with tempfile.TemporaryDirectory() as root:
@@ -335,12 +335,12 @@ class CachedModelsTests(unittest.TestCase):
             (bare / "cached-blob").write_bytes(b"cached")
             (Path(root) / "datasets--org--corpus").mkdir()
 
-            self.assertEqual(cached_models(Path(root)), ())
+            self.assertEqual(list_cached_models(Path(root)), [])
 
     def test_a_missing_cache_has_an_empty_inventory(self):
         with tempfile.TemporaryDirectory() as root:
             missing = Path(root) / "not-created"
-            self.assertEqual(cached_models(missing), ())
+            self.assertEqual(list_cached_models(missing), [])
 
 
 class Encoding(dict):
