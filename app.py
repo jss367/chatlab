@@ -19,11 +19,14 @@ from gradio.utils import get_upload_folder
 
 import charts
 from conversation import (
+    CHAT_PREFIX,
     MAIN_BRANCH,
     THINK_CLOSE,
+    branch_choices,
     copy_forks,
     copy_turns,
     display_messages,
+    forget_measurements,
     fork_at,
     from_json,
     last_user_index,
@@ -31,6 +34,7 @@ from conversation import (
     make_turn,
     model_messages,
     new_forks,
+    next_branch_name,
     next_fork_name,
     split_reasoning,
     to_json,
@@ -1289,6 +1293,13 @@ def _stream_reply(
 
     pending = make_turn("assistant", "", "")
     pending["reasoning_closed"] = True
+    # Where this reply came from, for the conversation list. The model is
+    # stamped from the first update rather than read off MANAGER here: the
+    # generator does not take the model lock until it is first resumed, and
+    # a load can land in the round trip the opening frame costs. Only the
+    # update knows which weights it came from. The token counts are filled
+    # in as the stream arrives so a stopped or failed reply still says how
+    # far it got.
     turns.append(pending)
 
     def snapshot(
@@ -1415,17 +1426,21 @@ def _stream_reply(
                 pending["reasoning_closed"] = closed
                 highlight = strip_value(update.metrics, scale_name)
                 metrics = list(update.metrics)
+                pending["generated_tokens"] = len(metrics)
                 status = generation_progress(len(metrics), started, used_seed)
                 if stream_note:
                     status = f"{stream_note} {status}"
                 prompt_panel = None
                 context_ids = gr.skip()
                 if first:
+                    if update.model_id:
+                        pending["model"] = update.model_id
                     # Every prompt token is measured before the first response
                     # token exists, so this is published once and never
                     # changes. It shares the response strip's stamp: the two
                     # are replaced together, and a click on either has to
                     # match the stamp the pair was drawn with.
+                    pending["prompt_tokens"] = len(update.prompt_ids)
                     prompt_metrics = list(update.prompt_metrics)
                     prompt_panel = (
                         strip_update(prompt_metrics, scale_name),
@@ -1437,7 +1452,7 @@ def _stream_reply(
                     context_ids = (
                         generation,
                         [int(v) for v in update.prompt_ids],
-                        MANAGER.load_id,
+                        update.load_id,
                     )
                 yield snapshot(
                     highlight,
@@ -1516,7 +1531,7 @@ def _stream_reply(
         sampling["assistant_prefill"] = assistant_prefill
     trace = (
         build_trace(
-            model_id=MANAGER.model_id,
+            model_id=pending.get("model"),
             messages=request,
             response=raw_text,
             sampling=sampling,
@@ -1699,7 +1714,9 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
         try:
             turns[position] = edited_turn
             # The ranks and probabilities on screen describe the text the model
-            # generated, not what the user just typed over it.
+            # generated, not what the user just typed over it - and so do the
+            # token counts the reply and everything after it were tagged with.
+            turns = forget_measurements(turns, position)
             yield idle_state(
                 prompt_text,
                 turns,
@@ -1905,15 +1922,40 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
         charts.EMPTY_CHART,
         {},
         forks,
-        fork_picker_update(forks),
+        conversation_list_update(forks, []),
     )
 
 
+# --------------------------------------------------------- conversation list
+#
+# The pane beside the chat lists every branch - the main conversation, its
+# forks, and the chats started fresh - each tagged with the model that
+# answered and the conversation's size in tokens. The list is a plain Radio:
+# its choices are (label, name) pairs built from the turns, and picking one
+# switches to that branch.
+
+
+def conversation_list_update(forks: dict, turns: list[dict] | None):
+    """Redraw the list, with the active branch's turns read from ``turns``."""
+
+    return gr.update(choices=branch_choices(forks, turns), value=forks["active"])
+
+
+def refresh_conversation_list(turns: list[dict] | None, forks: dict | None):
+    """Redraw the list from state, for the paths that do not publish it.
+
+    Sending, retrying, editing, undoing and loading all write the conversation
+    state without knowing about the list, and a streaming reply rewrites it on
+    every frame, which is where the token count and model tag move. Rather than
+    thread the list through every one of those handlers, this listens to the
+    state itself: Gradio fires a State's change event only when the stored
+    value's hash differs, so it runs exactly when the labels could have changed.
+    """
+
+    return conversation_list_update(copy_forks(forks), turns)
+
+
 # --------------------------------------------------------------------- forks
-
-
-def fork_picker_update(forks: dict):
-    return gr.update(choices=list(forks["branches"]), value=forks["active"])
 
 
 def remember_message(turns: list[dict] | None, event: gr.SelectData):
@@ -1988,7 +2030,7 @@ def fork_refused(turns: list[dict], forks: dict, status: str):
         messages,
         turns,
         gr.skip(),
-        fork_picker_update(forks),
+        conversation_list_update(forks, turns),
         status,
         *send_stop_buttons(False),
         *PANEL_KEPT,
@@ -2039,7 +2081,7 @@ def fork_conversation(
         messages,
         forked,
         forks,
-        fork_picker_update(forks),
+        conversation_list_update(forks, forked),
         status,
         *send_stop_buttons(False),
         *(panel_reset(scale_name) if truncated else PANEL_KEPT),
@@ -2072,7 +2114,7 @@ def switch_fork(
         messages,
         target,
         forks,
-        fork_picker_update(forks),
+        conversation_list_update(forks, target),
         f"Switched to {name} ({count} message{'s' if count != 1 else ''}).",
         *send_stop_buttons(False),
         *panel_reset(scale_name),
@@ -2104,8 +2146,42 @@ def delete_fork(
         messages,
         target,
         forks,
-        fork_picker_update(forks),
+        conversation_list_update(forks, target),
         f"Deleted {name}. Back on {MAIN_BRANCH}.",
+        *send_stop_buttons(False),
+        *panel_reset(scale_name),
+    )
+
+
+def new_conversation(
+    turns: list[dict] | None,
+    forks: dict | None,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
+    """Put the conversation on screen away and start an empty one.
+
+    Unlike Fork, nothing is copied: the new chat begins with no turns, so the
+    next message is measured against the system prompt alone. The message box
+    is left as it is, since whatever is typed there is likely meant for the
+    new chat. Starting one cancels a running generation, as every branch
+    change does, so the turn that generator left behind is closed out before
+    it is put away.
+    """
+
+    forks = copy_forks(forks)
+    turns = copy_turns(turns)
+    finalize_partial(turns)
+    forks["branches"][forks["active"]] = turns
+    name = next_branch_name(forks, CHAT_PREFIX)
+    forks["branches"][name] = []
+    forks["active"] = name
+    return (
+        gr.skip(),
+        [],
+        [],
+        forks,
+        conversation_list_update(forks, []),
+        f"Started {name}. Send a message to begin it.",
         *send_stop_buttons(False),
         *panel_reset(scale_name),
     )
@@ -2459,6 +2535,16 @@ CSS = """
 .footer-note { color: var(--body-text-color-subdued); font-size: 0.9rem; }
 .scale-caption { color: var(--body-text-color-subdued); font-size: 0.85rem; }
 
+/* The conversation list is a Radio whose labels carry a line break: the
+   name and title on the first line, the model and token count on the
+   second. Stack the entries and let the break through. */
+#conversation-list .wrap { flex-direction: column; align-items: stretch; gap: 0.4rem; }
+#conversation-list label { align-items: flex-start; }
+#conversation-list label input { margin-top: 0.3rem; }
+#conversation-list label span {
+  white-space: pre-line; line-height: 1.35; overflow-wrap: anywhere;
+}
+
 .viz-root {
   --viz-ink: #0b0b0b;
   --viz-muted: #898781;
@@ -2563,10 +2649,36 @@ def build_app() -> gr.Blocks:
         inspect_target = gr.State(None)
         insight_state = gr.State(None)
 
-        # The side pane: everything about which model is loaded and how it is
-        # run, so the page itself is the conversation and the token panel.
+        with gr.Sidebar(label="Conversations", width=340, elem_id="conversation-pane"):
+            gr.Markdown("## Conversations")
+            conversation_list = gr.Radio(
+                choices=branch_choices(new_forks(), []),
+                value=MAIN_BRANCH,
+                show_label=False,
+                elem_id="conversation-list",
+            )
+            with gr.Row():
+                # The pane is narrow, so the buttons give up their usual
+                # minimum width to share one row.
+                new_button = gr.Button("➕ New", size="sm", min_width=60)
+                fork_button = gr.Button("🌿 Fork", size="sm", min_width=60)
+                delete_fork_button = gr.Button("🗑️ Delete", size="sm", min_width=60)
+            gr.Markdown(
+                "Each entry names the model that replied and the size of the "
+                "conversation in tokens: the prompt behind its latest reply plus "
+                "the reply itself. New starts an empty chat. Fork copies the "
+                "conversation on screen; click a message first to fork at that "
+                "point.",
+                elem_classes=["scale-caption"],
+            )
+
+        # Model selection and generation settings belong opposite conversation
+        # navigation, leaving the page itself for the chat and token panels.
         with gr.Sidebar(
-            label="Models and settings", width=SIDE_PANE_WIDTH, elem_id="side-pane"
+            label="Models and settings",
+            width=SIDE_PANE_WIDTH,
+            position="right",
+            elem_id="side-pane",
         ):
             gr.Markdown("## Model")
             model_id = gr.Textbox(
@@ -2717,20 +2829,6 @@ def build_app() -> gr.Blocks:
                             visible=False,
                             interactive=False,
                         )
-                        with gr.Row():
-                            fork_picker = gr.Dropdown(
-                                choices=[MAIN_BRANCH],
-                                value=MAIN_BRANCH,
-                                label="Conversation fork",
-                                info=(
-                                    "Fork copies the conversation so it can be taken "
-                                    "somewhere else. Click a message first to fork at "
-                                    "that point."
-                                ),
-                                scale=2,
-                            )
-                            fork_button = gr.Button("🌿 Fork")
-                            delete_fork_button = gr.Button("Delete fork")
                         generation_status = gr.Markdown("Ready.")
                         with gr.Accordion("Export full metric trace", open=False):
                             with gr.Row():
@@ -3009,19 +3107,20 @@ def build_app() -> gr.Blocks:
                 surprise_panel,
                 trace_state,
                 forks_state,
-                fork_picker,
+                conversation_list,
             ],
             cancels=running,
         )
 
-        # Forking, switching and deleting all replace the conversation, so they
-        # cancel a running generation for the same reason Undo does.
+        # Forking, switching, starting afresh and deleting all replace the
+        # conversation, so they cancel a running generation for the same
+        # reason Undo does.
         fork_outputs = [
             prompt,
             chatbot,
             conversation_state,
             forks_state,
-            fork_picker,
+            conversation_list,
             generation_status,
             send_button,
             stop_button,
@@ -3043,11 +3142,18 @@ def build_app() -> gr.Blocks:
             fork_outputs,
             cancels=running,
         )
-        # .input rather than .change: the picker is also moved by the handlers
-        # above, and a .change listener would switch a second time on each.
-        fork_picker.input(
+        new_button.click(
+            new_conversation,
+            [conversation_state, forks_state, color_scale],
+            fork_outputs,
+            cancels=running,
+        )
+        # .input rather than .change: the list is also redrawn by the handlers
+        # above and the listener below, and a .change listener would switch a
+        # second time on each.
+        conversation_list.input(
             switch_fork,
-            [fork_picker, conversation_state, forks_state, color_scale],
+            [conversation_list, conversation_state, forks_state, color_scale],
             fork_outputs,
             cancels=running,
         )
@@ -3056,6 +3162,14 @@ def build_app() -> gr.Blocks:
             [conversation_state, forks_state, color_scale],
             fork_outputs,
             cancels=running,
+        )
+        # Every other path that changes the conversation - a streaming reply
+        # above all - lands here, and the list's model tag and token count
+        # follow it.
+        conversation_state.change(
+            refresh_conversation_list,
+            [conversation_state, forks_state],
+            conversation_list,
         )
 
         save_button.click(

@@ -5,8 +5,14 @@ from conversation import (
     MAIN_BRANCH,
     REASONING_TITLE,
     SAVE_FORMAT,
+    TITLE_LIMIT,
+    branch_choices,
+    branch_label,
+    branch_title,
     copy_forks,
+    describe_branch,
     display_messages,
+    forget_measurements,
     fork_at,
     from_json,
     last_user_index,
@@ -14,7 +20,9 @@ from conversation import (
     make_turn,
     model_messages,
     new_forks,
+    next_branch_name,
     next_fork_name,
+    short_model_name,
     split_reasoning,
     to_json,
     user_index_at_or_before,
@@ -239,6 +247,14 @@ class ForkTests(unittest.TestCase):
         forks["branches"]["Fork 3"] = []
         self.assertEqual(next_fork_name(forks), "Fork 2")
 
+    def test_each_prefix_numbers_its_own_branches(self):
+        forks = new_forks()
+        forks["branches"]["Fork 1"] = []
+        self.assertEqual(next_branch_name(forks, "Chat"), "Chat 1")
+        forks["branches"]["Chat 1"] = []
+        self.assertEqual(next_branch_name(forks, "Chat"), "Chat 2")
+        self.assertEqual(next_branch_name(forks, "Fork"), "Fork 2")
+
     def test_copying_forks_detaches_every_turn(self):
         forks = new_forks()
         forks["branches"][MAIN_BRANCH] = self.turns()
@@ -279,7 +295,186 @@ class ForkTests(unittest.TestCase):
         self.assertIsNone(box)
 
 
+def measured(content, model="allenai/Olmo-3-7B-Think", prompt=100, generated=20):
+    """An assistant turn as a generation leaves it: tagged with its origin."""
+
+    turn = make_turn("assistant", content)
+    turn["model"] = model
+    turn["prompt_tokens"] = prompt
+    turn["generated_tokens"] = generated
+    return turn
+
+
+class ConversationListTests(unittest.TestCase):
+    """What the pane beside the chat says about each conversation."""
+
+    def test_the_short_model_name_drops_the_organization(self):
+        self.assertEqual(short_model_name("allenai/Olmo-3-7B-Think"), "Olmo-3-7B-Think")
+        self.assertEqual(short_model_name("gpt2"), "gpt2")
+        self.assertEqual(short_model_name("org/model/"), "model")
+
+    def test_the_title_is_the_first_user_message_on_one_line(self):
+        turns = [make_turn("user", "  Tell me\nabout   whales "), measured("Sure.")]
+        self.assertEqual(branch_title(turns), "Tell me about whales")
+
+    def test_a_long_title_is_cut_with_an_ellipsis(self):
+        title = branch_title([make_turn("user", "x" * (TITLE_LIMIT + 10))])
+        self.assertEqual(len(title), TITLE_LIMIT)
+        self.assertTrue(title.endswith("…"))
+        self.assertEqual(branch_title([make_turn("user", "x" * TITLE_LIMIT)]), "x" * TITLE_LIMIT)
+
+    def test_an_empty_conversation_has_no_title(self):
+        self.assertEqual(branch_title([]), "")
+        self.assertEqual(branch_title(None), "")
+        self.assertEqual(branch_title([make_turn("assistant", "hello")]), "")
+
+    def test_the_token_count_is_the_latest_measured_exchange(self):
+        # The last prompt already holds everything before it, so the last
+        # measured reply is the size of the whole conversation.
+        turns = [
+            make_turn("user", "one"),
+            measured("first", prompt=10, generated=5),
+            make_turn("user", "two"),
+            measured("second", prompt=30, generated=7),
+        ]
+        self.assertEqual(describe_branch(turns)["tokens"], 37)
+
+    def test_an_unmeasured_reply_has_no_count(self):
+        turns = [make_turn("user", "one"), make_turn("assistant", "first")]
+        summary = describe_branch(turns)
+        self.assertIsNone(summary["tokens"])
+        self.assertEqual(summary["models"], [])
+        self.assertEqual(summary["replies"], 1)
+
+    def test_models_are_listed_once_each_most_recent_first(self):
+        turns = [
+            make_turn("user", "one"),
+            measured("a", model="org/alpha"),
+            make_turn("user", "two"),
+            measured("b", model="org/beta"),
+            make_turn("user", "three"),
+            measured("c", model="org/alpha"),
+        ]
+        self.assertEqual(describe_branch(turns)["models"], ["alpha", "beta"])
+
+    def test_models_that_share_a_name_are_told_apart_by_their_full_ids(self):
+        # org-a/model and org-b/model are different models; shortening both to
+        # "model" would merge them into one entry. Only the colliding pair is
+        # spelled out in full - the third model keeps its short name.
+        turns = [
+            make_turn("user", "one"),
+            measured("a", model="org-a/model"),
+            make_turn("user", "two"),
+            measured("b", model="org-b/model"),
+            make_turn("user", "three"),
+            measured("c", model="org-c/other"),
+            make_turn("user", "four"),
+            measured("d", model="org-a/model"),
+        ]
+        self.assertEqual(
+            describe_branch(turns)["models"], ["org-a/model", "other", "org-b/model"]
+        )
+
+    def test_rewriting_a_reply_forgets_what_its_counts_measured(self):
+        turns = [
+            make_turn("user", "one"),
+            measured("first", prompt=10, generated=5),
+            make_turn("user", "two"),
+            measured("second", prompt=30, generated=7),
+            make_turn("user", "three"),
+            measured("third", prompt=50, generated=9),
+        ]
+        result = forget_measurements(turns, 3)
+        # The edited reply's counts measured text that is gone; its model stays.
+        self.assertEqual(set(result[3]), {"role", "content", "reasoning", "model"})
+        # A later reply's prompt held the old text; its own text did not change.
+        self.assertNotIn("prompt_tokens", result[5])
+        self.assertEqual(result[5]["generated_tokens"], 9)
+        self.assertEqual(result[5]["model"], "allenai/Olmo-3-7B-Think")
+        # Earlier replies are untouched, and the size falls back to the last.
+        self.assertEqual(result[1], turns[1])
+        self.assertEqual(describe_branch(result)["tokens"], 15)
+        # The input was not mutated.
+        self.assertEqual(turns[3]["prompt_tokens"], 30)
+        self.assertEqual(turns[5]["prompt_tokens"], 50)
+
+    def test_the_label_of_an_empty_conversation(self):
+        self.assertEqual(branch_label(MAIN_BRANCH, []), "Main\nNo messages yet")
+
+    def test_the_label_before_the_first_reply(self):
+        turns = [make_turn("user", "Tell me about whales")]
+        self.assertEqual(
+            branch_label("Fork 1", turns), "Fork 1 · Tell me about whales\nNo replies yet"
+        )
+
+    def test_the_label_of_a_measured_conversation(self):
+        turns = [make_turn("user", "Tell me about whales"), measured("Sure.", prompt=1200, generated=345)]
+        self.assertEqual(
+            branch_label(MAIN_BRANCH, turns),
+            "Main · Tell me about whales\nOlmo-3-7B-Think · 1,545 tokens",
+        )
+
+    def test_the_label_of_an_unrecorded_reply(self):
+        turns = [make_turn("user", "hi"), make_turn("assistant", "hello")]
+        self.assertEqual(branch_label(MAIN_BRANCH, turns), "Main · hi\nModel not recorded")
+
+    def test_a_model_without_counts_is_still_named(self):
+        turn = make_turn("assistant", "hello")
+        turn["model"] = "org/alpha"
+        self.assertEqual(
+            branch_label(MAIN_BRANCH, [make_turn("user", "hi"), turn]), "Main · hi\nalpha"
+        )
+
+    def test_the_choices_read_the_active_branch_from_the_live_turns(self):
+        # The active branch's stored entry is stale by design; the live turns
+        # are what the conversation state holds.
+        forks = new_forks()
+        forks["branches"][MAIN_BRANCH] = [make_turn("user", "stale")]
+        forks["branches"]["Fork 1"] = [make_turn("user", "other")]
+        live = [make_turn("user", "fresh")]
+        choices = branch_choices(forks, live)
+        self.assertEqual([name for _label, name in choices], [MAIN_BRANCH, "Fork 1"])
+        self.assertEqual(choices[0][0], "Main · fresh\nNo replies yet")
+        self.assertEqual(choices[1][0], "Fork 1 · other\nNo replies yet")
+
+    def test_choices_for_no_forks_at_all(self):
+        self.assertEqual(branch_choices(None, None), [("Main\nNo messages yet", MAIN_BRANCH)])
+
+
 class SaveLoadTests(unittest.TestCase):
+    def test_a_reply_keeps_its_origin_through_a_save(self):
+        turns = [make_turn("user", "hi"), measured("Hello.", prompt=12, generated=3)]
+        restored, _ = from_json(to_json(turns))
+        self.assertEqual(restored, turns)
+        payload = json.loads(to_json(turns))
+        self.assertEqual(
+            set(payload["turns"][1]),
+            {"role", "content", "reasoning", "model", "prompt_tokens", "generated_tokens"},
+        )
+
+    def test_a_malformed_origin_is_refused(self):
+        for field, value in (
+            ("model", 7),
+            ("prompt_tokens", "12"),
+            ("generated_tokens", True),
+            ("generated_tokens", -1),
+            ("prompt_tokens", 1.5),
+        ):
+            with self.subTest(field=field, value=value):
+                payload = json.dumps(
+                    {
+                        "format": SAVE_FORMAT,
+                        "turns": [{"role": "assistant", "content": "x", field: value}],
+                    }
+                )
+                with self.assertRaises(ValueError):
+                    from_json(payload)
+
+    def test_a_flag_is_never_written_as_a_count(self):
+        turn = make_turn("assistant", "x")
+        turn["generated_tokens"] = True
+        self.assertNotIn("generated_tokens", json.loads(to_json([turn]))["turns"][0])
+
     def test_round_trip(self):
         turns = [
             make_turn("user", "hi"),

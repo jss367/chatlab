@@ -1072,6 +1072,31 @@ class ScoreTokenLimitTests(unittest.TestCase):
         self.assertEqual(score_token_limit(Model(wrapper)), 2048)
 
 
+class ModelLockTests(unittest.TestCase):
+    def test_a_stream_can_release_the_model_lock_from_another_worker(self):
+        """Gradio is allowed to resume a streaming generator on another thread."""
+
+        import threading
+
+        manager = ModelManager()
+        acquired = threading.Event()
+
+        def begin_stream():
+            manager._lock.acquire()
+            acquired.set()
+
+        first_worker = threading.Thread(target=begin_stream)
+        first_worker.start()
+        first_worker.join(timeout=1)
+
+        self.assertTrue(acquired.is_set())
+        self.assertFalse(first_worker.is_alive())
+        # This raised "cannot release un-acquired lock" when the guard was an
+        # RLock owned by first_worker.
+        manager._lock.release()
+        self.assertFalse(manager._lock.locked())
+
+
 class ScoreTextGuardTests(unittest.TestCase):
     """What ``score_text`` refuses, decided before any tensor is built."""
 

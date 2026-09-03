@@ -228,6 +228,41 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(final[DETAIL], app.NO_TOKEN_SELECTED)
         self.assertEqual(final[ALTS], [])
 
+    def test_editing_an_assistant_message_forgets_its_token_counts(self):
+        # The counts describe the generated text, which the edit replaced; a
+        # later reply's prompt count measured the transcript before the edit.
+        # The model that answered is still the model that answered.
+        turns = [
+            make_turn("user", "one"),
+            make_turn("assistant", "first"),
+            make_turn("user", "two"),
+            make_turn("assistant", "second"),
+            make_turn("user", "three"),
+            make_turn("assistant", "third"),
+        ]
+        for turn, prompt, generated in (
+            (turns[1], 10, 5),
+            (turns[3], 30, 7),
+            (turns[5], 50, 9),
+        ):
+            turn.update(
+                model="org/alpha", prompt_tokens=prompt, generated_tokens=generated
+            )
+        event = gr.EditData(
+            None, {"index": 3, "previous_value": "second", "value": "fixed"}
+        )
+        final = self.last(app.edit_message(event, "", turns, *SETTINGS))[-1]
+        edited, later = final[TURNS][3], final[TURNS][5]
+        self.assertEqual(edited["content"], "fixed")
+        self.assertEqual(set(edited), {"role", "content", "reasoning", "model"})
+        self.assertNotIn("prompt_tokens", later)
+        self.assertEqual(later["generated_tokens"], 9)
+        self.assertEqual(final[TURNS][1]["prompt_tokens"], 10)
+        self.assertEqual(
+            app.branch_choices(new_forks(), final[TURNS])[0][0],
+            "Main · one\nalpha · 15 tokens",
+        )
+
     def test_a_new_response_resets_the_selected_token_details(self):
         # The first frame empties the strip, so the token the user had selected
         # in the previous response no longer exists and its probabilities must
@@ -1642,6 +1677,16 @@ def contents(turns):
     return [turn["content"] for turn in turns]
 
 
+def names_of(list_update):
+    """The branch names behind a conversation-list update's (label, name) choices."""
+
+    return [name for _label, name in list_update["choices"]]
+
+
+def labels_of(list_update):
+    return [label for label, _name in list_update["choices"]]
+
+
 def cell(row):
     """A click on one row of the alternatives table."""
 
@@ -1909,7 +1954,7 @@ class ForkTests(unittest.TestCase):
             contents(result[FORK_STATE]["branches"][MAIN_BRANCH]),
             contents(self.turns()),
         )
-        self.assertEqual(result[FORK_PICKER]["choices"], [MAIN_BRANCH, "Fork 1"])
+        self.assertEqual(names_of(result[FORK_PICKER]), [MAIN_BRANCH, "Fork 1"])
         self.assertEqual(result[FORK_PICKER]["value"], "Fork 1")
         self.assertIn("Copied", result[FORK_STATUS])
         self.assertEqual(result[FORK_PROMPT], gr.skip())
@@ -2000,7 +2045,7 @@ class ForkTests(unittest.TestCase):
         result = app.delete_fork(forked[FORK_TURNS], forked[FORK_STATE])
         self.assertEqual(contents(result[FORK_TURNS]), contents(self.turns()))
         self.assertEqual(list(result[FORK_STATE]["branches"]), [MAIN_BRANCH])
-        self.assertEqual(result[FORK_PICKER]["choices"], [MAIN_BRANCH])
+        self.assertEqual(names_of(result[FORK_PICKER]), [MAIN_BRANCH])
         self.assertIn("Deleted Fork 1", result[FORK_STATUS])
 
     def test_the_main_conversation_cannot_be_deleted(self):
@@ -2020,13 +2065,205 @@ class ForkTests(unittest.TestCase):
         result = app.clear_chat()
         self.assertEqual(len(result), CLEAR_OUTPUTS)
         self.assertEqual(result[-2], new_forks())
-        self.assertEqual(result[-1]["choices"], [MAIN_BRANCH])
+        self.assertEqual(names_of(result[-1]), [MAIN_BRANCH])
 
     def test_a_forked_conversation_can_be_continued(self):
         forked = app.fork_conversation(self.turns(), new_forks(), None)
         last = list(app.chat("three", forked[FORK_TURNS], *SETTINGS))[-1]
         self.assertEqual(len(last[TURNS]), 6)
         self.assertEqual(last[TURNS][4]["content"], "three")
+
+    def test_starting_a_new_chat_puts_the_current_one_away(self):
+        result = app.new_conversation(self.turns(), new_forks())
+        self.assertEqual(len(result), 18)
+        self.assertEqual(result[FORK_TURNS], [])
+        self.assertEqual(result[FORK_CHATBOT], [])
+        self.assertEqual(result[FORK_STATE]["active"], "Chat 1")
+        self.assertEqual(
+            contents(result[FORK_STATE]["branches"][MAIN_BRANCH]), contents(self.turns())
+        )
+        self.assertEqual(result[FORK_STATE]["branches"]["Chat 1"], [])
+        self.assertEqual(names_of(result[FORK_PICKER]), [MAIN_BRANCH, "Chat 1"])
+        self.assertEqual(result[FORK_PICKER]["value"], "Chat 1")
+        self.assertIn("Started Chat 1", result[FORK_STATUS])
+        # Whatever is typed in the box is likely meant for the new chat.
+        self.assertEqual(result[FORK_PROMPT], gr.skip())
+        self.assertEqual((result[FORK_SEND], result[FORK_STOP]), app.send_stop_buttons(False))
+        # The token panel described a reply that is no longer on screen.
+        self.assertEqual(result[FORK_DETAIL], app.NO_TOKEN_SELECTED)
+        self.assertEqual(strip_of(result[FORK_STRIP]), [])
+
+    def test_new_chats_and_forks_are_numbered_separately(self):
+        forked = app.fork_conversation(self.turns(), new_forks(), None)
+        fresh = app.new_conversation(forked[FORK_TURNS], forked[FORK_STATE])
+        again = app.new_conversation(fresh[FORK_TURNS], fresh[FORK_STATE])
+        self.assertEqual(
+            list(again[FORK_STATE]["branches"]), [MAIN_BRANCH, "Fork 1", "Chat 1", "Chat 2"]
+        )
+
+    def test_a_new_chat_closes_out_a_cancelled_reply(self):
+        turns = self.turns()
+        turns[-1]["reasoning"] = "thinking"
+        turns[-1]["reasoning_closed"] = False
+        result = app.new_conversation(turns, new_forks())
+        stored = result[FORK_STATE]["branches"][MAIN_BRANCH]
+        self.assertTrue(stored[-1]["reasoning_closed"])
+
+    def test_a_new_chat_can_be_deleted_back_to_main(self):
+        fresh = app.new_conversation(self.turns(), new_forks())
+        result = app.delete_fork(fresh[FORK_TURNS], fresh[FORK_STATE])
+        self.assertEqual(result[FORK_STATE]["active"], MAIN_BRANCH)
+        self.assertEqual(contents(result[FORK_TURNS]), contents(self.turns()))
+        self.assertEqual(names_of(result[FORK_PICKER]), [MAIN_BRANCH])
+
+
+class ConversationListTests(unittest.TestCase):
+    """The pane lists every conversation with its model and token count."""
+
+    def setUp(self):
+        self.original = app.MANAGER
+        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, app, "MANAGER", self.original)
+
+    def test_a_reply_records_the_model_and_its_token_counts(self):
+        frames = list(app.chat("hi", [], *SETTINGS))
+        reply = frames[-1][TURNS][-1]
+        self.assertEqual(reply["role"], "assistant")
+        self.assertEqual(reply["model"], "fake/model")
+        self.assertEqual(reply["generated_tokens"], len(metrics_of(frames[-1][METRICS])))
+        # The opening frame empties the ids; the first streamed frame fills them.
+        _stamp, prompt_ids, _load = next(
+            frame[CONTEXT_IDS]
+            for frame in frames
+            if isinstance(frame[CONTEXT_IDS], tuple) and frame[CONTEXT_IDS][1]
+        )
+        self.assertEqual(reply["prompt_tokens"], len(prompt_ids))
+        self.assertGreater(reply["prompt_tokens"], 0)
+
+    def test_the_reply_names_the_model_that_held_the_lock(self):
+        # Loading is not refused while a reply is pending, and the generator
+        # takes the model lock only when it is first resumed, so a load that
+        # lands in the round trip the opening frame costs is the model that
+        # generates. The reply has to say so: a stamp taken on the way in
+        # would name the model that was swapped out.
+        frames = app.chat("hi", [], *SETTINGS)
+        opening = next(frames)
+        self.assertEqual(opening[TURNS][-1]["role"], "assistant")
+        self.assertNotIn("model", opening[TURNS][-1])
+        # What load() leaves behind, minus the weights: the fakes stand in for
+        # both models.
+        app.MANAGER.model_id = "other/model"
+        app.MANAGER.load_count += 1
+        rest = list(frames)
+        reply = rest[-1][TURNS][-1]
+        self.assertEqual(reply["model"], "other/model")
+        self.assertEqual(rest[-1][TRACE]["model_id"], "other/model")
+        _stamp, _ids, load = next(
+            frame[CONTEXT_IDS]
+            for frame in rest
+            if isinstance(frame[CONTEXT_IDS], tuple) and frame[CONTEXT_IDS][1]
+        )
+        self.assertEqual(load, "other/model#1")
+        self.assertEqual(load, app.MANAGER.load_id)
+
+    def test_the_counts_grow_with_the_stream(self):
+        # A reply stopped part way keeps the count it had reached, since every
+        # frame publishes the turn with the tokens so far.
+        frames = list(app.chat("hi", [], *SETTINGS))
+        counts = [
+            frame[TURNS][-1].get("generated_tokens")
+            for frame in frames[1:]
+            if frame[TURNS] and frame[TURNS][-1]["role"] == "assistant"
+        ]
+        self.assertEqual(counts, sorted(counts))
+        self.assertEqual(counts[-1], len(metrics_of(frames[-1][METRICS])))
+
+    def test_the_refreshed_list_names_the_model_and_the_size(self):
+        last = list(app.chat("hi", [], *SETTINGS))[-1]
+        update = app.refresh_conversation_list(last[TURNS], new_forks())
+        reply = last[TURNS][-1]
+        total = reply["prompt_tokens"] + reply["generated_tokens"]
+        self.assertEqual(names_of(update), [MAIN_BRANCH])
+        self.assertEqual(update["value"], MAIN_BRANCH)
+        self.assertEqual(labels_of(update), [f"Main · hi\nmodel · {total:,} tokens"])
+
+    def test_the_refresh_reads_the_active_branch_from_the_live_turns(self):
+        forks = new_forks()
+        forks["branches"][MAIN_BRANCH] = [make_turn("user", "stale")]
+        forks["branches"]["Fork 1"] = [make_turn("user", "other")]
+        forks["active"] = "Fork 1"
+        update = app.refresh_conversation_list([make_turn("user", "live")], forks)
+        self.assertEqual(
+            labels_of(update),
+            ["Main · stale\nNo replies yet", "Fork 1 · live\nNo replies yet"],
+        )
+        self.assertEqual(update["value"], "Fork 1")
+
+    def test_a_loaded_conversation_keeps_its_tags(self):
+        last = list(app.chat("hi", [], *SETTINGS))[-1]
+        saved, _ = app.save_conversation(last[TURNS], "")
+        loaded = app.load_conversation(saved["value"], [])
+        self.assertEqual(loaded[1][-1]["model"], "fake/model")
+        self.assertEqual(
+            loaded[1][-1]["generated_tokens"], last[TURNS][-1]["generated_tokens"]
+        )
+
+
+class ConversationListWiringTests(unittest.TestCase):
+    """The list is redrawn from state, and picking an entry switches to it."""
+
+    def setUp(self):
+        self.demo = app.build_app()
+
+    def named(self, name):
+        return next(
+            fn
+            for fn in self.demo.fns.values()
+            if getattr(fn.fn, "__name__", None) == name
+        )
+
+    def conversation_list(self):
+        return next(
+            block
+            for block in self.demo.blocks.values()
+            if isinstance(block, gr.Radio) and block.elem_id == "conversation-list"
+        )
+
+    def test_the_list_lives_in_a_sidebar(self):
+        sidebar = next(
+            block for block in self.demo.blocks.values() if isinstance(block, gr.Sidebar)
+        )
+
+        def descendants(block):
+            for child in getattr(block, "children", []):
+                yield child
+                yield from descendants(child)
+
+        self.assertIn(self.conversation_list(), list(descendants(sidebar)))
+
+    def test_the_list_starts_with_the_main_conversation(self):
+        radio = self.conversation_list()
+        self.assertEqual(radio.choices, [("Main\nNo messages yet", MAIN_BRANCH)])
+        self.assertEqual(radio.value, MAIN_BRANCH)
+
+    def test_a_change_to_the_conversation_state_redraws_the_list(self):
+        refresh = self.named("refresh_conversation_list")
+        state, _metrics = self.named("stop_generation").inputs
+        self.assertEqual(refresh.targets, [(state._id, "change")])
+        self.assertEqual(refresh.outputs, [self.conversation_list()])
+
+    def test_picking_an_entry_switches_to_it(self):
+        switch = self.named("switch_fork")
+        radio = self.conversation_list()
+        self.assertEqual(switch.targets, [(radio._id, "input")])
+        self.assertIs(switch.inputs[0], radio)
+        self.assertIn(radio, switch.outputs)
+
+    def test_every_branch_handler_redraws_the_list(self):
+        radio = self.conversation_list()
+        for name in ("fork_conversation", "delete_fork", "new_conversation", "clear_chat"):
+            with self.subTest(handler=name):
+                self.assertIn(radio, self.named(name).outputs)
 
 
 class CancelWiringTests(unittest.TestCase):
@@ -2116,6 +2353,7 @@ class CancelWiringTests(unittest.TestCase):
                 "fork_conversation",
                 "switch_fork",
                 "delete_fork",
+                "new_conversation",
             },
         )
 

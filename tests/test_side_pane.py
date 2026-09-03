@@ -452,9 +452,11 @@ class SidePaneLayoutTests(unittest.TestCase):
 
     def setUp(self):
         self.demo = app.build_app()
-        (self.pane,) = [
-            block for block in self.demo.blocks.values() if isinstance(block, gr.Sidebar)
-        ]
+        self.pane = next(
+            block
+            for block in self.demo.blocks.values()
+            if isinstance(block, gr.Sidebar) and block.elem_id == "side-pane"
+        )
 
     def labelled(self, label):
         matches = [
@@ -486,6 +488,9 @@ class SidePaneLayoutTests(unittest.TestCase):
     def test_the_pane_is_thin(self):
         self.assertEqual(self.pane.width, app.SIDE_PANE_WIDTH)
         self.assertLessEqual(app.SIDE_PANE_WIDTH, 360)
+
+    def test_the_pane_sits_opposite_conversation_navigation(self):
+        self.assertEqual(self.pane.position, "right")
 
     def listeners(self, name):
         return [

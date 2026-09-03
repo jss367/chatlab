@@ -1,6 +1,5 @@
 accelerate>=1.2
-# 5.14 is the first release with gr.Sidebar, which the side pane is built on;
-# the floor here is already past it.
+# Sidebar arrived in 5.14, so the floor already covers the side pane.
 gradio>=5.20,<6
 # 1.1 is the first release whose snapshot_download reports byte progress
 # through the caller's tqdm_class; the download card shows only file counts
