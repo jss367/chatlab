@@ -192,6 +192,52 @@ def is_transformers_config(path: Path) -> bool:
     )
 
 
+# File endings that hold model weights in some framework or other. A file
+# with one of these where a Transformers checkpoint would not put it is the
+# positive evidence that a snapshot is a repo of another kind.
+WEIGHT_SUFFIXES = frozenset(
+    {".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".onnx", ".npz", ".gguf",
+     ".msgpack", ".h5", ".tflite", ".mlmodel"}
+)
+
+# Endings Transformers never loads from. Even a repo that keeps its source
+# ``config.json`` is not a Transformers checkpoint when these are all it has.
+FOREIGN_SUFFIXES = frozenset(
+    {".onnx", ".npz", ".gguf", ".tflite", ".mlmodel", ".h5", ".msgpack"}
+)
+
+SHARD_NAME = re.compile(r"-\d{5}-of-\d{5}\.(safetensors|bin)$")
+
+
+def foreign_weights(snapshot: Path, *, transformers_config: bool) -> bool:
+    """Whether the snapshot holds weights laid out for something other than Transformers.
+
+    A diffusers pipeline announces itself with ``model_index.json``. Otherwise
+    the evidence is a weight file where ``from_pretrained`` would never look:
+    at the root under a name that is not a checkpoint or a shard (CTranslate2's
+    ``model.bin``, an ``model.onnx``), or in a subfolder. When the root
+    ``config.json`` is a Transformers one, only a foreign format in a
+    subfolder counts, since such repos often ship extras like
+    ``original/consolidated.00.pth`` beside the checkpoint they are missing.
+    """
+
+    if (snapshot / "model_index.json").is_file():
+        return True
+    checkpoints = {name for pair in WEIGHT_FORMATS for name in pair}
+    for entry in snapshot.rglob("*"):
+        if not entry.is_file() or entry.suffix not in WEIGHT_SUFFIXES:
+            continue
+        if entry.parent == snapshot:
+            if entry.name in checkpoints or SHARD_NAME.search(entry.name):
+                continue
+            if transformers_config and entry.suffix not in FOREIGN_SUFFIXES:
+                continue
+            return True
+        if not transformers_config or entry.suffix in FOREIGN_SUFFIXES:
+            return True
+    return False
+
+
 def judge_snapshot(snapshot: Path | None) -> tuple[tuple[str, ...], bool]:
     """``(missing_files, unsupported)`` for what the snapshot holds.
 
@@ -199,19 +245,21 @@ def judge_snapshot(snapshot: Path | None) -> tuple[tuple[str, ...], bool]:
     load: only the config and the weights are checked, since which tokenizer
     files a repo ships varies too much to know from the outside, and a wrong
     "incomplete" verdict on a good cache would be worse than a generic load
-    error. A snapshot with neither a Transformers ``config.json`` nor any
-    weights at its root is not a cut-off download but a repo of another kind
-    (diffusers, CTranslate2, ONNX, SAE weights), and is ``unsupported``
-    instead, with nothing reported missing.
+    error. A snapshot with no Transformers checkpoint at its root but weights
+    laid out for another framework (diffusers, CTranslate2, ONNX, SAE
+    weights) is not a cut-off download and is ``unsupported`` instead, with
+    nothing reported missing. Absence alone is never that verdict: a snapshot
+    holding only a tokenizer, or only a config, is incomplete.
     """
 
     if snapshot is None:
         return ("config.json", MODEL_WEIGHTS), False
-    config = snapshot / "config.json"
-    has_weights = any(
+    has_checkpoint = any(
         (snapshot / name).is_file() for pair in WEIGHT_FORMATS for name in pair
     )
-    if not has_weights and not is_transformers_config(config):
+    if not has_checkpoint and foreign_weights(
+        snapshot, transformers_config=is_transformers_config(snapshot / "config.json")
+    ):
         return (), True
     return missing_files(snapshot), False
 

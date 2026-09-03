@@ -268,28 +268,74 @@ class CacheStatusTests(unittest.TestCase):
         self.assertTrue(status.complete)
         self.assertEqual(status.missing_files, ())
 
+    def snapshot_with_folders(self, root: str, files: dict[str, bytes]) -> Path:
+        snapshot = self.snapshot(root, {k: v for k, v in files.items() if "/" not in k})
+        for name, content in files.items():
+            if "/" in name:
+                (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
+                (snapshot / name).write_bytes(content)
+        return snapshot
+
     def test_a_repo_of_another_kind_is_unsupported_rather_than_incomplete(self):
-        """A diffusers pipeline, a CTranslate2 export, or a folder of ONNX
-        models is whole on disk; it just is not something ChatLab loads."""
+        """A diffusers pipeline, a CTranslate2 export, a folder of ONNX
+        models, or an ONNX export that kept its Transformers ``config.json``
+        is whole on disk; it just is not something ChatLab loads."""
 
         layouts = {
             "diffusers": {"model_index.json": b"{}", "unet/config.json": b"{}"},
             "ctranslate2": {"config.json": b'{"lang_ids": []}', "model.bin": b"x"},
             "onnx bundle": {"sam2-small/model.onnx": b"x" * 10},
+            "sae weights": {"resid_post/width_16k/params.npz": b"x"},
+            "onnx export at root": {"config.json": self.CONFIG, "model.onnx": b"x"},
+            "onnx export in a folder": {"config.json": self.CONFIG, "onnx/model.onnx": b"x"},
         }
         for kind, files in layouts.items():
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as root:
-                snapshot = self.snapshot(root, {k: v for k, v in files.items() if "/" not in k})
-                for name, content in files.items():
-                    if "/" in name:
-                        (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
-                        (snapshot / name).write_bytes(content)
+                self.snapshot_with_folders(root, files)
                 status = cache_status(self.MODEL, Path(root))
 
                 self.assertTrue(status.present)
                 self.assertTrue(status.unsupported)
                 self.assertFalse(status.complete)
                 self.assertEqual(status.missing_files, ())
+
+    def test_absence_alone_is_incomplete_not_unsupported(self):
+        """A tokenizer another tool fetched, or a download cut off before the
+        config arrived, has no weights of any kind: that is a gap, not a repo
+        of another kind."""
+
+        layouts = {
+            "tokenizer only": {"tokenizer.json": b"{}", "tokenizer_config.json": b"{}"},
+            "readme only": {"README.md": b"# model"},
+            "config and tokenizer": {"config.json": self.CONFIG, "tokenizer.json": b"{}"},
+        }
+        for kind, files in layouts.items():
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as root:
+                self.snapshot(root, files)
+                status = cache_status(self.MODEL, Path(root))
+
+                self.assertFalse(status.unsupported)
+                self.assertIn(MODEL_WEIGHTS, status.missing_files)
+
+    def test_transformers_extras_do_not_make_a_missing_checkpoint_foreign(self):
+        """Llama repos ship ``original/consolidated.00.pth``; a download that
+        has that and the config but not the safetensors yet is incomplete.
+        So is one that has fetched a shard but not the index."""
+
+        layouts = {
+            "original weights": {"config.json": self.CONFIG, "original/consolidated.00.pth": b"x"},
+            "shard before index": {
+                "config.json": self.CONFIG,
+                "model-00001-of-00003.safetensors": b"x",
+            },
+        }
+        for kind, files in layouts.items():
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as root:
+                self.snapshot_with_folders(root, files)
+                status = cache_status(self.MODEL, Path(root))
+
+                self.assertFalse(status.unsupported)
+                self.assertEqual(status.missing_files, (MODEL_WEIGHTS,))
 
     def test_a_transformers_config_without_weights_is_still_incomplete(self):
         """``architectures`` alone marks a Transformers config too."""

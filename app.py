@@ -494,10 +494,10 @@ def format_timestamp(stamp: float | None) -> str:
 
 
 UNSUPPORTED_REASON = (
-    "not a Transformers language model: its files are all here, but there is no "
-    "`config.json` with a `model_type` and no `model.safetensors` or "
-    "`pytorch_model.bin` at the top of the repo (a diffusers pipeline, a "
-    "CTranslate2 or ONNX export, say), so ChatLab cannot load it."
+    "not a Transformers language model: its files are all here, but its weights "
+    "are laid out for another framework (a diffusers pipeline, a CTranslate2 or "
+    "ONNX export, say) and there is no `model.safetensors` or `pytorch_model.bin` "
+    "at the top of the repo, so ChatLab cannot load it."
 )
 
 
