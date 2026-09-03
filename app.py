@@ -2855,6 +2855,7 @@ CSS = f"""
 #nav-pane > *, #nav, #nav .wrap {{ height: 100%; }}
 #nav .wrap {{ flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 0.3rem; }}
 #nav label {{
+  position: relative;
   justify-content: center; text-align: center; padding: 0.7rem 0.2rem;
   font-size: 0.85rem; border-radius: 8px; box-shadow: none; border: none;
   background: transparent;
@@ -2865,7 +2866,14 @@ CSS = f"""
   border: 1px solid var(--border-color-primary);
 }}
 #nav label:last-child {{ margin-top: auto; }}
-#nav label input {{ display: none; }}
+/* The radio inputs stay in the tab order, just out of sight, and the tile
+   they belong to shows the keyboard focus ring. */
+#nav label input {{
+  position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none;
+}}
+#nav label:has(input:focus-visible) {{
+  outline: 2px solid var(--color-accent); outline-offset: 2px;
+}}
 .model-list .wrap {{ flex-direction: column; align-items: stretch; gap: 0.2rem; }}
 .model-list label {{ font-size: 0.82rem; line-height: 1.3; word-break: break-word; }}
 .model-detail {{ font-size: 0.85rem; }}
