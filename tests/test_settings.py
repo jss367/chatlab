@@ -3,6 +3,8 @@
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -234,6 +236,35 @@ class ProcessSettingsTests(unittest.TestCase):
         self.assertEqual(self.saved()["temperature"], 0.2)
         self.assertEqual(self.saved()["system_prompt"], "Be brief.")
         self.assertEqual(settings.current().temperature, 0.2)
+
+    def test_the_later_of_two_overlapping_changes_is_the_one_on_disk(self):
+        """Two controls changed at once must not leave the older value saved.
+
+        Gradio runs each control's handler on its own thread. With the file
+        written outside the lock, a slow write could land after a newer one
+        and leave the file disagreeing with the settings in memory.
+        """
+
+        real_write = settings.write
+
+        def slow_write(chosen, unknown=None, path=None):
+            # Only the first change is held up, so it would finish last.
+            time.sleep(0.2 if chosen.temperature == 0.1 else 0)
+            return real_write(chosen, unknown, path)
+
+        with mock.patch.object(settings, "write", slow_write):
+            threads = [
+                threading.Thread(target=settings.update, kwargs={"temperature": value})
+                for value in (0.1, 0.2)
+            ]
+            threads[0].start()
+            time.sleep(0.05)
+            threads[1].start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(settings.current().temperature, 0.2)
+        self.assertEqual(self.saved()["temperature"], 0.2)
 
     def test_a_change_that_changes_nothing_is_not_written(self):
         settings.update(temperature=0.2)

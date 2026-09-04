@@ -344,18 +344,21 @@ def update(**values: Any) -> Settings:
     Every value goes through :func:`sanitize`, so a caller may pass whatever
     a control gave it. A change that changes nothing is not written: controls
     report their value on every frame, and most frames repeat it.
+
+    The read, the merge, and the write are one critical section. Two controls
+    changed in quick succession run their handlers on separate threads, and
+    were the file written outside the lock the slower of the two could land
+    last and leave the file holding the older of the two values.
     """
 
     global _current
     with _lock:
         base = _current if _current is not None else DEFAULTS
-        unknown = dict(_unknown)
-    merged = sanitize(base.to_mapping() | values)
-    if merged == base:
-        return merged
-    with _lock:
+        merged = sanitize(base.to_mapping() | values)
+        if merged == base:
+            return merged
         _current = merged
-    write(merged, unknown)
+        write(merged, _unknown)
     return merged
 
 
