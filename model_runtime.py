@@ -1914,9 +1914,15 @@ class ModelManager:
         # still relying on, and the chat badge would go back to saying that
         # nothing was loaded in the middle of a minutes-long load.
         self._pending_loads: list[str] = []
-        # Guards _pending_loads. A load runs on whichever worker thread
-        # Gradio handed the click to, so adding and removing entries must not
-        # interleave with each other or with a reader building the badge.
+        # The one load that holds the model lock and is reading weights right
+        # now, as opposed to queued behind something. Kept apart from the
+        # list because the order loads are appended in is the order they
+        # arrived, which need not be the order they win the lock in.
+        self._active_load: str | None = None
+        # Guards _pending_loads and _active_load. A load runs on whichever
+        # worker thread Gradio handed the click to, so adding and removing
+        # entries must not interleave with each other or with a reader
+        # building the badge.
         self._pending_loads_lock = threading.Lock()
         # Downloads under way right now, by model ID, so a second request for
         # the same model can follow the first instead of racing it for the
@@ -1951,13 +1957,18 @@ class ModelManager:
     def loading_id(self) -> str | None:
         """Name the model a load is bringing in right now, or None.
 
-        The oldest load still running, when there are several: that is the
-        one holding the model lock, or next in line for it, so it is the
-        load actually reading weights while the others wait their turn.
-        A later load takes over the name once the earlier one is done.
+        The load that has the model lock in hand, when one has: it is the
+        one really reading weights, whatever order the loads arrived in.
+        Failing that the oldest load still running, which is the one next in
+        line for the lock and so about to become the answer anyway; that
+        fallback is what keeps the badge from saying nothing is loaded
+        during the moment between a load being asked for and it taking the
+        lock.
         """
 
         with self._pending_loads_lock:
+            if self._active_load is not None:
+                return self._active_load
             return self._pending_loads[0] if self._pending_loads else None
 
     def is_loading(self, model_id: str) -> bool:
@@ -1990,6 +2001,26 @@ class ModelManager:
                 # when two loads of the same model overlap: each undoes its
                 # own append and the second stays counted.
                 self._pending_loads.remove(model_id)
+
+    @contextlib.contextmanager
+    def _reading_weights(self, model_id: str) -> Iterator[None]:
+        """Name ``model_id`` as the load that owns the model lock, for the block.
+
+        Entered with the model lock already held, which is what makes one
+        entry enough: only one load can be inside at a time. A load counts
+        itself pending before it waits for that lock, and the wait can be
+        long, so append order is arrival order and not the order the loads
+        get to read anything - a thread can be set aside by the scheduler
+        between the two steps and a later load can take the lock first.
+        """
+
+        with self._pending_loads_lock:
+            self._active_load = model_id
+        try:
+            yield
+        finally:
+            with self._pending_loads_lock:
+                self._active_load = None
 
     @property
     def load_id(self) -> str | None:
@@ -2124,10 +2155,11 @@ class ModelManager:
         import torch
 
         checked_id = validate_model_id(model_id)
-        # Recorded before waiting for the lock, not after: a load queued
-        # behind a long generation, or behind another load, is a load under
-        # way for the whole wait.
-        with self._loading(checked_id), self._lock:
+        # Counted as pending before waiting for the lock, not after: a load
+        # queued behind a long generation, or behind another load, is a load
+        # under way for the whole wait. Marked as the active one only once
+        # the lock is in hand, which is the point it starts reading weights.
+        with self._loading(checked_id), self._lock, self._reading_weights(checked_id):
             return self._load_locked(checked_id, local_path, torch)
 
     def _load_locked(self, model_id: str, local_path: Path, torch) -> str:

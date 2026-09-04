@@ -460,6 +460,50 @@ class LoadingIdTests(unittest.TestCase):
         self.assertFalse(manager.is_loading(second))
         self.assertFalse(manager._lock.locked())
 
+    def test_the_load_holding_the_lock_is_named_whatever_order_they_arrived_in(self):
+        # Loads count themselves pending before they wait for the model
+        # lock, so the list is in arrival order, and arrival order is not
+        # promised to be the order the lock is handed out in: a thread can
+        # be set aside between the two steps. The badge has to name the load
+        # that is really reading weights, not the one that clicked first.
+        import threading
+
+        manager = ModelManager()
+        second = "org/second"
+        in_second = threading.Event()
+        let_second_finish = threading.Event()
+
+        def fake_load(model_id, local_path, torch):
+            in_second.set()
+            let_second_finish.wait(5)
+            return "CPU"
+
+        # Stand in for the descheduled first thread: pending, but nowhere
+        # near the lock.
+        with manager._loading(OLMO):
+            with mock.patch.object(manager, "_load_locked", fake_load):
+                worker = threading.Thread(
+                    target=manager.load, args=(second, Path("/snap"))
+                )
+                worker.start()
+                try:
+                    self.assertTrue(in_second.wait(5))
+                    self.assertEqual(manager.loading_id, second)
+                    # The first load is still counted, so nothing may
+                    # disturb its files either.
+                    self.assertTrue(manager.is_loading(OLMO))
+                    self.assertTrue(manager.is_loading(second))
+                finally:
+                    let_second_finish.set()
+                    worker.join(timeout=5)
+
+            # With no load holding the lock the pending one is named again,
+            # so the badge does not fall back to "No model loaded".
+            self.assertEqual(manager.loading_id, OLMO)
+
+        self.assertIsNone(manager.loading_id)
+        self.assertFalse(manager._lock.locked())
+
     def test_two_loads_of_the_same_model_each_undo_their_own_mark(self):
         # remove() takes one entry off the list, not every match, so a
         # second request for the model still on its way in stays counted
