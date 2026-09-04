@@ -329,7 +329,8 @@ class ManagerRemoveTests(unittest.TestCase):
 
 
 class LoadingIdTests(unittest.TestCase):
-    """The manager names the model it is loading for as long as the load runs."""
+    """The manager names the model it is loading for as long as the load runs,
+    and keeps the loads that overlap apart from each other."""
 
     def test_the_loading_id_is_set_during_the_load_and_cleared_after(self):
         manager = ModelManager()
@@ -392,6 +393,83 @@ class LoadingIdTests(unittest.TestCase):
         manager = ModelManager()
         with self.assertRaises(ValueError):
             manager.load("nonsense", Path("/snap"))
+        self.assertIsNone(manager.loading_id)
+
+    def test_one_load_finishing_does_not_cancel_another_still_running(self):
+        # "Load cached" and "Download and load" are separate Gradio events,
+        # so they get a worker each and can both be inside load() at once,
+        # the second waiting on the model lock. The load that finishes first
+        # must leave the other's name in place: otherwise the chat badge
+        # goes back to "No model loaded" halfway through a load, and offers
+        # the reader a button to start one more.
+        import threading
+
+        manager = ModelManager()
+        second = "org/second"
+        in_first = threading.Event()
+        in_second = threading.Event()
+        let_first_finish = threading.Event()
+        let_second_finish = threading.Event()
+
+        def fake_load(model_id, local_path, torch):
+            if model_id == OLMO:
+                in_first.set()
+                let_first_finish.wait(5)
+            else:
+                in_second.set()
+                let_second_finish.wait(5)
+            return "CPU"
+
+        with mock.patch.object(manager, "_load_locked", fake_load):
+            first_worker = threading.Thread(
+                target=manager.load, args=(OLMO, Path("/snap"))
+            )
+            first_worker.start()
+            try:
+                self.assertTrue(in_first.wait(5))
+                second_worker = threading.Thread(
+                    target=manager.load, args=(second, Path("/snap"))
+                )
+                second_worker.start()
+                try:
+                    for _ in range(200):
+                        if manager.is_loading(second):
+                            break
+                        time.sleep(0.005)
+                    # Both count as under way, and the one that got there
+                    # first is the one the badge names.
+                    self.assertTrue(manager.is_loading(second))
+                    self.assertTrue(manager.is_loading(OLMO))
+                    self.assertEqual(manager.loading_id, OLMO)
+                    self.assertFalse(in_second.is_set())
+
+                    let_first_finish.set()
+                    first_worker.join(timeout=5)
+                    self.assertTrue(in_second.wait(5))
+                    # The finished load took only its own name away.
+                    self.assertEqual(manager.loading_id, second)
+                    self.assertFalse(manager.is_loading(OLMO))
+                finally:
+                    let_second_finish.set()
+                    second_worker.join(timeout=5)
+            finally:
+                let_first_finish.set()
+                first_worker.join(timeout=5)
+
+        self.assertIsNone(manager.loading_id)
+        self.assertFalse(manager.is_loading(second))
+        self.assertFalse(manager._lock.locked())
+
+    def test_two_loads_of_the_same_model_each_undo_their_own_mark(self):
+        # remove() takes one entry off the list, not every match, so a
+        # second request for the model still on its way in stays counted
+        # after the first one is done with it.
+        manager = ModelManager()
+        with manager._loading(OLMO):
+            with manager._loading(OLMO):
+                self.assertEqual(manager.loading_id, OLMO)
+            self.assertEqual(manager.loading_id, OLMO)
+
         self.assertIsNone(manager.loading_id)
 
 
@@ -633,11 +711,21 @@ class ManageMyModelsTests(unittest.TestCase):
         self.assertFalse(card.startswith("downloading"), card)  # the fake never ran
 
     def test_a_model_being_loaded_is_not_redownloaded_under_itself(self):
-        # model_id is empty for the whole of a load, so the manager names
-        # the model it is bringing in separately.
-        self.manager.loading_id = "org/partial"
+        # model_id is empty for the whole of a load, so the manager keeps
+        # the models it is bringing in separately.
+        with self.manager._loading("org/partial"):
+            (card,) = list(app.redownload_my_model("org/partial", ""))
 
-        (card,) = list(app.redownload_my_model("org/partial", ""))
+        self.assertIn("Model in use", card)
+        self.assertIn("being loaded", card)
+        self.assertFalse(card.startswith("downloading"), card)
+
+    def test_a_model_waiting_behind_another_load_is_not_redownloaded_either(self):
+        # Two loads can run at once, and only one of them is the one the
+        # badge names. The one waiting its turn is still going to read its
+        # own files, so a redownload of it has to be refused as well.
+        with self.manager._loading(OLMO), self.manager._loading("org/partial"):
+            (card,) = list(app.redownload_my_model("org/partial", ""))
 
         self.assertIn("Model in use", card)
         self.assertIn("being loaded", card)
@@ -950,8 +1038,21 @@ class ModelBadgeTests(unittest.TestCase):
     def test_a_load_under_way_names_the_model_coming_in(self):
         # model_id is cleared for the whole of a load, so the badge reads
         # loading_id and reports the minutes in between as a load.
-        self.manager.loading_id = OLMO
-        badge, button = app.refresh_model_badge()
+        with self.manager._loading(OLMO):
+            badge, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="loading"', badge)
+        self.assertIn(f"Loading {OLMO}", badge)
+        self.assertFalse(button["visible"])
+
+    def test_a_second_load_finishing_leaves_the_first_one_showing(self):
+        # Two loads can be under way at once, and the one that finishes
+        # first must not clear the other's marker: the badge would then say
+        # nothing was loaded in the middle of a load.
+        with self.manager._loading(OLMO):
+            with self.manager._loading("org/second"):
+                pass
+            badge, button = app.refresh_model_badge()
 
         self.assertIn('data-state="loading"', badge)
         self.assertIn(f"Loading {OLMO}", badge)

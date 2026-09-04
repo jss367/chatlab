@@ -519,11 +519,14 @@ def loaded_model_badge() -> str:
 
     ``loading_id`` is asked first: ``model_id`` is cleared for the whole of a
     load, so during those minutes the badge would otherwise claim that nothing
-    is loaded while the weights are on their way in.
+    is loaded while the weights are on their way in. It is read once and kept,
+    rather than asked again to fill in the text: a load can finish between two
+    reads, which would leave the badge saying "Loading None".
     """
 
-    if MANAGER.loading_id:
-        return model_badge("loading", f"Loading {MANAGER.loading_id}…")
+    loading = MANAGER.loading_id
+    if loading:
+        return model_badge("loading", f"Loading {loading}…")
     if not MANAGER.loaded:
         return model_badge("empty", NO_MODEL_BADGE)
     return model_badge(
@@ -678,12 +681,17 @@ def redownload_my_model(selected: str | None, hf_token: str):
     ID alone, so it would then call the new snapshot "loaded" while every
     reply still came from the old one. An incomplete model cannot be loaded,
     so the refusal never stands in the way of finishing a download.
+
+    ``is_loading`` rather than the name in the badge, because with two loads
+    running at once only one of them is named there, and a load still waiting
+    its turn for the model lock is going to read that model's files just the
+    same.
     """
 
     if not selected:
         yield status_card("Nothing to redownload", NO_MODEL_TO_MANAGE)
         return
-    if MANAGER.loading_id == selected:
+    if MANAGER.is_loading(selected):
         yield status_card(
             "Model in use",
             f"`{selected}` is being loaded right now. Wait for the load to finish, "

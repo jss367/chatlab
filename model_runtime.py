@@ -1898,12 +1898,26 @@ class ModelManager:
         # can be told from state produced under the next even when both came
         # from the same repository ID (a re-download at a newer revision).
         self.load_count = 0
-        # The model a load is bringing in right now, or None. ``model_id`` is
-        # cleared for the whole of a load and set only once the weights are
-        # in, so on its own it says nothing about the minutes in between;
-        # anything that must not touch a model's files while it is being
-        # read (a redownload, say) asks this as well.
-        self.loading_id: str | None = None
+        # The models that loads are bringing in right now, in the order the
+        # loads arrived. ``model_id`` is cleared for the whole of a load and
+        # set only once the weights are in, so on its own it says nothing
+        # about the minutes in between; anything that must not touch a
+        # model's files while it is being read (a redownload, say) asks this
+        # as well.
+        #
+        # A list rather than one slot because two loads really can be under
+        # way at once. Gradio limits concurrency per event handler, so
+        # "Load cached" and "Download and load" each get a worker of their
+        # own, and a second browser tab gets more still; the load that does
+        # not win the model lock sits waiting for it. With a single slot the
+        # first load to finish would clear the marker the second one was
+        # still relying on, and the chat badge would go back to saying that
+        # nothing was loaded in the middle of a minutes-long load.
+        self._pending_loads: list[str] = []
+        # Guards _pending_loads. A load runs on whichever worker thread
+        # Gradio handed the click to, so adding and removing entries must not
+        # interleave with each other or with a reader building the badge.
+        self._pending_loads_lock = threading.Lock()
         # Downloads under way right now, by model ID, so a second request for
         # the same model can follow the first instead of racing it for the
         # same files.
@@ -1932,6 +1946,50 @@ class ModelManager:
     @property
     def loaded(self) -> bool:
         return self.model is not None and self.tokenizer is not None
+
+    @property
+    def loading_id(self) -> str | None:
+        """Name the model a load is bringing in right now, or None.
+
+        The oldest load still running, when there are several: that is the
+        one holding the model lock, or next in line for it, so it is the
+        load actually reading weights while the others wait their turn.
+        A later load takes over the name once the earlier one is done.
+        """
+
+        with self._pending_loads_lock:
+            return self._pending_loads[0] if self._pending_loads else None
+
+    def is_loading(self, model_id: str) -> bool:
+        """Say whether any load running right now is reading ``model_id``.
+
+        Asked instead of comparing against :attr:`loading_id`, which names
+        only one of them: a load waiting its turn for the model lock is
+        still going to read that model's files, so anything that would
+        disturb them has to be refused on its behalf too.
+        """
+
+        with self._pending_loads_lock:
+            return model_id in self._pending_loads
+
+    @contextlib.contextmanager
+    def _loading(self, model_id: str) -> Iterator[None]:
+        """Count ``model_id`` as being loaded for the length of the block.
+
+        Each load adds its own entry and takes its own entry away again, so
+        one load finishing cannot cancel out another that is still running.
+        """
+
+        with self._pending_loads_lock:
+            self._pending_loads.append(model_id)
+        try:
+            yield
+        finally:
+            with self._pending_loads_lock:
+                # remove() drops one matching entry, which is the right thing
+                # when two loads of the same model overlap: each undoes its
+                # own append and the second stays counted.
+                self._pending_loads.remove(model_id)
 
     @property
     def load_id(self) -> str | None:
@@ -2067,13 +2125,10 @@ class ModelManager:
 
         checked_id = validate_model_id(model_id)
         # Recorded before waiting for the lock, not after: a load queued
-        # behind a long generation is a load under way for the whole wait.
-        self.loading_id = checked_id
-        try:
-            with self._lock:
-                return self._load_locked(checked_id, local_path, torch)
-        finally:
-            self.loading_id = None
+        # behind a long generation, or behind another load, is a load under
+        # way for the whole wait.
+        with self._loading(checked_id), self._lock:
+            return self._load_locked(checked_id, local_path, torch)
 
     def _load_locked(self, model_id: str, local_path: Path, torch) -> str:
         """Bring ``model_id`` in from ``local_path`` while the caller holds ``_lock``."""
