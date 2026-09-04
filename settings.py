@@ -390,3 +390,22 @@ def model_id_to_save(shown: str, chosen: Settings | None = None) -> str:
         return shown
     saved = chosen if chosen is not None else current()
     return saved.model_id
+
+
+def seed_to_save(shown: Any, randomizing: bool, chosen: Settings | None = None) -> Any:
+    """The seed to write down while the box on the Settings page shows ``shown``.
+
+    The seed box is the one control the app writes to itself: a finished
+    response leaves the seed that produced it there. While randomization is
+    on, that number is the app's rather than the reader's, and every control
+    publishes it whenever anything changes, so without this a nudge of the
+    temperature would save a seed nobody chose over the one the reader did.
+    Committing the seed box itself is an explicit choice and is saved, and so
+    is turning randomization off, which is how a reader keeps the seed a
+    response has just used.
+    """
+
+    if not randomizing:
+        return shown
+    saved = chosen if chosen is not None else current()
+    return saved.seed

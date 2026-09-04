@@ -3271,21 +3271,35 @@ PERSISTED_SETTING_NAMES = (
 )
 
 
-def remember_settings(*values) -> None:
+def remember_settings(*values, seed_committed: bool = False) -> None:
     """Save every setting whenever one of them changes.
 
     There is no save button, so each control reports the whole set and the
     file is rewritten. A change that changes nothing is not written, which is
     what keeps a slider drag from writing once per pixel.
 
-    The model box is the one control whose contents are not always the
-    reader's choice: ``OLMO_MODEL_ID`` puts a model there for one run, and
-    that must not be written down just because something else changed.
+    Two of the controls hold something that is not always the reader's
+    choice, and both are filtered rather than saved as they are read.
+    ``OLMO_MODEL_ID`` puts a model in the model box for one run, and a
+    finished response leaves the seed it used in the seed box. Neither must
+    be written down just because something else changed.
+    ``seed_committed`` is the seed box's own blur or submit saying the number
+    there is a choice after all.
     """
 
     chosen = dict(zip(PERSISTED_SETTING_NAMES, values, strict=True))
     chosen["model_id"] = settings.model_id_to_save(chosen["model_id"])
+    if not seed_committed:
+        chosen["seed"] = settings.seed_to_save(
+            chosen["seed"], chosen["randomize_seed"]
+        )
     settings.update(**chosen)
+
+
+def remember_committed_seed(*values) -> None:
+    """Save every setting, the seed box included, when it is done being edited."""
+
+    remember_settings(*values, seed_committed=True)
 
 
 def restore_settings():
@@ -3860,9 +3874,11 @@ def build_app() -> gr.Blocks:
         # The seed box is the one control the app writes to itself: a finished
         # response leaves the seed that produced it there, and saving that
         # would overwrite the seed the reader chose. Blur and submit are the
-        # two ways a person is done editing a number.
+        # two ways a person is done editing a number, and they are the only
+        # events that write the box's contents down; every other control
+        # leaves the saved seed where it is. See remember_settings().
         for event in (seed.blur, seed.submit):
-            event(remember_settings, persisted_inputs, None)
+            event(remember_committed_seed, persisted_inputs, None)
         # The context limit is committed rather than saved as it is typed: the
         # handler writes a clamped value back, which mid-word would fight the
         # typing.

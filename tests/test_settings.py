@@ -320,5 +320,21 @@ class StartupModelTests(unittest.TestCase):
             )
 
 
+class SeedToSaveTests(unittest.TestCase):
+    """A response writes its own seed into the box; that is not a choice."""
+
+    def setUp(self):
+        self.chosen = settings.sanitize({"seed": 99, "randomize_seed": True})
+
+    def test_a_generated_seed_leaves_the_saved_one_alone(self):
+        self.assertEqual(settings.seed_to_save(1234567, True, self.chosen), 99)
+
+    def test_a_locked_seed_is_the_readers_own(self):
+        self.assertEqual(settings.seed_to_save(1234567, False, self.chosen), 1234567)
+
+    def test_the_saved_seed_survives_being_republished(self):
+        self.assertEqual(settings.seed_to_save(99, True, self.chosen), 99)
+
+
 if __name__ == "__main__":
     unittest.main()

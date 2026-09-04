@@ -1198,9 +1198,16 @@ class SavedSettingsTests(unittest.TestCase):
 
         self.assertTrue(self.path.is_file())
 
+    def saving_listeners(self):
+        """Every handler that writes the whole set, however it was reached."""
+
+        return self.listeners("remember_settings") + self.listeners(
+            "remember_committed_seed"
+        )
+
     def test_changing_any_setting_saves_them_all(self):
         self.build_with()
-        saved = self.listeners("remember_settings")
+        saved = self.saving_listeners()
         triggers = {
             self.demo.blocks[block_id]: event
             for fn in saved
@@ -1233,18 +1240,24 @@ class SavedSettingsTests(unittest.TestCase):
         # saving that would overwrite the seed the reader chose.
         self.build_with()
         events = {}
-        for fn in self.listeners("remember_settings"):
+        for fn in self.saving_listeners():
             for block_id, event in fn.targets:
                 events.setdefault(self.demo.blocks[block_id], set()).add(event)
 
         self.assertEqual(events[self.labelled("Random seed")], {"blur", "submit"})
         self.assertEqual(events[self.labelled("Temperature")], {"change"})
+        # And only the seed box's own events are allowed to write it down.
+        for fn in self.listeners("remember_committed_seed"):
+            self.assertEqual(
+                {self.demo.blocks[block_id] for block_id, _ in fn.targets},
+                {self.labelled("Random seed")},
+            )
 
     def test_the_hugging_face_token_is_not_among_the_settings_saved(self):
         self.build_with()
         token_box = self.labelled("Hugging Face token (optional)")
 
-        for fn in self.listeners("remember_settings"):
+        for fn in self.saving_listeners():
             self.assertNotIn(token_box, fn.inputs)
             self.assertNotIn(token_box, [self.demo.blocks[i] for i, _ in fn.targets])
 
@@ -1315,6 +1328,41 @@ class SavedSettingsTests(unittest.TestCase):
             )
 
         self.assertEqual(settings.current().model_id, "org/typed")
+
+    def test_a_generated_seed_is_not_saved_when_something_else_changes(self):
+        """A response leaves its own seed in the box; that is not a choice."""
+
+        self.build_with(seed=99, randomize_seed=True)
+        values = settings.current().to_mapping() | {
+            "seed": 1234567,  # what a finished response put in the box
+            "temperature": 0.1,
+        }
+        app.remember_settings(*(values[name] for name in app.PERSISTED_SETTING_NAMES))
+
+        self.assertEqual(json.loads(self.path.read_text())["temperature"], 0.1)
+        self.assertEqual(settings.current().seed, 99)
+        self.assertEqual(json.loads(self.path.read_text())["seed"], 99)
+
+    def test_committing_the_seed_box_saves_what_is_in_it(self):
+        self.build_with(seed=99, randomize_seed=True)
+        values = settings.current().to_mapping() | {"seed": 7}
+        app.remember_committed_seed(
+            *(values[name] for name in app.PERSISTED_SETTING_NAMES)
+        )
+
+        self.assertEqual(settings.current().seed, 7)
+
+    def test_a_locked_seed_is_saved_by_any_control(self):
+        # With randomization off the box is the reader's alone, and turning it
+        # off is how one keeps the seed a response has just used.
+        self.build_with(seed=99, randomize_seed=True)
+        values = settings.current().to_mapping() | {
+            "seed": 1234567,
+            "randomize_seed": False,
+        }
+        app.remember_settings(*(values[name] for name in app.PERSISTED_SETTING_NAMES))
+
+        self.assertEqual(settings.current().seed, 1234567)
 
     def test_lowering_the_context_limit_pulls_the_response_length_under_it(self):
         self.build_with(prefill_token_limit=8192, max_new_tokens=4096)
