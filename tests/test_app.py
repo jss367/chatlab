@@ -108,7 +108,8 @@ class ScoreStatusTests(unittest.TestCase):
         original = app.MANAGER
         app.MANAGER = StubManager(seam_verified, chat_template_missing)
         try:
-            return app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE)[7]
+            frames = list(app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE))
+            return frames[-1][7]
         finally:
             app.MANAGER = original
 
@@ -166,7 +167,7 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
         self.addCleanup(setattr, app, "MANAGER", original)
 
     def score(self):
-        return app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE)
+        return list(app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE))[-1]
 
     def test_a_reserved_slot_is_refused_with_a_reason(self):
         self.assertTrue(self.manager.reserve_generation())
@@ -210,6 +211,23 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
             self.manager.reserve_generation(), "a failure kept the slot"
         )
         self.manager.release_generation()
+
+    def test_the_slot_is_held_until_the_scored_strips_are_delivered(self):
+        # Gradio resumes the generator only once the browser has this frame.
+        # Giving the slot back any earlier would let a Send mint a newer stamp
+        # and publish its opening frame first, leaving these strips on screen
+        # under a stamp the app has already moved past.
+        frames = app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE)
+        first = next(frames)
+
+        self.assertNotEqual(first[7], app.SCORE_BUSY)
+        self.assertFalse(
+            self.manager.reserve_generation(), "the slot was given back early"
+        )
+        self.assertEqual(list(frames), [])
+        self.assertTrue(self.manager.reserve_generation())
+        self.manager.release_generation()
+
 
 class FailureReportTests(unittest.TestCase):
     """A failure has to reach a reader who is not looking at the status line."""

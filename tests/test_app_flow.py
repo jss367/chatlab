@@ -3120,7 +3120,7 @@ class LayerInspectionTests(unittest.TestCase):
         self.assertEqual(frames[-1][CONTEXT_IDS], gr.skip())
 
     def test_scored_text_publishes_its_context_ids(self):
-        result = app.score_text("", "Hello", False, DEFAULT_COLOR_SCALE)
+        result = list(app.score_text("", "Hello", False, DEFAULT_COLOR_SCALE))[-1]
         stamp, ids, load = result[10]
         self.assertEqual(stamp, result[1][0])
         self.assertEqual(ids, [])

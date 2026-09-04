@@ -2863,12 +2863,23 @@ def score_text(
     use_chat_template: bool,
     scale_name: str = DEFAULT_COLOR_SCALE,
 ):
-    """Measure text the model did not write, and put it in the same panel."""
+    """Measure text the model did not write, and put it in the same panel.
+
+    This is a generator for the same reason inspect_layers() is: Gradio does
+    not resume a streaming handler until the browser has been sent the frame
+    it yielded, so the generation slot is held not just for the pass but
+    until the scored strips are on screen. Returning instead would give the
+    slot back while the frame was still in flight, and a Send starting in
+    that window would mint a newer stamp and publish its opening frame
+    first, leaving these strips on screen under a stamp the app has already
+    moved past and refusing every click on them.
+    """
 
     skip = gr.skip()
     refused = (skip,) * 7
     if not MANAGER.loaded:
-        return refused + ("Download and load a model first.", skip, skip, skip)
+        yield refused + ("Download and load a model first.", skip, skip, skip)
+        return
 
     # A generation holds the model lock across every one of its yields, so
     # without the slot this pass would simply wait on it: the button would sit
@@ -2879,19 +2890,22 @@ def score_text(
     # leave the scored tokens on screen refusing every click. inspect_layers()
     # takes the slot for both reasons.
     if not MANAGER.reserve_generation():
-        return refused + (SCORE_BUSY, skip, skip, skip)
+        yield refused + (SCORE_BUSY, skip, skip, skip)
+        return
     try:
-        result = MANAGER.score_text(
-            text, context=context or "", use_chat_template=bool(use_chat_template)
-        )
-    except Exception as error:
-        return refused + (
-            failure_status("Could not score that text", str(error)),
-            skip,
-            skip,
-            skip,
-        )
-    else:
+        try:
+            result = MANAGER.score_text(
+                text, context=context or "", use_chat_template=bool(use_chat_template)
+            )
+        except Exception as error:
+            yield refused + (
+                failure_status("Could not score that text", str(error)),
+                skip,
+                skip,
+                skip,
+            )
+            return
+
         summary = summarize(result.metrics)
         status = (
             f"Scored {summary['token_count']:,} tokens. "
@@ -2907,7 +2921,7 @@ def score_text(
         # Both strips are replaced, so they take one shared stamp - and that
         # stamp is what drops a click made against the response they overwrite.
         generation = new_metrics_generation()
-        return (
+        yield (
             strip_update(result.metrics, scale_name, "Scored tokens — click one"),
             stamped(result.metrics, generation),
             strip_update(result.context_metrics, scale_name),
@@ -2920,9 +2934,9 @@ def score_text(
             [],
             (generation, [int(value) for value in result.context_ids], MANAGER.load_id),
         )
+        # Resumed once the browser has the frame above, so nothing between the
+        # mint and the strips arriving can hold the slot.
     finally:
-        # The stamp is minted under the slot, so it is released only once the
-        # frame this returns is fully built.
         MANAGER.release_generation()
 
 
