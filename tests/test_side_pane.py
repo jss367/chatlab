@@ -327,6 +327,43 @@ class ManagerRemoveTests(unittest.TestCase):
             self.manager.remove("nonsense", Path(self.root.name))
 
 
+class LoadingIdTests(unittest.TestCase):
+    """The manager names the model it is loading for as long as the load runs."""
+
+    def test_the_loading_id_is_set_during_the_load_and_cleared_after(self):
+        manager = ModelManager()
+        seen = []
+
+        def fake_load(model_id, local_path, torch):
+            seen.append((manager.loading_id, manager._lock.locked()))
+            return "CPU"
+
+        with mock.patch.object(manager, "_load_locked", fake_load):
+            self.assertEqual(manager.load(OLMO, Path("/snap")), "CPU")
+
+        self.assertEqual(seen, [(OLMO, True)])
+        self.assertIsNone(manager.loading_id)
+
+    def test_a_failed_load_clears_the_loading_id(self):
+        manager = ModelManager()
+
+        def fail(model_id, local_path, torch):
+            raise RuntimeError("gpu fell over")
+
+        with mock.patch.object(manager, "_load_locked", fail):
+            with self.assertRaises(RuntimeError):
+                manager.load(OLMO, Path("/snap"))
+
+        self.assertIsNone(manager.loading_id)
+        self.assertFalse(manager._lock.locked())
+
+    def test_a_malformed_id_is_refused_before_the_lock(self):
+        manager = ModelManager()
+        with self.assertRaises(ValueError):
+            manager.load("nonsense", Path("/snap"))
+        self.assertIsNone(manager.loading_id)
+
+
 def cached(model_id: str, **overrides) -> CachedModel:
     fields = dict(
         model_id=model_id,
@@ -563,6 +600,17 @@ class ManageMyModelsTests(unittest.TestCase):
         self.assertIn("Model in use", card)
         self.assertIn("Unload", card)
         self.assertFalse(card.startswith("downloading"), card)  # the fake never ran
+
+    def test_a_model_being_loaded_is_not_redownloaded_under_itself(self):
+        # model_id is empty for the whole of a load, so the manager names
+        # the model it is bringing in separately.
+        self.manager.loading_id = "org/partial"
+
+        (card,) = list(app.redownload_my_model("org/partial", ""))
+
+        self.assertIn("Model in use", card)
+        self.assertIn("being loaded", card)
+        self.assertFalse(card.startswith("downloading"), card)
 
     def test_redownload_with_nothing_selected_says_so(self):
         (card,) = list(app.redownload_my_model(None, ""))

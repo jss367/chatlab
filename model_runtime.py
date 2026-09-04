@@ -1898,6 +1898,12 @@ class ModelManager:
         # can be told from state produced under the next even when both came
         # from the same repository ID (a re-download at a newer revision).
         self.load_count = 0
+        # The model a load is bringing in right now, or None. ``model_id`` is
+        # cleared for the whole of a load and set only once the weights are
+        # in, so on its own it says nothing about the minutes in between;
+        # anything that must not touch a model's files while it is being
+        # read (a redownload, say) asks this as well.
+        self.loading_id: str | None = None
         # Downloads under way right now, by model ID, so a second request for
         # the same model can follow the first instead of racing it for the
         # same files.
@@ -2058,71 +2064,82 @@ class ModelManager:
 
     def load(self, model_id: str, local_path: Path) -> str:
         import torch
+
+        checked_id = validate_model_id(model_id)
+        with self._lock:
+            self.loading_id = checked_id
+            try:
+                return self._load_locked(checked_id, local_path, torch)
+            finally:
+                self.loading_id = None
+
+    def _load_locked(self, model_id: str, local_path: Path, torch) -> str:
+        """Bring ``model_id`` in from ``local_path`` while the caller holds ``_lock``."""
+
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        with self._lock:
-            self._unload_locked(torch)
-            if torch.cuda.is_available():
-                backend = "cuda"
-                dtype = (
-                    torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-                )
-            elif torch.backends.mps.is_available():
-                backend = "mps"
-                dtype = torch.float16
-            else:
-                backend = "cpu"
-                dtype = torch.float32
-            self._check_memory(
-                model_id, local_path, str(dtype).replace("torch.", ""), backend
+        self._unload_locked(torch)
+        if torch.cuda.is_available():
+            backend = "cuda"
+            dtype = (
+                torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
             )
-            tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
+        elif torch.backends.mps.is_available():
+            backend = "mps"
+            dtype = torch.float16
+        else:
+            backend = "cpu"
+            dtype = torch.float32
+        self._check_memory(
+            model_id, local_path, str(dtype).replace("torch.", ""), backend
+        )
+        tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
 
-            try:
-                if torch.cuda.is_available():
-                    model = AutoModelForCausalLM.from_pretrained(
-                        local_path,
-                        local_files_only=True,
-                        dtype=dtype,
-                        device_map="auto",
-                        low_cpu_mem_usage=True,
-                    )
-                    device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
-                elif torch.backends.mps.is_available():
-                    self._cap_mps_memory(torch)
-                    model = AutoModelForCausalLM.from_pretrained(
-                        local_path,
-                        local_files_only=True,
-                        dtype=dtype,
-                        low_cpu_mem_usage=True,
-                    ).to("mps")
-                    device_name = "Apple Metal (MPS)"
-                else:
-                    model = AutoModelForCausalLM.from_pretrained(
-                        local_path,
-                        local_files_only=True,
-                        dtype=dtype,
-                        low_cpu_mem_usage=True,
-                    )
-                    device_name = "CPU"
-            except (RuntimeError, MemoryError) as error:
-                self._release_device_cache(torch)
-                if is_out_of_memory_error(error):
-                    raise OutOfMemoryError(
-                        f"{model_id.strip()} did not fit in memory. Close other "
-                        "applications or choose a smaller model. "
-                        f"({str(error).splitlines()[0][:200]})"
-                    ) from error
-                raise
+        try:
+            if torch.cuda.is_available():
+                model = AutoModelForCausalLM.from_pretrained(
+                    local_path,
+                    local_files_only=True,
+                    dtype=dtype,
+                    device_map="auto",
+                    low_cpu_mem_usage=True,
+                )
+                device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
+            elif torch.backends.mps.is_available():
+                self._cap_mps_memory(torch)
+                model = AutoModelForCausalLM.from_pretrained(
+                    local_path,
+                    local_files_only=True,
+                    dtype=dtype,
+                    low_cpu_mem_usage=True,
+                ).to("mps")
+                device_name = "Apple Metal (MPS)"
+            else:
+                model = AutoModelForCausalLM.from_pretrained(
+                    local_path,
+                    local_files_only=True,
+                    dtype=dtype,
+                    low_cpu_mem_usage=True,
+                )
+                device_name = "CPU"
+        except (RuntimeError, MemoryError) as error:
+            self._release_device_cache(torch)
+            if is_out_of_memory_error(error):
+                raise OutOfMemoryError(
+                    f"{model_id.strip()} did not fit in memory. Close other "
+                    "applications or choose a smaller model. "
+                    f"({str(error).splitlines()[0][:200]})"
+                ) from error
+            raise
 
-            model.eval()
-            self.model = model
-            self.tokenizer = tokenizer
-            self.model_id = validate_model_id(model_id)
-            self.local_path = local_path
-            self.device_name = device_name
-            self.load_count += 1
-            return device_name
+        model.eval()
+        self.model = model
+        self.tokenizer = tokenizer
+        self.model_id = model_id
+        self.local_path = local_path
+        self.device_name = device_name
+        self.load_count += 1
+        return device_name
 
     def unload(self) -> None:
         import torch

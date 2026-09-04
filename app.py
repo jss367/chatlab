@@ -605,16 +605,23 @@ def redownload_my_model(selected: str | None, hf_token: str):
     for an incomplete model this fetches the rest, and for a complete one it
     checks the hub for updated files. Remove the model first to start over.
 
-    The loaded model is refused. A redownload can move ``refs/main`` to a
-    newer revision while the old weights stay in memory, and the list marks
-    a model loaded by ID alone, so it would then call the new snapshot
-    "loaded" while every reply still came from the old one. An incomplete
-    model cannot be the loaded one, so the refusal never stands in the way
-    of finishing a download.
+    The loaded model is refused, and so is one being loaded. A redownload
+    can move ``refs/main`` to a newer revision while the old weights stay in
+    memory (or are still being read), and the list marks a model loaded by
+    ID alone, so it would then call the new snapshot "loaded" while every
+    reply still came from the old one. An incomplete model cannot be loaded,
+    so the refusal never stands in the way of finishing a download.
     """
 
     if not selected:
         yield status_card("Nothing to redownload", NO_MODEL_TO_MANAGE)
+        return
+    if MANAGER.loading_id == selected:
+        yield status_card(
+            "Model in use",
+            f"`{selected}` is being loaded right now. Wait for the load to finish, "
+            "then **Unload** it before redownloading.",
+        )
         return
     if MANAGER.model_id == selected:
         yield status_card(
