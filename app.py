@@ -1,4 +1,4 @@
-"""Chatlab interface for chatting with and inspecting model tokens."""
+"""ChatLab interface for chatting with and inspecting model tokens."""
 
 from __future__ import annotations
 
@@ -49,6 +49,8 @@ from model_runtime import (
     CacheStatus,
     DownloadSnapshot,
     HubModel,
+    LoadProgress,
+    LoadSnapshot,
     ModelBusy,
     ModelChanged,
     ModelDownloading,
@@ -69,7 +71,7 @@ from token_metrics import (
     category_for,
     summarize,
 )
-from trace_export import build_trace, write_trace_export
+from trace_export import build_trace, write_private_text, write_trace_export
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +89,10 @@ MANAGER = ModelManager()
 # How often the download card is redrawn. Every frame is a message to the
 # browser, so this is a floor on chatter as much as a refresh rate.
 DOWNLOAD_POLL_SECONDS = 0.5
+
+# The load card is redrawn on the same beat as the download card, and for
+# the same reason: every frame is a message to the browser.
+LOAD_POLL_SECONDS = 0.5
 
 # Transfer speed is averaged over this long, so a stall or a burst shows within
 # a breath but one slow chunk does not swing the time remaining.
@@ -142,13 +148,69 @@ TEMPLATE_CAVEAT = (
 
 
 def status_card(title: str, detail: str, tone: str = "neutral") -> str:
-    icon = {"success": "●", "error": "●", "working": "◌"}.get(tone, "○")
-    return f"### {icon} {title}\n\n{detail}"
+    icon = {"success": "●", "error": "⚠", "working": "◌"}.get(tone, "○")
+    heading = f"{icon} {title}"
+    if tone == "error":
+        # Only the heading is tinted. A detail can carry markdown - file names
+        # in backticks, a progress bar - and wrapping it in a tag would stop
+        # that from rendering.
+        heading = f'<span class="failure-text">{heading}</span>'
+    return f"### {heading}\n\n{detail}"
+
+
+def alarm(title: str, detail: str) -> None:
+    """Pop the failure up over the page, wherever the reader is looking.
+
+    A status line is easy to miss: it is one sentence in a column of them,
+    and someone watching the transcript never looks at it. Gradio's only
+    modal that does not also end the event is the warning, so the app raises
+    warnings for failures alone and CSS paints them in the error colors. The
+    toast stays until it is closed, because the point is that a reader who
+    stepped away still learns why the response stopped.
+
+    The toast writes ``detail`` into the page as markup, so what arrives here
+    is already escaped - a runtime that says it could not read ``<pad>``
+    would otherwise lose the word. The title is written as text and is the
+    application's own wording, so it is passed through as it is.
+    """
+
+    gr.Warning(detail, title=title, duration=None)
+
+
+def failure_status(title: str, detail: str) -> str:
+    """A red status line that stays, and the toast that announces it.
+
+    Both take the failure as plain text and escape it once, here.
+    """
+
+    safe = html.escape(f"{title}: {detail}")
+    alarm(title, html.escape(detail))
+    return f'<div class="failure">{safe}</div>'
+
+
+def failure_card(title: str, detail: str) -> str:
+    """A red status card, and the toast that announces it.
+
+    ``detail`` is markdown the caller has already made safe, because a card
+    spells out file names in backticks and draws bars out of block
+    characters. Both the card and the toast render it as it is given.
+    """
+
+    alarm(title, detail)
+    return status_card(title, detail, "error")
 
 
 def describe_duration(seconds: float) -> str:
-    if seconds < 60:
-        return "under a minute"
+    """A rounded spoken length: ``a few seconds``, ``about 4 minutes``.
+
+    Rounded to five seconds under a minute, because a load is often over in
+    that time and "under a minute" would be the whole of what it ever said.
+    """
+
+    if seconds < 10:
+        return "a few seconds"
+    if seconds < 55:
+        return f"about {round(seconds / 5) * 5} seconds"
     minutes = round(seconds / 60)
     if minutes < 60:
         return f"about {minutes} minute{'s' if minutes != 1 else ''}"
@@ -189,6 +251,35 @@ class RateMeter:
         return (bytes_done - first_bytes) / elapsed
 
 
+class Pace:
+    """Time left in a job, from how fast its own progress has moved so far.
+
+    Measured from the first reading that showed any progress rather than from
+    the start, because the seconds before that are setup: a load spends them
+    reading the config and building the model, and counting them as slow
+    progress would put the first estimate minutes out.
+    """
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._first: tuple[float, float] | None = None
+
+    def remaining(self, fraction: float) -> float | None:
+        """Seconds left at the pace set since progress began, where it can be told."""
+
+        now = self._clock()
+        if fraction <= 0:
+            return None
+        if self._first is None:
+            self._first = (now, fraction)
+            return None
+        first_time, first_fraction = self._first
+        elapsed, moved = now - first_time, fraction - first_fraction
+        if elapsed < 1.0 or moved <= 0:
+            return None
+        return (1.0 - fraction) * elapsed / moved
+
+
 def download_detail(model_id: str, snap: DownloadSnapshot, rate: float | None) -> str:
     name = f"`{model_id}`"
     if not snap.started:
@@ -205,8 +296,15 @@ def download_detail(model_id: str, snap: DownloadSnapshot, rate: float | None) -
     )
     if rate:
         remaining = max(0, snap.bytes_total - snap.bytes_done)
+        # format_bytes() prints a byte count verbatim below 1 KB, so a rate
+        # handed to it as the float it is measured in reads "812.3456789 B/s".
+        # Rounding never reaches zero: a download with nothing moving has no
+        # rate at all and never gets here, so "0 B/s" beside a time left would
+        # contradict itself. The estimate keeps the unrounded rate: it divides
+        # by it.
         figures += (
-            f" · {format_bytes(rate)}/s · {describe_duration(remaining / rate)} left"
+            f" · {format_bytes(max(1, round(rate)))}/s"
+            f" · {describe_duration(remaining / rate)} left"
         )
     return f"{name}\n\n`{progress_bar(snap.fraction)}` {percent}%\n\n{figures}"
 
@@ -269,6 +367,97 @@ def stream_download(model_id: str, hf_token: str):
     if "error" in outcome:
         raise outcome["error"]
     return outcome["path"]
+
+
+def load_detail(
+    model_id: str, snap: LoadSnapshot, rate: float | None, remaining: float | None
+) -> str:
+    name = f"`{model_id}`"
+    if not snap.started:
+        weights = (
+            f"{format_bytes(snap.bytes_total)} of weights"
+            if snap.bytes_total
+            else "the weights"
+        )
+        return (
+            f"Reading {weights} for {name} out of the cache on disk. Nothing "
+            "is being downloaded; this is the wait for memory."
+        )
+    # A card that still says "loading" never claims to be finished: the
+    # allocator holds the last byte a moment before the loader is done with
+    # the model, and a full bar over a wait that goes on reads as a hang.
+    shown = min(snap.fraction, 0.99)
+    percent = int(shown * 100)
+    if snap.counts_bytes:
+        # Bytes on the device: the second half of a load onto Metal, and the
+        # whole of one onto a graphics card.
+        figures = (
+            f"{format_bytes(snap.bytes_done)} of {format_bytes(snap.bytes_total)} "
+            "on the device"
+        )
+        if rate:
+            figures += f" · {format_bytes(rate)}/s"
+    else:
+        figures = f"{snap.steps_done} of {snap.steps_total} parts read"
+    if remaining is not None:
+        figures += f" · {describe_duration(remaining)} left"
+    return f"{name}\n\n`{progress_bar(shown)}` {percent}%\n\n{figures}"
+
+
+def stream_load(model_id: str, path: Path):
+    """Yield a status card every half second until ``model_id`` is in memory.
+
+    Returns the device it landed on, so a caller writes
+    ``device = yield from stream_load(...)``. A failed load raises here.
+
+    The load runs on its own thread, as a download does: ``from_pretrained``
+    blocks until the last weight, and a handler that blocked with it could
+    show nothing past its first frame.
+    """
+
+    progress = LoadProgress()
+    outcome: dict = {}
+
+    def work() -> None:
+        try:
+            outcome["device"] = MANAGER.load(model_id, path, progress)
+        except BaseException as error:
+            outcome["error"] = error
+        finally:
+            # Held until the load is over, so the two claims between them
+            # cover the whole of it: this one from before the thread existed,
+            # the manager's own from the moment it reached load().
+            MANAGER.release_load(claim)
+
+    worker = threading.Thread(target=work, name="chatlab-load", daemon=True)
+    # Claimed before the worker exists, because the claim is what stops a
+    # removal or a redownload arriving in this same instant from moving the
+    # snapshot the load is about to read. The worker names the load only once
+    # it reaches MANAGER.load, and the model lock is taken later still.
+    _model_id, claim = MANAGER.reserve_load(model_id)
+    try:
+        worker.start()
+    except BaseException:
+        # work() never ran, so its finally cannot give the claim back.
+        MANAGER.release_load(claim)
+        raise
+    meter, pace = RateMeter(), Pace()
+    while worker.is_alive():
+        snap = progress.snapshot()
+        yield status_card(
+            "Loading model",
+            load_detail(
+                model_id.strip(),
+                snap,
+                meter.rate(snap.bytes_done),
+                pace.remaining(snap.fraction),
+            ),
+            "working",
+        )
+        worker.join(LOAD_POLL_SECONDS)
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["device"]
 
 
 def describe_missing(status: CacheStatus) -> str:
@@ -351,13 +540,13 @@ def download_model(model_id: str, hf_token: str):
     try:
         before = cache_status(model_id)
     except ValueError as error:
-        yield status_card("Download failed", html.escape(str(error)), "error")
+        yield failure_card("Download failed", html.escape(str(error)))
         return
     yield status_card(*describe_cache(model_id, before), "working")
     try:
         path = yield from stream_download(model_id, hf_token)
     except Exception as error:
-        yield status_card("Download failed", html.escape(str(error)), "error")
+        yield failure_card("Download failed", html.escape(str(error)))
         return
 
     elapsed = time.monotonic() - started
@@ -375,7 +564,7 @@ def download_and_load_model(model_id: str, hf_token: str):
     try:
         before = cache_status(model_id)
     except ValueError as error:
-        yield status_card("Model setup failed", html.escape(str(error)), "error")
+        yield failure_card("Model setup failed", html.escape(str(error)))
         return
     yield status_card(*describe_cache(model_id, before), "working")
     try:
@@ -388,9 +577,9 @@ def download_and_load_model(model_id: str, hf_token: str):
             f"{fetched} Moving `{model_id.strip()}` onto the best available device…",
             "working",
         )
-        device = MANAGER.load(model_id, path)
+        device = yield from stream_load(model_id, path)
     except Exception as error:
-        yield status_card("Model setup failed", html.escape(str(error)), "error")
+        yield failure_card("Model setup failed", html.escape(str(error)))
         return
 
     elapsed = time.monotonic() - started
@@ -442,7 +631,7 @@ def load_cached_model(model_id: str):
     try:
         status = cache_status(cleaned)
     except ValueError as error:
-        yield status_card("Could not load cached model", html.escape(str(error)), "error")
+        yield failure_card("Could not load cached model", html.escape(str(error)))
         return
     if status.missing_files:
         yield status_card(
@@ -470,24 +659,21 @@ def load_cached_model(model_id: str):
         return
     try:
         path = MANAGER.find_cached(cleaned)
-        yield status_card(
-            "Loading model",
-            f"Loading {format_bytes(status.cached_bytes)} of cached files from `{path}`…",
-            "working",
-        )
-        device = MANAGER.load(cleaned, path)
+        started = time.monotonic()
+        device = yield from stream_load(cleaned, path)
     except IncompleteSnapshotError as error:
-        yield status_card(
-            "Download unfinished", incomplete_snapshot_detail(cleaned, error), "error"
+        yield failure_card(
+            "Download unfinished", incomplete_snapshot_detail(cleaned, error)
         )
         return
     except Exception as error:
-        yield status_card(
-            "Could not load cached model", html.escape(str(error)), "error"
-        )
+        yield failure_card("Could not load cached model", html.escape(str(error)))
         return
     yield status_card(
-        "Model ready", f"{name} is loaded on **{device}**.", "success"
+        "Model ready",
+        f"{name} is loaded on **{device}** "
+        f"({time.monotonic() - started:.1f} seconds).",
+        "success",
     )
 
 
@@ -824,10 +1010,9 @@ def remove_my_model(pending: str | None):
         )
     except (OSError, ValueError) as error:
         return (
-            status_card(
+            failure_card(
                 "Could not remove model",
                 f"Removing `{pending}` failed: {html.escape(str(error))}",
-                "error",
             ),
             hidden,
             None,
@@ -918,7 +1103,7 @@ def search_models(query: str, hf_token: str):
     except Exception as error:
         return (
             cleared,
-            status_card("Search failed", html.escape(str(error)), "error"),
+            failure_card("Search failed", html.escape(str(error))),
             {},
         )
     if not results:
@@ -1872,7 +2057,7 @@ def _stream_reply(
         yield snapshot(
             highlight,
             metrics,
-            f"Generation failed: {error}",
+            failure_status("Generation failed", str(error)),
             busy=False,
             branch_source=(generation, producing_load_id) if kept and metrics else None,
         )
@@ -2805,7 +2990,12 @@ def save_conversation(turns, system_prompt):
     # path and silently overwriting each other's download.
     stamp = time.strftime("%Y%m%d-%H%M%S")
     path = directory / f"conversation-{stamp}-{uuid4().hex[:8]}.json"
-    path.write_text(to_json(turns, system_prompt=system_prompt), encoding="utf-8")
+    # A transcript is the reader's own writing, and the upload folder is shared:
+    # on Linux it is /tmp/gradio, which every account on the machine can read.
+    # write_private_text() makes the file owner-only before it holds a word of
+    # the conversation, so there is no moment for another account to open it.
+    # write_trace_export() writes its export the same way.
+    write_private_text(path, to_json(turns, system_prompt=system_prompt))
     return (
         gr.update(value=str(path), visible=True),
         f"Saved {len(turns)} message{'s' if len(turns) != 1 else ''}.",
@@ -2849,7 +3039,7 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE):
     try:
         loaded, system_prompt = from_json(Path(file_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        return keep_current(f"Could not load that file: {error}")
+        return keep_current(failure_status("Could not load that file", str(error)))
 
     # A successful load replaces the conversation wholesale, so whatever the
     # cancelled generator left behind goes with it and needs no finalizing.
@@ -2884,53 +3074,90 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE):
 # ---------------------------------------------------------------- score text
 
 
+SCORE_BUSY = "Wait for the response to finish before scoring text."
+
+
 def score_text(
     context: str,
     text: str,
     use_chat_template: bool,
     scale_name: str = DEFAULT_COLOR_SCALE,
 ):
-    """Measure text the model did not write, and put it in the same panel."""
+    """Measure text the model did not write, and put it in the same panel.
+
+    This is a generator for the same reason inspect_layers() is: Gradio does
+    not resume a streaming handler until the browser has been sent the frame
+    it yielded, so the generation slot is held not just for the pass but
+    until the scored strips are on screen. Returning instead would give the
+    slot back while the frame was still in flight, and a Send starting in
+    that window would mint a newer stamp and publish its opening frame
+    first, leaving these strips on screen under a stamp the app has already
+    moved past and refusing every click on them.
+    """
 
     skip = gr.skip()
+    refused = (skip,) * 7
     if not MANAGER.loaded:
-        return (skip,) * 7 + ("Download and load a model first.", skip, skip, skip)
+        yield refused + ("Download and load a model first.", skip, skip, skip)
+        return
 
+    # A generation holds the model lock across every one of its yields, so
+    # without the slot this pass would simply wait on it: the button would sit
+    # dead for the length of the response and then fire, with nothing on screen
+    # to tell that apart from a hang. Reserving rather than reading
+    # MANAGER.busy also keeps a Send from starting while the pass runs and
+    # minting a stamp over the strips this is about to replace, which would
+    # leave the scored tokens on screen refusing every click. inspect_layers()
+    # takes the slot for both reasons.
+    if not MANAGER.reserve_generation():
+        yield refused + (SCORE_BUSY, skip, skip, skip)
+        return
     try:
-        result = MANAGER.score_text(
-            text, context=context or "", use_chat_template=bool(use_chat_template)
-        )
-    except Exception as error:
-        return (skip,) * 7 + (f"Could not score that text: {error}", skip, skip, skip)
+        try:
+            result = MANAGER.score_text(
+                text, context=context or "", use_chat_template=bool(use_chat_template)
+            )
+        except Exception as error:
+            yield refused + (
+                failure_status("Could not score that text", str(error)),
+                skip,
+                skip,
+                skip,
+            )
+            return
 
-    summary = summarize(result.metrics)
-    status = (
-        f"Scored {summary['token_count']:,} tokens. "
-        f"Perplexity {summary['perplexity']:,.1f}."
-    )
-    # What was scored comes before how exactly it was scored: the template
-    # caveat says which passage the numbers describe, the seam caveat says how
-    # sure their first token is.
-    if result.chat_template_missing:
-        status = f"{status} {TEMPLATE_CAVEAT}"
-    if not result.seam_verified:
-        status = f"{status} {SEAM_CAVEAT}"
-    # Both strips are replaced, so they take one shared stamp - and that stamp
-    # is what drops a click made against the response they overwrite.
-    generation = new_metrics_generation()
-    return (
-        strip_update(result.metrics, scale_name, "Scored tokens — click one"),
-        stamped(result.metrics, generation),
-        strip_update(result.context_metrics, scale_name),
-        stamped(result.context_metrics, generation),
-        prompt_note_text(len(result.context_metrics), "", "context"),
-        charts.summary_tiles(summary),
-        charts.surprise_chart(result.metrics, title="Surprise per scored token"),
-        status,
-        NO_TOKEN_SELECTED,
-        [],
-        (generation, [int(value) for value in result.context_ids], MANAGER.load_id),
-    )
+        summary = summarize(result.metrics)
+        status = (
+            f"Scored {summary['token_count']:,} tokens. "
+            f"Perplexity {summary['perplexity']:,.1f}."
+        )
+        # What was scored comes before how exactly it was scored: the template
+        # caveat says which passage the numbers describe, the seam caveat says
+        # how sure their first token is.
+        if result.chat_template_missing:
+            status = f"{status} {TEMPLATE_CAVEAT}"
+        if not result.seam_verified:
+            status = f"{status} {SEAM_CAVEAT}"
+        # Both strips are replaced, so they take one shared stamp - and that
+        # stamp is what drops a click made against the response they overwrite.
+        generation = new_metrics_generation()
+        yield (
+            strip_update(result.metrics, scale_name, "Scored tokens — click one"),
+            stamped(result.metrics, generation),
+            strip_update(result.context_metrics, scale_name),
+            stamped(result.context_metrics, generation),
+            prompt_note_text(len(result.context_metrics), "", "context"),
+            charts.summary_tiles(summary),
+            charts.surprise_chart(result.metrics, title="Surprise per scored token"),
+            status,
+            NO_TOKEN_SELECTED,
+            [],
+            (generation, [int(value) for value in result.context_ids], MANAGER.load_id),
+        )
+        # Resumed once the browser has the frame above, so nothing between the
+        # mint and the strips arriving can hold the slot.
+    finally:
+        MANAGER.release_generation()
 
 
 # ------------------------------------------------------- layers and attention
@@ -3059,7 +3286,10 @@ def inspect_layers(
             yield (*refused, INSPECT_MODEL_CHANGED)
             return
         except Exception as error:
-            yield (*refused, f"Could not inspect that token: {error}")
+            yield (
+                *refused,
+                failure_status("Could not inspect that token", str(error)),
+            )
             return
         if target["generation"] != _metrics_generation:
             yield (*refused, INSPECT_GONE)
@@ -3135,7 +3365,6 @@ NAV_TILE_CSS = "\n".join(
 )
 
 CSS = f"""
-.gradio-container {{ max-width: none !important; }}
 #hero, #models-hero, #settings-hero {{ padding: 0.5rem 0 0.2rem; }}
 #hero h1, #models-hero h1, #settings-hero h1 {{ font-size: 2.1rem; margin-bottom: 0.25rem; }}
 #model-status {{ min-height: 128px; }}
@@ -3254,6 +3483,45 @@ CSS = f"""
 .footer-note {{ color: var(--body-text-color-subdued); font-size: 0.9rem; }}
 .scale-caption {{ color: var(--body-text-color-subdued); font-size: 0.85rem; }}
 
+/* A failure says so twice: in the status line, where it stays, and in a toast
+   over the page, where it cannot be missed. The line is boxed in red with a
+   thick left edge so it reads as a failure even at a glance across the
+   column of ordinary status sentences. */
+.failure {{
+  border: 1px solid var(--color-red-500); border-left-width: 5px;
+  border-radius: 8px; padding: 0.6rem 0.75rem;
+  background: var(--error-background-fill);
+  color: var(--color-red-600); font-weight: 600;
+}}
+/* The mark is decoration; the line already says what failed, so the empty
+   alternative text keeps a screen reader from reading the glyph out. */
+.failure::before {{ content: "⚠ " / ""; }}
+.failure-text {{ color: var(--color-red-600); }}
+.dark .failure, .dark .failure-text {{ color: var(--color-red-400); }}
+
+/* Gradio's only toast that does not also end the event is the warning, and
+   the app raises warnings for failures alone, so the warning toast is painted
+   in the error colors. Its own rules carry a Svelte hash, which outranks a
+   plain class, so these have to insist. */
+.toast-body.warning {{
+  border-color: var(--color-red-700) !important;
+  background: var(--color-red-50) !important;
+}}
+.dark .toast-body.warning {{
+  border-color: var(--color-red-500) !important;
+  background: var(--color-grey-950) !important;
+}}
+.toast-title.warning, .toast-text.warning,
+.toast-icon.warning, .toast-close.warning {{
+  color: var(--color-red-700) !important;
+}}
+.dark .toast-title.warning, .dark .toast-text.warning {{
+  color: var(--color-red-50) !important;
+}}
+.dark .toast-icon.warning, .dark .toast-close.warning {{
+  color: var(--color-red-500) !important;
+}}
+
 /* The conversation list is a Radio whose labels carry a line break: the
    name and title on the first line, the model and token count on the
    second. Stack the entries and let the break through. */
@@ -3357,7 +3625,13 @@ def show_page(page: str):
 
 
 def build_app() -> gr.Blocks:
-    with gr.Blocks(title="Chatlab", css=CSS, theme=gr.themes.Soft()) as demo:
+    # Gradio otherwise caps the page at one of a handful of widths and centers
+    # it, which leaves a band of empty room down each side on a wide screen.
+    # The shell wants every pixel: the two side panes are a fixed width, so the
+    # width the cap was holding back goes to the chat and the panel beside it.
+    with gr.Blocks(
+        title="ChatLab", css=CSS, theme=gr.themes.Soft(), fill_width=True
+    ) as demo:
         conversation_state = gr.State([])
         metrics_state = gr.State(empty_metrics())
         prompt_metrics_state = gr.State(empty_metrics())
@@ -3419,7 +3693,7 @@ def build_app() -> gr.Blocks:
             # time, chosen by the nav.
             with gr.Column(scale=1, elem_id="chat-page") as chat_page:
                 gr.Markdown(
-                    "# Chatlab\nChat with an open model and see exactly how likely every generated token was.",
+                    "# ChatLab\nChat with an open model and see exactly how likely every generated token was.",
                     elem_id="hero",
                 )
 
@@ -3728,7 +4002,7 @@ def build_app() -> gr.Blocks:
                             lines=2,
                             info=(
                                 "Replays this text as the start of each answer, then lets the "
-                                "model continue. For reasoning models, Chatlab closes the "
+                                "model continue. For reasoning models, ChatLab closes the "
                                 "reasoning block first so this remains visible answer text."
                             ),
                         )

@@ -1,4 +1,4 @@
-# Chatlab
+# ChatLab
 
 A local chat interface that shows what happened under the hood for every token, generated or not. Tokens are colored by whichever measurement you pick, and clicking one shows its probability, sampling probability, surprise, entropy, and the alternatives the model preferred.
 
@@ -56,7 +56,7 @@ same downloads.
 
 ### In Conductor
 
-Create a workspace for this repository. Its setup script creates the Python environment and installs the dependencies. Use the **Chatlab** action to start the app on the workspace's assigned port.
+Create a workspace for this repository. Its setup script creates the Python environment and installs the dependencies. Use the **ChatLab** action to start the app on the workspace's assigned port.
 
 ### From a terminal
 
@@ -77,14 +77,14 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Model files use the standard Hugging Face cache. Chatlab lists complete downloads and resumable partial downloads under **My Models** on the Models page. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
+Model files use the standard Hugging Face cache. ChatLab lists complete downloads and resumable partial downloads under **My Models** on the Models page. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
 
 ### Memory
 
 A model has to fit in memory with room to spare: the weights, the key-value
 cache that grows with every token of a conversation, the app itself, and the
 rest of the system all share it, and on Apple silicon the GPU draws from the
-same pool. Before reading any weights, Chatlab estimates the loaded size from
+same pool. Before reading any weights, ChatLab estimates the loaded size from
 the checkpoint and refuses a model that would not leave about 4 GB free,
 saying so in the status card instead of letting the machine page itself into a
 freeze. On CUDA the weights fill the graphics cards first and the rest is
@@ -103,7 +103,7 @@ A thin pane at the far left switches between three pages. **Chat** is the conver
 
 ### Models
 
-- **Model** holds the model ID and token boxes and the download, load, and unload buttons, with the status card under them.
+- **Model** holds the model ID and token boxes and the download, load, and unload buttons, with the status card under them. The card follows a download file by file and byte by byte, and then the load in the same shape: how many of the weights have been read, how much of the model is on the device, the speed, and how long is left. Reading 15 GB of cached weights into memory takes half a minute or so, and the card says so rather than sitting still.
 - **My Models** lists every model in the Hugging Face cache with its size on disk. **Sort by** orders the list newest download first, by name, or by size in either direction. A model short of files is marked *incomplete* and tinted amber, one that is whole but not a Transformers language model (a diffusers pipeline, a CTranslate2 or ONNX export) *unsupported*, and the one in memory *loaded*. Selecting one shows its file count, architecture and weight type from its `config.json`, revision, when it was last downloaded, and its folder, and puts its ID in the model box ready for **Load cached**. **Redownload** fetches whatever the selected model still lacks, resuming partial files rather than starting over; on a complete model it checks the Hub for updated files. **Remove** deletes the selected model's folder from the cache after a confirmation; a model that is loaded or still downloading has to be unloaded or finished first. The list rescans after every download, load, unload, and removal, and **Refresh** rescans it by hand.
 - **Model search** searches the Hub for text-generation models with Transformers support, most downloaded first. Each result shows its parameter count and recent downloads; selecting one adds its license, likes, last update, whether it is gated, and whether any of it is already on disk, and puts its ID in the model box ready for **Download and load**.
 
@@ -121,13 +121,13 @@ The system prompt, assistant prefill, and reasoning options; the sampling, analy
 ### Assistant prefill
 
 Enter text in **Assistant prefill (optional)** to force every new reply to begin
-with those words. Chatlab measures the prefilled tokens against the model's own
+with those words. ChatLab measures the prefilled tokens against the model's own
 distribution, then resumes sampling after them. **Maximum new tokens** counts
 only the tokens sampled after the prefill, so the prefix does not reduce the
 requested continuation length.
 
 For a reasoning model whose chat template already opens a `<think>` block,
-Chatlab closes that block before replaying the prefill. The supplied text
+ChatLab closes that block before replaying the prefill. The supplied text
 therefore appears as the visible answer rather than hidden reasoning. Clear the
 field to return to ordinary generation. JSON metric exports record the supplied
 text as `assistant_prefill` and the replayed token count as

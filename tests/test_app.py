@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import gradio as gr
 import numpy as np
 
 import app
@@ -70,6 +71,16 @@ class StubManager:
     def __init__(self, seam_verified: bool = True, chat_template_missing: bool = False):
         self.seam_verified = seam_verified
         self.chat_template_missing = chat_template_missing
+        # The generation slot, modelled the way ModelManager does it: a plain
+        # Lock, taken without blocking, so a caller that loses reports instead
+        # of queueing.
+        self._generating = threading.Lock()
+
+    def reserve_generation(self) -> bool:
+        return self._generating.acquire(blocking=False)
+
+    def release_generation(self) -> None:
+        self._generating.release()
 
     def score_text(self, text, *, context="", use_chat_template=False):
         log_probs = np.log(np.array([0.75, 0.25]))
@@ -97,7 +108,8 @@ class ScoreStatusTests(unittest.TestCase):
         original = app.MANAGER
         app.MANAGER = StubManager(seam_verified, chat_template_missing)
         try:
-            return app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE)[7]
+            frames = list(app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE))
+            return frames[-1][7]
         finally:
             app.MANAGER = original
 
@@ -139,6 +151,136 @@ class ScoreStatusTests(unittest.TestCase):
         self.assertTrue(status.endswith(f"{app.TEMPLATE_CAVEAT} {app.SEAM_CAVEAT}"))
 
 
+class ScoreWhileGeneratingTests(unittest.TestCase):
+    """Score text refuses while a reply is streaming, rather than waiting on it.
+
+    MANAGER.score_text() takes the model lock, which a generation holds across
+    every one of its yields, so a pass started mid-reply would not run until the
+    reply ended. Without the slot the button simply stops responding for as long
+    as the response takes, which the reader cannot tell from a hang.
+    """
+
+    def setUp(self):
+        self.manager = StubManager()
+        original = app.MANAGER
+        app.MANAGER = self.manager
+        self.addCleanup(setattr, app, "MANAGER", original)
+
+    def score(self):
+        return list(app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE))[-1]
+
+    def test_a_reserved_slot_is_refused_with_a_reason(self):
+        self.assertTrue(self.manager.reserve_generation())
+        try:
+            result = self.score()
+        finally:
+            self.manager.release_generation()
+
+        self.assertEqual(result[7], app.SCORE_BUSY)
+
+    def test_a_refusal_touches_nothing_but_the_status(self):
+        # The strips still describe the response that is streaming, and the
+        # stamp on them still has to match the clicks it is collecting.
+        before = app._metrics_generation
+        self.assertTrue(self.manager.reserve_generation())
+        try:
+            result = self.score()
+        finally:
+            self.manager.release_generation()
+
+        self.assertEqual(app._metrics_generation, before, "no stamp was minted")
+        for index, value in enumerate(result):
+            if index != 7:
+                self.assertEqual(value, gr.skip(), f"output {index}")
+
+    def test_the_slot_is_given_back_after_a_successful_pass(self):
+        self.score()
+
+        self.assertTrue(
+            self.manager.reserve_generation(), "score_text() kept the slot"
+        )
+        self.manager.release_generation()
+
+    def test_the_slot_is_given_back_after_a_failed_pass(self):
+        self.manager.score_text = mock.Mock(side_effect=RuntimeError("no room"))
+
+        result = self.score()
+
+        self.assertIn("no room", result[7])
+        self.assertTrue(
+            self.manager.reserve_generation(), "a failure kept the slot"
+        )
+        self.manager.release_generation()
+
+    def test_the_slot_is_held_until_the_scored_strips_are_delivered(self):
+        # Gradio resumes the generator only once the browser has this frame.
+        # Giving the slot back any earlier would let a Send mint a newer stamp
+        # and publish its opening frame first, leaving these strips on screen
+        # under a stamp the app has already moved past.
+        frames = app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE)
+        first = next(frames)
+
+        self.assertNotEqual(first[7], app.SCORE_BUSY)
+        self.assertFalse(
+            self.manager.reserve_generation(), "the slot was given back early"
+        )
+        self.assertEqual(list(frames), [])
+        self.assertTrue(self.manager.reserve_generation())
+        self.manager.release_generation()
+
+
+class FailureReportTests(unittest.TestCase):
+    """A failure has to reach a reader who is not looking at the status line."""
+
+    def test_a_failure_pops_up_and_stays_on_the_line(self):
+        with mock.patch.object(app.gr, "Warning") as toast:
+            line = app.failure_status("Generation failed", "out of memory")
+
+        self.assertIn("out of memory", line)
+        self.assertIn('class="failure"', line)
+        # The toast carries the cause, not just the fact that something went
+        # wrong, and it waits to be closed rather than fading on its own.
+        toast.assert_called_once_with(
+            "out of memory", title="Generation failed", duration=None
+        )
+
+    def test_an_angle_bracket_survives_both_the_line_and_the_toast(self):
+        # Error messages quote what the reader typed and what the runtime
+        # printed, and neither is markup. The toast writes its message into
+        # the page as markup, so an unescaped "cannot read <pad>" would show
+        # up with the word missing.
+        with mock.patch.object(app.gr, "Warning") as toast:
+            line = app.failure_status("Could not score that text", "no <pad> here")
+
+        self.assertIn("no &lt;pad&gt; here", line)
+        self.assertNotIn("<pad>", line)
+        self.assertEqual(toast.call_args.args[0], "no &lt;pad&gt; here")
+
+    def test_a_failure_card_pops_up_and_is_tinted(self):
+        with mock.patch.object(app.gr, "Warning") as toast:
+            card = app.failure_card("Download failed", "no such repo")
+
+        self.assertEqual(card, app.status_card("Download failed", "no such repo", "error"))
+        self.assertIn('class="failure-text"', card)
+        toast.assert_called_once_with(
+            "no such repo", title="Download failed", duration=None
+        )
+
+    def test_only_a_failing_card_is_tinted(self):
+        for tone in ("neutral", "working", "success"):
+            with self.subTest(tone=tone):
+                self.assertNotIn(
+                    "failure-text", app.status_card("Model ready", "loaded", tone)
+                )
+
+    def test_a_card_detail_keeps_its_markdown(self):
+        # The heading carries the tint so the detail stays plain markdown -
+        # a card that spelled out a file name in backticks still renders it.
+        card = app.failure_card("Download unfinished", "`config.json` is missing.")
+
+        self.assertIn("`config.json` is missing.", card)
+
+
 class FakeDownloads(ModelManager):
     """A manager that keeps the real download bookkeeping around a fake fetch."""
 
@@ -173,7 +315,9 @@ class DownloadCardTests(unittest.TestCase):
         self.assertEqual(app.format_bytes(14_600_000_000), "14.6 GB")
 
     def test_durations_read_as_estimates(self):
-        self.assertEqual(app.describe_duration(30), "under a minute")
+        self.assertEqual(app.describe_duration(4), "a few seconds")
+        self.assertEqual(app.describe_duration(32), "about 30 seconds")
+        self.assertEqual(app.describe_duration(57), "about 1 minute")
         self.assertEqual(app.describe_duration(60), "about 1 minute")
         self.assertEqual(app.describe_duration(4 * 60 + 20), "about 4 minutes")
         self.assertEqual(app.describe_duration(3600 + 10 * 60), "about 1 hour 10 minutes")
@@ -191,6 +335,32 @@ class DownloadCardTests(unittest.TestCase):
         self.assertIn("50.0 MB/s", detail)
         self.assertIn("about 4 minutes left", detail)
         self.assertIn("█", detail)
+
+    def test_a_slow_rate_is_rounded_to_whole_bytes(self):
+        # The meter measures in float bytes per second, and format_bytes()
+        # prints anything under 1 KB verbatim, so an unrounded rate used to
+        # read "812.3456789 B/s".
+        snap = app.DownloadSnapshot(
+            files_done=1, files_total=2, bytes_done=100, bytes_total=2_000
+        )
+
+        detail = app.download_detail("org/model", snap, rate=812.3456789)
+
+        self.assertIn("812 B/s", detail)
+        self.assertNotIn("812.3", detail)
+
+    def test_a_crawling_download_is_never_reported_as_stopped(self):
+        # The meter has no rate at all for a download with nothing moving, so
+        # this clause only runs while bytes arrive. Rounding a byte every few
+        # seconds down to "0 B/s" would contradict the time left beside it.
+        snap = app.DownloadSnapshot(
+            files_done=1, files_total=2, bytes_done=100, bytes_total=2_000
+        )
+
+        detail = app.download_detail("org/model", snap, rate=0.25)
+
+        self.assertIn("1 B/s", detail)
+        self.assertNotIn("0 B/s", detail)
 
     def test_the_detail_explains_the_wait_before_the_file_list_arrives(self):
         detail = app.download_detail("org/model", app.DownloadSnapshot(), rate=None)
@@ -306,7 +476,7 @@ class DownloadCardTests(unittest.TestCase):
                 finish.wait(5)
                 return Path("/cache/snap")
 
-            def load(self, model_id, local_path):
+            def load(self, model_id, local_path, progress=None):
                 return "cpu"
 
         app.MANAGER = Manager()
@@ -395,8 +565,201 @@ class DownloadManager(FakeDownloads):
         self.downloads += 1
         return Path("/cache/models--allenai--Olmo-3-7B-Think/snapshots/abc")
 
-    def load(self, model_id, path):
+    def load(self, model_id, path, progress=None):
         return "mps"
+
+
+class LoadCardTests(unittest.TestCase):
+    """What the model panel says while a cached model is read into memory."""
+
+    MODEL = "allenai/Olmo-3-7B-Think"
+
+    class Manager(ModelManager):
+        """A manager whose load does whatever the test hands it.
+
+        The real claim bookkeeping is kept, so the card's own reservation is
+        the one under test.
+        """
+
+        def __init__(self, work):
+            super().__init__()
+            self._work = work
+
+        def find_cached(self, model_id):
+            return Path("/cache/models--allenai--Olmo-3-7B-Think/snapshots/abc")
+
+        def load(self, model_id, path, progress=None):
+            return self._work(progress)
+
+    def setUp(self):
+        self.addCleanup(setattr, app, "MANAGER", app.MANAGER)
+        self.addCleanup(setattr, app, "cache_status", app.cache_status)
+        self.addCleanup(setattr, app, "LOAD_POLL_SECONDS", app.LOAD_POLL_SECONDS)
+        app.MANAGER = self.Manager(lambda progress: "CPU")
+        app.cache_status = lambda model_id: CacheStatus(cached_bytes=14_600_000_000)
+        app.LOAD_POLL_SECONDS = 0.01
+
+    def test_the_first_frame_says_the_weights_are_being_read_not_fetched(self):
+        # The old card named the size and the folder and then sat there, which
+        # read like a download that had stalled.
+        detail = app.load_detail(
+            self.MODEL,
+            app.LoadSnapshot(bytes_total=14_600_000_000),
+            rate=None,
+            remaining=None,
+        )
+
+        self.assertIn("14.6 GB of weights", detail)
+        self.assertIn("Nothing is being downloaded", detail)
+        self.assertNotIn("%", detail)
+
+    def test_the_card_counts_the_weights_read_before_any_reach_the_device(self):
+        detail = app.load_detail(
+            self.MODEL,
+            app.LoadSnapshot(
+                bytes_done=0, bytes_total=14_600_000_000, steps_done=178, steps_total=356
+            ),
+            rate=None,
+            remaining=90.0,
+        )
+
+        self.assertIn("25%", detail)
+        self.assertIn("178 of 356 parts read", detail)
+        self.assertIn("about 2 minutes left", detail)
+        self.assertIn("\u2588", detail)
+
+    def test_the_card_counts_bytes_once_they_are_on_the_device(self):
+        detail = app.load_detail(
+            self.MODEL,
+            app.LoadSnapshot(
+                bytes_done=7_300_000_000,
+                bytes_total=14_600_000_000,
+                steps_done=356,
+                steps_total=356,
+            ),
+            rate=500_000_000,
+            remaining=15.0,
+        )
+
+        self.assertIn("75%", detail)
+        self.assertIn("7.3 GB of 14.6 GB on the device", detail)
+        self.assertIn("about 15 seconds left", detail)
+        self.assertIn("500 MB/s", detail)
+
+    def test_a_card_that_is_still_loading_stops_short_of_finished(self):
+        # The allocator holds the last byte a little before the loader is
+        # done with the model, and a full bar over a wait that goes on reads
+        # as a hang.
+        detail = app.load_detail(
+            self.MODEL,
+            app.LoadSnapshot(
+                bytes_done=14_600_000_000,
+                bytes_total=14_600_000_000,
+                steps_done=356,
+                steps_total=356,
+            ),
+            rate=None,
+            remaining=2.0,
+        )
+
+        self.assertIn("99%", detail)
+        self.assertNotIn("100%", detail)
+
+    def test_the_pace_is_measured_from_the_first_progress_not_from_the_start(self):
+        # The seconds before the first weight are setup, and counting them as
+        # slow progress would put the first estimate minutes out.
+        clock = iter([0.0, 10.0, 10.5, 12.0, 14.0])
+        pace = app.Pace(clock=lambda: next(clock))
+
+        self.assertIsNone(pace.remaining(0.0), "nothing has moved yet")
+        self.assertIsNone(pace.remaining(0.25), "the baseline reading")
+        self.assertIsNone(pace.remaining(0.30), "too soon to tell")
+        # A quarter of the load in the two seconds since the baseline, so
+        # the half that is left reads as four seconds, not the ten that
+        # counting the setup as progress would have implied.
+        self.assertAlmostEqual(pace.remaining(0.50), 4.0)
+        # Two seconds later and no further on: a stall lengthens the estimate
+        # rather than freezing it.
+        self.assertAlmostEqual(pace.remaining(0.50), 8.0)
+
+    def test_the_load_card_updates_until_the_load_ends(self):
+        def work(progress):
+            bar = progress.bar_class()(desc="Loading weights", total=4)
+            held = [0]
+            progress.measure_bytes(1000, lambda: held[0])
+            for _ in range(4):
+                time.sleep(0.02)
+                bar.update(1)
+            for byte_count in (500, 1000):
+                time.sleep(0.02)
+                held[0] = byte_count
+            return "Apple Metal (MPS)"
+
+        app.MANAGER = self.Manager(work)
+
+        frames = list(app.load_cached_model(self.MODEL))
+
+        self.assertIn("Finding cached model", frames[0])
+        self.assertTrue(
+            any("parts read" in frame for frame in frames), frames
+        )
+        self.assertTrue(
+            any("on the device" in frame for frame in frames), frames
+        )
+        self.assertIn("Model ready", frames[-1])
+        self.assertIn("Apple Metal (MPS)", frames[-1])
+        self.assertIn("seconds", frames[-1])
+
+    def test_a_failed_load_is_reported_on_the_card(self):
+        def work(progress):
+            raise RuntimeError("Metal ran out of memory")
+
+        app.MANAGER = self.Manager(work)
+
+        frames = list(app.load_cached_model(self.MODEL))
+
+        self.assertIn("Could not load cached model", frames[-1])
+        self.assertIn("Metal ran out of memory", frames[-1])
+
+    def test_the_load_is_claimed_before_its_worker_starts(self):
+        # Between the click and the worker's first instruction the manager
+        # would otherwise look idle, and a removal or a redownload arriving
+        # in that window could move the snapshot out from under the load.
+        order = []
+
+        class Manager(self.Manager):
+            def reserve_load(self, model_id):
+                order.append(("claimed", model_id))
+                return super().reserve_load(model_id)
+
+            def load(self, model_id, path, progress=None):
+                order.append(("loaded", self.loading_id))
+                return "CPU"
+
+        app.MANAGER = Manager(lambda progress: "CPU")
+
+        list(app.load_cached_model(self.MODEL))
+
+        self.assertEqual(order, [("claimed", self.MODEL), ("loaded", self.MODEL)])
+        self.assertIsNone(app.MANAGER.loading_id, "given back when the load ends")
+
+    def test_a_worker_that_cannot_start_gives_the_claim_back(self):
+        app.MANAGER = ModelManager()
+
+        with mock.patch.object(
+            threading.Thread, "start", side_effect=RuntimeError("no threads")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no threads"):
+                list(app.stream_load(self.MODEL, Path("/cache/snap")))
+
+        self.assertIsNone(app.MANAGER.loading_id)
+
+    def test_a_load_that_ends_before_the_first_frame_still_reports_ready(self):
+        app.MANAGER = self.Manager(lambda progress: "CPU")
+
+        frames = list(app.load_cached_model(self.MODEL))
+
+        self.assertIn("Model ready", frames[-1])
 
 
 class DownloadStatusTests(unittest.TestCase):

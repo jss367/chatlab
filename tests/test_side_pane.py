@@ -323,6 +323,18 @@ class ManagerRemoveTests(unittest.TestCase):
         for error in (model_runtime.ModelLoaded, model_runtime.ModelDownloading, model_runtime.ModelBusy):
             self.assertTrue(issubclass(error, model_runtime.ModelInUse))
 
+    def test_a_load_claimed_on_another_thread_is_refused(self):
+        # The load's own thread has not reached the model lock yet, so the
+        # lock is free and would let the deletion through.
+        _model_id, claim = self.manager.reserve_load(OLMO)
+        with self.assertRaises(model_runtime.ModelBusy):
+            self.manager.remove(OLMO, Path(self.root.name))
+        self.assertTrue(self.folder.is_dir())
+        self.assertFalse(self.manager._lock.locked())
+        self.manager.release_load(claim)
+        self.manager.remove(OLMO, Path(self.root.name))
+        self.assertFalse(self.folder.exists(), "removed once the claim is gone")
+
     def test_a_malformed_id_is_refused(self):
         with self.assertRaises(ValueError):
             self.manager.remove("nonsense", Path(self.root.name))
@@ -336,7 +348,7 @@ class LoadingIdTests(unittest.TestCase):
         manager = ModelManager()
         seen = []
 
-        def fake_load(model_id, local_path, torch):
+        def fake_load(model_id, local_path, torch, progress=None):
             seen.append((manager.loading_id, manager._lock.locked()))
             return "CPU"
 
@@ -355,7 +367,7 @@ class LoadingIdTests(unittest.TestCase):
         manager._lock.acquire()
         entered = threading.Event()
 
-        def fake_load(model_id, local_path, torch):
+        def fake_load(model_id, local_path, torch, progress=None):
             entered.set()
             return "CPU"
 
@@ -379,7 +391,7 @@ class LoadingIdTests(unittest.TestCase):
     def test_a_failed_load_clears_the_loading_id(self):
         manager = ModelManager()
 
-        def fail(model_id, local_path, torch):
+        def fail(model_id, local_path, torch, progress=None):
             raise RuntimeError("gpu fell over")
 
         with mock.patch.object(manager, "_load_locked", fail):
@@ -388,6 +400,50 @@ class LoadingIdTests(unittest.TestCase):
 
         self.assertIsNone(manager.loading_id)
         self.assertFalse(manager._lock.locked())
+
+    def test_a_claim_names_the_load_before_it_starts(self):
+        # A load that runs on its own thread is under way from the click:
+        # the worker names it only once it reaches load(), and a redownload
+        # or a removal arriving in between must find it already claimed.
+        manager = ModelManager()
+
+        checked_id, _claim = manager.reserve_load(" allenai/Olmo-3-7B-Think ")
+
+        self.assertEqual(checked_id, OLMO)
+        self.assertEqual(manager.loading_id, OLMO)
+        self.assertTrue(manager.is_loading(OLMO))
+        self.assertFalse(manager.is_loading("org/other"))
+
+    def test_two_overlapping_loads_keep_their_own_claims(self):
+        manager = ModelManager()
+        _first_id, first = manager.reserve_load(OLMO)
+        _second_id, second = manager.reserve_load("org/other")
+
+        manager.release_load(first)
+
+        self.assertFalse(manager.is_loading(OLMO))
+        self.assertTrue(manager.is_loading("org/other"), "the other load stands")
+        manager.release_load(second)
+        self.assertIsNone(manager.loading_id)
+        manager.release_load(second)
+        self.assertIsNone(manager.loading_id, "releasing twice is harmless")
+
+    def test_a_load_does_not_clear_a_claim_it_did_not_take(self):
+        # One load finishing used to leave the other looking idle while it
+        # waited for the lock, which is the window a removal needs.
+        from unittest import mock
+
+        manager = ModelManager()
+        _model_id, waiting = manager.reserve_load(OLMO)
+
+        with mock.patch.object(
+            manager, "_load_locked", lambda *args, **kwargs: "CPU"
+        ):
+            manager.load("org/other", Path("/snap"))
+
+        self.assertTrue(manager.is_loading(OLMO), "still claimed by its own worker")
+        manager.release_load(waiting)
+        self.assertIsNone(manager.loading_id)
 
     def test_a_malformed_id_is_refused_before_the_lock(self):
         manager = ModelManager()
@@ -411,7 +467,7 @@ class LoadingIdTests(unittest.TestCase):
         let_first_finish = threading.Event()
         let_second_finish = threading.Event()
 
-        def fake_load(model_id, local_path, torch):
+        def fake_load(model_id, local_path, torch, progress=None):
             if model_id == OLMO:
                 in_first.set()
                 let_first_finish.wait(5)
@@ -460,61 +516,44 @@ class LoadingIdTests(unittest.TestCase):
         self.assertFalse(manager.is_loading(second))
         self.assertFalse(manager._lock.locked())
 
-    def test_the_load_holding_the_lock_is_named_whatever_order_they_arrived_in(self):
-        # Loads count themselves pending before they wait for the model
-        # lock, so the list is in arrival order, and arrival order is not
-        # promised to be the order the lock is handed out in: a thread can
-        # be set aside between the two steps. The badge has to name the load
-        # that is really reading weights, not the one that clicked first.
+    def test_the_load_holding_the_lock_is_named_whatever_order_they_claimed_in(self):
+        # Loads claim themselves before they wait for the model lock, so
+        # claim order is arrival order, and arrival order is not promised to
+        # be the order the lock is handed out in: a thread can be set aside
+        # between the two steps. The badge has to name the load that is
+        # really reading weights, not the one that claimed last.
         import threading
 
         manager = ModelManager()
-        second = "org/second"
-        in_second = threading.Event()
-        let_second_finish = threading.Event()
+        reading = threading.Event()
+        let_it_finish = threading.Event()
 
-        def fake_load(model_id, local_path, torch):
-            in_second.set()
-            let_second_finish.wait(5)
+        def fake_load(model_id, local_path, torch, progress=None):
+            reading.set()
+            let_it_finish.wait(5)
             return "CPU"
 
-        # Stand in for the descheduled first thread: pending, but nowhere
-        # near the lock.
-        with manager._loading(OLMO):
-            with mock.patch.object(manager, "_load_locked", fake_load):
-                worker = threading.Thread(
-                    target=manager.load, args=(second, Path("/snap"))
-                )
-                worker.start()
-                try:
-                    self.assertTrue(in_second.wait(5))
-                    self.assertEqual(manager.loading_id, second)
-                    # The first load is still counted, so nothing may
-                    # disturb its files either.
-                    self.assertTrue(manager.is_loading(OLMO))
-                    self.assertTrue(manager.is_loading(second))
-                finally:
-                    let_second_finish.set()
-                    worker.join(timeout=5)
+        with mock.patch.object(manager, "_load_locked", fake_load):
+            worker = threading.Thread(target=manager.load, args=(OLMO, Path("/snap")))
+            worker.start()
+            try:
+                self.assertTrue(reading.wait(5))
+                # A later click lands its claim while the first load reads.
+                _later_id, later = manager.reserve_load("org/second")
+                self.assertEqual(manager.loading_id, OLMO)
+                # Both are claimed, so neither model's files may be touched.
+                self.assertTrue(manager.is_loading(OLMO))
+                self.assertTrue(manager.is_loading("org/second"))
+            finally:
+                let_it_finish.set()
+                worker.join(timeout=5)
 
-            # With no load holding the lock the pending one is named again,
-            # so the badge does not fall back to "No model loaded".
-            self.assertEqual(manager.loading_id, OLMO)
-
+        # With the lock free, the load waiting for it is named again, so the
+        # badge does not fall back to "No model loaded" while it runs.
+        self.assertEqual(manager.loading_id, "org/second")
+        manager.release_load(later)
         self.assertIsNone(manager.loading_id)
         self.assertFalse(manager._lock.locked())
-
-    def test_two_loads_of_the_same_model_each_undo_their_own_mark(self):
-        # remove() takes one entry off the list, not every match, so a
-        # second request for the model still on its way in stays counted
-        # after the first one is done with it.
-        manager = ModelManager()
-        with manager._loading(OLMO):
-            with manager._loading(OLMO):
-                self.assertEqual(manager.loading_id, OLMO)
-            self.assertEqual(manager.loading_id, OLMO)
-
-        self.assertIsNone(manager.loading_id)
 
 
 def cached(model_id: str, **overrides) -> CachedModel:
@@ -755,10 +794,11 @@ class ManageMyModelsTests(unittest.TestCase):
         self.assertFalse(card.startswith("downloading"), card)  # the fake never ran
 
     def test_a_model_being_loaded_is_not_redownloaded_under_itself(self):
-        # model_id is empty for the whole of a load, so the manager keeps
-        # the models it is bringing in separately.
-        with self.manager._loading("org/partial"):
-            (card,) = list(app.redownload_my_model("org/partial", ""))
+        # model_id is empty for the whole of a load, so the manager names
+        # the model it is bringing in separately.
+        self.manager.reserve_load("org/partial")
+
+        (card,) = list(app.redownload_my_model("org/partial", ""))
 
         self.assertIn("Model in use", card)
         self.assertIn("being loaded", card)
@@ -768,8 +808,10 @@ class ManageMyModelsTests(unittest.TestCase):
         # Two loads can run at once, and only one of them is the one the
         # badge names. The one waiting its turn is still going to read its
         # own files, so a redownload of it has to be refused as well.
-        with self.manager._loading(OLMO), self.manager._loading("org/partial"):
-            (card,) = list(app.redownload_my_model("org/partial", ""))
+        self.manager.reserve_load(OLMO)
+        self.manager.reserve_load("org/partial")
+
+        (card,) = list(app.redownload_my_model("org/partial", ""))
 
         self.assertIn("Model in use", card)
         self.assertIn("being loaded", card)
@@ -1082,8 +1124,9 @@ class ModelBadgeTests(unittest.TestCase):
     def test_a_load_under_way_names_the_model_coming_in(self):
         # model_id is cleared for the whole of a load, so the badge reads
         # loading_id and reports the minutes in between as a load.
-        with self.manager._loading(OLMO):
-            badge, button = app.refresh_model_badge()
+        self.manager.reserve_load(OLMO)
+
+        badge, button = app.refresh_model_badge()
 
         self.assertIn('data-state="loading"', badge)
         self.assertIn(f"Loading {OLMO}", badge)
@@ -1091,12 +1134,13 @@ class ModelBadgeTests(unittest.TestCase):
 
     def test_a_second_load_finishing_leaves_the_first_one_showing(self):
         # Two loads can be under way at once, and the one that finishes
-        # first must not clear the other's marker: the badge would then say
-        # nothing was loaded in the middle of a load.
-        with self.manager._loading(OLMO):
-            with self.manager._loading("org/second"):
-                pass
-            badge, button = app.refresh_model_badge()
+        # first must not give back the other's claim: the badge would then
+        # say nothing was loaded in the middle of a load.
+        self.manager.reserve_load(OLMO)
+        _second_id, second = self.manager.reserve_load("org/second")
+        self.manager.release_load(second)
+
+        badge, button = app.refresh_model_badge()
 
         self.assertIn('data-state="loading"', badge)
         self.assertIn(f"Loading {OLMO}", badge)
@@ -1108,24 +1152,26 @@ class ModelBadgeTests(unittest.TestCase):
         # generation. The model still producing the tokens is the one the
         # badge is for, so it keeps the name until the load empties memory.
         self.load()
-        with self.manager._loading("org/second"):
-            badge, button = app.refresh_model_badge()
+        self.manager.reserve_load("org/second")
 
-            self.assertIn('data-state="ready"', badge)
-            self.assertIn(OLMO, badge)
-            self.assertNotIn("Loading", badge)
-            self.assertFalse(button["visible"])
+        badge, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="ready"', badge)
+        self.assertIn(OLMO, badge)
+        self.assertNotIn("Loading", badge)
+        self.assertFalse(button["visible"])
 
     def test_a_load_that_has_emptied_memory_names_the_model_coming_in(self):
         # Once the queued load wins the lock it unloads first, and from then
         # on there is nothing in memory to name.
         self.load()
-        with self.manager._loading("org/second"):
-            self.manager.model = None
-            self.manager.tokenizer = None
-            self.manager.model_id = None
-            self.manager.device_name = None
-            badge, button = app.refresh_model_badge()
+        self.manager.reserve_load("org/second")
+        self.manager.model = None
+        self.manager.tokenizer = None
+        self.manager.model_id = None
+        self.manager.device_name = None
+
+        badge, button = app.refresh_model_badge()
 
         self.assertIn('data-state="loading"', badge)
         self.assertIn("Loading org/second", badge)
@@ -1208,6 +1254,11 @@ class PageLayoutTests(unittest.TestCase):
         self.assertEqual([value for _, value in nav.choices], ["Chat", "Models", "Settings"])
         self.assertEqual(nav.value, "Chat")
         self.assertTrue(self.within(nav, self.by_id("nav-pane")))
+
+    def test_the_shell_spans_the_whole_window(self):
+        # Gradio otherwise caps the page at one of a handful of widths and
+        # centers it, leaving empty room down each side on a wide screen.
+        self.assertTrue(self.demo.fill_width)
 
     def test_the_nav_pane_is_thin(self):
         self.assertLessEqual(app.NAV_PANE_WIDTH, 64)

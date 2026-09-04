@@ -1614,6 +1614,211 @@ class DownloadProgressTests(unittest.TestCase):
         self.assertEqual(manager.active_downloads, {})
 
 
+class LoadProgressTests(unittest.TestCase):
+    """What a load reports about itself while it runs."""
+
+    def progress(self):
+        from model_runtime import LoadProgress
+
+        return LoadProgress()
+
+    def test_nothing_is_started_before_the_loader_builds_its_bar(self):
+        snap = self.progress().snapshot()
+
+        self.assertFalse(snap.started)
+        self.assertEqual(snap.fraction, 0.0)
+        self.assertFalse(snap.counts_bytes)
+
+    def test_the_weights_the_loader_has_read_are_counted(self):
+        progress = self.progress()
+        bar = progress.bar_class()(desc="Loading weights", total=4)
+        bar.update(3)
+
+        snap = progress.snapshot()
+
+        self.assertTrue(snap.started)
+        self.assertEqual((snap.steps_done, snap.steps_total), (3, 4))
+        self.assertAlmostEqual(snap.fraction, 0.75)
+
+    def test_a_bar_the_loader_walks_rather_than_advances_is_counted_too(self):
+        progress = self.progress()
+        bar = progress.bar_class()(["a", "b", "c", "d"], desc="Loading weights")
+
+        self.assertEqual(list(bar), ["a", "b", "c", "d"])
+        self.assertEqual(progress.snapshot().steps_done, 4)
+
+    def test_bytes_are_counted_from_where_the_load_started(self):
+        # Memory already held when the load begins is not this load's own.
+        progress = self.progress()
+        held = [400]
+        progress.measure_bytes(1000, lambda: held[0])
+        progress.bar_class()(desc="Loading weights", total=2)
+        held[0] = 900
+
+        snap = progress.snapshot()
+
+        self.assertEqual((snap.bytes_done, snap.bytes_total), (500, 1000))
+        self.assertTrue(snap.counts_bytes)
+
+    def test_bytes_are_left_alone_until_the_load_begins(self):
+        # Between the baseline and the first weight the allocator holds
+        # whatever the device was already holding, not this load's progress.
+        progress = self.progress()
+        progress.measure_bytes(1000, lambda: 1000)
+
+        snap = progress.snapshot()
+
+        self.assertEqual(snap.bytes_done, 0)
+        self.assertFalse(snap.started)
+
+    def test_a_load_that_never_builds_a_bar_still_counts_bytes(self):
+        # transformers 4.x builds its bar only for a checkpoint of several
+        # shards, so a model kept in a single weight file draws none: the
+        # load is watched through the allocator alone rather than sitting in
+        # the pre-start state from beginning to end.
+        progress = self.progress()
+        held = [0]
+        progress.measure_bytes(1000, lambda: held[0])
+        with progress.watch():
+            held[0] = 400
+            snap = progress.snapshot()
+
+        self.assertTrue(snap.started)
+        self.assertEqual((snap.bytes_done, snap.bytes_total), (400, 1000))
+        self.assertAlmostEqual(snap.fraction, 0.4)
+        self.assertEqual(snap.steps_total, 0, "the loader built no bar")
+
+    def test_a_snapshot_that_could_not_be_measured_leaves_the_bytes_out(self):
+        progress = self.progress()
+        progress.measure_bytes(None, lambda: 900)
+        progress.bar_class()(desc="Loading weights", total=2).update(1)
+
+        snap = progress.snapshot()
+
+        self.assertEqual((snap.bytes_done, snap.bytes_total), (0, 0))
+        self.assertAlmostEqual(snap.fraction, 0.5, msg="counted in steps alone")
+
+    def test_the_fraction_averages_the_measures_there_are(self):
+        from model_runtime import LoadSnapshot
+
+        # Metal reads the weights into host memory and copies them across
+        # afterwards, so each measure covers half the load.
+        reading = LoadSnapshot(bytes_done=0, bytes_total=1000, steps_done=2, steps_total=4)
+        moving = LoadSnapshot(bytes_done=500, bytes_total=1000, steps_done=4, steps_total=4)
+        self.assertAlmostEqual(reading.fraction, 0.25)
+        self.assertAlmostEqual(moving.fraction, 0.75)
+        # One pass that does both at once is still that pass.
+        together = LoadSnapshot(bytes_done=300, bytes_total=1000, steps_done=3, steps_total=10)
+        self.assertAlmostEqual(together.fraction, 0.3)
+        # And a byte total read off the files can overshoot what a loaded
+        # model holds, which is what the step count is there to finish.
+        overshot = LoadSnapshot(bytes_done=1200, bytes_total=1000, steps_done=4, steps_total=4)
+        self.assertEqual(overshot.fraction, 1.0)
+
+    def test_watching_lends_the_loader_a_bar_and_takes_it_back(self):
+        import importlib
+
+        from model_runtime import LOADER_BAR_ATTRIBUTES
+
+        progress = self.progress()
+        found = []
+        for module_name, attribute in LOADER_BAR_ATTRIBUTES:
+            try:
+                module = importlib.import_module(module_name)
+            except ImportError:
+                continue
+            if hasattr(module, attribute):
+                found.append((module, attribute, getattr(module, attribute)))
+
+        self.assertTrue(found, "transformers draws its loading bar somewhere")
+        with progress.watch():
+            for module, attribute, original in found:
+                self.assertIsNot(getattr(module, attribute), original)
+        for module, attribute, original in found:
+            self.assertIs(getattr(module, attribute), original)
+
+    def test_the_loader_gets_its_bar_back_even_when_the_load_fails(self):
+        import importlib
+
+        from model_runtime import LOADER_BAR_ATTRIBUTES
+
+        # Whichever of the two the installed transformers actually draws
+        # through: 5.x moved its bar between modules more than once.
+        for module_name, attribute in LOADER_BAR_ATTRIBUTES:
+            module = importlib.import_module(module_name)
+            if hasattr(module, attribute):
+                break
+        else:
+            self.fail("transformers draws its loading bar somewhere")
+        original = getattr(module, attribute)
+
+        with self.assertRaises(RuntimeError):
+            with self.progress().watch():
+                raise RuntimeError("out of memory")
+
+        self.assertIs(getattr(module, attribute), original)
+
+    def test_the_manager_hands_a_load_the_progress_it_was_given(self):
+        from unittest import mock
+
+        from model_runtime import LoadProgress
+
+        manager = ModelManager()
+        progress = LoadProgress()
+        seen = []
+
+        def fake_load(model_id, local_path, torch, load_progress=None):
+            seen.append(load_progress)
+            return "CPU"
+
+        with mock.patch.object(manager, "_load_locked", fake_load):
+            manager.load("org/model", Path("/snap"), progress)
+
+        self.assertEqual(seen, [progress])
+
+
+class AllocatedBytesTests(unittest.TestCase):
+    """How far a load has got, read from the device's own allocator."""
+
+    def test_the_graphics_cards_are_summed(self):
+        from model_runtime import allocated_bytes
+
+        torch = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(
+                device_count=lambda: 2,
+                memory_allocated=lambda index: (index + 1) * 1000,
+            )
+        )
+
+        self.assertEqual(allocated_bytes("cuda", torch), 3000)
+
+    def test_metal_reports_what_it_holds(self):
+        from model_runtime import allocated_bytes
+
+        torch = types.SimpleNamespace(
+            mps=types.SimpleNamespace(current_allocated_memory=lambda: 4096)
+        )
+
+        self.assertEqual(allocated_bytes("mps", torch), 4096)
+
+    def test_host_memory_keeps_no_such_figure(self):
+        from model_runtime import allocated_bytes
+
+        self.assertIsNone(allocated_bytes("cpu", types.SimpleNamespace()))
+
+    def test_a_device_that_will_not_answer_is_left_unmeasured(self):
+        from model_runtime import allocated_bytes
+
+        def refuse():
+            raise RuntimeError("no metal device")
+
+        torch = types.SimpleNamespace(
+            mps=types.SimpleNamespace(current_allocated_memory=refuse)
+        )
+
+        self.assertIsNone(allocated_bytes("mps", torch))
+
+
 class MemoryGuardTests(unittest.TestCase):
     """A model is refused before any weight is read when it cannot fit."""
 
@@ -1735,7 +1940,7 @@ class MemoryGuardTests(unittest.TestCase):
         model_runtime.system_memory = lambda: host
         model_runtime.cuda_memory = lambda torch=None: gpu
         try:
-            ModelManager._check_memory("org/model", snapshot, "float16", backend)
+            return ModelManager._check_memory("org/model", snapshot, "float16", backend)
         finally:
             model_runtime.system_memory, model_runtime.cuda_memory = saved
 
@@ -1789,6 +1994,27 @@ class MemoryGuardTests(unittest.TestCase):
         # Metal shares the machine's memory, so the host figures alone rule.
         with self.assertRaises(InsufficientMemoryError):
             self._check_with(snapshot, "mps", host=host, gpu=(8 * self.GB, 8 * self.GB))
+
+    def test_the_check_reports_the_memory_it_expects_the_weights_to_take(self):
+        # The figure a load counts its own progress towards, so the two can
+        # never disagree about how much there is to do.
+        snapshot = self._snapshot({"model.safetensors": 4096})
+        (snapshot / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
+
+        estimated = self._check_with(
+            snapshot, "cpu", host=(32 * self.GB, 32 * self.GB), gpu=(None, None)
+        )
+
+        self.assertEqual(estimated, 4096, "bfloat16 weights loaded as float16")
+        self.assertIsNone(
+            self._check_with(
+                self._snapshot({"config.json": 2}),
+                "cpu",
+                host=(32 * self.GB, 32 * self.GB),
+                gpu=(None, None),
+            ),
+            "an unmeasurable snapshot has no figure to report",
+        )
 
     def test_an_unmeasurable_snapshot_is_left_to_the_loader(self):
         snapshot = self._snapshot({"config.json": 2})
