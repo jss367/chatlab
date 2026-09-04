@@ -3783,7 +3783,13 @@ def build_app() -> gr.Blocks:
         # And on a timer, so a tab that did not start the load hears about it
         # too. demo.load stays: it draws the badge at once rather than leaving
         # the value baked in when the page was built there for a tick.
-        badge_timer.tick(refresh_model_badge, None, badge_outputs)
+        # show_progress="hidden" because this one runs on its own: the default
+        # puts a pending shimmer on a handler's outputs, which every couple of
+        # seconds would have the badge flickering at a reader who never asked
+        # it anything.
+        badge_timer.tick(
+            refresh_model_badge, None, badge_outputs, show_progress="hidden"
+        )
         load_model_button.click(
             go_to_models,
             None,

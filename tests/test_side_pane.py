@@ -1300,6 +1300,9 @@ class PageLayoutTests(unittest.TestCase):
             if listener.targets == [(timers[0]._id, "tick")]
         ]
         self.assertEqual(len(ticks), 1)
+        # Nobody asked for this one, so it does not put a pending shimmer on
+        # the badge every couple of seconds.
+        self.assertEqual(ticks[0].show_progress, "hidden")
 
     def test_the_badge_button_sends_the_nav_to_the_models_page(self):
         (listener,) = self.listeners("go_to_models")
