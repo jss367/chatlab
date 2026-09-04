@@ -1660,10 +1660,9 @@ class LoadProgressTests(unittest.TestCase):
         self.assertEqual((snap.bytes_done, snap.bytes_total), (500, 1000))
         self.assertTrue(snap.counts_bytes)
 
-    def test_bytes_are_left_alone_until_the_loader_has_a_bar(self):
-        # The loader warms the allocator up with one block the size of the
-        # whole model before it reads a weight, and a load is not finished a
-        # moment after it began.
+    def test_bytes_are_left_alone_until_the_load_begins(self):
+        # Between the baseline and the first weight the allocator holds
+        # whatever the device was already holding, not this load's progress.
         progress = self.progress()
         progress.measure_bytes(1000, lambda: 1000)
 
@@ -1671,6 +1670,23 @@ class LoadProgressTests(unittest.TestCase):
 
         self.assertEqual(snap.bytes_done, 0)
         self.assertFalse(snap.started)
+
+    def test_a_load_that_never_builds_a_bar_still_counts_bytes(self):
+        # transformers 4.x builds its bar only for a checkpoint of several
+        # shards, so a model kept in a single weight file draws none: the
+        # load is watched through the allocator alone rather than sitting in
+        # the pre-start state from beginning to end.
+        progress = self.progress()
+        held = [0]
+        progress.measure_bytes(1000, lambda: held[0])
+        with progress.watch():
+            held[0] = 400
+            snap = progress.snapshot()
+
+        self.assertTrue(snap.started)
+        self.assertEqual((snap.bytes_done, snap.bytes_total), (400, 1000))
+        self.assertAlmostEqual(snap.fraction, 0.4)
+        self.assertEqual(snap.steps_total, 0, "the loader built no bar")
 
     def test_a_snapshot_that_could_not_be_measured_leaves_the_bytes_out(self):
         progress = self.progress()
@@ -1726,8 +1742,14 @@ class LoadProgressTests(unittest.TestCase):
 
         from model_runtime import LOADER_BAR_ATTRIBUTES
 
-        module = importlib.import_module(LOADER_BAR_ATTRIBUTES[0][0])
-        attribute = LOADER_BAR_ATTRIBUTES[0][1]
+        # Whichever of the two the installed transformers actually draws
+        # through: 5.x moved its bar between modules more than once.
+        for module_name, attribute in LOADER_BAR_ATTRIBUTES:
+            module = importlib.import_module(module_name)
+            if hasattr(module, attribute):
+                break
+        else:
+            self.fail("transformers draws its loading bar somewhere")
         original = getattr(module, attribute)
 
         with self.assertRaises(RuntimeError):

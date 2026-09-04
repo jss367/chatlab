@@ -1970,6 +1970,11 @@ class DownloadProgress:
 # 5.x walks one bar over the parameters in core_model_loading, 4.x one over
 # the checkpoint shards through the logging module's tqdm. Both are module
 # attributes bound at import time, so both are replaced for a load.
+#
+# 4.x builds its bar only for a checkpoint of several shards, so a model kept
+# in a single weight file draws none at all. Such a load is watched through
+# the allocator alone, which is why LoadProgress.begin marks the start of a
+# load rather than leaving the first bar to stand for it.
 LOADER_BAR_ATTRIBUTES = (
     ("transformers.core_model_loading", "tqdm"),
     ("transformers.utils.logging", "tqdm"),
@@ -1992,6 +1997,7 @@ class LoadProgress:
         self._total_bytes = 0
         self._sampler: Callable[[], int | None] | None = None
         self._baseline = 0
+        self._started = False
 
     def measure_bytes(
         self, total_bytes: int | None, sampler: Callable[[], int | None]
@@ -2018,6 +2024,19 @@ class LoadProgress:
 
         return _recording_bar_class(tqdm, self)
 
+    def begin(self) -> None:
+        """Note that the loader now has the weights and has started reading.
+
+        The allocator is only worth reading once that is true: before it, a
+        reading is whatever the device was already holding rather than this
+        load's progress. The loader's first bar cannot stand in for this -
+        transformers 4.x builds one only for a checkpoint of several shards -
+        so the start of a load is recorded on its own.
+        """
+
+        with self._lock:
+            self._started = True
+
     @contextlib.contextmanager
     def watch(self) -> Iterator[None]:
         """Report the loader's own progress bar here for the duration.
@@ -2042,6 +2061,7 @@ class LoadProgress:
                 continue
             setattr(module, attribute, bar_class)
             patched.append((module, attribute, original))
+        self.begin()
         try:
             yield
         finally:
@@ -2051,6 +2071,9 @@ class LoadProgress:
     def _register(self, bar) -> None:
         with self._lock:
             self._bars.append(bar)
+            # A bar is the loader saying it has begun, for a caller that
+            # watched the load without going through watch().
+            self._started = True
 
     def snapshot(self) -> LoadSnapshot:
         with self._lock:
@@ -2058,11 +2081,12 @@ class LoadProgress:
             baseline, total = self._baseline, self._total_bytes
             steps_done = sum(int(bar.n or 0) for bar in self._bars)
             steps_total = sum(int(bar.total or 0) for bar in self._bars)
-            # Bytes are counted only once the loader has a bar, which it
-            # builds after warming the allocator up with one block the size of
-            # the whole model. Read any earlier, the allocator would report a
-            # finished load a moment before the first weight is placed.
-            if not self._bars:
+            # Bytes are counted from the moment the loader starts reading,
+            # and not before: between the baseline and the first weight the
+            # allocator has nothing to say about this load. A single-file
+            # checkpoint under transformers 4.x never builds a bar, so the
+            # allocator is all such a load has to report with.
+            if not self._started:
                 sampler = None
         # Sampled outside the lock: the allocator holds a lock of its own that
         # the loading thread has for much of a load.
