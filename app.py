@@ -97,9 +97,19 @@ DOWNLOAD_BAR_WIDTH = 24
 # with its label, narrow enough to leave the conversation most of the screen.
 # The thin pane at the far left picks the page; the conversations pane beside
 # it shows with Chat only.
-NAV_PANE_WIDTH = 88
+NAV_PANE_WIDTH = 56
 CONVERSATION_PANE_WIDTH = 340
 CHAT_PAGE, MODELS_PAGE, SETTINGS_PAGE = PAGES = ("Chat", "Models", "Settings")
+# Each nav tile is an icon, which is what lets the pane be this thin. The
+# page's name stays on the tile for the browser to read out; the stylesheet
+# hides it, draws the icon in its place, and pops the name up on hover.
+NAV_ICONS = {
+    CHAT_PAGE: "💬",
+    MODELS_PAGE: "🧠",
+    # The gear has a text form and an emoji form; the variation selector
+    # asks for the emoji, so it matches the other two tiles.
+    SETTINGS_PAGE: "⚙️",
+}
 SEED_LIMIT = 2**31 - 1
 NO_TOKEN_SELECTED = "Select a token to inspect it."
 
@@ -3023,6 +3033,18 @@ def reset_inspection(insight: dict | None):
     return charts.EMPTY_LENS, charts.EMPTY_ATTENTION, None, INSPECT_HINT
 
 
+# One pair of rules per tile: the icon it shows, and the name it pops up.
+# Gradio stamps each option's text on its label as data-testid, which is the
+# only hook a Radio gives CSS.
+NAV_TILE_CSS = "\n".join(
+    f'#nav label[data-testid="{name}-radio-label"]::before '
+    f'{{ content: "{NAV_ICONS[name]}"; }}\n'
+    f'#nav label[data-testid="{name}-radio-label"]:hover::after,\n'
+    f'#nav label[data-testid="{name}-radio-label"]:has(input:focus-visible)::after '
+    f'{{ content: "{name}"; }}'
+    for name in PAGES
+)
+
 CSS = f"""
 .gradio-container {{ max-width: none !important; }}
 #hero, #models-hero, #settings-hero {{ padding: 0.5rem 0 0.2rem; }}
@@ -3035,6 +3057,9 @@ CSS = f"""
 #nav-pane, #conversation-pane {{
   position: sticky; top: 0; align-self: flex-start; max-height: 100vh;
 }}
+/* Both panes are sticky, so each is its own stacking context and the later
+   one would paint over the nav's tooltip. Lift the nav above it. */
+#nav-pane {{ z-index: 5; }}
 #nav-pane {{
   flex: 0 0 {NAV_PANE_WIDTH}px !important; min-width: {NAV_PANE_WIDTH}px !important;
   height: 100vh; padding: 0.6rem 0.5rem 0.6rem 0;
@@ -3050,13 +3075,34 @@ CSS = f"""
    selected tile is filled, and the last tile (Settings) is pushed to the
    bottom. */
 #nav-pane > *, #nav, #nav .wrap {{ height: 100%; }}
+/* Gradio's fieldset scrolls its own content, which would cut the tooltip off
+   at the tile's edge. */
+#nav {{ overflow: visible !important; }}
 #nav .wrap {{ flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 0.3rem; }}
 #nav label {{
   position: relative;
-  justify-content: center; text-align: center; padding: 0.7rem 0.2rem;
-  font-size: 0.85rem; border-radius: 8px; box-shadow: none; border: none;
+  justify-content: center; text-align: center; padding: 0.55rem 0.2rem;
+  font-size: 1.3rem; line-height: 1.25; border-radius: 8px; box-shadow: none;
   background: transparent;
+  /* The selected tile is outlined; the others hold the same border in
+     transparent so picking a page does not nudge the icons. */
+  border: 1px solid transparent;
 }}
+/* The page name is still on the tile, an inch out of sight, so the browser
+   reads it out and the icon that ::before draws sits where it was. */
+#nav label span {{
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%);
+}}
+/* Hover or keyboard focus brings the name back as a bubble beside the tile. */
+#nav label::after {{
+  position: absolute; left: calc(100% + 0.5rem); top: 50%;
+  transform: translateY(-50%);
+  padding: 0.25rem 0.5rem; border-radius: 6px; white-space: nowrap;
+  font-size: 0.8rem; font-weight: 500; line-height: 1.3; pointer-events: none;
+  background: var(--body-text-color); color: var(--background-fill-primary);
+}}
+{NAV_TILE_CSS}
 #nav label:hover {{ background: var(--background-fill-secondary); }}
 #nav label.selected {{
   background: var(--block-background-fill); color: var(--body-text-color); font-weight: 600;
