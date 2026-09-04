@@ -20,6 +20,7 @@ from typing import NamedTuple
 
 import numpy as np
 
+import settings
 from conversation import THINK_CLOSE, THINK_OPEN
 from token_metrics import (
     UNSCORED_BEYOND_LIMIT,
@@ -42,12 +43,6 @@ PROMPT_SCORE_LIMIT = 1024
 
 # Refuse to score a wall of pasted text rather than appearing to hang.
 SCORE_TOKEN_LIMIT = 4096
-
-# Refuse a generation prefix large enough to make replay itself an
-# unexpectedly expensive operation. The response-length control already tops
-# out here, so a branch cannot paste an unbounded second response around that
-# control even when the model advertises a much larger context window.
-GENERATION_PREFILL_TOKEN_LIMIT = 8192
 
 # Where a config keeps the length of its position table, newest name first.
 # ``max_seq_len`` is MPT's and DBRX's spelling. RWKV's ``context_length`` is
@@ -652,16 +647,17 @@ def check_memory_for_load(
 def mps_memory_fraction() -> float | None:
     """The Metal allocation cap to apply, or ``None`` to leave PyTorch's own.
 
-    ``CHATLAB_MPS_MEMORY_FRACTION`` overrides the default; a value PyTorch
-    would reject, or a user-set ``PYTORCH_MPS_HIGH_WATERMARK_RATIO``, leaves
-    the allocator alone.
+    ``CHATLAB_MPS_MEMORY_FRACTION`` overrides the settings file, which
+    overrides the default; a value PyTorch would reject, or a user-set
+    ``PYTORCH_MPS_HIGH_WATERMARK_RATIO``, leaves the allocator alone.
     """
 
     if os.environ.get(TORCH_MPS_WATERMARK_ENV):
         return None
     raw = os.environ.get(MPS_MEMORY_FRACTION_ENV)
     if raw is None:
-        return DEFAULT_MPS_MEMORY_FRACTION
+        saved = settings.current().mps_memory_fraction
+        return DEFAULT_MPS_MEMORY_FRACTION if saved is None else saved
     try:
         fraction = float(raw)
     except ValueError:
@@ -1100,21 +1096,25 @@ def score_token_limit(model) -> int:
     return SCORE_TOKEN_LIMIT if window is None else min(SCORE_TOKEN_LIMIT, window)
 
 
+def application_prefill_limit() -> int:
+    """The reader's cap on a generation prefix, whatever the model allows."""
+
+    return settings.current().prefill_token_limit
+
+
 def generation_prefill_token_limit(model) -> int:
     """The most prompt-plus-replayed tokens accepted by one generation.
 
-    A learned positional table is a hard correctness limit. The flat cap is a
-    separate application guard: typed branches can otherwise turn an
+    A learned positional table is a hard correctness limit. The reader's cap
+    is a separate application guard: typed branches can otherwise turn an
     unrestricted textbox into an arbitrarily large scored prefill while the
-    model lock is held.
+    model lock is held, and one long conversation's key-value cache can
+    outgrow the machine.
     """
 
+    limit = application_prefill_limit()
     window = model_position_limit(model)
-    return (
-        GENERATION_PREFILL_TOKEN_LIMIT
-        if window is None
-        else min(GENERATION_PREFILL_TOKEN_LIMIT, window)
-    )
+    return limit if window is None else min(limit, window)
 
 
 def _joint_ids(tokenizer, passage: str, *, add_special_tokens: bool = True) -> list[int] | None:
@@ -2833,6 +2833,52 @@ class ModelManager:
                 max_new_tokens=max_new_tokens,
             )
 
+    def _validate_prefix_within_limit(
+        self,
+        prompt_ids: Sequence[int],
+        forced_ids: Sequence[int],
+    ) -> None:
+        """Refuse a prefill above the reader's context limit.
+
+        Every generation is checked here, not only a typed branch. The cap is
+        a memory guard as much as a replay guard: what a reply costs is mostly
+        the key-value cache of everything fed to it, held for as long as the
+        answer runs, so an ordinary conversation left to grow can exhaust the
+        machine exactly as a pasted branch can.
+        """
+
+        assert self.model is not None
+        total = len(prompt_ids) + len(forced_ids)
+        limit = generation_prefill_token_limit(self.model)
+        if total <= limit:
+            return
+        configured = application_prefill_limit()
+        window = model_position_limit(self.model)
+        model_bound = window is not None and window <= configured
+        ceiling = (
+            f"the {limit:,} positions this model can attend to"
+            if model_bound
+            else f"the {configured:,} token limit for a generation prefix"
+        )
+        measured = (
+            f"The prompt and replayed response are {total:,} tokens"
+            if forced_ids
+            else f"The prompt is {total:,} tokens"
+        )
+        shorten = (
+            "Shorten the conversation or replacement."
+            if forced_ids
+            else "Shorten the conversation."
+        )
+        # Only worth saying when the reader's own cap is what bit: no setting
+        # moves a model's position table.
+        hint = (
+            ""
+            if model_bound
+            else " Context limit (tokens) on the Settings page raises the cap."
+        )
+        raise ValueError(f"{measured}, above {ceiling}. {shorten}{hint}")
+
     def _validate_generation_prefix_length(
         self,
         prompt_ids: Sequence[int],
@@ -2840,25 +2886,20 @@ class ModelManager:
         *,
         max_new_tokens: int,
     ) -> None:
-        """Check a tokenized generation and its continuation capacity."""
+        """Check a tokenized generation and its continuation capacity.
+
+        The continuation half is a typed branch's alone. A branch names the
+        response length it wants replayed room for up front, so reserving the
+        positions before the stream starts is the honest answer; an ordinary
+        reply is free to run into the position table and keep what it wrote,
+        which is the better outcome when the model would have stopped on its
+        own long before the requested length.
+        """
 
         assert self.model is not None
+        self._validate_prefix_within_limit(prompt_ids, forced_ids)
         total = len(prompt_ids) + len(forced_ids)
-        limit = generation_prefill_token_limit(self.model)
         window = model_position_limit(self.model)
-        if total > limit:
-            ceiling = (
-                f"the {limit:,} positions this model can attend to"
-                if window is not None and window <= GENERATION_PREFILL_TOKEN_LIMIT
-                else (
-                    f"the {GENERATION_PREFILL_TOKEN_LIMIT:,} token limit for a "
-                    "generation prefix"
-                )
-            )
-            raise ValueError(
-                f"The prompt and replayed response are {total:,} tokens, above "
-                f"{ceiling}. Shorten the conversation or replacement."
-            )
 
         stops_before_sampling = bool(
             forced_ids and int(forced_ids[-1]) in self._stop_token_ids()
@@ -3260,6 +3301,14 @@ class ModelManager:
                 if token_id in stop_ids and index >= literal_prefill_tokens:
                     forced = forced[: index + 1]
                     break
+
+            # Checked here, on the tokens actually about to be fed, rather
+            # than only in validate_generation_prefix(): that one runs for a
+            # typed branch before the UI stream starts, and an ordinary reply
+            # would otherwise reach the prefill with a conversation of any
+            # size behind it. Refuse before the cache is allocated, not once
+            # the machine is already out of memory.
+            self._validate_prefix_within_limit(prompt_ids, forced)
 
             def sample(log_probs: np.ndarray) -> np.ndarray:
                 return sampling_probabilities(

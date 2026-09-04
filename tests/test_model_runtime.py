@@ -5,8 +5,9 @@ import types
 import unittest
 from pathlib import Path
 
+import settings
+import settings_sandbox
 from model_runtime import (
-    GENERATION_PREFILL_TOKEN_LIMIT,
     MIN_MODEL_POSITION_LIMIT,
     MODEL_WEIGHTS,
     SCORE_TOKEN_LIMIT,
@@ -20,6 +21,14 @@ from model_runtime import (
     split_context_and_text,
     validate_model_id,
 )
+
+
+def setUpModule():
+    settings_sandbox.start()
+
+
+def tearDownModule():
+    settings_sandbox.stop()
 
 
 class ModelIdTests(unittest.TestCase):
@@ -1180,8 +1189,15 @@ class GenerationPrefillTokenLimitTests(unittest.TestCase):
         model = Model(Config(max_position_embeddings=131072))
 
         self.assertEqual(
-            generation_prefill_token_limit(model), GENERATION_PREFILL_TOKEN_LIMIT
+            generation_prefill_token_limit(model),
+            settings.DEFAULT_PREFILL_TOKEN_LIMIT,
         )
+
+    def test_the_saved_context_limit_is_the_application_limit(self):
+        model = Model(Config(max_position_embeddings=131072))
+
+        with settings.override(prefill_token_limit=4096):
+            self.assertEqual(generation_prefill_token_limit(model), 4096)
 
 
 class ModelLockTests(unittest.TestCase):
@@ -2052,6 +2068,21 @@ class MetalCapTests(unittest.TestCase):
 
         os.environ["CHATLAB_MPS_MEMORY_FRACTION"] = "0.8"
         self.assertEqual(mps_memory_fraction(), 0.8)
+
+    def test_the_settings_file_overrides_the_default(self):
+        from model_runtime import mps_memory_fraction
+
+        with settings.override(mps_memory_fraction=0.6):
+            self.assertEqual(mps_memory_fraction(), 0.6)
+
+    def test_the_environment_overrides_the_settings_file(self):
+        import os
+
+        from model_runtime import mps_memory_fraction
+
+        os.environ["CHATLAB_MPS_MEMORY_FRACTION"] = "0.9"
+        with settings.override(mps_memory_fraction=0.6):
+            self.assertEqual(mps_memory_fraction(), 0.9)
 
     def test_a_value_pytorch_would_reject_leaves_the_allocator_alone(self):
         import os

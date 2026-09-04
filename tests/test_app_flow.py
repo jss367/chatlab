@@ -10,7 +10,6 @@ import numpy as np
 
 import app
 import charts
-import model_runtime
 from conversation import (
     MAIN_BRANCH,
     display_messages,
@@ -21,7 +20,17 @@ from conversation import (
 from model_runtime import GenerationUpdate, ModelChanged, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
 
+import settings
+import settings_sandbox
 from test_streaming import ChatTemplateTokenizer, SentencePieceTokenizer, loaded_manager
+
+
+def setUpModule():
+    settings_sandbox.start()
+
+
+def tearDownModule():
+    settings_sandbox.stop()
 
 
 # "Hello" and " world" are the answer; the reasoning tags are their own tokens.
@@ -2481,7 +2490,9 @@ class BranchFromTokenTests(unittest.TestCase):
         )
         self.assertTrue(last[TURNS][-1]["content"].startswith(" world"))
 
-    def assert_oversized_typed_branch_is_refused(self, final, expected_status):
+    def assert_oversized_typed_branch_is_refused(
+        self, final, expected_status, repeats=15
+    ):
         calls = []
         real_generate = app.MANAGER.generate
 
@@ -2490,7 +2501,7 @@ class BranchFromTokenTests(unittest.TestCase):
             return real_generate(*args, **kwargs)
 
         app.MANAGER.generate = observe
-        frames = self.branch_text(final, "Hello" * 15)
+        frames = self.branch_text(final, "Hello" * repeats)
 
         self.assertEqual(
             len(frames), 1, "no destructive opening frame was published"
@@ -2531,17 +2542,12 @@ class BranchFromTokenTests(unittest.TestCase):
 
     def test_a_replacement_past_the_application_cap_preserves_the_old_response(self):
         final = self.respond()[-1]
-        old_limit = model_runtime.GENERATION_PREFILL_TOKEN_LIMIT
-        model_runtime.GENERATION_PREFILL_TOKEN_LIMIT = 16
-        self.addCleanup(
-            setattr,
-            model_runtime,
-            "GENERATION_PREFILL_TOKEN_LIMIT",
-            old_limit,
-        )
+        # The cap is the reader's setting, and the floor of its range is the
+        # smallest one a test can ask for.
+        self.enterContext(settings.override(prefill_token_limit=256))
 
         self.assert_oversized_typed_branch_is_refused(
-            final, "16 token limit for a generation prefix"
+            final, "256 token limit for a generation prefix", repeats=300
         )
 
     def test_typed_text_follows_noncanonical_sentencepiece_tokens(self):
@@ -3050,7 +3056,8 @@ class MessageBoxKeysTests(unittest.TestCase):
             for c in demo.blocks.values()
             if isinstance(c, gr.Textbox) and c.label == "Assistant prefill (optional)"
         )
-        self.assertEqual(prefill.value, None)
+        # Empty until the reader saves one, whether as "" or as nothing at all.
+        self.assertFalse(prefill.value)
         self.assertIn("closes the reasoning block", prefill.info)
 
 

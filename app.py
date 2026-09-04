@@ -18,6 +18,7 @@ import gradio as gr
 from gradio.utils import get_upload_folder
 
 import charts
+import settings
 from conversation import (
     CHAT_PREFIX,
     MAIN_BRANCH,
@@ -83,7 +84,6 @@ except ImportError:  # huggingface_hub before 1.x had no such check
         pass
 
 
-DEFAULT_MODEL = "allenai/Olmo-3-7B-Think"
 MANAGER = ModelManager()
 
 # How often the download card is redrawn. Every frame is a message to the
@@ -3624,7 +3624,102 @@ def show_page(page: str):
     ]
 
 
+# The settings that outlive the session, in the order the controls wired to
+# remember_settings publish them. The Hugging Face token is not among them on
+# purpose: see the settings module.
+PERSISTED_SETTING_NAMES = (
+    "system_prompt",
+    "keep_reasoning",
+    "assistant_prefill",
+    "temperature",
+    "top_p",
+    "top_k",
+    "max_new_tokens",
+    "seed",
+    "randomize_seed",
+    "analyze_prompt",
+    "color_scale",
+    "enter_sends",
+    "model_id",
+)
+
+
+def remember_settings(*values, seed_committed: bool = False) -> None:
+    """Save every setting whenever one of them changes.
+
+    There is no save button, so each control reports the whole set and the
+    file is rewritten. A change that changes nothing is not written, which is
+    what keeps a slider drag from writing once per pixel.
+
+    Two of the controls hold something that is not always the reader's
+    choice, and both are filtered rather than saved as they are read.
+    ``OLMO_MODEL_ID`` puts a model in the model box for one run, and a
+    finished response leaves the seed it used in the seed box. Neither must
+    be written down just because something else changed.
+    ``seed_committed`` is the seed box's own blur or submit saying the number
+    there is a choice after all.
+    """
+
+    chosen = dict(zip(PERSISTED_SETTING_NAMES, values, strict=True))
+    chosen["model_id"] = settings.model_id_to_save(chosen["model_id"])
+    if not seed_committed:
+        chosen["seed"] = settings.seed_to_save(
+            chosen["seed"], chosen["randomize_seed"]
+        )
+    settings.update(**chosen)
+
+
+def remember_committed_seed(*values) -> None:
+    """Save every setting, the seed box included, when it is done being edited."""
+
+    remember_settings(*values, seed_committed=True)
+
+
+def restore_settings():
+    """Put the saved settings back into every control, and re-read the file.
+
+    A browser reload rebuilds the page from the values the interface was built
+    with, which are the ones the file held when the app started. Without this
+    a reload would show stale values, and the next change would write them
+    back over whatever the file has learned since — including an edit made to
+    the file by hand, which this is also how one takes effect.
+    """
+
+    saved = settings.load()
+    values = saved.to_mapping() | {"model_id": settings.model_id_at_startup(saved)}
+    updates = [
+        # The response-length ceiling is the context limit, so it comes back
+        # with the length itself.
+        gr.update(value=saved.max_new_tokens, maximum=saved.prefill_token_limit)
+        if name == "max_new_tokens"
+        else gr.update(value=values[name])
+        for name in PERSISTED_SETTING_NAMES
+    ]
+    return (*updates, gr.update(value=saved.prefill_token_limit))
+
+
+def remember_prefill_limit(limit, max_new_tokens):
+    """Save the context limit, and pull the response length under it.
+
+    The response-length control tops out at the context limit, so lowering
+    the limit lowers the ceiling and, if it was above the new one, the length
+    itself. The limit is echoed back because it is clamped to a range the
+    number box cannot express on its own.
+    """
+
+    saved = settings.update(prefill_token_limit=limit, max_new_tokens=max_new_tokens)
+    return (
+        gr.update(value=saved.prefill_token_limit),
+        gr.update(maximum=saved.prefill_token_limit, value=saved.max_new_tokens),
+    )
+
+
 def build_app() -> gr.Blocks:
+    # Read once, here, rather than per control: a build is one snapshot of
+    # the file, and a control whose value came from a later read than its
+    # neighbour's would be a puzzle to explain.
+    saved = settings.load()
+    settings.ensure_file()
     # Gradio otherwise caps the page at one of a handful of widths and centers
     # it, which leaves a band of empty room down each side on a wide screen.
     # The shell wants every pixel: the two side panes are a fixed width, so the
@@ -3730,7 +3825,7 @@ def build_app() -> gr.Blocks:
                                 )
                                 prompt = gr.Textbox(
                                     label="Message",
-                                    **message_box_settings(enter_sends=True),
+                                    **message_box_settings(saved.enter_sends),
                                 )
                                 with gr.Row():
                                     send_button = gr.Button("Send", variant="primary")
@@ -3807,11 +3902,11 @@ def build_app() -> gr.Blocks:
                         gr.Markdown("## Under the hood")
                         color_scale = gr.Dropdown(
                             choices=list(COLOR_SCALES),
-                            value=DEFAULT_COLOR_SCALE,
+                            value=saved.color_scale,
                             label="Color tokens by",
                         )
                         scale_caption = gr.Markdown(
-                            COLOR_SCALES[DEFAULT_COLOR_SCALE].caption,
+                            COLOR_SCALES[saved.color_scale].caption,
                             elem_classes=["scale-caption"],
                         )
                         token_strip = gr.HighlightedText(
@@ -3903,7 +3998,7 @@ def build_app() -> gr.Blocks:
                     with gr.Column():
                         gr.Markdown("## Model")
                         model_id = gr.Textbox(
-                            value=os.environ.get("OLMO_MODEL_ID", DEFAULT_MODEL),
+                            value=settings.model_id_at_startup(saved),
                             label="Hugging Face model ID",
                             placeholder="organization/model-name",
                             info="The default OLMo 3 7B model is about 15 GB in full precision.",
@@ -3991,12 +4086,14 @@ def build_app() -> gr.Blocks:
                     with gr.Column():
                         gr.Markdown("## System prompt, reasoning, and prefill")
                         system_prompt = gr.Textbox(
+                            value=saved.system_prompt,
                             label="System prompt",
                             placeholder="You are a careful assistant that answers concisely.",
                             lines=3,
                             info="Sent as a system message ahead of the conversation. Leave empty to use the model's default behavior.",
                         )
                         assistant_prefill = gr.Textbox(
+                            value=saved.assistant_prefill,
                             label="Assistant prefill (optional)",
                             placeholder="Start every reply with these exact words…",
                             lines=2,
@@ -4007,42 +4104,77 @@ def build_app() -> gr.Blocks:
                             ),
                         )
                         keep_reasoning = gr.Checkbox(
-                            value=False,
+                            value=saved.keep_reasoning,
                             label="Send previous reasoning back to the model",
                             info="Off by default. Think models write a fresh reasoning block each turn, so replaying old ones burns context and usually hurts the next answer.",
                         )
 
                         gr.Markdown("## Input")
                         enter_sends = gr.Checkbox(
-                            value=True,
+                            value=saved.enter_sends,
                             label="Enter sends the message",
                             info="Shift+Enter starts a new line. Turn off to swap the two.",
                         )
 
                     with gr.Column():
                         gr.Markdown("## Sampling and analysis")
-                        temperature = gr.Slider(0, 2, value=0.8, step=0.05, label="Temperature")
-                        top_p = gr.Slider(0.05, 1, value=0.95, step=0.01, label="Top-p")
-                        top_k = gr.Slider(0, 200, value=50, step=1, label="Top-k (0 disables)")
+                        temperature = gr.Slider(
+                            0, 2, value=saved.temperature, step=0.05, label="Temperature"
+                        )
+                        top_p = gr.Slider(
+                            0.05, 1, value=saved.top_p, step=0.01, label="Top-p"
+                        )
+                        top_k = gr.Slider(
+                            0, 200, value=saved.top_k, step=1, label="Top-k (0 disables)"
+                        )
+                        # The ceiling is the context limit: a response cannot
+                        # be longer than a prompt is allowed to be.
                         max_new_tokens = gr.Slider(
-                            1, 8192, value=1024, step=1, label="Maximum new tokens"
+                            1,
+                            saved.prefill_token_limit,
+                            value=saved.max_new_tokens,
+                            step=1,
+                            label="Maximum new tokens",
                         )
                         seed = gr.Number(
-                            value=42,
+                            value=saved.seed,
                             precision=0,
                             minimum=0,
                             label="Random seed",
                             info="Updated after each response so you can reproduce it.",
                         )
                         randomize_seed = gr.Checkbox(
-                            value=True,
+                            value=saved.randomize_seed,
                             label="🎲 New seed each response",
                             info="Turn off to lock the seed and reproduce a response exactly.",
                         )
                         analyze_prompt = gr.Checkbox(
-                            value=True,
+                            value=saved.analyze_prompt,
                             label="Measure prompt tokens",
                             info="Scores every prompt token during the same pass that warms the cache.",
+                        )
+
+                        gr.Markdown("## Memory")
+                        prefill_token_limit = gr.Number(
+                            value=saved.prefill_token_limit,
+                            precision=0,
+                            minimum=settings.PREFILL_TOKEN_LIMIT_RANGE[0],
+                            maximum=settings.PREFILL_TOKEN_LIMIT_RANGE[1],
+                            label="Context limit (tokens)",
+                            info=(
+                                "The most tokens one prompt may carry, and the "
+                                "ceiling on the response length. Every token in "
+                                "the conversation costs memory for as long as the "
+                                "answer runs, so this is the control to lower when "
+                                "a model runs out of it."
+                            ),
+                        )
+                        gr.Markdown(
+                            f"Settings are saved to `{settings.settings_path()}` as "
+                            "you change them, and read from there at startup. The "
+                            "Metal memory cap lives in that file as "
+                            "`mps_memory_fraction`.",
+                            elem_classes=["scale-caption"],
                         )
 
         nav.change(
@@ -4139,6 +4271,44 @@ def build_app() -> gr.Blocks:
             color_scale,
         ]
         chat_inputs = [prompt, conversation_state, *settings_inputs]
+
+        # Everything saved between sessions, in PERSISTED_SETTING_NAMES order.
+        persisted_inputs = [*settings_inputs, enter_sends, model_id]
+        for control in (
+            system_prompt,
+            keep_reasoning,
+            assistant_prefill,
+            temperature,
+            top_p,
+            top_k,
+            max_new_tokens,
+            randomize_seed,
+            analyze_prompt,
+            color_scale,
+            enter_sends,
+            model_id,
+        ):
+            control.change(remember_settings, persisted_inputs, None)
+        # The seed box is the one control the app writes to itself: a finished
+        # response leaves the seed that produced it there, and saving that
+        # would overwrite the seed the reader chose. Blur and submit are the
+        # two ways a person is done editing a number, and they are the only
+        # events that write the box's contents down; every other control
+        # leaves the saved seed where it is. See remember_settings().
+        for event in (seed.blur, seed.submit):
+            event(remember_committed_seed, persisted_inputs, None)
+        # The context limit is committed rather than saved as it is typed: the
+        # handler writes a clamped value back, which mid-word would fight the
+        # typing.
+        for event in (prefill_token_limit.blur, prefill_token_limit.submit):
+            event(
+                remember_prefill_limit,
+                [prefill_token_limit, max_new_tokens],
+                [prefill_token_limit, max_new_tokens],
+            )
+        # A page load is where the file is read back, so reloading the browser
+        # shows what was saved rather than what the app started with.
+        demo.load(restore_settings, None, [*persisted_inputs, prefill_token_limit])
         # The order every generation handler publishes in; see
         # CHAT_OUTPUT_NAMES.
         chat_outputs = [
