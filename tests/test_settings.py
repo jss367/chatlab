@@ -171,6 +171,29 @@ class WriteTests(unittest.TestCase):
 
         self.assertEqual(list(self.root.iterdir()), [])
 
+    def test_a_symlinked_file_is_written_through_rather_than_replaced(self):
+        """The documented way to share one file: settings.json is a link."""
+
+        shared = self.root / "dotfiles" / "chatlab.json"
+        shared.parent.mkdir()
+        settings.write(settings.sanitize({"temperature": 0.3}), path=shared)
+        self.path.symlink_to(shared)
+
+        settings.write(settings.sanitize({"temperature": 0.9}), path=self.path)
+
+        self.assertTrue(self.path.is_symlink())
+        self.assertEqual(self.path.readlink(), shared)
+        self.assertEqual(json.loads(shared.read_text(encoding="utf-8"))["temperature"], 0.9)
+
+    def test_a_symlink_pointing_nowhere_yet_creates_its_destination(self):
+        shared = self.root / "dotfiles" / "chatlab.json"
+        self.path.symlink_to(shared)
+
+        settings.write(settings.sanitize({"temperature": 0.9}), path=self.path)
+
+        self.assertTrue(self.path.is_symlink())
+        self.assertEqual(json.loads(shared.read_text(encoding="utf-8"))["temperature"], 0.9)
+
     def test_a_save_replaces_the_file_rather_than_truncating_it(self):
         settings.write(settings.DEFAULTS, path=self.path)
         first = self.path.stat().st_ino

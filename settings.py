@@ -254,20 +254,26 @@ def write(
     payload = dict(unknown or {}) | chosen.to_mapping()
     text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # Same directory as the target: os.replace is only atomic within one
-        # filesystem, and the temporary directory is often another.
+        # A settings file symlinked out of a dotfiles repository is one of the
+        # arrangements this file is for, and os.replace onto the link would
+        # put a plain file where the link was and leave the repository's copy
+        # behind. Following the link first writes where the reader actually
+        # keeps the file, and leaves the link itself alone.
+        destination = target.resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # Same directory as the destination: os.replace is only atomic within
+        # one filesystem, and the temporary directory is often another.
         handle = tempfile.NamedTemporaryFile(
             "w",
             encoding="utf-8",
-            dir=target.parent,
-            prefix=f".{target.name}.",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
             delete=False,
         )
         try:
             with handle as stream:
                 stream.write(text)
-            os.replace(handle.name, target)
+            os.replace(handle.name, destination)
         except OSError:
             with contextlib.suppress(OSError):
                 os.unlink(handle.name)
@@ -366,3 +372,4 @@ def model_id_at_startup(chosen: Settings | None = None) -> str:
 
     saved = chosen if chosen is not None else current()
     return os.environ.get(MODEL_ID_ENV) or saved.model_id
+
