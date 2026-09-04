@@ -526,21 +526,30 @@ def model_badge(state: str, text: str) -> str:
 def loaded_model_badge() -> str:
     """Name the model in memory, the one being loaded, or neither.
 
-    ``loading_id`` is asked first: ``model_id`` is cleared for the whole of a
-    load, so during those minutes the badge would otherwise claim that nothing
-    is loaded while the weights are on their way in. It is read once and kept,
-    rather than asked again to fill in the text: a load can finish between two
-    reads, which would leave the badge saying "Loading None".
+    A model in memory is named ahead of any load. A load counts itself as
+    under way before it waits for the model lock, so asking for a second
+    model while the first is part-way through a reply leaves that load
+    queued for the rest of the generation - and the model still producing
+    the tokens is the one the badge exists to name. A load that has really
+    started emptied memory as its first act under that lock, so there is
+    nothing left to name and the load is reported instead: that is what
+    keeps the badge from claiming nothing is loaded during the minutes the
+    weights are on their way in.
+
+    Each attribute is read once and kept rather than asked again to fill in
+    the text: a load can finish, or empty memory, between two reads, which
+    would leave the badge saying "Loading None" or naming a model loaded on
+    None.
     """
 
     loading = MANAGER.loading_id
+    model_id = MANAGER.model_id
+    device = MANAGER.device_name
+    if model_id and device:
+        return model_badge("ready", f"{model_id} · loaded on {device}")
     if loading:
         return model_badge("loading", f"Loading {loading}…")
-    if not MANAGER.loaded:
-        return model_badge("empty", NO_MODEL_BADGE)
-    return model_badge(
-        "ready", f"{MANAGER.model_id} · loaded on {MANAGER.device_name}"
-    )
+    return model_badge("empty", NO_MODEL_BADGE)
 
 
 def refresh_model_badge():

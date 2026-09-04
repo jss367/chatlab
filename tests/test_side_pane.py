@@ -1058,6 +1058,35 @@ class ModelBadgeTests(unittest.TestCase):
         self.assertIn(f"Loading {OLMO}", badge)
         self.assertFalse(button["visible"])
 
+    def test_a_load_waiting_its_turn_leaves_the_answering_model_named(self):
+        # A load counts itself as under way before it waits for the model
+        # lock, so asking for a second model mid-reply queues it behind the
+        # generation. The model still producing the tokens is the one the
+        # badge is for, so it keeps the name until the load empties memory.
+        self.load()
+        with self.manager._loading("org/second"):
+            badge, button = app.refresh_model_badge()
+
+            self.assertIn('data-state="ready"', badge)
+            self.assertIn(OLMO, badge)
+            self.assertNotIn("Loading", badge)
+            self.assertFalse(button["visible"])
+
+    def test_a_load_that_has_emptied_memory_names_the_model_coming_in(self):
+        # Once the queued load wins the lock it unloads first, and from then
+        # on there is nothing in memory to name.
+        self.load()
+        with self.manager._loading("org/second"):
+            self.manager.model = None
+            self.manager.tokenizer = None
+            self.manager.model_id = None
+            self.manager.device_name = None
+            badge, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="loading"', badge)
+        self.assertIn("Loading org/second", badge)
+        self.assertFalse(button["visible"])
+
     def test_the_model_id_is_escaped(self):
         self.load()
         self.manager.model_id = "org/<script>"
