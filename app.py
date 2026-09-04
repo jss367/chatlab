@@ -736,7 +736,7 @@ def remove_my_model(pending: str | None):
         status_card(
             "Model removed",
             f"Removed `{pending}` from the Hugging Face cache, "
-            f"freeing {format_bytes(freed.total_bytes)}.",
+            f"freeing {format_bytes(freed)}.",
             "success",
         ),
         hidden,

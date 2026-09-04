@@ -192,8 +192,22 @@ class RemoveCachedModelTests(unittest.TestCase):
 
             self.assertFalse(folder.exists())
             self.assertTrue(other.is_dir())
-        self.assertEqual(freed.total_bytes, 2 + 99 + 10)
-        self.assertEqual(freed.partial_files, 1)
+        # The 40-byte refs/main file goes too, so it counts.
+        self.assertEqual(freed, 2 + 99 + 10 + len(COMMIT))
+
+    def test_every_revision_counts_toward_the_space_freed(self):
+        # Without symlinks the hub keeps each revision's files in its own
+        # snapshot folder, and deleting the repo folder takes them all.
+        with tempfile.TemporaryDirectory() as root:
+            folder = lay_out(root, OLMO, {"config.json": b"{}"})
+            old = folder / "snapshots" / ("0" * 40)
+            old.mkdir()
+            (old / "model.safetensors").write_bytes(b"x" * 500)
+            (folder / "snapshots" / COMMIT / "model.safetensors").write_bytes(b"y" * 70)
+
+            self.assertEqual(
+                remove_cached_model(OLMO, Path(root)), 2 + 500 + 70 + len(COMMIT)
+            )
 
     def test_the_hubs_lock_folder_is_left_for_other_processes(self):
         # Released lock files are harmless; a deleted one that another
@@ -265,7 +279,7 @@ class ManagerRemoveTests(unittest.TestCase):
         freed = self.manager.remove(OLMO, Path(self.root.name))
 
         self.assertFalse(self.folder.exists())
-        self.assertEqual(freed.total_bytes, 12)
+        self.assertEqual(freed, 12 + len(COMMIT))  # files plus the refs/main entry
         self.assertFalse(self.manager._lock.locked())
         self.assertFalse(self.manager._downloads_lock.locked())
 
@@ -516,7 +530,7 @@ class ManageMyModelsTests(unittest.TestCase):
 
     def remove(self, model_id, cache_dir=None):
         self.removed.append(model_id)
-        return PARTIAL.status
+        return PARTIAL.size_bytes
 
     def download(self, model_id, hf_token):
         yield f"downloading {model_id} with {hf_token!r}"

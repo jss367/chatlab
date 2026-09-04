@@ -857,8 +857,28 @@ def hub_lock_held(root: Path, folder_name: str) -> bool:
     return False
 
 
-def remove_cached_model(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
-    """Delete everything the cache holds for ``model_id`` and say what was there.
+def folder_bytes(folder: Path) -> int:
+    """The bytes a cache folder holds, counting every regular file once.
+
+    In the usual layout the snapshots are symlinks into ``blobs`` and only
+    the blobs count; on a filesystem without symlinks the snapshots hold the
+    files themselves and count instead. Either way this is what deleting the
+    folder frees, every revision included, where :func:`cache_status` sizes
+    the ``main`` snapshot alone.
+    """
+
+    total = 0
+    for entry in folder.rglob("*"):
+        try:
+            if entry.is_file() and not entry.is_symlink():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def remove_cached_model(model_id: str, cache_dir: Path | None = None) -> int:
+    """Delete everything the cache holds for ``model_id``; return the bytes freed.
 
     Removes the model's ``models--org--name`` folder. The lock folder the hub
     keeps beside it under ``.locks`` is left alone, as the hub's own
@@ -871,10 +891,11 @@ def remove_cached_model(model_id: str, cache_dir: Path | None = None) -> CacheSt
     The locks in this process are the manager's business, see
     :meth:`ModelManager.remove`.
 
-    Returns the :class:`CacheStatus` measured before deletion, which is the
-    space freed. A model with nothing on disk raises ``FileNotFoundError``;
-    a folder that cannot be deleted raises the ``OSError`` that stopped it,
-    with whatever was already removed gone.
+    The size is measured over the whole folder before deletion, so it counts
+    every revision the folder held, not just the ``main`` snapshot. A model
+    with nothing on disk raises ``FileNotFoundError``; a folder that cannot
+    be deleted raises the ``OSError`` that stopped it, with whatever was
+    already removed gone.
     """
 
     checked_id = validate_model_id(model_id)
@@ -886,9 +907,9 @@ def remove_cached_model(model_id: str, cache_dir: Path | None = None) -> CacheSt
         raise ModelDownloading(
             f"{checked_id} is being downloaded or loaded by another process."
         )
-    status = cache_status(checked_id, root)
+    freed = folder_bytes(folder)
     shutil.rmtree(folder)
-    return status
+    return freed
 
 
 # How many hub search results are shown. The hub sorts them by downloads, so
@@ -2103,7 +2124,7 @@ class ModelManager:
         with self._lock:
             self._unload_locked(torch)
 
-    def remove(self, model_id: str, cache_dir: Path | None = None) -> CacheStatus:
+    def remove(self, model_id: str, cache_dir: Path | None = None) -> int:
         """Delete ``model_id``'s cache folder, unless the manager is using it.
 
         Removal is serialized with everything else that touches the files.
