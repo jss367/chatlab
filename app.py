@@ -975,9 +975,23 @@ def setup_default_model(hf_token: str):
 
 
 def start_default_model():
-    """Put the default model in the ID box and open the page that reports on it."""
+    """Name the default model, drop any picked row, and open the page for it.
 
-    return settings.DEFAULT_MODEL_ID, *go_to_models()
+    Dropping the row is not decoration. ``chosen_model`` gives a My Models
+    selection precedence over the ID box, and the listener that would
+    normally clear it is bound to ``model_id.input``, which Gradio fires for
+    a reader's typing and not for a box written by a handler. A row picked
+    earlier would therefore survive this press and take the next **Load
+    cached** or **Download and load** with it, against a box plainly showing
+    the default. The selection is dropped here rather than chained after, so
+    the box and the row are never out of step with each other.
+    """
+
+    return (
+        settings.DEFAULT_MODEL_ID,
+        *clear_my_model_selection(),
+        *go_to_models(),
+    )
 
 
 # The side pane's model lists.
@@ -3995,6 +4009,14 @@ SCORE_COUNT_UNKNOWN = (
 # always the one that publishes last.
 SCORE_BUDGET_QUEUE = "score-budget"
 
+# And one for the sampling summary, for the same reason. Four sliders is four
+# listeners, and always_last coalesces each on its own; across them Gradio
+# orders nothing. Each handler reads all four values as they were when its
+# request was sent, so two sliders moved in quick succession can finish out of
+# order and leave the label describing the older pair - and it is only
+# rewritten by the next change, so it would stay that way.
+SAMPLING_LABEL_QUEUE = "sampling-label"
+
 
 def score_token_count(context: str, text: str, use_chat_template: bool):
     """The count for the box, and the load it was counted against.
@@ -4645,7 +4667,9 @@ def build_app() -> gr.Blocks:
                             show_label=False,
                             elem_classes=["model-list"],
                         )
-                        my_model_detail = gr.Markdown("", elem_classes=["model-detail"])
+                        my_model_detail = gr.Markdown(
+                            "", elem_id="my-model-detail", elem_classes=["model-detail"]
+                        )
                         with gr.Row():
                             redownload_button = gr.Button("⬇️ Redownload", size="sm")
                             remove_button = gr.Button("🗑️ Remove", size="sm")
@@ -4862,7 +4886,16 @@ def build_app() -> gr.Blocks:
             default_model_button.click(
                 start_default_model,
                 None,
-                [model_id, nav, conversation_pane, chat_page, models_page, settings_page],
+                [
+                    model_id,
+                    my_models,
+                    my_model_detail,
+                    nav,
+                    conversation_pane,
+                    chat_page,
+                    models_page,
+                    settings_page,
+                ],
             ).then(setup_default_model, hf_token, model_status)
         )
         # .input rather than .change: the refresh above also sets the radio,
@@ -4925,6 +4958,7 @@ def build_app() -> gr.Blocks:
                 sampling_accordion,
                 trigger_mode="always_last",
                 show_progress="hidden",
+                concurrency_id=SAMPLING_LABEL_QUEUE,
             )
 
         settings_inputs = [
@@ -4977,7 +5011,12 @@ def build_app() -> gr.Blocks:
                 remember_prefill_limit,
                 [prefill_token_limit, max_new_tokens],
                 [prefill_token_limit, max_new_tokens],
-            ).then(update_sampling_label, sampling_controls, sampling_accordion)
+            ).then(
+            update_sampling_label,
+            sampling_controls,
+            sampling_accordion,
+            concurrency_id=SAMPLING_LABEL_QUEUE,
+        )
         # A page load is where the file is read back, so reloading the browser
         # shows what was saved rather than what the app started with. The
         # sampling summary is rebuilt from whatever came back, since the label
@@ -4985,7 +5024,12 @@ def build_app() -> gr.Blocks:
         # startup, not as it is now.
         demo.load(
             restore_settings, None, [*persisted_inputs, prefill_token_limit]
-        ).then(update_sampling_label, sampling_controls, sampling_accordion)
+        ).then(
+            update_sampling_label,
+            sampling_controls,
+            sampling_accordion,
+            concurrency_id=SAMPLING_LABEL_QUEUE,
+        )
         # The order every generation handler publishes in; see
         # CHAT_OUTPUT_NAMES.
         chat_outputs = [

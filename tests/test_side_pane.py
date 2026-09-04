@@ -1643,6 +1643,9 @@ class PageLayoutTests(unittest.TestCase):
             setup.outputs,
             [
                 self.labelled("Hugging Face model ID"),
+                # A row picked earlier outranks the ID box, so it goes.
+                self.labelled("Downloaded models"),
+                self.by_id("my-model-detail"),
                 self.by_id("nav"),
                 self.by_id("conversation-pane"),
                 self.by_id("chat-page"),
@@ -1746,6 +1749,28 @@ class PageLayoutTests(unittest.TestCase):
         # touching it: the settings file read back on load, and the context
         # limit committed, which can pull the response length down with it.
         self.assertEqual(len(listeners) - len(moved), 3)
+
+    def test_everything_that_writes_the_summary_shares_one_queue(self):
+        # always_last coalesces each slider's own requests; across four
+        # listeners Gradio orders nothing. Each handler reads all four values
+        # as they were when its request was sent, so two sliders moved in
+        # quick succession can finish out of order and leave the label
+        # describing the older pair - and only the next change rewrites it.
+        accordion = next(
+            block
+            for block in self.demo.blocks.values()
+            if isinstance(block, gr.Accordion)
+            and (block.label or "").startswith("Sampling")
+        )
+        writers = [fn for fn in self.demo.fns.values() if accordion in fn.outputs]
+
+        self.assertGreater(len(writers), 1)
+        self.assertEqual(
+            {fn.concurrency_id for fn in writers}, {app.SAMPLING_LABEL_QUEUE}
+        )
+        # And it is its own queue, not shared with the token count, which
+        # costs an encoding and would make the label wait behind it.
+        self.assertNotEqual(app.SAMPLING_LABEL_QUEUE, app.SCORE_BUDGET_QUEUE)
 
     def test_the_sampling_summary_follows_a_slider_moved_by_keyboard(self):
         # Gradio dispatches release from pointerup alone, so a slider moved

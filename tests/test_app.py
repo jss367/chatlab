@@ -1417,13 +1417,18 @@ class DefaultModelOfferTests(unittest.TestCase):
         # The download's progress and any failure land on the Models page, so
         # the press goes there rather than leaving the reader on a chat page
         # that looks like nothing happened.
-        model_id, page, *panes = app.start_default_model()
+        model_id, row, _detail, page, *panes = app.start_default_model()
 
         self.assertEqual(model_id, settings.DEFAULT_MODEL_ID)
         self.assertEqual(page, app.MODELS_PAGE)
         self.assertEqual(
             [update["visible"] for update in panes], [False, False, True, False]
         )
+        # chosen_model gives a picked row precedence over the ID box, and the
+        # listener that would clear it only fires for a reader's own typing.
+        # A row left selected would take the next Load cached with it, against
+        # a box plainly showing the default.
+        self.assertIsNone(row["value"])
 
     def test_a_cache_that_cannot_be_read_is_treated_as_no_cache(self):
         # The offer is a courtesy; an unreadable cache should make it offer
