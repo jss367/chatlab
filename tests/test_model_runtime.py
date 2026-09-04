@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 import tempfile
 import types
 import unittest
@@ -1840,8 +1841,21 @@ class MemoryGuardTests(unittest.TestCase):
 
     GB = 1024**3
 
+    def _sparse_snapshot(self, name: str, size: int) -> Path:
+        """A snapshot whose weights are as big as they claim without the bytes.
+
+        The guard reads sizes, never contents, so a hole stands in for the
+        tens of gigabytes a realistic checkpoint would otherwise write.
+        """
+
+        folder = self._snapshot({name: 1})
+        with (folder / name).open("r+b") as handle:
+            handle.truncate(size)
+        return folder
+
     def _snapshot(self, files: dict[str, int], index: dict | None = None) -> Path:
         folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
         for name, size in files.items():
             (folder / name).write_bytes(b"\0" * size)
         if index is not None:
@@ -1948,7 +1962,7 @@ class MemoryGuardTests(unittest.TestCase):
         torch = self._fake_torch((1, 1), failing=True)
         self.assertEqual(cuda_memory(torch), (None, None))
 
-    def _check_with(self, snapshot, backend, host, gpu):
+    def _check_with(self, snapshot, backend, host, gpu, ceiling=None):
         import model_runtime
         from model_runtime import ModelManager
 
@@ -1956,7 +1970,9 @@ class MemoryGuardTests(unittest.TestCase):
         model_runtime.system_memory = lambda: host
         model_runtime.cuda_memory = lambda torch=None: gpu
         try:
-            return ModelManager._check_memory("org/model", snapshot, "float16", backend)
+            return ModelManager._check_memory(
+                "org/model", snapshot, "float16", backend, ceiling=ceiling
+            )
         finally:
             model_runtime.system_memory, model_runtime.cuda_memory = saved
 
@@ -2011,30 +2027,177 @@ class MemoryGuardTests(unittest.TestCase):
         with self.assertRaises(InsufficientMemoryError):
             self._check_with(snapshot, "mps", host=host, gpu=(8 * self.GB, 8 * self.GB))
 
+    def test_the_metal_ceiling_is_part_of_the_fit_check(self):
+        # A model can fit the machine and still not fit the allocator's half
+        # of it. Refusing here saves reading the whole checkpoint off disk
+        # only for .to("mps") to fail.
+        from model_runtime import InsufficientMemoryError
+
+        snapshot = self._sparse_snapshot("model.safetensors", 25 * self.GB)
+        idle = (48 * self.GB, 40 * self.GB)
+
+        # Without a ceiling an idle 48 GB machine takes it.
+        estimated, _ = self._check_with(snapshot, "mps", host=idle, gpu=(None, None))
+        self.assertEqual(estimated, 25 * self.GB)
+
+        with self.assertRaises(InsufficientMemoryError) as refused:
+            self._check_with(
+                snapshot, "mps", host=idle, gpu=(None, None), ceiling=24 * self.GB
+            )
+        message = str(refused.exception)
+        self.assertIn("Metal on this machine", message)
+        self.assertIn("24.0 GB", message)
+
+    def test_a_refused_load_is_recorded(self):
+        # The refusal is the outcome most worth explaining afterwards, and the
+        # caller turns it into a status card the log never sees.
+        from model_runtime import InsufficientMemoryError
+
+        snapshot = self._sparse_snapshot("model.safetensors", 8 * self.GB)
+        with self.assertLogs("model_runtime", level="WARNING") as logged:
+            with self.assertRaises(InsufficientMemoryError):
+                self._check_with(
+                    snapshot, "cpu", host=(32 * self.GB, 2 * self.GB), gpu=(None, None)
+                )
+        (line,) = [entry for entry in logged.output if "Refused" in entry]
+        self.assertIn("org/model", line)
+        self.assertIn("8.0 GB estimated", line)
+        self.assertIn("2.0 GB free", line)
+
     def test_the_check_reports_the_memory_it_expects_the_weights_to_take(self):
         # The figure a load counts its own progress towards, so the two can
         # never disagree about how much there is to do.
         snapshot = self._snapshot({"model.safetensors": 4096})
         (snapshot / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
 
-        estimated = self._check_with(
+        estimated, available = self._check_with(
             snapshot, "cpu", host=(32 * self.GB, 32 * self.GB), gpu=(None, None)
         )
 
         self.assertEqual(estimated, 4096, "bfloat16 weights loaded as float16")
-        self.assertIsNone(
+        # The second figure is what the decision was judged against, which is
+        # what the load then records.
+        self.assertEqual(available, 32 * self.GB)
+        self.assertEqual(
             self._check_with(
                 self._snapshot({"config.json": 2}),
                 "cpu",
                 host=(32 * self.GB, 32 * self.GB),
                 gpu=(None, None),
             ),
-            "an unmeasurable snapshot has no figure to report",
+            (None, None),
+            "an unmeasurable snapshot has no figures to report",
         )
 
     def test_an_unmeasurable_snapshot_is_left_to_the_loader(self):
         snapshot = self._snapshot({"config.json": 2})
         self._check_with(snapshot, "cpu", host=(1, 1), gpu=(1, 1))
+
+
+class DarwinAvailableMemoryTests(unittest.TestCase):
+    """What counts as free is what can be handed over without paging.
+
+    ``vm_stat``'s counters overlap and none of them measures the one thing
+    wanted here, so these tests are about never claiming a page twice and
+    never claiming one that needs swap.
+    """
+
+    # A real reading from a 48 GB Mac deep in swap, where the inactive queue
+    # is smaller than the machine's anonymous total and so could be all
+    # dirty anonymous pages.
+    VM_STAT = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   147787.
+Pages active:                                 961343.
+Pages inactive:                              1031471.
+Pages speculative:                            149733.
+Pages throttled:                                   0.
+Pages wired down:                             277525.
+Pages purgeable:                               73270.
+File-backed pages:                            925706.
+Anonymous pages:                             1440383.
+"""
+    DISJOINT = 147787 + 149733 + 73270
+
+    def _available(self, output):
+        import model_runtime
+
+        saved = model_runtime._run_quietly
+        model_runtime._run_quietly = lambda command: output
+        try:
+            return model_runtime._darwin_available_memory()
+        finally:
+            model_runtime._run_quietly = saved
+
+    def _swap(self, label, value):
+        return re.sub(rf"{label}:\s*\d+\.", f"{label}: {value}.", self.VM_STAT)
+
+    def test_free_read_ahead_and_purgeable_pages_count_in_full(self):
+        # The three that do not overlap each other. Purgeable pages sit
+        # inside the active and inactive queues, but purgeable memory is
+        # anonymous, so they never overlap the file-page credit below.
+        self.assertEqual(self._available(self.VM_STAT), self.DISJOINT * 16384)
+
+    def test_an_inactive_queue_that_could_be_all_anonymous_credits_nothing(self):
+        # Reclaiming a dirty anonymous page means writing it to swap, which
+        # is the freeze this figure exists to prevent. memory_pressure counts
+        # the queue whole and reported 87% of this machine free while its
+        # swap was nearly full.
+        counted = self._available(self.VM_STAT)
+        self.assertLess(counted, (self.DISJOINT + 1031471) * 16384)
+        self.assertEqual(counted, self.DISJOINT * 16384)
+
+    def test_the_part_of_the_queue_that_must_be_file_pages_is_credited(self):
+        # The queue cannot hold more anonymous pages than the machine has, so
+        # the excess is file pages and reclaimable without swap.
+        machine = self._swap("Anonymous pages", 400000)
+        self.assertEqual(
+            self._available(machine), (self.DISJOINT + 1031471 - 400000) * 16384
+        )
+
+    def test_the_file_backed_total_is_not_used_as_a_bound(self):
+        # It counts active file pages too, and vm_stat does not say how many,
+        # so it cannot bound the inactive queue. Changing it changes nothing.
+        self.assertEqual(
+            self._available(self._swap("File-backed pages", 5)),
+            self._available(self.VM_STAT),
+        )
+
+    def test_an_exhausted_machine_answers_zero_rather_than_unknown(self):
+        # None means unmeasured, and an unmeasured machine is let through. A
+        # machine with nothing left must not read as one of those.
+        empty = re.sub(r"(Pages|File-backed pages|Anonymous pages)(.*?):\s*\d+\.", r"\1\2: 0.", self.VM_STAT)
+        self.assertEqual(self._available(empty), 0)
+
+    def test_output_without_a_page_size_says_nothing(self):
+        self.assertIsNone(self._available("nothing useful here"))
+
+    def test_output_without_any_counters_says_nothing(self):
+        self.assertIsNone(self._available("Mach Virtual Memory Statistics: (page size of 16384 bytes)"))
+
+
+class FirstLineTests(unittest.TestCase):
+    """A backend that raises with nothing to say must not take the run down."""
+
+    def test_the_first_line_is_quoted_and_clipped(self):
+        from model_runtime import first_line
+
+        self.assertEqual(first_line(RuntimeError("boom\ndetail")), "boom")
+        self.assertEqual(len(first_line(RuntimeError("x" * 500))), 200)
+
+    def test_a_message_less_error_names_its_type_instead(self):
+        # MemoryError() is the one that turns up under memory pressure, and
+        # indexing the first line of an empty message is how a memory failure
+        # becomes an IndexError somewhere else entirely.
+        from model_runtime import first_line, out_of_memory_message
+
+        self.assertEqual(first_line(MemoryError()), "no message from MemoryError")
+        self.assertIn("MemoryError", out_of_memory_message(MemoryError()))
+
+    def test_a_message_less_error_still_reaches_the_caller_as_one(self):
+        from model_runtime import OutOfMemoryError, _reraise_out_of_memory
+
+        with self.assertRaises(OutOfMemoryError):
+            _reraise_out_of_memory(MemoryError())
 
 
 class MetalCapTests(unittest.TestCase):
@@ -2055,11 +2218,27 @@ class MetalCapTests(unittest.TestCase):
             else:
                 os.environ[key] = value
 
-    def test_the_default_caps_at_the_recommended_working_set(self):
-        from model_runtime import DEFAULT_MPS_MEMORY_FRACTION, mps_memory_fraction
+    def test_the_default_caps_at_half_the_machine(self):
+        from model_runtime import mps_memory_fraction
 
-        self.assertEqual(mps_memory_fraction(), DEFAULT_MPS_MEMORY_FRACTION)
-        self.assertEqual(DEFAULT_MPS_MEMORY_FRACTION, 1.0)
+        # A 48 GB Mac whose Metal recommendation is 37.44 GiB: half the
+        # machine is 24 GB, which is 0.64 of what Metal would allow.
+        total, recommended = 48 * 1000**3, int(37.44 * 1024**3)
+        fraction = mps_memory_fraction(recommended, total)
+        self.assertAlmostEqual(recommended * fraction / 1000**3, 24.0, places=1)
+
+    def test_the_default_never_exceeds_what_metal_offers(self):
+        from model_runtime import mps_memory_fraction
+
+        # A machine whose Metal recommendation is already below half of it.
+        self.assertEqual(mps_memory_fraction(4 * 1024**3, 64 * 1024**3), 1.0)
+
+    def test_unknown_figures_take_half_of_the_recommendation(self):
+        from model_runtime import FALLBACK_MPS_MEMORY_FRACTION, mps_memory_fraction
+
+        self.assertEqual(mps_memory_fraction(), FALLBACK_MPS_MEMORY_FRACTION)
+        self.assertEqual(mps_memory_fraction(None, 48 * 1024**3), 0.5)
+        self.assertEqual(mps_memory_fraction(37 * 1024**3, None), 0.5)
 
     def test_the_environment_overrides_the_default(self):
         import os
@@ -2093,7 +2272,7 @@ class MetalCapTests(unittest.TestCase):
             os.environ["CHATLAB_MPS_MEMORY_FRACTION"] = raw
             self.assertIsNone(mps_memory_fraction(), raw)
         os.environ["CHATLAB_MPS_MEMORY_FRACTION"] = "lots"
-        self.assertEqual(mps_memory_fraction(), 1.0)
+        self.assertEqual(mps_memory_fraction(), 0.5)
 
     def test_a_user_set_pytorch_watermark_stands(self):
         import os
@@ -2108,10 +2287,23 @@ class MetalCapTests(unittest.TestCase):
 
         from model_runtime import ModelManager
 
+        import model_runtime
+
         applied = []
-        fake_torch = SimpleNamespace(mps=SimpleNamespace(set_per_process_memory_fraction=applied.append))
-        ModelManager._cap_mps_memory(fake_torch)
-        self.assertEqual(applied, [1.0])
+        recommended = 32 * 1024**3
+        fake_torch = SimpleNamespace(
+            mps=SimpleNamespace(
+                set_per_process_memory_fraction=applied.append,
+                recommended_max_memory=lambda: recommended,
+            )
+        )
+        ceiling = ModelManager._cap_mps_memory(fake_torch)
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(ceiling, int(recommended * applied[0]))
+        # Never more than half the machine, whatever Metal recommends.
+        total = model_runtime.system_memory()[0]
+        if total:
+            self.assertLessEqual(ceiling, total // 2 + 1)
 
     def test_a_torch_without_the_setter_is_tolerated(self):
         from types import SimpleNamespace

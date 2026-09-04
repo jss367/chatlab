@@ -1395,9 +1395,41 @@ class PageLayoutTests(unittest.TestCase):
         # page load: each ends in a rescan.
         self.assertEqual(len(self.listeners("refresh_my_models")), 9)
 
+    def test_every_load_reads_the_my_models_selection(self):
+        # The ID box lags a row selection by a server round trip, so a button
+        # clicked in that window would act on the box's previous contents -
+        # the 15 GB default. Each load takes the radio as well and prefers it.
+        radio = self.labelled("Downloaded models")
+        for name in ("load_cached_model", "download_model", "download_and_load_model"):
+            (fn,) = self.listeners(name)
+            self.assertIn(radio, fn.inputs, name)
+
+    def test_a_picked_row_outranks_the_id_box(self):
+        # A click's inputs are snapshotted in the browser, and a row reaches
+        # the box only through a server round trip, so the box a button
+        # carries can still hold the 15 GB default while the radio is
+        # current. The radio therefore wins whenever there is one.
+        self.assertEqual(
+            app.chosen_model(settings.DEFAULT_MODEL_ID, "org/picked"), "org/picked"
+        )
+        self.assertEqual(app.chosen_model("", "org/picked"), "org/picked")
+        # With no row picked the typed ID is all there is.
+        self.assertEqual(app.chosen_model("  org/typed  ", None), "org/typed")
+        self.assertEqual(app.chosen_model("", None), "")
+
+    def test_naming_a_model_another_way_withdraws_the_selection(self):
+        # Typing an ID or picking a search result names its own model, so the
+        # highlighted row cannot outrank it.
+        listeners = self.listeners("clear_my_model_selection")
+        self.assertEqual(len(listeners), 2)
+        radio = self.labelled("Downloaded models")
+        for fn in listeners:
+            self.assertIn(radio, fn.outputs)
+
     def test_removal_asks_before_deleting(self):
         # The Remove button only opens the question; deleting is the
-        # confirm button's job, and choosing another model withdraws it.
+        # confirm button's job. Cancelling withdraws it, and so does naming
+        # another model, whether by choosing a row or by typing an ID.
         (ask,) = self.listeners("ask_remove_my_model")
         (remove,) = self.listeners("remove_my_model")
         buttons = {
@@ -1407,7 +1439,7 @@ class PageLayoutTests(unittest.TestCase):
         }
         self.assertIs(buttons["🗑️ Remove"], ask)
         self.assertIs(buttons["Remove from disk"], remove)
-        self.assertEqual(len(self.listeners("hide_remove_confirm")), 2)
+        self.assertEqual(len(self.listeners("hide_remove_confirm")), 3)
 
     def test_the_confirm_button_deletes_the_model_the_question_named(self):
         # The confirm handler reads the stored pending ID, not the radio, so

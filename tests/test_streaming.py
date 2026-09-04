@@ -324,6 +324,99 @@ class GenerateStreamingTests(unittest.TestCase):
         self.assertFalse(manager.busy)
         self.assertTrue(self.collect(manager, load_id=manager.load_id))
 
+    def test_every_response_is_recorded_once(self):
+        # The log is the only record of what a response cost, and it is what
+        # makes a later memory failure readable. One line, never one a token.
+        manager = loaded_manager([0, 1, EOS_ID])
+        with self.assertLogs("model_runtime", level="INFO") as logged:
+            self.collect(manager, max_new_tokens=40)
+        lines = [line for line in logged.output if "Generated" in line]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("3 tokens of at most 40", lines[0])
+
+    def test_a_replayed_prefix_is_not_counted_as_generated(self):
+        # A branch replays its prefix through the model and carries it in
+        # metrics, but max_new_tokens bounds the continuation alone, so
+        # counting both would log "3 tokens of at most 1".
+        manager = loaded_manager([0, 1, 2, EOS_ID])
+        with self.assertLogs("model_runtime", level="INFO") as logged:
+            for _ in manager.generate(
+                [{"role": "user", "content": "hi"}],
+                temperature=0.0,
+                top_p=1.0,
+                top_k=0,
+                max_new_tokens=1,
+                seed=1,
+                forced_ids=[0, 1],
+                load_id=manager.load_id,
+            ):
+                pass
+        (line,) = [entry for entry in logged.output if "Generated" in entry]
+        self.assertIn("1 tokens of at most 1", line)
+
+    def test_a_run_that_fails_before_its_first_update_still_names_the_model(self):
+        # Prefill is where a memory failure is most likely, and nothing has
+        # been published by then, so the model and prompt size cannot come
+        # from an update.
+        manager = loaded_manager([0, 1, EOS_ID])
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("MPS backend out of memory")
+
+        manager._prefill = explode
+        with self.assertLogs("model_runtime", level="INFO") as logged:
+            with self.assertRaises(model_runtime.OutOfMemoryError):
+                for _ in manager.generate(
+                    [{"role": "user", "content": "hi"}],
+                    temperature=0.0,
+                    top_p=1.0,
+                    top_k=0,
+                    max_new_tokens=8,
+                    seed=1,
+                ):
+                    pass
+        (line,) = [entry for entry in logged.output if "Generated" in entry]
+        self.assertIn("fake/model", line)
+        self.assertNotIn("unknown prompt tokens", line)
+
+    def test_the_device_figure_is_read_before_the_model_lock_goes(self):
+        # A load queued behind a response takes the lock the moment it is
+        # free. Measuring after that reports the load's allocation, or zero
+        # if it unloaded first, rather than what the response cost.
+        manager = loaded_manager([0, 1, EOS_ID])
+        held = []
+
+        def watched(torch=None):
+            held.append(manager._lock.locked())
+            return 3 * 1024**3
+
+        saved = model_runtime.reserved_bytes
+        model_runtime.reserved_bytes = watched
+        self.addCleanup(setattr, model_runtime, "reserved_bytes", saved)
+
+        with self.assertLogs("model_runtime", level="INFO") as logged:
+            self.collect(manager, max_new_tokens=8)
+
+        self.assertTrue(held, "the figure was never read")
+        self.assertTrue(all(held), "read after the lock was released")
+        (line,) = [entry for entry in logged.output if "Generated" in entry]
+        self.assertIn("3.0 GB held on the device", line)
+
+    def test_a_stopped_response_is_still_recorded(self):
+        manager = loaded_manager([0, 1, 2, 4, 5, 6, 7, 2])
+        stream = manager.generate(
+            [{"role": "user", "content": "hi"}],
+            temperature=0.0,
+            top_p=1.0,
+            top_k=0,
+            max_new_tokens=40,
+            seed=1,
+        )
+        next(stream)
+        with self.assertLogs("model_runtime", level="INFO") as logged:
+            stream.close()
+        self.assertTrue(any("Generated" in line for line in logged.output))
+
     def test_updates_are_batched(self):
         manager = loaded_manager([0, 1, 2, 4, 5, 6, 7, 2])
         updates = self.collect(manager, max_new_tokens=40)
