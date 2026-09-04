@@ -2449,6 +2449,42 @@ class CountScoreTokensTests(unittest.TestCase):
     def test_nothing_loaded_has_no_answer_rather_than_a_wrong_one(self):
         self.assertIsNone(ModelManager().count_score_tokens("one two"))
 
+    def test_the_encoding_does_not_run_under_the_model_lock(self):
+        # The lock is held only to read the tokenizer, the limit and the load
+        # they belong to. Encoding under it was the real hazard: a generation
+        # claims its slot before it goes for the lock, so a keystroke landing
+        # in that window could keep a reply waiting for as long as tokenizing
+        # a large paste took.
+        manager = self.manager()
+        held = []
+
+        class WatchesTheLock(FakeTokenizer):
+            def __call__(self, text, **kwargs):
+                held.append(manager._lock.locked())
+                return super().__call__(text, **kwargs)
+
+        manager.tokenizer = WatchesTheLock()
+
+        self.assertIsNotNone(manager.count_score_tokens("one two"))
+
+        self.assertTrue(held, "the tokenizer was never asked")
+        self.assertFalse(any(held), "the lock was held while encoding")
+        self.assertFalse(manager._lock.locked())
+
+    def test_a_load_landing_mid_count_throws_the_count_away(self):
+        # Encoding outside the lock means the weights can change under it,
+        # and a number from the wrong tokenizer is worse than no number.
+        manager = self.manager()
+
+        class LoadsUnderneath(FakeTokenizer):
+            def __call__(self, text, **kwargs):
+                manager.load_count += 1
+                return super().__call__(text, **kwargs)
+
+        manager.tokenizer = LoadsUnderneath()
+
+        self.assertIsNone(manager.count_score_tokens("one two"))
+
     def test_a_reserved_generation_is_not_talked_over(self):
         # A generation claims the slot before it goes for the model lock, so
         # in between the lock is free. Taking it then would tokenize however

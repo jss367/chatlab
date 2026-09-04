@@ -817,7 +817,19 @@ def model_badge(state: str, text: str) -> str:
     )
 
 
-def loaded_model_badge() -> str:
+def model_snapshot() -> tuple[str | None, str | None, str | None]:
+    """The load under way, the model in memory, and its device, read once.
+
+    One reading, because the three move together and a caller that asks
+    twice can be told two different stories: a load finishing between two
+    questions leaves nothing loading and nothing loaded, which is neither
+    true before nor after.
+    """
+
+    return MANAGER.loading_id, MANAGER.model_id, MANAGER.device_name
+
+
+def loaded_model_badge(snapshot=None) -> str:
     """Name the model in memory, the one being loaded, or neither.
 
     A model in memory is named ahead of any load. A load counts itself as
@@ -833,12 +845,14 @@ def loaded_model_badge() -> str:
     Each attribute is read once and kept rather than asked again to fill in
     the text: a load can finish, or empty memory, between two reads, which
     would leave the badge saying "Loading None" or naming a model loaded on
-    None.
+    None. ``snapshot`` is how a caller that has to agree with this badge
+    about something else shares the one reading; see
+    :func:`refresh_model_badge`.
     """
 
-    loading = MANAGER.loading_id
-    model_id = MANAGER.model_id
-    device = MANAGER.device_name
+    loading, model_id, device = (
+        model_snapshot() if snapshot is None else snapshot
+    )
     if model_id and device:
         return model_badge("ready", f"{model_id} · loaded on {device}")
     if loading:
@@ -870,10 +884,19 @@ def refresh_model_badge():
     calls this is what keeps the answer current in every open tab.
     """
 
-    have_model = MANAGER.loaded or MANAGER.loading_id
-    if have_model:
+    snapshot = model_snapshot()
+    loading, model_id, device = snapshot
+    # The badge and the buttons decide from one reading, and from the same
+    # condition, so what is on screen cannot disagree with itself. Asking the
+    # manager twice let a load finishing in between answer "nothing loading"
+    # and "nothing loaded" to two questions that were both about to be true:
+    # the badge, rendered afterwards, then read the finished load and said
+    # ready, beside an offer still inviting a press that would replace the
+    # model that had just arrived - and the timer only comes round again two
+    # seconds later.
+    if (model_id and device) or loading:
         hidden = gr.update(visible=False)
-        return loaded_model_badge(), hidden, hidden
+        return loaded_model_badge(snapshot), hidden, hidden
     if MANAGER.is_downloading(settings.DEFAULT_MODEL_ID):
         offer = gr.update(
             visible=True,
@@ -884,7 +907,7 @@ def refresh_model_badge():
         offer = gr.update(
             visible=True, interactive=True, value=default_model_offer()
         )
-    return loaded_model_badge(), offer, gr.update(visible=True)
+    return loaded_model_badge(snapshot), offer, gr.update(visible=True)
 
 
 def go_to_models():
