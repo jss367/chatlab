@@ -4810,15 +4810,23 @@ def build_app() -> gr.Blocks:
         )
         enter_sends.change(set_message_box_keys, enter_sends, prompt)
 
-        # The sampling accordion wears its own values. On release rather than
-        # on change: a slider fires continuously while it is being dragged,
-        # and the label only has to be right once it is let go.
+        # The sampling accordion wears its own values.
+        #
+        # On change rather than on release, even though a slider fires
+        # continuously while it is dragged. Gradio dispatches release from
+        # pointerup alone, so a slider moved with the arrow keys - which is
+        # how it is moved without a mouse - changes its value and never
+        # reports a release, and the summary would sit there describing the
+        # settings as they were. always_last is what makes change affordable
+        # instead: a drag's worth of them collapses to the one that matters,
+        # and the label only has to be right once the slider stops.
         sampling_controls = [temperature, top_p, top_k, max_new_tokens]
         for control in sampling_controls:
-            control.release(
+            control.change(
                 update_sampling_label,
                 sampling_controls,
                 sampling_accordion,
+                trigger_mode="always_last",
                 show_progress="hidden",
             )
 

@@ -1660,7 +1660,7 @@ class PageLayoutTests(unittest.TestCase):
             self.labelled("Maximum new tokens").maximum, saved.prefill_token_limit
         )
 
-    def test_the_sampling_summary_follows_the_sliders_on_release(self):
+    def test_the_sampling_summary_follows_every_slider(self):
         # A slider fires continuously while it is dragged; the label only has
         # to be right once it is let go.
         sliders = [
@@ -1668,17 +1668,36 @@ class PageLayoutTests(unittest.TestCase):
             for label in ("Temperature", "Top-p", "Top-k (0 disables)", "Maximum new tokens")
         ]
         listeners = self.listeners("update_sampling_label")
-        released = [fn for fn in listeners if fn.targets[0][1] == "release"]
+        # A page load's target has no block, so look the ids up by hand.
+        by_id = {slider._id: slider for slider in sliders}
+        moved = [fn for fn in listeners if fn.targets[0][0] in by_id]
 
-        self.assertEqual(
-            [self.demo.blocks[fn.targets[0][0]] for fn in released], sliders
-        )
+        self.assertEqual([by_id[fn.targets[0][0]] for fn in moved], sliders)
         for fn in listeners:
             self.assertEqual(fn.inputs, sliders)
         # The other three are the paths that move a slider without anyone
         # touching it: the settings file read back on load, and the context
         # limit committed, which can pull the response length down with it.
-        self.assertEqual(len(listeners) - len(released), 3)
+        self.assertEqual(len(listeners) - len(moved), 3)
+
+    def test_the_sampling_summary_follows_a_slider_moved_by_keyboard(self):
+        # Gradio dispatches release from pointerup alone, so a slider moved
+        # with the arrow keys - which is how it is moved without a mouse -
+        # changes its value and never reports a release. Listening for
+        # release would leave the summary describing the old settings for
+        # anyone not using a pointer.
+        sliders = {
+            self.labelled(label)._id
+            for label in ("Temperature", "Top-p", "Top-k (0 disables)", "Maximum new tokens")
+        }
+
+        for fn in self.listeners("update_sampling_label"):
+            block_id, event = fn.targets[0]
+            if block_id in sliders:
+                with self.subTest(slider=self.demo.blocks[block_id].label):
+                    self.assertEqual(event, "change")
+                    # A drag fires change on every step, so they coalesce.
+                    self.assertEqual(fn.trigger_mode, "always_last")
 
     def test_the_scored_token_count_follows_every_box_that_feeds_it(self):
         # The count has to match what would actually be scored, so a change
