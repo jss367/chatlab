@@ -161,20 +161,34 @@ def alarm(title: str, detail: str) -> None:
     warnings for failures alone and CSS paints them in the error colors. The
     toast stays until it is closed, because the point is that a reader who
     stepped away still learns why the response stopped.
+
+    The toast writes ``detail`` into the page as markup, so what arrives here
+    is already escaped - a runtime that says it could not read ``<pad>``
+    would otherwise lose the word. The title is written as text and is the
+    application's own wording, so it is passed through as it is.
     """
 
     gr.Warning(detail, title=title, duration=None)
 
 
 def failure_status(title: str, detail: str) -> str:
-    """A red status line that stays, and the toast that announces it."""
+    """A red status line that stays, and the toast that announces it.
 
-    alarm(title, detail)
-    return f'<div class="failure">{html.escape(f"{title}: {detail}")}</div>'
+    Both take the failure as plain text and escape it once, here.
+    """
+
+    safe = html.escape(f"{title}: {detail}")
+    alarm(title, html.escape(detail))
+    return f'<div class="failure">{safe}</div>'
 
 
 def failure_card(title: str, detail: str) -> str:
-    """A red status card, and the toast that announces it."""
+    """A red status card, and the toast that announces it.
+
+    ``detail`` is markdown the caller has already made safe, because a card
+    spells out file names in backticks and draws bars out of block
+    characters. Both the card and the toast render it as it is given.
+    """
 
     alarm(title, detail)
     return status_card(title, detail, "error")

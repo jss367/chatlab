@@ -154,14 +154,17 @@ class FailureReportTests(unittest.TestCase):
             "out of memory", title="Generation failed", duration=None
         )
 
-    def test_the_line_reads_an_angle_bracket_as_text(self):
+    def test_an_angle_bracket_survives_both_the_line_and_the_toast(self):
         # Error messages quote what the reader typed and what the runtime
-        # printed. Neither is markup.
-        with mock.patch.object(app.gr, "Warning"):
-            line = app.failure_status("Could not score that text", "<b>hi</b>")
+        # printed, and neither is markup. The toast writes its message into
+        # the page as markup, so an unescaped "cannot read <pad>" would show
+        # up with the word missing.
+        with mock.patch.object(app.gr, "Warning") as toast:
+            line = app.failure_status("Could not score that text", "no <pad> here")
 
-        self.assertIn("&lt;b&gt;hi&lt;/b&gt;", line)
-        self.assertNotIn("<b>", line)
+        self.assertIn("no &lt;pad&gt; here", line)
+        self.assertNotIn("<pad>", line)
+        self.assertEqual(toast.call_args.args[0], "no &lt;pad&gt; here")
 
     def test_a_failure_card_pops_up_and_is_tinted(self):
         with mock.patch.object(app.gr, "Warning") as toast:
