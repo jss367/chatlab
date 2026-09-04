@@ -266,6 +266,38 @@ class ProcessSettingsTests(unittest.TestCase):
         self.assertEqual(settings.current().temperature, 0.2)
         self.assertEqual(self.saved()["temperature"], 0.2)
 
+    def test_a_reload_that_overlaps_a_change_leaves_the_file_and_memory_agreeing(self):
+        """A page load restores the settings while the controls can change them.
+
+        A reload that read the file just before a change was written must not
+        install what it read over the newer settings, or the app runs on one
+        set of values while the file holds another.
+        """
+
+        settings.update(temperature=0.3)
+        real_read = settings.read
+
+        def slow_read(path=None):
+            # The file is captured first and the delay follows, which is the
+            # order that makes what was read stale by the time it lands.
+            captured = real_read(path)
+            time.sleep(0.2)
+            return captured
+
+        with mock.patch.object(settings, "read", slow_read):
+            reload = threading.Thread(target=settings.load)
+            reload.start()
+            time.sleep(0.05)
+            change = threading.Thread(
+                target=settings.update, kwargs={"temperature": 0.7}
+            )
+            change.start()
+            reload.join()
+            change.join()
+
+        self.assertEqual(settings.current().temperature, 0.7)
+        self.assertEqual(self.saved()["temperature"], 0.7)
+
     def test_a_change_that_changes_nothing_is_not_written(self):
         settings.update(temperature=0.2)
         before = self.path.stat().st_mtime_ns

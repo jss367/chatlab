@@ -314,11 +314,19 @@ def current() -> Settings:
 
 
 def load() -> Settings:
-    """Re-read the settings file and make it what the process runs under."""
+    """Re-read the settings file and make it what the process runs under.
+
+    The read and the publication are one critical section, as the read, the
+    merge and the write are in :func:`update`. A page load restoring the
+    settings runs alongside the controls that change them, and one that read
+    the file just before a change was written must not then install what it
+    read over the newer settings and leave the file and the running app
+    disagreeing.
+    """
 
     global _current, _unknown
-    loaded, unknown = read()
     with _lock:
+        loaded, unknown = read()
         _current = loaded
         _unknown = dict(unknown)
     return loaded
