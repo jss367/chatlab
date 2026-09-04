@@ -828,32 +828,30 @@ def loaded_model_badge() -> str:
     loading = MANAGER.loading_id
     model_id = MANAGER.model_id
     device = MANAGER.device_name
-    downloading = next(iter(MANAGER.active_downloads), None)
     if model_id and device:
         return model_badge("ready", f"{model_id} · loaded on {device}")
     if loading:
         return model_badge("loading", f"Loading {loading}…")
-    # A download is setup under way as much as a load is, and the long one:
-    # nothing is in memory and nothing is being read into it for as long as
-    # the files are still arriving, so without this the badge would report
-    # an empty machine through the whole of a 15 GB fetch.
-    if downloading:
-        return model_badge("loading", f"Downloading {downloading}…")
     return model_badge("empty", NO_MODEL_BADGE)
 
 
 def refresh_model_badge():
     """The badge, plus the two buttons that only show while there is no model.
 
-    A load in progress hides them too: the Models page is already busy
-    bringing that model in, so offering to start one would suggest work that
-    is under way needs starting. So does a download, which is the longer
-    half of the same job and the one nothing else would report here - the
-    manager sets ``loading_id`` only once the files are all in and the
-    weights start being read, so a 15 GB fetch would otherwise leave the
-    offer up for its whole duration. Pressing it again then queues a second
-    setup behind the first, which finds a complete cache when its turn comes
-    and unloads and reloads the model the first one just brought in.
+    A load in progress hides them: the Models page is already busy bringing
+    that model in, so offering to start one would suggest work that is under
+    way needs starting.
+
+    A download is different, and only the offer cares about it. The manager
+    sets ``loading_id`` only once the files are all in and the weights start
+    being read, so a 15 GB fetch would otherwise leave the offer up for its
+    whole duration, and pressing it again would queue a second setup behind
+    the first. But the offer is disabled rather than taken away, and only
+    for a download of the model it offers: **Download** and **Redownload**
+    on the Models page fetch without loading anything, and can be a long
+    fetch of some quite different model, which is no reason to take the way
+    out of an empty chat page off the screen. Saying what the button is
+    waiting for beats it vanishing, too.
 
     The offer's label is re-read here rather than baked in at build time,
     because what pressing it would do depends on what is on disk, and a
@@ -861,15 +859,21 @@ def refresh_model_badge():
     calls this is what keeps the answer current in every open tab.
     """
 
-    have_model = MANAGER.loaded or MANAGER.loading_id or MANAGER.active_downloads
-    hidden = gr.update(visible=not have_model)
+    have_model = MANAGER.loaded or MANAGER.loading_id
     if have_model:
+        hidden = gr.update(visible=False)
         return loaded_model_badge(), hidden, hidden
-    return (
-        loaded_model_badge(),
-        gr.update(visible=True, value=default_model_offer()),
-        gr.update(visible=True),
-    )
+    if MANAGER.is_downloading(settings.DEFAULT_MODEL_ID):
+        offer = gr.update(
+            visible=True,
+            interactive=False,
+            value="⏳ Downloading the default model…",
+        )
+    else:
+        offer = gr.update(
+            visible=True, interactive=True, value=default_model_offer()
+        )
+    return loaded_model_badge(), offer, gr.update(visible=True)
 
 
 def go_to_models():

@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -1137,30 +1138,61 @@ class ModelBadgeTests(unittest.TestCase):
         self.assertTrue(offer["visible"])
         self.assertEqual(offer["value"], app.default_model_offer())
 
-    def test_a_download_under_way_is_reported_and_takes_the_offer_away(self):
-        # A download is setup under way as much as a load, and the long one:
+    def test_the_offer_waits_out_a_download_of_its_own_model(self):
         # loading_id is only set once the files are all in, so a 15 GB fetch
-        # would otherwise leave the badge saying nothing is loaded and the
-        # offer sitting there inviting a second press of the same job.
-        self.manager.active_downloads[OLMO] = object()
+        # would otherwise leave the offer live for its whole duration and a
+        # second press would queue a second setup behind the first. It is
+        # disabled rather than taken away: a button that says what it is
+        # waiting for beats one that vanishes.
+        self.manager.active_downloads[settings.DEFAULT_MODEL_ID] = object()
 
-        badge, offer, button = app.refresh_model_badge()
+        _badge, offer, button = app.refresh_model_badge()
 
-        self.assertIn('data-state="loading"', badge)
-        self.assertIn(f"Downloading {OLMO}", badge)
-        self.assertFalse(offer["visible"])
-        self.assertFalse(button["visible"])
+        self.assertTrue(offer["visible"])
+        self.assertFalse(offer["interactive"])
+        self.assertIn("Downloading", offer["value"])
+        # The way to the Models page is never the thing to take away.
+        self.assertTrue(button["visible"])
 
-    def test_a_model_in_memory_outranks_a_download_of_another(self):
-        # The badge names what would answer a message now, and a fetch of
-        # something else does not change that.
-        self.load()
-        self.manager.active_downloads["org/other"] = object()
+    def test_a_download_of_another_model_leaves_the_offer_alone(self):
+        # Download and Redownload on the Models page fetch without loading
+        # anything, and can be a long fetch of some quite different model.
+        # That is no reason to disable the way out of an empty chat page.
+        self.manager.active_downloads["org/something-else"] = object()
+
+        _badge, offer, button = app.refresh_model_badge()
+
+        self.assertTrue(offer["interactive"])
+        self.assertEqual(offer["value"], app.default_model_offer())
+        self.assertTrue(button["visible"])
+
+    def test_a_download_alone_does_not_claim_a_model_is_coming(self):
+        # Download only ends by telling the reader to load the cached model;
+        # nothing is read into memory. A badge saying "loading" would promise
+        # a model that never arrives and then fall back to "No model loaded".
+        self.manager.active_downloads[settings.DEFAULT_MODEL_ID] = object()
 
         badge, _offer, _button = app.refresh_model_badge()
 
-        self.assertIn('data-state="ready"', badge)
-        self.assertIn(OLMO, badge)
+        self.assertIn('data-state="empty"', badge)
+        self.assertIn(app.NO_MODEL_BADGE, badge)
+
+    def test_the_active_download_is_read_under_the_downloads_lock(self):
+        # A worker finishing removes its entry, and picking through the
+        # dictionary while that happens is how "changed size during
+        # iteration" is raised - at exactly the download-to-load moment.
+        self.manager._downloads_lock.acquire()
+        try:
+            held = threading.Thread(
+                target=lambda: self.manager.is_downloading(OLMO)
+            )
+            held.start()
+            held.join(timeout=0.2)
+            self.assertTrue(held.is_alive(), "the read did not wait for the lock")
+        finally:
+            self.manager._downloads_lock.release()
+        held.join(timeout=2)
+        self.assertFalse(held.is_alive())
 
     def test_a_load_under_way_names_the_model_coming_in(self):
         # model_id is cleared for the whole of a load, so the badge reads
