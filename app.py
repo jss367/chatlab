@@ -93,10 +93,10 @@ DOWNLOAD_POLL_SECONDS = 0.5
 RATE_WINDOW_SECONDS = 15.0
 
 DOWNLOAD_BAR_WIDTH = 24
-# The side pane's width in pixels: wide enough for a model ID and a slider
-# with its label, narrow enough to leave the conversation most of the screen.
-# The thin pane at the far left picks the page; the conversations pane beside
-# it shows with Chat only.
+# The two left panes' widths in pixels. The thin pane at the far left picks
+# the page and holds nothing but an icon per page; the conversations pane
+# beside it shows with Chat only, and is wide enough for a model ID and a
+# token count while leaving the conversation most of the screen.
 NAV_PANE_WIDTH = 56
 CONVERSATION_PANE_WIDTH = 340
 CHAT_PAGE, MODELS_PAGE, SETTINGS_PAGE = PAGES = ("Chat", "Models", "Settings")
