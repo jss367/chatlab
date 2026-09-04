@@ -994,11 +994,14 @@ class PageLayoutTests(unittest.TestCase):
         for page in app.PAGES:
             with self.subTest(page=page):
                 tile = f'#nav label[data-testid="{page}-radio-label"]'
+                # The empty alternative text keeps the icon and the tooltip
+                # out of what a screen reader reads for the tile.
                 self.assertIn(
-                    f'{tile}::before {{ content: "{app.NAV_ICONS[page]}"; }}', app.CSS
+                    f'{tile}::before {{ content: "{app.NAV_ICONS[page]}" / ""; }}',
+                    app.CSS,
                 )
                 self.assertIn(f"{tile}:hover::after", app.CSS)
-                self.assertIn(f'{{ content: "{page}"; }}', app.CSS)
+                self.assertIn(f'{{ content: "{page}" / ""; }}', app.CSS)
         # The name stays on the tile, out of sight, for the browser to read out.
         self.assertIn("#nav label span {", app.CSS)
 

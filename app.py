@@ -3036,12 +3036,18 @@ def reset_inspection(insight: dict | None):
 # One pair of rules per tile: the icon it shows, and the name it pops up.
 # Gradio stamps each option's text on its label as data-testid, which is the
 # only hook a Radio gives CSS.
+#
+# Both are drawn on the label, so both would otherwise join the radio's
+# accessible name and have a screen reader read "speech balloon Chat", or
+# "speech balloon Chat Chat" once the tooltip is up. The empty string after
+# the slash is the generated text's alternative text, which keeps the pair of
+# them out of the name and leaves the page's own name to stand for the tile.
 NAV_TILE_CSS = "\n".join(
     f'#nav label[data-testid="{name}-radio-label"]::before '
-    f'{{ content: "{NAV_ICONS[name]}"; }}\n'
+    f'{{ content: "{NAV_ICONS[name]}" / ""; }}\n'
     f'#nav label[data-testid="{name}-radio-label"]:hover::after,\n'
     f'#nav label[data-testid="{name}-radio-label"]:has(input:focus-visible)::after '
-    f'{{ content: "{name}"; }}'
+    f'{{ content: "{name}" / ""; }}'
     for name in PAGES
 )
 
