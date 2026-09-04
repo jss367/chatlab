@@ -1,4 +1,4 @@
-# Chatlab
+# ChatLab
 
 A local chat interface that shows what happened under the hood for every token, generated or not. Tokens are colored by whichever measurement you pick, and clicking one shows its probability, sampling probability, surprise, entropy, and the alternatives the model preferred.
 
@@ -55,7 +55,7 @@ same downloads.
 
 ### In Conductor
 
-Create a workspace for this repository. Its setup script creates the Python environment and installs the dependencies. Use the **Chatlab** action to start the app on the workspace's assigned port.
+Create a workspace for this repository. Its setup script creates the Python environment and installs the dependencies. Use the **ChatLab** action to start the app on the workspace's assigned port.
 
 ### From a terminal
 
@@ -76,14 +76,14 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Model files use the standard Hugging Face cache. Chatlab lists complete downloads and resumable partial downloads under **My Models** on the Models page. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
+Model files use the standard Hugging Face cache. ChatLab lists complete downloads and resumable partial downloads under **My Models** on the Models page. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
 
 ### Memory
 
 A model has to fit in memory with room to spare: the weights, the key-value
 cache that grows with every token of a conversation, the app itself, and the
 rest of the system all share it, and on Apple silicon the GPU draws from the
-same pool. Before reading any weights, Chatlab estimates the loaded size from
+same pool. Before reading any weights, ChatLab estimates the loaded size from
 the checkpoint and refuses a model that would not leave about 4 GB free,
 saying so in the status card instead of letting the machine page itself into a
 freeze. On CUDA the weights fill the graphics cards first and the rest is
@@ -120,13 +120,13 @@ The system prompt, assistant prefill, and reasoning options; the sampling, analy
 ### Assistant prefill
 
 Enter text in **Assistant prefill (optional)** to force every new reply to begin
-with those words. Chatlab measures the prefilled tokens against the model's own
+with those words. ChatLab measures the prefilled tokens against the model's own
 distribution, then resumes sampling after them. **Maximum new tokens** counts
 only the tokens sampled after the prefill, so the prefix does not reduce the
 requested continuation length.
 
 For a reasoning model whose chat template already opens a `<think>` block,
-Chatlab closes that block before replaying the prefill. The supplied text
+ChatLab closes that block before replaying the prefill. The supplied text
 therefore appears as the visible answer rather than hidden reasoning. Clear the
 field to return to ordinary generation. JSON metric exports record the supplied
 text as `assistant_prefill` and the replayed token count as
