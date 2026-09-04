@@ -503,6 +503,15 @@ def unload_model():
 # up as a refusal after a message had been typed and sent.
 NO_MODEL_BADGE = "No model loaded"
 
+# How often an open chat page asks again which model is in memory. The manager
+# is one object for the whole process, but a handler's updates only reach the
+# tab that ran it, so a second tab would go on naming a model that has since
+# been swapped out or unloaded. Asking on a timer is what keeps every tab
+# honest; a couple of seconds is short enough that nobody types a message
+# against a badge that has gone stale, and the question is a few attribute
+# reads.
+BADGE_REFRESH_SECONDS = 2.0
+
 
 def model_badge(state: str, text: str) -> str:
     """A pill naming the model in memory. ``state`` is the stylesheet's hook."""
@@ -3420,6 +3429,11 @@ def build_app() -> gr.Blocks:
                         elem_id="load-model",
                     )
 
+                # Nothing to see: the timer is what makes the badge tell every
+                # open tab about a load or unload, not just the one that asked
+                # for it. See BADGE_REFRESH_SECONDS.
+                badge_timer = gr.Timer(BADGE_REFRESH_SECONDS)
+
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=3):
                         with gr.Tabs():
@@ -3757,6 +3771,10 @@ def build_app() -> gr.Blocks:
         badge_outputs = [model_badge_view, load_model_button]
         nav.change(refresh_model_badge, None, badge_outputs)
         demo.load(refresh_model_badge, None, badge_outputs)
+        # And on a timer, so a tab that did not start the load hears about it
+        # too. demo.load stays: it draws the badge at once rather than leaving
+        # the value baked in when the page was built there for a tick.
+        badge_timer.tick(refresh_model_badge, None, badge_outputs)
         load_model_button.click(
             go_to_models,
             None,

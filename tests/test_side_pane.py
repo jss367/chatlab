@@ -1200,14 +1200,33 @@ class PageLayoutTests(unittest.TestCase):
 
     def test_every_change_to_what_is_in_memory_repaints_the_badge(self):
         # Download-and-load, load cached and unload change what is in memory;
-        # the page load draws the badge first, and switching pages catches a
-        # load that started while the chat page was out of sight.
+        # the page load draws the badge first, switching pages catches a load
+        # that started while the chat page was out of sight, and the timer
+        # catches one another tab started.
         listeners = self.listeners("refresh_model_badge")
-        self.assertEqual(len(listeners), 5)
+        self.assertEqual(len(listeners), 6)
         for listener in listeners:
             self.assertEqual(
                 listener.outputs, [self.by_id("model-badge"), self.by_id("load-model")]
             )
+
+    def test_the_badge_asks_again_on_a_timer(self):
+        # The manager is one object for the whole process, but a handler's
+        # updates only reach the tab that ran it. Without the timer a second
+        # tab would name a model that another tab has since swapped out.
+        timers = [
+            block
+            for block in self.demo.blocks.values()
+            if isinstance(block, gr.Timer)
+        ]
+        self.assertEqual([timer.value for timer in timers], [app.BADGE_REFRESH_SECONDS])
+        self.assertLessEqual(app.BADGE_REFRESH_SECONDS, 5)
+        ticks = [
+            listener
+            for listener in self.listeners("refresh_model_badge")
+            if listener.targets == [(timers[0]._id, "tick")]
+        ]
+        self.assertEqual(len(ticks), 1)
 
     def test_the_badge_button_sends_the_nav_to_the_models_page(self):
         (listener,) = self.listeners("go_to_models")
