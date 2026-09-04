@@ -577,6 +577,27 @@ def cuda_memory(torch=None) -> tuple[int | None, int | None]:
     return total, free
 
 
+def allocated_bytes(backend: str, torch=None) -> int | None:
+    """Bytes of live tensors on ``backend``'s device, or ``None`` where unknown.
+
+    CUDA and Metal each keep a running total in their allocator, which is how
+    far a load has got measured in bytes. Host memory keeps no such figure, so
+    a load onto the CPU is followed by the loader's own step count instead.
+    """
+
+    if torch is None:
+        import torch
+    try:
+        if backend == "cuda":
+            devices = range(int(torch.cuda.device_count()))
+            return sum(int(torch.cuda.memory_allocated(index)) for index in devices)
+        if backend == "mps":
+            return int(torch.mps.current_allocated_memory())
+    except (RuntimeError, AttributeError, ValueError, TypeError):
+        return None
+    return None
+
+
 def _sum_known(*figures: int | None) -> int | None:
     known = [figure for figure in figures if figure is not None]
     return sum(known) if known else None
@@ -1804,6 +1825,92 @@ class DownloadSnapshot(NamedTuple):
         return min(1.0, self.bytes_done / self.bytes_total)
 
 
+class LoadSnapshot(NamedTuple):
+    """One reading of a load: how much of the model is in memory yet.
+
+    Two measures of the same weights: ``steps_*`` is the loader's own count
+    of the ones it has read, ``bytes_done`` what the device allocator holds.
+    :attr:`fraction` averages the two, because each covers half of a load
+    onto Metal - the weights are read into host memory and copied across
+    afterwards - and on a graphics card, where one pass does both at once,
+    the average of two measures of that pass is still that pass.
+
+    A load into host memory has no bytes to report, there being no allocator
+    to ask, and counts in steps alone. ``bytes_total`` comes from the files,
+    so it runs a little ahead of what a loaded model really occupies (tied
+    weights are stored twice and loaded once), which the step count covers.
+    """
+
+    bytes_done: int = 0
+    bytes_total: int = 0
+    steps_done: int = 0
+    steps_total: int = 0
+
+    @property
+    def started(self) -> bool:
+        """Whether the loader has begun placing weights."""
+
+        return self.bytes_done > 0 or self.steps_total > 0
+
+    @property
+    def counts_bytes(self) -> bool:
+        """Whether this reading can be given in bytes."""
+
+        return self.bytes_total > 0 and self.bytes_done > 0
+
+    @property
+    def fraction(self) -> float:
+        measures = []
+        if self.bytes_total > 0:
+            measures.append(min(1.0, self.bytes_done / self.bytes_total))
+        if self.steps_total > 0:
+            measures.append(min(1.0, self.steps_done / self.steps_total))
+        if not measures:
+            return 0.0
+        return sum(measures) / len(measures)
+
+
+def _recording_bar_class(base: type, progress) -> type:
+    """A silent tqdm subclass whose counts ``progress`` can read at any time.
+
+    Neither the downloader nor the loader offers a callback: both report
+    through tqdm, so both are watched by handing them a bar class that keeps
+    its numbers where another thread can find them. ``progress`` supplies the
+    ``_lock`` and the ``_register`` that receives each bar as it is built.
+
+    A bar built this way answers ``n`` and ``total`` and nothing else. tqdm
+    leaves a disabled bar half-initialized - no ``desc``, no rate - so a
+    reader may only count.
+    """
+
+    class RecordingBar(base):
+        def __init__(self, *args, **kwargs) -> None:
+            self.counts_bytes = kwargs.get("unit") == "B"
+            # A disabled bar never writes to the terminal, and tqdm's own
+            # update() drops the count on the floor for one, so it is kept
+            # here instead.
+            kwargs["disable"] = True
+            super().__init__(*args, **kwargs)
+            progress._register(self)
+
+        def update(self, n=1) -> None:
+            if n:
+                with progress._lock:
+                    self.n += n
+
+        def __iter__(self):
+            # tqdm's own __iter__ skips counting for a disabled bar, and bars
+            # that are consumed by iteration rather than advanced by update()
+            # are on both paths: huggingface_hub before 1.25 hands the file
+            # bar to tqdm's thread_map (which before tqdm 4.70 counted by
+            # iterating), and the loader walks its bar over the weights.
+            for item in self.iterable:
+                yield item
+                self.update(1)
+
+    return RecordingBar
+
+
 class DownloadProgress:
     """Live totals for one snapshot download, safe to read from another thread.
 
@@ -1831,33 +1938,7 @@ class DownloadProgress:
 
         from huggingface_hub.utils import tqdm as hub_tqdm
 
-        progress = self
-
-        class RecordingBar(hub_tqdm):
-            def __init__(self, *args, **kwargs) -> None:
-                self.counts_bytes = kwargs.get("unit") == "B"
-                # A disabled bar never writes to the terminal, and tqdm's own
-                # update() drops the count on the floor for one, so it is kept
-                # here instead.
-                kwargs["disable"] = True
-                super().__init__(*args, **kwargs)
-                progress._register(self)
-
-            def update(self, n=1) -> None:
-                if n:
-                    with progress._lock:
-                        self.n += n
-
-            def __iter__(self):
-                # tqdm's own __iter__ skips counting for a disabled bar. Until
-                # huggingface_hub 1.25 the file bar is tqdm's thread_map, which
-                # (before tqdm 4.70) advances it by iterating rather than by
-                # update(), so count here.
-                for item in self.iterable:
-                    yield item
-                    self.update(1)
-
-        return RecordingBar
+        return _recording_bar_class(hub_tqdm, self)
 
     def _register(self, bar) -> None:
         with self._lock:
@@ -1885,6 +1966,134 @@ class DownloadProgress:
         return DownloadSnapshot(files_done, files_total, bytes_done, bytes_total)
 
 
+# The loader's progress bar over the weights, by transformers version:
+# 5.x walks one bar over the parameters in core_model_loading, 4.x one over
+# the checkpoint shards through the logging module's tqdm. Both are module
+# attributes bound at import time, so both are replaced for a load.
+#
+# 4.x builds its bar only for a checkpoint of several shards, so a model kept
+# in a single weight file draws none at all. Such a load is watched through
+# the allocator alone, which is why LoadProgress.begin marks the start of a
+# load rather than leaving the first bar to stand for it.
+LOADER_BAR_ATTRIBUTES = (
+    ("transformers.core_model_loading", "tqdm"),
+    ("transformers.utils.logging", "tqdm"),
+)
+
+
+class LoadProgress:
+    """Live progress for one load, safe to read from another thread.
+
+    ``from_pretrained`` blocks until the last weight is in and offers no
+    callback, so a load is watched from two sides. :meth:`watch` puts a silent
+    bar in place of the loader's own, which counts the weights it has placed;
+    :meth:`measure_bytes` reads the device allocator, which counts the bytes
+    those weights take. :class:`LoadSnapshot` says why both are needed.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._bars: list = []
+        self._total_bytes = 0
+        self._sampler: Callable[[], int | None] | None = None
+        self._baseline = 0
+        self._started = False
+
+    def measure_bytes(
+        self, total_bytes: int | None, sampler: Callable[[], int | None]
+    ) -> None:
+        """Count bytes towards ``total_bytes``, reading them from ``sampler``.
+
+        Call this once the device is settled and the model it replaces is
+        gone: whatever the sampler reports now is the baseline, so memory in
+        use for something else is not credited to this load. A ``total_bytes``
+        of ``None`` (a snapshot whose weights could not be measured) leaves
+        the load counted in steps alone.
+        """
+
+        baseline = sampler() or 0
+        with self._lock:
+            self._sampler = sampler
+            self._total_bytes = max(0, int(total_bytes or 0))
+            self._baseline = baseline
+
+    def bar_class(self) -> type:
+        """A tqdm class the loader can build its bar from that reports here."""
+
+        from tqdm.auto import tqdm
+
+        return _recording_bar_class(tqdm, self)
+
+    def begin(self) -> None:
+        """Note that the loader now has the weights and has started reading.
+
+        The allocator is only worth reading once that is true: before it, a
+        reading is whatever the device was already holding rather than this
+        load's progress. The loader's first bar cannot stand in for this -
+        transformers 4.x builds one only for a checkpoint of several shards -
+        so the start of a load is recorded on its own.
+        """
+
+        with self._lock:
+            self._started = True
+
+    @contextlib.contextmanager
+    def watch(self) -> Iterator[None]:
+        """Report the loader's own progress bar here for the duration.
+
+        The bars are module attributes, so this is the whole process's tqdm
+        for as long as the load runs. A load holds the model lock, and nothing
+        else in the app draws a transformers bar, so there is nobody else to
+        surprise.
+        """
+
+        import importlib
+
+        bar_class = self.bar_class()
+        patched: list[tuple[object, str, object]] = []
+        for module_name, attribute in LOADER_BAR_ATTRIBUTES:
+            try:
+                module = importlib.import_module(module_name)
+            except ImportError:
+                continue
+            original = getattr(module, attribute, None)
+            if original is None:
+                continue
+            setattr(module, attribute, bar_class)
+            patched.append((module, attribute, original))
+        self.begin()
+        try:
+            yield
+        finally:
+            for module, attribute, original in patched:
+                setattr(module, attribute, original)
+
+    def _register(self, bar) -> None:
+        with self._lock:
+            self._bars.append(bar)
+            # A bar is the loader saying it has begun, for a caller that
+            # watched the load without going through watch().
+            self._started = True
+
+    def snapshot(self) -> LoadSnapshot:
+        with self._lock:
+            sampler = self._sampler
+            baseline, total = self._baseline, self._total_bytes
+            steps_done = sum(int(bar.n or 0) for bar in self._bars)
+            steps_total = sum(int(bar.total or 0) for bar in self._bars)
+            # Bytes are counted from the moment the loader starts reading,
+            # and not before: between the baseline and the first weight the
+            # allocator has nothing to say about this load. A single-file
+            # checkpoint under transformers 4.x never builds a bar, so the
+            # allocator is all such a load has to report with.
+            if not self._started:
+                sampler = None
+        # Sampled outside the lock: the allocator holds a lock of its own that
+        # the loading thread has for much of a load.
+        bytes_done = max(0, (sampler() or 0) - baseline) if sampler else 0
+        return LoadSnapshot(bytes_done, total, steps_done, steps_total)
+
+
 class ModelManager:
     """Own the single in-memory model used by the local application."""
 
@@ -1898,12 +2107,21 @@ class ModelManager:
         # can be told from state produced under the next even when both came
         # from the same repository ID (a re-download at a newer revision).
         self.load_count = 0
-        # The model a load is bringing in right now, or None. ``model_id`` is
-        # cleared for the whole of a load and set only once the weights are
-        # in, so on its own it says nothing about the minutes in between;
-        # anything that must not touch a model's files while it is being
-        # read (a redownload, say) asks this as well.
-        self.loading_id: str | None = None
+        # Loads claimed and not finished yet, by claim number. ``model_id``
+        # is cleared for the whole of a load and set only once the weights
+        # are in, so on its own it says nothing about the minutes in
+        # between; anything that must not touch a model's files while they
+        # are being read (a redownload, say) asks these as well.
+        #
+        # More than one claim can stand at once. The model lock serializes
+        # the loads themselves, but a second click lands its claim while the
+        # first load is still running, and a claim numbered this way is only
+        # ever given back by the load that took it.
+        self._load_claims: dict[int, str] = {}
+        self._next_claim = 0
+        # Guards the claims, so that taking one and reading them are each a
+        # single step for handlers running on several workers.
+        self._claims_lock = threading.Lock()
         # Downloads under way right now, by model ID, so a second request for
         # the same model can follow the first instead of racing it for the
         # same files.
@@ -2048,6 +2266,55 @@ class ModelManager:
             if self.active_downloads.get(checked_id) is progress:
                 del self.active_downloads[checked_id]
 
+    @property
+    def loading_id(self) -> str | None:
+        """The model a load is bringing in right now, or ``None``.
+
+        The most recently claimed one when two loads overlap; ask
+        :meth:`is_loading` about a particular model rather than comparing
+        against this.
+        """
+
+        with self._claims_lock:
+            return next(reversed(self._load_claims.values()), None)
+
+    def is_loading(self, model_id: str) -> bool:
+        """Whether a load of ``model_id`` is claimed and not finished."""
+
+        checked_id = validate_model_id(model_id)
+        with self._claims_lock:
+            return checked_id in self._load_claims.values()
+
+    def reserve_load(self, model_id: str) -> tuple[str, int]:
+        """Claim a load of ``model_id``: its checked ID and the claim number.
+
+        Claimed before waiting for the model lock, not after: a load queued
+        behind a long generation is a load under way for the whole wait. A
+        caller that runs :meth:`load` on another thread claims it here first,
+        because the worker names the load only once it reaches ``load`` and
+        takes the lock later still, and in that window a removal or a
+        redownload would find the manager idle and move the snapshot out from
+        under the load. This is what :meth:`reserve_download` is for
+        downloads.
+
+        The claim number is what gives the claim back, so two overlapping
+        loads cannot clear each other's. Whoever takes one must release it:
+        ``load`` releases its own, and a caller that claimed a load for
+        another thread releases that claim when the thread is done with it.
+        """
+
+        checked_id = validate_model_id(model_id)
+        with self._claims_lock:
+            self._next_claim += 1
+            self._load_claims[self._next_claim] = checked_id
+            return checked_id, self._next_claim
+
+    def release_load(self, claim: int) -> None:
+        """Give back one claim, leaving any other load's standing."""
+
+        with self._claims_lock:
+            self._load_claims.pop(claim, None)
+
     def find_cached(self, model_id: str) -> Path:
         """The complete local snapshot of ``model_id``, without going online.
 
@@ -2062,24 +2329,38 @@ class ModelManager:
             snapshot_download(repo_id=validate_model_id(model_id), local_files_only=True)
         )
 
-    def load(self, model_id: str, local_path: Path) -> str:
+    def load(
+        self, model_id: str, local_path: Path, progress: LoadProgress | None = None
+    ) -> str:
+        """Read ``model_id`` into memory from ``local_path``, and say where it landed.
+
+        Blocks until the last weight is in; ``progress`` is how a caller on
+        another thread watches it happen.
+        """
+
         import torch
 
-        checked_id = validate_model_id(model_id)
-        # Recorded before waiting for the lock, not after: a load queued
-        # behind a long generation is a load under way for the whole wait.
-        self.loading_id = checked_id
+        # A caller on another thread will have claimed this load already;
+        # this claim is the manager's own, released whatever happens.
+        checked_id, claim = self.reserve_load(model_id)
         try:
             with self._lock:
-                return self._load_locked(checked_id, local_path, torch)
+                return self._load_locked(checked_id, local_path, torch, progress)
         finally:
-            self.loading_id = None
+            self.release_load(claim)
 
-    def _load_locked(self, model_id: str, local_path: Path, torch) -> str:
+    def _load_locked(
+        self,
+        model_id: str,
+        local_path: Path,
+        torch,
+        progress: LoadProgress | None = None,
+    ) -> str:
         """Bring ``model_id`` in from ``local_path`` while the caller holds ``_lock``."""
 
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        progress = progress or LoadProgress()
         self._unload_locked(torch)
         if torch.cuda.is_available():
             backend = "cuda"
@@ -2092,38 +2373,50 @@ class ModelManager:
         else:
             backend = "cpu"
             dtype = torch.float32
-        self._check_memory(
+        estimated = self._check_memory(
             model_id, local_path, str(dtype).replace("torch.", ""), backend
         )
+        # Bytes are counted only where the device keeps a total to count
+        # them against; elsewhere the loader's own steps are all there is.
+        if allocated_bytes(backend, torch) is not None:
+            progress.measure_bytes(estimated, lambda: allocated_bytes(backend, torch))
         tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
 
         try:
-            if torch.cuda.is_available():
-                model = AutoModelForCausalLM.from_pretrained(
-                    local_path,
-                    local_files_only=True,
-                    dtype=dtype,
-                    device_map="auto",
-                    low_cpu_mem_usage=True,
-                )
-                device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
-            elif torch.backends.mps.is_available():
-                self._cap_mps_memory(torch)
-                model = AutoModelForCausalLM.from_pretrained(
-                    local_path,
-                    local_files_only=True,
-                    dtype=dtype,
-                    low_cpu_mem_usage=True,
-                ).to("mps")
-                device_name = "Apple Metal (MPS)"
-            else:
-                model = AutoModelForCausalLM.from_pretrained(
-                    local_path,
-                    local_files_only=True,
-                    dtype=dtype,
-                    low_cpu_mem_usage=True,
-                )
-                device_name = "CPU"
+            with progress.watch():
+                if backend == "cuda":
+                    model = AutoModelForCausalLM.from_pretrained(
+                        local_path,
+                        local_files_only=True,
+                        dtype=dtype,
+                        device_map="auto",
+                        low_cpu_mem_usage=True,
+                    )
+                    device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
+                elif backend == "mps":
+                    self._cap_mps_memory(torch)
+                    # Into host memory and across afterwards, rather than
+                    # materialized on the device with device_map="mps". The
+                    # checkpoint is converted on the way in, and Metal does
+                    # that conversion with one cast kernel per tensor: on
+                    # torch 2.14, Olmo-3-7B loaded in 15 seconds this way
+                    # (12 to read and convert, 3 to copy across) and had not
+                    # finished after seven minutes the other way.
+                    model = AutoModelForCausalLM.from_pretrained(
+                        local_path,
+                        local_files_only=True,
+                        dtype=dtype,
+                        low_cpu_mem_usage=True,
+                    ).to("mps")
+                    device_name = "Apple Metal (MPS)"
+                else:
+                    model = AutoModelForCausalLM.from_pretrained(
+                        local_path,
+                        local_files_only=True,
+                        dtype=dtype,
+                        low_cpu_mem_usage=True,
+                    )
+                    device_name = "CPU"
         except (RuntimeError, MemoryError) as error:
             self._release_device_cache(torch)
             if is_out_of_memory_error(error):
@@ -2162,6 +2455,10 @@ class ModelManager:
         ``active_downloads`` first and deleting afterwards would leave exactly
         that gap: the interface runs its handlers on several workers.
 
+        A load claimed through :meth:`reserve_load` refuses the removal even
+        before it reaches the lock, because a load that runs on its own thread
+        is under way from the click, not from its first weight.
+
         The model lock is never waited for. It is held across a whole
         generation, and a handler blocked on it would tie up a worker for as
         long as the reply takes, so a busy manager raises :class:`ModelBusy`
@@ -2177,6 +2474,14 @@ class ModelManager:
         try:
             if self.model_id == checked_id:
                 raise ModelLoaded(f"{checked_id} is loaded in memory.")
+            claimed = self.loading_id
+            if claimed is not None:
+                # A load claimed on another thread that has not reached the
+                # lock yet. The lock alone would let this deletion through in
+                # the window between the claim and the first weight.
+                raise ModelBusy(
+                    f"{checked_id} cannot be removed while {claimed} is being loaded."
+                )
             with self._downloads_lock:
                 if checked_id in self.active_downloads:
                     raise ModelDownloading(f"{checked_id} is being downloaded.")
@@ -2209,8 +2514,12 @@ class ModelManager:
     @staticmethod
     def _check_memory(
         model_id: str, local_path: Path, load_dtype: str, backend: str
-    ) -> None:
+    ) -> int | None:
         """Refuse a load that cannot fit, before any weight is read.
+
+        Returns the memory the weights are expected to take, which is also
+        what a load counts its own progress towards, or ``None`` when the
+        snapshot could not be measured.
 
         On CUDA the weights fill the graphics cards and ``device_map="auto"``
         places the rest on the CPU, so the cards plus the machine's memory is
@@ -2222,7 +2531,7 @@ class ModelManager:
 
         weight_bytes = snapshot_weight_bytes(local_path)
         if weight_bytes is None:
-            return
+            return None
         _architecture, checkpoint_dtype = _read_config(local_path)
         estimated = estimate_loaded_bytes(weight_bytes, checkpoint_dtype, load_dtype)
         if backend == "cuda":
@@ -2234,6 +2543,7 @@ class ModelManager:
         check_memory_for_load(
             validate_model_id(model_id), estimated, total, available, pool=pool
         )
+        return estimated
 
     @staticmethod
     def _cap_mps_memory(torch) -> None:

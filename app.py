@@ -49,6 +49,8 @@ from model_runtime import (
     CacheStatus,
     DownloadSnapshot,
     HubModel,
+    LoadProgress,
+    LoadSnapshot,
     ModelBusy,
     ModelChanged,
     ModelDownloading,
@@ -87,6 +89,10 @@ MANAGER = ModelManager()
 # How often the download card is redrawn. Every frame is a message to the
 # browser, so this is a floor on chatter as much as a refresh rate.
 DOWNLOAD_POLL_SECONDS = 0.5
+
+# The load card is redrawn on the same beat as the download card, and for
+# the same reason: every frame is a message to the browser.
+LOAD_POLL_SECONDS = 0.5
 
 # Transfer speed is averaged over this long, so a stall or a burst shows within
 # a breath but one slow chunk does not swing the time remaining.
@@ -195,8 +201,16 @@ def failure_card(title: str, detail: str) -> str:
 
 
 def describe_duration(seconds: float) -> str:
-    if seconds < 60:
-        return "under a minute"
+    """A rounded spoken length: ``a few seconds``, ``about 4 minutes``.
+
+    Rounded to five seconds under a minute, because a load is often over in
+    that time and "under a minute" would be the whole of what it ever said.
+    """
+
+    if seconds < 10:
+        return "a few seconds"
+    if seconds < 55:
+        return f"about {round(seconds / 5) * 5} seconds"
     minutes = round(seconds / 60)
     if minutes < 60:
         return f"about {minutes} minute{'s' if minutes != 1 else ''}"
@@ -235,6 +249,35 @@ class RateMeter:
         if elapsed < 1.0 or bytes_done <= first_bytes:
             return None
         return (bytes_done - first_bytes) / elapsed
+
+
+class Pace:
+    """Time left in a job, from how fast its own progress has moved so far.
+
+    Measured from the first reading that showed any progress rather than from
+    the start, because the seconds before that are setup: a load spends them
+    reading the config and building the model, and counting them as slow
+    progress would put the first estimate minutes out.
+    """
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._first: tuple[float, float] | None = None
+
+    def remaining(self, fraction: float) -> float | None:
+        """Seconds left at the pace set since progress began, where it can be told."""
+
+        now = self._clock()
+        if fraction <= 0:
+            return None
+        if self._first is None:
+            self._first = (now, fraction)
+            return None
+        first_time, first_fraction = self._first
+        elapsed, moved = now - first_time, fraction - first_fraction
+        if elapsed < 1.0 or moved <= 0:
+            return None
+        return (1.0 - fraction) * elapsed / moved
 
 
 def download_detail(model_id: str, snap: DownloadSnapshot, rate: float | None) -> str:
@@ -317,6 +360,97 @@ def stream_download(model_id: str, hf_token: str):
     if "error" in outcome:
         raise outcome["error"]
     return outcome["path"]
+
+
+def load_detail(
+    model_id: str, snap: LoadSnapshot, rate: float | None, remaining: float | None
+) -> str:
+    name = f"`{model_id}`"
+    if not snap.started:
+        weights = (
+            f"{format_bytes(snap.bytes_total)} of weights"
+            if snap.bytes_total
+            else "the weights"
+        )
+        return (
+            f"Reading {weights} for {name} out of the cache on disk. Nothing "
+            "is being downloaded; this is the wait for memory."
+        )
+    # A card that still says "loading" never claims to be finished: the
+    # allocator holds the last byte a moment before the loader is done with
+    # the model, and a full bar over a wait that goes on reads as a hang.
+    shown = min(snap.fraction, 0.99)
+    percent = int(shown * 100)
+    if snap.counts_bytes:
+        # Bytes on the device: the second half of a load onto Metal, and the
+        # whole of one onto a graphics card.
+        figures = (
+            f"{format_bytes(snap.bytes_done)} of {format_bytes(snap.bytes_total)} "
+            "on the device"
+        )
+        if rate:
+            figures += f" · {format_bytes(rate)}/s"
+    else:
+        figures = f"{snap.steps_done} of {snap.steps_total} parts read"
+    if remaining is not None:
+        figures += f" · {describe_duration(remaining)} left"
+    return f"{name}\n\n`{progress_bar(shown)}` {percent}%\n\n{figures}"
+
+
+def stream_load(model_id: str, path: Path):
+    """Yield a status card every half second until ``model_id`` is in memory.
+
+    Returns the device it landed on, so a caller writes
+    ``device = yield from stream_load(...)``. A failed load raises here.
+
+    The load runs on its own thread, as a download does: ``from_pretrained``
+    blocks until the last weight, and a handler that blocked with it could
+    show nothing past its first frame.
+    """
+
+    progress = LoadProgress()
+    outcome: dict = {}
+
+    def work() -> None:
+        try:
+            outcome["device"] = MANAGER.load(model_id, path, progress)
+        except BaseException as error:
+            outcome["error"] = error
+        finally:
+            # Held until the load is over, so the two claims between them
+            # cover the whole of it: this one from before the thread existed,
+            # the manager's own from the moment it reached load().
+            MANAGER.release_load(claim)
+
+    worker = threading.Thread(target=work, name="chatlab-load", daemon=True)
+    # Claimed before the worker exists, because the claim is what stops a
+    # removal or a redownload arriving in this same instant from moving the
+    # snapshot the load is about to read. The worker names the load only once
+    # it reaches MANAGER.load, and the model lock is taken later still.
+    _model_id, claim = MANAGER.reserve_load(model_id)
+    try:
+        worker.start()
+    except BaseException:
+        # work() never ran, so its finally cannot give the claim back.
+        MANAGER.release_load(claim)
+        raise
+    meter, pace = RateMeter(), Pace()
+    while worker.is_alive():
+        snap = progress.snapshot()
+        yield status_card(
+            "Loading model",
+            load_detail(
+                model_id.strip(),
+                snap,
+                meter.rate(snap.bytes_done),
+                pace.remaining(snap.fraction),
+            ),
+            "working",
+        )
+        worker.join(LOAD_POLL_SECONDS)
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["device"]
 
 
 def describe_missing(status: CacheStatus) -> str:
@@ -436,7 +570,7 @@ def download_and_load_model(model_id: str, hf_token: str):
             f"{fetched} Moving `{model_id.strip()}` onto the best available device…",
             "working",
         )
-        device = MANAGER.load(model_id, path)
+        device = yield from stream_load(model_id, path)
     except Exception as error:
         yield failure_card("Model setup failed", html.escape(str(error)))
         return
@@ -518,12 +652,8 @@ def load_cached_model(model_id: str):
         return
     try:
         path = MANAGER.find_cached(cleaned)
-        yield status_card(
-            "Loading model",
-            f"Loading {format_bytes(status.cached_bytes)} of cached files from `{path}`…",
-            "working",
-        )
-        device = MANAGER.load(cleaned, path)
+        started = time.monotonic()
+        device = yield from stream_load(cleaned, path)
     except IncompleteSnapshotError as error:
         yield failure_card(
             "Download unfinished", incomplete_snapshot_detail(cleaned, error)
@@ -533,7 +663,10 @@ def load_cached_model(model_id: str):
         yield failure_card("Could not load cached model", html.escape(str(error)))
         return
     yield status_card(
-        "Model ready", f"{name} is loaded on **{device}**.", "success"
+        "Model ready",
+        f"{name} is loaded on **{device}** "
+        f"({time.monotonic() - started:.1f} seconds).",
+        "success",
     )
 
 
@@ -672,7 +805,7 @@ def redownload_my_model(selected: str | None, hf_token: str):
     if not selected:
         yield status_card("Nothing to redownload", NO_MODEL_TO_MANAGE)
         return
-    if MANAGER.loading_id == selected:
+    if MANAGER.is_loading(selected):
         yield status_card(
             "Model in use",
             f"`{selected}` is being loaded right now. Wait for the load to finish, "

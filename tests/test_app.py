@@ -225,7 +225,9 @@ class DownloadCardTests(unittest.TestCase):
         self.assertEqual(app.format_bytes(14_600_000_000), "14.6 GB")
 
     def test_durations_read_as_estimates(self):
-        self.assertEqual(app.describe_duration(30), "under a minute")
+        self.assertEqual(app.describe_duration(4), "a few seconds")
+        self.assertEqual(app.describe_duration(32), "about 30 seconds")
+        self.assertEqual(app.describe_duration(57), "about 1 minute")
         self.assertEqual(app.describe_duration(60), "about 1 minute")
         self.assertEqual(app.describe_duration(4 * 60 + 20), "about 4 minutes")
         self.assertEqual(app.describe_duration(3600 + 10 * 60), "about 1 hour 10 minutes")
@@ -358,7 +360,7 @@ class DownloadCardTests(unittest.TestCase):
                 finish.wait(5)
                 return Path("/cache/snap")
 
-            def load(self, model_id, local_path):
+            def load(self, model_id, local_path, progress=None):
                 return "cpu"
 
         app.MANAGER = Manager()
@@ -447,8 +449,201 @@ class DownloadManager(FakeDownloads):
         self.downloads += 1
         return Path("/cache/models--allenai--Olmo-3-7B-Think/snapshots/abc")
 
-    def load(self, model_id, path):
+    def load(self, model_id, path, progress=None):
         return "mps"
+
+
+class LoadCardTests(unittest.TestCase):
+    """What the model panel says while a cached model is read into memory."""
+
+    MODEL = "allenai/Olmo-3-7B-Think"
+
+    class Manager(ModelManager):
+        """A manager whose load does whatever the test hands it.
+
+        The real claim bookkeeping is kept, so the card's own reservation is
+        the one under test.
+        """
+
+        def __init__(self, work):
+            super().__init__()
+            self._work = work
+
+        def find_cached(self, model_id):
+            return Path("/cache/models--allenai--Olmo-3-7B-Think/snapshots/abc")
+
+        def load(self, model_id, path, progress=None):
+            return self._work(progress)
+
+    def setUp(self):
+        self.addCleanup(setattr, app, "MANAGER", app.MANAGER)
+        self.addCleanup(setattr, app, "cache_status", app.cache_status)
+        self.addCleanup(setattr, app, "LOAD_POLL_SECONDS", app.LOAD_POLL_SECONDS)
+        app.MANAGER = self.Manager(lambda progress: "CPU")
+        app.cache_status = lambda model_id: CacheStatus(cached_bytes=14_600_000_000)
+        app.LOAD_POLL_SECONDS = 0.01
+
+    def test_the_first_frame_says_the_weights_are_being_read_not_fetched(self):
+        # The old card named the size and the folder and then sat there, which
+        # read like a download that had stalled.
+        detail = app.load_detail(
+            self.MODEL,
+            app.LoadSnapshot(bytes_total=14_600_000_000),
+            rate=None,
+            remaining=None,
+        )
+
+        self.assertIn("14.6 GB of weights", detail)
+        self.assertIn("Nothing is being downloaded", detail)
+        self.assertNotIn("%", detail)
+
+    def test_the_card_counts_the_weights_read_before_any_reach_the_device(self):
+        detail = app.load_detail(
+            self.MODEL,
+            app.LoadSnapshot(
+                bytes_done=0, bytes_total=14_600_000_000, steps_done=178, steps_total=356
+            ),
+            rate=None,
+            remaining=90.0,
+        )
+
+        self.assertIn("25%", detail)
+        self.assertIn("178 of 356 parts read", detail)
+        self.assertIn("about 2 minutes left", detail)
+        self.assertIn("\u2588", detail)
+
+    def test_the_card_counts_bytes_once_they_are_on_the_device(self):
+        detail = app.load_detail(
+            self.MODEL,
+            app.LoadSnapshot(
+                bytes_done=7_300_000_000,
+                bytes_total=14_600_000_000,
+                steps_done=356,
+                steps_total=356,
+            ),
+            rate=500_000_000,
+            remaining=15.0,
+        )
+
+        self.assertIn("75%", detail)
+        self.assertIn("7.3 GB of 14.6 GB on the device", detail)
+        self.assertIn("about 15 seconds left", detail)
+        self.assertIn("500 MB/s", detail)
+
+    def test_a_card_that_is_still_loading_stops_short_of_finished(self):
+        # The allocator holds the last byte a little before the loader is
+        # done with the model, and a full bar over a wait that goes on reads
+        # as a hang.
+        detail = app.load_detail(
+            self.MODEL,
+            app.LoadSnapshot(
+                bytes_done=14_600_000_000,
+                bytes_total=14_600_000_000,
+                steps_done=356,
+                steps_total=356,
+            ),
+            rate=None,
+            remaining=2.0,
+        )
+
+        self.assertIn("99%", detail)
+        self.assertNotIn("100%", detail)
+
+    def test_the_pace_is_measured_from_the_first_progress_not_from_the_start(self):
+        # The seconds before the first weight are setup, and counting them as
+        # slow progress would put the first estimate minutes out.
+        clock = iter([0.0, 10.0, 10.5, 12.0, 14.0])
+        pace = app.Pace(clock=lambda: next(clock))
+
+        self.assertIsNone(pace.remaining(0.0), "nothing has moved yet")
+        self.assertIsNone(pace.remaining(0.25), "the baseline reading")
+        self.assertIsNone(pace.remaining(0.30), "too soon to tell")
+        # A quarter of the load in the two seconds since the baseline, so
+        # the half that is left reads as four seconds, not the ten that
+        # counting the setup as progress would have implied.
+        self.assertAlmostEqual(pace.remaining(0.50), 4.0)
+        # Two seconds later and no further on: a stall lengthens the estimate
+        # rather than freezing it.
+        self.assertAlmostEqual(pace.remaining(0.50), 8.0)
+
+    def test_the_load_card_updates_until_the_load_ends(self):
+        def work(progress):
+            bar = progress.bar_class()(desc="Loading weights", total=4)
+            held = [0]
+            progress.measure_bytes(1000, lambda: held[0])
+            for _ in range(4):
+                time.sleep(0.02)
+                bar.update(1)
+            for byte_count in (500, 1000):
+                time.sleep(0.02)
+                held[0] = byte_count
+            return "Apple Metal (MPS)"
+
+        app.MANAGER = self.Manager(work)
+
+        frames = list(app.load_cached_model(self.MODEL))
+
+        self.assertIn("Finding cached model", frames[0])
+        self.assertTrue(
+            any("parts read" in frame for frame in frames), frames
+        )
+        self.assertTrue(
+            any("on the device" in frame for frame in frames), frames
+        )
+        self.assertIn("Model ready", frames[-1])
+        self.assertIn("Apple Metal (MPS)", frames[-1])
+        self.assertIn("seconds", frames[-1])
+
+    def test_a_failed_load_is_reported_on_the_card(self):
+        def work(progress):
+            raise RuntimeError("Metal ran out of memory")
+
+        app.MANAGER = self.Manager(work)
+
+        frames = list(app.load_cached_model(self.MODEL))
+
+        self.assertIn("Could not load cached model", frames[-1])
+        self.assertIn("Metal ran out of memory", frames[-1])
+
+    def test_the_load_is_claimed_before_its_worker_starts(self):
+        # Between the click and the worker's first instruction the manager
+        # would otherwise look idle, and a removal or a redownload arriving
+        # in that window could move the snapshot out from under the load.
+        order = []
+
+        class Manager(self.Manager):
+            def reserve_load(self, model_id):
+                order.append(("claimed", model_id))
+                return super().reserve_load(model_id)
+
+            def load(self, model_id, path, progress=None):
+                order.append(("loaded", self.loading_id))
+                return "CPU"
+
+        app.MANAGER = Manager(lambda progress: "CPU")
+
+        list(app.load_cached_model(self.MODEL))
+
+        self.assertEqual(order, [("claimed", self.MODEL), ("loaded", self.MODEL)])
+        self.assertIsNone(app.MANAGER.loading_id, "given back when the load ends")
+
+    def test_a_worker_that_cannot_start_gives_the_claim_back(self):
+        app.MANAGER = ModelManager()
+
+        with mock.patch.object(
+            threading.Thread, "start", side_effect=RuntimeError("no threads")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no threads"):
+                list(app.stream_load(self.MODEL, Path("/cache/snap")))
+
+        self.assertIsNone(app.MANAGER.loading_id)
+
+    def test_a_load_that_ends_before_the_first_frame_still_reports_ready(self):
+        app.MANAGER = self.Manager(lambda progress: "CPU")
+
+        frames = list(app.load_cached_model(self.MODEL))
+
+        self.assertIn("Model ready", frames[-1])
 
 
 class DownloadStatusTests(unittest.TestCase):

@@ -323,6 +323,18 @@ class ManagerRemoveTests(unittest.TestCase):
         for error in (model_runtime.ModelLoaded, model_runtime.ModelDownloading, model_runtime.ModelBusy):
             self.assertTrue(issubclass(error, model_runtime.ModelInUse))
 
+    def test_a_load_claimed_on_another_thread_is_refused(self):
+        # The load's own thread has not reached the model lock yet, so the
+        # lock is free and would let the deletion through.
+        _model_id, claim = self.manager.reserve_load(OLMO)
+        with self.assertRaises(model_runtime.ModelBusy):
+            self.manager.remove(OLMO, Path(self.root.name))
+        self.assertTrue(self.folder.is_dir())
+        self.assertFalse(self.manager._lock.locked())
+        self.manager.release_load(claim)
+        self.manager.remove(OLMO, Path(self.root.name))
+        self.assertFalse(self.folder.exists(), "removed once the claim is gone")
+
     def test_a_malformed_id_is_refused(self):
         with self.assertRaises(ValueError):
             self.manager.remove("nonsense", Path(self.root.name))
@@ -335,7 +347,7 @@ class LoadingIdTests(unittest.TestCase):
         manager = ModelManager()
         seen = []
 
-        def fake_load(model_id, local_path, torch):
+        def fake_load(model_id, local_path, torch, progress=None):
             seen.append((manager.loading_id, manager._lock.locked()))
             return "CPU"
 
@@ -354,7 +366,7 @@ class LoadingIdTests(unittest.TestCase):
         manager._lock.acquire()
         entered = threading.Event()
 
-        def fake_load(model_id, local_path, torch):
+        def fake_load(model_id, local_path, torch, progress=None):
             entered.set()
             return "CPU"
 
@@ -378,7 +390,7 @@ class LoadingIdTests(unittest.TestCase):
     def test_a_failed_load_clears_the_loading_id(self):
         manager = ModelManager()
 
-        def fail(model_id, local_path, torch):
+        def fail(model_id, local_path, torch, progress=None):
             raise RuntimeError("gpu fell over")
 
         with mock.patch.object(manager, "_load_locked", fail):
@@ -387,6 +399,50 @@ class LoadingIdTests(unittest.TestCase):
 
         self.assertIsNone(manager.loading_id)
         self.assertFalse(manager._lock.locked())
+
+    def test_a_claim_names_the_load_before_it_starts(self):
+        # A load that runs on its own thread is under way from the click:
+        # the worker names it only once it reaches load(), and a redownload
+        # or a removal arriving in between must find it already claimed.
+        manager = ModelManager()
+
+        checked_id, _claim = manager.reserve_load(" allenai/Olmo-3-7B-Think ")
+
+        self.assertEqual(checked_id, OLMO)
+        self.assertEqual(manager.loading_id, OLMO)
+        self.assertTrue(manager.is_loading(OLMO))
+        self.assertFalse(manager.is_loading("org/other"))
+
+    def test_two_overlapping_loads_keep_their_own_claims(self):
+        manager = ModelManager()
+        _first_id, first = manager.reserve_load(OLMO)
+        _second_id, second = manager.reserve_load("org/other")
+
+        manager.release_load(first)
+
+        self.assertFalse(manager.is_loading(OLMO))
+        self.assertTrue(manager.is_loading("org/other"), "the other load stands")
+        manager.release_load(second)
+        self.assertIsNone(manager.loading_id)
+        manager.release_load(second)
+        self.assertIsNone(manager.loading_id, "releasing twice is harmless")
+
+    def test_a_load_does_not_clear_a_claim_it_did_not_take(self):
+        # One load finishing used to leave the other looking idle while it
+        # waited for the lock, which is the window a removal needs.
+        from unittest import mock
+
+        manager = ModelManager()
+        _model_id, waiting = manager.reserve_load(OLMO)
+
+        with mock.patch.object(
+            manager, "_load_locked", lambda *args, **kwargs: "CPU"
+        ):
+            manager.load("org/other", Path("/snap"))
+
+        self.assertTrue(manager.is_loading(OLMO), "still claimed by its own worker")
+        manager.release_load(waiting)
+        self.assertIsNone(manager.loading_id)
 
     def test_a_malformed_id_is_refused_before_the_lock(self):
         manager = ModelManager()
@@ -635,7 +691,7 @@ class ManageMyModelsTests(unittest.TestCase):
     def test_a_model_being_loaded_is_not_redownloaded_under_itself(self):
         # model_id is empty for the whole of a load, so the manager names
         # the model it is bringing in separately.
-        self.manager.loading_id = "org/partial"
+        self.manager.reserve_load("org/partial")
 
         (card,) = list(app.redownload_my_model("org/partial", ""))
 
