@@ -2449,6 +2449,20 @@ class CountScoreTokensTests(unittest.TestCase):
     def test_nothing_loaded_has_no_answer_rather_than_a_wrong_one(self):
         self.assertIsNone(ModelManager().count_score_tokens("one two"))
 
+    def test_a_reserved_generation_is_not_talked_over(self):
+        # A generation claims the slot before it goes for the model lock, so
+        # in between the lock is free. Taking it then would tokenize however
+        # much text has been pasted while an operation the interface already
+        # reports as running waits behind a keystroke.
+        manager = self.manager()
+        self.assertTrue(manager.reserve_generation())
+        try:
+            self.assertFalse(manager._lock.locked(), "the lock is free here")
+            self.assertIsNone(manager.count_score_tokens("one two"))
+        finally:
+            manager.release_generation()
+        self.assertIsNotNone(manager.count_score_tokens("one two"))
+
     def test_a_busy_model_is_not_waited_on(self):
         # The count answers a box being typed into. Blocking on the model lock
         # would hang the keystroke behind a whole generation, so a held lock

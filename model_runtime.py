@@ -3774,11 +3774,20 @@ class ModelManager:
         """How many tokens :meth:`score_text` would measure, and its limit.
 
         ``None`` where the count cannot be had at this instant: nothing is
-        loaded, the model lock is held, or the tokenizer refuses the text.
-        The lock is taken without blocking on purpose. This answers a box
-        being typed into, and waiting behind a running generation would hang
-        the keystroke rather than the number; a caller with no answer says so
-        and asks again on the next one.
+        loaded, a generation has the floor, the model lock is held, or the
+        tokenizer refuses the text. The lock is taken without blocking on
+        purpose. This answers a box being typed into, and waiting behind a
+        running generation would hang the keystroke rather than the number; a
+        caller with no answer says so and asks again on the next one.
+
+        :attr:`busy` is asked first because the model lock alone is not the
+        whole of "something else is running". A generation claims the slot
+        before it goes for the lock, so between those two steps the lock is
+        free and this would take it - and then hold it, tokenizing however
+        much text has been pasted, while an operation the interface already
+        reports as running waits behind a keystroke. That check is an early
+        exit and nothing more, as its own docstring says: the non-blocking
+        acquire below is still what makes this safe.
 
         A tokenizer that refuses the passage outright is one of those "not
         now" cases rather than a failure to report: pressing **Score text**
@@ -3786,7 +3795,7 @@ class ModelManager:
         half-typed passage is not yet worth complaining about.
         """
 
-        if not self.loaded:
+        if not self.loaded or self.busy:
             return None
         if not self._lock.acquire(blocking=False):
             return None
