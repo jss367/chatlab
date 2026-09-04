@@ -88,17 +88,26 @@ rest of the system all share it, and on Apple silicon the GPU draws from the
 same pool. Before reading any weights, ChatLab estimates the loaded size from
 the checkpoint and refuses a model that would not leave about 4 GB free,
 saying so in the status card instead of letting the machine page itself into a
-freeze. On CUDA the weights fill the graphics cards first and the rest is
-placed in the machine's own memory, so that check is made against the two
-together. On Apple Metal it also caps what PyTorch may allocate at Metal's
-recommended working set, so a conversation that outgrows the machine ends
-with an out-of-memory message rather than a frozen Mac. Move that cap with
-`mps_memory_fraction` in the settings file, or with
-`CHATLAB_MPS_MEMORY_FRACTION` for one run; `1.0` is the default, the
-environment wins over the file, and PyTorch's own
-`PYTORCH_MPS_HIGH_WATERMARK_RATIO`, if set, leaves the allocator alone. The
-cache a response used is handed back when it finishes, so the process returns
-to the model's own size between requests.
+freeze. What counts as free is what macOS can hand over without writing to
+swap, so a machine that looks idle but is already paging is treated as full.
+On CUDA the weights fill the graphics cards first and the rest is placed in
+the machine's own memory, so that check is made against the two together. On
+Apple Metal it also caps what PyTorch may allocate at half the machine's
+memory, so a conversation that outgrows that half ends with an out-of-memory
+message rather than a frozen Mac. Half rather than everything available
+because Metal's own recommendation is most of the machine — 37.4 GB of a 48 GB
+Mac — and a process that size leaves the window server, the browser and the
+editor paging to disk. Move that cap with `mps_memory_fraction` in the
+settings file, or with `CHATLAB_MPS_MEMORY_FRACTION` for one run; either names
+a fraction of Metal's recommendation, so on that 48 GB Mac the default works
+out to about `0.64` and `1.0` restores the old ceiling. The environment wins
+over the file, and PyTorch's own `PYTORCH_MPS_HIGH_WATERMARK_RATIO`, if set,
+leaves the allocator alone. The cache a response used is handed back when it
+finishes, so the process returns to the model's own size between requests.
+
+Each load and each response is recorded in the log with the model, the
+estimate, what the device ended up holding and what was free beforehand,
+which is what makes a memory failure readable after the fact.
 
 What a conversation costs is mostly its key-value cache, which grows with
 every token and is held for as long as the answer runs. How fast it grows is

@@ -535,7 +535,33 @@ def describe_fetched(before: CacheStatus, after: CacheStatus, elapsed: float) ->
     return f"Fetched {format_bytes(fetched)} in {elapsed:.1f} seconds."
 
 
-def download_model(model_id: str, hf_token: str):
+def chosen_model(model_id: str, selected: str | None) -> str:
+    """The model a Model-panel button acts on: the picked row, or the typed ID.
+
+    The row wins when there is one. Gradio snapshots a click's inputs in the
+    browser, and a row selection reaches the ID box only through a server
+    round trip (see ``select_my_model``), so a button clicked inside that
+    window carries a box that still holds whatever was there before - which
+    starts out as the 15 GB default, a model nobody asked for. The radio is
+    set by the reader's own click and so is always current.
+
+    The reverse window is real and is not closed here: typing an ID clears the
+    highlight, but that also takes a round trip, so a click landing inside it
+    still carries the old row and loads that instead of the typed ID. It is
+    left open deliberately. Both candidates are models the reader named, and
+    the row is already on disk, so the cost is a wrong-but-cheap load rather
+    than an unrequested 15 GB one. Closing it would need the two controls to
+    be ordered against each other, and Gradio's queue does not order separate
+    listeners: ``default_concurrency_limit`` is per listener, so the marker a
+    typing listener would set is not guaranteed to be written before a click
+    handler reads it.
+    """
+
+    return (selected or model_id or "").strip()
+
+
+def download_model(model_id: str, hf_token: str, selected: str | None = None):
+    model_id = chosen_model(model_id, selected)
     started = time.monotonic()
     try:
         before = cache_status(model_id)
@@ -559,7 +585,8 @@ def download_model(model_id: str, hf_token: str):
     )
 
 
-def download_and_load_model(model_id: str, hf_token: str):
+def download_and_load_model(model_id: str, hf_token: str, selected: str | None = None):
+    model_id = chosen_model(model_id, selected)
     started = time.monotonic()
     try:
         before = cache_status(model_id)
@@ -608,8 +635,8 @@ def incomplete_snapshot_detail(model_id: str, error: Exception) -> str:
     )
 
 
-def load_cached_model(model_id: str):
-    cleaned = model_id.strip()
+def load_cached_model(model_id: str, selected: str | None = None):
+    cleaned = chosen_model(model_id, selected)
     active = MANAGER.active_downloads.get(cleaned)
     if active is not None:
         snap = active.snapshot()
@@ -867,6 +894,18 @@ def select_my_model(selected: str | None):
     if entry is None:
         return gr.skip(), f"`{selected}` is no longer in the cache. Press **Refresh**."
     return gr.update(value=selected), describe_cached_model(entry)
+
+
+def clear_my_model_selection():
+    """Drop the My Models selection, because a typed ID names its own model.
+
+    Runs when the reader types in the ID box or picks a search result, so the
+    two controls never disagree on screen and ``chosen_model`` has one answer
+    to give. It is a round trip like any other, which is the window
+    ``chosen_model`` describes rather than closes.
+    """
+
+    return gr.update(value=None), NO_CACHED_MODEL_SELECTED
 
 
 NO_MODEL_TO_MANAGE = "Select a model under **My Models** first."
@@ -4207,18 +4246,20 @@ def build_app() -> gr.Blocks:
         models_inputs = [my_models, sort_models]
         models_outputs = [my_models, my_model_detail, my_models_summary]
         download_button.click(
-            download_model, [model_id, hf_token], model_status
+            download_model, [model_id, hf_token, my_models], model_status
         ).then(refresh_my_models, models_inputs, models_outputs)
         # These three are the handlers that change what is in memory, so each
         # ends by rewriting the chat page's badge as well.
         download_load_button.click(
-            download_and_load_model, [model_id, hf_token], model_status
+            download_and_load_model, [model_id, hf_token, my_models], model_status
         ).then(refresh_my_models, models_inputs, models_outputs).then(
             refresh_model_badge, None, badge_outputs
         )
-        cached_button.click(load_cached_model, model_id, model_status).then(
-            refresh_my_models, models_inputs, models_outputs
-        ).then(refresh_model_badge, None, badge_outputs)
+        cached_button.click(
+            load_cached_model, [model_id, my_models], model_status
+        ).then(refresh_my_models, models_inputs, models_outputs).then(
+            refresh_model_badge, None, badge_outputs
+        )
         unload_button.click(unload_model, outputs=model_status).then(
             refresh_my_models, models_inputs, models_outputs
         ).then(refresh_model_badge, None, badge_outputs)
@@ -4228,10 +4269,14 @@ def build_app() -> gr.Blocks:
         # .input rather than .change: the refresh above also sets the radio,
         # and a .change listener would rewrite the model ID box on each rescan.
         my_models.input(select_my_model, my_models, [model_id, my_model_detail])
+        # .input again, for the same reason: only the reader's own typing
+        # withdraws the selection, never a refresh writing the box.
+        model_id.input(clear_my_model_selection, None, [my_models, my_model_detail])
         # A pending removal is about the model that was selected when it was
         # asked for, so changing the selection withdraws it.
         confirm_outputs = [remove_confirm, pending_removal]
         my_models.input(hide_remove_confirm, None, confirm_outputs)
+        model_id.input(hide_remove_confirm, None, confirm_outputs)
         redownload_button.click(
             redownload_my_model, [my_models, hf_token], model_status
         ).then(refresh_my_models, models_inputs, models_outputs)
@@ -4250,11 +4295,13 @@ def build_app() -> gr.Blocks:
         search_outputs = [search_results, search_detail, search_results_state]
         search_button.click(search_models, [search_query, hf_token], search_outputs)
         search_query.submit(search_models, [search_query, hf_token], search_outputs)
+        # Picking a search result names a model too, so it withdraws the My
+        # Models selection the same way typing an ID does.
         search_results.input(
             select_search_result,
             [search_results, search_results_state],
             [model_id, search_detail],
-        )
+        ).then(clear_my_model_selection, None, [my_models, my_model_detail])
         enter_sends.change(set_message_box_keys, enter_sends, prompt)
 
         settings_inputs = [
