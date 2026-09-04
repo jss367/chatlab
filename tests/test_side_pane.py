@@ -2,7 +2,10 @@
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -15,10 +18,13 @@ from model_runtime import (
     MODEL_WEIGHTS,
     CachedModel,
     CacheStatus,
+    DownloadProgress,
     HubModel,
     ModelManager,
     format_count,
     list_cached_models,
+    remove_cached_model,
+    sort_cached_models,
 )
 
 COMMIT = "d97e442d7cc678210054dbcc9b440894d62c89a4"
@@ -104,7 +110,8 @@ class CachedModelListTests(unittest.TestCase):
 
         self.assertEqual(entry.model_id, OLMO)
         self.assertTrue(entry.status.complete)
-        self.assertEqual(entry.size_bytes, 100 + len(self.CONFIG))
+        # The size is the whole folder, refs/main included.
+        self.assertEqual(entry.size_bytes, 100 + len(self.CONFIG) + len(COMMIT))
         self.assertEqual(entry.files, 2)
         self.assertEqual(entry.commit, COMMIT)
         self.assertEqual(entry.architecture, "Olmo3ForCausalLM")
@@ -120,9 +127,22 @@ class CachedModelListTests(unittest.TestCase):
 
         self.assertEqual(entry.status.missing_files, (MODEL_WEIGHTS,))
         self.assertEqual(entry.status.partial_files, 1)
-        self.assertEqual(entry.size_bytes, len(self.CONFIG) + 40)
+        self.assertEqual(entry.size_bytes, len(self.CONFIG) + 40 + len(COMMIT))
         # The config is on disk, so what the model is can still be said.
         self.assertEqual(entry.architecture, "Olmo3ForCausalLM")
+
+    def test_old_revisions_count_toward_the_listed_size(self):
+        # Without symlinks each snapshot holds its own files; the list says
+        # what the folder takes, which is what removing it frees.
+        with tempfile.TemporaryDirectory() as root:
+            folder = lay_out(root, OLMO, {"config.json": b"{}", "model.safetensors": b"x"})
+            old = folder / "snapshots" / ("0" * 40)
+            old.mkdir()
+            (old / "model.safetensors").write_bytes(b"y" * 500)
+            (entry,) = list_cached_models(Path(root))
+
+        self.assertEqual(entry.size_bytes, 3 + 500 + len(COMMIT))
+        self.assertEqual(entry.status.total_bytes, 3)
 
     def test_folders_that_are_not_models_are_skipped(self):
         with tempfile.TemporaryDirectory() as root:
@@ -174,6 +194,207 @@ class CachedModelListTests(unittest.TestCase):
         self.assertEqual(listed, ["org/newer", "org/older"])
 
 
+class RemoveCachedModelTests(unittest.TestCase):
+    """Removing a model deletes its folder and nothing else."""
+
+    def test_the_folder_is_removed_and_the_size_reported(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = lay_out(root, OLMO, {"config.json": b"{}", "model.safetensors": b"x" * 99})
+            (folder / "blobs" / "shard.incomplete").write_bytes(b"y" * 10)
+            other = lay_out(root, "org/other", {"config.json": b"{}"})
+
+            freed = remove_cached_model(OLMO, Path(root))
+
+            self.assertFalse(folder.exists())
+            self.assertTrue(other.is_dir())
+        # The 40-byte refs/main file goes too, so it counts.
+        self.assertEqual(freed, 2 + 99 + 10 + len(COMMIT))
+
+    def test_every_revision_counts_toward_the_space_freed(self):
+        # Without symlinks the hub keeps each revision's files in its own
+        # snapshot folder, and deleting the repo folder takes them all.
+        with tempfile.TemporaryDirectory() as root:
+            folder = lay_out(root, OLMO, {"config.json": b"{}"})
+            old = folder / "snapshots" / ("0" * 40)
+            old.mkdir()
+            (old / "model.safetensors").write_bytes(b"x" * 500)
+            (folder / "snapshots" / COMMIT / "model.safetensors").write_bytes(b"y" * 70)
+
+            self.assertEqual(
+                remove_cached_model(OLMO, Path(root)), 2 + 500 + 70 + len(COMMIT)
+            )
+
+    def test_the_hubs_lock_folder_is_left_for_other_processes(self):
+        # Released lock files are harmless; a deleted one that another
+        # process was waiting on would let two writers in.
+        with tempfile.TemporaryDirectory() as root:
+            folder = lay_out(root, OLMO, {"config.json": b"{}"})
+            lock = Path(root) / ".locks" / folder.name
+            lock.mkdir(parents=True)
+            (lock / "blob.lock").write_text("")
+
+            remove_cached_model(OLMO, Path(root))
+
+            self.assertFalse(folder.exists())
+            self.assertTrue((lock / "blob.lock").is_file())
+
+    def test_a_lock_held_by_another_process_refuses_the_removal(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = lay_out(root, OLMO, {"config.json": b"{}"})
+            lock_dir = Path(root) / ".locks" / folder.name
+            lock_dir.mkdir(parents=True)
+            # filelock is reentrant within a process, so the hold has to come
+            # from outside it, as the hub's would.
+            script = (
+                "import time\nfrom filelock import FileLock\n"
+                f"lock = FileLock({str(lock_dir / 'blob.lock')!r})\nlock.acquire()\n"
+                "print('held', flush=True)\ntime.sleep(30)"
+            )
+            other = subprocess.Popen(
+                [sys.executable, "-c", script], stdout=subprocess.PIPE, text=True
+            )
+            try:
+                self.assertEqual(other.stdout.readline().strip(), "held")
+                with self.assertRaises(model_runtime.ModelDownloading) as caught:
+                    remove_cached_model(OLMO, Path(root))
+                self.assertIn("another process", str(caught.exception))
+                self.assertTrue(folder.is_dir())
+            finally:
+                other.kill()
+                other.wait()
+
+            # Once the other process is gone the same lock file is no bar.
+            remove_cached_model(OLMO, Path(root))
+            self.assertFalse(folder.exists())
+
+    def test_a_model_that_is_not_on_disk_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(FileNotFoundError):
+                remove_cached_model(OLMO, Path(root))
+
+    def test_a_malformed_id_is_refused_before_anything_is_touched(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(ValueError):
+                remove_cached_model("../../etc", Path(root))
+            self.assertEqual(list(Path(root).iterdir()), [])
+
+
+class ManagerRemoveTests(unittest.TestCase):
+    """The manager deletes a model only when nothing of its own is using it."""
+
+    def setUp(self):
+        self.root = tempfile.TemporaryDirectory()
+        self.addCleanup(self.root.cleanup)
+        self.folder = lay_out(
+            self.root.name, OLMO, {"config.json": b"{}", "model.safetensors": b"x" * 10}
+        )
+        self.manager = ModelManager()
+
+    def test_an_idle_model_is_removed_and_the_locks_released(self):
+        freed = self.manager.remove(OLMO, Path(self.root.name))
+
+        self.assertFalse(self.folder.exists())
+        self.assertEqual(freed, 12 + len(COMMIT))  # files plus the refs/main entry
+        self.assertFalse(self.manager._lock.locked())
+        self.assertFalse(self.manager._downloads_lock.locked())
+
+    def test_the_loaded_model_is_refused(self):
+        self.manager.model_id = OLMO
+        with self.assertRaises(model_runtime.ModelLoaded):
+            self.manager.remove(OLMO, Path(self.root.name))
+        self.assertTrue(self.folder.is_dir())
+        self.assertFalse(self.manager._lock.locked())
+
+    def test_a_model_being_downloaded_is_refused(self):
+        self.manager.active_downloads[OLMO] = DownloadProgress()
+        with self.assertRaises(model_runtime.ModelDownloading):
+            self.manager.remove(OLMO, Path(self.root.name))
+        self.assertTrue(self.folder.is_dir())
+        self.assertFalse(self.manager._downloads_lock.locked())
+
+    def test_a_busy_manager_is_refused_without_waiting(self):
+        self.manager._lock.acquire()
+        self.addCleanup(self.manager._lock.release)
+        with self.assertRaises(model_runtime.ModelBusy):
+            self.manager.remove(OLMO, Path(self.root.name))
+        self.assertTrue(self.folder.is_dir())
+
+    def test_every_refusal_is_a_model_in_use(self):
+        for error in (model_runtime.ModelLoaded, model_runtime.ModelDownloading, model_runtime.ModelBusy):
+            self.assertTrue(issubclass(error, model_runtime.ModelInUse))
+
+    def test_a_malformed_id_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.manager.remove("nonsense", Path(self.root.name))
+
+
+class LoadingIdTests(unittest.TestCase):
+    """The manager names the model it is loading for as long as the load runs."""
+
+    def test_the_loading_id_is_set_during_the_load_and_cleared_after(self):
+        manager = ModelManager()
+        seen = []
+
+        def fake_load(model_id, local_path, torch):
+            seen.append((manager.loading_id, manager._lock.locked()))
+            return "CPU"
+
+        with mock.patch.object(manager, "_load_locked", fake_load):
+            self.assertEqual(manager.load(OLMO, Path("/snap")), "CPU")
+
+        self.assertEqual(seen, [(OLMO, True)])
+        self.assertIsNone(manager.loading_id)
+
+    def test_a_load_waiting_for_the_lock_is_already_named(self):
+        # A generation holds the lock for as long as its reply takes; the
+        # load queued behind it must count as under way from the click.
+        import threading
+
+        manager = ModelManager()
+        manager._lock.acquire()
+        entered = threading.Event()
+
+        def fake_load(model_id, local_path, torch):
+            entered.set()
+            return "CPU"
+
+        with mock.patch.object(manager, "_load_locked", fake_load):
+            worker = threading.Thread(target=manager.load, args=(OLMO, Path("/snap")))
+            worker.start()
+            try:
+                for _ in range(200):
+                    if manager.loading_id == OLMO:
+                        break
+                    time.sleep(0.005)
+                self.assertEqual(manager.loading_id, OLMO)
+                self.assertFalse(entered.is_set())
+            finally:
+                manager._lock.release()
+                worker.join(timeout=5)
+
+        self.assertTrue(entered.is_set())
+        self.assertIsNone(manager.loading_id)
+
+    def test_a_failed_load_clears_the_loading_id(self):
+        manager = ModelManager()
+
+        def fail(model_id, local_path, torch):
+            raise RuntimeError("gpu fell over")
+
+        with mock.patch.object(manager, "_load_locked", fail):
+            with self.assertRaises(RuntimeError):
+                manager.load(OLMO, Path("/snap"))
+
+        self.assertIsNone(manager.loading_id)
+        self.assertFalse(manager._lock.locked())
+
+    def test_a_malformed_id_is_refused_before_the_lock(self):
+        manager = ModelManager()
+        with self.assertRaises(ValueError):
+            manager.load("nonsense", Path("/snap"))
+        self.assertIsNone(manager.loading_id)
+
+
 def cached(model_id: str, **overrides) -> CachedModel:
     fields = dict(
         model_id=model_id,
@@ -204,6 +425,43 @@ UNSUPPORTED = cached(
     architecture=None,
     dtype=None,
 )
+
+
+class SortCachedModelsTests(unittest.TestCase):
+    OLD_SMALL = cached("zeta/old-small", updated=1.0, status=CacheStatus(cached_bytes=10))
+    NEW_LARGE = cached("Alpha/new-large", updated=3.0, status=CacheStatus(cached_bytes=300))
+    MID = cached("mid/model", updated=2.0, status=CacheStatus(cached_bytes=20))
+    MODELS = [OLD_SMALL, NEW_LARGE, MID]
+
+    def ids(self, order):
+        return [entry.model_id for entry in sort_cached_models(self.MODELS, order)]
+
+    def test_each_order_lists_the_models_its_way(self):
+        self.assertEqual(
+            self.ids("Newest first"), ["Alpha/new-large", "mid/model", "zeta/old-small"]
+        )
+        self.assertEqual(self.ids("Name"), ["Alpha/new-large", "mid/model", "zeta/old-small"])
+        self.assertEqual(
+            self.ids("Largest first"), ["Alpha/new-large", "mid/model", "zeta/old-small"]
+        )
+        self.assertEqual(
+            self.ids("Smallest first"), ["zeta/old-small", "mid/model", "Alpha/new-large"]
+        )
+
+    def test_name_order_ignores_case(self):
+        models = [cached("b/one"), cached("A/two"), cached("a/one")]
+        self.assertEqual(
+            [e.model_id for e in sort_cached_models(models, "Name")],
+            ["a/one", "A/two", "b/one"],
+        )
+
+    def test_an_unknown_order_falls_back_to_newest_first(self):
+        self.assertEqual(self.ids(None), self.ids("Newest first"))
+        self.assertEqual(self.ids("sideways"), self.ids("Newest first"))
+
+    def test_the_input_is_left_alone(self):
+        sort_cached_models(self.MODELS, "Name")
+        self.assertEqual(self.MODELS, [self.OLD_SMALL, self.NEW_LARGE, self.MID])
 
 
 class MyModelsPaneTests(unittest.TestCase):
@@ -237,6 +495,26 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertIn("2 models", summary)
         self.assertIn("15.0 GB", summary)
         self.assertIn("/cache", summary)
+
+    def test_the_list_follows_the_chosen_sort_order(self):
+        self.entries = [cached("b/big"), PARTIAL, cached("a/small", status=CacheStatus(cached_bytes=1))]
+
+        by_name, _, _ = app.refresh_my_models(None, "Name")
+        by_size, _, _ = app.refresh_my_models(None, "Largest first")
+        smallest, _, _ = app.refresh_my_models(None, "Smallest first")
+
+        self.assertEqual([v for _, v in by_name["choices"]], ["a/small", "b/big", "org/partial"])
+        self.assertEqual([v for _, v in by_size["choices"]], ["b/big", "org/partial", "a/small"])
+        self.assertEqual([v for _, v in smallest["choices"]], ["a/small", "org/partial", "b/big"])
+
+    def test_an_incomplete_label_ends_in_the_word_the_stylesheet_looks_for(self):
+        # The CSS tints options whose label carries "· incomplete", the only
+        # hook Gradio's Radio gives a stylesheet.
+        radio, _, _ = app.refresh_my_models(None)
+        labels = dict((v, k) for k, v in radio["choices"])
+        self.assertIn("· incomplete", labels["org/partial"])
+        self.assertNotIn("incomplete", labels[OLMO])
+        self.assertIn('[data-testid*="· incomplete"]', app.CSS)
 
     def test_a_whole_repo_of_another_kind_is_listed_as_unsupported(self):
         self.entries = [UNSUPPORTED]
@@ -304,6 +582,181 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertEqual(
             app.select_my_model(None), (gr.skip(), app.NO_CACHED_MODEL_SELECTED)
         )
+
+
+class ManageMyModelsTests(unittest.TestCase):
+    """Redownloading and removing a model from My Models."""
+
+    def setUp(self):
+        self.entries = [cached(OLMO), PARTIAL]
+        self.manager = ModelManager()
+        self.removed = []
+        originals = (
+            app.MANAGER,
+            app.list_cached_models,
+            model_runtime.remove_cached_model,
+            app.download_model,
+        )
+        app.MANAGER = self.manager
+        app.list_cached_models = lambda: list(self.entries)
+        # The manager deletes through the module-level function, so that is
+        # what stands in: the manager's own checks stay real.
+        model_runtime.remove_cached_model = self.remove
+        app.download_model = self.download
+        self.addCleanup(
+            lambda: setattr(app, "MANAGER", originals[0])
+            or setattr(app, "list_cached_models", originals[1])
+            or setattr(model_runtime, "remove_cached_model", originals[2])
+            or setattr(app, "download_model", originals[3])
+        )
+
+    def remove(self, model_id, cache_dir=None):
+        self.removed.append(model_id)
+        return PARTIAL.size_bytes
+
+    def download(self, model_id, hf_token):
+        yield f"downloading {model_id} with {hf_token!r}"
+
+    def test_redownload_resumes_the_selected_model(self):
+        frames = list(app.redownload_my_model("org/partial", "tok"))
+        self.assertEqual(frames, ["downloading org/partial with 'tok'"])
+
+    def test_the_loaded_model_is_not_redownloaded_under_itself(self):
+        # A newer revision on disk with the old weights in memory would be
+        # listed as loaded: the label goes by ID alone.
+        self.manager.model_id = OLMO
+
+        (card,) = list(app.redownload_my_model(OLMO, ""))
+
+        self.assertIn("Model in use", card)
+        self.assertIn("Unload", card)
+        self.assertFalse(card.startswith("downloading"), card)  # the fake never ran
+
+    def test_a_model_being_loaded_is_not_redownloaded_under_itself(self):
+        # model_id is empty for the whole of a load, so the manager names
+        # the model it is bringing in separately.
+        self.manager.loading_id = "org/partial"
+
+        (card,) = list(app.redownload_my_model("org/partial", ""))
+
+        self.assertIn("Model in use", card)
+        self.assertIn("being loaded", card)
+        self.assertFalse(card.startswith("downloading"), card)
+
+    def test_redownload_with_nothing_selected_says_so(self):
+        (card,) = list(app.redownload_my_model(None, ""))
+        self.assertIn("Nothing to redownload", card)
+        self.assertIn("Select a model", card)
+
+    def test_asking_to_remove_shows_the_question_with_the_size(self):
+        status, confirm, question, pending = app.ask_remove_my_model("org/partial")
+
+        self.assertEqual(status, gr.skip())
+        self.assertTrue(confirm["visible"])
+        self.assertIn("org/partial", question)
+        self.assertIn("150 B", question)
+        self.assertIn("cannot be undone", question)
+        self.assertEqual(pending, "org/partial")
+
+    def test_asking_with_nothing_selected_is_refused(self):
+        status, confirm, question, pending = app.ask_remove_my_model(None)
+
+        self.assertIn("Nothing to remove", status)
+        self.assertFalse(confirm["visible"])
+        self.assertEqual(question, "")
+        self.assertIsNone(pending)
+
+    def test_the_loaded_model_cannot_be_removed(self):
+        self.manager.model_id = OLMO
+
+        status, confirm, _, pending = app.ask_remove_my_model(OLMO)
+        self.assertIn("Unload", status)
+        self.assertFalse(confirm["visible"])
+        self.assertIsNone(pending)
+
+        status, confirm, pending = app.remove_my_model(OLMO)
+        self.assertIn("Unload", status)
+        self.assertFalse(confirm["visible"])
+        self.assertIsNone(pending)
+        self.assertEqual(self.removed, [])
+
+    def test_a_model_being_downloaded_cannot_be_removed(self):
+        self.manager.active_downloads["org/partial"] = DownloadProgress()
+
+        status, confirm, _, _ = app.ask_remove_my_model("org/partial")
+        self.assertIn("Still downloading", status)
+        self.assertFalse(confirm["visible"])
+
+        status, _, _ = app.remove_my_model("org/partial")
+        self.assertIn("Still downloading", status)
+        self.assertEqual(self.removed, [])
+
+    def test_a_model_busy_in_memory_cannot_be_removed(self):
+        # A load holds the model lock until ``from_pretrained`` returns, and
+        # ``model_id`` is only assigned after: the lock is the real guard.
+        self.manager._lock.acquire()
+        self.addCleanup(self.manager._lock.release)
+
+        status, confirm, _ = app.remove_my_model("org/partial")
+
+        self.assertIn("Model busy", status)
+        self.assertIn("idle", status)
+        self.assertFalse(confirm["visible"])
+        self.assertEqual(self.removed, [])
+
+    def test_a_model_that_left_the_cache_is_reported_without_a_question(self):
+        status, confirm, _, pending = app.ask_remove_my_model("gone/model")
+
+        self.assertIn("no longer in the cache", status)
+        self.assertFalse(confirm["visible"])
+        self.assertIsNone(pending)
+
+    def test_confirming_removes_the_model_and_reports_the_space_freed(self):
+        status, confirm, pending = app.remove_my_model("org/partial")
+
+        self.assertEqual(self.removed, ["org/partial"])
+        self.assertIn("Model removed", status)
+        self.assertIn("org/partial", status)
+        self.assertIn("150 B", status)
+        self.assertFalse(confirm["visible"])
+        self.assertIsNone(pending)
+
+    def test_confirming_with_no_pending_model_removes_nothing(self):
+        # The question was withdrawn (another model chosen, or Cancel) before
+        # the click landed: nothing is pending, so nothing is deleted.
+        status, confirm, pending = app.remove_my_model(None)
+
+        self.assertEqual(self.removed, [])
+        self.assertIn("Nothing to remove", status)
+        self.assertFalse(confirm["visible"])
+        self.assertIsNone(pending)
+
+    def test_withdrawing_the_question_forgets_the_model(self):
+        confirm, pending = app.hide_remove_confirm()
+        self.assertFalse(confirm["visible"])
+        self.assertIsNone(pending)
+
+    def test_a_removal_that_fails_is_reported(self):
+        def refuse(model_id, cache_dir=None):
+            raise PermissionError(13, "Permission denied: <blobs>")
+
+        model_runtime.remove_cached_model = refuse
+
+        status, confirm, pending = app.remove_my_model("org/partial")
+
+        self.assertIn("Could not remove model", status)
+        self.assertIn("Permission denied: &lt;blobs&gt;", status)
+        self.assertFalse(confirm["visible"])
+        self.assertIsNone(pending)
+
+    def test_a_model_gone_before_confirming_is_reported(self):
+        def gone(model_id, cache_dir=None):
+            raise FileNotFoundError(model_id)
+
+        model_runtime.remove_cached_model = gone
+
+        status, _, _ = app.remove_my_model("org/partial")
+        self.assertIn("no longer in the cache", status)
 
 
 INSTRUCT = HubModel(
@@ -470,6 +923,7 @@ class PageLayoutTests(unittest.TestCase):
         "Hugging Face model ID",
         "Hugging Face token (optional)",
         "Downloaded models",
+        "Sort by",
         "Search Hugging Face",
         "Search results",
     ]
@@ -568,9 +1022,36 @@ class PageLayoutTests(unittest.TestCase):
         ]
 
     def test_every_model_change_rescans_the_cache(self):
-        # Download, download-and-load, load cached, unload, the refresh
-        # button, and the page load: each ends in a rescan.
-        self.assertEqual(len(self.listeners("refresh_my_models")), 6)
+        # Download, download-and-load, load cached, unload, redownload,
+        # confirmed removal, the refresh button, a new sort order, and the
+        # page load: each ends in a rescan.
+        self.assertEqual(len(self.listeners("refresh_my_models")), 9)
+
+    def test_removal_asks_before_deleting(self):
+        # The Remove button only opens the question; deleting is the
+        # confirm button's job, and choosing another model withdraws it.
+        (ask,) = self.listeners("ask_remove_my_model")
+        (remove,) = self.listeners("remove_my_model")
+        buttons = {
+            self.demo.blocks[block_id].value: fn
+            for fn in (ask, remove)
+            for block_id, _ in fn.targets
+        }
+        self.assertIs(buttons["🗑️ Remove"], ask)
+        self.assertIs(buttons["Remove from disk"], remove)
+        self.assertEqual(len(self.listeners("hide_remove_confirm")), 2)
+
+    def test_the_confirm_button_deletes_the_model_the_question_named(self):
+        # The confirm handler reads the stored pending ID, not the radio, so
+        # a selection moved after the question opened cannot redirect it.
+        (ask,) = self.listeners("ask_remove_my_model")
+        (remove,) = self.listeners("remove_my_model")
+        radio = self.labelled("Downloaded models")
+        (pending,) = remove.inputs
+        self.assertIsInstance(pending, gr.State)
+        self.assertIsNot(pending, radio)
+        self.assertIn(pending, ask.outputs)
+        self.assertIn(pending, remove.outputs)
 
     def test_choosing_a_model_writes_the_id_box(self):
         box = self.labelled("Hugging Face model ID")

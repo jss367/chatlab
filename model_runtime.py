@@ -8,6 +8,7 @@ import gc
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -367,6 +368,26 @@ def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
     return CacheStatus(cached, partial_files, partial_bytes, missing, unsupported)
 
 
+def folder_bytes(folder: Path) -> int:
+    """The bytes a cache folder holds, counting every regular file once.
+
+    In the usual layout the snapshots are symlinks into ``blobs`` and only
+    the blobs count; on a filesystem without symlinks the snapshots hold the
+    files themselves and count instead. Either way this is what deleting the
+    folder frees, every revision included, where :func:`cache_status` sizes
+    the ``main`` snapshot alone.
+    """
+
+    total = 0
+    for entry in folder.rglob("*"):
+        try:
+            if entry.is_file() and not entry.is_symlink():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 def format_bytes(count: int) -> str:
     """Render a byte count the way a download dialog would: ``1.2 GB``."""
 
@@ -402,7 +423,11 @@ class CachedModel:
 
     ``status`` is the same verdict :func:`cache_status` gives, so a folder a
     cut-off download left behind is listed with its missing files rather than
-    hidden. ``files`` counts what the ``main`` snapshot has so far; ``updated``
+    hidden. ``disk_bytes`` is the whole folder, every revision included, as
+    :func:`folder_bytes` measures it: what the list shows as the size, what
+    the size orders sort by, and what removing the model frees, so those
+    three never disagree. ``files`` counts what the ``main`` snapshot has so
+    far; ``updated``
     is the newest write among the model's files, as epoch seconds, which is
     when it was last downloaded or resumed. ``architecture`` and ``dtype``
     come from the snapshot's ``config.json`` and are absent when it is.
@@ -416,10 +441,11 @@ class CachedModel:
     architecture: str | None = None
     dtype: str | None = None
     path: Path | None = None
+    disk_bytes: int | None = None
 
     @property
     def size_bytes(self) -> int:
-        return self.status.total_bytes
+        return self.disk_bytes if self.disk_bytes is not None else self.status.total_bytes
 
 
 class InsufficientMemoryError(RuntimeError):
@@ -780,7 +806,116 @@ def _cached_model(folder: Path, root: Path) -> CachedModel | None:
         architecture=architecture,
         dtype=dtype,
         path=folder,
+        disk_bytes=folder_bytes(folder),
     )
+
+
+# The orders My Models can be listed in. "Newest first" is the scan's own
+# order; the rest re-sort the same entries, ties broken by ID so the list is
+# stable across rescans.
+MODEL_SORT_ORDERS = ("Newest first", "Name", "Largest first", "Smallest first")
+DEFAULT_MODEL_SORT = MODEL_SORT_ORDERS[0]
+
+_SORT_KEYS: dict[str, Callable[[CachedModel], tuple]] = {
+    "Newest first": lambda entry: (-(entry.updated or 0), entry.model_id),
+    "Name": lambda entry: (entry.model_id.lower(), entry.model_id),
+    "Largest first": lambda entry: (-entry.size_bytes, entry.model_id),
+    "Smallest first": lambda entry: (entry.size_bytes, entry.model_id),
+}
+
+
+def sort_cached_models(models: list[CachedModel], order: str | None) -> list[CachedModel]:
+    """``models`` in one of :data:`MODEL_SORT_ORDERS`; an unknown order is the default."""
+
+    key = _SORT_KEYS.get(order or "", _SORT_KEYS[DEFAULT_MODEL_SORT])
+    return sorted(models, key=key)
+
+
+
+
+class ModelInUse(RuntimeError):
+    """A cached model's files cannot be removed right now.
+
+    The subclasses say why, so the interface can tell the reader what to do:
+    unload the model, wait for its download, or wait for the model to go idle.
+    """
+
+
+class ModelLoaded(ModelInUse):
+    """The model is the one in memory."""
+
+
+class ModelDownloading(ModelInUse):
+    """A download of the model is under way, in this process or another."""
+
+
+class ModelBusy(ModelInUse):
+    """The model lock is held: a load, generation, scoring, or inspection is running."""
+
+
+def hub_lock_held(root: Path, folder_name: str) -> bool:
+    """Whether another process holds one of the hub's locks for this repo.
+
+    ``huggingface_hub`` takes a ``filelock`` on ``.locks/<repo>/<etag>.lock``
+    for each file it is writing, and Transformers loads through the same
+    library. Each lock is tried without waiting and let go at once: taking
+    one is the only way to ask, since a lock file exists whether or not
+    anyone holds it. A lock this process cannot open counts as held.
+    """
+
+    locks = root / ".locks" / folder_name
+    if not locks.is_dir():
+        return False
+    from filelock import FileLock, Timeout
+
+    for path in locks.iterdir():
+        if not path.is_file():
+            continue
+        lock = FileLock(str(path))
+        try:
+            lock.acquire(timeout=0)
+        except Timeout:
+            return True
+        except OSError:
+            return True
+        else:
+            lock.release()
+    return False
+
+
+def remove_cached_model(model_id: str, cache_dir: Path | None = None) -> int:
+    """Delete everything the cache holds for ``model_id``; return the bytes freed.
+
+    Removes the model's ``models--org--name`` folder. The lock folder the hub
+    keeps beside it under ``.locks`` is left alone, as the hub's own
+    ``delete_revisions`` leaves it: a process in another window may be
+    waiting on one of those files, and deleting a lock someone holds lets a
+    second writer in beside them. Before deleting, every lock in that folder
+    is tried: one held by another process means a download or load is
+    touching these files right now, and the removal is refused with
+    :class:`ModelDownloading` rather than pulling them out from under it.
+    The locks in this process are the manager's business, see
+    :meth:`ModelManager.remove`.
+
+    The size is measured over the whole folder before deletion, so it counts
+    every revision the folder held, not just the ``main`` snapshot. A model
+    with nothing on disk raises ``FileNotFoundError``; a folder that cannot
+    be deleted raises the ``OSError`` that stopped it, with whatever was
+    already removed gone.
+    """
+
+    checked_id = validate_model_id(model_id)
+    root = cache_root(cache_dir)
+    folder = cache_folder(checked_id, root)
+    if not folder.is_dir():
+        raise FileNotFoundError(f"Nothing for {checked_id} is in the cache at {root}.")
+    if hub_lock_held(root, folder.name):
+        raise ModelDownloading(
+            f"{checked_id} is being downloaded or loaded by another process."
+        )
+    freed = folder_bytes(folder)
+    shutil.rmtree(folder)
+    return freed
 
 
 # How many hub search results are shown. The hub sorts them by downloads, so
@@ -1763,6 +1898,12 @@ class ModelManager:
         # can be told from state produced under the next even when both came
         # from the same repository ID (a re-download at a newer revision).
         self.load_count = 0
+        # The model a load is bringing in right now, or None. ``model_id`` is
+        # cleared for the whole of a load and set only once the weights are
+        # in, so on its own it says nothing about the minutes in between;
+        # anything that must not touch a model's files while it is being
+        # read (a redownload, say) asks this as well.
+        self.loading_id: str | None = None
         # Downloads under way right now, by model ID, so a second request for
         # the same model can follow the first instead of racing it for the
         # same files.
@@ -1923,77 +2064,125 @@ class ModelManager:
 
     def load(self, model_id: str, local_path: Path) -> str:
         import torch
+
+        checked_id = validate_model_id(model_id)
+        # Recorded before waiting for the lock, not after: a load queued
+        # behind a long generation is a load under way for the whole wait.
+        self.loading_id = checked_id
+        try:
+            with self._lock:
+                return self._load_locked(checked_id, local_path, torch)
+        finally:
+            self.loading_id = None
+
+    def _load_locked(self, model_id: str, local_path: Path, torch) -> str:
+        """Bring ``model_id`` in from ``local_path`` while the caller holds ``_lock``."""
+
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        with self._lock:
-            self._unload_locked(torch)
-            if torch.cuda.is_available():
-                backend = "cuda"
-                dtype = (
-                    torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-                )
-            elif torch.backends.mps.is_available():
-                backend = "mps"
-                dtype = torch.float16
-            else:
-                backend = "cpu"
-                dtype = torch.float32
-            self._check_memory(
-                model_id, local_path, str(dtype).replace("torch.", ""), backend
+        self._unload_locked(torch)
+        if torch.cuda.is_available():
+            backend = "cuda"
+            dtype = (
+                torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
             )
-            tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
+        elif torch.backends.mps.is_available():
+            backend = "mps"
+            dtype = torch.float16
+        else:
+            backend = "cpu"
+            dtype = torch.float32
+        self._check_memory(
+            model_id, local_path, str(dtype).replace("torch.", ""), backend
+        )
+        tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
 
-            try:
-                if torch.cuda.is_available():
-                    model = AutoModelForCausalLM.from_pretrained(
-                        local_path,
-                        local_files_only=True,
-                        dtype=dtype,
-                        device_map="auto",
-                        low_cpu_mem_usage=True,
-                    )
-                    device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
-                elif torch.backends.mps.is_available():
-                    self._cap_mps_memory(torch)
-                    model = AutoModelForCausalLM.from_pretrained(
-                        local_path,
-                        local_files_only=True,
-                        dtype=dtype,
-                        low_cpu_mem_usage=True,
-                    ).to("mps")
-                    device_name = "Apple Metal (MPS)"
-                else:
-                    model = AutoModelForCausalLM.from_pretrained(
-                        local_path,
-                        local_files_only=True,
-                        dtype=dtype,
-                        low_cpu_mem_usage=True,
-                    )
-                    device_name = "CPU"
-            except (RuntimeError, MemoryError) as error:
-                self._release_device_cache(torch)
-                if is_out_of_memory_error(error):
-                    raise OutOfMemoryError(
-                        f"{model_id.strip()} did not fit in memory. Close other "
-                        "applications or choose a smaller model. "
-                        f"({str(error).splitlines()[0][:200]})"
-                    ) from error
-                raise
+        try:
+            if torch.cuda.is_available():
+                model = AutoModelForCausalLM.from_pretrained(
+                    local_path,
+                    local_files_only=True,
+                    dtype=dtype,
+                    device_map="auto",
+                    low_cpu_mem_usage=True,
+                )
+                device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
+            elif torch.backends.mps.is_available():
+                self._cap_mps_memory(torch)
+                model = AutoModelForCausalLM.from_pretrained(
+                    local_path,
+                    local_files_only=True,
+                    dtype=dtype,
+                    low_cpu_mem_usage=True,
+                ).to("mps")
+                device_name = "Apple Metal (MPS)"
+            else:
+                model = AutoModelForCausalLM.from_pretrained(
+                    local_path,
+                    local_files_only=True,
+                    dtype=dtype,
+                    low_cpu_mem_usage=True,
+                )
+                device_name = "CPU"
+        except (RuntimeError, MemoryError) as error:
+            self._release_device_cache(torch)
+            if is_out_of_memory_error(error):
+                raise OutOfMemoryError(
+                    f"{model_id.strip()} did not fit in memory. Close other "
+                    "applications or choose a smaller model. "
+                    f"({str(error).splitlines()[0][:200]})"
+                ) from error
+            raise
 
-            model.eval()
-            self.model = model
-            self.tokenizer = tokenizer
-            self.model_id = validate_model_id(model_id)
-            self.local_path = local_path
-            self.device_name = device_name
-            self.load_count += 1
-            return device_name
+        model.eval()
+        self.model = model
+        self.tokenizer = tokenizer
+        self.model_id = model_id
+        self.local_path = local_path
+        self.device_name = device_name
+        self.load_count += 1
+        return device_name
 
     def unload(self) -> None:
         import torch
 
         with self._lock:
             self._unload_locked(torch)
+
+    def remove(self, model_id: str, cache_dir: Path | None = None) -> int:
+        """Delete ``model_id``'s cache folder, unless the manager is using it.
+
+        Removal is serialized with everything else that touches the files.
+        The model lock is taken for the whole deletion, so a load that is
+        still reading the folder (``model_id`` is assigned only once
+        ``from_pretrained`` returns) cannot have its files pulled from under
+        it, and no load can start until the folder is gone. The downloads
+        lock is held too, so a download cannot be reserved for the model
+        between the check and the deletion. Looking at ``model_id`` and
+        ``active_downloads`` first and deleting afterwards would leave exactly
+        that gap: the interface runs its handlers on several workers.
+
+        The model lock is never waited for. It is held across a whole
+        generation, and a handler blocked on it would tie up a worker for as
+        long as the reply takes, so a busy manager raises :class:`ModelBusy`
+        and the reader tries again when the model is idle.
+        """
+
+        checked_id = validate_model_id(model_id)
+        if not self._lock.acquire(blocking=False):
+            raise ModelBusy(
+                f"{checked_id} cannot be removed while a model is loading, "
+                "generating, scoring, or being inspected."
+            )
+        try:
+            if self.model_id == checked_id:
+                raise ModelLoaded(f"{checked_id} is loaded in memory.")
+            with self._downloads_lock:
+                if checked_id in self.active_downloads:
+                    raise ModelDownloading(f"{checked_id} is being downloaded.")
+                return remove_cached_model(checked_id, cache_dir)
+        finally:
+            self._lock.release()
 
     def _unload_locked(self, torch) -> None:
         """Clear the loaded model while the caller holds ``_lock``."""
