@@ -2233,6 +2233,34 @@ class ModelManager:
             if self.active_downloads.get(checked_id) is progress:
                 del self.active_downloads[checked_id]
 
+    def reserve_load(self, model_id: str) -> str:
+        """Name the model a load is about to bring in, and return its ID.
+
+        A caller that runs :meth:`load` on another thread claims the load here
+        first. The worker names it only once it reaches ``load``, and the
+        model lock is taken later still, so until then a removal or a
+        redownload would find the manager idle and move the snapshot out from
+        under the load. Claiming it in the handler closes that window, the way
+        :meth:`reserve_download` closes the same one for downloads.
+
+        The caller must release the reservation if the worker never runs;
+        ``load`` itself gives it back when it returns or raises.
+        """
+
+        checked_id = validate_model_id(model_id)
+        self.loading_id = checked_id
+        return checked_id
+
+    def release_load(self, model_id: str) -> None:
+        """Give up a load reservation that no load will honour.
+
+        Left alone when the slot has since been claimed for another model, so
+        one handler's cleanup cannot cancel another's reservation.
+        """
+
+        if self.loading_id == validate_model_id(model_id):
+            self.loading_id = None
+
     def find_cached(self, model_id: str) -> Path:
         """The complete local snapshot of ``model_id``, without going online.
 
@@ -2258,10 +2286,11 @@ class ModelManager:
 
         import torch
 
-        checked_id = validate_model_id(model_id)
         # Recorded before waiting for the lock, not after: a load queued
         # behind a long generation is a load under way for the whole wait.
-        self.loading_id = checked_id
+        # A caller on another thread will have named it already through
+        # reserve_load; naming it again is the same answer.
+        checked_id = self.reserve_load(model_id)
         try:
             with self._lock:
                 return self._load_locked(checked_id, local_path, torch, progress)
@@ -2374,6 +2403,10 @@ class ModelManager:
         ``active_downloads`` first and deleting afterwards would leave exactly
         that gap: the interface runs its handlers on several workers.
 
+        A load claimed through :meth:`reserve_load` refuses the removal even
+        before it reaches the lock, because a load that runs on its own thread
+        is under way from the click, not from its first weight.
+
         The model lock is never waited for. It is held across a whole
         generation, and a handler blocked on it would tie up a worker for as
         long as the reply takes, so a busy manager raises :class:`ModelBusy`
@@ -2389,6 +2422,14 @@ class ModelManager:
         try:
             if self.model_id == checked_id:
                 raise ModelLoaded(f"{checked_id} is loaded in memory.")
+            if self.loading_id is not None:
+                # A load claimed on another thread that has not reached the
+                # lock yet. The lock alone would let this deletion through in
+                # the window between the claim and the first weight.
+                raise ModelBusy(
+                    f"{checked_id} cannot be removed while {self.loading_id} "
+                    "is being loaded."
+                )
             with self._downloads_lock:
                 if checked_id in self.active_downloads:
                     raise ModelDownloading(f"{checked_id} is being downloaded.")

@@ -413,9 +413,17 @@ class LoadCardTests(unittest.TestCase):
 
         def __init__(self, work):
             self._work = work
+            self.loading_id = None
 
         def find_cached(self, model_id):
             return Path("/cache/models--allenai--Olmo-3-7B-Think/snapshots/abc")
+
+        def reserve_load(self, model_id):
+            self.loading_id = model_id
+            return model_id
+
+        def release_load(self, model_id):
+            self.loading_id = None
 
         def load(self, model_id, path, progress=None):
             return self._work(progress)
@@ -549,6 +557,38 @@ class LoadCardTests(unittest.TestCase):
 
         self.assertIn("Could not load cached model", frames[-1])
         self.assertIn("Metal ran out of memory", frames[-1])
+
+    def test_the_load_is_claimed_before_its_worker_starts(self):
+        # Between the click and the worker's first instruction the manager
+        # would otherwise look idle, and a removal or a redownload arriving
+        # in that window could move the snapshot out from under the load.
+        order = []
+
+        class Manager(self.Manager):
+            def reserve_load(self, model_id):
+                order.append(("reserved", model_id))
+                return super().reserve_load(model_id)
+
+            def load(self, model_id, path, progress=None):
+                order.append(("loaded", self.loading_id))
+                return "CPU"
+
+        app.MANAGER = Manager(lambda progress: "CPU")
+
+        list(app.load_cached_model(self.MODEL))
+
+        self.assertEqual(order, [("reserved", self.MODEL), ("loaded", self.MODEL)])
+
+    def test_a_worker_that_cannot_start_gives_the_claim_back(self):
+        app.MANAGER = ModelManager()
+
+        with mock.patch.object(
+            threading.Thread, "start", side_effect=RuntimeError("no threads")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no threads"):
+                list(app.stream_load(self.MODEL, Path("/cache/snap")))
+
+        self.assertIsNone(app.MANAGER.loading_id)
 
     def test_a_load_that_ends_before_the_first_frame_still_reports_ready(self):
         app.MANAGER = self.Manager(lambda progress: "CPU")

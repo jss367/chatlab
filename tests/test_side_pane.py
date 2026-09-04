@@ -323,6 +323,18 @@ class ManagerRemoveTests(unittest.TestCase):
         for error in (model_runtime.ModelLoaded, model_runtime.ModelDownloading, model_runtime.ModelBusy):
             self.assertTrue(issubclass(error, model_runtime.ModelInUse))
 
+    def test_a_load_claimed_on_another_thread_is_refused(self):
+        # The load's own thread has not reached the model lock yet, so the
+        # lock is free and would let the deletion through.
+        self.manager.reserve_load(OLMO)
+        with self.assertRaises(model_runtime.ModelBusy):
+            self.manager.remove(OLMO, Path(self.root.name))
+        self.assertTrue(self.folder.is_dir())
+        self.assertFalse(self.manager._lock.locked())
+        self.manager.release_load(OLMO)
+        self.manager.remove(OLMO, Path(self.root.name))
+        self.assertFalse(self.folder.exists(), "removed once the claim is gone")
+
     def test_a_malformed_id_is_refused(self):
         with self.assertRaises(ValueError):
             self.manager.remove("nonsense", Path(self.root.name))
@@ -387,6 +399,38 @@ class LoadingIdTests(unittest.TestCase):
 
         self.assertIsNone(manager.loading_id)
         self.assertFalse(manager._lock.locked())
+
+    def test_a_reservation_names_the_load_before_it_starts(self):
+        # A load that runs on its own thread is under way from the click:
+        # the worker names it only once it reaches load(), and a redownload
+        # or a removal arriving in between must find it already claimed.
+        manager = ModelManager()
+
+        self.assertEqual(manager.reserve_load(" allenai/Olmo-3-7B-Think "), OLMO)
+        self.assertEqual(manager.loading_id, OLMO)
+
+    def test_a_reservation_is_only_given_back_by_the_load_that_holds_it(self):
+        manager = ModelManager()
+        manager.reserve_load(OLMO)
+
+        manager.release_load("org/other")
+        self.assertEqual(manager.loading_id, OLMO, "another handler's cleanup")
+
+        manager.release_load(OLMO)
+        self.assertIsNone(manager.loading_id)
+
+    def test_a_load_gives_a_reservation_back_when_it_returns(self):
+        from unittest import mock
+
+        manager = ModelManager()
+        manager.reserve_load(OLMO)
+
+        with mock.patch.object(
+            manager, "_load_locked", lambda *args, **kwargs: "CPU"
+        ):
+            manager.load(OLMO, Path("/snap"))
+
+        self.assertIsNone(manager.loading_id)
 
     def test_a_malformed_id_is_refused_before_the_lock(self):
         manager = ModelManager()

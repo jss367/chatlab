@@ -370,7 +370,17 @@ def stream_load(model_id: str, path: Path):
             outcome["error"] = error
 
     worker = threading.Thread(target=work, name="chatlab-load", daemon=True)
-    worker.start()
+    # Claimed before the worker exists, because the claim is what stops a
+    # removal or a redownload arriving in this same instant from moving the
+    # snapshot the load is about to read. The worker names the load only once
+    # it reaches MANAGER.load, and the model lock is taken later still.
+    MANAGER.reserve_load(model_id)
+    try:
+        worker.start()
+    except BaseException:
+        # load() never ran, so its finally cannot give the claim back.
+        MANAGER.release_load(model_id)
+        raise
     meter, pace = RateMeter(), Pace()
     while worker.is_alive():
         snap = progress.snapshot()
