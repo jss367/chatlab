@@ -109,7 +109,8 @@ class CachedModelListTests(unittest.TestCase):
 
         self.assertEqual(entry.model_id, OLMO)
         self.assertTrue(entry.status.complete)
-        self.assertEqual(entry.size_bytes, 100 + len(self.CONFIG))
+        # The size is the whole folder, refs/main included.
+        self.assertEqual(entry.size_bytes, 100 + len(self.CONFIG) + len(COMMIT))
         self.assertEqual(entry.files, 2)
         self.assertEqual(entry.commit, COMMIT)
         self.assertEqual(entry.architecture, "Olmo3ForCausalLM")
@@ -125,9 +126,22 @@ class CachedModelListTests(unittest.TestCase):
 
         self.assertEqual(entry.status.missing_files, (MODEL_WEIGHTS,))
         self.assertEqual(entry.status.partial_files, 1)
-        self.assertEqual(entry.size_bytes, len(self.CONFIG) + 40)
+        self.assertEqual(entry.size_bytes, len(self.CONFIG) + 40 + len(COMMIT))
         # The config is on disk, so what the model is can still be said.
         self.assertEqual(entry.architecture, "Olmo3ForCausalLM")
+
+    def test_old_revisions_count_toward_the_listed_size(self):
+        # Without symlinks each snapshot holds its own files; the list says
+        # what the folder takes, which is what removing it frees.
+        with tempfile.TemporaryDirectory() as root:
+            folder = lay_out(root, OLMO, {"config.json": b"{}", "model.safetensors": b"x"})
+            old = folder / "snapshots" / ("0" * 40)
+            old.mkdir()
+            (old / "model.safetensors").write_bytes(b"y" * 500)
+            (entry,) = list_cached_models(Path(root))
+
+        self.assertEqual(entry.size_bytes, 3 + 500 + len(COMMIT))
+        self.assertEqual(entry.status.total_bytes, 3)
 
     def test_folders_that_are_not_models_are_skipped(self):
         with tempfile.TemporaryDirectory() as root:

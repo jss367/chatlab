@@ -368,6 +368,26 @@ def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
     return CacheStatus(cached, partial_files, partial_bytes, missing, unsupported)
 
 
+def folder_bytes(folder: Path) -> int:
+    """The bytes a cache folder holds, counting every regular file once.
+
+    In the usual layout the snapshots are symlinks into ``blobs`` and only
+    the blobs count; on a filesystem without symlinks the snapshots hold the
+    files themselves and count instead. Either way this is what deleting the
+    folder frees, every revision included, where :func:`cache_status` sizes
+    the ``main`` snapshot alone.
+    """
+
+    total = 0
+    for entry in folder.rglob("*"):
+        try:
+            if entry.is_file() and not entry.is_symlink():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 def format_bytes(count: int) -> str:
     """Render a byte count the way a download dialog would: ``1.2 GB``."""
 
@@ -403,7 +423,11 @@ class CachedModel:
 
     ``status`` is the same verdict :func:`cache_status` gives, so a folder a
     cut-off download left behind is listed with its missing files rather than
-    hidden. ``files`` counts what the ``main`` snapshot has so far; ``updated``
+    hidden. ``disk_bytes`` is the whole folder, every revision included, as
+    :func:`folder_bytes` measures it: what the list shows as the size, what
+    the size orders sort by, and what removing the model frees, so those
+    three never disagree. ``files`` counts what the ``main`` snapshot has so
+    far; ``updated``
     is the newest write among the model's files, as epoch seconds, which is
     when it was last downloaded or resumed. ``architecture`` and ``dtype``
     come from the snapshot's ``config.json`` and are absent when it is.
@@ -417,10 +441,11 @@ class CachedModel:
     architecture: str | None = None
     dtype: str | None = None
     path: Path | None = None
+    disk_bytes: int | None = None
 
     @property
     def size_bytes(self) -> int:
-        return self.status.total_bytes
+        return self.disk_bytes if self.disk_bytes is not None else self.status.total_bytes
 
 
 class InsufficientMemoryError(RuntimeError):
@@ -781,6 +806,7 @@ def _cached_model(folder: Path, root: Path) -> CachedModel | None:
         architecture=architecture,
         dtype=dtype,
         path=folder,
+        disk_bytes=folder_bytes(folder),
     )
 
 
@@ -855,26 +881,6 @@ def hub_lock_held(root: Path, folder_name: str) -> bool:
         else:
             lock.release()
     return False
-
-
-def folder_bytes(folder: Path) -> int:
-    """The bytes a cache folder holds, counting every regular file once.
-
-    In the usual layout the snapshots are symlinks into ``blobs`` and only
-    the blobs count; on a filesystem without symlinks the snapshots hold the
-    files themselves and count instead. Either way this is what deleting the
-    folder frees, every revision included, where :func:`cache_status` sizes
-    the ``main`` snapshot alone.
-    """
-
-    total = 0
-    for entry in folder.rglob("*"):
-        try:
-            if entry.is_file() and not entry.is_symlink():
-                total += entry.stat().st_size
-        except OSError:
-            continue
-    return total
 
 
 def remove_cached_model(model_id: str, cache_dir: Path | None = None) -> int:
