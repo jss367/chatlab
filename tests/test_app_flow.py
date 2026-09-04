@@ -1,13 +1,15 @@
 import inspect
+import os
+import stat
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 import gradio as gr
 import numpy as np
 
 import app
 import charts
-import model_runtime
 from conversation import (
     MAIN_BRANCH,
     display_messages,
@@ -18,7 +20,17 @@ from conversation import (
 from model_runtime import GenerationUpdate, ModelChanged, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
 
+import settings
+import settings_sandbox
 from test_streaming import ChatTemplateTokenizer, SentencePieceTokenizer, loaded_manager
+
+
+def setUpModule():
+    settings_sandbox.start()
+
+
+def tearDownModule():
+    settings_sandbox.stop()
 
 
 # "Hello" and " world" are the answer; the reasoning tags are their own tokens.
@@ -1114,6 +1126,18 @@ class SaveLoadTests(unittest.TestCase):
         update, status = app.save_conversation([], "")
         self.assertFalse(update["visible"])
         self.assertIn("nothing to save", status)
+
+    def test_a_saved_conversation_is_readable_by_its_owner_alone(self):
+        # The upload folder is shared - on Linux it is /tmp/gradio, which every
+        # account on the machine can read - and a transcript is the reader's own
+        # writing. write_trace_export() writes its export the same way. The
+        # permissive umask stands in for a host that would otherwise have let
+        # the file be created world-readable.
+        self.addCleanup(os.umask, os.umask(0))
+        update, _status = app.save_conversation([make_turn("user", "hi")], "")
+
+        mode = Path(update["value"]).stat().st_mode
+        self.assertEqual(stat.S_IMODE(mode), 0o600)
 
     def test_loading_a_bad_file_reports_the_problem(
         self,
@@ -2467,7 +2491,9 @@ class BranchFromTokenTests(unittest.TestCase):
         )
         self.assertTrue(last[TURNS][-1]["content"].startswith(" world"))
 
-    def assert_oversized_typed_branch_is_refused(self, final, expected_status):
+    def assert_oversized_typed_branch_is_refused(
+        self, final, expected_status, repeats=15
+    ):
         calls = []
         real_generate = app.MANAGER.generate
 
@@ -2476,7 +2502,7 @@ class BranchFromTokenTests(unittest.TestCase):
             return real_generate(*args, **kwargs)
 
         app.MANAGER.generate = observe
-        frames = self.branch_text(final, "Hello" * 15)
+        frames = self.branch_text(final, "Hello" * repeats)
 
         self.assertEqual(
             len(frames), 1, "no destructive opening frame was published"
@@ -2517,17 +2543,12 @@ class BranchFromTokenTests(unittest.TestCase):
 
     def test_a_replacement_past_the_application_cap_preserves_the_old_response(self):
         final = self.respond()[-1]
-        old_limit = model_runtime.GENERATION_PREFILL_TOKEN_LIMIT
-        model_runtime.GENERATION_PREFILL_TOKEN_LIMIT = 16
-        self.addCleanup(
-            setattr,
-            model_runtime,
-            "GENERATION_PREFILL_TOKEN_LIMIT",
-            old_limit,
-        )
+        # The cap is the reader's setting, and the floor of its range is the
+        # smallest one a test can ask for.
+        self.enterContext(settings.override(prefill_token_limit=256))
 
         self.assert_oversized_typed_branch_is_refused(
-            final, "16 token limit for a generation prefix"
+            final, "256 token limit for a generation prefix", repeats=300
         )
 
     def test_typed_text_follows_noncanonical_sentencepiece_tokens(self):
@@ -3038,7 +3059,8 @@ class MessageBoxKeysTests(unittest.TestCase):
             for c in demo.blocks.values()
             if isinstance(c, gr.Textbox) and c.label == "Assistant prefill (optional)"
         )
-        self.assertEqual(prefill.value, None)
+        # Empty until the reader saves one, whether as "" or as nothing at all.
+        self.assertFalse(prefill.value)
         self.assertIn("closes the reasoning block", prefill.info)
 
 
@@ -3112,7 +3134,7 @@ class LayerInspectionTests(unittest.TestCase):
         self.assertEqual(frames[-1][CONTEXT_IDS], gr.skip())
 
     def test_scored_text_publishes_its_context_ids(self):
-        result = app.score_text("", "Hello", False, DEFAULT_COLOR_SCALE)
+        result = list(app.score_text("", "Hello", False, DEFAULT_COLOR_SCALE))[-1]
         stamp, ids, load = result[10]
         self.assertEqual(stamp, result[1][0])
         self.assertEqual(ids, [])

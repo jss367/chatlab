@@ -1,4 +1,4 @@
-# Chatlab
+# ChatLab
 
 A local chat interface that shows what happened under the hood for every token, generated or not. Tokens are colored by whichever measurement you pick, and clicking one shows its probability, sampling probability, surprise, entropy, and the alternatives the model preferred.
 
@@ -6,6 +6,7 @@ A local chat interface that shows what happened under the hood for every token, 
 
 - Hugging Face model download and cache controls
 - A Models page listing the models already downloaded, with a search of the Hugging Face Hub for more
+- A badge above the chat naming the model in memory and the device it runs on, or saying that none is loaded
 - A chat interface that collapses OLMo reasoning blocks into an expandable section
 - Live token-by-token generation with a **Stop** button
 - Exact raw vocabulary rank for each generated token
@@ -17,6 +18,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Perplexity, mean surprise, and a surprise trace for each response
 - Full metric-trace export as JSON or CSV
 - A system prompt, plus temperature, top-p, top-k, seed, and response-length controls
+- Every setting saved to one JSON file you can edit by hand or share between machines
 - Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
@@ -55,7 +57,7 @@ same downloads.
 
 ### In Conductor
 
-Create a workspace for this repository. Its setup script creates the Python environment and installs the dependencies. Use the **Chatlab** action to start the app on the workspace's assigned port.
+Create a workspace for this repository. Its setup script creates the Python environment and installs the dependencies. Use the **ChatLab** action to start the app on the workspace's assigned port.
 
 ### From a terminal
 
@@ -76,43 +78,80 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Model files use the standard Hugging Face cache. Chatlab lists complete downloads and resumable partial downloads under **My Models** on the Models page. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
+Model files use the standard Hugging Face cache. ChatLab lists complete downloads and resumable partial downloads under **My Models** on the Models page. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
 
 ### Memory
 
 A model has to fit in memory with room to spare: the weights, the key-value
 cache that grows with every token of a conversation, the app itself, and the
 rest of the system all share it, and on Apple silicon the GPU draws from the
-same pool. Before reading any weights, Chatlab estimates the loaded size from
+same pool. Before reading any weights, ChatLab estimates the loaded size from
 the checkpoint and refuses a model that would not leave about 4 GB free,
 saying so in the status card instead of letting the machine page itself into a
 freeze. On CUDA the weights fill the graphics cards first and the rest is
 placed in the machine's own memory, so that check is made against the two
 together. On Apple Metal it also caps what PyTorch may allocate at Metal's
 recommended working set, so a conversation that outgrows the machine ends
-with an out-of-memory message rather than a frozen Mac. Set
-`CHATLAB_MPS_MEMORY_FRACTION` to move that cap (`1.0` is the default; PyTorch's
-own `PYTORCH_MPS_HIGH_WATERMARK_RATIO`, if set, takes precedence). The cache a
-response used is handed back when it finishes, so the process returns to the
-model's own size between requests.
+with an out-of-memory message rather than a frozen Mac. Move that cap with
+`mps_memory_fraction` in the settings file, or with
+`CHATLAB_MPS_MEMORY_FRACTION` for one run; `1.0` is the default, the
+environment wins over the file, and PyTorch's own
+`PYTORCH_MPS_HIGH_WATERMARK_RATIO`, if set, leaves the allocator alone. The
+cache a response used is handed back when it finishes, so the process returns
+to the model's own size between requests.
+
+What a conversation costs is mostly its key-value cache, which grows with
+every token and is held for as long as the answer runs. How fast it grows is
+the model's own doing: an architecture with grouped-query attention, which
+most current models have, spends a fraction of what one with a key-value head
+per query head does at the same size. Lowering **Context limit (tokens)** on
+the Settings page is the direct way to bound it.
 
 ## The pages
 
 A pane at the far left switches between three pages, each tile an icon above the page's name. **Chat** is the conversation, with the conversations pane beside it and the token panel to its right. **Models** is everything about which model is running. **Settings**, at the bottom of the pane, is how every reply is prompted and measured.
 
-Until a model is loaded, the Chat page carries a banner saying so and offering the default model in one press: a load if it is already in the cache, a download of about 15 GB if it is not. Either opens the Models page, which is where the progress is reported.
+A badge above the tabs names the model that would answer. Until one is loaded it says so, and two buttons appear beside it: the default model in one press — a load if it is already in the cache, a download of about 15 GB if it is not, said on the button before it is pressed — or **Choose another**, for the Models page. Either opens Models, which is where the progress and any failure are reported.
 
 ### Models
 
-- **Model** holds the model ID and token boxes and the download, load, and unload buttons, with the status card under them.
+- **Model** holds the model ID and token boxes and the download, load, and unload buttons, with the status card under them. The card follows a download file by file and byte by byte, and then the load in the same shape: how many of the weights have been read, how much of the model is on the device, the speed, and how long is left. Reading 15 GB of cached weights into memory takes half a minute or so, and the card says so rather than sitting still.
 - **My Models** lists every model in the Hugging Face cache with its size on disk. **Sort by** orders the list newest download first, by name, or by size in either direction. A model short of files is marked *incomplete* and tinted amber, one that is whole but not a Transformers language model (a diffusers pipeline, a CTranslate2 or ONNX export) *unsupported*, and the one in memory *loaded*. Selecting one shows its file count, architecture and weight type from its `config.json`, revision, when it was last downloaded, and its folder, and puts its ID in the model box ready for **Load cached**. **Redownload** fetches whatever the selected model still lacks, resuming partial files rather than starting over; on a complete model it checks the Hub for updated files. **Remove** deletes the selected model's folder from the cache after a confirmation; a model that is loaded or still downloading has to be unloaded or finished first. The list rescans after every download, load, unload, and removal, and **Refresh** rescans it by hand.
 - **Model search** searches the Hub for text-generation models with Transformers support, most downloaded first. Each result shows its parameter count and recent downloads; selecting one adds its license, likes, last update, whether it is gated, and whether any of it is already on disk, and puts its ID in the model box ready for **Download and load**.
 
 ### Settings
 
-The system prompt, assistant prefill, and reasoning options, plus the input and analysis controls described below. Settings apply to the next reply on any conversation.
+The system prompt, assistant prefill, and reasoning options; the analysis and input controls described below; and the context limit under **Memory**. Settings apply to the next reply on any conversation.
 
-The sampling controls are **not** here. Temperature, top-p, top-k, the response length and the seed are what gets moved between one retry and the next, so they sit under the message box on the Chat page, in a **Sampling** section that wears its own values: the summary reads without opening it.
+The sampling controls are **not** here. Temperature, top-p, top-k, the response length and the seed are what gets moved between one retry and the next, so they sit under the message box on the Chat page, in a **Sampling** section that wears its own values: the summary reads without opening it. They are saved between sessions like everything else.
+
+Every setting is saved as you change it, and read back the next time the app
+starts. They live in one file:
+
+```
+~/.config/chatlab/settings.json
+```
+
+`XDG_CONFIG_HOME` moves the directory and `CHATLAB_SETTINGS_PATH` names the
+file outright, so the file can be symlinked out of a dotfiles repository and
+shared between machines. It is plain JSON, written with one key per setting,
+and safe to edit by hand: a value out of range is pulled back into it and one
+of the wrong type falls back to its default, with a line in the log to say so.
+Keys the running version does not recognize are left where they are, so one
+file can be shared by two machines on different versions. The Hugging Face
+token is not among the settings, because a file meant to be committed is the
+wrong place for a secret.
+
+`prefill_token_limit` is **Context limit (tokens)** on the page, and it is
+the one to lower when a model runs out of memory: it caps the tokens one
+prompt may carry and, with it, the ceiling on the response length. Every
+reply is measured against it, a branch and an ordinary answer alike, and a
+conversation that has grown past it is refused before anything is allocated
+rather than run until the machine gives out. The file
+holds two keys with no control beside the others: `model_id`, the model the
+Models page opens with, which `OLMO_MODEL_ID` still overrides for one run,
+and `mps_memory_fraction`, the Apple Metal cap described under
+[Memory](#memory), which is read when a model is loaded.
 
 ## Working with a conversation
 
@@ -124,13 +163,13 @@ The sampling controls are **not** here. Temperature, top-p, top-k, the response 
 ### Assistant prefill
 
 Enter text in **Assistant prefill (optional)** to force every new reply to begin
-with those words. Chatlab measures the prefilled tokens against the model's own
+with those words. ChatLab measures the prefilled tokens against the model's own
 distribution, then resumes sampling after them. **Maximum new tokens** counts
 only the tokens sampled after the prefill, so the prefix does not reduce the
 requested continuation length.
 
 For a reasoning model whose chat template already opens a `<think>` block,
-Chatlab closes that block before replaying the prefill. The supplied text
+ChatLab closes that block before replaying the prefill. The supplied text
 therefore appears as the visible answer rather than hidden reasoning. Clear the
 field to return to ordinary generation. JSON metric exports record the supplied
 text as `assistant_prefill` and the replayed token count as

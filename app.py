@@ -1,4 +1,4 @@
-"""Chatlab interface for chatting with and inspecting model tokens."""
+"""ChatLab interface for chatting with and inspecting model tokens."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import gradio as gr
 from gradio.utils import get_upload_folder
 
 import charts
+import settings
 from conversation import (
     CHAT_PREFIX,
     MAIN_BRANCH,
@@ -49,6 +50,8 @@ from model_runtime import (
     CacheStatus,
     DownloadSnapshot,
     HubModel,
+    LoadProgress,
+    LoadSnapshot,
     ModelBusy,
     ModelChanged,
     ModelDownloading,
@@ -69,7 +72,7 @@ from token_metrics import (
     category_for,
     summarize,
 )
-from trace_export import build_trace, write_trace_export
+from trace_export import build_trace, write_private_text, write_trace_export
 
 logger = logging.getLogger(__name__)
 
@@ -81,16 +84,19 @@ except ImportError:  # huggingface_hub before 1.x had no such check
         pass
 
 
-DEFAULT_MODEL = "allenai/Olmo-3-7B-Think"
 # The size of the default model's full weights, said before the download
-# starts rather than after. The banner on the Chat page offers that download
-# in one click, and 15 GB is not a thing to find out about halfway through.
+# starts rather than after. The model bar offers that download in one press,
+# and 15 GB is not a thing to find out about halfway through.
 DEFAULT_MODEL_DOWNLOAD = "about 15 GB"
 MANAGER = ModelManager()
 
 # How often the download card is redrawn. Every frame is a message to the
 # browser, so this is a floor on chatter as much as a refresh rate.
 DOWNLOAD_POLL_SECONDS = 0.5
+
+# The load card is redrawn on the same beat as the download card, and for
+# the same reason: every frame is a message to the browser.
+LOAD_POLL_SECONDS = 0.5
 
 # Transfer speed is averaged over this long, so a stall or a burst shows within
 # a breath but one slow chunk does not swing the time remaining.
@@ -120,14 +126,6 @@ NAV_ICONS = {
 }
 SEED_LIMIT = 2**31 - 1
 NO_TOKEN_SELECTED = "Select a token to inspect it."
-
-# The sampling controls' starting values. They are named because two places
-# need the same numbers: the controls themselves, and the summary the
-# sampling accordion wears before anything has been moved.
-DEFAULT_TEMPERATURE = 0.8
-DEFAULT_TOP_P = 0.95
-DEFAULT_TOP_K = 50
-DEFAULT_MAX_NEW_TOKENS = 1024
 
 # Redrawing the trace on every streamed token is wasted work, so it catches up
 # in batches and again once the response finishes.
@@ -273,8 +271,16 @@ def failure_card(title: str, detail: str) -> str:
 
 
 def describe_duration(seconds: float) -> str:
-    if seconds < 60:
-        return "under a minute"
+    """A rounded spoken length: ``a few seconds``, ``about 4 minutes``.
+
+    Rounded to five seconds under a minute, because a load is often over in
+    that time and "under a minute" would be the whole of what it ever said.
+    """
+
+    if seconds < 10:
+        return "a few seconds"
+    if seconds < 55:
+        return f"about {round(seconds / 5) * 5} seconds"
     minutes = round(seconds / 60)
     if minutes < 60:
         return f"about {minutes} minute{'s' if minutes != 1 else ''}"
@@ -315,6 +321,35 @@ class RateMeter:
         return (bytes_done - first_bytes) / elapsed
 
 
+class Pace:
+    """Time left in a job, from how fast its own progress has moved so far.
+
+    Measured from the first reading that showed any progress rather than from
+    the start, because the seconds before that are setup: a load spends them
+    reading the config and building the model, and counting them as slow
+    progress would put the first estimate minutes out.
+    """
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._first: tuple[float, float] | None = None
+
+    def remaining(self, fraction: float) -> float | None:
+        """Seconds left at the pace set since progress began, where it can be told."""
+
+        now = self._clock()
+        if fraction <= 0:
+            return None
+        if self._first is None:
+            self._first = (now, fraction)
+            return None
+        first_time, first_fraction = self._first
+        elapsed, moved = now - first_time, fraction - first_fraction
+        if elapsed < 1.0 or moved <= 0:
+            return None
+        return (1.0 - fraction) * elapsed / moved
+
+
 def download_detail(model_id: str, snap: DownloadSnapshot, rate: float | None) -> str:
     name = f"`{model_id}`"
     if not snap.started:
@@ -331,8 +366,15 @@ def download_detail(model_id: str, snap: DownloadSnapshot, rate: float | None) -
     )
     if rate:
         remaining = max(0, snap.bytes_total - snap.bytes_done)
+        # format_bytes() prints a byte count verbatim below 1 KB, so a rate
+        # handed to it as the float it is measured in reads "812.3456789 B/s".
+        # Rounding never reaches zero: a download with nothing moving has no
+        # rate at all and never gets here, so "0 B/s" beside a time left would
+        # contradict itself. The estimate keeps the unrounded rate: it divides
+        # by it.
         figures += (
-            f" · {format_bytes(rate)}/s · {describe_duration(remaining / rate)} left"
+            f" · {format_bytes(max(1, round(rate)))}/s"
+            f" · {describe_duration(remaining / rate)} left"
         )
     return f"{name}\n\n`{progress_bar(snap.fraction)}` {percent}%\n\n{figures}"
 
@@ -395,6 +437,97 @@ def stream_download(model_id: str, hf_token: str):
     if "error" in outcome:
         raise outcome["error"]
     return outcome["path"]
+
+
+def load_detail(
+    model_id: str, snap: LoadSnapshot, rate: float | None, remaining: float | None
+) -> str:
+    name = f"`{model_id}`"
+    if not snap.started:
+        weights = (
+            f"{format_bytes(snap.bytes_total)} of weights"
+            if snap.bytes_total
+            else "the weights"
+        )
+        return (
+            f"Reading {weights} for {name} out of the cache on disk. Nothing "
+            "is being downloaded; this is the wait for memory."
+        )
+    # A card that still says "loading" never claims to be finished: the
+    # allocator holds the last byte a moment before the loader is done with
+    # the model, and a full bar over a wait that goes on reads as a hang.
+    shown = min(snap.fraction, 0.99)
+    percent = int(shown * 100)
+    if snap.counts_bytes:
+        # Bytes on the device: the second half of a load onto Metal, and the
+        # whole of one onto a graphics card.
+        figures = (
+            f"{format_bytes(snap.bytes_done)} of {format_bytes(snap.bytes_total)} "
+            "on the device"
+        )
+        if rate:
+            figures += f" · {format_bytes(rate)}/s"
+    else:
+        figures = f"{snap.steps_done} of {snap.steps_total} parts read"
+    if remaining is not None:
+        figures += f" · {describe_duration(remaining)} left"
+    return f"{name}\n\n`{progress_bar(shown)}` {percent}%\n\n{figures}"
+
+
+def stream_load(model_id: str, path: Path):
+    """Yield a status card every half second until ``model_id`` is in memory.
+
+    Returns the device it landed on, so a caller writes
+    ``device = yield from stream_load(...)``. A failed load raises here.
+
+    The load runs on its own thread, as a download does: ``from_pretrained``
+    blocks until the last weight, and a handler that blocked with it could
+    show nothing past its first frame.
+    """
+
+    progress = LoadProgress()
+    outcome: dict = {}
+
+    def work() -> None:
+        try:
+            outcome["device"] = MANAGER.load(model_id, path, progress)
+        except BaseException as error:
+            outcome["error"] = error
+        finally:
+            # Held until the load is over, so the two claims between them
+            # cover the whole of it: this one from before the thread existed,
+            # the manager's own from the moment it reached load().
+            MANAGER.release_load(claim)
+
+    worker = threading.Thread(target=work, name="chatlab-load", daemon=True)
+    # Claimed before the worker exists, because the claim is what stops a
+    # removal or a redownload arriving in this same instant from moving the
+    # snapshot the load is about to read. The worker names the load only once
+    # it reaches MANAGER.load, and the model lock is taken later still.
+    _model_id, claim = MANAGER.reserve_load(model_id)
+    try:
+        worker.start()
+    except BaseException:
+        # work() never ran, so its finally cannot give the claim back.
+        MANAGER.release_load(claim)
+        raise
+    meter, pace = RateMeter(), Pace()
+    while worker.is_alive():
+        snap = progress.snapshot()
+        yield status_card(
+            "Loading model",
+            load_detail(
+                model_id.strip(),
+                snap,
+                meter.rate(snap.bytes_done),
+                pace.remaining(snap.fraction),
+            ),
+            "working",
+        )
+        worker.join(LOAD_POLL_SECONDS)
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["device"]
 
 
 def describe_missing(status: CacheStatus) -> str:
@@ -514,7 +647,7 @@ def download_and_load_model(model_id: str, hf_token: str):
             f"{fetched} Moving `{model_id.strip()}` onto the best available device…",
             "working",
         )
-        device = MANAGER.load(model_id, path)
+        device = yield from stream_load(model_id, path)
     except Exception as error:
         yield failure_card("Model setup failed", html.escape(str(error)))
         return
@@ -596,12 +729,8 @@ def load_cached_model(model_id: str):
         return
     try:
         path = MANAGER.find_cached(cleaned)
-        yield status_card(
-            "Loading model",
-            f"Loading {format_bytes(status.cached_bytes)} of cached files from `{path}`…",
-            "working",
-        )
-        device = MANAGER.load(cleaned, path)
+        started = time.monotonic()
+        device = yield from stream_load(cleaned, path)
     except IncompleteSnapshotError as error:
         yield failure_card(
             "Download unfinished", incomplete_snapshot_detail(cleaned, error)
@@ -611,7 +740,10 @@ def load_cached_model(model_id: str):
         yield failure_card("Could not load cached model", html.escape(str(error)))
         return
     yield status_card(
-        "Model ready", f"{name} is loaded on **{device}**.", "success"
+        "Model ready",
+        f"{name} is loaded on **{device}** "
+        f"({time.monotonic() - started:.1f} seconds).",
+        "success",
     )
 
 
@@ -622,75 +754,146 @@ def unload_model():
     return status_card("Model unloaded", "Model memory has been released.", "success")
 
 
-# ----------------------------------------------------- the Chat page's banner
-#
-# Chat is where a reader lands, and until a model is loaded nothing on it
-# does anything: Send only writes "Download and load a model first" into a
-# status line under the transcript. The banner is that page's own way out.
-# It says what is missing where the reader is already looking and offers the
-# default model in one press, so finding the Models page is no longer the
-# first thing anyone has to work out.
+# The chat page's badge: which model is answering, or that none is loaded.
+# Nothing on the chat page said so before, so an unloaded model only showed
+# up as a refusal after a message had been typed and sent.
+NO_MODEL_BADGE = "No model loaded"
+
+# How often an open chat page asks again which model is in memory. The manager
+# is one object for the whole process, but a handler's updates only reach the
+# tab that ran it, so a second tab would go on naming a model that has since
+# been swapped out or unloaded. Asking on a timer is what keeps every tab
+# honest; a couple of seconds is short enough that nobody types a message
+# against a badge that has gone stale, and the question is a few attribute
+# reads.
+BADGE_REFRESH_SECONDS = 2.0
 
 
-def setup_default_model(hf_token: str):
-    """Fetch and load :data:`DEFAULT_MODEL`, reporting into the Models card.
+def model_badge(state: str, text: str) -> str:
+    """A pill naming the model in memory. ``state`` is the stylesheet's hook."""
 
-    The model ID is taken from the constant rather than from the ID box, so
-    the button cannot be redirected by whatever the box happens to hold when
-    the chain reaches this step.
+    return (
+        f'<div class="model-badge" data-state="{state}">'
+        f'<span class="model-badge-dot" aria-hidden="true"></span>'
+        f"<span>{html.escape(text)}</span></div>"
+    )
+
+
+def loaded_model_badge() -> str:
+    """Name the model in memory, the one being loaded, or neither.
+
+    A model in memory is named ahead of any load. A load counts itself as
+    under way before it waits for the model lock, so asking for a second
+    model while the first is part-way through a reply leaves that load
+    queued for the rest of the generation - and the model still producing
+    the tokens is the one the badge exists to name. A load that has really
+    started emptied memory as its first act under that lock, so there is
+    nothing left to name and the load is reported instead: that is what
+    keeps the badge from claiming nothing is loaded during the minutes the
+    weights are on their way in.
+
+    Each attribute is read once and kept rather than asked again to fill in
+    the text: a load can finish, or empty memory, between two reads, which
+    would leave the badge saying "Loading None" or naming a model loaded on
+    None.
     """
 
-    yield from download_and_load_model(DEFAULT_MODEL, hf_token)
+    loading = MANAGER.loading_id
+    model_id = MANAGER.model_id
+    device = MANAGER.device_name
+    if model_id and device:
+        return model_badge("ready", f"{model_id} · loaded on {device}")
+    if loading:
+        return model_badge("loading", f"Loading {loading}…")
+    return model_badge("empty", NO_MODEL_BADGE)
+
+
+def refresh_model_badge():
+    """The badge, plus the two buttons that only show while there is no model.
+
+    A load in progress hides them too: the Models page is already busy
+    bringing that model in, so offering to start one would suggest work that
+    is under way needs starting.
+
+    The offer's label is re-read here rather than baked in at build time,
+    because what pressing it would do depends on what is on disk, and a
+    download finished on the Models page changes that answer. The timer that
+    calls this is what keeps the answer current in every open tab.
+    """
+
+    have_model = MANAGER.loaded or MANAGER.loading_id
+    hidden = gr.update(visible=not have_model)
+    if have_model:
+        return loaded_model_badge(), hidden, hidden
+    return (
+        loaded_model_badge(),
+        gr.update(visible=True, value=default_model_offer()),
+        gr.update(visible=True),
+    )
+
+
+def go_to_models():
+    """Move the nav to Models and show that page, as clicking its tile does.
+
+    The pages are switched here rather than left to the nav's own change
+    handler: Gradio's Radio reports a change the visitor made, not one a
+    handler wrote, so setting the nav alone would tick Models and leave the
+    chat page on screen.
+    """
+
+    return MODELS_PAGE, *show_page(MODELS_PAGE)
+
+
+# ------------------------------------------------- the default model's offer
+#
+# The badge below says whether a model is loaded. This is what to do about it
+# when none is: the default model in one press, saying first whether that
+# means a load from the cache or a download, and how large the download is.
+# Without it the only route to a model was the Models page, which a reader
+# has to know exists before the app does anything at all.
 
 
 def default_model_cached() -> bool:
     """Whether the default model is whole on disk, so loading it needs no network."""
 
     try:
-        status = cache_status(DEFAULT_MODEL)
+        status = cache_status(settings.DEFAULT_MODEL_ID)
     except (ValueError, OSError):
         return False
     return status.present and not status.missing_files and not status.unsupported
 
 
-def model_banner():
-    """The banner's visibility, its wording, and the primary button's label.
+def default_model_offer() -> str:
+    """What pressing the offer would do, said on the button before it is pressed."""
 
-    Three things vary together, so they are decided together: with a model
-    loaded there is nothing to say and the banner goes away, and without one
-    the offer is a load or a download depending on what the cache already
-    holds. Saying which it will be, and how large the download is, belongs
-    before the press.
+    if default_model_cached():
+        return "⚡ Load the default model"
+    return f"⬇️ Download the default model ({DEFAULT_MODEL_DOWNLOAD})"
+
+
+def setup_default_model(hf_token: str):
+    """Bring the default model in, by whichever route its files call for.
+
+    A model already whole on disk is loaded from the cache. Going through the
+    download path for it would reach ``snapshot_download`` for a Hub update
+    check, which is a stall at best and a failure with no network at all -
+    and the button has just promised an immediate local load.
+
+    The model ID is taken from the settings default rather than from the ID
+    box, so the button cannot be redirected by whatever the box happens to
+    hold when the chain reaches this step.
     """
 
-    if MANAGER.loaded:
-        return gr.update(visible=False), gr.skip(), gr.skip()
     if default_model_cached():
-        text = (
-            f"**No model is loaded yet.** `{DEFAULT_MODEL}` is already in your "
-            "Hugging Face cache, so it can be loaded now."
-        )
-        label = "⚡ Load the default model"
+        yield from load_cached_model(settings.DEFAULT_MODEL_ID)
     else:
-        text = (
-            f"**No model is loaded yet.** Chatlab can fetch `{DEFAULT_MODEL}`, "
-            f"a download of {DEFAULT_MODEL_DOWNLOAD}, or you can pick a "
-            "different one on the Models page."
-        )
-        label = f"⬇️ Download the default model ({DEFAULT_MODEL_DOWNLOAD})"
-    return gr.update(visible=True), text, gr.update(value=label)
-
-
-def open_models_page():
-    """Move the nav to Models, which shows the page and the download card with it."""
-
-    return gr.update(value=MODELS_PAGE)
+        yield from download_and_load_model(settings.DEFAULT_MODEL_ID, hf_token)
 
 
 def start_default_model():
     """Put the default model in the ID box and open the page that reports on it."""
 
-    return DEFAULT_MODEL, gr.update(value=MODELS_PAGE)
+    return settings.DEFAULT_MODEL_ID, *go_to_models()
 
 
 # The side pane's model lists.
@@ -816,12 +1019,17 @@ def redownload_my_model(selected: str | None, hf_token: str):
     ID alone, so it would then call the new snapshot "loaded" while every
     reply still came from the old one. An incomplete model cannot be loaded,
     so the refusal never stands in the way of finishing a download.
+
+    ``is_loading`` rather than the name in the badge, because with two loads
+    running at once only one of them is named there, and a load still waiting
+    its turn for the model lock is going to read that model's files just the
+    same.
     """
 
     if not selected:
         yield status_card("Nothing to redownload", NO_MODEL_TO_MANAGE)
         return
-    if MANAGER.loading_id == selected:
+    if MANAGER.is_loading(selected):
         yield status_card(
             "Model in use",
             f"`{selected}` is being loaded right now. Wait for the load to finish, "
@@ -2965,7 +3173,12 @@ def save_conversation(turns, system_prompt):
     # path and silently overwriting each other's download.
     stamp = time.strftime("%Y%m%d-%H%M%S")
     path = directory / f"conversation-{stamp}-{uuid4().hex[:8]}.json"
-    path.write_text(to_json(turns, system_prompt=system_prompt), encoding="utf-8")
+    # A transcript is the reader's own writing, and the upload folder is shared:
+    # on Linux it is /tmp/gradio, which every account on the machine can read.
+    # write_private_text() makes the file owner-only before it holds a word of
+    # the conversation, so there is no moment for another account to open it.
+    # write_trace_export() writes its export the same way.
+    write_private_text(path, to_json(turns, system_prompt=system_prompt))
     return (
         gr.update(value=str(path), visible=True),
         f"Saved {len(turns)} message{'s' if len(turns) != 1 else ''}.",
@@ -3044,58 +3257,90 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE):
 # ---------------------------------------------------------------- score text
 
 
+SCORE_BUSY = "Wait for the response to finish before scoring text."
+
+
 def score_text(
     context: str,
     text: str,
     use_chat_template: bool,
     scale_name: str = DEFAULT_COLOR_SCALE,
 ):
-    """Measure text the model did not write, and put it in the same panel."""
+    """Measure text the model did not write, and put it in the same panel.
+
+    This is a generator for the same reason inspect_layers() is: Gradio does
+    not resume a streaming handler until the browser has been sent the frame
+    it yielded, so the generation slot is held not just for the pass but
+    until the scored strips are on screen. Returning instead would give the
+    slot back while the frame was still in flight, and a Send starting in
+    that window would mint a newer stamp and publish its opening frame
+    first, leaving these strips on screen under a stamp the app has already
+    moved past and refusing every click on them.
+    """
 
     skip = gr.skip()
+    refused = (skip,) * 7
     if not MANAGER.loaded:
-        return (skip,) * 7 + ("Download and load a model first.", skip, skip, skip)
+        yield refused + ("Download and load a model first.", skip, skip, skip)
+        return
 
+    # A generation holds the model lock across every one of its yields, so
+    # without the slot this pass would simply wait on it: the button would sit
+    # dead for the length of the response and then fire, with nothing on screen
+    # to tell that apart from a hang. Reserving rather than reading
+    # MANAGER.busy also keeps a Send from starting while the pass runs and
+    # minting a stamp over the strips this is about to replace, which would
+    # leave the scored tokens on screen refusing every click. inspect_layers()
+    # takes the slot for both reasons.
+    if not MANAGER.reserve_generation():
+        yield refused + (SCORE_BUSY, skip, skip, skip)
+        return
     try:
-        result = MANAGER.score_text(
-            text, context=context or "", use_chat_template=bool(use_chat_template)
-        )
-    except Exception as error:
-        return (skip,) * 7 + (
-            failure_status("Could not score that text", str(error)),
-            skip,
-            skip,
-            skip,
-        )
+        try:
+            result = MANAGER.score_text(
+                text, context=context or "", use_chat_template=bool(use_chat_template)
+            )
+        except Exception as error:
+            yield refused + (
+                failure_status("Could not score that text", str(error)),
+                skip,
+                skip,
+                skip,
+            )
+            return
 
-    summary = summarize(result.metrics)
-    status = (
-        f"Scored {summary['token_count']:,} tokens. "
-        f"Perplexity {summary['perplexity']:,.1f}."
-    )
-    # What was scored comes before how exactly it was scored: the template
-    # caveat says which passage the numbers describe, the seam caveat says how
-    # sure their first token is.
-    if result.chat_template_missing:
-        status = f"{status} {TEMPLATE_CAVEAT}"
-    if not result.seam_verified:
-        status = f"{status} {SEAM_CAVEAT}"
-    # Both strips are replaced, so they take one shared stamp - and that stamp
-    # is what drops a click made against the response they overwrite.
-    generation = new_metrics_generation()
-    return (
-        strip_update(result.metrics, scale_name, "Scored tokens — click one"),
-        stamped(result.metrics, generation),
-        strip_update(result.context_metrics, scale_name),
-        stamped(result.context_metrics, generation),
-        prompt_note_text(len(result.context_metrics), "", "context"),
-        charts.summary_tiles(summary),
-        charts.surprise_chart(result.metrics, title="Surprise per scored token"),
-        status,
-        NO_TOKEN_SELECTED,
-        [],
-        (generation, [int(value) for value in result.context_ids], MANAGER.load_id),
-    )
+        summary = summarize(result.metrics)
+        status = (
+            f"Scored {summary['token_count']:,} tokens. "
+            f"Perplexity {summary['perplexity']:,.1f}."
+        )
+        # What was scored comes before how exactly it was scored: the template
+        # caveat says which passage the numbers describe, the seam caveat says
+        # how sure their first token is.
+        if result.chat_template_missing:
+            status = f"{status} {TEMPLATE_CAVEAT}"
+        if not result.seam_verified:
+            status = f"{status} {SEAM_CAVEAT}"
+        # Both strips are replaced, so they take one shared stamp - and that
+        # stamp is what drops a click made against the response they overwrite.
+        generation = new_metrics_generation()
+        yield (
+            strip_update(result.metrics, scale_name, "Scored tokens — click one"),
+            stamped(result.metrics, generation),
+            strip_update(result.context_metrics, scale_name),
+            stamped(result.context_metrics, generation),
+            prompt_note_text(len(result.context_metrics), "", "context"),
+            charts.summary_tiles(summary),
+            charts.surprise_chart(result.metrics, title="Surprise per scored token"),
+            status,
+            NO_TOKEN_SELECTED,
+            [],
+            (generation, [int(value) for value in result.context_ids], MANAGER.load_id),
+        )
+        # Resumed once the browser has the frame above, so nothing between the
+        # mint and the strips arriving can hold the slot.
+    finally:
+        MANAGER.release_generation()
 
 
 # ------------------------------------------------------- layers and attention
@@ -3304,6 +3549,29 @@ CSS = f"""
 #hero h1, #models-hero h1, #settings-hero h1 {{ font-size: 2.1rem; margin-bottom: 0.25rem; }}
 #model-status {{ min-height: 128px; }}
 
+/* The chat page's model badge and the button that appears beside it when
+   there is nothing loaded. Both keep their own width and sit on one line. */
+#model-bar {{ flex-wrap: nowrap; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }}
+#model-bar #model-badge {{ flex: 0 1 auto; width: auto; min-width: 0; }}
+#model-bar #load-model, #model-bar #default-model {{
+  flex: 0 0 auto; width: auto; min-width: 0;
+}}
+.model-badge {{
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  padding: 0.3rem 0.75rem; border-radius: 999px;
+  border: 1px solid var(--border-color-primary);
+  background: var(--block-background-fill);
+  font-size: 0.9rem; font-weight: 500; line-height: 1.3;
+}}
+.model-badge-dot {{ width: 0.55rem; height: 0.55rem; border-radius: 50%; flex: none; }}
+.model-badge[data-state="ready"] .model-badge-dot {{ background: #16a34a; }}
+/* Amber in both themes, the same warning colour an incomplete model gets. */
+.model-badge[data-state="loading"] .model-badge-dot {{ background: #d97706; }}
+.model-badge[data-state="empty"] {{
+  border-color: #d97706; background: rgba(217, 119, 6, 0.09);
+}}
+.model-badge[data-state="empty"] .model-badge-dot {{ background: #d97706; }}
+
 /* The shell is one row: nav, conversations, page. It never wraps, and the two
    panes keep their widths and stay put while the page scrolls. */
 #shell {{ flex-wrap: nowrap; align-items: stretch; }}
@@ -3378,11 +3646,6 @@ CSS = f"""
 .clear-confirm {{
   border: 1px solid #d97706; border-radius: 8px; padding: 0.4rem 0.6rem;
   background: rgba(217, 119, 6, 0.09);
-}}
-/* The standing offer on the Chat page while no model is loaded. */
-#model-banner {{
-  border: 1px solid var(--color-accent); border-radius: 8px;
-  padding: 0.6rem 0.75rem; background: var(--background-fill-secondary);
 }}
 .model-detail {{ font-size: 0.85rem; }}
 .model-detail p, .model-detail ul, .model-detail li {{ margin: 0.15rem 0; }}
@@ -3637,13 +3900,108 @@ def show_page(page: str):
     ]
 
 
+# The settings that outlive the session, in the order the controls wired to
+# remember_settings publish them. The Hugging Face token is not among them on
+# purpose: see the settings module.
+PERSISTED_SETTING_NAMES = (
+    "system_prompt",
+    "keep_reasoning",
+    "assistant_prefill",
+    "temperature",
+    "top_p",
+    "top_k",
+    "max_new_tokens",
+    "seed",
+    "randomize_seed",
+    "analyze_prompt",
+    "color_scale",
+    "enter_sends",
+    "model_id",
+)
+
+
+def remember_settings(*values, seed_committed: bool = False) -> None:
+    """Save every setting whenever one of them changes.
+
+    There is no save button, so each control reports the whole set and the
+    file is rewritten. A change that changes nothing is not written, which is
+    what keeps a slider drag from writing once per pixel.
+
+    Two of the controls hold something that is not always the reader's
+    choice, and both are filtered rather than saved as they are read.
+    ``OLMO_MODEL_ID`` puts a model in the model box for one run, and a
+    finished response leaves the seed it used in the seed box. Neither must
+    be written down just because something else changed.
+    ``seed_committed`` is the seed box's own blur or submit saying the number
+    there is a choice after all.
+    """
+
+    chosen = dict(zip(PERSISTED_SETTING_NAMES, values, strict=True))
+    chosen["model_id"] = settings.model_id_to_save(chosen["model_id"])
+    if not seed_committed:
+        chosen["seed"] = settings.seed_to_save(
+            chosen["seed"], chosen["randomize_seed"]
+        )
+    settings.update(**chosen)
+
+
+def remember_committed_seed(*values) -> None:
+    """Save every setting, the seed box included, when it is done being edited."""
+
+    remember_settings(*values, seed_committed=True)
+
+
+def restore_settings():
+    """Put the saved settings back into every control, and re-read the file.
+
+    A browser reload rebuilds the page from the values the interface was built
+    with, which are the ones the file held when the app started. Without this
+    a reload would show stale values, and the next change would write them
+    back over whatever the file has learned since — including an edit made to
+    the file by hand, which this is also how one takes effect.
+    """
+
+    saved = settings.load()
+    values = saved.to_mapping() | {"model_id": settings.model_id_at_startup(saved)}
+    updates = [
+        # The response-length ceiling is the context limit, so it comes back
+        # with the length itself.
+        gr.update(value=saved.max_new_tokens, maximum=saved.prefill_token_limit)
+        if name == "max_new_tokens"
+        else gr.update(value=values[name])
+        for name in PERSISTED_SETTING_NAMES
+    ]
+    return (*updates, gr.update(value=saved.prefill_token_limit))
+
+
+def remember_prefill_limit(limit, max_new_tokens):
+    """Save the context limit, and pull the response length under it.
+
+    The response-length control tops out at the context limit, so lowering
+    the limit lowers the ceiling and, if it was above the new one, the length
+    itself. The limit is echoed back because it is clamped to a range the
+    number box cannot express on its own.
+    """
+
+    saved = settings.update(prefill_token_limit=limit, max_new_tokens=max_new_tokens)
+    return (
+        gr.update(value=saved.prefill_token_limit),
+        gr.update(maximum=saved.prefill_token_limit, value=saved.max_new_tokens),
+    )
+
+
 def build_app() -> gr.Blocks:
+    # Read once, here, rather than per control: a build is one snapshot of
+    # the file, and a control whose value came from a later read than its
+    # neighbour's would be a puzzle to explain.
+    saved = settings.load()
+    settings.ensure_file()
     # Gradio otherwise caps the page at one of a handful of widths and centers
     # it, which leaves a band of empty room down each side on a wide screen.
     # The shell wants every pixel: the two side panes are a fixed width, so the
     # width the cap was holding back goes to the chat and the panel beside it.
     with gr.Blocks(
-        title="Chatlab", css=CSS, theme=gr.themes.Soft(), fill_width=True
+        title="ChatLab", css=CSS, theme=gr.themes.Soft(), fill_width=True
     ) as demo:
         conversation_state = gr.State([])
         metrics_state = gr.State(empty_metrics())
@@ -3710,27 +4068,36 @@ def build_app() -> gr.Blocks:
             # time, chosen by the nav.
             with gr.Column(scale=1, elem_id="chat-page") as chat_page:
                 gr.Markdown(
-                    "# Chatlab\nChat with an open model and see exactly how likely every generated token was.",
+                    "# ChatLab\nChat with an open model and see exactly how likely every generated token was.",
                     elem_id="hero",
                 )
 
-                # Shown until a model is loaded, and refreshed by everything
-                # that changes what is on disk or in memory. Its wording and
-                # its button's label are set on load; the values here are the
-                # placeholders they replace.
-                with gr.Column(visible=False, elem_id="model-banner") as model_banner_box:
-                    model_banner_text = gr.Markdown("")
-                    with gr.Row():
-                        default_model_button = gr.Button(
-                            "Set up the default model",
-                            variant="primary",
-                            size="sm",
-                            scale=0,
-                            min_width=280,
-                        )
-                        browse_models_button = gr.Button(
-                            "Browse models", size="sm", scale=0, min_width=140
-                        )
+                # The badge sits above the tabs, so both Chat and Score text
+                # say which model would answer. Beside it, while none is
+                # loaded, are the two ways out: the default model in one
+                # press, or the Models page to choose another.
+                with gr.Row(elem_id="model-bar"):
+                    model_badge_view = gr.HTML(
+                        loaded_model_badge(), elem_id="model-badge"
+                    )
+                    default_model_button = gr.Button(
+                        default_model_offer(),
+                        variant="primary",
+                        size="sm",
+                        visible=not MANAGER.loaded,
+                        elem_id="default-model",
+                    )
+                    load_model_button = gr.Button(
+                        "Choose another",
+                        size="sm",
+                        visible=not MANAGER.loaded,
+                        elem_id="load-model",
+                    )
+
+                # Nothing to see: the timer is what makes the badge tell every
+                # open tab about a load or unload, not just the one that asked
+                # for it. See BADGE_REFRESH_SECONDS.
+                badge_timer = gr.Timer(BADGE_REFRESH_SECONDS)
 
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=3):
@@ -3745,7 +4112,7 @@ def build_app() -> gr.Blocks:
                                 )
                                 prompt = gr.Textbox(
                                     label="Message",
-                                    **message_box_settings(enter_sends=True),
+                                    **message_box_settings(saved.enter_sends),
                                 )
                                 with gr.Row():
                                     send_button = gr.Button("Send", variant="primary")
@@ -3785,12 +4152,19 @@ def build_app() -> gr.Blocks:
                                 # happens. The accordion's label carries their
                                 # values, so it does not have to be opened to
                                 # be read.
+                                # The knobs reached for between one retry and
+                                # the next, on the page where the retrying
+                                # happens. The accordion's label carries their
+                                # values, so it does not have to be opened to
+                                # be read - and it starts from the saved
+                                # settings, so a reopened app reads back what
+                                # it was left set to rather than the defaults.
                                 with gr.Accordion(
                                     sampling_label(
-                                        DEFAULT_TEMPERATURE,
-                                        DEFAULT_TOP_P,
-                                        DEFAULT_TOP_K,
-                                        DEFAULT_MAX_NEW_TOKENS,
+                                        saved.temperature,
+                                        saved.top_p,
+                                        saved.top_k,
+                                        saved.max_new_tokens,
                                     ),
                                     open=False,
                                 ) as sampling_accordion:
@@ -3798,14 +4172,14 @@ def build_app() -> gr.Blocks:
                                         temperature = gr.Slider(
                                             0,
                                             2,
-                                            value=DEFAULT_TEMPERATURE,
+                                            value=saved.temperature,
                                             step=0.05,
                                             label="Temperature",
                                         )
                                         top_p = gr.Slider(
                                             0.05,
                                             1,
-                                            value=DEFAULT_TOP_P,
+                                            value=saved.top_p,
                                             step=0.01,
                                             label="Top-p",
                                         )
@@ -3813,27 +4187,30 @@ def build_app() -> gr.Blocks:
                                         top_k = gr.Slider(
                                             0,
                                             200,
-                                            value=DEFAULT_TOP_K,
+                                            value=saved.top_k,
                                             step=1,
                                             label="Top-k (0 disables)",
                                         )
+                                        # The ceiling is the context limit: a
+                                        # response cannot be longer than a
+                                        # prompt is allowed to be.
                                         max_new_tokens = gr.Slider(
                                             1,
-                                            8192,
-                                            value=DEFAULT_MAX_NEW_TOKENS,
+                                            saved.prefill_token_limit,
+                                            value=saved.max_new_tokens,
                                             step=1,
                                             label="Maximum new tokens",
                                         )
                                     with gr.Row():
                                         seed = gr.Number(
-                                            value=42,
+                                            value=saved.seed,
                                             precision=0,
                                             minimum=0,
                                             label="Random seed",
                                             info="Updated after each response so you can reproduce it.",
                                         )
                                         randomize_seed = gr.Checkbox(
-                                            value=True,
+                                            value=saved.randomize_seed,
                                             label="🎲 New seed each response",
                                             info="Turn off to lock the seed and reproduce a response exactly.",
                                         )
@@ -3917,11 +4294,11 @@ def build_app() -> gr.Blocks:
                         gr.Markdown("## Under the hood")
                         color_scale = gr.Dropdown(
                             choices=list(COLOR_SCALES),
-                            value=DEFAULT_COLOR_SCALE,
+                            value=saved.color_scale,
                             label="Color tokens by",
                         )
                         scale_caption = gr.Markdown(
-                            COLOR_SCALES[DEFAULT_COLOR_SCALE].caption,
+                            COLOR_SCALES[saved.color_scale].caption,
                             elem_classes=["scale-caption"],
                         )
                         token_strip = gr.HighlightedText(
@@ -4029,7 +4406,7 @@ def build_app() -> gr.Blocks:
                     with gr.Column():
                         gr.Markdown("## Model")
                         model_id = gr.Textbox(
-                            value=os.environ.get("OLMO_MODEL_ID", DEFAULT_MODEL),
+                            value=settings.model_id_at_startup(saved),
                             label="Hugging Face model ID",
                             placeholder="organization/model-name",
                             info="The default OLMo 3 7B model is about 15 GB in full precision.",
@@ -4124,23 +4501,25 @@ def build_app() -> gr.Blocks:
                     with gr.Column():
                         gr.Markdown("## System prompt, reasoning, and prefill")
                         system_prompt = gr.Textbox(
+                            value=saved.system_prompt,
                             label="System prompt",
                             placeholder="You are a careful assistant that answers concisely.",
                             lines=3,
                             info="Sent as a system message ahead of the conversation. Leave empty to use the model's default behavior.",
                         )
                         assistant_prefill = gr.Textbox(
+                            value=saved.assistant_prefill,
                             label="Assistant prefill (optional)",
                             placeholder="Start every reply with these exact words…",
                             lines=2,
                             info=(
                                 "Replays this text as the start of each answer, then lets the "
-                                "model continue. For reasoning models, Chatlab closes the "
+                                "model continue. For reasoning models, ChatLab closes the "
                                 "reasoning block first so this remains visible answer text."
                             ),
                         )
                         keep_reasoning = gr.Checkbox(
-                            value=False,
+                            value=saved.keep_reasoning,
                             label="Send previous reasoning back to the model",
                             info="Off by default. Think models write a fresh reasoning block each turn, so replaying old ones burns context and usually hurts the next answer.",
                         )
@@ -4148,7 +4527,7 @@ def build_app() -> gr.Blocks:
                     with gr.Column():
                         gr.Markdown("## Input")
                         enter_sends = gr.Checkbox(
-                            value=True,
+                            value=saved.enter_sends,
                             label="Enter sends the message",
                             info="Shift+Enter starts a new line. Turn off to swap the two.",
                         )
@@ -4160,35 +4539,104 @@ def build_app() -> gr.Blocks:
 
                         gr.Markdown("## Analysis")
                         analyze_prompt = gr.Checkbox(
-                            value=True,
+                            value=saved.analyze_prompt,
                             label="Measure prompt tokens",
                             info="Scores every prompt token during the same pass that warms the cache.",
                         )
 
-        # The banner on the Chat page is read on navigation too, so a model
-        # loaded or unloaded on the Models page is reflected the moment the
-        # reader comes back.
-        banner_outputs = [model_banner_box, model_banner_text, default_model_button]
+                        gr.Markdown("## Memory")
+                        prefill_token_limit = gr.Number(
+                            value=saved.prefill_token_limit,
+                            precision=0,
+                            minimum=settings.PREFILL_TOKEN_LIMIT_RANGE[0],
+                            maximum=settings.PREFILL_TOKEN_LIMIT_RANGE[1],
+                            label="Context limit (tokens)",
+                            info=(
+                                "The most tokens one prompt may carry, and the "
+                                "ceiling on the response length. Every token in "
+                                "the conversation costs memory for as long as the "
+                                "answer runs, so this is the control to lower when "
+                                "a model runs out of it."
+                            ),
+                        )
+                        gr.Markdown(
+                            f"Settings are saved to `{settings.settings_path()}` as "
+                            "you change them, and read from there at startup. The "
+                            "Metal memory cap lives in that file as "
+                            "`mps_memory_fraction`.",
+                            elem_classes=["scale-caption"],
+                        )
+
         nav.change(
             show_page, nav, [conversation_pane, chat_page, models_page, settings_page]
-        ).then(model_banner, None, banner_outputs)
+        )
+        # The badge is refreshed on the way to the chat page as well, so a
+        # load started a moment ago shows as one in progress rather than as
+        # the "no model" state the page was left in.
+        badge_outputs = [model_badge_view, default_model_button, load_model_button]
+        nav.change(refresh_model_badge, None, badge_outputs)
+        demo.load(refresh_model_badge, None, badge_outputs)
+        # And on a timer, so a tab that did not start the load hears about it
+        # too. demo.load stays: it draws the badge at once rather than leaving
+        # the value baked in when the page was built there for a tick.
+        # show_progress="hidden" because this one runs on its own: the default
+        # puts a pending shimmer on a handler's outputs, which every couple of
+        # seconds would have the badge flickering at a reader who never asked
+        # it anything.
+        badge_timer.tick(
+            refresh_model_badge, None, badge_outputs, show_progress="hidden"
+        )
+        load_model_button.click(
+            go_to_models,
+            None,
+            [nav, conversation_pane, chat_page, models_page, settings_page],
+        )
 
         # Every handler that can change what is on disk or in memory rescans
-        # the cache afterwards, so My Models never shows a stale list - and
-        # re-reads the Chat page's banner with it, since whether a model is
-        # loaded, and whether the default one is on disk, are exactly what
-        # these change.
+        # the cache afterwards, so My Models never shows a stale list.
         models_inputs = [my_models, sort_models]
         models_outputs = [my_models, my_model_detail, my_models_summary]
 
-        def rescan(event):
-            """Rescan the cache after ``event``, then re-read the banner."""
+        # The scored token count follows the boxes as they are typed into.
+        # always_last coalesces a burst of keystrokes into the one count that
+        # matters, and the progress bar is hidden because a spinner on every
+        # keystroke would be worse than the number is good.
+        score_budget_inputs = [score_context, score_input, use_chat_template]
+        for control in score_budget_inputs:
+            control.change(
+                score_token_count,
+                score_budget_inputs,
+                score_budget,
+                trigger_mode="always_last",
+                show_progress="hidden",
+            )
 
-            return event.then(
-                refresh_my_models, models_inputs, models_outputs
-            ).then(model_banner, None, banner_outputs)
 
-        rescan(download_button.click(download_model, [model_id, hf_token], model_status))
+        # Loading, unloading and downloading all change what the chat page's
+        # badge and its offer should say, and they change what the scored
+        # token count would come to - a different tokenizer counts a passage
+        # differently, and a different model has its own context limit. The
+        # badge has a timer to keep it honest, but the count does not: it
+        # costs an encoding, so it is recomputed here, where the model
+        # actually changed, rather than every couple of seconds.
+        def rescan(event, *, reloads: bool = True):
+            """Rescan the cache after ``event``, and re-read what the model feeds."""
+
+            event = event.then(refresh_my_models, models_inputs, models_outputs)
+            if not reloads:
+                return event
+            return event.then(refresh_model_badge, None, badge_outputs).then(
+                score_token_count,
+                score_budget_inputs,
+                score_budget,
+                show_progress="hidden",
+            )
+
+        # A download alone brings nothing into memory, but it does decide
+        # whether the offer reads "load" or "download" next time.
+        rescan(
+            download_button.click(download_model, [model_id, hf_token], model_status)
+        )
         rescan(
             download_load_button.click(
                 download_and_load_model, [model_id, hf_token], model_status
@@ -4196,27 +4644,25 @@ def build_app() -> gr.Blocks:
         )
         rescan(cached_button.click(load_cached_model, model_id, model_status))
         rescan(unload_button.click(unload_model, outputs=model_status))
-        refresh_models_button.click(
-            refresh_my_models, models_inputs, models_outputs
-        ).then(model_banner, None, banner_outputs)
-        # Sorting alone is left out: it reorders a list and changes neither
-        # what is on disk nor what is in memory, which is all the banner asks.
+        # A manual refresh and a new sort order reorder a list; neither
+        # changes what is on disk or in memory, which is all the badge and the
+        # count ask about.
+        refresh_models_button.click(refresh_my_models, models_inputs, models_outputs)
         sort_models.input(refresh_my_models, models_inputs, models_outputs)
-        demo.load(refresh_my_models, models_inputs, models_outputs).then(
-            model_banner, None, banner_outputs
-        )
+        demo.load(refresh_my_models, models_inputs, models_outputs)
         # Escape stops a running generation, from anywhere on the page.
         demo.load(None, None, None, js=SHORTCUT_JS)
 
-        # The banner's two ways out of an empty Chat page: fetch the default
-        # model, or go and choose one. Both open Models, because that is
-        # where the download reports its progress.
+        # The offer beside the badge: bring the default model in, and open the
+        # Models page on the way, because that is where its progress and any
+        # failure are reported.
         rescan(
             default_model_button.click(
-                start_default_model, None, [model_id, nav]
+                start_default_model,
+                None,
+                [model_id, nav, conversation_pane, chat_page, models_page, settings_page],
             ).then(setup_default_model, hf_token, model_status)
         )
-        browse_models_button.click(open_models_page, None, nav)
         # .input rather than .change: the refresh above also sets the radio,
         # and a .change listener would rewrite the model ID box on each rescan.
         my_models.input(select_my_model, my_models, [model_id, my_model_detail])
@@ -4265,20 +4711,6 @@ def build_app() -> gr.Blocks:
                 show_progress="hidden",
             )
 
-        # The scored token count follows the boxes as they are typed into.
-        # always_last coalesces a burst of keystrokes into the one count that
-        # matters, and the progress bar is hidden because a spinner on every
-        # keystroke would be worse than the number is good.
-        score_budget_inputs = [score_context, score_input, use_chat_template]
-        for control in score_budget_inputs:
-            control.change(
-                score_token_count,
-                score_budget_inputs,
-                score_budget,
-                trigger_mode="always_last",
-                show_progress="hidden",
-            )
-
         settings_inputs = [
             system_prompt,
             keep_reasoning,
@@ -4293,6 +4725,51 @@ def build_app() -> gr.Blocks:
             color_scale,
         ]
         chat_inputs = [prompt, conversation_state, *settings_inputs]
+
+        # Everything saved between sessions, in PERSISTED_SETTING_NAMES order.
+        persisted_inputs = [*settings_inputs, enter_sends, model_id]
+        for control in (
+            system_prompt,
+            keep_reasoning,
+            assistant_prefill,
+            temperature,
+            top_p,
+            top_k,
+            max_new_tokens,
+            randomize_seed,
+            analyze_prompt,
+            color_scale,
+            enter_sends,
+            model_id,
+        ):
+            control.change(remember_settings, persisted_inputs, None)
+        # The seed box is the one control the app writes to itself: a finished
+        # response leaves the seed that produced it there, and saving that
+        # would overwrite the seed the reader chose. Blur and submit are the
+        # two ways a person is done editing a number, and they are the only
+        # events that write the box's contents down; every other control
+        # leaves the saved seed where it is. See remember_settings().
+        for event in (seed.blur, seed.submit):
+            event(remember_committed_seed, persisted_inputs, None)
+        # The context limit is committed rather than saved as it is typed: the
+        # handler writes a clamped value back, which mid-word would fight the
+        # typing.
+        # Lowering it can pull the response length down with it, which the
+        # sampling summary names, so the label follows that too.
+        for event in (prefill_token_limit.blur, prefill_token_limit.submit):
+            event(
+                remember_prefill_limit,
+                [prefill_token_limit, max_new_tokens],
+                [prefill_token_limit, max_new_tokens],
+            ).then(update_sampling_label, sampling_controls, sampling_accordion)
+        # A page load is where the file is read back, so reloading the browser
+        # shows what was saved rather than what the app started with. The
+        # sampling summary is rebuilt from whatever came back, since the label
+        # the accordion was built with describes the file as it was read at
+        # startup, not as it is now.
+        demo.load(
+            restore_settings, None, [*persisted_inputs, prefill_token_limit]
+        ).then(update_sampling_label, sampling_controls, sampling_accordion)
         # The order every generation handler publishes in; see
         # CHAT_OUTPUT_NAMES.
         chat_outputs = [

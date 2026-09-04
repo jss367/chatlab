@@ -14,6 +14,7 @@ import gradio as gr
 
 import app
 import model_runtime
+import settings
 from model_runtime import (
     MODEL_WEIGHTS,
     CachedModel,
@@ -27,8 +28,19 @@ from model_runtime import (
     sort_cached_models,
 )
 
+import settings_sandbox
+
 COMMIT = "d97e442d7cc678210054dbcc9b440894d62c89a4"
 OLMO = "allenai/Olmo-3-7B-Think"
+
+
+def setUpModule():
+    settings_sandbox.start()
+
+
+def tearDownModule():
+    settings_sandbox.stop()
+
 
 
 def lay_out(root: str, model_id: str, files: dict[str, bytes]) -> Path:
@@ -323,19 +335,32 @@ class ManagerRemoveTests(unittest.TestCase):
         for error in (model_runtime.ModelLoaded, model_runtime.ModelDownloading, model_runtime.ModelBusy):
             self.assertTrue(issubclass(error, model_runtime.ModelInUse))
 
+    def test_a_load_claimed_on_another_thread_is_refused(self):
+        # The load's own thread has not reached the model lock yet, so the
+        # lock is free and would let the deletion through.
+        _model_id, claim = self.manager.reserve_load(OLMO)
+        with self.assertRaises(model_runtime.ModelBusy):
+            self.manager.remove(OLMO, Path(self.root.name))
+        self.assertTrue(self.folder.is_dir())
+        self.assertFalse(self.manager._lock.locked())
+        self.manager.release_load(claim)
+        self.manager.remove(OLMO, Path(self.root.name))
+        self.assertFalse(self.folder.exists(), "removed once the claim is gone")
+
     def test_a_malformed_id_is_refused(self):
         with self.assertRaises(ValueError):
             self.manager.remove("nonsense", Path(self.root.name))
 
 
 class LoadingIdTests(unittest.TestCase):
-    """The manager names the model it is loading for as long as the load runs."""
+    """The manager names the model it is loading for as long as the load runs,
+    and keeps the loads that overlap apart from each other."""
 
     def test_the_loading_id_is_set_during_the_load_and_cleared_after(self):
         manager = ModelManager()
         seen = []
 
-        def fake_load(model_id, local_path, torch):
+        def fake_load(model_id, local_path, torch, progress=None):
             seen.append((manager.loading_id, manager._lock.locked()))
             return "CPU"
 
@@ -354,7 +379,7 @@ class LoadingIdTests(unittest.TestCase):
         manager._lock.acquire()
         entered = threading.Event()
 
-        def fake_load(model_id, local_path, torch):
+        def fake_load(model_id, local_path, torch, progress=None):
             entered.set()
             return "CPU"
 
@@ -378,7 +403,7 @@ class LoadingIdTests(unittest.TestCase):
     def test_a_failed_load_clears_the_loading_id(self):
         manager = ModelManager()
 
-        def fail(model_id, local_path, torch):
+        def fail(model_id, local_path, torch, progress=None):
             raise RuntimeError("gpu fell over")
 
         with mock.patch.object(manager, "_load_locked", fail):
@@ -388,11 +413,159 @@ class LoadingIdTests(unittest.TestCase):
         self.assertIsNone(manager.loading_id)
         self.assertFalse(manager._lock.locked())
 
+    def test_a_claim_names_the_load_before_it_starts(self):
+        # A load that runs on its own thread is under way from the click:
+        # the worker names it only once it reaches load(), and a redownload
+        # or a removal arriving in between must find it already claimed.
+        manager = ModelManager()
+
+        checked_id, _claim = manager.reserve_load(" allenai/Olmo-3-7B-Think ")
+
+        self.assertEqual(checked_id, OLMO)
+        self.assertEqual(manager.loading_id, OLMO)
+        self.assertTrue(manager.is_loading(OLMO))
+        self.assertFalse(manager.is_loading("org/other"))
+
+    def test_two_overlapping_loads_keep_their_own_claims(self):
+        manager = ModelManager()
+        _first_id, first = manager.reserve_load(OLMO)
+        _second_id, second = manager.reserve_load("org/other")
+
+        manager.release_load(first)
+
+        self.assertFalse(manager.is_loading(OLMO))
+        self.assertTrue(manager.is_loading("org/other"), "the other load stands")
+        manager.release_load(second)
+        self.assertIsNone(manager.loading_id)
+        manager.release_load(second)
+        self.assertIsNone(manager.loading_id, "releasing twice is harmless")
+
+    def test_a_load_does_not_clear_a_claim_it_did_not_take(self):
+        # One load finishing used to leave the other looking idle while it
+        # waited for the lock, which is the window a removal needs.
+        from unittest import mock
+
+        manager = ModelManager()
+        _model_id, waiting = manager.reserve_load(OLMO)
+
+        with mock.patch.object(
+            manager, "_load_locked", lambda *args, **kwargs: "CPU"
+        ):
+            manager.load("org/other", Path("/snap"))
+
+        self.assertTrue(manager.is_loading(OLMO), "still claimed by its own worker")
+        manager.release_load(waiting)
+        self.assertIsNone(manager.loading_id)
+
     def test_a_malformed_id_is_refused_before_the_lock(self):
         manager = ModelManager()
         with self.assertRaises(ValueError):
             manager.load("nonsense", Path("/snap"))
         self.assertIsNone(manager.loading_id)
+
+    def test_one_load_finishing_does_not_cancel_another_still_running(self):
+        # "Load cached" and "Download and load" are separate Gradio events,
+        # so they get a worker each and can both be inside load() at once,
+        # the second waiting on the model lock. The load that finishes first
+        # must leave the other's name in place: otherwise the chat badge
+        # goes back to "No model loaded" halfway through a load, and offers
+        # the reader a button to start one more.
+        import threading
+
+        manager = ModelManager()
+        second = "org/second"
+        in_first = threading.Event()
+        in_second = threading.Event()
+        let_first_finish = threading.Event()
+        let_second_finish = threading.Event()
+
+        def fake_load(model_id, local_path, torch, progress=None):
+            if model_id == OLMO:
+                in_first.set()
+                let_first_finish.wait(5)
+            else:
+                in_second.set()
+                let_second_finish.wait(5)
+            return "CPU"
+
+        with mock.patch.object(manager, "_load_locked", fake_load):
+            first_worker = threading.Thread(
+                target=manager.load, args=(OLMO, Path("/snap"))
+            )
+            first_worker.start()
+            try:
+                self.assertTrue(in_first.wait(5))
+                second_worker = threading.Thread(
+                    target=manager.load, args=(second, Path("/snap"))
+                )
+                second_worker.start()
+                try:
+                    for _ in range(200):
+                        if manager.is_loading(second):
+                            break
+                        time.sleep(0.005)
+                    # Both count as under way, and the one that got there
+                    # first is the one the badge names.
+                    self.assertTrue(manager.is_loading(second))
+                    self.assertTrue(manager.is_loading(OLMO))
+                    self.assertEqual(manager.loading_id, OLMO)
+                    self.assertFalse(in_second.is_set())
+
+                    let_first_finish.set()
+                    first_worker.join(timeout=5)
+                    self.assertTrue(in_second.wait(5))
+                    # The finished load took only its own name away.
+                    self.assertEqual(manager.loading_id, second)
+                    self.assertFalse(manager.is_loading(OLMO))
+                finally:
+                    let_second_finish.set()
+                    second_worker.join(timeout=5)
+            finally:
+                let_first_finish.set()
+                first_worker.join(timeout=5)
+
+        self.assertIsNone(manager.loading_id)
+        self.assertFalse(manager.is_loading(second))
+        self.assertFalse(manager._lock.locked())
+
+    def test_the_load_holding_the_lock_is_named_whatever_order_they_claimed_in(self):
+        # Loads claim themselves before they wait for the model lock, so
+        # claim order is arrival order, and arrival order is not promised to
+        # be the order the lock is handed out in: a thread can be set aside
+        # between the two steps. The badge has to name the load that is
+        # really reading weights, not the one that claimed last.
+        import threading
+
+        manager = ModelManager()
+        reading = threading.Event()
+        let_it_finish = threading.Event()
+
+        def fake_load(model_id, local_path, torch, progress=None):
+            reading.set()
+            let_it_finish.wait(5)
+            return "CPU"
+
+        with mock.patch.object(manager, "_load_locked", fake_load):
+            worker = threading.Thread(target=manager.load, args=(OLMO, Path("/snap")))
+            worker.start()
+            try:
+                self.assertTrue(reading.wait(5))
+                # A later click lands its claim while the first load reads.
+                _later_id, later = manager.reserve_load("org/second")
+                self.assertEqual(manager.loading_id, OLMO)
+                # Both are claimed, so neither model's files may be touched.
+                self.assertTrue(manager.is_loading(OLMO))
+                self.assertTrue(manager.is_loading("org/second"))
+            finally:
+                let_it_finish.set()
+                worker.join(timeout=5)
+
+        # With the lock free, the load waiting for it is named again, so the
+        # badge does not fall back to "No model loaded" while it runs.
+        self.assertEqual(manager.loading_id, "org/second")
+        manager.release_load(later)
+        self.assertIsNone(manager.loading_id)
+        self.assertFalse(manager._lock.locked())
 
 
 def cached(model_id: str, **overrides) -> CachedModel:
@@ -635,7 +808,20 @@ class ManageMyModelsTests(unittest.TestCase):
     def test_a_model_being_loaded_is_not_redownloaded_under_itself(self):
         # model_id is empty for the whole of a load, so the manager names
         # the model it is bringing in separately.
-        self.manager.loading_id = "org/partial"
+        self.manager.reserve_load("org/partial")
+
+        (card,) = list(app.redownload_my_model("org/partial", ""))
+
+        self.assertIn("Model in use", card)
+        self.assertIn("being loaded", card)
+        self.assertFalse(card.startswith("downloading"), card)
+
+    def test_a_model_waiting_behind_another_load_is_not_redownloaded_either(self):
+        # Two loads can run at once, and only one of them is the one the
+        # badge names. The one waiting its turn is still going to read its
+        # own files, so a redownload of it has to be refused as well.
+        self.manager.reserve_load(OLMO)
+        self.manager.reserve_load("org/partial")
 
         (card,) = list(app.redownload_my_model("org/partial", ""))
 
@@ -915,6 +1101,107 @@ class ModelSearchPaneTests(unittest.TestCase):
         )
 
 
+class ModelBadgeTests(unittest.TestCase):
+    """The chat page's badge: the model in memory, or the lack of one."""
+
+    def setUp(self):
+        self.manager = ModelManager()
+        original = app.MANAGER
+        app.MANAGER = self.manager
+        self.addCleanup(lambda: setattr(app, "MANAGER", original))
+
+    def load(self):
+        self.manager.model = object()
+        self.manager.tokenizer = object()
+        self.manager.model_id = OLMO
+        self.manager.device_name = "Apple Metal (MPS)"
+
+    def test_a_loaded_model_is_named_with_its_device(self):
+        self.load()
+        badge, offer, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="ready"', badge)
+        self.assertIn(OLMO, badge)
+        self.assertIn("Apple Metal (MPS)", badge)
+        # Nothing to go to the Models page for, and nothing to offer.
+        self.assertFalse(button["visible"])
+        self.assertFalse(offer["visible"])
+
+    def test_no_model_says_so_and_offers_the_way_to_the_models_page(self):
+        badge, offer, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="empty"', badge)
+        self.assertIn(app.NO_MODEL_BADGE, badge)
+        self.assertTrue(button["visible"])
+        # And the offer beside it says which way it would go.
+        self.assertTrue(offer["visible"])
+        self.assertEqual(offer["value"], app.default_model_offer())
+
+    def test_a_load_under_way_names_the_model_coming_in(self):
+        # model_id is cleared for the whole of a load, so the badge reads
+        # loading_id and reports the minutes in between as a load.
+        self.manager.reserve_load(OLMO)
+
+        badge, offer, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="loading"', badge)
+        self.assertIn(f"Loading {OLMO}", badge)
+        self.assertFalse(button["visible"])
+        self.assertFalse(offer["visible"])
+
+    def test_a_second_load_finishing_leaves_the_first_one_showing(self):
+        # Two loads can be under way at once, and the one that finishes
+        # first must not give back the other's claim: the badge would then
+        # say nothing was loaded in the middle of a load.
+        self.manager.reserve_load(OLMO)
+        _second_id, second = self.manager.reserve_load("org/second")
+        self.manager.release_load(second)
+
+        badge, offer, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="loading"', badge)
+        self.assertIn(f"Loading {OLMO}", badge)
+        self.assertFalse(button["visible"])
+        self.assertFalse(offer["visible"])
+
+    def test_a_load_waiting_its_turn_leaves_the_answering_model_named(self):
+        # A load counts itself as under way before it waits for the model
+        # lock, so asking for a second model mid-reply queues it behind the
+        # generation. The model still producing the tokens is the one the
+        # badge is for, so it keeps the name until the load empties memory.
+        self.load()
+        self.manager.reserve_load("org/second")
+
+        badge, offer, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="ready"', badge)
+        self.assertIn(OLMO, badge)
+        self.assertNotIn("Loading", badge)
+        self.assertFalse(button["visible"])
+
+    def test_a_load_that_has_emptied_memory_names_the_model_coming_in(self):
+        # Once the queued load wins the lock it unloads first, and from then
+        # on there is nothing in memory to name.
+        self.load()
+        self.manager.reserve_load("org/second")
+        self.manager.model = None
+        self.manager.tokenizer = None
+        self.manager.model_id = None
+        self.manager.device_name = None
+
+        badge, offer, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="loading"', badge)
+        self.assertIn("Loading org/second", badge)
+        self.assertFalse(button["visible"])
+
+    def test_the_model_id_is_escaped(self):
+        self.load()
+        self.manager.model_id = "org/<script>"
+
+        self.assertIn("&lt;script&gt;", app.loaded_model_badge())
+
+
 class PageLayoutTests(unittest.TestCase):
     """The nav picks a page: the model controls sit on Models, the settings on
     Settings, and the conversation on Chat."""
@@ -932,6 +1219,7 @@ class PageLayoutTests(unittest.TestCase):
         "Send previous reasoning back to the model",
         "Measure prompt tokens",
         "Enter sends the message",
+        "Context limit (tokens)",
     ]
     # Sampling sits with the conversation, not behind the nav: these are what
     # a reader moves between one retry and the next.
@@ -1069,6 +1357,70 @@ class PageLayoutTests(unittest.TestCase):
             for index in fn.cancels
         }
 
+    def test_the_badge_sits_above_the_chat_page_tabs(self):
+        chat_page = self.by_id("chat-page")
+        badge = self.by_id("model-badge")
+        button = self.by_id("load-model")
+        self.assertTrue(self.within(badge, chat_page))
+        self.assertTrue(self.within(button, chat_page))
+        # Above the tabs, so Score text names the model as well as Chat.
+        tabs = next(
+            block for block in self.demo.blocks.values() if isinstance(block, gr.Tabs)
+        )
+        self.assertFalse(self.within(badge, tabs))
+
+    def test_every_change_to_what_is_in_memory_repaints_the_badge(self):
+        # Download-and-load, load cached and unload change what is in memory;
+        # the page load draws the badge first, switching pages catches a load
+        # that started while the chat page was out of sight, and the timer
+        # catches one another tab started.
+        # The three that change memory, the download that only changes what
+        # is on disk, redownload, a confirmed removal and the offer's own
+        # chain, plus the page load, the nav and the timer.
+        self.assertEqual(len(self.listeners("refresh_model_badge")), 10)
+
+    def test_the_badge_asks_again_on_a_timer(self):
+        # The manager is one object for the whole process, but a handler's
+        # updates only reach the tab that ran it. Without the timer a second
+        # tab would name a model that another tab has since swapped out.
+        timers = [
+            block
+            for block in self.demo.blocks.values()
+            if isinstance(block, gr.Timer)
+        ]
+        self.assertEqual([timer.value for timer in timers], [app.BADGE_REFRESH_SECONDS])
+        self.assertLessEqual(app.BADGE_REFRESH_SECONDS, 5)
+        ticks = [
+            listener
+            for listener in self.listeners("refresh_model_badge")
+            if listener.targets == [(timers[0]._id, "tick")]
+        ]
+        self.assertEqual(len(ticks), 1)
+        # Nobody asked for this one, so it does not put a pending shimmer on
+        # the badge every couple of seconds.
+        self.assertEqual(ticks[0].show_progress, "hidden")
+
+    def test_the_badge_button_sends_the_nav_to_the_models_page(self):
+        (listener,) = self.listeners("go_to_models")
+        self.assertEqual(listener.targets, [(self.by_id("load-model")._id, "click")])
+        # The button switches the pages itself: a Radio set by a handler
+        # reports no change, so the nav's own handler would not run.
+        self.assertEqual(
+            listener.outputs,
+            [
+                self.by_id("nav"),
+                self.by_id("conversation-pane"),
+                self.by_id("chat-page"),
+                self.by_id("models-page"),
+                self.by_id("settings-page"),
+            ],
+        )
+        page, *panes = app.go_to_models()
+        self.assertEqual(page, "Models")
+        self.assertEqual(
+            [update["visible"] for update in panes], [False, False, True, False]
+        )
+
     def test_every_model_change_rescans_the_cache(self):
         # Download, download-and-load, load cached, unload, redownload,
         # confirmed removal, the banner's own setup of the default model,
@@ -1131,40 +1483,46 @@ class PageLayoutTests(unittest.TestCase):
 
         self.assertEqual(self.demo.blocks[block_id].value, "🗑️ Clear all")
 
-    def test_the_banner_offers_a_model_from_the_page_that_needs_one(self):
-        # Chat is where a reader lands and until a model is loaded nothing on
-        # it works, so the way out is on that page rather than behind an icon
-        # in the nav.
-        banner = self.by_id("model-banner")
+    def test_the_offer_sits_beside_the_badge_that_says_it_is_needed(self):
+        # The badge names the missing model; the offer is what to do about
+        # it, and both belong where the reader already is.
+        offer = self.by_id("default-model")
 
-        self.assertFalse(banner.visible)
-        self.assertTrue(self.within(banner, self.by_id("chat-page")))
+        self.assertTrue(self.within(offer, self.by_id("chat-page")))
+        self.assertTrue(self.within(offer, self.by_id("model-bar")))
         (setup,) = self.listeners("start_default_model")
-        (browse,) = self.listeners("open_models_page")
-        for fn in (setup, browse):
-            with self.subTest(handler=fn.fn.__name__):
-                ((block_id, _),) = fn.targets
-                self.assertTrue(self.within(self.demo.blocks[block_id], banner))
-        # Both open Models, which is where the download reports its progress.
-        self.assertIn(self.by_id("nav"), setup.outputs)
-        self.assertEqual(browse.outputs, [self.by_id("nav")])
+        self.assertEqual(setup.targets, [(offer._id, "click")])
+        # It switches the pages itself, for the reason go_to_models gives: a
+        # Radio set by a handler reports no change, so setting the nav alone
+        # would tick Models and leave the chat page on screen.
+        self.assertEqual(
+            setup.outputs,
+            [
+                self.labelled("Hugging Face model ID"),
+                self.by_id("nav"),
+                self.by_id("conversation-pane"),
+                self.by_id("chat-page"),
+                self.by_id("models-page"),
+                self.by_id("settings-page"),
+            ],
+        )
 
-    def test_the_banner_is_re_read_whenever_it_could_have_changed(self):
-        # Whether a model is loaded, and whether the default one is on disk,
-        # are exactly what the model handlers change - and navigating back to
-        # Chat is the other moment the banner could be stale.
-        listeners = self.listeners("model_banner")
-        outputs = {tuple(fn.outputs) for fn in listeners}
-
-        self.assertEqual(len(outputs), 1, "the banner is published one way")
-        self.assertEqual(outputs.pop()[0], self.by_id("model-banner"))
-        # Every rescan but the sort, which reorders a list and changes
-        # neither what is on disk nor what is in memory, plus the nav.
-        self.assertEqual(len(listeners), len(self.listeners("refresh_my_models")))
-        sort_by = self.labelled("Sort by")
-        rescans = {fn.targets[0][0] for fn in self.listeners("refresh_my_models")}
-        self.assertIn(sort_by._id, rescans, "sorting still rescans the list")
-        self.assertNotIn(sort_by._id, {fn.targets[0][0] for fn in listeners})
+    def test_the_offer_is_published_wherever_the_badge_is(self):
+        # What the offer would do depends on what is on disk, which a
+        # download changes. It rides the badge's own refresh, so the timer
+        # that keeps the badge honest in every open tab keeps the offer
+        # honest too.
+        listeners = self.listeners("refresh_model_badge")
+        self.assertTrue(listeners)
+        for listener in listeners:
+            self.assertEqual(
+                listener.outputs,
+                [
+                    self.by_id("model-badge"),
+                    self.by_id("default-model"),
+                    self.by_id("load-model"),
+                ],
+            )
 
     def test_escape_is_wired_to_the_stop_button_by_its_id(self):
         # The shortcut presses the button rather than reaching past it, so
@@ -1183,50 +1541,58 @@ class PageLayoutTests(unittest.TestCase):
             "nothing attaches the keyboard shortcut on load",
         )
 
-    def test_the_sampling_accordion_starts_showing_its_own_defaults(self):
+    def test_the_sampling_accordion_starts_showing_the_saved_values(self):
         # The summary is only worth having if it is right before anything is
         # touched, which means the label and the sliders read one set of
-        # numbers rather than two that can drift apart.
+        # numbers - and that set is the saved settings, not a second copy of
+        # the defaults that could drift from them.
         accordion = next(
             block
             for block in self.demo.blocks.values()
-            if isinstance(block, gr.Accordion) and block.label.startswith("Sampling")
+            if isinstance(block, gr.Accordion)
+            and (block.label or "").startswith("Sampling")
         )
+        saved = settings.load()
 
         self.assertEqual(
             accordion.label,
             app.sampling_label(
-                app.DEFAULT_TEMPERATURE,
-                app.DEFAULT_TOP_P,
-                app.DEFAULT_TOP_K,
-                app.DEFAULT_MAX_NEW_TOKENS,
+                saved.temperature, saved.top_p, saved.top_k, saved.max_new_tokens
             ),
         )
         for label, value in [
-            ("Temperature", app.DEFAULT_TEMPERATURE),
-            ("Top-p", app.DEFAULT_TOP_P),
-            ("Top-k (0 disables)", app.DEFAULT_TOP_K),
-            ("Maximum new tokens", app.DEFAULT_MAX_NEW_TOKENS),
+            ("Temperature", saved.temperature),
+            ("Top-p", saved.top_p),
+            ("Top-k (0 disables)", saved.top_k),
+            ("Maximum new tokens", saved.max_new_tokens),
         ]:
             with self.subTest(control=label):
                 self.assertEqual(self.labelled(label).value, value)
                 self.assertTrue(self.within(self.labelled(label), accordion))
+        # The response length cannot outrun the context limit.
+        self.assertEqual(
+            self.labelled("Maximum new tokens").maximum, saved.prefill_token_limit
+        )
 
     def test_the_sampling_summary_follows_the_sliders_on_release(self):
         # A slider fires continuously while it is dragged; the label only has
         # to be right once it is let go.
-        listeners = self.listeners("update_sampling_label")
         sliders = [
             self.labelled(label)
             for label in ("Temperature", "Top-p", "Top-k (0 disables)", "Maximum new tokens")
         ]
+        listeners = self.listeners("update_sampling_label")
+        released = [fn for fn in listeners if fn.targets[0][1] == "release"]
 
-        self.assertEqual(len(listeners), len(sliders))
+        self.assertEqual(
+            [self.demo.blocks[fn.targets[0][0]] for fn in released], sliders
+        )
         for fn in listeners:
-            ((block_id, event),) = fn.targets
-            with self.subTest(slider=self.demo.blocks[block_id].label):
-                self.assertEqual(event, "release")
-                self.assertEqual(fn.inputs, sliders)
+            self.assertEqual(fn.inputs, sliders)
+        # The other three are the paths that move a slider without anyone
+        # touching it: the settings file read back on load, and the context
+        # limit committed, which can pull the response length down with it.
+        self.assertEqual(len(listeners) - len(released), 3)
 
     def test_the_scored_token_count_follows_every_box_that_feeds_it(self):
         # The count has to match what would actually be scored, so a change
@@ -1237,12 +1603,18 @@ class PageLayoutTests(unittest.TestCase):
             self.labelled("Treat the context as a chat message"),
         ]
         listeners = self.listeners("score_token_count")
+        typed = [fn for fn in listeners if fn.trigger_mode == "always_last"]
 
-        self.assertEqual(len(listeners), len(boxes))
+        self.assertEqual([self.demo.blocks[fn.targets[0][0]] for fn in typed], boxes)
         for fn in listeners:
             self.assertEqual(fn.inputs, boxes)
-            # Coalesced, so a burst of keystrokes costs one count.
-            self.assertEqual(fn.trigger_mode, "always_last")
+        # A different tokenizer counts the same passage differently and a
+        # different model has its own limit, so every handler that changes
+        # what is loaded recomputes the count rather than leaving the old
+        # model's answer under the box.
+        self.assertEqual(
+            len(listeners) - len(typed), len(self.listeners("refresh_my_models")) - 3
+        )
 
     def test_choosing_a_model_writes_the_id_box(self):
         box = self.labelled("Hugging Face model ID")
@@ -1250,6 +1622,345 @@ class PageLayoutTests(unittest.TestCase):
             with self.subTest(handler=name):
                 (listener,) = self.listeners(name)
                 self.assertIs(listener.outputs[0], box)
+
+
+class SavedSettingsTests(unittest.TestCase):
+    """The settings file the interface opens with and writes back to."""
+
+    def setUp(self):
+        self.path = settings.settings_path()
+        self.addCleanup(self.forget)
+
+    def forget(self):
+        self.path.unlink(missing_ok=True)
+        settings.load()
+
+    def build_with(self, **values):
+        """The interface as it comes up with ``values`` already saved."""
+
+        settings.write(settings.sanitize(values), path=self.path)
+        settings.load()
+        self.demo = app.build_app()
+        return self.demo
+
+    def labelled(self, label):
+        matches = [
+            block
+            for block in self.demo.blocks.values()
+            if getattr(block, "label", None) == label
+        ]
+        self.assertEqual(len(matches), 1, label)
+        return matches[0]
+
+    def listeners(self, name):
+        return [
+            fn
+            for fn in self.demo.fns.values()
+            if getattr(fn.fn, "__name__", None) == name
+        ]
+
+    def test_every_control_starts_from_the_saved_file(self):
+        self.build_with(
+            model_id="org/other-model",
+            system_prompt="Be brief.",
+            assistant_prefill="Well,",
+            keep_reasoning=True,
+            temperature=0.25,
+            top_p=0.5,
+            top_k=7,
+            max_new_tokens=64,
+            seed=99,
+            randomize_seed=False,
+            analyze_prompt=False,
+            color_scale="Surprise",
+            prefill_token_limit=2048,
+        )
+
+        for label, value in [
+            ("Hugging Face model ID", "org/other-model"),
+            ("System prompt", "Be brief."),
+            ("Assistant prefill (optional)", "Well,"),
+            ("Send previous reasoning back to the model", True),
+            ("Temperature", 0.25),
+            ("Top-p", 0.5),
+            ("Top-k (0 disables)", 7),
+            ("Maximum new tokens", 64),
+            ("Random seed", 99),
+            ("🎲 New seed each response", False),
+            ("Measure prompt tokens", False),
+            ("Color tokens by", "Surprise"),
+            ("Context limit (tokens)", 2048),
+        ]:
+            with self.subTest(label=label):
+                self.assertEqual(self.labelled(label).value, value)
+
+    def test_the_message_box_keys_start_from_the_saved_file(self):
+        self.build_with(enter_sends=False)
+
+        self.assertFalse(self.labelled("Enter sends the message").value)
+        self.assertEqual(
+            self.labelled("Message").placeholder,
+            app.message_box_settings(enter_sends=False)["placeholder"],
+        )
+
+    def test_the_response_length_cannot_exceed_the_context_limit(self):
+        self.build_with(prefill_token_limit=2048)
+
+        self.assertEqual(self.labelled("Maximum new tokens").maximum, 2048)
+
+    def test_a_missing_file_leaves_every_control_at_its_default(self):
+        self.path.unlink(missing_ok=True)
+        settings.load()
+        self.demo = app.build_app()
+
+        self.assertEqual(
+            self.labelled("Temperature").value, settings.DEFAULTS.temperature
+        )
+        self.assertEqual(
+            self.labelled("Hugging Face model ID").value, settings.DEFAULT_MODEL_ID
+        )
+
+    def test_the_file_is_there_to_edit_after_one_launch(self):
+        self.path.unlink(missing_ok=True)
+        settings.load()
+
+        app.build_app()
+
+        self.assertTrue(self.path.is_file())
+
+    def saving_listeners(self):
+        """Every handler that writes the whole set, however it was reached."""
+
+        return self.listeners("remember_settings") + self.listeners(
+            "remember_committed_seed"
+        )
+
+    def test_changing_any_setting_saves_them_all(self):
+        self.build_with()
+        saved = self.saving_listeners()
+        triggers = {
+            self.demo.blocks[block_id]: event
+            for fn in saved
+            for block_id, event in fn.targets
+        }
+
+        for label in [
+            "System prompt",
+            "Send previous reasoning back to the model",
+            "Assistant prefill (optional)",
+            "Temperature",
+            "Top-p",
+            "Top-k (0 disables)",
+            "Maximum new tokens",
+            "Random seed",
+            "🎲 New seed each response",
+            "Measure prompt tokens",
+            "Color tokens by",
+            "Enter sends the message",
+            "Hugging Face model ID",
+        ]:
+            with self.subTest(label=label):
+                self.assertIn(self.labelled(label), triggers)
+        # Each one publishes the whole set, in the order the names are in.
+        for fn in saved:
+            self.assertEqual(len(fn.inputs), len(app.PERSISTED_SETTING_NAMES))
+
+    def test_the_seed_is_saved_when_it_is_committed_and_not_when_it_is_written(self):
+        # A finished response leaves the seed that produced it in the box, and
+        # saving that would overwrite the seed the reader chose.
+        self.build_with()
+        events = {}
+        for fn in self.saving_listeners():
+            for block_id, event in fn.targets:
+                events.setdefault(self.demo.blocks[block_id], set()).add(event)
+
+        self.assertEqual(events[self.labelled("Random seed")], {"blur", "submit"})
+        self.assertEqual(events[self.labelled("Temperature")], {"change"})
+        # And only the seed box's own events are allowed to write it down.
+        for fn in self.listeners("remember_committed_seed"):
+            self.assertEqual(
+                {self.demo.blocks[block_id] for block_id, _ in fn.targets},
+                {self.labelled("Random seed")},
+            )
+
+    def test_the_hugging_face_token_is_not_among_the_settings_saved(self):
+        self.build_with()
+        token_box = self.labelled("Hugging Face token (optional)")
+
+        for fn in self.saving_listeners():
+            self.assertNotIn(token_box, fn.inputs)
+            self.assertNotIn(token_box, [self.demo.blocks[i] for i, _ in fn.targets])
+
+    def test_the_settings_page_says_where_the_file_is(self):
+        self.build_with()
+        page = next(
+            block
+            for block in self.demo.blocks.values()
+            if getattr(block, "elem_id", None) == "settings-page"
+        )
+        notes = [
+            block.value
+            for block in self.demo.blocks.values()
+            if isinstance(block, gr.Markdown)
+            and getattr(block, "value", None)
+            and str(self.path) in str(block.value)
+        ]
+
+        self.assertTrue(notes, f"{self.path} is not named on {page.elem_id}")
+        self.assertIn("mps_memory_fraction", notes[0])
+
+    def test_saving_a_setting_writes_the_file(self):
+        self.build_with()
+        values = dict(zip(app.PERSISTED_SETTING_NAMES, [None] * 13))
+        values.update(settings.current().to_mapping())
+        values["temperature"] = 0.1
+        app.remember_settings(
+            *(values[name] for name in app.PERSISTED_SETTING_NAMES)
+        )
+
+        self.assertEqual(settings.current().temperature, 0.1)
+        self.assertEqual(json.loads(self.path.read_text())["temperature"], 0.1)
+
+    def test_a_pinned_model_is_not_saved_when_something_else_changes(self):
+        """``OLMO_MODEL_ID`` names a model for one run, not for every run."""
+
+        with mock.patch.dict(
+            os.environ, {"OLMO_MODEL_ID": "org/pinned"}, clear=False
+        ):
+            self.build_with(model_id="org/saved-model")
+            box = self.labelled("Hugging Face model ID")
+            self.assertEqual(box.value, "org/pinned")
+
+            values = settings.current().to_mapping() | {
+                "enter_sends": settings.current().enter_sends,
+                "model_id": box.value,
+                "temperature": 0.1,
+            }
+            app.remember_settings(
+                *(values[name] for name in app.PERSISTED_SETTING_NAMES)
+            )
+
+        self.assertEqual(json.loads(self.path.read_text())["temperature"], 0.1)
+        self.assertEqual(settings.current().model_id, "org/saved-model")
+        self.assertEqual(json.loads(self.path.read_text())["model_id"], "org/saved-model")
+
+    def test_a_model_typed_over_a_pinned_one_is_saved(self):
+        with mock.patch.dict(
+            os.environ, {"OLMO_MODEL_ID": "org/pinned"}, clear=False
+        ):
+            self.build_with(model_id="org/saved-model")
+            values = settings.current().to_mapping() | {
+                "enter_sends": settings.current().enter_sends,
+                "model_id": "org/typed",
+            }
+            app.remember_settings(
+                *(values[name] for name in app.PERSISTED_SETTING_NAMES)
+            )
+
+        self.assertEqual(settings.current().model_id, "org/typed")
+
+    def test_a_generated_seed_is_not_saved_when_something_else_changes(self):
+        """A response leaves its own seed in the box; that is not a choice."""
+
+        self.build_with(seed=99, randomize_seed=True)
+        values = settings.current().to_mapping() | {
+            "seed": 1234567,  # what a finished response put in the box
+            "temperature": 0.1,
+        }
+        app.remember_settings(*(values[name] for name in app.PERSISTED_SETTING_NAMES))
+
+        self.assertEqual(json.loads(self.path.read_text())["temperature"], 0.1)
+        self.assertEqual(settings.current().seed, 99)
+        self.assertEqual(json.loads(self.path.read_text())["seed"], 99)
+
+    def test_committing_the_seed_box_saves_what_is_in_it(self):
+        self.build_with(seed=99, randomize_seed=True)
+        values = settings.current().to_mapping() | {"seed": 7}
+        app.remember_committed_seed(
+            *(values[name] for name in app.PERSISTED_SETTING_NAMES)
+        )
+
+        self.assertEqual(settings.current().seed, 7)
+
+    def test_a_locked_seed_is_saved_by_any_control(self):
+        # With randomization off the box is the reader's alone, and turning it
+        # off is how one keeps the seed a response has just used.
+        self.build_with(seed=99, randomize_seed=True)
+        values = settings.current().to_mapping() | {
+            "seed": 1234567,
+            "randomize_seed": False,
+        }
+        app.remember_settings(*(values[name] for name in app.PERSISTED_SETTING_NAMES))
+
+        self.assertEqual(settings.current().seed, 1234567)
+
+    def test_lowering_the_context_limit_pulls_the_response_length_under_it(self):
+        self.build_with(prefill_token_limit=8192, max_new_tokens=4096)
+
+        limit, length = app.remember_prefill_limit(1024, 4096)
+
+        self.assertEqual(limit["value"], 1024)
+        self.assertEqual(length["maximum"], 1024)
+        self.assertEqual(length["value"], 1024)
+        self.assertEqual(settings.current().max_new_tokens, 1024)
+        self.assertEqual(json.loads(self.path.read_text())["prefill_token_limit"], 1024)
+
+    def test_a_page_load_puts_the_saved_settings_back_into_the_controls(self):
+        self.build_with(temperature=0.4, max_new_tokens=64, prefill_token_limit=2048)
+        (restore,) = self.listeners("restore_settings")
+
+        self.assertEqual(restore.targets, [(self.demo._id, "load")])
+        self.assertEqual(
+            restore.outputs,
+            [
+                *(
+                    self.labelled(label)
+                    for label in [
+                        "System prompt",
+                        "Send previous reasoning back to the model",
+                        "Assistant prefill (optional)",
+                        "Temperature",
+                        "Top-p",
+                        "Top-k (0 disables)",
+                        "Maximum new tokens",
+                        "Random seed",
+                        "🎲 New seed each response",
+                        "Measure prompt tokens",
+                        "Color tokens by",
+                        "Enter sends the message",
+                        "Hugging Face model ID",
+                    ]
+                ),
+                self.labelled("Context limit (tokens)"),
+            ],
+        )
+        updates = app.restore_settings()
+        self.assertEqual(len(updates), len(app.PERSISTED_SETTING_NAMES) + 1)
+        published = dict(zip(app.PERSISTED_SETTING_NAMES, updates))
+        self.assertEqual(published["temperature"]["value"], 0.4)
+        self.assertEqual(published["max_new_tokens"]["value"], 64)
+        # The response-length ceiling comes back with it.
+        self.assertEqual(published["max_new_tokens"]["maximum"], 2048)
+        self.assertEqual(updates[-1]["value"], 2048)
+
+    def test_a_page_load_reads_the_file_again_so_a_hand_edit_takes_effect(self):
+        self.build_with(temperature=0.4)
+        self.path.write_text(
+            json.dumps(settings.current().to_mapping() | {"temperature": 1.1}),
+            encoding="utf-8",
+        )
+
+        published = dict(zip(app.PERSISTED_SETTING_NAMES, app.restore_settings()))
+
+        self.assertEqual(published["temperature"]["value"], 1.1)
+        self.assertEqual(settings.current().temperature, 1.1)
+
+    def test_a_context_limit_outside_its_range_is_pulled_back_into_it(self):
+        self.build_with()
+
+        limit, _length = app.remember_prefill_limit(2, 512)
+
+        self.assertEqual(limit["value"], settings.PREFILL_TOKEN_LIMIT_RANGE[0])
 
 
 if __name__ == "__main__":
