@@ -986,6 +986,11 @@ class PageLayoutTests(unittest.TestCase):
         self.assertEqual(nav.value, "Chat")
         self.assertTrue(self.within(nav, self.by_id("nav-pane")))
 
+    def test_the_shell_spans_the_whole_window(self):
+        # Gradio otherwise caps the page at one of a handful of widths and
+        # centers it, leaving empty room down each side on a wide screen.
+        self.assertTrue(self.demo.fill_width)
+
     def test_the_nav_pane_is_thin(self):
         self.assertLessEqual(app.NAV_PANE_WIDTH, 64)
         self.assertEqual(self.by_id("nav-pane").min_width, app.NAV_PANE_WIDTH)
