@@ -879,6 +879,23 @@ def setup_default_model(hf_token: str):
     check, which is a stall at best and a failure with no network at all -
     and the button has just promised an immediate local load.
 
+    "Whole", though, is only as good as what can be checked from outside.
+    :func:`model_runtime.missing_files` deliberately looks at the config and
+    the weights alone, because which tokenizer files a repo ships varies too
+    much to guess and a wrong "incomplete" verdict on a good cache would be
+    worse than a load error. So a download cut off after the weights but
+    before the tokenizer looks complete here and fails in
+    ``from_pretrained``. On the Models page that is a fair answer to an
+    explicit request for a cached load; from this button it would be a dead
+    end, since the reader asked for a working model and the files to fix it
+    are one fetch away.
+
+    So a cached load that does not end with the model in memory falls through
+    to the download, which resumes whatever the snapshot lacks. When the
+    cache really was complete and the load failed for another reason -
+    memory, above all - that fetch finds nothing to do and the same failure
+    is reported by the second attempt, at the cost of one Hub round trip.
+
     The model ID is taken from the settings default rather than from the ID
     box, so the button cannot be redirected by whatever the box happens to
     hold when the chain reaches this step.
@@ -886,8 +903,15 @@ def setup_default_model(hf_token: str):
 
     if default_model_cached():
         yield from load_cached_model(settings.DEFAULT_MODEL_ID)
-    else:
-        yield from download_and_load_model(settings.DEFAULT_MODEL_ID, hf_token)
+        if MANAGER.model_id == settings.DEFAULT_MODEL_ID:
+            return
+        yield status_card(
+            "Finishing the download",
+            f"The cache holds the weights for `{settings.DEFAULT_MODEL_ID}` but "
+            "not everything needed to load them. Fetching the rest…",
+            "working",
+        )
+    yield from download_and_load_model(settings.DEFAULT_MODEL_ID, hf_token)
 
 
 def start_default_model():
@@ -4179,7 +4203,9 @@ def build_app() -> gr.Blocks:
                                     # every other one with it.
                                     clear_button = gr.Button("🗑️ Clear all", min_width=110)
                                 with gr.Column(
-                                    visible=False, elem_classes=["clear-confirm"]
+                                    visible=False,
+                                    elem_id="clear-confirm",
+                                    elem_classes=["clear-confirm"],
                                 ) as clear_confirm:
                                     clear_question = gr.Markdown("")
                                     with gr.Row():
@@ -4935,6 +4961,15 @@ def build_app() -> gr.Blocks:
             [generation_status, clear_confirm, clear_question],
         )
         cancel_clear_button.click(hide_clear_confirm, None, clear_confirm)
+        # The question names how many conversations it would take, and that
+        # count is read when it is asked. Anything that adds or removes one
+        # withdraws it rather than leaving a stale promise above a button
+        # that would take more than the promise says - the same reason
+        # choosing another model withdraws the removal question. Pressing
+        # Clear again re-asks with the numbers as they are now.
+        for control in (new_button, fork_button, delete_fork_button):
+            control.click(hide_clear_confirm, None, clear_confirm)
+        conversation_list.input(hide_clear_confirm, None, clear_confirm)
         confirm_clear_button.click(
             clear_chat,
             inputs=color_scale,

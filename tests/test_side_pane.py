@@ -1490,7 +1490,11 @@ class PageLayoutTests(unittest.TestCase):
         # only one that cancels the running generators.
         (ask,) = self.listeners("ask_clear_chat")
         (clear,) = self.listeners("clear_chat")
-        (cancel,) = self.listeners("hide_clear_confirm")
+        cancel = next(
+            fn
+            for fn in self.listeners("hide_clear_confirm")
+            if self.demo.blocks[fn.targets[0][0]].value == "Cancel"
+        )
         buttons = {
             self.demo.blocks[block_id].value: fn
             for fn in (ask, clear, cancel)
@@ -1503,6 +1507,25 @@ class PageLayoutTests(unittest.TestCase):
         # so it is read the way ClearCancelsGenerationTests reads it.
         self.assertFalse(self.cancelled_by(ask.targets[0]))
         self.assertTrue(self.cancelled_by(clear.targets[0]))
+
+    def test_changing_the_conversations_withdraws_the_clear_question(self):
+        # The question names how many conversations it would take, counted
+        # when it was asked. Left open across a New or a Fork it would
+        # promise less than "Clear everything" would take - and that promise
+        # is the whole reason the question exists.
+        withdrawals = self.listeners("hide_clear_confirm")
+        triggered_by = {fn.targets[0][0] for fn in withdrawals}
+        buttons = {
+            self.demo.blocks[block_id].value
+            for block_id in triggered_by
+            if isinstance(self.demo.blocks[block_id], gr.Button)
+        }
+
+        self.assertEqual(buttons, {"Cancel", "➕ New", "🌿 Fork", "🗑️ Delete"})
+        # Switching conversations counts too, and it is the list itself.
+        self.assertIn(self.by_id("conversation-list")._id, triggered_by)
+        for fn in withdrawals:
+            self.assertEqual(fn.outputs, [self.by_id("clear-confirm")])
 
     def test_the_clear_button_is_named_for_everything_it_takes(self):
         # "Clear" alone reads as emptying the chat on screen, which is what

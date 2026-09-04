@@ -1241,39 +1241,83 @@ class DefaultModelOfferTests(unittest.TestCase):
         self.assertIn("Download", offer)
         self.assertIn(app.DEFAULT_MODEL_DOWNLOAD, offer)
 
+    class Loads:
+        """A manager that ends up holding whichever model was asked for."""
+
+        def __init__(self, model_id=None):
+            self.model_id = model_id
+
+    def run_setup(self, *, cached: bool, ends_with=None):
+        original = app.MANAGER
+        app.MANAGER = self.Loads(ends_with)
+        try:
+            with mock.patch.object(app, "default_model_cached", return_value=cached):
+                with mock.patch.object(app, "load_cached_model") as load:
+                    with mock.patch.object(app, "download_and_load_model") as fetch:
+                        load.return_value = iter([])
+                        fetch.return_value = iter([])
+                        list(app.setup_default_model("token"))
+            return load, fetch
+        finally:
+            app.MANAGER = original
+
     def test_a_cached_default_is_loaded_without_touching_the_network(self):
         # The offer has just promised an immediate local load. Going through
         # the download path would reach snapshot_download for a Hub update
         # check: a stall at best, and a failure with no network at all.
-        with mock.patch.object(app, "default_model_cached", return_value=True):
-            with mock.patch.object(app, "load_cached_model") as cached:
-                with mock.patch.object(app, "download_and_load_model") as fetched:
-                    cached.return_value = iter([])
-                    list(app.setup_default_model("token"))
+        load, fetch = self.run_setup(
+            cached=True, ends_with=settings.DEFAULT_MODEL_ID
+        )
 
-        cached.assert_called_once_with(settings.DEFAULT_MODEL_ID)
-        fetched.assert_not_called()
+        load.assert_called_once_with(settings.DEFAULT_MODEL_ID)
+        fetch.assert_not_called()
+
+    def test_a_cache_that_would_not_load_falls_through_to_the_download(self):
+        # missing_files checks the config and the weights alone, so a
+        # download cut off before the tokenizer looks complete and fails in
+        # from_pretrained. From this button that would be a dead end: the
+        # reader asked for a working model and the rest is one fetch away.
+        load, fetch = self.run_setup(cached=True, ends_with=None)
+
+        load.assert_called_once_with(settings.DEFAULT_MODEL_ID)
+        fetch.assert_called_once_with(settings.DEFAULT_MODEL_ID, "token")
+
+    def test_a_cached_load_of_something_else_is_not_mistaken_for_success(self):
+        # Another model in memory is not this one having loaded.
+        _load, fetch = self.run_setup(cached=True, ends_with="org/other")
+
+        fetch.assert_called_once_with(settings.DEFAULT_MODEL_ID, "token")
+
+    def test_the_fallback_says_what_it_is_doing(self):
+        # A second progress card appearing unexplained would read as the
+        # download the button promised was not needed.
+        original = app.MANAGER
+        app.MANAGER = self.Loads(None)
+        try:
+            with mock.patch.object(app, "default_model_cached", return_value=True):
+                with mock.patch.object(app, "load_cached_model") as load:
+                    with mock.patch.object(app, "download_and_load_model") as fetch:
+                        load.return_value = iter([])
+                        fetch.return_value = iter([])
+                        cards = list(app.setup_default_model("token"))
+        finally:
+            app.MANAGER = original
+
+        self.assertTrue(any("Finishing the download" in card for card in cards))
 
     def test_an_uncached_default_is_downloaded(self):
-        with mock.patch.object(app, "default_model_cached", return_value=False):
-            with mock.patch.object(app, "load_cached_model") as cached:
-                with mock.patch.object(app, "download_and_load_model") as fetched:
-                    fetched.return_value = iter([])
-                    list(app.setup_default_model("token"))
+        load, fetch = self.run_setup(cached=False)
 
-        fetched.assert_called_once_with(settings.DEFAULT_MODEL_ID, "token")
-        cached.assert_not_called()
+        fetch.assert_called_once_with(settings.DEFAULT_MODEL_ID, "token")
+        load.assert_not_called()
 
     def test_the_offer_cannot_be_redirected_by_the_id_box(self):
         # The chain writes the default into the ID box and then loads it, but
         # it takes the ID from settings rather than reading the box back, so a
         # box edited in between cannot send it elsewhere.
-        with mock.patch.object(app, "default_model_cached", return_value=False):
-            with mock.patch.object(app, "download_and_load_model") as fetched:
-                fetched.return_value = iter([])
-                list(app.setup_default_model("token"))
+        _load, fetch = self.run_setup(cached=False)
 
-        self.assertEqual(fetched.call_args.args[0], settings.DEFAULT_MODEL_ID)
+        self.assertEqual(fetch.call_args.args[0], settings.DEFAULT_MODEL_ID)
 
     def test_pressing_the_offer_opens_the_page_that_reports_on_it(self):
         # The download's progress and any failure land on the Models page, so
