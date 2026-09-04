@@ -801,10 +801,17 @@ def loaded_model_badge() -> str:
     loading = MANAGER.loading_id
     model_id = MANAGER.model_id
     device = MANAGER.device_name
+    downloading = next(iter(MANAGER.active_downloads), None)
     if model_id and device:
         return model_badge("ready", f"{model_id} · loaded on {device}")
     if loading:
         return model_badge("loading", f"Loading {loading}…")
+    # A download is setup under way as much as a load is, and the long one:
+    # nothing is in memory and nothing is being read into it for as long as
+    # the files are still arriving, so without this the badge would report
+    # an empty machine through the whole of a 15 GB fetch.
+    if downloading:
+        return model_badge("loading", f"Downloading {downloading}…")
     return model_badge("empty", NO_MODEL_BADGE)
 
 
@@ -813,7 +820,13 @@ def refresh_model_badge():
 
     A load in progress hides them too: the Models page is already busy
     bringing that model in, so offering to start one would suggest work that
-    is under way needs starting.
+    is under way needs starting. So does a download, which is the longer
+    half of the same job and the one nothing else would report here - the
+    manager sets ``loading_id`` only once the files are all in and the
+    weights start being read, so a 15 GB fetch would otherwise leave the
+    offer up for its whole duration. Pressing it again then queues a second
+    setup behind the first, which finds a complete cache when its turn comes
+    and unloads and reloads the model the first one just brought in.
 
     The offer's label is re-read here rather than baked in at build time,
     because what pressing it would do depends on what is on disk, and a
@@ -821,7 +834,7 @@ def refresh_model_badge():
     calls this is what keeps the answer current in every open tab.
     """
 
-    have_model = MANAGER.loaded or MANAGER.loading_id
+    have_model = MANAGER.loaded or MANAGER.loading_id or MANAGER.active_downloads
     hidden = gr.update(visible=not have_model)
     if have_model:
         return loaded_model_badge(), hidden, hidden
@@ -3810,12 +3823,25 @@ abbr[title] {{ text-decoration: underline dotted; cursor: help; }}
 # load.
 #
 # It presses the button rather than reaching past it, which keeps one path
-# through the cancellation: whatever Stop does, Escape does. The button is
-# hidden while nothing is generating, and a hidden element has no offset
-# parent, so at every other moment Escape falls through untouched - including
-# out of the message box, where it would otherwise swallow a keystroke the
-# browser has its own use for. A modifier held down means the reader is
-# asking the browser for something else, so those are left alone too.
+# through the cancellation: whatever Stop does, Escape does.
+#
+# Whether the button is in the document is the whole test, and it is an exact
+# one. Gradio does not hide a component whose ``visible`` is false, it leaves
+# it out of the page altogether, so the button is there while a response is
+# streaming and gone at every other moment - including inside the message
+# box, where Escape must fall through to whatever the browser makes of it.
+#
+# What must NOT be tested is whether the button can be seen. It is laid out
+# inside the Chat tab, so switching to Score text leaves it in the page with
+# a hidden ancestor and no offset parent - and that is exactly the moment a
+# reader is most likely to reach for the key, being away from the button
+# they would otherwise press. Switching to Models or Settings unmounts the
+# chat page entirely and takes the button with it; nothing here can reach a
+# button that is not in the document, and there is no way to stop a response
+# from those pages by any other means either.
+#
+# A modifier held down means the reader is asking the browser for something
+# else, so those are left alone.
 SHORTCUT_JS = """
 () => {
   if (window.__chatlabShortcuts) { return; }
@@ -3824,7 +3850,7 @@ SHORTCUT_JS = """
     if (event.key !== 'Escape') { return; }
     if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) { return; }
     const stop = document.querySelector('#stop-button');
-    if (!stop || stop.offsetParent === null) { return; }
+    if (!stop) { return; }
     event.preventDefault();
     stop.click();
   });
@@ -4604,7 +4630,8 @@ def build_app() -> gr.Blocks:
                         )
                         gr.Markdown(
                             "Escape stops a response that is still being written, "
-                            "wherever the cursor is.",
+                            "from anywhere on the Chat page - including the message "
+                            "box and the Score text tab.",
                             elem_classes=["scale-caption"],
                         )
 

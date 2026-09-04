@@ -1137,6 +1137,31 @@ class ModelBadgeTests(unittest.TestCase):
         self.assertTrue(offer["visible"])
         self.assertEqual(offer["value"], app.default_model_offer())
 
+    def test_a_download_under_way_is_reported_and_takes_the_offer_away(self):
+        # A download is setup under way as much as a load, and the long one:
+        # loading_id is only set once the files are all in, so a 15 GB fetch
+        # would otherwise leave the badge saying nothing is loaded and the
+        # offer sitting there inviting a second press of the same job.
+        self.manager.active_downloads[OLMO] = object()
+
+        badge, offer, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="loading"', badge)
+        self.assertIn(f"Downloading {OLMO}", badge)
+        self.assertFalse(offer["visible"])
+        self.assertFalse(button["visible"])
+
+    def test_a_model_in_memory_outranks_a_download_of_another(self):
+        # The badge names what would answer a message now, and a fetch of
+        # something else does not change that.
+        self.load()
+        self.manager.active_downloads["org/other"] = object()
+
+        badge, _offer, _button = app.refresh_model_badge()
+
+        self.assertIn('data-state="ready"', badge)
+        self.assertIn(OLMO, badge)
+
     def test_a_load_under_way_names_the_model_coming_in(self):
         # model_id is cleared for the whole of a load, so the badge reads
         # loading_id and reports the minutes in between as a load.
@@ -1587,7 +1612,16 @@ class PageLayoutTests(unittest.TestCase):
 
         self.assertEqual(stop.elem_id, "stop-button")
         self.assertIn("#stop-button", app.SHORTCUT_JS)
-        self.assertIn("offsetParent", app.SHORTCUT_JS)
+        # Whether the button is in the document is the whole test. Gradio
+        # leaves a component whose visible is false out of the page, so its
+        # presence is the generation state itself. Testing whether it can be
+        # *seen* would drop the key on the Score text tab, where the button
+        # is still in the page with a hidden ancestor - the moment a reader
+        # is most likely to reach for it, being away from the button.
+        self.assertNotIn("offsetParent", app.SHORTCUT_JS)
+        self.assertNotIn("offsetWidth", app.SHORTCUT_JS)
+        self.assertNotIn("getBoundingClientRect", app.SHORTCUT_JS)
+        self.assertNotIn("checkVisibility", app.SHORTCUT_JS)
         self.assertTrue(
             any(fn.js == app.SHORTCUT_JS for fn in self.demo.fns.values()),
             "nothing attaches the keyboard shortcut on load",
