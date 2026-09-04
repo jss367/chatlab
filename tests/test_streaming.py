@@ -6,8 +6,20 @@ import numpy as np
 import torch
 
 import model_runtime
+import settings
+import settings_sandbox
 from conversation import split_reasoning
 from model_runtime import IncrementalDecoder, ModelChanged, ModelManager
+
+
+def setUpModule():
+    # Generation reads the context limit out of the settings file, so the
+    # tests must not read whoever is running them.
+    settings_sandbox.start()
+
+
+def tearDownModule():
+    settings_sandbox.stop()
 
 
 PIECES = [
@@ -354,6 +366,87 @@ class GenerateStreamingTests(unittest.TestCase):
             ]
         )
         self.assertIn("Be terse.", manager.tokenizer.last_prompt)
+
+
+class ContextLimitTests(unittest.TestCase):
+    """The saved context limit bounds every generation, not only a branch."""
+
+    # The floor of the range the setting is clamped to; a smaller number in a
+    # test would silently become this one.
+    SMALL = settings.PREFILL_TOKEN_LIMIT_RANGE[0]
+
+    def manager(self, prompt_tokens: int, script=(0, 1, EOS_ID)):
+        manager = loaded_manager(list(script))
+        # One real vocabulary token, repeated: only the count matters here.
+        manager._prompt_token_ids = lambda _messages: ([0] * prompt_tokens, False)
+        return manager
+
+    def generate(self, manager, **kwargs):
+        options = {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "top_k": 0,
+            "max_new_tokens": 4,
+            "seed": 1,
+        }
+        options.update(kwargs)
+        return list(manager.generate([{"role": "user", "content": "hi"}], **options))
+
+    def test_an_ordinary_conversation_above_the_limit_is_refused(self):
+        manager = self.manager(prompt_tokens=self.SMALL + 44)
+        with settings.override(prefill_token_limit=self.SMALL):
+            with self.assertRaises(ValueError) as caught:
+                self.generate(manager)
+        message = str(caught.exception)
+        self.assertIn(f"The prompt is {self.SMALL + 44:,} tokens", message)
+        self.assertIn(f"{self.SMALL:,} token limit", message)
+        self.assertIn("Context limit (tokens)", message)
+        # Refused before the cache was allocated: the model was never fed.
+        self.assertEqual(manager.model.step, 0)
+        # And the slot is free for the next attempt.
+        self.assertFalse(manager.busy)
+
+    def test_a_conversation_under_the_limit_still_runs(self):
+        manager = self.manager(prompt_tokens=40)
+        with settings.override(prefill_token_limit=self.SMALL):
+            updates = self.generate(manager)
+        self.assertTrue(updates)
+        self.assertTrue(updates[-1].metrics)
+
+    def test_raising_the_limit_lets_the_same_conversation_through(self):
+        with settings.override(prefill_token_limit=self.SMALL):
+            with self.assertRaises(ValueError):
+                self.generate(self.manager(prompt_tokens=self.SMALL + 44))
+        with settings.override(prefill_token_limit=8192):
+            self.assertTrue(self.generate(self.manager(prompt_tokens=self.SMALL + 44)))
+
+    def test_an_assistant_prefill_counts_towards_the_limit(self):
+        manager = self.manager(prompt_tokens=self.SMALL - 2)
+        with settings.override(prefill_token_limit=self.SMALL):
+            with self.assertRaises(ValueError) as caught:
+                self.generate(manager, answer_prefill="Hello world!")
+        message = str(caught.exception)
+        total = self.SMALL + 1
+        self.assertIn(f"prompt and replayed response are {total:,} tokens", message)
+        self.assertIn("Shorten the conversation or replacement.", message)
+        self.assertEqual(manager.model.step, 0)
+
+    def test_a_branch_replay_counts_towards_the_limit(self):
+        manager = self.manager(prompt_tokens=self.SMALL - 2)
+        with settings.override(prefill_token_limit=self.SMALL):
+            with self.assertRaises(ValueError):
+                self.generate(manager, forced_ids=[0, 1, 2])
+
+    def test_a_model_window_below_the_limit_is_still_the_ceiling(self):
+        manager = self.manager(prompt_tokens=2048)
+        manager.model.config = SimpleNamespace(max_position_embeddings=1024)
+        with settings.override(prefill_token_limit=8192):
+            with self.assertRaises(ValueError) as caught:
+                self.generate(manager)
+        message = str(caught.exception)
+        self.assertIn("1,024 positions this model can attend to", message)
+        # No setting moves a position table, so no setting is suggested.
+        self.assertNotIn("Context limit (tokens)", message)
 
 
 class ForcedPrefixTests(unittest.TestCase):

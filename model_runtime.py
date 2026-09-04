@@ -2489,6 +2489,52 @@ class ModelManager:
                 max_new_tokens=max_new_tokens,
             )
 
+    def _validate_prefix_within_limit(
+        self,
+        prompt_ids: Sequence[int],
+        forced_ids: Sequence[int],
+    ) -> None:
+        """Refuse a prefill above the reader's context limit.
+
+        Every generation is checked here, not only a typed branch. The cap is
+        a memory guard as much as a replay guard: what a reply costs is mostly
+        the key-value cache of everything fed to it, held for as long as the
+        answer runs, so an ordinary conversation left to grow can exhaust the
+        machine exactly as a pasted branch can.
+        """
+
+        assert self.model is not None
+        total = len(prompt_ids) + len(forced_ids)
+        limit = generation_prefill_token_limit(self.model)
+        if total <= limit:
+            return
+        configured = application_prefill_limit()
+        window = model_position_limit(self.model)
+        model_bound = window is not None and window <= configured
+        ceiling = (
+            f"the {limit:,} positions this model can attend to"
+            if model_bound
+            else f"the {configured:,} token limit for a generation prefix"
+        )
+        measured = (
+            f"The prompt and replayed response are {total:,} tokens"
+            if forced_ids
+            else f"The prompt is {total:,} tokens"
+        )
+        shorten = (
+            "Shorten the conversation or replacement."
+            if forced_ids
+            else "Shorten the conversation."
+        )
+        # Only worth saying when the reader's own cap is what bit: no setting
+        # moves a model's position table.
+        hint = (
+            ""
+            if model_bound
+            else " Context limit (tokens) on the Settings page raises the cap."
+        )
+        raise ValueError(f"{measured}, above {ceiling}. {shorten}{hint}")
+
     def _validate_generation_prefix_length(
         self,
         prompt_ids: Sequence[int],
@@ -2496,23 +2542,20 @@ class ModelManager:
         *,
         max_new_tokens: int,
     ) -> None:
-        """Check a tokenized generation and its continuation capacity."""
+        """Check a tokenized generation and its continuation capacity.
+
+        The continuation half is a typed branch's alone. A branch names the
+        response length it wants replayed room for up front, so reserving the
+        positions before the stream starts is the honest answer; an ordinary
+        reply is free to run into the position table and keep what it wrote,
+        which is the better outcome when the model would have stopped on its
+        own long before the requested length.
+        """
 
         assert self.model is not None
+        self._validate_prefix_within_limit(prompt_ids, forced_ids)
         total = len(prompt_ids) + len(forced_ids)
-        limit = generation_prefill_token_limit(self.model)
         window = model_position_limit(self.model)
-        if total > limit:
-            configured = application_prefill_limit()
-            ceiling = (
-                f"the {limit:,} positions this model can attend to"
-                if window is not None and window <= configured
-                else f"the {configured:,} token limit for a generation prefix"
-            )
-            raise ValueError(
-                f"The prompt and replayed response are {total:,} tokens, above "
-                f"{ceiling}. Shorten the conversation or replacement."
-            )
 
         stops_before_sampling = bool(
             forced_ids and int(forced_ids[-1]) in self._stop_token_ids()
@@ -2914,6 +2957,14 @@ class ModelManager:
                 if token_id in stop_ids and index >= literal_prefill_tokens:
                     forced = forced[: index + 1]
                     break
+
+            # Checked here, on the tokens actually about to be fed, rather
+            # than only in validate_generation_prefix(): that one runs for a
+            # typed branch before the UI stream starts, and an ordinary reply
+            # would otherwise reach the prefill with a conversation of any
+            # size behind it. Refuse before the cache is allocated, not once
+            # the machine is already out of memory.
+            self._validate_prefix_within_limit(prompt_ids, forced)
 
             def sample(log_probs: np.ndarray) -> np.ndarray:
                 return sampling_probabilities(

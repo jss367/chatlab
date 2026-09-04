@@ -139,7 +139,10 @@ wrong place for a secret.
 
 `prefill_token_limit` is **Context limit (tokens)** on the page, and it is
 the one to lower when a model runs out of memory: it caps the tokens one
-prompt may carry and, with it, the ceiling on the response length. The file
+prompt may carry and, with it, the ceiling on the response length. Every
+reply is measured against it, a branch and an ordinary answer alike, and a
+conversation that has grown past it is refused before anything is allocated
+rather than run until the machine gives out. The file
 holds two keys with no control beside the others: `model_id`, the model the
 Models page opens with, which `OLMO_MODEL_ID` still overrides for one run,
 and `mps_memory_fraction`, the Apple Metal cap described under
