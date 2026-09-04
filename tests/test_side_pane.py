@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -342,6 +343,36 @@ class LoadingIdTests(unittest.TestCase):
             self.assertEqual(manager.load(OLMO, Path("/snap")), "CPU")
 
         self.assertEqual(seen, [(OLMO, True)])
+        self.assertIsNone(manager.loading_id)
+
+    def test_a_load_waiting_for_the_lock_is_already_named(self):
+        # A generation holds the lock for as long as its reply takes; the
+        # load queued behind it must count as under way from the click.
+        import threading
+
+        manager = ModelManager()
+        manager._lock.acquire()
+        entered = threading.Event()
+
+        def fake_load(model_id, local_path, torch):
+            entered.set()
+            return "CPU"
+
+        with mock.patch.object(manager, "_load_locked", fake_load):
+            worker = threading.Thread(target=manager.load, args=(OLMO, Path("/snap")))
+            worker.start()
+            try:
+                for _ in range(200):
+                    if manager.loading_id == OLMO:
+                        break
+                    time.sleep(0.005)
+                self.assertEqual(manager.loading_id, OLMO)
+                self.assertFalse(entered.is_set())
+            finally:
+                manager._lock.release()
+                worker.join(timeout=5)
+
+        self.assertTrue(entered.is_set())
         self.assertIsNone(manager.loading_id)
 
     def test_a_failed_load_clears_the_loading_id(self):

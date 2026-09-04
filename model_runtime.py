@@ -2066,12 +2066,14 @@ class ModelManager:
         import torch
 
         checked_id = validate_model_id(model_id)
-        with self._lock:
-            self.loading_id = checked_id
-            try:
+        # Recorded before waiting for the lock, not after: a load queued
+        # behind a long generation is a load under way for the whole wait.
+        self.loading_id = checked_id
+        try:
+            with self._lock:
                 return self._load_locked(checked_id, local_path, torch)
-            finally:
-                self.loading_id = None
+        finally:
+            self.loading_id = None
 
     def _load_locked(self, model_id: str, local_path: Path, torch) -> str:
         """Bring ``model_id`` in from ``local_path`` while the caller holds ``_lock``."""
