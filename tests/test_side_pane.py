@@ -987,8 +987,23 @@ class PageLayoutTests(unittest.TestCase):
         self.assertTrue(self.within(nav, self.by_id("nav-pane")))
 
     def test_the_nav_pane_is_thin(self):
-        self.assertLessEqual(app.NAV_PANE_WIDTH, 100)
+        self.assertLessEqual(app.NAV_PANE_WIDTH, 64)
         self.assertEqual(self.by_id("nav-pane").min_width, app.NAV_PANE_WIDTH)
+
+    def test_each_nav_tile_shows_an_icon_and_names_itself_on_hover(self):
+        for page in app.PAGES:
+            with self.subTest(page=page):
+                tile = f'#nav label[data-testid="{page}-radio-label"]'
+                # The empty alternative text keeps the icon and the tooltip
+                # out of what a screen reader reads for the tile.
+                self.assertIn(
+                    f'{tile}::before {{ content: "{app.NAV_ICONS[page]}" / ""; }}',
+                    app.CSS,
+                )
+                self.assertIn(f"{tile}:hover::after", app.CSS)
+                self.assertIn(f'{{ content: "{page}" / ""; }}', app.CSS)
+        # The name stays on the tile, out of sight, for the browser to read out.
+        self.assertIn("#nav label span {", app.CSS)
 
     def test_only_the_chat_page_starts_visible(self):
         self.assertTrue(self.by_id("chat-page").visible)
