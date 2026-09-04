@@ -4,5 +4,5 @@ Bump this, commit, then tag the commit ``v<version>`` and push the tag. The
 release workflow refuses to publish when the tag and this value disagree.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 BUNDLE_IDENTIFIER = "build.chatlab.app"
