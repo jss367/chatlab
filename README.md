@@ -17,6 +17,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Perplexity, mean surprise, and a surprise trace for each response
 - Full metric-trace export as JSON or CSV
 - A system prompt, plus temperature, top-p, top-k, seed, and response-length controls
+- Every setting saved to one JSON file you can edit by hand or share between machines
 - Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
@@ -90,11 +91,20 @@ freeze. On CUDA the weights fill the graphics cards first and the rest is
 placed in the machine's own memory, so that check is made against the two
 together. On Apple Metal it also caps what PyTorch may allocate at Metal's
 recommended working set, so a conversation that outgrows the machine ends
-with an out-of-memory message rather than a frozen Mac. Set
-`CHATLAB_MPS_MEMORY_FRACTION` to move that cap (`1.0` is the default; PyTorch's
-own `PYTORCH_MPS_HIGH_WATERMARK_RATIO`, if set, takes precedence). The cache a
-response used is handed back when it finishes, so the process returns to the
-model's own size between requests.
+with an out-of-memory message rather than a frozen Mac. Move that cap with
+`mps_memory_fraction` in the settings file, or with
+`CHATLAB_MPS_MEMORY_FRACTION` for one run; `1.0` is the default, the
+environment wins over the file, and PyTorch's own
+`PYTORCH_MPS_HIGH_WATERMARK_RATIO`, if set, leaves the allocator alone. The
+cache a response used is handed back when it finishes, so the process returns
+to the model's own size between requests.
+
+What a conversation costs is mostly its key-value cache, which grows with
+every token and is held for as long as the answer runs. How fast it grows is
+the model's own doing: an architecture with grouped-query attention, which
+most current models have, spends a fraction of what one with a key-value head
+per query head does at the same size. Lowering **Context limit (tokens)** on
+the Settings page is the direct way to bound it.
 
 ## The pages
 
@@ -108,7 +118,32 @@ A thin pane at the far left switches between three pages. **Chat** is the conver
 
 ### Settings
 
-The system prompt, assistant prefill, and reasoning options; the sampling, analysis, and input controls described below. Settings apply to the next reply on any conversation.
+The system prompt, assistant prefill, and reasoning options; the sampling, analysis, and input controls described below; and the context limit under **Memory**. Settings apply to the next reply on any conversation.
+
+Every setting is saved as you change it, and read back the next time the app
+starts. They live in one file:
+
+```
+~/.config/chatlab/settings.json
+```
+
+`XDG_CONFIG_HOME` moves the directory and `CHATLAB_SETTINGS_PATH` names the
+file outright, so the file can be symlinked out of a dotfiles repository and
+shared between machines. It is plain JSON, written with one key per setting,
+and safe to edit by hand: a value out of range is pulled back into it and one
+of the wrong type falls back to its default, with a line in the log to say so.
+Keys the running version does not recognize are left where they are, so one
+file can be shared by two machines on different versions. The Hugging Face
+token is not among the settings, because a file meant to be committed is the
+wrong place for a secret.
+
+`prefill_token_limit` is **Context limit (tokens)** on the page, and it is
+the one to lower when a model runs out of memory: it caps the tokens one
+prompt may carry and, with it, the ceiling on the response length. The file
+holds two keys with no control beside the others: `model_id`, the model the
+Models page opens with, which `OLMO_MODEL_ID` still overrides for one run,
+and `mps_memory_fraction`, the Apple Metal cap described under
+[Memory](#memory), which is read when a model is loaded.
 
 ## Working with a conversation
 

@@ -14,6 +14,7 @@ import gradio as gr
 
 import app
 import model_runtime
+import settings
 from model_runtime import (
     MODEL_WEIGHTS,
     CachedModel,
@@ -27,8 +28,19 @@ from model_runtime import (
     sort_cached_models,
 )
 
+import settings_sandbox
+
 COMMIT = "d97e442d7cc678210054dbcc9b440894d62c89a4"
 OLMO = "allenai/Olmo-3-7B-Think"
+
+
+def setUpModule():
+    settings_sandbox.start()
+
+
+def tearDownModule():
+    settings_sandbox.stop()
+
 
 
 def lay_out(root: str, model_id: str, files: dict[str, bytes]) -> Path:
@@ -938,6 +950,7 @@ class PageLayoutTests(unittest.TestCase):
         "🎲 New seed each response",
         "Measure prompt tokens",
         "Enter sends the message",
+        "Context limit (tokens)",
     ]
     ON_CHAT_PAGE = ["Conversation", "Message", "Color tokens by", "Text to score"]
 
@@ -1079,6 +1092,259 @@ class PageLayoutTests(unittest.TestCase):
             with self.subTest(handler=name):
                 (listener,) = self.listeners(name)
                 self.assertIs(listener.outputs[0], box)
+
+
+class SavedSettingsTests(unittest.TestCase):
+    """The settings file the interface opens with and writes back to."""
+
+    def setUp(self):
+        self.path = settings.settings_path()
+        self.addCleanup(self.forget)
+
+    def forget(self):
+        self.path.unlink(missing_ok=True)
+        settings.load()
+
+    def build_with(self, **values):
+        """The interface as it comes up with ``values`` already saved."""
+
+        settings.write(settings.sanitize(values), path=self.path)
+        settings.load()
+        self.demo = app.build_app()
+        return self.demo
+
+    def labelled(self, label):
+        matches = [
+            block
+            for block in self.demo.blocks.values()
+            if getattr(block, "label", None) == label
+        ]
+        self.assertEqual(len(matches), 1, label)
+        return matches[0]
+
+    def listeners(self, name):
+        return [
+            fn
+            for fn in self.demo.fns.values()
+            if getattr(fn.fn, "__name__", None) == name
+        ]
+
+    def test_every_control_starts_from_the_saved_file(self):
+        self.build_with(
+            model_id="org/other-model",
+            system_prompt="Be brief.",
+            assistant_prefill="Well,",
+            keep_reasoning=True,
+            temperature=0.25,
+            top_p=0.5,
+            top_k=7,
+            max_new_tokens=64,
+            seed=99,
+            randomize_seed=False,
+            analyze_prompt=False,
+            color_scale="Surprise",
+            prefill_token_limit=2048,
+        )
+
+        for label, value in [
+            ("Hugging Face model ID", "org/other-model"),
+            ("System prompt", "Be brief."),
+            ("Assistant prefill (optional)", "Well,"),
+            ("Send previous reasoning back to the model", True),
+            ("Temperature", 0.25),
+            ("Top-p", 0.5),
+            ("Top-k (0 disables)", 7),
+            ("Maximum new tokens", 64),
+            ("Random seed", 99),
+            ("🎲 New seed each response", False),
+            ("Measure prompt tokens", False),
+            ("Color tokens by", "Surprise"),
+            ("Context limit (tokens)", 2048),
+        ]:
+            with self.subTest(label=label):
+                self.assertEqual(self.labelled(label).value, value)
+
+    def test_the_message_box_keys_start_from_the_saved_file(self):
+        self.build_with(enter_sends=False)
+
+        self.assertFalse(self.labelled("Enter sends the message").value)
+        self.assertEqual(
+            self.labelled("Message").placeholder,
+            app.message_box_settings(enter_sends=False)["placeholder"],
+        )
+
+    def test_the_response_length_cannot_exceed_the_context_limit(self):
+        self.build_with(prefill_token_limit=2048)
+
+        self.assertEqual(self.labelled("Maximum new tokens").maximum, 2048)
+
+    def test_a_missing_file_leaves_every_control_at_its_default(self):
+        self.path.unlink(missing_ok=True)
+        settings.load()
+        self.demo = app.build_app()
+
+        self.assertEqual(
+            self.labelled("Temperature").value, settings.DEFAULTS.temperature
+        )
+        self.assertEqual(
+            self.labelled("Hugging Face model ID").value, settings.DEFAULT_MODEL_ID
+        )
+
+    def test_the_file_is_there_to_edit_after_one_launch(self):
+        self.path.unlink(missing_ok=True)
+        settings.load()
+
+        app.build_app()
+
+        self.assertTrue(self.path.is_file())
+
+    def test_changing_any_setting_saves_them_all(self):
+        self.build_with()
+        saved = self.listeners("remember_settings")
+        triggers = {
+            self.demo.blocks[block_id]: event
+            for fn in saved
+            for block_id, event in fn.targets
+        }
+
+        for label in [
+            "System prompt",
+            "Send previous reasoning back to the model",
+            "Assistant prefill (optional)",
+            "Temperature",
+            "Top-p",
+            "Top-k (0 disables)",
+            "Maximum new tokens",
+            "Random seed",
+            "🎲 New seed each response",
+            "Measure prompt tokens",
+            "Color tokens by",
+            "Enter sends the message",
+            "Hugging Face model ID",
+        ]:
+            with self.subTest(label=label):
+                self.assertIn(self.labelled(label), triggers)
+        # Each one publishes the whole set, in the order the names are in.
+        for fn in saved:
+            self.assertEqual(len(fn.inputs), len(app.PERSISTED_SETTING_NAMES))
+
+    def test_the_seed_is_saved_when_it_is_committed_and_not_when_it_is_written(self):
+        # A finished response leaves the seed that produced it in the box, and
+        # saving that would overwrite the seed the reader chose.
+        self.build_with()
+        events = {}
+        for fn in self.listeners("remember_settings"):
+            for block_id, event in fn.targets:
+                events.setdefault(self.demo.blocks[block_id], set()).add(event)
+
+        self.assertEqual(events[self.labelled("Random seed")], {"blur", "submit"})
+        self.assertEqual(events[self.labelled("Temperature")], {"change"})
+
+    def test_the_hugging_face_token_is_not_among_the_settings_saved(self):
+        self.build_with()
+        token_box = self.labelled("Hugging Face token (optional)")
+
+        for fn in self.listeners("remember_settings"):
+            self.assertNotIn(token_box, fn.inputs)
+            self.assertNotIn(token_box, [self.demo.blocks[i] for i, _ in fn.targets])
+
+    def test_the_settings_page_says_where_the_file_is(self):
+        self.build_with()
+        page = next(
+            block
+            for block in self.demo.blocks.values()
+            if getattr(block, "elem_id", None) == "settings-page"
+        )
+        notes = [
+            block.value
+            for block in self.demo.blocks.values()
+            if isinstance(block, gr.Markdown)
+            and getattr(block, "value", None)
+            and str(self.path) in str(block.value)
+        ]
+
+        self.assertTrue(notes, f"{self.path} is not named on {page.elem_id}")
+        self.assertIn("mps_memory_fraction", notes[0])
+
+    def test_saving_a_setting_writes_the_file(self):
+        self.build_with()
+        values = dict(zip(app.PERSISTED_SETTING_NAMES, [None] * 13))
+        values.update(settings.current().to_mapping())
+        values["temperature"] = 0.1
+        app.remember_settings(
+            *(values[name] for name in app.PERSISTED_SETTING_NAMES)
+        )
+
+        self.assertEqual(settings.current().temperature, 0.1)
+        self.assertEqual(json.loads(self.path.read_text())["temperature"], 0.1)
+
+    def test_lowering_the_context_limit_pulls_the_response_length_under_it(self):
+        self.build_with(prefill_token_limit=8192, max_new_tokens=4096)
+
+        limit, length = app.remember_prefill_limit(1024, 4096)
+
+        self.assertEqual(limit["value"], 1024)
+        self.assertEqual(length["maximum"], 1024)
+        self.assertEqual(length["value"], 1024)
+        self.assertEqual(settings.current().max_new_tokens, 1024)
+        self.assertEqual(json.loads(self.path.read_text())["prefill_token_limit"], 1024)
+
+    def test_a_page_load_puts_the_saved_settings_back_into_the_controls(self):
+        self.build_with(temperature=0.4, max_new_tokens=64, prefill_token_limit=2048)
+        (restore,) = self.listeners("restore_settings")
+
+        self.assertEqual(restore.targets, [(self.demo._id, "load")])
+        self.assertEqual(
+            restore.outputs,
+            [
+                *(
+                    self.labelled(label)
+                    for label in [
+                        "System prompt",
+                        "Send previous reasoning back to the model",
+                        "Assistant prefill (optional)",
+                        "Temperature",
+                        "Top-p",
+                        "Top-k (0 disables)",
+                        "Maximum new tokens",
+                        "Random seed",
+                        "🎲 New seed each response",
+                        "Measure prompt tokens",
+                        "Color tokens by",
+                        "Enter sends the message",
+                        "Hugging Face model ID",
+                    ]
+                ),
+                self.labelled("Context limit (tokens)"),
+            ],
+        )
+        updates = app.restore_settings()
+        self.assertEqual(len(updates), len(app.PERSISTED_SETTING_NAMES) + 1)
+        published = dict(zip(app.PERSISTED_SETTING_NAMES, updates))
+        self.assertEqual(published["temperature"]["value"], 0.4)
+        self.assertEqual(published["max_new_tokens"]["value"], 64)
+        # The response-length ceiling comes back with it.
+        self.assertEqual(published["max_new_tokens"]["maximum"], 2048)
+        self.assertEqual(updates[-1]["value"], 2048)
+
+    def test_a_page_load_reads_the_file_again_so_a_hand_edit_takes_effect(self):
+        self.build_with(temperature=0.4)
+        self.path.write_text(
+            json.dumps(settings.current().to_mapping() | {"temperature": 1.1}),
+            encoding="utf-8",
+        )
+
+        published = dict(zip(app.PERSISTED_SETTING_NAMES, app.restore_settings()))
+
+        self.assertEqual(published["temperature"]["value"], 1.1)
+        self.assertEqual(settings.current().temperature, 1.1)
+
+    def test_a_context_limit_outside_its_range_is_pulled_back_into_it(self):
+        self.build_with()
+
+        limit, _length = app.remember_prefill_limit(2, 512)
+
+        self.assertEqual(limit["value"], settings.PREFILL_TOKEN_LIMIT_RANGE[0])
 
 
 if __name__ == "__main__":
