@@ -3203,7 +3203,10 @@ class LayerInspectionTests(unittest.TestCase):
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
         self.assertEqual(lens, gr.skip())
-        self.assertEqual(status, "Could not inspect that token: out of memory")
+        self.assertEqual(
+            status,
+            '<div class="failure">Could not inspect that token: out of memory</div>',
+        )
 
     def test_the_slider_keeps_its_layer_when_it_still_exists(self):
         final = self.finished()

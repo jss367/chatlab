@@ -211,6 +211,57 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
         )
         self.manager.release_generation()
 
+class FailureReportTests(unittest.TestCase):
+    """A failure has to reach a reader who is not looking at the status line."""
+
+    def test_a_failure_pops_up_and_stays_on_the_line(self):
+        with mock.patch.object(app.gr, "Warning") as toast:
+            line = app.failure_status("Generation failed", "out of memory")
+
+        self.assertIn("out of memory", line)
+        self.assertIn('class="failure"', line)
+        # The toast carries the cause, not just the fact that something went
+        # wrong, and it waits to be closed rather than fading on its own.
+        toast.assert_called_once_with(
+            "out of memory", title="Generation failed", duration=None
+        )
+
+    def test_an_angle_bracket_survives_both_the_line_and_the_toast(self):
+        # Error messages quote what the reader typed and what the runtime
+        # printed, and neither is markup. The toast writes its message into
+        # the page as markup, so an unescaped "cannot read <pad>" would show
+        # up with the word missing.
+        with mock.patch.object(app.gr, "Warning") as toast:
+            line = app.failure_status("Could not score that text", "no <pad> here")
+
+        self.assertIn("no &lt;pad&gt; here", line)
+        self.assertNotIn("<pad>", line)
+        self.assertEqual(toast.call_args.args[0], "no &lt;pad&gt; here")
+
+    def test_a_failure_card_pops_up_and_is_tinted(self):
+        with mock.patch.object(app.gr, "Warning") as toast:
+            card = app.failure_card("Download failed", "no such repo")
+
+        self.assertEqual(card, app.status_card("Download failed", "no such repo", "error"))
+        self.assertIn('class="failure-text"', card)
+        toast.assert_called_once_with(
+            "no such repo", title="Download failed", duration=None
+        )
+
+    def test_only_a_failing_card_is_tinted(self):
+        for tone in ("neutral", "working", "success"):
+            with self.subTest(tone=tone):
+                self.assertNotIn(
+                    "failure-text", app.status_card("Model ready", "loaded", tone)
+                )
+
+    def test_a_card_detail_keeps_its_markdown(self):
+        # The heading carries the tint so the detail stays plain markdown -
+        # a card that spelled out a file name in backticks still renders it.
+        card = app.failure_card("Download unfinished", "`config.json` is missing.")
+
+        self.assertIn("`config.json` is missing.", card)
+
 
 class FakeDownloads(ModelManager):
     """A manager that keeps the real download bookkeeping around a fake fetch."""

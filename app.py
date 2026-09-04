@@ -142,8 +142,56 @@ TEMPLATE_CAVEAT = (
 
 
 def status_card(title: str, detail: str, tone: str = "neutral") -> str:
-    icon = {"success": "●", "error": "●", "working": "◌"}.get(tone, "○")
-    return f"### {icon} {title}\n\n{detail}"
+    icon = {"success": "●", "error": "⚠", "working": "◌"}.get(tone, "○")
+    heading = f"{icon} {title}"
+    if tone == "error":
+        # Only the heading is tinted. A detail can carry markdown - file names
+        # in backticks, a progress bar - and wrapping it in a tag would stop
+        # that from rendering.
+        heading = f'<span class="failure-text">{heading}</span>'
+    return f"### {heading}\n\n{detail}"
+
+
+def alarm(title: str, detail: str) -> None:
+    """Pop the failure up over the page, wherever the reader is looking.
+
+    A status line is easy to miss: it is one sentence in a column of them,
+    and someone watching the transcript never looks at it. Gradio's only
+    modal that does not also end the event is the warning, so the app raises
+    warnings for failures alone and CSS paints them in the error colors. The
+    toast stays until it is closed, because the point is that a reader who
+    stepped away still learns why the response stopped.
+
+    The toast writes ``detail`` into the page as markup, so what arrives here
+    is already escaped - a runtime that says it could not read ``<pad>``
+    would otherwise lose the word. The title is written as text and is the
+    application's own wording, so it is passed through as it is.
+    """
+
+    gr.Warning(detail, title=title, duration=None)
+
+
+def failure_status(title: str, detail: str) -> str:
+    """A red status line that stays, and the toast that announces it.
+
+    Both take the failure as plain text and escape it once, here.
+    """
+
+    safe = html.escape(f"{title}: {detail}")
+    alarm(title, html.escape(detail))
+    return f'<div class="failure">{safe}</div>'
+
+
+def failure_card(title: str, detail: str) -> str:
+    """A red status card, and the toast that announces it.
+
+    ``detail`` is markdown the caller has already made safe, because a card
+    spells out file names in backticks and draws bars out of block
+    characters. Both the card and the toast render it as it is given.
+    """
+
+    alarm(title, detail)
+    return status_card(title, detail, "error")
 
 
 def describe_duration(seconds: float) -> str:
@@ -355,13 +403,13 @@ def download_model(model_id: str, hf_token: str):
     try:
         before = cache_status(model_id)
     except ValueError as error:
-        yield status_card("Download failed", html.escape(str(error)), "error")
+        yield failure_card("Download failed", html.escape(str(error)))
         return
     yield status_card(*describe_cache(model_id, before), "working")
     try:
         path = yield from stream_download(model_id, hf_token)
     except Exception as error:
-        yield status_card("Download failed", html.escape(str(error)), "error")
+        yield failure_card("Download failed", html.escape(str(error)))
         return
 
     elapsed = time.monotonic() - started
@@ -379,7 +427,7 @@ def download_and_load_model(model_id: str, hf_token: str):
     try:
         before = cache_status(model_id)
     except ValueError as error:
-        yield status_card("Model setup failed", html.escape(str(error)), "error")
+        yield failure_card("Model setup failed", html.escape(str(error)))
         return
     yield status_card(*describe_cache(model_id, before), "working")
     try:
@@ -394,7 +442,7 @@ def download_and_load_model(model_id: str, hf_token: str):
         )
         device = MANAGER.load(model_id, path)
     except Exception as error:
-        yield status_card("Model setup failed", html.escape(str(error)), "error")
+        yield failure_card("Model setup failed", html.escape(str(error)))
         return
 
     elapsed = time.monotonic() - started
@@ -446,7 +494,7 @@ def load_cached_model(model_id: str):
     try:
         status = cache_status(cleaned)
     except ValueError as error:
-        yield status_card("Could not load cached model", html.escape(str(error)), "error")
+        yield failure_card("Could not load cached model", html.escape(str(error)))
         return
     if status.missing_files:
         yield status_card(
@@ -481,14 +529,12 @@ def load_cached_model(model_id: str):
         )
         device = MANAGER.load(cleaned, path)
     except IncompleteSnapshotError as error:
-        yield status_card(
-            "Download unfinished", incomplete_snapshot_detail(cleaned, error), "error"
+        yield failure_card(
+            "Download unfinished", incomplete_snapshot_detail(cleaned, error)
         )
         return
     except Exception as error:
-        yield status_card(
-            "Could not load cached model", html.escape(str(error)), "error"
-        )
+        yield failure_card("Could not load cached model", html.escape(str(error)))
         return
     yield status_card(
         "Model ready", f"{name} is loaded on **{device}**.", "success"
@@ -745,10 +791,9 @@ def remove_my_model(pending: str | None):
         )
     except (OSError, ValueError) as error:
         return (
-            status_card(
+            failure_card(
                 "Could not remove model",
                 f"Removing `{pending}` failed: {html.escape(str(error))}",
-                "error",
             ),
             hidden,
             None,
@@ -839,7 +884,7 @@ def search_models(query: str, hf_token: str):
     except Exception as error:
         return (
             cleared,
-            status_card("Search failed", html.escape(str(error)), "error"),
+            failure_card("Search failed", html.escape(str(error))),
             {},
         )
     if not results:
@@ -1793,7 +1838,7 @@ def _stream_reply(
         yield snapshot(
             highlight,
             metrics,
-            f"Generation failed: {error}",
+            failure_status("Generation failed", str(error)),
             busy=False,
             branch_source=(generation, producing_load_id) if kept and metrics else None,
         )
@@ -2774,7 +2819,7 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE):
     try:
         loaded, system_prompt = from_json(Path(file_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        return keep_current(f"Could not load that file: {error}")
+        return keep_current(failure_status("Could not load that file", str(error)))
 
     # A successful load replaces the conversation wholesale, so whatever the
     # cancelled generator left behind goes with it and needs no finalizing.
@@ -2840,7 +2885,12 @@ def score_text(
             text, context=context or "", use_chat_template=bool(use_chat_template)
         )
     except Exception as error:
-        return refused + (f"Could not score that text: {error}", skip, skip, skip)
+        return refused + (
+            failure_status("Could not score that text", str(error)),
+            skip,
+            skip,
+            skip,
+        )
     else:
         summary = summarize(result.metrics)
         status = (
@@ -3002,7 +3052,10 @@ def inspect_layers(
             yield (*refused, INSPECT_MODEL_CHANGED)
             return
         except Exception as error:
-            yield (*refused, f"Could not inspect that token: {error}")
+            yield (
+                *refused,
+                failure_status("Could not inspect that token", str(error)),
+            )
             return
         if target["generation"] != _metrics_generation:
             yield (*refused, INSPECT_GONE)
@@ -3174,6 +3227,45 @@ CSS = f"""
 #token-strip .category-label, #prompt-strip .category-label {{ color: #0b0b0b; }}
 .footer-note {{ color: var(--body-text-color-subdued); font-size: 0.9rem; }}
 .scale-caption {{ color: var(--body-text-color-subdued); font-size: 0.85rem; }}
+
+/* A failure says so twice: in the status line, where it stays, and in a toast
+   over the page, where it cannot be missed. The line is boxed in red with a
+   thick left edge so it reads as a failure even at a glance across the
+   column of ordinary status sentences. */
+.failure {{
+  border: 1px solid var(--color-red-500); border-left-width: 5px;
+  border-radius: 8px; padding: 0.6rem 0.75rem;
+  background: var(--error-background-fill);
+  color: var(--color-red-600); font-weight: 600;
+}}
+/* The mark is decoration; the line already says what failed, so the empty
+   alternative text keeps a screen reader from reading the glyph out. */
+.failure::before {{ content: "⚠ " / ""; }}
+.failure-text {{ color: var(--color-red-600); }}
+.dark .failure, .dark .failure-text {{ color: var(--color-red-400); }}
+
+/* Gradio's only toast that does not also end the event is the warning, and
+   the app raises warnings for failures alone, so the warning toast is painted
+   in the error colors. Its own rules carry a Svelte hash, which outranks a
+   plain class, so these have to insist. */
+.toast-body.warning {{
+  border-color: var(--color-red-700) !important;
+  background: var(--color-red-50) !important;
+}}
+.dark .toast-body.warning {{
+  border-color: var(--color-red-500) !important;
+  background: var(--color-grey-950) !important;
+}}
+.toast-title.warning, .toast-text.warning,
+.toast-icon.warning, .toast-close.warning {{
+  color: var(--color-red-700) !important;
+}}
+.dark .toast-title.warning, .dark .toast-text.warning {{
+  color: var(--color-red-50) !important;
+}}
+.dark .toast-icon.warning, .dark .toast-close.warning {{
+  color: var(--color-red-500) !important;
+}}
 
 /* The conversation list is a Radio whose labels carry a line break: the
    name and title on the first line, the model and token count on the
