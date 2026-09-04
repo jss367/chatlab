@@ -1,4 +1,4 @@
-"""Chatlab interface for chatting with and inspecting model tokens."""
+"""ChatLab interface for chatting with and inspecting model tokens."""
 
 from __future__ import annotations
 
@@ -3257,7 +3257,7 @@ def build_app() -> gr.Blocks:
     # The shell wants every pixel: the two side panes are a fixed width, so the
     # width the cap was holding back goes to the chat and the panel beside it.
     with gr.Blocks(
-        title="Chatlab", css=CSS, theme=gr.themes.Soft(), fill_width=True
+        title="ChatLab", css=CSS, theme=gr.themes.Soft(), fill_width=True
     ) as demo:
         conversation_state = gr.State([])
         metrics_state = gr.State(empty_metrics())
@@ -3320,7 +3320,7 @@ def build_app() -> gr.Blocks:
             # time, chosen by the nav.
             with gr.Column(scale=1, elem_id="chat-page") as chat_page:
                 gr.Markdown(
-                    "# Chatlab\nChat with an open model and see exactly how likely every generated token was.",
+                    "# ChatLab\nChat with an open model and see exactly how likely every generated token was.",
                     elem_id="hero",
                 )
 
@@ -3609,7 +3609,7 @@ def build_app() -> gr.Blocks:
                             lines=2,
                             info=(
                                 "Replays this text as the start of each answer, then lets the "
-                                "model continue. For reasoning models, Chatlab closes the "
+                                "model continue. For reasoning models, ChatLab closes the "
                                 "reasoning block first so this remains visible answer text."
                             ),
                         )
