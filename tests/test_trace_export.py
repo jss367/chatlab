@@ -1,12 +1,22 @@
 import csv
 import io
 import json
+import os
 import shutil
 import stat
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from trace_export import build_trace, trace_to_csv, trace_to_json, write_trace_export
+import trace_export
+from trace_export import (
+    build_trace,
+    trace_to_csv,
+    trace_to_json,
+    write_private_text,
+    write_trace_export,
+)
 
 
 def sample_metrics():
@@ -78,6 +88,49 @@ class TraceExportTests(unittest.TestCase):
 
         self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+
+class WritePrivateTextTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp(prefix="chatlab-test-"))
+        self.addCleanup(shutil.rmtree, self.directory)
+        # A permissive umask is what makes the difference visible: under it a
+        # plain Path.write_text() would create the file world-readable.
+        self.addCleanup(os.umask, os.umask(0))
+
+    def test_the_file_is_owner_only_before_its_contents_are_written(self):
+        path = self.directory / "transcript.json"
+        modes = []
+        opened = os.fdopen
+
+        def record(descriptor, *args, **kwargs):
+            modes.append(stat.S_IMODE(path.stat().st_mode))
+            return opened(descriptor, *args, **kwargs)
+
+        with mock.patch.object(trace_export.os, "fdopen", record):
+            write_private_text(path, "a private conversation")
+
+        # The mode is already settled when the handle the text goes through is
+        # opened, so there is no window in which another account could read it.
+        self.assertEqual(modes, [0o600])
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(path.read_text(), "a private conversation")
+
+    def test_an_existing_file_is_replaced_and_narrowed(self):
+        path = self.directory / "transcript.json"
+        path.write_text("a much longer previous export")
+        path.chmod(0o666)
+
+        write_private_text(path, "new")
+
+        self.assertEqual(path.read_text(), "new")
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_the_caller_chooses_the_newline_translation(self):
+        path = self.directory / "rows.csv"
+        write_private_text(path, "one\r\ntwo\r\n", newline="")
+
+        self.assertEqual(path.read_bytes(), b"one\r\ntwo\r\n")
 
 
 if __name__ == "__main__":

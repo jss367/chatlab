@@ -71,7 +71,7 @@ from token_metrics import (
     category_for,
     summarize,
 )
-from trace_export import build_trace, write_trace_export
+from trace_export import build_trace, write_private_text, write_trace_export
 
 logger = logging.getLogger(__name__)
 
@@ -296,8 +296,15 @@ def download_detail(model_id: str, snap: DownloadSnapshot, rate: float | None) -
     )
     if rate:
         remaining = max(0, snap.bytes_total - snap.bytes_done)
+        # format_bytes() prints a byte count verbatim below 1 KB, so a rate
+        # handed to it as the float it is measured in reads "812.3456789 B/s".
+        # Rounding never reaches zero: a download with nothing moving has no
+        # rate at all and never gets here, so "0 B/s" beside a time left would
+        # contradict itself. The estimate keeps the unrounded rate: it divides
+        # by it.
         figures += (
-            f" · {format_bytes(rate)}/s · {describe_duration(remaining / rate)} left"
+            f" · {format_bytes(max(1, round(rate)))}/s"
+            f" · {describe_duration(remaining / rate)} left"
         )
     return f"{name}\n\n`{progress_bar(snap.fraction)}` {percent}%\n\n{figures}"
 
@@ -2900,7 +2907,12 @@ def save_conversation(turns, system_prompt):
     # path and silently overwriting each other's download.
     stamp = time.strftime("%Y%m%d-%H%M%S")
     path = directory / f"conversation-{stamp}-{uuid4().hex[:8]}.json"
-    path.write_text(to_json(turns, system_prompt=system_prompt), encoding="utf-8")
+    # A transcript is the reader's own writing, and the upload folder is shared:
+    # on Linux it is /tmp/gradio, which every account on the machine can read.
+    # write_private_text() makes the file owner-only before it holds a word of
+    # the conversation, so there is no moment for another account to open it.
+    # write_trace_export() writes its export the same way.
+    write_private_text(path, to_json(turns, system_prompt=system_prompt))
     return (
         gr.update(value=str(path), visible=True),
         f"Saved {len(turns)} message{'s' if len(turns) != 1 else ''}.",
@@ -2979,58 +2991,90 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE):
 # ---------------------------------------------------------------- score text
 
 
+SCORE_BUSY = "Wait for the response to finish before scoring text."
+
+
 def score_text(
     context: str,
     text: str,
     use_chat_template: bool,
     scale_name: str = DEFAULT_COLOR_SCALE,
 ):
-    """Measure text the model did not write, and put it in the same panel."""
+    """Measure text the model did not write, and put it in the same panel.
+
+    This is a generator for the same reason inspect_layers() is: Gradio does
+    not resume a streaming handler until the browser has been sent the frame
+    it yielded, so the generation slot is held not just for the pass but
+    until the scored strips are on screen. Returning instead would give the
+    slot back while the frame was still in flight, and a Send starting in
+    that window would mint a newer stamp and publish its opening frame
+    first, leaving these strips on screen under a stamp the app has already
+    moved past and refusing every click on them.
+    """
 
     skip = gr.skip()
+    refused = (skip,) * 7
     if not MANAGER.loaded:
-        return (skip,) * 7 + ("Download and load a model first.", skip, skip, skip)
+        yield refused + ("Download and load a model first.", skip, skip, skip)
+        return
 
+    # A generation holds the model lock across every one of its yields, so
+    # without the slot this pass would simply wait on it: the button would sit
+    # dead for the length of the response and then fire, with nothing on screen
+    # to tell that apart from a hang. Reserving rather than reading
+    # MANAGER.busy also keeps a Send from starting while the pass runs and
+    # minting a stamp over the strips this is about to replace, which would
+    # leave the scored tokens on screen refusing every click. inspect_layers()
+    # takes the slot for both reasons.
+    if not MANAGER.reserve_generation():
+        yield refused + (SCORE_BUSY, skip, skip, skip)
+        return
     try:
-        result = MANAGER.score_text(
-            text, context=context or "", use_chat_template=bool(use_chat_template)
-        )
-    except Exception as error:
-        return (skip,) * 7 + (
-            failure_status("Could not score that text", str(error)),
-            skip,
-            skip,
-            skip,
-        )
+        try:
+            result = MANAGER.score_text(
+                text, context=context or "", use_chat_template=bool(use_chat_template)
+            )
+        except Exception as error:
+            yield refused + (
+                failure_status("Could not score that text", str(error)),
+                skip,
+                skip,
+                skip,
+            )
+            return
 
-    summary = summarize(result.metrics)
-    status = (
-        f"Scored {summary['token_count']:,} tokens. "
-        f"Perplexity {summary['perplexity']:,.1f}."
-    )
-    # What was scored comes before how exactly it was scored: the template
-    # caveat says which passage the numbers describe, the seam caveat says how
-    # sure their first token is.
-    if result.chat_template_missing:
-        status = f"{status} {TEMPLATE_CAVEAT}"
-    if not result.seam_verified:
-        status = f"{status} {SEAM_CAVEAT}"
-    # Both strips are replaced, so they take one shared stamp - and that stamp
-    # is what drops a click made against the response they overwrite.
-    generation = new_metrics_generation()
-    return (
-        strip_update(result.metrics, scale_name, "Scored tokens — click one"),
-        stamped(result.metrics, generation),
-        strip_update(result.context_metrics, scale_name),
-        stamped(result.context_metrics, generation),
-        prompt_note_text(len(result.context_metrics), "", "context"),
-        charts.summary_tiles(summary),
-        charts.surprise_chart(result.metrics, title="Surprise per scored token"),
-        status,
-        NO_TOKEN_SELECTED,
-        [],
-        (generation, [int(value) for value in result.context_ids], MANAGER.load_id),
-    )
+        summary = summarize(result.metrics)
+        status = (
+            f"Scored {summary['token_count']:,} tokens. "
+            f"Perplexity {summary['perplexity']:,.1f}."
+        )
+        # What was scored comes before how exactly it was scored: the template
+        # caveat says which passage the numbers describe, the seam caveat says
+        # how sure their first token is.
+        if result.chat_template_missing:
+            status = f"{status} {TEMPLATE_CAVEAT}"
+        if not result.seam_verified:
+            status = f"{status} {SEAM_CAVEAT}"
+        # Both strips are replaced, so they take one shared stamp - and that
+        # stamp is what drops a click made against the response they overwrite.
+        generation = new_metrics_generation()
+        yield (
+            strip_update(result.metrics, scale_name, "Scored tokens — click one"),
+            stamped(result.metrics, generation),
+            strip_update(result.context_metrics, scale_name),
+            stamped(result.context_metrics, generation),
+            prompt_note_text(len(result.context_metrics), "", "context"),
+            charts.summary_tiles(summary),
+            charts.surprise_chart(result.metrics, title="Surprise per scored token"),
+            status,
+            NO_TOKEN_SELECTED,
+            [],
+            (generation, [int(value) for value in result.context_ids], MANAGER.load_id),
+        )
+        # Resumed once the browser has the frame above, so nothing between the
+        # mint and the strips arriving can hold the slot.
+    finally:
+        MANAGER.release_generation()
 
 
 # ------------------------------------------------------- layers and attention

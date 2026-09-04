@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import gradio as gr
 import numpy as np
 
 import app
@@ -70,6 +71,16 @@ class StubManager:
     def __init__(self, seam_verified: bool = True, chat_template_missing: bool = False):
         self.seam_verified = seam_verified
         self.chat_template_missing = chat_template_missing
+        # The generation slot, modelled the way ModelManager does it: a plain
+        # Lock, taken without blocking, so a caller that loses reports instead
+        # of queueing.
+        self._generating = threading.Lock()
+
+    def reserve_generation(self) -> bool:
+        return self._generating.acquire(blocking=False)
+
+    def release_generation(self) -> None:
+        self._generating.release()
 
     def score_text(self, text, *, context="", use_chat_template=False):
         log_probs = np.log(np.array([0.75, 0.25]))
@@ -97,7 +108,8 @@ class ScoreStatusTests(unittest.TestCase):
         original = app.MANAGER
         app.MANAGER = StubManager(seam_verified, chat_template_missing)
         try:
-            return app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE)[7]
+            frames = list(app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE))
+            return frames[-1][7]
         finally:
             app.MANAGER = original
 
@@ -137,6 +149,84 @@ class ScoreStatusTests(unittest.TestCase):
 
         self.assertTrue(status.startswith("Scored 1 tokens. Perplexity"))
         self.assertTrue(status.endswith(f"{app.TEMPLATE_CAVEAT} {app.SEAM_CAVEAT}"))
+
+
+class ScoreWhileGeneratingTests(unittest.TestCase):
+    """Score text refuses while a reply is streaming, rather than waiting on it.
+
+    MANAGER.score_text() takes the model lock, which a generation holds across
+    every one of its yields, so a pass started mid-reply would not run until the
+    reply ended. Without the slot the button simply stops responding for as long
+    as the response takes, which the reader cannot tell from a hang.
+    """
+
+    def setUp(self):
+        self.manager = StubManager()
+        original = app.MANAGER
+        app.MANAGER = self.manager
+        self.addCleanup(setattr, app, "MANAGER", original)
+
+    def score(self):
+        return list(app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE))[-1]
+
+    def test_a_reserved_slot_is_refused_with_a_reason(self):
+        self.assertTrue(self.manager.reserve_generation())
+        try:
+            result = self.score()
+        finally:
+            self.manager.release_generation()
+
+        self.assertEqual(result[7], app.SCORE_BUSY)
+
+    def test_a_refusal_touches_nothing_but_the_status(self):
+        # The strips still describe the response that is streaming, and the
+        # stamp on them still has to match the clicks it is collecting.
+        before = app._metrics_generation
+        self.assertTrue(self.manager.reserve_generation())
+        try:
+            result = self.score()
+        finally:
+            self.manager.release_generation()
+
+        self.assertEqual(app._metrics_generation, before, "no stamp was minted")
+        for index, value in enumerate(result):
+            if index != 7:
+                self.assertEqual(value, gr.skip(), f"output {index}")
+
+    def test_the_slot_is_given_back_after_a_successful_pass(self):
+        self.score()
+
+        self.assertTrue(
+            self.manager.reserve_generation(), "score_text() kept the slot"
+        )
+        self.manager.release_generation()
+
+    def test_the_slot_is_given_back_after_a_failed_pass(self):
+        self.manager.score_text = mock.Mock(side_effect=RuntimeError("no room"))
+
+        result = self.score()
+
+        self.assertIn("no room", result[7])
+        self.assertTrue(
+            self.manager.reserve_generation(), "a failure kept the slot"
+        )
+        self.manager.release_generation()
+
+    def test_the_slot_is_held_until_the_scored_strips_are_delivered(self):
+        # Gradio resumes the generator only once the browser has this frame.
+        # Giving the slot back any earlier would let a Send mint a newer stamp
+        # and publish its opening frame first, leaving these strips on screen
+        # under a stamp the app has already moved past.
+        frames = app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE)
+        first = next(frames)
+
+        self.assertNotEqual(first[7], app.SCORE_BUSY)
+        self.assertFalse(
+            self.manager.reserve_generation(), "the slot was given back early"
+        )
+        self.assertEqual(list(frames), [])
+        self.assertTrue(self.manager.reserve_generation())
+        self.manager.release_generation()
 
 
 class FailureReportTests(unittest.TestCase):
@@ -245,6 +335,32 @@ class DownloadCardTests(unittest.TestCase):
         self.assertIn("50.0 MB/s", detail)
         self.assertIn("about 4 minutes left", detail)
         self.assertIn("█", detail)
+
+    def test_a_slow_rate_is_rounded_to_whole_bytes(self):
+        # The meter measures in float bytes per second, and format_bytes()
+        # prints anything under 1 KB verbatim, so an unrounded rate used to
+        # read "812.3456789 B/s".
+        snap = app.DownloadSnapshot(
+            files_done=1, files_total=2, bytes_done=100, bytes_total=2_000
+        )
+
+        detail = app.download_detail("org/model", snap, rate=812.3456789)
+
+        self.assertIn("812 B/s", detail)
+        self.assertNotIn("812.3", detail)
+
+    def test_a_crawling_download_is_never_reported_as_stopped(self):
+        # The meter has no rate at all for a download with nothing moving, so
+        # this clause only runs while bytes arrive. Rounding a byte every few
+        # seconds down to "0 B/s" would contradict the time left beside it.
+        snap = app.DownloadSnapshot(
+            files_done=1, files_total=2, bytes_done=100, bytes_total=2_000
+        )
+
+        detail = app.download_detail("org/model", snap, rate=0.25)
+
+        self.assertIn("1 B/s", detail)
+        self.assertNotIn("0 B/s", detail)
 
     def test_the_detail_explains_the_wait_before_the_file_list_arrives(self):
         detail = app.download_detail("org/model", app.DownloadSnapshot(), rate=None)

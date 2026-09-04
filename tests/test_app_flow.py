@@ -1,6 +1,9 @@
 import inspect
+import os
+import stat
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 import gradio as gr
 import numpy as np
@@ -1113,6 +1116,18 @@ class SaveLoadTests(unittest.TestCase):
         update, status = app.save_conversation([], "")
         self.assertFalse(update["visible"])
         self.assertIn("nothing to save", status)
+
+    def test_a_saved_conversation_is_readable_by_its_owner_alone(self):
+        # The upload folder is shared - on Linux it is /tmp/gradio, which every
+        # account on the machine can read - and a transcript is the reader's own
+        # writing. write_trace_export() writes its export the same way. The
+        # permissive umask stands in for a host that would otherwise have let
+        # the file be created world-readable.
+        self.addCleanup(os.umask, os.umask(0))
+        update, _status = app.save_conversation([make_turn("user", "hi")], "")
+
+        mode = Path(update["value"]).stat().st_mode
+        self.assertEqual(stat.S_IMODE(mode), 0o600)
 
     def test_loading_a_bad_file_reports_the_problem(
         self,
@@ -3109,7 +3124,7 @@ class LayerInspectionTests(unittest.TestCase):
         self.assertEqual(frames[-1][CONTEXT_IDS], gr.skip())
 
     def test_scored_text_publishes_its_context_ids(self):
-        result = app.score_text("", "Hello", False, DEFAULT_COLOR_SCALE)
+        result = list(app.score_text("", "Hello", False, DEFAULT_COLOR_SCALE))[-1]
         stamp, ids, load = result[10]
         self.assertEqual(stamp, result[1][0])
         self.assertEqual(ids, [])

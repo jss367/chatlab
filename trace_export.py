@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -100,6 +101,31 @@ def trace_to_csv(trace: dict) -> str:
     return output.getvalue()
 
 
+def write_private_text(path: Path, text: str, *, newline: str | None = None) -> None:
+    """Write ``text`` to ``path`` as a file only its owner can read.
+
+    ``Path.write_text()`` creates the file with whatever the process umask
+    allows - usually 0644 - and puts every byte of it on disk before a
+    following ``chmod`` can narrow it. Exports and saved transcripts land in
+    shared directories, so another account on the machine can open the file
+    during that window and read it. Creating the file 0600 and settling its
+    mode on the descriptor, before anything is written into it, closes the
+    window. The mode is set explicitly rather than left to ``os.open()``
+    because the umask can only take bits away from the mode it is given, so a
+    strict one would otherwise leave the owner unable to read their own file.
+    """
+
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        handle = os.fdopen(descriptor, "w", encoding="utf-8", newline=newline)
+    except Exception:
+        os.close(descriptor)
+        raise
+    with handle:
+        handle.write(text)
+
+
 def write_trace_export(trace: dict, file_format: str) -> str | None:
     """Write a browser-downloadable export and return its path."""
 
@@ -115,6 +141,5 @@ def write_trace_export(trace: dict, file_format: str) -> str | None:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     filename = f"olmo-metric-trace-{timestamp}-{uuid.uuid4().hex[:8]}.{file_format}"
     path = export_dir / filename
-    path.write_text(serialize(trace), encoding="utf-8", newline="")
-    path.chmod(0o600)
+    write_private_text(path, serialize(trace), newline="")
     return str(path)
