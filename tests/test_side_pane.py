@@ -335,7 +335,7 @@ class LoadingIdTests(unittest.TestCase):
         manager = ModelManager()
         seen = []
 
-        def fake_load(model_id, local_path, torch):
+        def fake_load(model_id, local_path, torch, progress=None):
             seen.append((manager.loading_id, manager._lock.locked()))
             return "CPU"
 
@@ -354,7 +354,7 @@ class LoadingIdTests(unittest.TestCase):
         manager._lock.acquire()
         entered = threading.Event()
 
-        def fake_load(model_id, local_path, torch):
+        def fake_load(model_id, local_path, torch, progress=None):
             entered.set()
             return "CPU"
 
@@ -378,7 +378,7 @@ class LoadingIdTests(unittest.TestCase):
     def test_a_failed_load_clears_the_loading_id(self):
         manager = ModelManager()
 
-        def fail(model_id, local_path, torch):
+        def fail(model_id, local_path, torch, progress=None):
             raise RuntimeError("gpu fell over")
 
         with mock.patch.object(manager, "_load_locked", fail):
