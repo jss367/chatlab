@@ -1,6 +1,8 @@
 import inspect
+import stat
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 import gradio as gr
 import numpy as np
@@ -1113,6 +1115,15 @@ class SaveLoadTests(unittest.TestCase):
         update, status = app.save_conversation([], "")
         self.assertFalse(update["visible"])
         self.assertIn("nothing to save", status)
+
+    def test_a_saved_conversation_is_readable_by_its_owner_alone(self):
+        # The upload folder is shared - on Linux it is /tmp/gradio, which every
+        # account on the machine can read - and a transcript is the reader's own
+        # writing. write_trace_export() narrows its export the same way.
+        update, _status = app.save_conversation([make_turn("user", "hi")], "")
+
+        mode = Path(update["value"]).stat().st_mode
+        self.assertEqual(stat.S_IMODE(mode), 0o600)
 
     def test_loading_a_bad_file_reports_the_problem(
         self,
