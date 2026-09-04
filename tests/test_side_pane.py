@@ -1393,6 +1393,21 @@ class PageLayoutTests(unittest.TestCase):
         self.assertEqual(recovery.inputs[0], self.by_id("score-budget"))
         self.assertEqual(recovery.outputs, [self.by_id("score-budget")])
 
+    def test_everything_that_writes_the_count_shares_one_queue(self):
+        # Gradio's concurrency limit is per event, not across events, so
+        # without a shared id the timer's recovery and a keystroke's count
+        # can overlap - and they contend for the same model lock, so one of
+        # them loses it and publishes the "not mid-response" message. The
+        # loser finishing last would leave a count that does not describe the
+        # box, which is the one thing this line exists to rule out.
+        budget = self.by_id("score-budget")
+        writers = [fn for fn in self.demo.fns.values() if budget in fn.outputs]
+
+        self.assertGreater(len(writers), 1)
+        self.assertEqual(
+            {fn.concurrency_id for fn in writers}, {app.SCORE_BUDGET_QUEUE}
+        )
+
     def test_the_badge_asks_again_on_a_timer(self):
         # The manager is one object for the whole process, but a handler's
         # updates only reach the tab that ran it. Without the timer a second

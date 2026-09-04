@@ -3871,6 +3871,21 @@ SCORE_COUNT_UNKNOWN = (
     "The token count needs a loaded model that is not mid-response."
 )
 
+# Every listener that writes the count shares this queue, and so runs one at a
+# time and in the order the requests were sent.
+#
+# Gradio's concurrency limit is per event, not across events, so without this
+# the timer's recovery and a keystroke's count are free to overlap - and they
+# contend for the same model lock, so overlapping means one of them loses it
+# and publishes the "not mid-response" message. Whichever finished last would
+# then be on screen, which can be the one computed for the older passage. That
+# is worse than the message it replaces: a count that does not describe the
+# box is exactly what this line exists to rule out, and the recovery below
+# leaves any numeric count alone, so a wrong one would stay until the next
+# edit. In one queue the fresher request is always the one sent later, and so
+# always the one that publishes last.
+SCORE_BUDGET_QUEUE = "score-budget"
+
 
 def score_token_count(context: str, text: str, use_chat_template: bool) -> str:
     """How many tokens the box would score, against the limit for this model."""
@@ -3914,6 +3929,10 @@ def recover_score_budget(shown: str, context: str, text: str, use_chat_template:
         return gr.skip()
     recovered = score_token_count(context, text, use_chat_template)
     return gr.skip() if recovered == shown else recovered
+
+
+# The listeners below and the ones on the boxes themselves share
+# SCORE_BUDGET_QUEUE; see the comment there for why that is not optional.
 
 
 def show_page(page: str):
@@ -4608,6 +4627,7 @@ def build_app() -> gr.Blocks:
                 score_budget,
                 trigger_mode="always_last",
                 show_progress="hidden",
+                concurrency_id=SCORE_BUDGET_QUEUE,
             )
 
         # The badge is refreshed on the way to the chat page as well, so a
@@ -4636,6 +4656,7 @@ def build_app() -> gr.Blocks:
             [score_budget, *score_budget_inputs],
             score_budget,
             show_progress="hidden",
+            concurrency_id=SCORE_BUDGET_QUEUE,
         )
         load_model_button.click(
             go_to_models,
@@ -4666,6 +4687,7 @@ def build_app() -> gr.Blocks:
                 score_budget_inputs,
                 score_budget,
                 show_progress="hidden",
+                concurrency_id=SCORE_BUDGET_QUEUE,
             )
 
         # A download alone brings nothing into memory, but it does decide
