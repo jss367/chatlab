@@ -336,5 +336,24 @@ class SeedToSaveTests(unittest.TestCase):
         self.assertEqual(settings.seed_to_save(99, True, self.chosen), 99)
 
 
+class SeedFloorTests(unittest.TestCase):
+    """A locked seed is saved as it was used, so a restart repeats it."""
+
+    def test_a_negative_seed_comes_back_as_one_numpy_accepts(self):
+        self.assertEqual(settings.sanitize({"seed": -1}).seed, 0)
+
+    def test_a_seed_past_the_apps_own_ceiling_is_kept(self):
+        # app.resolve_seed hands 3_000_000_000 to the generator unchanged, so
+        # saving it as 2**31 - 1 would reproduce a different response.
+        self.assertEqual(settings.sanitize({"seed": 3_000_000_000}).seed, 3_000_000_000)
+
+    def test_a_seed_of_the_wrong_shape_falls_back_to_its_default(self):
+        for value in (None, "", "abc", float("nan"), float("inf")):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    settings.sanitize({"seed": value}).seed, settings.DEFAULTS.seed
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

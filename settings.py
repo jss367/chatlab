@@ -59,8 +59,13 @@ MPS_MEMORY_FRACTION_RANGE = (0.1, 2.0)
 TEMPERATURE_RANGE = (0.0, 2.0)
 TOP_P_RANGE = (0.05, 1.0)
 TOP_K_RANGE = (0, 200)
-# NumPy's default generator rejects a negative seed; see app.resolve_seed.
-SEED_RANGE = (0, 2**31 - 1)
+# NumPy's default generator rejects a negative seed but takes any
+# non-negative one, however large; see app.resolve_seed. So the seed has a
+# floor rather than a range: the point of locking a seed is to reproduce a
+# response, and pulling a saved 3_000_000_000 down to a ceiling the app only
+# uses when it picks a seed itself (app.SEED_LIMIT) would reproduce a
+# different one.
+SEED_FLOOR = 0
 
 
 def _clamped_float(value: Any, bounds: tuple[float, float], default: float) -> float:
@@ -81,6 +86,14 @@ def _clamped_int(value: Any, bounds: tuple[int, int], default: int) -> int:
     except (OverflowError, TypeError, ValueError):
         return default
     return min(max(number, low), high)
+
+
+def _floored_int(value: Any, low: int, default: int) -> int:
+    try:
+        number = int(value)
+    except (OverflowError, TypeError, ValueError):
+        return default
+    return max(number, low)
 
 
 def _text(value: Any, default: str) -> str:
@@ -177,7 +190,9 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
             (1, prefill),
             min(DEFAULTS.max_new_tokens, prefill),
         ),
-        seed=_clamped_int(values.get("seed", DEFAULTS.seed), SEED_RANGE, DEFAULTS.seed),
+        seed=_floored_int(
+            values.get("seed", DEFAULTS.seed), SEED_FLOOR, DEFAULTS.seed
+        ),
         randomize_seed=_flag(
             values.get("randomize_seed", DEFAULTS.randomize_seed),
             DEFAULTS.randomize_seed,
