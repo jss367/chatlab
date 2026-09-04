@@ -706,6 +706,16 @@ def incomplete_snapshot_detail(model_id: str, error: Exception) -> str:
 
 
 def load_cached_model(model_id: str, selected: str | None = None):
+    """Load a model already on disk, and say whether it ended up in memory.
+
+    The ``bool`` this returns is for ``yield from`` callers, which have to
+    know whether the load worked and cannot ask the manager afterwards: a
+    load started in another tab can replace ``model_id`` in the moment
+    between this generator's last frame and the caller resuming, and reading
+    it then would call this load a failure and undo the other tab's choice.
+    Gradio drops the value; only :func:`setup_default_model` reads it.
+    """
+
     cleaned = chosen_model(model_id, selected)
     active = MANAGER.active_downloads.get(cleaned)
     if active is not None:
@@ -721,7 +731,7 @@ def load_cached_model(model_id: str, selected: str | None = None):
             "Click **Download and load** to follow the download and load the model when it finishes.",
             "working",
         )
-        return
+        return False
 
     name = f"`{cleaned}`"
     yield status_card("Finding cached model", f"Looking for {name} locally…", "working")
@@ -729,7 +739,7 @@ def load_cached_model(model_id: str, selected: str | None = None):
         status = cache_status(cleaned)
     except ValueError as error:
         yield failure_card("Could not load cached model", html.escape(str(error)))
-        return
+        return False
     if status.missing_files:
         yield status_card(
             "Download incomplete",
@@ -738,7 +748,7 @@ def load_cached_model(model_id: str, selected: str | None = None):
             "Use **Download and load** to fetch the rest.",
             "error",
         )
-        return
+        return False
     if not status.present:
         yield status_card(
             "Not cached",
@@ -746,14 +756,14 @@ def load_cached_model(model_id: str, selected: str | None = None):
             "Use **Download and load** to fetch it.",
             "error",
         )
-        return
+        return False
     if status.unsupported:
         yield status_card(
             "Unsupported model",
             f"{name} is on disk ({describe_on_disk(status)}) but is {UNSUPPORTED_REASON}",
             "error",
         )
-        return
+        return False
     try:
         path = MANAGER.find_cached(cleaned)
         started = time.monotonic()
@@ -762,16 +772,17 @@ def load_cached_model(model_id: str, selected: str | None = None):
         yield failure_card(
             "Download unfinished", incomplete_snapshot_detail(cleaned, error)
         )
-        return
+        return False
     except Exception as error:
         yield failure_card("Could not load cached model", html.escape(str(error)))
-        return
+        return False
     yield status_card(
         "Model ready",
         f"{name} is loaded on **{device}** "
         f"({time.monotonic() - started:.1f} seconds).",
         "success",
     )
+    return True
 
 
 def unload_model():
@@ -934,11 +945,17 @@ def setup_default_model(hf_token: str):
     end, since the reader asked for a working model and the files to fix it
     are one fetch away.
 
-    So a cached load that does not end with the model in memory falls through
-    to the download, which resumes whatever the snapshot lacks. When the
-    cache really was complete and the load failed for another reason -
-    memory, above all - that fetch finds nothing to do and the same failure
-    is reported by the second attempt, at the cost of one Hub round trip.
+    So a cached load that says it did not load falls through to the download,
+    which resumes whatever the snapshot lacks. When the cache really was
+    complete and the load failed for another reason - memory, above all -
+    that fetch finds nothing to do and the same failure is reported by the
+    second attempt, at the cost of one Hub round trip.
+
+    It is the load's own answer that is read, not the manager's ``model_id``.
+    A load started in another tab can replace that between this generator's
+    last frame and this line, and inferring failure from it would send a
+    successful load down the download path and put the default model back
+    over the one the other tab deliberately chose.
 
     The model ID is taken from the settings default rather than from the ID
     box, so the button cannot be redirected by whatever the box happens to
@@ -946,8 +963,7 @@ def setup_default_model(hf_token: str):
     """
 
     if default_model_cached():
-        yield from load_cached_model(settings.DEFAULT_MODEL_ID)
-        if MANAGER.model_id == settings.DEFAULT_MODEL_ID:
+        if (yield from load_cached_model(settings.DEFAULT_MODEL_ID)):
             return
         yield status_card(
             "Finishing the download",

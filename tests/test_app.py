@@ -1266,6 +1266,44 @@ class ClearConfirmationTests(unittest.TestCase):
         self.assertEqual(app.hide_clear_confirm(), {"visible": False, "__type__": "update"})
 
 
+class CachedLoadOutcomeTests(unittest.TestCase):
+    """load_cached_model says whether it loaded, rather than leaving it to be
+    inferred from what happens to be in memory afterwards."""
+
+    def outcome(self, **cache):
+        """Run the generator to exhaustion and return what it reported."""
+
+        with mock.patch.object(app, "cache_status", return_value=CacheStatus(**cache)):
+            generator = app.load_cached_model("org/model")
+            try:
+                while True:
+                    next(generator)
+            except StopIteration as stop:
+                return stop.value
+
+    def test_every_refusal_reports_that_nothing_was_loaded(self):
+        for name, cache in [
+            ("nothing cached", {}),
+            ("part of it cached", {"cached_bytes": 1, "missing_files": ("x",)}),
+            ("not a transformers model", {"cached_bytes": 1, "unsupported": True}),
+        ]:
+            with self.subTest(cache=name):
+                self.assertIs(self.outcome(**cache), False)
+
+    def test_a_load_that_raises_reports_that_nothing_was_loaded(self):
+        with mock.patch.object(app.MANAGER, "find_cached", side_effect=OSError("no")):
+            self.assertIs(self.outcome(cached_bytes=1), False)
+
+    def test_a_load_that_works_reports_that_it_did(self):
+        def loaded(model_id, path):
+            yield "loading card"
+            return "Apple Metal (MPS)"
+
+        with mock.patch.object(app.MANAGER, "find_cached", return_value=Path("/tmp/x")):
+            with mock.patch.object(app, "stream_load", side_effect=loaded):
+                self.assertIs(self.outcome(cached_bytes=1), True)
+
+
 class DefaultModelOfferTests(unittest.TestCase):
     """The offer beside the chat page's badge, and the route it takes.
 
@@ -1289,35 +1327,59 @@ class DefaultModelOfferTests(unittest.TestCase):
         self.assertIn("Download", offer)
         self.assertIn(app.DEFAULT_MODEL_DOWNLOAD, offer)
 
-    class Loads:
-        """A manager that ends up holding whichever model was asked for."""
+    def run_setup(self, *, cached: bool, cached_load_works: bool = True):
+        """Drive setup_default_model with both halves stubbed as generators.
 
-        def __init__(self, model_id=None):
-            self.model_id = model_id
+        The cached half reports its own outcome, which is the whole point:
+        setup_default_model must read that rather than ask the manager what
+        is loaded now. So the stub returns it the way the real generator
+        does, and no manager is involved at all.
+        """
 
-    def run_setup(self, *, cached: bool, ends_with=None):
-        original = app.MANAGER
-        app.MANAGER = self.Loads(ends_with)
-        try:
-            with mock.patch.object(app, "default_model_cached", return_value=cached):
-                with mock.patch.object(app, "load_cached_model") as load:
-                    with mock.patch.object(app, "download_and_load_model") as fetch:
-                        load.return_value = iter([])
-                        fetch.return_value = iter([])
-                        list(app.setup_default_model("token"))
-            return load, fetch
-        finally:
-            app.MANAGER = original
+        def cached_half(*args, **kwargs):
+            yield "cached card"
+            return cached_load_works
+
+        def download_half(*args, **kwargs):
+            yield "download card"
+            return True
+
+        with mock.patch.object(app, "default_model_cached", return_value=cached):
+            with mock.patch.object(
+                app, "load_cached_model", side_effect=cached_half
+            ) as load:
+                with mock.patch.object(
+                    app, "download_and_load_model", side_effect=download_half
+                ) as fetch:
+                    self.cards = list(app.setup_default_model("token"))
+        return load, fetch
 
     def test_a_cached_default_is_loaded_without_touching_the_network(self):
         # The offer has just promised an immediate local load. Going through
         # the download path would reach snapshot_download for a Hub update
         # check: a stall at best, and a failure with no network at all.
-        load, fetch = self.run_setup(
-            cached=True, ends_with=settings.DEFAULT_MODEL_ID
-        )
+        load, fetch = self.run_setup(cached=True)
 
         load.assert_called_once_with(settings.DEFAULT_MODEL_ID)
+        fetch.assert_not_called()
+
+    def test_the_load_is_believed_over_whatever_is_loaded_afterwards(self):
+        # A load started in another tab can replace MANAGER.model_id between
+        # the cached load's last frame and this handler resuming. Asking the
+        # manager then would call a successful load a failure, download the
+        # default again, and put it back over the model that other tab
+        # deliberately chose. Nothing here reads the manager at all.
+        class Swapped:
+            model_id = "org/chosen-in-another-tab"
+            load_id = "org/chosen-in-another-tab#1"
+
+        original = app.MANAGER
+        app.MANAGER = Swapped()
+        try:
+            _load, fetch = self.run_setup(cached=True)
+        finally:
+            app.MANAGER = original
+
         fetch.assert_not_called()
 
     def test_a_cache_that_would_not_load_falls_through_to_the_download(self):
@@ -1325,33 +1387,17 @@ class DefaultModelOfferTests(unittest.TestCase):
         # download cut off before the tokenizer looks complete and fails in
         # from_pretrained. From this button that would be a dead end: the
         # reader asked for a working model and the rest is one fetch away.
-        load, fetch = self.run_setup(cached=True, ends_with=None)
+        load, fetch = self.run_setup(cached=True, cached_load_works=False)
 
         load.assert_called_once_with(settings.DEFAULT_MODEL_ID)
-        fetch.assert_called_once_with(settings.DEFAULT_MODEL_ID, "token")
-
-    def test_a_cached_load_of_something_else_is_not_mistaken_for_success(self):
-        # Another model in memory is not this one having loaded.
-        _load, fetch = self.run_setup(cached=True, ends_with="org/other")
-
         fetch.assert_called_once_with(settings.DEFAULT_MODEL_ID, "token")
 
     def test_the_fallback_says_what_it_is_doing(self):
         # A second progress card appearing unexplained would read as the
         # download the button promised was not needed.
-        original = app.MANAGER
-        app.MANAGER = self.Loads(None)
-        try:
-            with mock.patch.object(app, "default_model_cached", return_value=True):
-                with mock.patch.object(app, "load_cached_model") as load:
-                    with mock.patch.object(app, "download_and_load_model") as fetch:
-                        load.return_value = iter([])
-                        fetch.return_value = iter([])
-                        cards = list(app.setup_default_model("token"))
-        finally:
-            app.MANAGER = original
+        self.run_setup(cached=True, cached_load_works=False)
 
-        self.assertTrue(any("Finishing the download" in card for card in cards))
+        self.assertTrue(any("Finishing the download" in card for card in self.cards))
 
     def test_an_uncached_default_is_downloaded(self):
         load, fetch = self.run_setup(cached=False)
