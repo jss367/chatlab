@@ -82,6 +82,10 @@ except ImportError:  # huggingface_hub before 1.x had no such check
 
 
 DEFAULT_MODEL = "allenai/Olmo-3-7B-Think"
+# The size of the default model's full weights, said before the download
+# starts rather than after. The banner on the Chat page offers that download
+# in one click, and 15 GB is not a thing to find out about halfway through.
+DEFAULT_MODEL_DOWNLOAD = "about 15 GB"
 MANAGER = ModelManager()
 
 # How often the download card is redrawn. Every frame is a message to the
@@ -93,16 +97,20 @@ DOWNLOAD_POLL_SECONDS = 0.5
 RATE_WINDOW_SECONDS = 15.0
 
 DOWNLOAD_BAR_WIDTH = 24
-# The two left panes' widths in pixels. The thin pane at the far left picks
-# the page and holds nothing but an icon per page; the conversations pane
-# beside it shows with Chat only, and is wide enough for a model ID and a
-# token count while leaving the conversation most of the screen.
-NAV_PANE_WIDTH = 56
+# The two left panes' widths in pixels. The pane at the far left picks the
+# page and holds an icon and a name per page; the conversations pane beside
+# it shows with Chat only, and is wide enough for a model ID and a token
+# count while leaving the conversation most of the screen.
+#
+# Wide enough for the longest page name at the tile's small type. With three
+# pages there is nothing to be won by hiding those names: the pane would save
+# a handful of pixels and cost a reader the only signpost on the screen.
+NAV_PANE_WIDTH = 72
 CONVERSATION_PANE_WIDTH = 340
 CHAT_PAGE, MODELS_PAGE, SETTINGS_PAGE = PAGES = ("Chat", "Models", "Settings")
-# Each nav tile is an icon, which is what lets the pane be this thin. The
-# page's name stays on the tile for the browser to read out; the stylesheet
-# hides it, draws the icon in its place, and pops the name up on hover.
+# Each nav tile shows an icon above the page's own name. The name is the
+# label's own text, so it is what a screen reader reads; the stylesheet draws
+# the icon in front of it and keeps it out of that reading.
 NAV_ICONS = {
     CHAT_PAGE: "💬",
     MODELS_PAGE: "🧠",
@@ -112,6 +120,14 @@ NAV_ICONS = {
 }
 SEED_LIMIT = 2**31 - 1
 NO_TOKEN_SELECTED = "Select a token to inspect it."
+
+# The sampling controls' starting values. They are named because two places
+# need the same numbers: the controls themselves, and the summary the
+# sampling accordion wears before anything has been moved.
+DEFAULT_TEMPERATURE = 0.8
+DEFAULT_TOP_P = 0.95
+DEFAULT_TOP_K = 50
+DEFAULT_MAX_NEW_TOKENS = 1024
 
 # Redrawing the trace on every streamed token is wasted work, so it catches up
 # in batches and again once the response finishes.
@@ -139,6 +155,68 @@ TEMPLATE_CAVEAT = (
     "Plain text, not a chat turn: this model has no chat template, so the "
     "context was measured as ordinary characters in front of the text."
 )
+
+
+def hint(summary: str, detail: str) -> str:
+    """A one-line disclosure: the question on screen, the answer on demand.
+
+    The panels carry more explanation than they have room for, and a
+    paragraph held permanently open competes for attention with the control
+    it is there to explain. ``<details>`` is the browser's own answer to
+    that and needs no script: the summary is a line, and the reader who
+    wants the paragraph opens it.
+
+    The detail is written as markup rather than markdown, because markdown is
+    not processed inside a raw HTML block; ``<strong>`` stands in for the
+    asterisks a caption would otherwise use.
+    """
+
+    return f'<details class="hint"><summary>{summary}</summary>{detail}</details>'
+
+
+# What each measurement in the token detail means, in one sentence. The panel
+# names them and the README explains them, which leaves a reader holding the
+# name with nowhere to ask; these are attached to the names themselves so the
+# answer is where the question is.
+METRIC_GLOSSARY = {
+    "Raw rank": (
+        "Where this token sat in the model's unmodified distribution. "
+        "Rank 1 was the model's first choice."
+    ),
+    "Raw model probability": (
+        "The probability the model gave this token before temperature, "
+        "top-k or top-p touched it."
+    ),
+    "Actual sampling probability": (
+        "The probability it was really drawn with, after temperature, "
+        "top-k and top-p."
+    ),
+    "Surprise": (
+        "-log2(probability), in bits. Larger values are less expected."
+    ),
+    "Distribution entropy": (
+        "How undecided the model was across the whole distribution, in bits. "
+        "Surprise says how unexpected the choice was; entropy says how open "
+        "the question was before it."
+    ),
+    "Top-1 margin": (
+        "The probability gap between the model's first and second choice."
+    ),
+    "Sampling shift": (
+        "log2(sampling probability / raw probability): how far your "
+        "temperature, top-k and top-p moved this token from the raw model."
+    ),
+    "Probability mass above it": (
+        "The combined raw probability of every token ranked above this one."
+    ),
+}
+
+
+def metric_term(name: str) -> str:
+    """A measurement's name with its meaning attached, for the detail panel."""
+
+    meaning = html.escape(METRIC_GLOSSARY[name], quote=True)
+    return f'<abbr title="{meaning}">{name}</abbr>'
 
 
 def status_card(title: str, detail: str, tone: str = "neutral") -> str:
@@ -542,6 +620,77 @@ def unload_model():
         return status_card("No model loaded", "There is nothing to unload.")
     MANAGER.unload()
     return status_card("Model unloaded", "Model memory has been released.", "success")
+
+
+# ----------------------------------------------------- the Chat page's banner
+#
+# Chat is where a reader lands, and until a model is loaded nothing on it
+# does anything: Send only writes "Download and load a model first" into a
+# status line under the transcript. The banner is that page's own way out.
+# It says what is missing where the reader is already looking and offers the
+# default model in one press, so finding the Models page is no longer the
+# first thing anyone has to work out.
+
+
+def setup_default_model(hf_token: str):
+    """Fetch and load :data:`DEFAULT_MODEL`, reporting into the Models card.
+
+    The model ID is taken from the constant rather than from the ID box, so
+    the button cannot be redirected by whatever the box happens to hold when
+    the chain reaches this step.
+    """
+
+    yield from download_and_load_model(DEFAULT_MODEL, hf_token)
+
+
+def default_model_cached() -> bool:
+    """Whether the default model is whole on disk, so loading it needs no network."""
+
+    try:
+        status = cache_status(DEFAULT_MODEL)
+    except (ValueError, OSError):
+        return False
+    return status.present and not status.missing_files and not status.unsupported
+
+
+def model_banner():
+    """The banner's visibility, its wording, and the primary button's label.
+
+    Three things vary together, so they are decided together: with a model
+    loaded there is nothing to say and the banner goes away, and without one
+    the offer is a load or a download depending on what the cache already
+    holds. Saying which it will be, and how large the download is, belongs
+    before the press.
+    """
+
+    if MANAGER.loaded:
+        return gr.update(visible=False), gr.skip(), gr.skip()
+    if default_model_cached():
+        text = (
+            f"**No model is loaded yet.** `{DEFAULT_MODEL}` is already in your "
+            "Hugging Face cache, so it can be loaded now."
+        )
+        label = "⚡ Load the default model"
+    else:
+        text = (
+            f"**No model is loaded yet.** Chatlab can fetch `{DEFAULT_MODEL}`, "
+            f"a download of {DEFAULT_MODEL_DOWNLOAD}, or you can pick a "
+            "different one on the Models page."
+        )
+        label = f"⬇️ Download the default model ({DEFAULT_MODEL_DOWNLOAD})"
+    return gr.update(visible=True), text, gr.update(value=label)
+
+
+def open_models_page():
+    """Move the nav to Models, which shows the page and the download card with it."""
+
+    return gr.update(value=MODELS_PAGE)
+
+
+def start_default_model():
+    """Put the default model in the ID box and open the page that reports on it."""
+
+    return DEFAULT_MODEL, gr.update(value=MODELS_PAGE)
 
 
 # The side pane's model lists.
@@ -1050,16 +1199,19 @@ def describe_token(metric: dict) -> tuple[str, list[list]]:
             [],
         )
 
+    # Every measurement here has a name that means nothing on first reading,
+    # so each name carries its own sentence: hovering it, or reaching it with
+    # a screen reader, says what the number is.
     summary = (
         f"### {where} {metric['position']}: `{token_repr}`\n\n"
-        f"- **Raw rank:** {metric['raw_rank']:,}\n"
-        f"- **Raw model probability:** {metric['raw_probability']:.5%}\n"
-        f"- **Actual sampling probability:** {metric['sampling_probability']:.5%}\n"
-        f"- **Surprise:** {metric['surprise_bits']:.2f} bits\n"
-        f"- **Distribution entropy:** {metric['entropy_bits']:.2f} bits\n"
-        f"- **Top-1 margin:** {metric['top1_margin']:.2%} between the model's first and second choice\n"
-        f"- **Sampling shift:** {metric['sampling_shift_bits']:+.2f} bits versus the raw model\n"
-        f"- **Probability mass above it:** {metric['probability_mass_above']:.2%}\n"
+        f"- **{metric_term('Raw rank')}:** {metric['raw_rank']:,}\n"
+        f"- **{metric_term('Raw model probability')}:** {metric['raw_probability']:.5%}\n"
+        f"- **{metric_term('Actual sampling probability')}:** {metric['sampling_probability']:.5%}\n"
+        f"- **{metric_term('Surprise')}:** {metric['surprise_bits']:.2f} bits\n"
+        f"- **{metric_term('Distribution entropy')}:** {metric['entropy_bits']:.2f} bits\n"
+        f"- **{metric_term('Top-1 margin')}:** {metric['top1_margin']:.2%} between the model's first and second choice\n"
+        f"- **{metric_term('Sampling shift')}:** {metric['sampling_shift_bits']:+.2f} bits versus the raw model\n"
+        f"- **{metric_term('Probability mass above it')}:** {metric['probability_mass_above']:.2%}\n"
         f"- **Token ID:** {metric['token_id']:,}"
     )
     rows = [
@@ -2458,12 +2610,57 @@ def undo_message(event: gr.UndoData, turns, scale_name: str = DEFAULT_COLOR_SCAL
     return undo_from(position, turns, scale_name)
 
 
+# Clear is the one control that reaches past the conversation on screen: it
+# empties this one and deletes every other conversation with it, and nothing
+# brings them back. Undo sits one button away and looks the same, so the
+# press is easy to make by accident. Removing a model from disk already asks
+# first; this is the same question about the same kind of loss, and it asks
+# it the same way - a panel that names what is about to go, and a button that
+# is the only thing that actually clears.
+
+NOTHING_TO_CLEAR = "There is nothing to clear."
+
+
+def ask_clear_chat(turns: list[dict] | None, forks: dict | None):
+    """Open the confirmation for Clear, or say there is nothing to clear.
+
+    Returns the status line, the panel's visibility and its question. The
+    count is taken here only to word the question; the clearing itself takes
+    whatever is on screen when it runs.
+    """
+
+    hidden = gr.update(visible=False)
+    others = max(len(copy_forks(forks)["branches"]) - 1, 0)
+    if not turns and not others:
+        return NOTHING_TO_CLEAR, hidden, ""
+    if others:
+        loss = (
+            f"the conversation on screen and {others} other"
+            f"{'s' if others != 1 else ''}"
+        )
+    else:
+        loss = "the conversation on screen"
+    return (
+        gr.skip(),
+        gr.update(visible=True),
+        f"Clear {loss}? This cannot be undone. To remove only this one, "
+        "use **🗑️ Delete** in the conversations pane.",
+    )
+
+
+def hide_clear_confirm():
+    return gr.update(visible=False)
+
+
 def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
     """Empty everything the conversation owns.
 
     Clear cancels a running generation (see ``cancels`` on its listener), and a
     cancelled ``generate_reply`` never reaches its final yield, so this has to
     restore the Send button itself exactly as Stop does.
+
+    Reached from the confirmation panel alone, which this closes on its way
+    out; the Clear button itself only opens that panel.
     """
 
     strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
@@ -2475,7 +2672,7 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
         [],
         strip,
         metrics,
-        "Conversation cleared.",
+        "Every conversation cleared.",
         *send_stop_buttons(False),
         NO_TOKEN_SELECTED,
         [],
@@ -2487,6 +2684,7 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
         {},
         forks,
         conversation_list_update(forks, []),
+        gr.update(visible=False),
     )
 
 
@@ -3086,21 +3284,18 @@ def reset_inspection(insight: dict | None):
     return charts.EMPTY_LENS, charts.EMPTY_ATTENTION, None, INSPECT_HINT
 
 
-# One pair of rules per tile: the icon it shows, and the name it pops up.
-# Gradio stamps each option's text on its label as data-testid, which is the
-# only hook a Radio gives CSS.
+# One rule per tile: the icon drawn above the page's own name. Gradio stamps
+# each option's text on its label as data-testid, which is the only hook a
+# Radio gives CSS.
 #
-# Both are drawn on the label, so both would otherwise join the radio's
-# accessible name and have a screen reader read "speech balloon Chat", or
-# "speech balloon Chat Chat" once the tooltip is up. The empty string after
-# the slash is the generated text's alternative text, which keeps the pair of
-# them out of the name and leaves the page's own name to stand for the tile.
+# The icon is drawn on the label, so it would otherwise join the radio's
+# accessible name and have a screen reader read "speech balloon Chat". The
+# empty string after the slash is the generated text's alternative text,
+# which keeps it out of the name and leaves the page's own name to stand for
+# the tile - the same name that is now printed under it.
 NAV_TILE_CSS = "\n".join(
     f'#nav label[data-testid="{name}-radio-label"]::before '
-    f'{{ content: "{NAV_ICONS[name]}" / ""; }}\n'
-    f'#nav label[data-testid="{name}-radio-label"]:hover::after,\n'
-    f'#nav label[data-testid="{name}-radio-label"]:has(input:focus-visible)::after '
-    f'{{ content: "{name}" / ""; }}'
+    f'{{ content: "{NAV_ICONS[name]}" / ""; }}'
     for name in PAGES
 )
 
@@ -3115,9 +3310,6 @@ CSS = f"""
 #nav-pane, #conversation-pane {{
   position: sticky; top: 0; align-self: flex-start; max-height: 100vh;
 }}
-/* Both panes are sticky, so each is its own stacking context and the later
-   one would paint over the nav's tooltip. Lift the nav above it. */
-#nav-pane {{ z-index: 5; }}
 #nav-pane {{
   flex: 0 0 {NAV_PANE_WIDTH}px !important; min-width: {NAV_PANE_WIDTH}px !important;
   height: 100vh; padding: 0.6rem 0.5rem 0.6rem 0;
@@ -3133,33 +3325,23 @@ CSS = f"""
    selected tile is filled, and the last tile (Settings) is pushed to the
    bottom. */
 #nav-pane > *, #nav, #nav .wrap {{ height: 100%; }}
-/* Gradio's fieldset scrolls its own content, which would cut the tooltip off
-   at the tile's edge. */
 #nav {{ overflow: visible !important; }}
 #nav .wrap {{ flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 0.3rem; }}
+/* Each tile stacks the icon over the page's name, so the name is on screen
+   rather than a hover away. Three pages is not a number worth hiding. */
 #nav label {{
   position: relative;
-  justify-content: center; text-align: center; padding: 0.55rem 0.2rem;
-  font-size: 1.3rem; line-height: 1.25; border-radius: 8px; box-shadow: none;
+  display: flex; flex-direction: column; align-items: center; gap: 0.15rem;
+  justify-content: center; text-align: center; padding: 0.5rem 0.15rem;
+  line-height: 1.2; border-radius: 8px; box-shadow: none;
   background: transparent;
   /* The selected tile is outlined; the others hold the same border in
      transparent so picking a page does not nudge the icons. */
   border: 1px solid transparent;
 }}
-/* The page name is still on the tile, an inch out of sight, so the browser
-   reads it out and the icon that ::before draws sits where it was. */
-#nav label span {{
-  position: absolute; width: 1px; height: 1px; overflow: hidden;
-  clip-path: inset(50%);
-}}
-/* Hover or keyboard focus brings the name back as a bubble beside the tile. */
-#nav label::after {{
-  position: absolute; left: calc(100% + 0.5rem); top: 50%;
-  transform: translateY(-50%);
-  padding: 0.25rem 0.5rem; border-radius: 6px; white-space: nowrap;
-  font-size: 0.8rem; font-weight: 500; line-height: 1.3; pointer-events: none;
-  background: var(--body-text-color); color: var(--background-fill-primary);
-}}
+#nav label::before {{ font-size: 1.3rem; line-height: 1.1; }}
+/* The label's own text, which is also what a screen reader reads for it. */
+#nav label span {{ font-size: 0.7rem; font-weight: 500; }}
 {NAV_TILE_CSS}
 #nav label:hover {{ background: var(--background-fill-secondary); }}
 #nav label.selected {{
@@ -3191,6 +3373,17 @@ CSS = f"""
   border: 1px solid #d97706; border-radius: 8px; padding: 0.4rem 0.6rem;
   background: rgba(217, 119, 6, 0.09);
 }}
+/* Clear deletes every conversation, so it asks first, in the same amber
+   panel the model removal uses. */
+.clear-confirm {{
+  border: 1px solid #d97706; border-radius: 8px; padding: 0.4rem 0.6rem;
+  background: rgba(217, 119, 6, 0.09);
+}}
+/* The standing offer on the Chat page while no model is loaded. */
+#model-banner {{
+  border: 1px solid var(--color-accent); border-radius: 8px;
+  padding: 0.6rem 0.75rem; background: var(--background-fill-secondary);
+}}
 .model-detail {{ font-size: 0.85rem; }}
 .model-detail p, .model-detail ul, .model-detail li {{ margin: 0.15rem 0; }}
 .model-detail code {{ word-break: break-all; }}
@@ -3201,6 +3394,20 @@ CSS = f"""
 #token-strip .category-label, #prompt-strip .category-label {{ color: #0b0b0b; }}
 .footer-note {{ color: var(--body-text-color-subdued); font-size: 0.9rem; }}
 .scale-caption {{ color: var(--body-text-color-subdued); font-size: 0.85rem; }}
+
+/* An explanation folded to one line. The panels have more to say than they
+   have room for, and a paragraph held open competes with the control it
+   describes, so the summary is a line and the paragraph is a click. */
+.hint {{ color: var(--body-text-color-subdued); font-size: 0.85rem; }}
+.hint summary {{ cursor: pointer; width: fit-content; }}
+.hint summary:hover {{ color: var(--body-text-color); }}
+.hint[open] summary {{ margin-bottom: 0.25rem; }}
+/* A measurement's name in the detail panel carries its meaning as a title.
+   The dotted underline is what says there is something to hover. */
+abbr[title] {{ text-decoration: underline dotted; cursor: help; }}
+/* The live count under the Score text box, and the message that stands in
+   for it when the model cannot be asked. */
+.token-budget {{ color: var(--body-text-color-subdued); font-size: 0.85rem; }}
 
 /* A failure says so twice: in the status line, where it stays, and in a toast
    over the page, where it cannot be missed. The line is boxed in red with a
@@ -3309,6 +3516,35 @@ CSS = f"""
 """
 
 
+# Escape stops a running generation. Stop is a button that only exists while
+# a response is streaming, so calling it off means finding it first, and a
+# reader who wants a runaway response to end wants it to end now. Gradio has
+# no key binding of its own, so the shortcut is a listener attached once on
+# load.
+#
+# It presses the button rather than reaching past it, which keeps one path
+# through the cancellation: whatever Stop does, Escape does. The button is
+# hidden while nothing is generating, and a hidden element has no offset
+# parent, so at every other moment Escape falls through untouched - including
+# out of the message box, where it would otherwise swallow a keystroke the
+# browser has its own use for. A modifier held down means the reader is
+# asking the browser for something else, so those are left alone too.
+SHORTCUT_JS = """
+() => {
+  if (window.__chatlabShortcuts) { return; }
+  window.__chatlabShortcuts = true;
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') { return; }
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) { return; }
+    const stop = document.querySelector('#stop-button');
+    if (!stop || stop.offsetParent === null) { return; }
+    event.preventDefault();
+    stop.click();
+  });
+}
+"""
+
+
 # Gradio's Textbox sends on Enter only when it is a single-line box, and on
 # Shift+Enter when it has more than one line, so the "Enter sends" preference
 # is expressed by choosing the box's starting height. The box grows to
@@ -3333,6 +3569,64 @@ def message_box_settings(enter_sends: bool) -> dict:
 
 def set_message_box_keys(enter_sends: bool):
     return gr.update(**message_box_settings(enter_sends))
+
+
+# ------------------------------------------------------- the sampling summary
+#
+# Temperature, top-p and the response length are what a reader reaches for
+# between one retry and the next, so they sit on the Chat page rather than
+# behind the nav. Folded away they would still be a trip to open, so the
+# accordion wears its own settings: the numbers read without a click, and the
+# click is only needed to change one.
+
+
+def sampling_label(temperature, top_p, top_k, max_new_tokens) -> str:
+    """The sampling accordion's own summary of what it holds."""
+
+    filtering = f"top-p {float(top_p):g}"
+    if int(top_k or 0):
+        filtering = f"{filtering} · top-k {int(top_k)}"
+    return (
+        f"Sampling · temperature {float(temperature):g} · {filtering} · "
+        f"up to {int(max_new_tokens):,} new tokens"
+    )
+
+
+def update_sampling_label(temperature, top_p, top_k, max_new_tokens):
+    return gr.update(label=sampling_label(temperature, top_p, top_k, max_new_tokens))
+
+
+# ---------------------------------------------------- the scored token budget
+#
+# Scoring refuses a passage above the model's limit, and it refuses it after
+# the paste, the press and the wait. The count under the box is the same
+# arithmetic done early: it uses the encoding the check itself uses, so the
+# number on screen is the number that will be judged.
+
+SCORE_COUNT_HINT = "Paste some text to see how many tokens it comes to."
+SCORE_COUNT_UNKNOWN = (
+    "The token count needs a loaded model that is not mid-response."
+)
+
+
+def score_token_count(context: str, text: str, use_chat_template: bool) -> str:
+    """How many tokens the box would score, against the limit for this model."""
+
+    if not text:
+        return SCORE_COUNT_HINT
+    counted = MANAGER.count_score_tokens(
+        text, context=context or "", use_chat_template=bool(use_chat_template)
+    )
+    if counted is None:
+        return SCORE_COUNT_UNKNOWN
+    count, limit = counted
+    if count > limit:
+        return (
+            f'<span class="failure-text">{count:,} tokens, above the '
+            f"{limit:,} this model can score in one pass. Score it in "
+            "smaller pieces.</span>"
+        )
+    return f"{count:,} of {limit:,} tokens."
 
 
 def show_page(page: str):
@@ -3400,11 +3694,15 @@ def build_app() -> gr.Blocks:
                     fork_button = gr.Button("🌿 Fork", size="sm", min_width=60)
                     delete_fork_button = gr.Button("🗑️ Delete", size="sm", min_width=60)
                 gr.Markdown(
-                    "Each entry names the model that replied and the size of the "
-                    "conversation in tokens: the prompt behind its latest reply plus "
-                    "the reply itself. New starts an empty chat. Fork copies the "
-                    "conversation on screen; click a message first to fork at that "
-                    "point.",
+                    hint(
+                        "What the entries say",
+                        "Each entry names the model that replied and the size of "
+                        "the conversation in tokens: the prompt behind its latest "
+                        "reply plus the reply itself. <strong>New</strong> starts "
+                        "an empty chat. <strong>Fork</strong> copies the "
+                        "conversation on screen; click a message first to fork at "
+                        "that point.",
+                    ),
                     elem_classes=["scale-caption"],
                 )
 
@@ -3415,6 +3713,24 @@ def build_app() -> gr.Blocks:
                     "# Chatlab\nChat with an open model and see exactly how likely every generated token was.",
                     elem_id="hero",
                 )
+
+                # Shown until a model is loaded, and refreshed by everything
+                # that changes what is on disk or in memory. Its wording and
+                # its button's label are set on load; the values here are the
+                # placeholders they replace.
+                with gr.Column(visible=False, elem_id="model-banner") as model_banner_box:
+                    model_banner_text = gr.Markdown("")
+                    with gr.Row():
+                        default_model_button = gr.Button(
+                            "Set up the default model",
+                            variant="primary",
+                            size="sm",
+                            scale=0,
+                            min_width=280,
+                        )
+                        browse_models_button = gr.Button(
+                            "Browse models", size="sm", scale=0, min_width=140
+                        )
 
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=3):
@@ -3433,12 +3749,94 @@ def build_app() -> gr.Blocks:
                                 )
                                 with gr.Row():
                                     send_button = gr.Button("Send", variant="primary")
+                                    # Escape presses this; see SHORTCUT_JS,
+                                    # which finds it by this id.
                                     stop_button = gr.Button(
-                                        "Stop", variant="stop", visible=False
+                                        "Stop",
+                                        variant="stop",
+                                        visible=False,
+                                        elem_id="stop-button",
                                     )
-                                    retry_button = gr.Button("🔁 Retry")
-                                    undo_button = gr.Button("↩️ Undo last")
-                                    clear_button = gr.Button("🗑️ Clear")
+                                    # The three give up their usual minimum
+                                    # width to stay on Send's row. Left to
+                                    # wrap, the last of them takes a line of
+                                    # its own and reads as the widest, most
+                                    # important button under the box.
+                                    retry_button = gr.Button("🔁 Retry", min_width=110)
+                                    undo_button = gr.Button("↩️ Undo last", min_width=110)
+                                    # Named for what it takes: this empties
+                                    # the conversation on screen and deletes
+                                    # every other one with it.
+                                    clear_button = gr.Button("🗑️ Clear all", min_width=110)
+                                with gr.Column(
+                                    visible=False, elem_classes=["clear-confirm"]
+                                ) as clear_confirm:
+                                    clear_question = gr.Markdown("")
+                                    with gr.Row():
+                                        confirm_clear_button = gr.Button(
+                                            "Clear everything", variant="stop", size="sm"
+                                        )
+                                        cancel_clear_button = gr.Button(
+                                            "Cancel", size="sm"
+                                        )
+
+                                # The knobs reached for between one retry and
+                                # the next, on the page where the retrying
+                                # happens. The accordion's label carries their
+                                # values, so it does not have to be opened to
+                                # be read.
+                                with gr.Accordion(
+                                    sampling_label(
+                                        DEFAULT_TEMPERATURE,
+                                        DEFAULT_TOP_P,
+                                        DEFAULT_TOP_K,
+                                        DEFAULT_MAX_NEW_TOKENS,
+                                    ),
+                                    open=False,
+                                ) as sampling_accordion:
+                                    with gr.Row():
+                                        temperature = gr.Slider(
+                                            0,
+                                            2,
+                                            value=DEFAULT_TEMPERATURE,
+                                            step=0.05,
+                                            label="Temperature",
+                                        )
+                                        top_p = gr.Slider(
+                                            0.05,
+                                            1,
+                                            value=DEFAULT_TOP_P,
+                                            step=0.01,
+                                            label="Top-p",
+                                        )
+                                    with gr.Row():
+                                        top_k = gr.Slider(
+                                            0,
+                                            200,
+                                            value=DEFAULT_TOP_K,
+                                            step=1,
+                                            label="Top-k (0 disables)",
+                                        )
+                                        max_new_tokens = gr.Slider(
+                                            1,
+                                            8192,
+                                            value=DEFAULT_MAX_NEW_TOKENS,
+                                            step=1,
+                                            label="Maximum new tokens",
+                                        )
+                                    with gr.Row():
+                                        seed = gr.Number(
+                                            value=42,
+                                            precision=0,
+                                            minimum=0,
+                                            label="Random seed",
+                                            info="Updated after each response so you can reproduce it.",
+                                        )
+                                        randomize_seed = gr.Checkbox(
+                                            value=True,
+                                            label="🎲 New seed each response",
+                                            info="Turn off to lock the seed and reproduce a response exactly.",
+                                        )
                                 with gr.Row():
                                     save_button = gr.Button("💾 Save conversation")
                                     load_upload = gr.UploadButton(
@@ -3469,8 +3867,15 @@ def build_app() -> gr.Blocks:
                                             size="sm",
                                         )
                                     gr.Markdown(
-                                        "Exports include every token metric and all recorded "
-                                        "alternatives for the latest completed response.",
+                                        hint(
+                                            "What the export holds",
+                                            "Every token metric and all recorded "
+                                            "alternatives for the latest completed "
+                                            "response. JSON keeps the nested "
+                                            "alternatives; CSV gives one row per "
+                                            "token and spreads them into numbered "
+                                            "columns.",
+                                        ),
                                         elem_classes=["footer-note"],
                                     )
 
@@ -3498,6 +3903,12 @@ def build_app() -> gr.Blocks:
                                     label="Text to score",
                                     placeholder="Paste the text you want measured…",
                                     lines=8,
+                                )
+                                # Scoring refuses a passage above the model's
+                                # limit. This is the same count, made while
+                                # the passage is still being written.
+                                score_budget = gr.Markdown(
+                                    SCORE_COUNT_HINT, elem_classes=["token-budget"]
                                 )
                                 score_button = gr.Button("Score text", variant="primary")
                                 score_status = gr.Markdown("Nothing scored yet.")
@@ -3530,9 +3941,12 @@ def build_app() -> gr.Blocks:
                         with gr.Row():
                             branch_button = gr.Button("🌱 Branch from token", size="sm")
                         gr.Markdown(
-                            "Branching keeps the response up to the selected token, puts "
-                            "the alternative in its place, and lets the model continue "
-                            "from there.",
+                            hint(
+                                "What branching does",
+                                "Branching keeps the response up to the selected "
+                                "token, puts the alternative in its place, and "
+                                "lets the model continue from there.",
+                            ),
                             elem_classes=["scale-caption"],
                         )
                         with gr.Row():
@@ -3549,9 +3963,16 @@ def build_app() -> gr.Blocks:
                                 "✏️ Branch with text", size="sm", scale=0, min_width=160
                             )
                         gr.Markdown(
-                            "The typed text replaces the selected token exactly as written, "
-                            "whether or not the model would ever have chosen it, and the "
-                            "model continues from there.",
+                            hint(
+                                "What typed text does",
+                                "The typed text replaces the selected token "
+                                "exactly as written, whether or not the model "
+                                "would ever have chosen it, and the model "
+                                "continues from there. Include a leading space "
+                                "if the word needs one; text this tokenizer "
+                                "cannot reproduce exactly at that position is "
+                                "refused rather than approximated.",
+                            ),
                             elem_classes=["scale-caption"],
                         )
                         with gr.Accordion("Layers and attention", open=False):
@@ -3585,8 +4006,14 @@ def build_app() -> gr.Blocks:
                             )
 
                 gr.Markdown(
-                    "Rank and raw probability come from the unmodified model distribution. "
-                    "Sampling probability includes temperature, top-k, and top-p. Quantized models may produce slightly different ranks.",
+                    hint(
+                        "How to read these numbers",
+                        "Rank and raw probability come from the unmodified model "
+                        "distribution. Sampling probability includes temperature, "
+                        "top-k, and top-p. Quantized models may produce slightly "
+                        "different ranks. Hover any measurement's name in the "
+                        "detail panel for what it means.",
+                    ),
                     elem_classes=["footer-note"],
                 )
 
@@ -3682,8 +4109,15 @@ def build_app() -> gr.Blocks:
             with gr.Column(
                 scale=1, visible=False, elem_id="settings-page"
             ) as settings_page:
+                # Sampling lives on the Chat page: temperature and the
+                # response length are what a reader moves between one retry
+                # and the next, and leaving the conversation to reach them
+                # broke that loop. What is left here is what is set once and
+                # then left alone.
                 gr.Markdown(
-                    "# Settings\nHow every reply is prompted, sampled, and measured.",
+                    "# Settings\nHow every reply is prompted and measured. The "
+                    "sampling controls are on the Chat page, under the message "
+                    "box, because they are moved between one reply and the next.",
                     elem_id="settings-hero",
                 )
                 with gr.Row():
@@ -3711,62 +4145,78 @@ def build_app() -> gr.Blocks:
                             info="Off by default. Think models write a fresh reasoning block each turn, so replaying old ones burns context and usually hurts the next answer.",
                         )
 
+                    with gr.Column():
                         gr.Markdown("## Input")
                         enter_sends = gr.Checkbox(
                             value=True,
                             label="Enter sends the message",
                             info="Shift+Enter starts a new line. Turn off to swap the two.",
                         )
+                        gr.Markdown(
+                            "Escape stops a response that is still being written, "
+                            "wherever the cursor is.",
+                            elem_classes=["scale-caption"],
+                        )
 
-                    with gr.Column():
-                        gr.Markdown("## Sampling and analysis")
-                        temperature = gr.Slider(0, 2, value=0.8, step=0.05, label="Temperature")
-                        top_p = gr.Slider(0.05, 1, value=0.95, step=0.01, label="Top-p")
-                        top_k = gr.Slider(0, 200, value=50, step=1, label="Top-k (0 disables)")
-                        max_new_tokens = gr.Slider(
-                            1, 8192, value=1024, step=1, label="Maximum new tokens"
-                        )
-                        seed = gr.Number(
-                            value=42,
-                            precision=0,
-                            minimum=0,
-                            label="Random seed",
-                            info="Updated after each response so you can reproduce it.",
-                        )
-                        randomize_seed = gr.Checkbox(
-                            value=True,
-                            label="🎲 New seed each response",
-                            info="Turn off to lock the seed and reproduce a response exactly.",
-                        )
+                        gr.Markdown("## Analysis")
                         analyze_prompt = gr.Checkbox(
                             value=True,
                             label="Measure prompt tokens",
                             info="Scores every prompt token during the same pass that warms the cache.",
                         )
 
+        # The banner on the Chat page is read on navigation too, so a model
+        # loaded or unloaded on the Models page is reflected the moment the
+        # reader comes back.
+        banner_outputs = [model_banner_box, model_banner_text, default_model_button]
         nav.change(
             show_page, nav, [conversation_pane, chat_page, models_page, settings_page]
-        )
+        ).then(model_banner, None, banner_outputs)
 
         # Every handler that can change what is on disk or in memory rescans
-        # the cache afterwards, so My Models never shows a stale list.
+        # the cache afterwards, so My Models never shows a stale list - and
+        # re-reads the Chat page's banner with it, since whether a model is
+        # loaded, and whether the default one is on disk, are exactly what
+        # these change.
         models_inputs = [my_models, sort_models]
         models_outputs = [my_models, my_model_detail, my_models_summary]
-        download_button.click(
-            download_model, [model_id, hf_token], model_status
-        ).then(refresh_my_models, models_inputs, models_outputs)
-        download_load_button.click(
-            download_and_load_model, [model_id, hf_token], model_status
-        ).then(refresh_my_models, models_inputs, models_outputs)
-        cached_button.click(load_cached_model, model_id, model_status).then(
-            refresh_my_models, models_inputs, models_outputs
+
+        def rescan(event):
+            """Rescan the cache after ``event``, then re-read the banner."""
+
+            return event.then(
+                refresh_my_models, models_inputs, models_outputs
+            ).then(model_banner, None, banner_outputs)
+
+        rescan(download_button.click(download_model, [model_id, hf_token], model_status))
+        rescan(
+            download_load_button.click(
+                download_and_load_model, [model_id, hf_token], model_status
+            )
         )
-        unload_button.click(unload_model, outputs=model_status).then(
+        rescan(cached_button.click(load_cached_model, model_id, model_status))
+        rescan(unload_button.click(unload_model, outputs=model_status))
+        refresh_models_button.click(
             refresh_my_models, models_inputs, models_outputs
-        )
-        refresh_models_button.click(refresh_my_models, models_inputs, models_outputs)
+        ).then(model_banner, None, banner_outputs)
+        # Sorting alone is left out: it reorders a list and changes neither
+        # what is on disk nor what is in memory, which is all the banner asks.
         sort_models.input(refresh_my_models, models_inputs, models_outputs)
-        demo.load(refresh_my_models, models_inputs, models_outputs)
+        demo.load(refresh_my_models, models_inputs, models_outputs).then(
+            model_banner, None, banner_outputs
+        )
+        # Escape stops a running generation, from anywhere on the page.
+        demo.load(None, None, None, js=SHORTCUT_JS)
+
+        # The banner's two ways out of an empty Chat page: fetch the default
+        # model, or go and choose one. Both open Models, because that is
+        # where the download reports its progress.
+        rescan(
+            default_model_button.click(
+                start_default_model, None, [model_id, nav]
+            ).then(setup_default_model, hf_token, model_status)
+        )
+        browse_models_button.click(open_models_page, None, nav)
         # .input rather than .change: the refresh above also sets the radio,
         # and a .change listener would rewrite the model ID box on each rescan.
         my_models.input(select_my_model, my_models, [model_id, my_model_detail])
@@ -3774,9 +4224,11 @@ def build_app() -> gr.Blocks:
         # asked for, so changing the selection withdraws it.
         confirm_outputs = [remove_confirm, pending_removal]
         my_models.input(hide_remove_confirm, None, confirm_outputs)
-        redownload_button.click(
-            redownload_my_model, [my_models, hf_token], model_status
-        ).then(refresh_my_models, models_inputs, models_outputs)
+        rescan(
+            redownload_button.click(
+                redownload_my_model, [my_models, hf_token], model_status
+            )
+        )
         remove_button.click(
             ask_remove_my_model,
             my_models,
@@ -3784,9 +4236,11 @@ def build_app() -> gr.Blocks:
         )
         # The confirm button deletes the model the question named, never the
         # radio's current value: see ask_remove_my_model.
-        confirm_remove_button.click(
-            remove_my_model, pending_removal, [model_status, *confirm_outputs]
-        ).then(refresh_my_models, models_inputs, models_outputs)
+        rescan(
+            confirm_remove_button.click(
+                remove_my_model, pending_removal, [model_status, *confirm_outputs]
+            )
+        )
         cancel_remove_button.click(hide_remove_confirm, None, confirm_outputs)
 
         search_outputs = [search_results, search_detail, search_results_state]
@@ -3798,6 +4252,32 @@ def build_app() -> gr.Blocks:
             [model_id, search_detail],
         )
         enter_sends.change(set_message_box_keys, enter_sends, prompt)
+
+        # The sampling accordion wears its own values. On release rather than
+        # on change: a slider fires continuously while it is being dragged,
+        # and the label only has to be right once it is let go.
+        sampling_controls = [temperature, top_p, top_k, max_new_tokens]
+        for control in sampling_controls:
+            control.release(
+                update_sampling_label,
+                sampling_controls,
+                sampling_accordion,
+                show_progress="hidden",
+            )
+
+        # The scored token count follows the boxes as they are typed into.
+        # always_last coalesces a burst of keystrokes into the one count that
+        # matters, and the progress bar is hidden because a spinner on every
+        # keystroke would be worse than the number is good.
+        score_budget_inputs = [score_context, score_input, use_chat_template]
+        for control in score_budget_inputs:
+            control.change(
+                score_token_count,
+                score_budget_inputs,
+                score_budget,
+                trigger_mode="always_last",
+                show_progress="hidden",
+            )
 
         settings_inputs = [
             system_prompt,
@@ -3911,7 +4391,16 @@ def build_app() -> gr.Blocks:
             undo_outputs,
             cancels=running,
         )
+        # Clear asks before it takes anything, so the button that opens the
+        # question does nothing else - it neither clears nor cancels. The
+        # confirm button is the one that does both.
         clear_button.click(
+            ask_clear_chat,
+            [conversation_state, forks_state],
+            [generation_status, clear_confirm, clear_question],
+        )
+        cancel_clear_button.click(hide_clear_confirm, None, clear_confirm)
+        confirm_clear_button.click(
             clear_chat,
             inputs=color_scale,
             outputs=[
@@ -3932,6 +4421,7 @@ def build_app() -> gr.Blocks:
                 trace_state,
                 forks_state,
                 conversation_list,
+                clear_confirm,
             ],
             cancels=running,
         )

@@ -1,3 +1,4 @@
+import html
 import threading
 import time
 import unittest
@@ -624,3 +625,299 @@ class DownloadStatusTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MetricGlossaryTests(unittest.TestCase):
+    """Every measurement in the detail panel says what it is on hover.
+
+    The names mean nothing on first reading, and the README that explains
+    them is not where the reader is. Attaching the sentence to the name puts
+    the answer where the question is - including for a screen reader, which
+    reads an ``abbr`` title out.
+    """
+
+    def scored(self) -> dict:
+        log_probs = np.log(np.array([0.75, 0.25]))
+        return build_metric(
+            position=1,
+            token_id=0,
+            token_text="a",
+            fallback_text="a",
+            raw_log_probabilities=log_probs,
+            sampled_probabilities=np.exp(log_probs),
+            decode_token=str,
+        ).to_dict()
+
+    def test_each_measurement_carries_its_meaning(self):
+        detail, _rows = app.describe_token(self.scored())
+
+        for name, meaning in app.METRIC_GLOSSARY.items():
+            with self.subTest(metric=name):
+                self.assertIn(f">{name}</abbr>", detail)
+                # Escaped once, into an attribute: an apostrophe in a
+                # sentence must not be able to close it.
+                self.assertIn(html.escape(meaning, quote=True), detail)
+
+    def test_a_meaning_with_a_quote_in_it_stays_inside_the_attribute(self):
+        # The sentences are written by hand today, but they are strings in a
+        # dict; a quotation mark in one would otherwise end the attribute
+        # early and spill the rest into the markup.
+        with mock.patch.dict(
+            app.METRIC_GLOSSARY, {"Surprise": 'the "surprise" of it'}, clear=False
+        ):
+            self.assertEqual(
+                app.metric_term("Surprise"),
+                '<abbr title="the &quot;surprise&quot; of it">Surprise</abbr>',
+            )
+
+    def test_an_unscored_token_says_why_instead_of_listing_measurements(self):
+        detail, _rows = app.describe_token(
+            unscored_metric(
+                position=1, token_id=7, token_text="<s>", fallback_text="<s>"
+            ).to_dict()
+        )
+
+        self.assertNotIn("<abbr", detail)
+
+
+class HintTests(unittest.TestCase):
+    """The panels' explanations fold to one line."""
+
+    def test_a_hint_is_a_disclosure_that_starts_closed(self):
+        folded = app.hint("What branching does", "It keeps the response.")
+
+        self.assertTrue(folded.startswith('<details class="hint">'))
+        self.assertNotIn("open", folded[: folded.index(">") + 1])
+        self.assertIn("<summary>What branching does</summary>", folded)
+        self.assertIn("It keeps the response.", folded)
+
+
+class SamplingSummaryTests(unittest.TestCase):
+    """The sampling accordion wears its own values, so it reads without opening."""
+
+    def test_the_summary_names_every_knob_behind_it(self):
+        summary = app.sampling_label(0.8, 0.95, 50, 1024)
+
+        self.assertIn("temperature 0.8", summary)
+        self.assertIn("top-p 0.95", summary)
+        self.assertIn("top-k 50", summary)
+        self.assertIn("1,024 new tokens", summary)
+
+    def test_a_disabled_top_k_is_left_out_rather_than_shown_as_zero(self):
+        # "top-k 0" reads as a setting of zero, which is the opposite of what
+        # it means: zero is the control switched off.
+        summary = app.sampling_label(1.0, 1.0, 0, 256)
+
+        self.assertNotIn("top-k", summary)
+        self.assertIn("temperature 1", summary)
+
+    def test_the_summary_is_an_accordion_label_update(self):
+        self.assertEqual(
+            app.update_sampling_label(0.8, 0.95, 50, 1024),
+            {"label": app.sampling_label(0.8, 0.95, 50, 1024), "__type__": "update"},
+        )
+
+
+class ScoreBudgetTests(unittest.TestCase):
+    """The count under the Score text box, which turns a refusal into a number."""
+
+    class Counting:
+        loaded = True
+
+        def __init__(self, answer):
+            self.answer = answer
+            self.asked = []
+
+        def count_score_tokens(self, text, *, context="", use_chat_template=False):
+            self.asked.append((text, context, use_chat_template))
+            return self.answer
+
+    def budget(self, manager, context="", text="some text", template=False) -> str:
+        original = app.MANAGER
+        app.MANAGER = manager
+        try:
+            return app.score_token_count(context, text, template)
+        finally:
+            app.MANAGER = original
+
+    def test_an_empty_box_is_not_counted_at_all(self):
+        counting = self.Counting((0, 4096))
+
+        self.assertEqual(self.budget(counting, text=""), app.SCORE_COUNT_HINT)
+        self.assertEqual(counting.asked, [])
+
+    def test_a_passage_within_the_limit_reads_as_a_fraction_of_it(self):
+        self.assertEqual(self.budget(self.Counting((1200, 4096))), "1,200 of 4,096 tokens.")
+
+    def test_a_passage_over_the_limit_says_so_before_the_press(self):
+        budget = self.budget(self.Counting((5000, 4096)))
+
+        self.assertIn("failure-text", budget)
+        self.assertIn("5,000 tokens, above the 4,096", budget)
+        self.assertIn("smaller pieces", budget)
+
+    def test_a_count_that_cannot_be_had_says_so_rather_than_guessing(self):
+        # No model, or one mid-response. A wrong number would be worse than
+        # none: the whole point of the line is that it matches the check.
+        self.assertEqual(self.budget(self.Counting(None)), app.SCORE_COUNT_UNKNOWN)
+
+    def test_the_count_is_asked_for_exactly_what_would_be_scored(self):
+        counting = self.Counting((10, 4096))
+
+        self.budget(counting, context="before", text="passage", template=True)
+
+        self.assertEqual(counting.asked, [("passage", "before", True)])
+
+
+class ClearConfirmationTests(unittest.TestCase):
+    """Clear deletes every conversation, so it asks first.
+
+    It sits one button away from Undo and looks the same, and nothing brings
+    the conversations back. Removing a model from disk already asks; this is
+    the same question about the same kind of loss.
+    """
+
+    def forks(self, *names) -> dict:
+        branches = {"Main": [], **{name: [] for name in names}}
+        return {"active": "Main", "branches": branches}
+
+    def turns(self) -> list[dict]:
+        return [{"role": "user", "content": "hello"}]
+
+    def test_an_empty_app_has_nothing_to_clear_and_asks_nothing(self):
+        status, panel, question = app.ask_clear_chat([], self.forks())
+
+        self.assertEqual(status, app.NOTHING_TO_CLEAR)
+        self.assertEqual(panel, {"visible": False, "__type__": "update"})
+        self.assertEqual(question, "")
+
+    def test_the_question_counts_the_other_conversations_it_would_take(self):
+        _status, panel, question = app.ask_clear_chat(
+            self.turns(), self.forks("Fork 1", "Fork 2")
+        )
+
+        self.assertEqual(panel, {"visible": True, "__type__": "update"})
+        self.assertIn("2 others", question)
+        self.assertIn("cannot be undone", question)
+        # And points at the control that takes only this one.
+        self.assertIn("Delete", question)
+
+    def test_one_other_conversation_is_named_in_the_singular(self):
+        _status, _panel, question = app.ask_clear_chat(
+            self.turns(), self.forks("Fork 1")
+        )
+
+        self.assertIn("1 other?", question)
+
+    def test_a_lone_conversation_is_described_without_a_count(self):
+        _status, _panel, question = app.ask_clear_chat(self.turns(), self.forks())
+
+        self.assertIn("the conversation on screen?", question)
+        self.assertNotIn("other", question)
+
+    def test_asking_never_clears_anything(self):
+        # The question is the whole of what the Clear button does. Nothing in
+        # this handler touches the conversation, so a reader who opens it and
+        # walks away still has everything.
+        turns = self.turns()
+        forks = self.forks("Fork 1")
+
+        app.ask_clear_chat(turns, forks)
+
+        self.assertEqual(turns, self.turns())
+        self.assertEqual(forks, self.forks("Fork 1"))
+
+    def test_confirming_clears_and_closes_the_question(self):
+        result = app.clear_chat()
+
+        self.assertEqual(result[-1], {"visible": False, "__type__": "update"})
+        self.assertEqual(result[0], [])
+
+    def test_cancelling_only_closes_the_question(self):
+        self.assertEqual(app.hide_clear_confirm(), {"visible": False, "__type__": "update"})
+
+
+class ModelBannerTests(unittest.TestCase):
+    """The Chat page's way out of having no model.
+
+    Until one is loaded nothing on the page does anything, and the only route
+    to a model was an icon in a pane at the far left. The banner says so where
+    the reader already is, and offers the default model in one press.
+    """
+
+    class Loaded:
+        loaded = True
+
+    class Empty:
+        loaded = False
+
+    def banner(self, manager, cached: bool):
+        original = app.MANAGER
+        app.MANAGER = manager
+        try:
+            with mock.patch.object(app, "default_model_cached", return_value=cached):
+                return app.model_banner()
+        finally:
+            app.MANAGER = original
+
+    def test_a_loaded_model_takes_the_banner_away(self):
+        visible, _text, _label = self.banner(self.Loaded(), cached=True)
+
+        self.assertEqual(visible, {"visible": False, "__type__": "update"})
+
+    def test_an_uncached_default_offers_a_download_and_says_how_large(self):
+        visible, text, label = self.banner(self.Empty(), cached=False)
+
+        self.assertEqual(visible, {"visible": True, "__type__": "update"})
+        self.assertIn("No model is loaded", text)
+        self.assertIn(app.DEFAULT_MODEL, text)
+        self.assertIn(app.DEFAULT_MODEL_DOWNLOAD, text)
+        # The size belongs on the button too: that is what gets pressed.
+        self.assertIn(app.DEFAULT_MODEL_DOWNLOAD, label["value"])
+        self.assertIn("Download", label["value"])
+
+    def test_a_cached_default_offers_a_load_instead(self):
+        _visible, text, label = self.banner(self.Empty(), cached=True)
+
+        self.assertIn("already in your Hugging Face cache", text)
+        self.assertIn("Load", label["value"])
+        self.assertNotIn(app.DEFAULT_MODEL_DOWNLOAD, label["value"])
+
+    def test_the_default_button_cannot_be_redirected_by_the_id_box(self):
+        # The chain writes DEFAULT_MODEL into the ID box and then downloads,
+        # but it takes the ID from the constant rather than reading the box
+        # back, so a box edited in between cannot send it elsewhere.
+        with mock.patch.object(app, "download_and_load_model") as fetch:
+            fetch.return_value = iter([])
+            list(app.setup_default_model("token"))
+
+        fetch.assert_called_once_with(app.DEFAULT_MODEL, "token")
+
+    def test_setting_up_the_default_model_opens_the_page_that_reports_on_it(self):
+        model_id, nav = app.start_default_model()
+
+        self.assertEqual(model_id, app.DEFAULT_MODEL)
+        self.assertEqual(nav, {"value": app.MODELS_PAGE, "__type__": "update"})
+        self.assertEqual(app.open_models_page(), nav)
+
+    def test_a_cache_that_cannot_be_read_is_treated_as_no_cache(self):
+        # The banner is a courtesy; an unreadable cache should make it offer
+        # the download rather than raise on the Chat page's first paint.
+        with mock.patch.object(app, "cache_status", side_effect=OSError("nope")):
+            self.assertFalse(app.default_model_cached())
+        with mock.patch.object(app, "cache_status", side_effect=ValueError("nope")):
+            self.assertFalse(app.default_model_cached())
+
+    def test_a_partly_downloaded_default_is_not_offered_as_loadable(self):
+        with mock.patch.object(
+            app, "cache_status", return_value=CacheStatus(cached_bytes=1, missing_files=("x",))
+        ):
+            self.assertFalse(app.default_model_cached())
+        with mock.patch.object(
+            app, "cache_status", return_value=CacheStatus(cached_bytes=1, unsupported=True)
+        ):
+            self.assertFalse(app.default_model_cached())
+        with mock.patch.object(
+            app, "cache_status", return_value=CacheStatus(cached_bytes=1)
+        ):
+            self.assertTrue(app.default_model_cached())

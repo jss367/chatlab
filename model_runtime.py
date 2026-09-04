@@ -3098,6 +3098,55 @@ class ModelManager:
                     outputs.logits[0, -1].detach().float().cpu().numpy()
                 )
 
+    def count_score_tokens(
+        self,
+        text: str,
+        *,
+        context: str = "",
+        use_chat_template: bool = False,
+    ) -> tuple[int, int] | None:
+        """How many tokens :meth:`score_text` would measure, and its limit.
+
+        ``None`` where the count cannot be had at this instant: nothing is
+        loaded, the model lock is held, or the tokenizer refuses the text.
+        The lock is taken without blocking on purpose. This answers a box
+        being typed into, and waiting behind a running generation would hang
+        the keystroke rather than the number; a caller with no answer says so
+        and asks again on the next one.
+
+        A tokenizer that refuses the passage outright is one of those "not
+        now" cases rather than a failure to report: pressing **Score text**
+        runs the same encoding and explains what went wrong properly, and a
+        half-typed passage is not yet worth complaining about.
+        """
+
+        if not self.loaded:
+            return None
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            if not self.loaded:
+                return None
+            limit = score_token_limit(self.model)
+            if not text:
+                return 0, limit
+            split = encode_for_scoring(
+                self.tokenizer,
+                text,
+                context=context,
+                use_chat_template=use_chat_template,
+            )
+            if not split.text_ids:
+                # Text that tokenizes to nothing is what score_text refuses,
+                # and reporting it as a confident zero would read as room to
+                # spare rather than as the refusal it is.
+                return None
+            return len(split.context_ids) + len(split.text_ids), limit
+        except Exception:
+            return None
+        finally:
+            self._lock.release()
+
     @_guards_device_memory
     def score_text(
         self,

@@ -930,16 +930,23 @@ class PageLayoutTests(unittest.TestCase):
     ON_SETTINGS_PAGE = [
         "System prompt",
         "Send previous reasoning back to the model",
+        "Measure prompt tokens",
+        "Enter sends the message",
+    ]
+    # Sampling sits with the conversation, not behind the nav: these are what
+    # a reader moves between one retry and the next.
+    ON_CHAT_PAGE = [
+        "Conversation",
+        "Message",
+        "Color tokens by",
+        "Text to score",
         "Temperature",
         "Top-p",
         "Top-k (0 disables)",
         "Maximum new tokens",
         "Random seed",
         "🎲 New seed each response",
-        "Measure prompt tokens",
-        "Enter sends the message",
     ]
-    ON_CHAT_PAGE = ["Conversation", "Message", "Color tokens by", "Text to score"]
 
     def setUp(self):
         self.demo = app.build_app()
@@ -992,23 +999,30 @@ class PageLayoutTests(unittest.TestCase):
         self.assertTrue(self.demo.fill_width)
 
     def test_the_nav_pane_is_thin(self):
-        self.assertLessEqual(app.NAV_PANE_WIDTH, 64)
+        # Wide enough for the longest page name at the tile's small type,
+        # and no wider: the pane is a signpost, not a sidebar.
+        self.assertLessEqual(app.NAV_PANE_WIDTH, 96)
         self.assertEqual(self.by_id("nav-pane").min_width, app.NAV_PANE_WIDTH)
 
-    def test_each_nav_tile_shows_an_icon_and_names_itself_on_hover(self):
+    def test_each_nav_tile_shows_an_icon_above_the_page_name(self):
         for page in app.PAGES:
             with self.subTest(page=page):
                 tile = f'#nav label[data-testid="{page}-radio-label"]'
-                # The empty alternative text keeps the icon and the tooltip
-                # out of what a screen reader reads for the tile.
+                # The empty alternative text keeps the icon out of what a
+                # screen reader reads; the label's own text stands for the
+                # tile, and is now printed under the icon rather than hidden.
                 self.assertIn(
                     f'{tile}::before {{ content: "{app.NAV_ICONS[page]}" / ""; }}',
                     app.CSS,
                 )
-                self.assertIn(f"{tile}:hover::after", app.CSS)
-                self.assertIn(f'{{ content: "{page}" / ""; }}', app.CSS)
-        # The name stays on the tile, out of sight, for the browser to read out.
-        self.assertIn("#nav label span {", app.CSS)
+        self.assertIn("#nav label span { font-size:", app.CSS)
+
+    def test_the_nav_names_are_on_screen_rather_than_a_hover_away(self):
+        # Three pages is not a number worth hiding. Nothing clips the name
+        # out of sight, and no tooltip stands in for it.
+        self.assertNotIn("clip-path: inset(50%)", app.CSS)
+        self.assertNotIn("#nav label::after", app.CSS)
+        self.assertNotIn(":hover::after", app.CSS)
 
     def test_only_the_chat_page_starts_visible(self):
         self.assertTrue(self.by_id("chat-page").visible)
@@ -1041,11 +1055,26 @@ class PageLayoutTests(unittest.TestCase):
             if getattr(fn.fn, "__name__", None) == name
         ]
 
+    def cancelled_by(self, trigger) -> set:
+        """Event indices cancelled by anything bound to ``trigger``.
+
+        Gradio records a listener's ``cancels`` against the target rather
+        than the handler, so this reads every function on that target.
+        """
+
+        return {
+            index
+            for fn in self.demo.fns.values()
+            if fn.targets == [trigger]
+            for index in fn.cancels
+        }
+
     def test_every_model_change_rescans_the_cache(self):
         # Download, download-and-load, load cached, unload, redownload,
-        # confirmed removal, the refresh button, a new sort order, and the
-        # page load: each ends in a rescan.
-        self.assertEqual(len(self.listeners("refresh_my_models")), 9)
+        # confirmed removal, the banner's own setup of the default model,
+        # the refresh button, a new sort order, and the page load: each ends
+        # in a rescan.
+        self.assertEqual(len(self.listeners("refresh_my_models")), 10)
 
     def test_removal_asks_before_deleting(self):
         # The Remove button only opens the question; deleting is the
@@ -1072,6 +1101,148 @@ class PageLayoutTests(unittest.TestCase):
         self.assertIsNot(pending, radio)
         self.assertIn(pending, ask.outputs)
         self.assertIn(pending, remove.outputs)
+
+    def test_clear_asks_before_it_takes_every_conversation(self):
+        # Clear reaches past the conversation on screen: it deletes every
+        # other one too, and nothing brings them back. The button only opens
+        # the question; the confirm button is the one that clears, and so the
+        # only one that cancels the running generators.
+        (ask,) = self.listeners("ask_clear_chat")
+        (clear,) = self.listeners("clear_chat")
+        (cancel,) = self.listeners("hide_clear_confirm")
+        buttons = {
+            self.demo.blocks[block_id].value: fn
+            for fn in (ask, clear, cancel)
+            for block_id, _ in fn.targets
+        }
+        self.assertIs(buttons["🗑️ Clear all"], ask)
+        self.assertIs(buttons["Clear everything"], clear)
+        self.assertIs(buttons["Cancel"], cancel)
+        # Cancelling is recorded against the target rather than the handler,
+        # so it is read the way ClearCancelsGenerationTests reads it.
+        self.assertFalse(self.cancelled_by(ask.targets[0]))
+        self.assertTrue(self.cancelled_by(clear.targets[0]))
+
+    def test_the_clear_button_is_named_for_everything_it_takes(self):
+        # "Clear" alone reads as emptying the chat on screen, which is what
+        # Delete does. This one takes the lot.
+        (ask,) = self.listeners("ask_clear_chat")
+        ((block_id, _),) = ask.targets
+
+        self.assertEqual(self.demo.blocks[block_id].value, "🗑️ Clear all")
+
+    def test_the_banner_offers_a_model_from_the_page_that_needs_one(self):
+        # Chat is where a reader lands and until a model is loaded nothing on
+        # it works, so the way out is on that page rather than behind an icon
+        # in the nav.
+        banner = self.by_id("model-banner")
+
+        self.assertFalse(banner.visible)
+        self.assertTrue(self.within(banner, self.by_id("chat-page")))
+        (setup,) = self.listeners("start_default_model")
+        (browse,) = self.listeners("open_models_page")
+        for fn in (setup, browse):
+            with self.subTest(handler=fn.fn.__name__):
+                ((block_id, _),) = fn.targets
+                self.assertTrue(self.within(self.demo.blocks[block_id], banner))
+        # Both open Models, which is where the download reports its progress.
+        self.assertIn(self.by_id("nav"), setup.outputs)
+        self.assertEqual(browse.outputs, [self.by_id("nav")])
+
+    def test_the_banner_is_re_read_whenever_it_could_have_changed(self):
+        # Whether a model is loaded, and whether the default one is on disk,
+        # are exactly what the model handlers change - and navigating back to
+        # Chat is the other moment the banner could be stale.
+        listeners = self.listeners("model_banner")
+        outputs = {tuple(fn.outputs) for fn in listeners}
+
+        self.assertEqual(len(outputs), 1, "the banner is published one way")
+        self.assertEqual(outputs.pop()[0], self.by_id("model-banner"))
+        # Every rescan but the sort, which reorders a list and changes
+        # neither what is on disk nor what is in memory, plus the nav.
+        self.assertEqual(len(listeners), len(self.listeners("refresh_my_models")))
+        sort_by = self.labelled("Sort by")
+        rescans = {fn.targets[0][0] for fn in self.listeners("refresh_my_models")}
+        self.assertIn(sort_by._id, rescans, "sorting still rescans the list")
+        self.assertNotIn(sort_by._id, {fn.targets[0][0] for fn in listeners})
+
+    def test_escape_is_wired_to_the_stop_button_by_its_id(self):
+        # The shortcut presses the button rather than reaching past it, so
+        # whatever Stop does, Escape does. It needs the id to find it.
+        stop = next(
+            block
+            for block in self.demo.blocks.values()
+            if getattr(block, "value", None) == "Stop"
+        )
+
+        self.assertEqual(stop.elem_id, "stop-button")
+        self.assertIn("#stop-button", app.SHORTCUT_JS)
+        self.assertIn("offsetParent", app.SHORTCUT_JS)
+        self.assertTrue(
+            any(fn.js == app.SHORTCUT_JS for fn in self.demo.fns.values()),
+            "nothing attaches the keyboard shortcut on load",
+        )
+
+    def test_the_sampling_accordion_starts_showing_its_own_defaults(self):
+        # The summary is only worth having if it is right before anything is
+        # touched, which means the label and the sliders read one set of
+        # numbers rather than two that can drift apart.
+        accordion = next(
+            block
+            for block in self.demo.blocks.values()
+            if isinstance(block, gr.Accordion) and block.label.startswith("Sampling")
+        )
+
+        self.assertEqual(
+            accordion.label,
+            app.sampling_label(
+                app.DEFAULT_TEMPERATURE,
+                app.DEFAULT_TOP_P,
+                app.DEFAULT_TOP_K,
+                app.DEFAULT_MAX_NEW_TOKENS,
+            ),
+        )
+        for label, value in [
+            ("Temperature", app.DEFAULT_TEMPERATURE),
+            ("Top-p", app.DEFAULT_TOP_P),
+            ("Top-k (0 disables)", app.DEFAULT_TOP_K),
+            ("Maximum new tokens", app.DEFAULT_MAX_NEW_TOKENS),
+        ]:
+            with self.subTest(control=label):
+                self.assertEqual(self.labelled(label).value, value)
+                self.assertTrue(self.within(self.labelled(label), accordion))
+
+    def test_the_sampling_summary_follows_the_sliders_on_release(self):
+        # A slider fires continuously while it is dragged; the label only has
+        # to be right once it is let go.
+        listeners = self.listeners("update_sampling_label")
+        sliders = [
+            self.labelled(label)
+            for label in ("Temperature", "Top-p", "Top-k (0 disables)", "Maximum new tokens")
+        ]
+
+        self.assertEqual(len(listeners), len(sliders))
+        for fn in listeners:
+            ((block_id, event),) = fn.targets
+            with self.subTest(slider=self.demo.blocks[block_id].label):
+                self.assertEqual(event, "release")
+                self.assertEqual(fn.inputs, sliders)
+
+    def test_the_scored_token_count_follows_every_box_that_feeds_it(self):
+        # The count has to match what would actually be scored, so a change
+        # to the context or the chat-template box moves it too.
+        boxes = [
+            self.labelled("Context (optional)"),
+            self.labelled("Text to score"),
+            self.labelled("Treat the context as a chat message"),
+        ]
+        listeners = self.listeners("score_token_count")
+
+        self.assertEqual(len(listeners), len(boxes))
+        for fn in listeners:
+            self.assertEqual(fn.inputs, boxes)
+            # Coalesced, so a burst of keystrokes costs one count.
+            self.assertEqual(fn.trigger_mode, "always_last")
 
     def test_choosing_a_model_writes_the_id_box(self):
         box = self.labelled("Hugging Face model ID")
