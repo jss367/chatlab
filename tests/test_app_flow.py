@@ -1,4 +1,5 @@
 import inspect
+import os
 import stat
 import unittest
 from dataclasses import replace
@@ -1119,7 +1120,10 @@ class SaveLoadTests(unittest.TestCase):
     def test_a_saved_conversation_is_readable_by_its_owner_alone(self):
         # The upload folder is shared - on Linux it is /tmp/gradio, which every
         # account on the machine can read - and a transcript is the reader's own
-        # writing. write_trace_export() narrows its export the same way.
+        # writing. write_trace_export() writes its export the same way. The
+        # permissive umask stands in for a host that would otherwise have let
+        # the file be created world-readable.
+        self.addCleanup(os.umask, os.umask(0))
         update, _status = app.save_conversation([make_turn("user", "hi")], "")
 
         mode = Path(update["value"]).stat().st_mode

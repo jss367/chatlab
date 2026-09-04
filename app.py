@@ -69,7 +69,7 @@ from token_metrics import (
     category_for,
     summarize,
 )
-from trace_export import build_trace, write_trace_export
+from trace_export import build_trace, write_private_text, write_trace_export
 
 logger = logging.getLogger(__name__)
 
@@ -2771,11 +2771,12 @@ def save_conversation(turns, system_prompt):
     # path and silently overwriting each other's download.
     stamp = time.strftime("%Y%m%d-%H%M%S")
     path = directory / f"conversation-{stamp}-{uuid4().hex[:8]}.json"
-    path.write_text(to_json(turns, system_prompt=system_prompt), encoding="utf-8")
     # A transcript is the reader's own writing, and the upload folder is shared:
     # on Linux it is /tmp/gradio, which every account on the machine can read.
-    # write_trace_export() narrows its export for the same reason.
-    path.chmod(0o600)
+    # write_private_text() makes the file owner-only before it holds a word of
+    # the conversation, so there is no moment for another account to open it.
+    # write_trace_export() writes its export the same way.
+    write_private_text(path, to_json(turns, system_prompt=system_prompt))
     return (
         gr.update(value=str(path), visible=True),
         f"Saved {len(turns)} message{'s' if len(turns) != 1 else ''}.",
