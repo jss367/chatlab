@@ -1036,8 +1036,9 @@ class ScoreBudgetTests(unittest.TestCase):
     class Counting:
         loaded = True
 
-        def __init__(self, answer):
+        def __init__(self, answer, load_id="stub/model#1"):
             self.answer = answer
+            self.load_id = load_id
             self.asked = []
 
         def count_score_tokens(self, text, *, context="", use_chat_template=False):
@@ -1048,7 +1049,21 @@ class ScoreBudgetTests(unittest.TestCase):
         original = app.MANAGER
         app.MANAGER = manager
         try:
-            return app.score_token_count(context, text, template)
+            shown, _load_id = app.score_token_count(context, text, template)
+            return shown
+        finally:
+            app.MANAGER = original
+
+    def test_the_count_travels_with_the_load_it_was_counted_against(self):
+        # A tokenizer belongs to the weights in memory, so a number counted
+        # under one load says nothing about the next.
+        original = app.MANAGER
+        app.MANAGER = self.Counting((12, 4096), load_id="stub/model#7")
+        try:
+            self.assertEqual(
+                app.score_token_count("", "some text", False),
+                ("12 of 4,096 tokens.", "stub/model#7"),
+            )
         finally:
             app.MANAGER = original
 
@@ -1093,29 +1108,57 @@ class ScoreBudgetRecoveryTests(unittest.TestCase):
     class Counting:
         loaded = True
 
-        def __init__(self, answer):
+        def __init__(self, answer, load_id="stub/model#1"):
             self.answer = answer
+            self.load_id = load_id
             self.asked = 0
 
         def count_score_tokens(self, text, *, context="", use_chat_template=False):
             self.asked += 1
             return self.answer
 
-    def recover(self, manager, shown):
+    def recover(self, manager, shown, counted_load="stub/model#1"):
         original = app.MANAGER
         app.MANAGER = manager
         try:
-            return app.recover_score_budget(shown, "", "some text", False)
+            return app.recover_score_budget(
+                shown, counted_load, "", "some text", False
+            )
         finally:
             app.MANAGER = original
 
     def test_a_count_that_is_stuck_is_recomputed(self):
         counting = self.Counting((12, 4096))
 
-        recovered = self.recover(counting, app.SCORE_COUNT_UNKNOWN)
+        recovered, load_id = self.recover(counting, app.SCORE_COUNT_UNKNOWN)
 
         self.assertEqual(recovered, "12 of 4,096 tokens.")
+        self.assertEqual(load_id, "stub/model#1")
         self.assertEqual(counting.asked, 1)
+
+    def test_a_model_swapped_out_from_another_tab_is_recounted(self):
+        # The handlers that recompute on a load or an unload only reach the
+        # tab that asked. This tab would otherwise go on advertising a number
+        # counted under the old tokenizer, against the old context limit,
+        # under the new model's badge.
+        counting = self.Counting((12, 512), load_id="other/model#1")
+
+        recovered, load_id = self.recover(
+            counting, "99 of 4,096 tokens.", counted_load="stub/model#1"
+        )
+
+        self.assertEqual(recovered, "12 of 512 tokens.")
+        self.assertEqual(load_id, "other/model#1")
+
+    def test_an_unloaded_model_takes_the_count_down(self):
+        counting = self.Counting(None, load_id=None)
+
+        recovered, load_id = self.recover(
+            counting, "99 of 4,096 tokens.", counted_load="stub/model#1"
+        )
+
+        self.assertEqual(recovered, app.SCORE_COUNT_UNKNOWN)
+        self.assertIsNone(load_id)
 
     def test_a_count_that_is_fine_is_not_asked_for_again(self):
         # This runs every couple of seconds, so the ordinary case must not
@@ -1124,7 +1167,9 @@ class ScoreBudgetRecoveryTests(unittest.TestCase):
 
         for shown in ("12 of 4,096 tokens.", app.SCORE_COUNT_HINT, ""):
             with self.subTest(shown=shown):
-                self.assertEqual(self.recover(counting, shown), gr.skip())
+                self.assertEqual(
+                    self.recover(counting, shown), (gr.skip(), gr.skip())
+                )
         self.assertEqual(counting.asked, 0)
 
     def test_a_count_that_is_still_stuck_publishes_nothing(self):
@@ -1133,7 +1178,10 @@ class ScoreBudgetRecoveryTests(unittest.TestCase):
         counting = self.Counting(None)
 
         self.assertEqual(
-            self.recover(counting, app.SCORE_COUNT_UNKNOWN), gr.skip()
+            self.recover(
+                counting, app.SCORE_COUNT_UNKNOWN, counted_load=counting.load_id
+            ),
+            (gr.skip(), gr.skip()),
         )
 
     def test_recovery_reads_the_boxes_it_would_score(self):
@@ -1145,8 +1193,8 @@ class ScoreBudgetRecoveryTests(unittest.TestCase):
             if getattr(fn.fn, "__name__", None) == "recover_score_budget"
         ]
 
-        self.assertEqual(len(listener.inputs), 4)
-        self.assertEqual(listener.outputs, [listener.inputs[0]])
+        self.assertEqual(len(listener.inputs), 5)
+        self.assertEqual(listener.outputs, listener.inputs[:2])
         self.assertEqual(listener.show_progress, "hidden")
 
 

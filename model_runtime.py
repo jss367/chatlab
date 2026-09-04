@@ -6,6 +6,7 @@ import contextlib
 import functools
 import gc
 import json
+import logging
 import os
 import re
 import shutil
@@ -32,6 +33,8 @@ from token_metrics import (
     sampling_probabilities,
     unscored_metric,
 )
+
+logger = logging.getLogger(__name__)
 
 # Prefill runs in chunks so a long prompt never materializes a
 # sequence-length by vocabulary logit tensor all at once.
@@ -80,11 +83,20 @@ DTYPE_BYTES = {
     "uint8": 1,
 }
 
-# Share of Metal's recommended working set that PyTorch may allocate before it
-# raises an out-of-memory error instead of letting macOS page the machine into
-# a freeze. PyTorch's own default is 1.7, well past physical memory.
+# How much a model may hold on Metal before PyTorch raises an out-of-memory
+# error instead of letting macOS page the machine into a freeze. PyTorch's own
+# ceiling is 1.7 times Metal's recommended working set, well past physical
+# memory; Metal's recommendation on its own is still most of the machine, 37.4
+# GiB of a 48 GB Mac, and a process that big leaves the window server, the
+# browser and the editor paging to disk. Half the machine is the default here,
+# which still holds a 7B model with a long conversation. Overriding the share
+# directly is what the environment variable is for: it names a fraction of
+# Metal's recommendation, the same units PyTorch takes.
+DEFAULT_MPS_MEMORY_SHARE = 0.5
 MPS_MEMORY_FRACTION_ENV = "CHATLAB_MPS_MEMORY_FRACTION"
-DEFAULT_MPS_MEMORY_FRACTION = 1.0
+# Used when the machine's size or Metal's recommendation cannot be read: half
+# of whatever Metal offers, which errs the same way.
+FALLBACK_MPS_MEMORY_FRACTION = 0.5
 # PyTorch reads this itself; when the user has set it, their choice stands.
 TORCH_MPS_WATERMARK_ENV = "PYTORCH_MPS_HIGH_WATERMARK_RATIO"
 
@@ -493,10 +505,8 @@ def estimate_loaded_bytes(
 def system_memory() -> tuple[int | None, int | None]:
     """Total and currently available physical memory in bytes, where known.
 
-    macOS reports availability through ``memory_pressure``, which accounts for
-    compression and file cache the way the kernel does; ``vm_stat`` is the
-    fallback. Linux reads ``MemAvailable``. Either figure is ``None`` when
-    the platform offers nothing usable.
+    macOS is read from ``vm_stat``; Linux reads ``MemAvailable``. Either
+    figure is ``None`` when the platform offers nothing usable.
     """
 
     total: int | None = None
@@ -506,7 +516,7 @@ def system_memory() -> tuple[int | None, int | None]:
         total = None
     available: int | None = None
     if sys.platform == "darwin":
-        available = _darwin_available_memory(total)
+        available = _darwin_available_memory()
     elif sys.platform.startswith("linux"):
         try:
             for line in Path("/proc/meminfo").read_text().splitlines():
@@ -527,28 +537,95 @@ def _run_quietly(command: list[str]) -> str:
         return ""
 
 
-def _darwin_available_memory(total: int | None) -> int | None:
-    match = re.search(
-        r"System-wide memory free percentage:\s*(\d+)%", _run_quietly(["memory_pressure"])
-    )
-    if match and total is not None:
-        return total * int(match.group(1)) // 100
+def _darwin_available_memory() -> int | None:
+    """Memory a load can take without pushing the machine into swap.
+
+    ``vm_stat``'s counters are not a partition, so the arithmetic here is
+    chosen to never claim a page twice and never claim one that needs swap.
+    Three of them are disjoint and count in full:
+
+    - ``Pages free``, which is nobody's.
+    - ``Pages speculative``, the read-ahead cache, its own queue.
+    - ``Pages purgeable``, which the kernel may throw away on demand. These
+      sit inside the active and inactive queues rather than beside them, but
+      purgeable memory is anonymous, so they do not overlap the file-page
+      credit below.
+
+    The inactive queue is the hard one. It mixes file pages, which are
+    reclaimed without touching swap, with dirty anonymous pages, which are
+    reclaimed by writing them out - the storm this figure exists to prevent.
+    Counting it whole is what makes ``memory_pressure`` useless here: it
+    reported 87% of this machine free while 10.6 GB of its 12 GB of swap was
+    in use.
+
+    ``File-backed pages`` cannot bound the file part of that queue, because
+    it counts active file pages too and ``vm_stat`` does not say how many.
+    ``Anonymous pages`` can, from the other side: the queue cannot hold more
+    anonymous pages than the machine has, so at least
+    ``inactive - anonymous`` of it is file pages. That is a floor rather than
+    a ceiling, which is the right direction for a guard - it credits a
+    machine whose inactive queue is mostly cache, and credits nothing when
+    the queue could be all dirty anonymous pages.
+
+    ``None`` means the platform said nothing usable, which the caller treats
+    as "unmeasured" and lets the load through. A machine with genuinely no
+    reclaimable pages therefore has to answer 0, not ``None``.
+    """
+
     output = _run_quietly(["vm_stat"])
     size = re.search(r"page size of (\d+) bytes", output)
     if not size:
         return None
-    pages = 0
-    for name in ("free", "inactive", "speculative", "purgeable"):
-        found = re.search(rf"Pages {name}:\s*(\d+)", output)
-        if found:
-            pages += int(found.group(1))
-    return pages * int(size.group(1)) if pages else None
+
+    def count(label: str) -> int | None:
+        found = re.search(rf"{label}:\s*(\d+)", output)
+        return int(found.group(1)) if found else None
+
+    reclaimable = [
+        count(f"Pages {name}") for name in ("free", "speculative", "purgeable")
+    ]
+    if all(pages is None for pages in reclaimable):
+        return None
+    total = sum(pages for pages in reclaimable if pages is not None)
+
+    inactive, anonymous = count("Pages inactive"), count("Anonymous pages")
+    if inactive is not None and anonymous is not None:
+        total += max(0, inactive - anonymous)
+    return total * int(size.group(1))
 
 
 def format_memory(count: int) -> str:
     """Render a memory size the way the machine's own specs do: ``48.0 GB``."""
 
     return f"{count / 1024**3:.1f} GB"
+
+
+def memory_note(count: int | None) -> str:
+    """``format_memory`` for a figure the platform may not have given."""
+
+    return "unknown" if count is None else format_memory(count)
+
+
+def reserved_bytes(torch=None) -> int | None:
+    """Bytes the accelerator's allocator holds from the driver, or ``None``.
+
+    :func:`allocated_bytes` counts live tensors, which is what a load measures
+    its own progress against. This counts what the process has taken out of
+    the machine, cached blocks included, which is the figure a machine-wide
+    memory problem shows up in and so the one worth recording.
+    """
+
+    if torch is None:
+        import torch
+    try:
+        if torch.cuda.is_available():
+            devices = range(int(torch.cuda.device_count()))
+            return sum(int(torch.cuda.memory_reserved(index)) for index in devices)
+        if torch.backends.mps.is_available():
+            return int(torch.mps.driver_allocated_memory())
+    except (RuntimeError, AttributeError, ValueError, TypeError):
+        return None
+    return None
 
 
 def cuda_memory(torch=None) -> tuple[int | None, int | None]:
@@ -644,25 +721,55 @@ def check_memory_for_load(
         )
 
 
-def mps_memory_fraction() -> float | None:
+def mps_memory_fraction(
+    recommended: int | None = None, total: int | None = None
+) -> float | None:
     """The Metal allocation cap to apply, or ``None`` to leave PyTorch's own.
 
+    The figure PyTorch wants is a share of Metal's recommended working set, so
+    the default is converted: half the machine's own memory, expressed against
+    ``recommended``, and never more than Metal would hand over anyway. Passing
+    neither figure falls back to half the recommendation.
+
     ``CHATLAB_MPS_MEMORY_FRACTION`` overrides the settings file, which
-    overrides the default; a value PyTorch would reject, or a user-set
+    overrides that default; a value PyTorch would reject, or a user-set
     ``PYTORCH_MPS_HIGH_WATERMARK_RATIO``, leaves the allocator alone.
     """
 
     if os.environ.get(TORCH_MPS_WATERMARK_ENV):
         return None
+    default = default_mps_memory_fraction(recommended, total)
     raw = os.environ.get(MPS_MEMORY_FRACTION_ENV)
     if raw is None:
         saved = settings.current().mps_memory_fraction
-        return DEFAULT_MPS_MEMORY_FRACTION if saved is None else saved
+        return default if saved is None else saved
     try:
         fraction = float(raw)
     except ValueError:
-        return DEFAULT_MPS_MEMORY_FRACTION
+        return default
     return fraction if 0 < fraction <= 2 else None
+
+
+def default_mps_memory_fraction(
+    recommended: int | None = None, total: int | None = None
+) -> float:
+    """Half the machine's memory, as a share of Metal's recommended working set."""
+
+    if not recommended or not total:
+        return FALLBACK_MPS_MEMORY_FRACTION
+    return min(1.0, (total * DEFAULT_MPS_MEMORY_SHARE) / recommended)
+
+
+def _recommended_mps_memory(torch) -> int | None:
+    """Metal's recommended working set, or ``None`` when torch will not say."""
+
+    reader = getattr(getattr(torch, "mps", None), "recommended_max_memory", None)
+    if not callable(reader):
+        return None
+    try:
+        return int(reader())
+    except (RuntimeError, ValueError, TypeError):
+        return None
 
 
 def is_out_of_memory_error(error: BaseException) -> bool:
@@ -674,13 +781,26 @@ def is_out_of_memory_error(error: BaseException) -> bool:
     return "out of memory" in text or "insufficient memory" in text
 
 
+def first_line(error: BaseException) -> str:
+    """The first line of a backend's complaint, short enough to quote.
+
+    A backend can raise with nothing to say - ``MemoryError()`` is the one
+    that turns up under memory pressure - and indexing the first line of an
+    empty message is how a memory failure becomes a confusing ``IndexError``
+    somewhere else entirely.
+    """
+
+    lines = str(error).splitlines()
+    return lines[0][:200] if lines else f"no message from {type(error).__name__}"
+
+
 def out_of_memory_message(error: BaseException) -> str:
     """One readable sentence for a backend's out-of-memory failure."""
 
     return (
         "The model ran out of memory. Shorten the conversation or the text, "
         "lower the response length, or load a smaller model. "
-        f"({str(error).splitlines()[0][:200]})"
+        f"({first_line(error)})"
     )
 
 
@@ -2152,6 +2272,14 @@ class ModelManager:
         # than the one that started it. An RLock, or any owner-checked
         # primitive, would refuse the release from that second thread.
         self._generating = threading.Lock()
+        # What a response's record needs and cannot read afterwards: the
+        # model and prompt size of the run under way, so a run that raises
+        # before it publishes anything still has both, and what the device
+        # held at the end, read under the lock above for the reason given
+        # where it is set. One slot each is enough: that lock admits one
+        # generation at a time.
+        self._run_note: tuple[str | None, int] | None = None
+        self._run_device_bytes: int | None = None
 
     @property
     def loaded(self) -> bool:
@@ -2407,8 +2535,17 @@ class ModelManager:
         else:
             backend = "cpu"
             dtype = torch.float32
-        estimated = self._check_memory(
-            model_id, local_path, str(dtype).replace("torch.", ""), backend
+        # The cap goes on before the check rather than before the load, so
+        # the check can refuse a model that fits the machine but not the
+        # allocator's half of it. Otherwise a 25 GB checkpoint on an idle
+        # 48 GB Mac passes, is read off disk, and only then fails.
+        ceiling = self._cap_mps_memory(torch) if backend == "mps" else None
+        estimated, available = self._check_memory(
+            model_id,
+            local_path,
+            str(dtype).replace("torch.", ""),
+            backend,
+            ceiling=ceiling,
         )
         # Bytes are counted only where the device keeps a total to count
         # them against; elsewhere the loader's own steps are all there is.
@@ -2428,7 +2565,6 @@ class ModelManager:
                     )
                     device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
                 elif backend == "mps":
-                    self._cap_mps_memory(torch)
                     # Into host memory and across afterwards, rather than
                     # materialized on the device with device_map="mps". The
                     # checkpoint is converted on the way in, and Metal does
@@ -2452,12 +2588,26 @@ class ModelManager:
                     )
                     device_name = "CPU"
         except (RuntimeError, MemoryError) as error:
+            # Before the cache goes back, so the figure is what the device was
+            # holding when the load gave up rather than what survived cleanup.
+            logger.warning(
+                "Load of %s as %s on %s failed: %s estimated, %s held on the "
+                "device, %s free beforehand, device ceiling %s (%s)",
+                model_id,
+                str(dtype).replace("torch.", ""),
+                backend,
+                memory_note(estimated),
+                memory_note(reserved_bytes(torch)),
+                memory_note(available),
+                memory_note(ceiling),
+                first_line(error),
+            )
             self._release_device_cache(torch)
             if is_out_of_memory_error(error):
                 raise OutOfMemoryError(
                     f"{model_id.strip()} did not fit in memory. Close other "
                     "applications or choose a smaller model. "
-                    f"({str(error).splitlines()[0][:200]})"
+                    f"({first_line(error)})"
                 ) from error
             raise
 
@@ -2468,6 +2618,20 @@ class ModelManager:
         self.local_path = local_path
         self.device_name = device_name
         self.load_count += 1
+        # The one record of what a load cost. Without it a later memory
+        # failure cannot be told from a leak, a second copy of the weights, or
+        # a machine that was already full when the load began.
+        logger.info(
+            "Loaded %s as %s on %s: %s estimated, %s held on the device, "
+            "%s free beforehand, device ceiling %s",
+            model_id,
+            str(dtype).replace("torch.", ""),
+            device_name,
+            memory_note(estimated),
+            memory_note(reserved_bytes(torch)),
+            memory_note(available),
+            memory_note(ceiling),
+        )
         return device_name
 
     def unload(self) -> None:
@@ -2547,13 +2711,18 @@ class ModelManager:
 
     @staticmethod
     def _check_memory(
-        model_id: str, local_path: Path, load_dtype: str, backend: str
-    ) -> int | None:
+        model_id: str,
+        local_path: Path,
+        load_dtype: str,
+        backend: str,
+        ceiling: int | None = None,
+    ) -> tuple[int | None, int | None]:
         """Refuse a load that cannot fit, before any weight is read.
 
         Returns the memory the weights are expected to take, which is also
-        what a load counts its own progress towards, or ``None`` when the
-        snapshot could not be measured.
+        what a load counts its own progress towards, and the free memory it
+        judged that against so the caller can record it. Both are ``None``
+        when the snapshot could not be measured.
 
         On CUDA the weights fill the graphics cards and ``device_map="auto"``
         places the rest on the CPU, so the cards plus the machine's memory is
@@ -2561,11 +2730,16 @@ class ModelManager:
         the CPU it is the machine's memory outright. A snapshot whose weights
         cannot be measured is let through: the loader will give its own, more
         specific error.
+
+        ``ceiling`` is what the device's own allocator will hand out, which on
+        Metal is less than the machine holds. Whichever of the two is smaller
+        is what the weights have to fit inside, so a model too big for the
+        allocator is refused here rather than part way through reading it.
         """
 
         weight_bytes = snapshot_weight_bytes(local_path)
         if weight_bytes is None:
-            return None
+            return None, None
         _architecture, checkpoint_dtype = _read_config(local_path)
         estimated = estimate_loaded_bytes(weight_bytes, checkpoint_dtype, load_dtype)
         if backend == "cuda":
@@ -2574,29 +2748,55 @@ class ModelManager:
         else:
             total, available = system_memory()
             pool = "this machine"
-        check_memory_for_load(
-            validate_model_id(model_id), estimated, total, available, pool=pool
-        )
-        return estimated
+        if ceiling is not None:
+            total = ceiling if total is None else min(total, ceiling)
+            available = ceiling if available is None else min(available, ceiling)
+            if total == ceiling:
+                pool = "Metal on this machine"
+        try:
+            check_memory_for_load(
+                validate_model_id(model_id), estimated, total, available, pool=pool
+            )
+        except InsufficientMemoryError:
+            # The refusal is the load record. It is the outcome most worth
+            # explaining afterwards, and the caller turns it into a status
+            # card that the log never sees.
+            logger.warning(
+                "Refused %s as %s on %s: %s estimated, %s free of %s in %s",
+                model_id,
+                load_dtype,
+                backend,
+                memory_note(estimated),
+                memory_note(available),
+                memory_note(total),
+                pool,
+            )
+            raise
+        return estimated, available
 
     @staticmethod
-    def _cap_mps_memory(torch) -> None:
-        """Make Metal allocations fail past the recommended working set.
+    def _cap_mps_memory(torch) -> int | None:
+        """Make Metal allocations fail well short of the whole machine.
 
         Unified memory means the GPU and everything else share one pool, and
-        PyTorch's default ceiling lies well beyond it. With the cap, a model
-        or conversation that outgrows the machine raises an error the
+        both PyTorch's default ceiling and Metal's own recommendation lie
+        beyond what macOS can give up without paging. With the cap, a model or
+        conversation that outgrows its half of the machine raises an error the
         interface can show; without it, macOS pages until it freezes.
+
+        Returns the ceiling it set, so a load can record what it was.
         """
 
-        fraction = mps_memory_fraction()
+        recommended = _recommended_mps_memory(torch)
+        fraction = mps_memory_fraction(recommended, system_memory()[0])
         setter = getattr(torch.mps, "set_per_process_memory_fraction", None)
         if fraction is None or setter is None:
-            return
+            return None
         try:
             setter(fraction)
         except (RuntimeError, ValueError, TypeError):
-            pass
+            return None
+        return int(recommended * fraction) if recommended else None
 
     def _prompt_token_ids(self, messages: list[dict]) -> tuple[list[int], bool]:
         """Token ids for a chat prompt, and whether it prefills ``<think>``.
@@ -3187,8 +3387,14 @@ class ModelManager:
         # below is what keeps two generations off the model at once, and it is
         # still acquired unconditionally.
         reserved = self.reserve_generation()
+        # Held so the record below can say how far the run got, whether it
+        # finished, was stopped, or raised.
+        last: GenerationUpdate | None = None
+        self._run_note = None
+        self._run_device_bytes = None
+        started = time.monotonic()
         try:
-            yield from self._generate(
+            for update in self._generate(
                 messages,
                 temperature=temperature,
                 top_p=top_p,
@@ -3202,15 +3408,58 @@ class ModelManager:
                 automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
                 literal_text_ranges=literal_text_ranges,
                 load_id=load_id,
-            )
+            ):
+                last = update
+                yield update
         except (RuntimeError, MemoryError) as error:
             _reraise_out_of_memory(error)
         finally:
             if reserved:
                 self.release_generation()
+            # Read before the cache goes back, so the figure is the run's own
+            # high-water mark rather than what is left after cleaning up.
+            self._log_run(last, max_new_tokens, time.monotonic() - started)
             # The key-value cache of this response is the largest thing a run
             # allocates; give it back rather than hold it until the next one.
             self._release_device_cache()
+
+    def _log_run(
+        self, last: GenerationUpdate | None, max_new_tokens: int, seconds: float
+    ) -> None:
+        """Record what a response cost, whatever its outcome.
+
+        One line per response, never per token. This is what makes a memory
+        failure readable afterwards: the model, how long the prompt was, how
+        many tokens it had produced, and what the device was holding when it
+        stopped.
+
+        A run that raised before publishing anything has no update to read,
+        so the model and the prompt size come from the note the run left
+        behind instead (see :attr:`_run_note`). Only sampled tokens are
+        counted: a branch replays its prefix through the model and carries it
+        in ``metrics``, but ``max_new_tokens`` bounds the continuation alone,
+        and a record saying "140 tokens of at most 40" says nothing.
+        """
+
+        try:
+            noted_model, noted_prompt = self._run_note or (None, None)
+            if last is None:
+                model_id, prompt_tokens, produced = noted_model, noted_prompt, 0
+            else:
+                model_id, prompt_tokens = last.model_id, len(last.prompt_ids)
+                produced = len(last.metrics) - last.forced_prefix_tokens
+            logger.info(
+                "Generated %s tokens of at most %s for %s in %.1fs: "
+                "%s prompt tokens, %s held on the device",
+                produced,
+                max_new_tokens,
+                model_id or "no model",
+                seconds,
+                "unknown" if prompt_tokens is None else prompt_tokens,
+                memory_note(self._run_device_bytes),
+            )
+        except Exception:  # noqa: BLE001 - a log line must not break a reply
+            logger.debug("Could not record the run", exc_info=True)
 
     def _generate(
         self,
@@ -3232,233 +3481,190 @@ class ModelManager:
         import torch
 
         with self._lock, torch.inference_mode():
-            if not self.loaded:
-                raise RuntimeError("Download and load a model before chatting.")
-            if load_id is not None and load_id != self.load_id:
-                raise ModelChanged(
-                    "The model has been reloaded since these tokens were produced."
-                )
-
-            assert self.model is not None
-            assert self.tokenizer is not None
-            model = self.model
-            tokenizer = self.tokenizer
-            # Read here, under the lock, alongside the weights: this is the
-            # only place the two are guaranteed to agree, which is what makes
-            # the stamp on each update worth trusting.
-            model_id = self.model_id
-            producing_load_id = self.load_id
-            assert producing_load_id is not None
-            device = next(model.parameters()).device
-
-            prompt_ids, reasoning_prefilled = self._prompt_token_ids(messages)
-            stop_ids = self._stop_token_ids()
-
-            if forced_ids and answer_prefill:
-                raise ValueError(
-                    "A token branch and an assistant prefill cannot be applied together."
-                )
-
-            forced = [int(value) for value in forced_ids]
-            if answer_prefill:
-                forced = self._response_prefix_ids(
-                    answer_prefill, close_reasoning=reasoning_prefilled
-                )
-                literal_prefill_tokens = len(forced)
-                automatic_reasoning_close_tokens = 0
-            else:
-                literal_prefill_tokens = max(
-                    0, min(int(literal_prefill_tokens), len(forced))
-                )
-                automatic_reasoning_close_tokens = max(
-                    0,
-                    min(
-                        int(automatic_reasoning_close_tokens),
-                        literal_prefill_tokens,
-                    ),
-                )
-
-            normalized_literal_ranges: list[tuple[int, int]] = []
-            for raw_start, raw_end in literal_text_ranges:
-                start = max(0, min(int(raw_start), len(forced)))
-                end = max(start, min(int(raw_end), len(forced)))
-                if start < end:
-                    normalized_literal_ranges.append((start, end))
-            normalized_literal_ranges.sort()
-            literal_ranges: list[tuple[int, int]] = []
-            for start, end in normalized_literal_ranges:
-                if literal_ranges and start <= literal_ranges[-1][1]:
-                    previous_start, previous_end = literal_ranges[-1]
-                    literal_ranges[-1] = (previous_start, max(previous_end, end))
-                else:
-                    literal_ranges.append((start, end))
-
-            # A sampled stop token replayed by a branch still ends the old
-            # response where it originally ended. A stop token the reader
-            # typed literally into an assistant prefill is ordinary prefix
-            # content instead: keep it visible and continue after it.
-            for index, token_id in enumerate(forced):
-                if token_id in stop_ids and index >= literal_prefill_tokens:
-                    forced = forced[: index + 1]
-                    break
-
-            # Checked here, on the tokens actually about to be fed, rather
-            # than only in validate_generation_prefix(): that one runs for a
-            # typed branch before the UI stream starts, and an ordinary reply
-            # would otherwise reach the prefill with a conversation of any
-            # size behind it. Refuse before the cache is allocated, not once
-            # the machine is already out of memory.
-            self._validate_prefix_within_limit(prompt_ids, forced)
-
-            def sample(log_probs: np.ndarray) -> np.ndarray:
-                return sampling_probabilities(
-                    log_probs,
-                    temperature=float(temperature),
-                    top_p=float(top_p),
-                    top_k=int(top_k),
-                )
-
-            # The prompt and the replayed prefix go through the model in one
-            # chunked pass. Feeding the prefix back a token at a time would
-            # cost a full forward step for every token the reader kept.
-            score_from = (
-                max(1, len(prompt_ids) - PROMPT_SCORE_LIMIT) if analyze_prompt else 0
-            )
-            prefilled_metrics, past_key_values, raw_log_probs = self._prefill(
-                prompt_ids + forced,
-                segments=["prompt"] * len(prompt_ids) + ["response"] * len(forced),
-                positions=list(range(1, len(prompt_ids) + 1))
-                + list(range(1, len(forced) + 1)),
-                score_from=score_from,
-                collect_from=0 if analyze_prompt else len(prompt_ids),
-                sample=sample,
-            )
-            prompt_metrics = [
-                metric for metric in prefilled_metrics if metric["segment"] == "prompt"
-            ]
-            metrics: list[dict] = [
-                metric for metric in prefilled_metrics if metric["segment"] == "response"
-            ]
-            for metric in metrics[:literal_prefill_tokens]:
-                metric["literal_prefill"] = True
-            for metric in metrics[:automatic_reasoning_close_tokens]:
-                metric["automatic_reasoning_close"] = True
-            for start, end in literal_ranges:
-                for metric in metrics[start:end]:
-                    metric["literal_text"] = True
-            prompt_note = ""
-            if analyze_prompt and score_from > 1:
-                prompt_note = (
-                    f"Only the most recent {PROMPT_SCORE_LIMIT:,} of "
-                    f"{len(prompt_ids):,} prompt tokens were scored."
-                )
-
-            rng = np.random.default_rng(int(seed))
-            decoder = IncrementalDecoder(tokenizer, self._hidden_token_ids())
-            literal_prefill_text = ""
-            literal_boundaries = {
-                boundary for span in literal_ranges for boundary in span
-            }
-            boundary_text = {0: ""}
-            for index, token_id in enumerate(forced):
-                decoder.push(
-                    token_id, force_visible=index < literal_prefill_tokens
-                )
-                if (
-                    answer_prefill
-                    and reasoning_prefilled
-                    and not automatic_reasoning_close_tokens
-                    and decoder.stable_text.startswith(f"{THINK_CLOSE}\n\n")
-                ):
-                    # The last token can straddle the boundary and include the
-                    # beginning of the reader's prefill. It still cannot be
-                    # replaced independently: doing so would remove part of
-                    # the close and leave the continuation inside reasoning.
-                    automatic_reasoning_close_tokens = index + 1
-                    for metric in metrics[:automatic_reasoning_close_tokens]:
-                        metric["automatic_reasoning_close"] = True
-                if index + 1 in literal_boundaries:
-                    boundary_text[index + 1] = decoder.text
-                if index + 1 == literal_prefill_tokens:
-                    # A branch can stop inside a byte-level token sequence for
-                    # one character. The replacement-character suffix will be
-                    # rewritten when the next token arrives, so it cannot be a
-                    # durable prefix for the application's literal-tag guard.
-                    literal_prefill_text = decoder.stable_text
-            forced_text = decoder.text
-
-            # A byte-level token boundary can land inside one Unicode
-            # character. Its temporary U+FFFD is rewritten when later bytes
-            # arrive, so use the longest prefix that is actually stable in the
-            # completed forced text. Ordinary word-piece boundaries take the
-            # fast path and keep their full decoded length.
-            def stable_length(at: int) -> int:
-                value = boundary_text.get(at, "")
-                if forced_text.startswith(value):
-                    return len(value)
-                for offset, (left, right) in enumerate(zip(value, forced_text)):
-                    if left != right:
-                        return offset
-                return min(len(value), len(forced_text))
-
-            literal_text_spans = tuple(
-                (stable_length(start), stable_length(end))
-                for start, end in literal_ranges
-                if stable_length(start) < stable_length(end)
-            )
-            limit = len(forced) + int(max_new_tokens)
-            pending_tokens = 0
-            last_yield = time.monotonic()
-
-            if forced:
-                yield GenerationUpdate(
-                    text=decoder.text,
-                    metrics=metrics,
-                    load_id=producing_load_id,
-                    prompt_metrics=prompt_metrics,
-                    prompt_note=prompt_note,
-                    reasoning_prefilled=reasoning_prefilled,
-                    forced_prefix_tokens=len(forced),
-                    literal_prefill_text=literal_prefill_text,
-                    literal_text_spans=literal_text_spans,
-                    prompt_ids=tuple(prompt_ids),
-                    model_id=model_id,
-                )
-                if (
-                    forced[-1] in stop_ids
-                    and len(forced) > literal_prefill_tokens
-                ):
-                    return
-
-            for position in range(len(forced) + 1, limit + 1):
-                assert raw_log_probs is not None
-                sampled_probs = sample(raw_log_probs)
-
-                if temperature <= 0:
-                    token_id = int(np.argmax(sampled_probs))
-                else:
-                    token_id = int(rng.choice(sampled_probs.size, p=sampled_probs))
-
-                decoder.push(token_id)
-                metrics.append(
-                    self._describe_token(
-                        position=position,
-                        token_id=token_id,
-                        raw_log_probabilities=raw_log_probs,
-                        sampled_probabilities=sampled_probs,
-                        segment="response",
+            try:
+                if not self.loaded:
+                    raise RuntimeError("Download and load a model before chatting.")
+                if load_id is not None and load_id != self.load_id:
+                    raise ModelChanged(
+                        "The model has been reloaded since these tokens were produced."
                     )
+
+                assert self.model is not None
+                assert self.tokenizer is not None
+                model = self.model
+                tokenizer = self.tokenizer
+                # Read here, under the lock, alongside the weights: this is the
+                # only place the two are guaranteed to agree, which is what makes
+                # the stamp on each update worth trusting.
+                model_id = self.model_id
+                producing_load_id = self.load_id
+                assert producing_load_id is not None
+                device = next(model.parameters()).device
+
+                prompt_ids, reasoning_prefilled = self._prompt_token_ids(messages)
+                # Noted here rather than left to the first update, because a run
+                # that fails in the prefill below never publishes one and prefill
+                # is where a memory failure is most likely.
+                self._run_note = (model_id, len(prompt_ids))
+                stop_ids = self._stop_token_ids()
+
+                if forced_ids and answer_prefill:
+                    raise ValueError(
+                        "A token branch and an assistant prefill cannot be applied together."
+                    )
+
+                forced = [int(value) for value in forced_ids]
+                if answer_prefill:
+                    forced = self._response_prefix_ids(
+                        answer_prefill, close_reasoning=reasoning_prefilled
+                    )
+                    literal_prefill_tokens = len(forced)
+                    automatic_reasoning_close_tokens = 0
+                else:
+                    literal_prefill_tokens = max(
+                        0, min(int(literal_prefill_tokens), len(forced))
+                    )
+                    automatic_reasoning_close_tokens = max(
+                        0,
+                        min(
+                            int(automatic_reasoning_close_tokens),
+                            literal_prefill_tokens,
+                        ),
+                    )
+
+                normalized_literal_ranges: list[tuple[int, int]] = []
+                for raw_start, raw_end in literal_text_ranges:
+                    start = max(0, min(int(raw_start), len(forced)))
+                    end = max(start, min(int(raw_end), len(forced)))
+                    if start < end:
+                        normalized_literal_ranges.append((start, end))
+                normalized_literal_ranges.sort()
+                literal_ranges: list[tuple[int, int]] = []
+                for start, end in normalized_literal_ranges:
+                    if literal_ranges and start <= literal_ranges[-1][1]:
+                        previous_start, previous_end = literal_ranges[-1]
+                        literal_ranges[-1] = (previous_start, max(previous_end, end))
+                    else:
+                        literal_ranges.append((start, end))
+
+                # A sampled stop token replayed by a branch still ends the old
+                # response where it originally ended. A stop token the reader
+                # typed literally into an assistant prefill is ordinary prefix
+                # content instead: keep it visible and continue after it.
+                for index, token_id in enumerate(forced):
+                    if token_id in stop_ids and index >= literal_prefill_tokens:
+                        forced = forced[: index + 1]
+                        break
+
+                # Checked here, on the tokens actually about to be fed, rather
+                # than only in validate_generation_prefix(): that one runs for a
+                # typed branch before the UI stream starts, and an ordinary reply
+                # would otherwise reach the prefill with a conversation of any
+                # size behind it. Refuse before the cache is allocated, not once
+                # the machine is already out of memory.
+                self._validate_prefix_within_limit(prompt_ids, forced)
+
+                def sample(log_probs: np.ndarray) -> np.ndarray:
+                    return sampling_probabilities(
+                        log_probs,
+                        temperature=float(temperature),
+                        top_p=float(top_p),
+                        top_k=int(top_k),
+                    )
+
+                # The prompt and the replayed prefix go through the model in one
+                # chunked pass. Feeding the prefix back a token at a time would
+                # cost a full forward step for every token the reader kept.
+                score_from = (
+                    max(1, len(prompt_ids) - PROMPT_SCORE_LIMIT) if analyze_prompt else 0
                 )
-                stopping = token_id in stop_ids or position == limit
-                pending_tokens += 1
-                now = time.monotonic()
-                if (
-                    stopping
-                    or pending_tokens >= STREAM_BATCH_TOKENS
-                    or now - last_yield >= STREAM_INTERVAL_SECONDS
-                ):
-                    pending_tokens = 0
-                    last_yield = now
+                prefilled_metrics, past_key_values, raw_log_probs = self._prefill(
+                    prompt_ids + forced,
+                    segments=["prompt"] * len(prompt_ids) + ["response"] * len(forced),
+                    positions=list(range(1, len(prompt_ids) + 1))
+                    + list(range(1, len(forced) + 1)),
+                    score_from=score_from,
+                    collect_from=0 if analyze_prompt else len(prompt_ids),
+                    sample=sample,
+                )
+                prompt_metrics = [
+                    metric for metric in prefilled_metrics if metric["segment"] == "prompt"
+                ]
+                metrics: list[dict] = [
+                    metric for metric in prefilled_metrics if metric["segment"] == "response"
+                ]
+                for metric in metrics[:literal_prefill_tokens]:
+                    metric["literal_prefill"] = True
+                for metric in metrics[:automatic_reasoning_close_tokens]:
+                    metric["automatic_reasoning_close"] = True
+                for start, end in literal_ranges:
+                    for metric in metrics[start:end]:
+                        metric["literal_text"] = True
+                prompt_note = ""
+                if analyze_prompt and score_from > 1:
+                    prompt_note = (
+                        f"Only the most recent {PROMPT_SCORE_LIMIT:,} of "
+                        f"{len(prompt_ids):,} prompt tokens were scored."
+                    )
+
+                rng = np.random.default_rng(int(seed))
+                decoder = IncrementalDecoder(tokenizer, self._hidden_token_ids())
+                literal_prefill_text = ""
+                literal_boundaries = {
+                    boundary for span in literal_ranges for boundary in span
+                }
+                boundary_text = {0: ""}
+                for index, token_id in enumerate(forced):
+                    decoder.push(
+                        token_id, force_visible=index < literal_prefill_tokens
+                    )
+                    if (
+                        answer_prefill
+                        and reasoning_prefilled
+                        and not automatic_reasoning_close_tokens
+                        and decoder.stable_text.startswith(f"{THINK_CLOSE}\n\n")
+                    ):
+                        # The last token can straddle the boundary and include the
+                        # beginning of the reader's prefill. It still cannot be
+                        # replaced independently: doing so would remove part of
+                        # the close and leave the continuation inside reasoning.
+                        automatic_reasoning_close_tokens = index + 1
+                        for metric in metrics[:automatic_reasoning_close_tokens]:
+                            metric["automatic_reasoning_close"] = True
+                    if index + 1 in literal_boundaries:
+                        boundary_text[index + 1] = decoder.text
+                    if index + 1 == literal_prefill_tokens:
+                        # A branch can stop inside a byte-level token sequence for
+                        # one character. The replacement-character suffix will be
+                        # rewritten when the next token arrives, so it cannot be a
+                        # durable prefix for the application's literal-tag guard.
+                        literal_prefill_text = decoder.stable_text
+                forced_text = decoder.text
+
+                # A byte-level token boundary can land inside one Unicode
+                # character. Its temporary U+FFFD is rewritten when later bytes
+                # arrive, so use the longest prefix that is actually stable in the
+                # completed forced text. Ordinary word-piece boundaries take the
+                # fast path and keep their full decoded length.
+                def stable_length(at: int) -> int:
+                    value = boundary_text.get(at, "")
+                    if forced_text.startswith(value):
+                        return len(value)
+                    for offset, (left, right) in enumerate(zip(value, forced_text)):
+                        if left != right:
+                            return offset
+                    return min(len(value), len(forced_text))
+
+                literal_text_spans = tuple(
+                    (stable_length(start), stable_length(end))
+                    for start, end in literal_ranges
+                    if stable_length(start) < stable_length(end)
+                )
+                limit = len(forced) + int(max_new_tokens)
+                pending_tokens = 0
+                last_yield = time.monotonic()
+
+                if forced:
                     yield GenerationUpdate(
                         text=decoder.text,
                         metrics=metrics,
@@ -3472,24 +3678,79 @@ class ModelManager:
                         prompt_ids=tuple(prompt_ids),
                         model_id=model_id,
                     )
+                    if (
+                        forced[-1] in stop_ids
+                        and len(forced) > literal_prefill_tokens
+                    ):
+                        return
 
-                if stopping:
-                    break
+                for position in range(len(forced) + 1, limit + 1):
+                    assert raw_log_probs is not None
+                    sampled_probs = sample(raw_log_probs)
 
-                outputs = model(
-                    input_ids=torch.tensor(
-                        [[token_id]], dtype=torch.long, device=device
-                    ),
-                    attention_mask=torch.ones(
-                        (1, len(prompt_ids) + position), dtype=torch.long, device=device
-                    ),
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                )
-                past_key_values = outputs.past_key_values
-                raw_log_probs = normalize_log_probabilities(
-                    outputs.logits[0, -1].detach().float().cpu().numpy()
-                )
+                    if temperature <= 0:
+                        token_id = int(np.argmax(sampled_probs))
+                    else:
+                        token_id = int(rng.choice(sampled_probs.size, p=sampled_probs))
+
+                    decoder.push(token_id)
+                    metrics.append(
+                        self._describe_token(
+                            position=position,
+                            token_id=token_id,
+                            raw_log_probabilities=raw_log_probs,
+                            sampled_probabilities=sampled_probs,
+                            segment="response",
+                        )
+                    )
+                    stopping = token_id in stop_ids or position == limit
+                    pending_tokens += 1
+                    now = time.monotonic()
+                    if (
+                        stopping
+                        or pending_tokens >= STREAM_BATCH_TOKENS
+                        or now - last_yield >= STREAM_INTERVAL_SECONDS
+                    ):
+                        pending_tokens = 0
+                        last_yield = now
+                        yield GenerationUpdate(
+                            text=decoder.text,
+                            metrics=metrics,
+                            load_id=producing_load_id,
+                            prompt_metrics=prompt_metrics,
+                            prompt_note=prompt_note,
+                            reasoning_prefilled=reasoning_prefilled,
+                            forced_prefix_tokens=len(forced),
+                            literal_prefill_text=literal_prefill_text,
+                            literal_text_spans=literal_text_spans,
+                            prompt_ids=tuple(prompt_ids),
+                            model_id=model_id,
+                        )
+
+                    if stopping:
+                        break
+
+                    outputs = model(
+                        input_ids=torch.tensor(
+                            [[token_id]], dtype=torch.long, device=device
+                        ),
+                        attention_mask=torch.ones(
+                            (1, len(prompt_ids) + position), dtype=torch.long, device=device
+                        ),
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                    )
+                    past_key_values = outputs.past_key_values
+                    raw_log_probs = normalize_log_probabilities(
+                        outputs.logits[0, -1].detach().float().cpu().numpy()
+                    )
+
+            finally:
+                # Read while the lock is still held. A load queued behind
+                # this response takes it the moment it is free, and would
+                # be what got measured: its own allocation, or nothing at
+                # all if it unloaded first.
+                self._run_device_bytes = reserved_bytes()
 
     def count_score_tokens(
         self,

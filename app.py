@@ -605,7 +605,33 @@ def describe_fetched(before: CacheStatus, after: CacheStatus, elapsed: float) ->
     return f"Fetched {format_bytes(fetched)} in {elapsed:.1f} seconds."
 
 
-def download_model(model_id: str, hf_token: str):
+def chosen_model(model_id: str, selected: str | None) -> str:
+    """The model a Model-panel button acts on: the picked row, or the typed ID.
+
+    The row wins when there is one. Gradio snapshots a click's inputs in the
+    browser, and a row selection reaches the ID box only through a server
+    round trip (see ``select_my_model``), so a button clicked inside that
+    window carries a box that still holds whatever was there before - which
+    starts out as the 15 GB default, a model nobody asked for. The radio is
+    set by the reader's own click and so is always current.
+
+    The reverse window is real and is not closed here: typing an ID clears the
+    highlight, but that also takes a round trip, so a click landing inside it
+    still carries the old row and loads that instead of the typed ID. It is
+    left open deliberately. Both candidates are models the reader named, and
+    the row is already on disk, so the cost is a wrong-but-cheap load rather
+    than an unrequested 15 GB one. Closing it would need the two controls to
+    be ordered against each other, and Gradio's queue does not order separate
+    listeners: ``default_concurrency_limit`` is per listener, so the marker a
+    typing listener would set is not guaranteed to be written before a click
+    handler reads it.
+    """
+
+    return (selected or model_id or "").strip()
+
+
+def download_model(model_id: str, hf_token: str, selected: str | None = None):
+    model_id = chosen_model(model_id, selected)
     started = time.monotonic()
     try:
         before = cache_status(model_id)
@@ -629,7 +655,8 @@ def download_model(model_id: str, hf_token: str):
     )
 
 
-def download_and_load_model(model_id: str, hf_token: str):
+def download_and_load_model(model_id: str, hf_token: str, selected: str | None = None):
+    model_id = chosen_model(model_id, selected)
     started = time.monotonic()
     try:
         before = cache_status(model_id)
@@ -678,8 +705,8 @@ def incomplete_snapshot_detail(model_id: str, error: Exception) -> str:
     )
 
 
-def load_cached_model(model_id: str):
-    cleaned = model_id.strip()
+def load_cached_model(model_id: str, selected: str | None = None):
+    cleaned = chosen_model(model_id, selected)
     active = MANAGER.active_downloads.get(cleaned)
     if active is not None:
         snap = active.snapshot()
@@ -1038,6 +1065,18 @@ def select_my_model(selected: str | None):
     if entry is None:
         return gr.skip(), f"`{selected}` is no longer in the cache. Press **Refresh**."
     return gr.update(value=selected), describe_cached_model(entry)
+
+
+def clear_my_model_selection():
+    """Drop the My Models selection, because a typed ID names its own model.
+
+    Runs when the reader types in the ID box or picks a search result, so the
+    two controls never disagree on screen and ``chosen_model`` has one answer
+    to give. It is a round trip like any other, which is the window
+    ``chosen_model`` describes rather than closes.
+    """
+
+    return gr.update(value=None), NO_CACHED_MODEL_SELECTED
 
 
 NO_MODEL_TO_MANAGE = "Select a model under **My Models** first."
@@ -3937,48 +3976,68 @@ SCORE_COUNT_UNKNOWN = (
 SCORE_BUDGET_QUEUE = "score-budget"
 
 
-def score_token_count(context: str, text: str, use_chat_template: bool) -> str:
-    """How many tokens the box would score, against the limit for this model."""
+def score_token_count(context: str, text: str, use_chat_template: bool):
+    """The count for the box, and the load it was counted against.
 
+    The second half is what lets a count be told from a stale one. A
+    tokenizer belongs to the weights in memory, so a number counted under one
+    load says nothing about the next, and ``load_id`` is how the rest of the
+    app already names "these weights, this time".
+    """
+
+    load_id = MANAGER.load_id
     if not text:
-        return SCORE_COUNT_HINT
+        return SCORE_COUNT_HINT, load_id
     counted = MANAGER.count_score_tokens(
         text, context=context or "", use_chat_template=bool(use_chat_template)
     )
     if counted is None:
-        return SCORE_COUNT_UNKNOWN
+        return SCORE_COUNT_UNKNOWN, load_id
     count, limit = counted
     if count > limit:
         return (
             f'<span class="failure-text">{count:,} tokens, above the '
             f"{limit:,} this model can score in one pass. Score it in "
-            "smaller pieces.</span>"
+            "smaller pieces.</span>",
+            load_id,
         )
-    return f"{count:,} of {limit:,} tokens."
+    return f"{count:,} of {limit:,} tokens.", load_id
 
 
-def recover_score_budget(shown: str, context: str, text: str, use_chat_template: bool):
-    """Try the count again, but only while it is the one that gives up.
+def recover_score_budget(
+    shown: str, counted_load, context: str, text: str, use_chat_template: bool
+):
+    """Recount when the shown number has gone wrong, or could have.
 
-    A count asked for during a reply cannot have the model lock and says so,
-    and nothing about that message is self-correcting: the generation ends,
-    the model goes idle, and the box still reads "not mid-response" until
-    something is typed into it. Every path out of a generation would have to
-    remember to recompute - the ordinary end of one, Stop, and the four
-    handlers that cancel one - and a path added later would have to remember
-    too.
+    Two things put it wrong, and neither corrects itself.
 
-    So the recovery is driven from the badge's timer instead, and guarded by
-    what is on screen. In every state but the stuck one this returns without
-    asking, and asking is itself cheap while it would still fail: an unloaded
-    model and a held lock both refuse before any encoding happens. The one
-    encoding this costs is the one on the tick that fixes the message.
+    A count asked for during a reply cannot have the model lock and says so.
+    The reply ends, the model goes idle, and the box still reads "not
+    mid-response" until something is typed into it. Every path out of a
+    generation would have to remember to recompute - the ordinary end of
+    one, Stop, and the four handlers that cancel one - and a path added later
+    would have to remember too.
+
+    The other is a model swapped out from another tab. The handlers that
+    recompute on a load or an unload only reach the tab that asked for it,
+    which is the whole reason the badge is on a timer rather than published
+    by those handlers alone. A tab left showing a number counted under the
+    old tokenizer, against the old context limit, would go on advertising it
+    under the new model's badge.
+
+    So the recovery is driven from that same timer, and guarded on both: the
+    message that gives up, and the load the number was counted against. In
+    every other state this returns without asking, and asking is itself cheap
+    while it would still fail, since an unloaded model and a held lock both
+    refuse before any encoding happens.
     """
 
-    if shown != SCORE_COUNT_UNKNOWN:
-        return gr.skip()
-    recovered = score_token_count(context, text, use_chat_template)
-    return gr.skip() if recovered == shown else recovered
+    if shown != SCORE_COUNT_UNKNOWN and counted_load == MANAGER.load_id:
+        return gr.skip(), gr.skip()
+    recovered, load_id = score_token_count(context, text, use_chat_template)
+    if recovered == shown and load_id == counted_load:
+        return gr.skip(), gr.skip()
+    return recovered, load_id
 
 
 # The listeners below and the ones on the boxes themselves share
@@ -4113,6 +4172,9 @@ def build_app() -> gr.Blocks:
         context_ids_state = gr.State((*empty_metrics(), None))
         inspect_target = gr.State(None)
         insight_state = gr.State(None)
+        # Which load the scored token count on screen was counted against, so
+        # a model swapped out from another tab can be told from this one.
+        score_budget_load = gr.State(None)
 
         with gr.Row(elem_id="shell"):
             # The thin pane at the far left picks the page: Chat, Models, or
@@ -4673,11 +4735,14 @@ def build_app() -> gr.Blocks:
         # matters, and the progress bar is hidden because a spinner on every
         # keystroke would be worse than the number is good.
         score_budget_inputs = [score_context, score_input, use_chat_template]
+        # The count travels with the load it was counted against; see
+        # recover_score_budget for what that is for.
+        score_budget_outputs = [score_budget, score_budget_load]
         for control in score_budget_inputs:
             control.change(
                 score_token_count,
                 score_budget_inputs,
-                score_budget,
+                score_budget_outputs,
                 trigger_mode="always_last",
                 show_progress="hidden",
                 concurrency_id=SCORE_BUDGET_QUEUE,
@@ -4706,8 +4771,8 @@ def build_app() -> gr.Blocks:
         # generation.
         badge_timer.tick(
             recover_score_budget,
-            [score_budget, *score_budget_inputs],
-            score_budget,
+            [score_budget, score_budget_load, *score_budget_inputs],
+            score_budget_outputs,
             show_progress="hidden",
             concurrency_id=SCORE_BUDGET_QUEUE,
         )
@@ -4738,7 +4803,7 @@ def build_app() -> gr.Blocks:
             return event.then(refresh_model_badge, None, badge_outputs).then(
                 score_token_count,
                 score_budget_inputs,
-                score_budget,
+                score_budget_outputs,
                 show_progress="hidden",
                 concurrency_id=SCORE_BUDGET_QUEUE,
             )
@@ -4746,14 +4811,20 @@ def build_app() -> gr.Blocks:
         # A download alone brings nothing into memory, but it does decide
         # whether the offer reads "load" or "download" next time.
         rescan(
-            download_button.click(download_model, [model_id, hf_token], model_status)
+            download_button.click(
+                download_model, [model_id, hf_token, my_models], model_status
+            )
         )
         rescan(
             download_load_button.click(
-                download_and_load_model, [model_id, hf_token], model_status
+                download_and_load_model, [model_id, hf_token, my_models], model_status
             )
         )
-        rescan(cached_button.click(load_cached_model, model_id, model_status))
+        rescan(
+            cached_button.click(
+                load_cached_model, [model_id, my_models], model_status
+            )
+        )
         rescan(unload_button.click(unload_model, outputs=model_status))
         # A manual refresh and a new sort order reorder a list; neither
         # changes what is on disk or in memory, which is all the badge and the
@@ -4777,10 +4848,14 @@ def build_app() -> gr.Blocks:
         # .input rather than .change: the refresh above also sets the radio,
         # and a .change listener would rewrite the model ID box on each rescan.
         my_models.input(select_my_model, my_models, [model_id, my_model_detail])
+        # .input again, for the same reason: only the reader's own typing
+        # withdraws the selection, never a refresh writing the box.
+        model_id.input(clear_my_model_selection, None, [my_models, my_model_detail])
         # A pending removal is about the model that was selected when it was
         # asked for, so changing the selection withdraws it.
         confirm_outputs = [remove_confirm, pending_removal]
         my_models.input(hide_remove_confirm, None, confirm_outputs)
+        model_id.input(hide_remove_confirm, None, confirm_outputs)
         rescan(
             redownload_button.click(
                 redownload_my_model, [my_models, hf_token], model_status
@@ -4803,11 +4878,13 @@ def build_app() -> gr.Blocks:
         search_outputs = [search_results, search_detail, search_results_state]
         search_button.click(search_models, [search_query, hf_token], search_outputs)
         search_query.submit(search_models, [search_query, hf_token], search_outputs)
+        # Picking a search result names a model too, so it withdraws the My
+        # Models selection the same way typing an ID does.
         search_results.input(
             select_search_result,
             [search_results, search_results_state],
             [model_id, search_detail],
-        )
+        ).then(clear_my_model_selection, None, [my_models, my_model_detail])
         enter_sends.change(set_message_box_keys, enter_sends, prompt)
 
         # The sampling accordion wears its own values.
