@@ -295,6 +295,30 @@ class StartupModelTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"OLMO_MODEL_ID": "org/pinned"}, clear=True):
             self.assertEqual(settings.model_id_at_startup(chosen), "org/pinned")
 
+    def test_the_pinned_model_is_not_written_down_as_the_saved_one(self):
+        chosen = settings.sanitize({"model_id": "org/saved-model"})
+
+        with mock.patch.dict(os.environ, {"OLMO_MODEL_ID": "org/pinned"}, clear=True):
+            self.assertEqual(
+                settings.model_id_to_save("org/pinned", chosen), "org/saved-model"
+            )
+
+    def test_a_model_typed_over_the_pinned_one_is_saved(self):
+        chosen = settings.sanitize({"model_id": "org/saved-model"})
+
+        with mock.patch.dict(os.environ, {"OLMO_MODEL_ID": "org/pinned"}, clear=True):
+            self.assertEqual(
+                settings.model_id_to_save("org/typed", chosen), "org/typed"
+            )
+
+    def test_without_the_variable_the_box_is_saved_as_it_stands(self):
+        chosen = settings.sanitize({"model_id": "org/saved-model"})
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                settings.model_id_to_save("org/typed", chosen), "org/typed"
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

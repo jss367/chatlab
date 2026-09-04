@@ -3277,9 +3277,15 @@ def remember_settings(*values) -> None:
     There is no save button, so each control reports the whole set and the
     file is rewritten. A change that changes nothing is not written, which is
     what keeps a slider drag from writing once per pixel.
+
+    The model box is the one control whose contents are not always the
+    reader's choice: ``OLMO_MODEL_ID`` puts a model there for one run, and
+    that must not be written down just because something else changed.
     """
 
-    settings.update(**dict(zip(PERSISTED_SETTING_NAMES, values, strict=True)))
+    chosen = dict(zip(PERSISTED_SETTING_NAMES, values, strict=True))
+    chosen["model_id"] = settings.model_id_to_save(chosen["model_id"])
+    settings.update(**chosen)
 
 
 def restore_settings():

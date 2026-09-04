@@ -373,3 +373,20 @@ def model_id_at_startup(chosen: Settings | None = None) -> str:
     saved = chosen if chosen is not None else current()
     return os.environ.get(MODEL_ID_ENV) or saved.model_id
 
+
+def model_id_to_save(shown: str, chosen: Settings | None = None) -> str:
+    """The model to write down while the box on the Models page shows ``shown``.
+
+    ``OLMO_MODEL_ID`` pins a model for one run, and the box shows what it
+    pins. Every control publishes the box's contents whenever anything
+    changes, so without this a nudge of the temperature would write the
+    one-run model down as the reader's own choice and leave it selected long
+    after the variable was gone. A reader who types a different model has
+    chosen it, and that is saved like any other setting.
+    """
+
+    override = os.environ.get(MODEL_ID_ENV)
+    if not override or shown != override:
+        return shown
+    saved = chosen if chosen is not None else current()
+    return saved.model_id

@@ -1278,6 +1278,44 @@ class SavedSettingsTests(unittest.TestCase):
         self.assertEqual(settings.current().temperature, 0.1)
         self.assertEqual(json.loads(self.path.read_text())["temperature"], 0.1)
 
+    def test_a_pinned_model_is_not_saved_when_something_else_changes(self):
+        """``OLMO_MODEL_ID`` names a model for one run, not for every run."""
+
+        with mock.patch.dict(
+            os.environ, {"OLMO_MODEL_ID": "org/pinned"}, clear=False
+        ):
+            self.build_with(model_id="org/saved-model")
+            box = self.labelled("Hugging Face model ID")
+            self.assertEqual(box.value, "org/pinned")
+
+            values = settings.current().to_mapping() | {
+                "enter_sends": settings.current().enter_sends,
+                "model_id": box.value,
+                "temperature": 0.1,
+            }
+            app.remember_settings(
+                *(values[name] for name in app.PERSISTED_SETTING_NAMES)
+            )
+
+        self.assertEqual(json.loads(self.path.read_text())["temperature"], 0.1)
+        self.assertEqual(settings.current().model_id, "org/saved-model")
+        self.assertEqual(json.loads(self.path.read_text())["model_id"], "org/saved-model")
+
+    def test_a_model_typed_over_a_pinned_one_is_saved(self):
+        with mock.patch.dict(
+            os.environ, {"OLMO_MODEL_ID": "org/pinned"}, clear=False
+        ):
+            self.build_with(model_id="org/saved-model")
+            values = settings.current().to_mapping() | {
+                "enter_sends": settings.current().enter_sends,
+                "model_id": "org/typed",
+            }
+            app.remember_settings(
+                *(values[name] for name in app.PERSISTED_SETTING_NAMES)
+            )
+
+        self.assertEqual(settings.current().model_id, "org/typed")
+
     def test_lowering_the_context_limit_pulls_the_response_length_under_it(self):
         self.build_with(prefill_token_limit=8192, max_new_tokens=4096)
 
