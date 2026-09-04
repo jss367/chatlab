@@ -6,6 +6,7 @@ A local chat interface that shows what happened under the hood for every token, 
 
 - Hugging Face model download and cache controls
 - A Models page listing the models already downloaded, with a search of the Hugging Face Hub for more
+- A badge above the chat naming the model in memory and the device it runs on, or saying that none is loaded
 - A chat interface that collapses OLMo reasoning blocks into an expandable section
 - Live token-by-token generation with a **Stop** button
 - Exact raw vocabulary rank for each generated token

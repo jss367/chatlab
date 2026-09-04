@@ -915,6 +915,55 @@ class ModelSearchPaneTests(unittest.TestCase):
         )
 
 
+class ModelBadgeTests(unittest.TestCase):
+    """The chat page's badge: the model in memory, or the lack of one."""
+
+    def setUp(self):
+        self.manager = ModelManager()
+        original = app.MANAGER
+        app.MANAGER = self.manager
+        self.addCleanup(lambda: setattr(app, "MANAGER", original))
+
+    def load(self):
+        self.manager.model = object()
+        self.manager.tokenizer = object()
+        self.manager.model_id = OLMO
+        self.manager.device_name = "Apple Metal (MPS)"
+
+    def test_a_loaded_model_is_named_with_its_device(self):
+        self.load()
+        badge, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="ready"', badge)
+        self.assertIn(OLMO, badge)
+        self.assertIn("Apple Metal (MPS)", badge)
+        # Nothing to go to the Models page for.
+        self.assertFalse(button["visible"])
+
+    def test_no_model_says_so_and_offers_the_way_to_the_models_page(self):
+        badge, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="empty"', badge)
+        self.assertIn(app.NO_MODEL_BADGE, badge)
+        self.assertTrue(button["visible"])
+
+    def test_a_load_under_way_names_the_model_coming_in(self):
+        # model_id is cleared for the whole of a load, so the badge reads
+        # loading_id and reports the minutes in between as a load.
+        self.manager.loading_id = OLMO
+        badge, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="loading"', badge)
+        self.assertIn(f"Loading {OLMO}", badge)
+        self.assertFalse(button["visible"])
+
+    def test_the_model_id_is_escaped(self):
+        self.load()
+        self.manager.model_id = "org/<script>"
+
+        self.assertIn("&lt;script&gt;", app.loaded_model_badge())
+
+
 class PageLayoutTests(unittest.TestCase):
     """The nav picks a page: the model controls sit on Models, the settings on
     Settings, and the conversation on Chat."""
@@ -1035,6 +1084,50 @@ class PageLayoutTests(unittest.TestCase):
             for fn in self.demo.fns.values()
             if getattr(fn.fn, "__name__", None) == name
         ]
+
+    def test_the_badge_sits_above_the_chat_page_tabs(self):
+        chat_page = self.by_id("chat-page")
+        badge = self.by_id("model-badge")
+        button = self.by_id("load-model")
+        self.assertTrue(self.within(badge, chat_page))
+        self.assertTrue(self.within(button, chat_page))
+        # Above the tabs, so Score text names the model as well as Chat.
+        tabs = next(
+            block for block in self.demo.blocks.values() if isinstance(block, gr.Tabs)
+        )
+        self.assertFalse(self.within(badge, tabs))
+
+    def test_every_change_to_what_is_in_memory_repaints_the_badge(self):
+        # Download-and-load, load cached and unload change what is in memory;
+        # the page load draws the badge first, and switching pages catches a
+        # load that started while the chat page was out of sight.
+        listeners = self.listeners("refresh_model_badge")
+        self.assertEqual(len(listeners), 5)
+        for listener in listeners:
+            self.assertEqual(
+                listener.outputs, [self.by_id("model-badge"), self.by_id("load-model")]
+            )
+
+    def test_the_badge_button_sends_the_nav_to_the_models_page(self):
+        (listener,) = self.listeners("go_to_models")
+        self.assertEqual(listener.targets, [(self.by_id("load-model")._id, "click")])
+        # The button switches the pages itself: a Radio set by a handler
+        # reports no change, so the nav's own handler would not run.
+        self.assertEqual(
+            listener.outputs,
+            [
+                self.by_id("nav"),
+                self.by_id("conversation-pane"),
+                self.by_id("chat-page"),
+                self.by_id("models-page"),
+                self.by_id("settings-page"),
+            ],
+        )
+        page, *panes = app.go_to_models()
+        self.assertEqual(page, "Models")
+        self.assertEqual(
+            [update["visible"] for update in panes], [False, False, True, False]
+        )
 
     def test_every_model_change_rescans_the_cache(self):
         # Download, download-and-load, load cached, unload, redownload,
