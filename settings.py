@@ -68,32 +68,56 @@ TOP_K_RANGE = (0, 200)
 SEED_FLOOR = 0
 
 
+def _number(value: Any) -> float | None:
+    """``value`` as a number, or ``None`` where it is not one.
+
+    ``bool`` is an ``int`` in Python, so a ``true`` in the file would
+    otherwise arrive as 1 and be pulled into range as though the reader had
+    written a number, rather than falling back to its default the way a value
+    of the wrong type is meant to.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _whole(value: Any) -> int | None:
+    """``value`` as a whole number, or ``None`` where it is not one.
+
+    A slider publishes ``1024.0`` rather than ``1024``, so an integral float
+    counts. ``2048.7`` does not: truncating it would save a limit the reader
+    never wrote. Infinities and NaN are not integral either, which is what
+    keeps them from reaching ``int()``.
+    """
+
+    number = _number(value)
+    if number is None:
+        return None
+    if isinstance(number, float):
+        return int(number) if number.is_integer() else None
+    return number
+
+
 def _clamped_float(value: Any, bounds: tuple[float, float], default: float) -> float:
     low, high = bounds
-    try:
-        number = float(value)
-    except (OverflowError, TypeError, ValueError):
+    number = _number(value)
+    if number is None or number != number:  # NaN compares false against every bound.
         return default
-    if number != number:  # NaN compares false against every bound.
-        return default
-    return min(max(number, low), high)
+    return min(max(float(number), low), high)
 
 
 def _clamped_int(value: Any, bounds: tuple[int, int], default: int) -> int:
     low, high = bounds
-    try:
-        number = int(value)
-    except (OverflowError, TypeError, ValueError):
+    number = _whole(value)
+    if number is None:
         return default
     return min(max(number, low), high)
 
 
 def _floored_int(value: Any, low: int, default: int) -> int:
-    try:
-        number = int(value)
-    except (OverflowError, TypeError, ValueError):
-        return default
-    return max(number, low)
+    number = _whole(value)
+    return default if number is None else max(number, low)
 
 
 def _text(value: Any, default: str) -> str:

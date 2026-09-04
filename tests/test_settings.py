@@ -93,6 +93,45 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(saved.keep_reasoning, settings.DEFAULTS.keep_reasoning)
         self.assertEqual(saved.color_scale, settings.DEFAULTS.color_scale)
 
+    def test_a_flag_where_a_number_belongs_falls_back_to_its_default(self):
+        # True is an int in Python, so without a check it would arrive as 1
+        # and be pulled up to the floor of the range, leaving an app that
+        # refuses almost every conversation.
+        self.write_file({"prefill_token_limit": True, "top_k": False, "seed": True})
+        saved, _unknown = settings.read(self.path)
+
+        self.assertEqual(
+            saved.prefill_token_limit, settings.DEFAULTS.prefill_token_limit
+        )
+        self.assertEqual(saved.top_k, settings.DEFAULTS.top_k)
+        self.assertEqual(saved.seed, settings.DEFAULTS.seed)
+        self.assertEqual(saved.temperature, settings.DEFAULTS.temperature)
+
+    def test_a_whole_number_written_as_a_float_is_the_number(self):
+        # A slider publishes 1024.0 rather than 1024.
+        self.write_file({"max_new_tokens": 512.0, "top_k": 20.0})
+        saved, _unknown = settings.read(self.path)
+
+        self.assertEqual(saved.max_new_tokens, 512)
+        self.assertEqual(saved.top_k, 20)
+
+    def test_a_fraction_where_a_whole_number_belongs_falls_back(self):
+        # Truncating would save a limit the reader never wrote.
+        self.write_file({"prefill_token_limit": 2048.7, "seed": 1.5})
+        saved, _unknown = settings.read(self.path)
+
+        self.assertEqual(
+            saved.prefill_token_limit, settings.DEFAULTS.prefill_token_limit
+        )
+        self.assertEqual(saved.seed, settings.DEFAULTS.seed)
+
+    def test_a_number_written_as_a_string_falls_back_to_its_default(self):
+        self.write_file({"top_k": "20", "temperature": "0.5"})
+        saved, _unknown = settings.read(self.path)
+
+        self.assertEqual(saved.top_k, settings.DEFAULTS.top_k)
+        self.assertEqual(saved.temperature, settings.DEFAULTS.temperature)
+
     def test_a_lowered_context_limit_lowers_a_saved_response_length(self):
         self.write_file({"prefill_token_limit": 512, "max_new_tokens": 4096})
         saved, _unknown = settings.read(self.path)
