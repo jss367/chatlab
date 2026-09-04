@@ -255,9 +255,12 @@ def download_detail(model_id: str, snap: DownloadSnapshot, rate: float | None) -
         remaining = max(0, snap.bytes_total - snap.bytes_done)
         # format_bytes() prints a byte count verbatim below 1 KB, so a rate
         # handed to it as the float it is measured in reads "812.3456789 B/s".
-        # The estimate keeps the unrounded rate: it divides by it.
+        # Rounding never reaches zero: a download with nothing moving has no
+        # rate at all and never gets here, so "0 B/s" beside a time left would
+        # contradict itself. The estimate keeps the unrounded rate: it divides
+        # by it.
         figures += (
-            f" · {format_bytes(round(rate))}/s"
+            f" · {format_bytes(max(1, round(rate)))}/s"
             f" · {describe_duration(remaining / rate)} left"
         )
     return f"{name}\n\n`{progress_bar(snap.fraction)}` {percent}%\n\n{figures}"

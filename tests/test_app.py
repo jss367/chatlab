@@ -347,6 +347,19 @@ class DownloadCardTests(unittest.TestCase):
         self.assertIn("812 B/s", detail)
         self.assertNotIn("812.3", detail)
 
+    def test_a_crawling_download_is_never_reported_as_stopped(self):
+        # The meter has no rate at all for a download with nothing moving, so
+        # this clause only runs while bytes arrive. Rounding a byte every few
+        # seconds down to "0 B/s" would contradict the time left beside it.
+        snap = app.DownloadSnapshot(
+            files_done=1, files_total=2, bytes_done=100, bytes_total=2_000
+        )
+
+        detail = app.download_detail("org/model", snap, rate=0.25)
+
+        self.assertIn("1 B/s", detail)
+        self.assertNotIn("0 B/s", detail)
+
     def test_the_detail_explains_the_wait_before_the_file_list_arrives(self):
         detail = app.download_detail("org/model", app.DownloadSnapshot(), rate=None)
 
