@@ -3892,6 +3892,30 @@ def score_token_count(context: str, text: str, use_chat_template: bool) -> str:
     return f"{count:,} of {limit:,} tokens."
 
 
+def recover_score_budget(shown: str, context: str, text: str, use_chat_template: bool):
+    """Try the count again, but only while it is the one that gives up.
+
+    A count asked for during a reply cannot have the model lock and says so,
+    and nothing about that message is self-correcting: the generation ends,
+    the model goes idle, and the box still reads "not mid-response" until
+    something is typed into it. Every path out of a generation would have to
+    remember to recompute - the ordinary end of one, Stop, and the four
+    handlers that cancel one - and a path added later would have to remember
+    too.
+
+    So the recovery is driven from the badge's timer instead, and guarded by
+    what is on screen. In every state but the stuck one this returns without
+    asking, and asking is itself cheap while it would still fail: an unloaded
+    model and a held lock both refuse before any encoding happens. The one
+    encoding this costs is the one on the tick that fixes the message.
+    """
+
+    if shown != SCORE_COUNT_UNKNOWN:
+        return gr.skip()
+    recovered = score_token_count(context, text, use_chat_template)
+    return gr.skip() if recovered == shown else recovered
+
+
 def show_page(page: str):
     """Show the chosen page. The conversations pane comes and goes with Chat."""
     return [
@@ -4285,7 +4309,9 @@ def build_app() -> gr.Blocks:
                                 # limit. This is the same count, made while
                                 # the passage is still being written.
                                 score_budget = gr.Markdown(
-                                    SCORE_COUNT_HINT, elem_classes=["token-budget"]
+                                    SCORE_COUNT_HINT,
+                                    elem_id="score-budget",
+                                    elem_classes=["token-budget"],
                                 )
                                 score_button = gr.Button("Score text", variant="primary")
                                 score_status = gr.Markdown("Nothing scored yet.")
@@ -4570,6 +4596,20 @@ def build_app() -> gr.Blocks:
         nav.change(
             show_page, nav, [conversation_pane, chat_page, models_page, settings_page]
         )
+        # The scored token count follows the boxes as they are typed into.
+        # always_last coalesces a burst of keystrokes into the one count that
+        # matters, and the progress bar is hidden because a spinner on every
+        # keystroke would be worse than the number is good.
+        score_budget_inputs = [score_context, score_input, use_chat_template]
+        for control in score_budget_inputs:
+            control.change(
+                score_token_count,
+                score_budget_inputs,
+                score_budget,
+                trigger_mode="always_last",
+                show_progress="hidden",
+            )
+
         # The badge is refreshed on the way to the chat page as well, so a
         # load started a moment ago shows as one in progress rather than as
         # the "no model" state the page was left in.
@@ -4586,6 +4626,17 @@ def build_app() -> gr.Blocks:
         badge_timer.tick(
             refresh_model_badge, None, badge_outputs, show_progress="hidden"
         )
+        # The same timer un-sticks the scored token count. A count asked for
+        # during a reply gives up, and nothing about that message corrects
+        # itself once the reply ends; see recover_score_budget, which is why
+        # this is one listener rather than one on every path out of a
+        # generation.
+        badge_timer.tick(
+            recover_score_budget,
+            [score_budget, *score_budget_inputs],
+            score_budget,
+            show_progress="hidden",
+        )
         load_model_button.click(
             go_to_models,
             None,
@@ -4596,21 +4647,6 @@ def build_app() -> gr.Blocks:
         # the cache afterwards, so My Models never shows a stale list.
         models_inputs = [my_models, sort_models]
         models_outputs = [my_models, my_model_detail, my_models_summary]
-
-        # The scored token count follows the boxes as they are typed into.
-        # always_last coalesces a burst of keystrokes into the one count that
-        # matters, and the progress bar is hidden because a spinner on every
-        # keystroke would be worse than the number is good.
-        score_budget_inputs = [score_context, score_input, use_chat_template]
-        for control in score_budget_inputs:
-            control.change(
-                score_token_count,
-                score_budget_inputs,
-                score_budget,
-                trigger_mode="always_last",
-                show_progress="hidden",
-            )
-
 
         # Loading, unloading and downloading all change what the chat page's
         # badge and its offer should say, and they change what the scored

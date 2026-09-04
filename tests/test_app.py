@@ -1081,6 +1081,75 @@ class ScoreBudgetTests(unittest.TestCase):
         self.assertEqual(counting.asked, [("passage", "before", True)])
 
 
+class ScoreBudgetRecoveryTests(unittest.TestCase):
+    """The count that gave up has to come back on its own.
+
+    A count asked for during a reply cannot have the model lock and says so.
+    Nothing about that message corrects itself: the reply ends, the model
+    goes idle, and the box still reads "not mid-response" until something is
+    typed into it. The badge's timer is what un-sticks it.
+    """
+
+    class Counting:
+        loaded = True
+
+        def __init__(self, answer):
+            self.answer = answer
+            self.asked = 0
+
+        def count_score_tokens(self, text, *, context="", use_chat_template=False):
+            self.asked += 1
+            return self.answer
+
+    def recover(self, manager, shown):
+        original = app.MANAGER
+        app.MANAGER = manager
+        try:
+            return app.recover_score_budget(shown, "", "some text", False)
+        finally:
+            app.MANAGER = original
+
+    def test_a_count_that_is_stuck_is_recomputed(self):
+        counting = self.Counting((12, 4096))
+
+        recovered = self.recover(counting, app.SCORE_COUNT_UNKNOWN)
+
+        self.assertEqual(recovered, "12 of 4,096 tokens.")
+        self.assertEqual(counting.asked, 1)
+
+    def test_a_count_that_is_fine_is_not_asked_for_again(self):
+        # This runs every couple of seconds, so the ordinary case must not
+        # pay for an encoding.
+        counting = self.Counting((12, 4096))
+
+        for shown in ("12 of 4,096 tokens.", app.SCORE_COUNT_HINT, ""):
+            with self.subTest(shown=shown):
+                self.assertEqual(self.recover(counting, shown), gr.skip())
+        self.assertEqual(counting.asked, 0)
+
+    def test_a_count_that_is_still_stuck_publishes_nothing(self):
+        # Still mid-response, or still no model. Rewriting the same message
+        # every tick would put a change event on the wire for nothing.
+        counting = self.Counting(None)
+
+        self.assertEqual(
+            self.recover(counting, app.SCORE_COUNT_UNKNOWN), gr.skip()
+        )
+
+    def test_recovery_reads_the_boxes_it_would_score(self):
+        # The recomputed count has to describe what is in the boxes now, not
+        # what was there when the count gave up.
+        (listener,) = [
+            fn
+            for fn in app.build_app().fns.values()
+            if getattr(fn.fn, "__name__", None) == "recover_score_budget"
+        ]
+
+        self.assertEqual(len(listener.inputs), 4)
+        self.assertEqual(listener.outputs, [listener.inputs[0]])
+        self.assertEqual(listener.show_progress, "hidden")
+
+
 class ClearConfirmationTests(unittest.TestCase):
     """Clear deletes every conversation, so it asks first.
 

@@ -1379,6 +1379,20 @@ class PageLayoutTests(unittest.TestCase):
         # chain, plus the page load, the nav and the timer.
         self.assertEqual(len(self.listeners("refresh_model_badge")), 10)
 
+    def test_the_timer_also_un_sticks_the_scored_token_count(self):
+        # A count asked for during a reply gives up and says so, and that
+        # message does not correct itself when the reply ends. Rather than
+        # ask every path out of a generation to remember, the badge's timer
+        # carries the recovery - guarded so the ordinary tick costs nothing.
+        timers = [
+            block for block in self.demo.blocks.values() if isinstance(block, gr.Timer)
+        ]
+        (recovery,) = self.listeners("recover_score_budget")
+
+        self.assertEqual(recovery.targets, [(timers[0]._id, "tick")])
+        self.assertEqual(recovery.inputs[0], self.by_id("score-budget"))
+        self.assertEqual(recovery.outputs, [self.by_id("score-budget")])
+
     def test_the_badge_asks_again_on_a_timer(self):
         # The manager is one object for the whole process, but a handler's
         # updates only reach the tab that ran it. Without the timer a second
