@@ -341,7 +341,8 @@ class ManagerRemoveTests(unittest.TestCase):
 
 
 class LoadingIdTests(unittest.TestCase):
-    """The manager names the model it is loading for as long as the load runs."""
+    """The manager names the model it is loading for as long as the load runs,
+    and keeps the loads that overlap apart from each other."""
 
     def test_the_loading_id_is_set_during_the_load_and_cleared_after(self):
         manager = ModelManager()
@@ -449,6 +450,110 @@ class LoadingIdTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             manager.load("nonsense", Path("/snap"))
         self.assertIsNone(manager.loading_id)
+
+    def test_one_load_finishing_does_not_cancel_another_still_running(self):
+        # "Load cached" and "Download and load" are separate Gradio events,
+        # so they get a worker each and can both be inside load() at once,
+        # the second waiting on the model lock. The load that finishes first
+        # must leave the other's name in place: otherwise the chat badge
+        # goes back to "No model loaded" halfway through a load, and offers
+        # the reader a button to start one more.
+        import threading
+
+        manager = ModelManager()
+        second = "org/second"
+        in_first = threading.Event()
+        in_second = threading.Event()
+        let_first_finish = threading.Event()
+        let_second_finish = threading.Event()
+
+        def fake_load(model_id, local_path, torch, progress=None):
+            if model_id == OLMO:
+                in_first.set()
+                let_first_finish.wait(5)
+            else:
+                in_second.set()
+                let_second_finish.wait(5)
+            return "CPU"
+
+        with mock.patch.object(manager, "_load_locked", fake_load):
+            first_worker = threading.Thread(
+                target=manager.load, args=(OLMO, Path("/snap"))
+            )
+            first_worker.start()
+            try:
+                self.assertTrue(in_first.wait(5))
+                second_worker = threading.Thread(
+                    target=manager.load, args=(second, Path("/snap"))
+                )
+                second_worker.start()
+                try:
+                    for _ in range(200):
+                        if manager.is_loading(second):
+                            break
+                        time.sleep(0.005)
+                    # Both count as under way, and the one that got there
+                    # first is the one the badge names.
+                    self.assertTrue(manager.is_loading(second))
+                    self.assertTrue(manager.is_loading(OLMO))
+                    self.assertEqual(manager.loading_id, OLMO)
+                    self.assertFalse(in_second.is_set())
+
+                    let_first_finish.set()
+                    first_worker.join(timeout=5)
+                    self.assertTrue(in_second.wait(5))
+                    # The finished load took only its own name away.
+                    self.assertEqual(manager.loading_id, second)
+                    self.assertFalse(manager.is_loading(OLMO))
+                finally:
+                    let_second_finish.set()
+                    second_worker.join(timeout=5)
+            finally:
+                let_first_finish.set()
+                first_worker.join(timeout=5)
+
+        self.assertIsNone(manager.loading_id)
+        self.assertFalse(manager.is_loading(second))
+        self.assertFalse(manager._lock.locked())
+
+    def test_the_load_holding_the_lock_is_named_whatever_order_they_claimed_in(self):
+        # Loads claim themselves before they wait for the model lock, so
+        # claim order is arrival order, and arrival order is not promised to
+        # be the order the lock is handed out in: a thread can be set aside
+        # between the two steps. The badge has to name the load that is
+        # really reading weights, not the one that claimed last.
+        import threading
+
+        manager = ModelManager()
+        reading = threading.Event()
+        let_it_finish = threading.Event()
+
+        def fake_load(model_id, local_path, torch, progress=None):
+            reading.set()
+            let_it_finish.wait(5)
+            return "CPU"
+
+        with mock.patch.object(manager, "_load_locked", fake_load):
+            worker = threading.Thread(target=manager.load, args=(OLMO, Path("/snap")))
+            worker.start()
+            try:
+                self.assertTrue(reading.wait(5))
+                # A later click lands its claim while the first load reads.
+                _later_id, later = manager.reserve_load("org/second")
+                self.assertEqual(manager.loading_id, OLMO)
+                # Both are claimed, so neither model's files may be touched.
+                self.assertTrue(manager.is_loading(OLMO))
+                self.assertTrue(manager.is_loading("org/second"))
+            finally:
+                let_it_finish.set()
+                worker.join(timeout=5)
+
+        # With the lock free, the load waiting for it is named again, so the
+        # badge does not fall back to "No model loaded" while it runs.
+        self.assertEqual(manager.loading_id, "org/second")
+        manager.release_load(later)
+        self.assertIsNone(manager.loading_id)
+        self.assertFalse(manager._lock.locked())
 
 
 def cached(model_id: str, **overrides) -> CachedModel:
@@ -691,6 +796,19 @@ class ManageMyModelsTests(unittest.TestCase):
     def test_a_model_being_loaded_is_not_redownloaded_under_itself(self):
         # model_id is empty for the whole of a load, so the manager names
         # the model it is bringing in separately.
+        self.manager.reserve_load("org/partial")
+
+        (card,) = list(app.redownload_my_model("org/partial", ""))
+
+        self.assertIn("Model in use", card)
+        self.assertIn("being loaded", card)
+        self.assertFalse(card.startswith("downloading"), card)
+
+    def test_a_model_waiting_behind_another_load_is_not_redownloaded_either(self):
+        # Two loads can run at once, and only one of them is the one the
+        # badge names. The one waiting its turn is still going to read its
+        # own files, so a redownload of it has to be refused as well.
+        self.manager.reserve_load(OLMO)
         self.manager.reserve_load("org/partial")
 
         (card,) = list(app.redownload_my_model("org/partial", ""))
@@ -971,6 +1089,101 @@ class ModelSearchPaneTests(unittest.TestCase):
         )
 
 
+class ModelBadgeTests(unittest.TestCase):
+    """The chat page's badge: the model in memory, or the lack of one."""
+
+    def setUp(self):
+        self.manager = ModelManager()
+        original = app.MANAGER
+        app.MANAGER = self.manager
+        self.addCleanup(lambda: setattr(app, "MANAGER", original))
+
+    def load(self):
+        self.manager.model = object()
+        self.manager.tokenizer = object()
+        self.manager.model_id = OLMO
+        self.manager.device_name = "Apple Metal (MPS)"
+
+    def test_a_loaded_model_is_named_with_its_device(self):
+        self.load()
+        badge, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="ready"', badge)
+        self.assertIn(OLMO, badge)
+        self.assertIn("Apple Metal (MPS)", badge)
+        # Nothing to go to the Models page for.
+        self.assertFalse(button["visible"])
+
+    def test_no_model_says_so_and_offers_the_way_to_the_models_page(self):
+        badge, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="empty"', badge)
+        self.assertIn(app.NO_MODEL_BADGE, badge)
+        self.assertTrue(button["visible"])
+
+    def test_a_load_under_way_names_the_model_coming_in(self):
+        # model_id is cleared for the whole of a load, so the badge reads
+        # loading_id and reports the minutes in between as a load.
+        self.manager.reserve_load(OLMO)
+
+        badge, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="loading"', badge)
+        self.assertIn(f"Loading {OLMO}", badge)
+        self.assertFalse(button["visible"])
+
+    def test_a_second_load_finishing_leaves_the_first_one_showing(self):
+        # Two loads can be under way at once, and the one that finishes
+        # first must not give back the other's claim: the badge would then
+        # say nothing was loaded in the middle of a load.
+        self.manager.reserve_load(OLMO)
+        _second_id, second = self.manager.reserve_load("org/second")
+        self.manager.release_load(second)
+
+        badge, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="loading"', badge)
+        self.assertIn(f"Loading {OLMO}", badge)
+        self.assertFalse(button["visible"])
+
+    def test_a_load_waiting_its_turn_leaves_the_answering_model_named(self):
+        # A load counts itself as under way before it waits for the model
+        # lock, so asking for a second model mid-reply queues it behind the
+        # generation. The model still producing the tokens is the one the
+        # badge is for, so it keeps the name until the load empties memory.
+        self.load()
+        self.manager.reserve_load("org/second")
+
+        badge, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="ready"', badge)
+        self.assertIn(OLMO, badge)
+        self.assertNotIn("Loading", badge)
+        self.assertFalse(button["visible"])
+
+    def test_a_load_that_has_emptied_memory_names_the_model_coming_in(self):
+        # Once the queued load wins the lock it unloads first, and from then
+        # on there is nothing in memory to name.
+        self.load()
+        self.manager.reserve_load("org/second")
+        self.manager.model = None
+        self.manager.tokenizer = None
+        self.manager.model_id = None
+        self.manager.device_name = None
+
+        badge, button = app.refresh_model_badge()
+
+        self.assertIn('data-state="loading"', badge)
+        self.assertIn("Loading org/second", badge)
+        self.assertFalse(button["visible"])
+
+    def test_the_model_id_is_escaped(self):
+        self.load()
+        self.manager.model_id = "org/<script>"
+
+        self.assertIn("&lt;script&gt;", app.loaded_model_badge())
+
+
 class PageLayoutTests(unittest.TestCase):
     """The nav picks a page: the model controls sit on Models, the settings on
     Settings, and the conversation on Chat."""
@@ -1096,6 +1309,72 @@ class PageLayoutTests(unittest.TestCase):
             for fn in self.demo.fns.values()
             if getattr(fn.fn, "__name__", None) == name
         ]
+
+    def test_the_badge_sits_above_the_chat_page_tabs(self):
+        chat_page = self.by_id("chat-page")
+        badge = self.by_id("model-badge")
+        button = self.by_id("load-model")
+        self.assertTrue(self.within(badge, chat_page))
+        self.assertTrue(self.within(button, chat_page))
+        # Above the tabs, so Score text names the model as well as Chat.
+        tabs = next(
+            block for block in self.demo.blocks.values() if isinstance(block, gr.Tabs)
+        )
+        self.assertFalse(self.within(badge, tabs))
+
+    def test_every_change_to_what_is_in_memory_repaints_the_badge(self):
+        # Download-and-load, load cached and unload change what is in memory;
+        # the page load draws the badge first, switching pages catches a load
+        # that started while the chat page was out of sight, and the timer
+        # catches one another tab started.
+        listeners = self.listeners("refresh_model_badge")
+        self.assertEqual(len(listeners), 6)
+        for listener in listeners:
+            self.assertEqual(
+                listener.outputs, [self.by_id("model-badge"), self.by_id("load-model")]
+            )
+
+    def test_the_badge_asks_again_on_a_timer(self):
+        # The manager is one object for the whole process, but a handler's
+        # updates only reach the tab that ran it. Without the timer a second
+        # tab would name a model that another tab has since swapped out.
+        timers = [
+            block
+            for block in self.demo.blocks.values()
+            if isinstance(block, gr.Timer)
+        ]
+        self.assertEqual([timer.value for timer in timers], [app.BADGE_REFRESH_SECONDS])
+        self.assertLessEqual(app.BADGE_REFRESH_SECONDS, 5)
+        ticks = [
+            listener
+            for listener in self.listeners("refresh_model_badge")
+            if listener.targets == [(timers[0]._id, "tick")]
+        ]
+        self.assertEqual(len(ticks), 1)
+        # Nobody asked for this one, so it does not put a pending shimmer on
+        # the badge every couple of seconds.
+        self.assertEqual(ticks[0].show_progress, "hidden")
+
+    def test_the_badge_button_sends_the_nav_to_the_models_page(self):
+        (listener,) = self.listeners("go_to_models")
+        self.assertEqual(listener.targets, [(self.by_id("load-model")._id, "click")])
+        # The button switches the pages itself: a Radio set by a handler
+        # reports no change, so the nav's own handler would not run.
+        self.assertEqual(
+            listener.outputs,
+            [
+                self.by_id("nav"),
+                self.by_id("conversation-pane"),
+                self.by_id("chat-page"),
+                self.by_id("models-page"),
+                self.by_id("settings-page"),
+            ],
+        )
+        page, *panes = app.go_to_models()
+        self.assertEqual(page, "Models")
+        self.assertEqual(
+            [update["visible"] for update in panes], [False, False, True, False]
+        )
 
     def test_every_model_change_rescans_the_cache(self):
         # Download, download-and-load, load cached, unload, redownload,

@@ -684,6 +684,84 @@ def unload_model():
     return status_card("Model unloaded", "Model memory has been released.", "success")
 
 
+# The chat page's badge: which model is answering, or that none is loaded.
+# Nothing on the chat page said so before, so an unloaded model only showed
+# up as a refusal after a message had been typed and sent.
+NO_MODEL_BADGE = "No model loaded"
+
+# How often an open chat page asks again which model is in memory. The manager
+# is one object for the whole process, but a handler's updates only reach the
+# tab that ran it, so a second tab would go on naming a model that has since
+# been swapped out or unloaded. Asking on a timer is what keeps every tab
+# honest; a couple of seconds is short enough that nobody types a message
+# against a badge that has gone stale, and the question is a few attribute
+# reads.
+BADGE_REFRESH_SECONDS = 2.0
+
+
+def model_badge(state: str, text: str) -> str:
+    """A pill naming the model in memory. ``state`` is the stylesheet's hook."""
+
+    return (
+        f'<div class="model-badge" data-state="{state}">'
+        f'<span class="model-badge-dot" aria-hidden="true"></span>'
+        f"<span>{html.escape(text)}</span></div>"
+    )
+
+
+def loaded_model_badge() -> str:
+    """Name the model in memory, the one being loaded, or neither.
+
+    A model in memory is named ahead of any load. A load counts itself as
+    under way before it waits for the model lock, so asking for a second
+    model while the first is part-way through a reply leaves that load
+    queued for the rest of the generation - and the model still producing
+    the tokens is the one the badge exists to name. A load that has really
+    started emptied memory as its first act under that lock, so there is
+    nothing left to name and the load is reported instead: that is what
+    keeps the badge from claiming nothing is loaded during the minutes the
+    weights are on their way in.
+
+    Each attribute is read once and kept rather than asked again to fill in
+    the text: a load can finish, or empty memory, between two reads, which
+    would leave the badge saying "Loading None" or naming a model loaded on
+    None.
+    """
+
+    loading = MANAGER.loading_id
+    model_id = MANAGER.model_id
+    device = MANAGER.device_name
+    if model_id and device:
+        return model_badge("ready", f"{model_id} · loaded on {device}")
+    if loading:
+        return model_badge("loading", f"Loading {loading}…")
+    return model_badge("empty", NO_MODEL_BADGE)
+
+
+def refresh_model_badge():
+    """The badge, plus the button that only shows while there is no model.
+
+    A load in progress hides the button too: the Models page is already busy
+    bringing that model in, so sending the reader there would suggest work
+    that is under way needs starting.
+    """
+
+    have_model = MANAGER.loaded or MANAGER.loading_id
+    return loaded_model_badge(), gr.update(visible=not have_model)
+
+
+def go_to_models():
+    """Move the nav to Models and show that page, as clicking its tile does.
+
+    The pages are switched here rather than left to the nav's own change
+    handler: Gradio's Radio reports a change the visitor made, not one a
+    handler wrote, so setting the nav alone would tick Models and leave the
+    chat page on screen.
+    """
+
+    return MODELS_PAGE, *show_page(MODELS_PAGE)
+
+
 # The side pane's model lists.
 NO_CACHED_MODEL_SELECTED = "Select a model to see its details and put it in the model ID box."
 SEARCH_HINT = (
@@ -807,6 +885,11 @@ def redownload_my_model(selected: str | None, hf_token: str):
     ID alone, so it would then call the new snapshot "loaded" while every
     reply still came from the old one. An incomplete model cannot be loaded,
     so the refusal never stands in the way of finishing a download.
+
+    ``is_loading`` rather than the name in the badge, because with two loads
+    running at once only one of them is named there, and a load still waiting
+    its turn for the model lock is going to read that model's files just the
+    same.
     """
 
     if not selected:
@@ -3286,6 +3369,27 @@ CSS = f"""
 #hero h1, #models-hero h1, #settings-hero h1 {{ font-size: 2.1rem; margin-bottom: 0.25rem; }}
 #model-status {{ min-height: 128px; }}
 
+/* The chat page's model badge and the button that appears beside it when
+   there is nothing loaded. Both keep their own width and sit on one line. */
+#model-bar {{ flex-wrap: nowrap; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }}
+#model-bar #model-badge {{ flex: 0 1 auto; width: auto; min-width: 0; }}
+#model-bar #load-model {{ flex: 0 0 auto; width: auto; min-width: 0; }}
+.model-badge {{
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  padding: 0.3rem 0.75rem; border-radius: 999px;
+  border: 1px solid var(--border-color-primary);
+  background: var(--block-background-fill);
+  font-size: 0.9rem; font-weight: 500; line-height: 1.3;
+}}
+.model-badge-dot {{ width: 0.55rem; height: 0.55rem; border-radius: 50%; flex: none; }}
+.model-badge[data-state="ready"] .model-badge-dot {{ background: #16a34a; }}
+/* Amber in both themes, the same warning colour an incomplete model gets. */
+.model-badge[data-state="loading"] .model-badge-dot {{ background: #d97706; }}
+.model-badge[data-state="empty"] {{
+  border-color: #d97706; background: rgba(217, 119, 6, 0.09);
+}}
+.model-badge[data-state="empty"] .model-badge-dot {{ background: #d97706; }}
+
 /* The shell is one row: nav, conversations, page. It never wraps, and the two
    panes keep their widths and stay put while the page scrolls. */
 #shell {{ flex-wrap: nowrap; align-items: stretch; }}
@@ -3592,6 +3696,26 @@ def build_app() -> gr.Blocks:
                     "# ChatLab\nChat with an open model and see exactly how likely every generated token was.",
                     elem_id="hero",
                 )
+
+                # The badge sits above the tabs, so both Chat and Score text
+                # say which model would answer. The button beside it is the
+                # way out when none is: the nav tiles are icons, and their
+                # names only appear on hover.
+                with gr.Row(elem_id="model-bar"):
+                    model_badge_view = gr.HTML(
+                        loaded_model_badge(), elem_id="model-badge"
+                    )
+                    load_model_button = gr.Button(
+                        "Load a model",
+                        size="sm",
+                        visible=not MANAGER.loaded,
+                        elem_id="load-model",
+                    )
+
+                # Nothing to see: the timer is what makes the badge tell every
+                # open tab about a load or unload, not just the one that asked
+                # for it. See BADGE_REFRESH_SECONDS.
+                badge_timer = gr.Timer(BADGE_REFRESH_SECONDS)
 
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=3):
@@ -3924,6 +4048,27 @@ def build_app() -> gr.Blocks:
         nav.change(
             show_page, nav, [conversation_pane, chat_page, models_page, settings_page]
         )
+        # The badge is refreshed on the way to the chat page as well, so a
+        # load started a moment ago shows as one in progress rather than as
+        # the "no model" state the page was left in.
+        badge_outputs = [model_badge_view, load_model_button]
+        nav.change(refresh_model_badge, None, badge_outputs)
+        demo.load(refresh_model_badge, None, badge_outputs)
+        # And on a timer, so a tab that did not start the load hears about it
+        # too. demo.load stays: it draws the badge at once rather than leaving
+        # the value baked in when the page was built there for a tick.
+        # show_progress="hidden" because this one runs on its own: the default
+        # puts a pending shimmer on a handler's outputs, which every couple of
+        # seconds would have the badge flickering at a reader who never asked
+        # it anything.
+        badge_timer.tick(
+            refresh_model_badge, None, badge_outputs, show_progress="hidden"
+        )
+        load_model_button.click(
+            go_to_models,
+            None,
+            [nav, conversation_pane, chat_page, models_page, settings_page],
+        )
 
         # Every handler that can change what is on disk or in memory rescans
         # the cache afterwards, so My Models never shows a stale list.
@@ -3932,15 +4077,19 @@ def build_app() -> gr.Blocks:
         download_button.click(
             download_model, [model_id, hf_token], model_status
         ).then(refresh_my_models, models_inputs, models_outputs)
+        # These three are the handlers that change what is in memory, so each
+        # ends by rewriting the chat page's badge as well.
         download_load_button.click(
             download_and_load_model, [model_id, hf_token], model_status
-        ).then(refresh_my_models, models_inputs, models_outputs)
+        ).then(refresh_my_models, models_inputs, models_outputs).then(
+            refresh_model_badge, None, badge_outputs
+        )
         cached_button.click(load_cached_model, model_id, model_status).then(
             refresh_my_models, models_inputs, models_outputs
-        )
+        ).then(refresh_model_badge, None, badge_outputs)
         unload_button.click(unload_model, outputs=model_status).then(
             refresh_my_models, models_inputs, models_outputs
-        )
+        ).then(refresh_model_badge, None, badge_outputs)
         refresh_models_button.click(refresh_my_models, models_inputs, models_outputs)
         sort_models.input(refresh_my_models, models_inputs, models_outputs)
         demo.load(refresh_my_models, models_inputs, models_outputs)

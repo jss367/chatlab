@@ -2122,6 +2122,12 @@ class ModelManager:
         # Guards the claims, so that taking one and reading them are each a
         # single step for handlers running on several workers.
         self._claims_lock = threading.Lock()
+        # The one load that has the model lock in hand and is reading
+        # weights right now, as opposed to claimed and queued behind
+        # something. Kept apart from the claims because the order loads are
+        # claimed in need not be the order they win the lock in, and the
+        # badge on the chat page names the load that is really reading.
+        self._active_load: str | None = None
         # Downloads under way right now, by model ID, so a second request for
         # the same model can follow the first instead of racing it for the
         # same files.
@@ -2270,12 +2276,18 @@ class ModelManager:
     def loading_id(self) -> str | None:
         """The model a load is bringing in right now, or ``None``.
 
-        The most recently claimed one when two loads overlap; ask
-        :meth:`is_loading` about a particular model rather than comparing
-        against this.
+        The load that has the model lock in hand, when one has: it is the
+        one really reading weights, whatever order the claims came in. That
+        matters to the badge on the chat page, which names this load while
+        memory stands empty. Failing that the most recently claimed load,
+        which covers the moment between a load being asked for and it taking
+        the lock. Ask :meth:`is_loading` about a particular model rather than
+        comparing against this.
         """
 
         with self._claims_lock:
+            if self._active_load is not None:
+                return self._active_load
             return next(reversed(self._load_claims.values()), None)
 
     def is_loading(self, model_id: str) -> bool:
@@ -2315,6 +2327,26 @@ class ModelManager:
         with self._claims_lock:
             self._load_claims.pop(claim, None)
 
+    @contextlib.contextmanager
+    def _reading_weights(self, model_id: str) -> Iterator[None]:
+        """Name ``model_id`` as the load holding the model lock, for the block.
+
+        Entered with that lock already held, which is what makes one slot
+        enough: only one load can be inside at a time. A load claims itself
+        before it waits for the lock and the wait can be long, so claim
+        order is arrival order and not the order the loads get to read
+        anything - a thread can be set aside by the scheduler between the
+        two steps and a later load can take the lock first.
+        """
+
+        with self._claims_lock:
+            self._active_load = model_id
+        try:
+            yield
+        finally:
+            with self._claims_lock:
+                self._active_load = None
+
     def find_cached(self, model_id: str) -> Path:
         """The complete local snapshot of ``model_id``, without going online.
 
@@ -2341,10 +2373,12 @@ class ModelManager:
         import torch
 
         # A caller on another thread will have claimed this load already;
-        # this claim is the manager's own, released whatever happens.
+        # this claim is the manager's own, released whatever happens. The
+        # claim stands for the whole wait for the lock; _reading_weights
+        # marks the shorter stretch where this load is the one reading.
         checked_id, claim = self.reserve_load(model_id)
         try:
-            with self._lock:
+            with self._lock, self._reading_weights(checked_id):
                 return self._load_locked(checked_id, local_path, torch, progress)
         finally:
             self.release_load(claim)
