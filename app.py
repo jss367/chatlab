@@ -368,18 +368,23 @@ def stream_load(model_id: str, path: Path):
             outcome["device"] = MANAGER.load(model_id, path, progress)
         except BaseException as error:
             outcome["error"] = error
+        finally:
+            # Held until the load is over, so the two claims between them
+            # cover the whole of it: this one from before the thread existed,
+            # the manager's own from the moment it reached load().
+            MANAGER.release_load(claim)
 
     worker = threading.Thread(target=work, name="chatlab-load", daemon=True)
     # Claimed before the worker exists, because the claim is what stops a
     # removal or a redownload arriving in this same instant from moving the
     # snapshot the load is about to read. The worker names the load only once
     # it reaches MANAGER.load, and the model lock is taken later still.
-    MANAGER.reserve_load(model_id)
+    _model_id, claim = MANAGER.reserve_load(model_id)
     try:
         worker.start()
     except BaseException:
-        # load() never ran, so its finally cannot give the claim back.
-        MANAGER.release_load(model_id)
+        # work() never ran, so its finally cannot give the claim back.
+        MANAGER.release_load(claim)
         raise
     meter, pace = RateMeter(), Pace()
     while worker.is_alive():
@@ -754,7 +759,7 @@ def redownload_my_model(selected: str | None, hf_token: str):
     if not selected:
         yield status_card("Nothing to redownload", NO_MODEL_TO_MANAGE)
         return
-    if MANAGER.loading_id == selected:
+    if MANAGER.is_loading(selected):
         yield status_card(
             "Model in use",
             f"`{selected}` is being loaded right now. Wait for the load to finish, "

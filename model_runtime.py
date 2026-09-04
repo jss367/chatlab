@@ -2083,12 +2083,21 @@ class ModelManager:
         # can be told from state produced under the next even when both came
         # from the same repository ID (a re-download at a newer revision).
         self.load_count = 0
-        # The model a load is bringing in right now, or None. ``model_id`` is
-        # cleared for the whole of a load and set only once the weights are
-        # in, so on its own it says nothing about the minutes in between;
-        # anything that must not touch a model's files while it is being
-        # read (a redownload, say) asks this as well.
-        self.loading_id: str | None = None
+        # Loads claimed and not finished yet, by claim number. ``model_id``
+        # is cleared for the whole of a load and set only once the weights
+        # are in, so on its own it says nothing about the minutes in
+        # between; anything that must not touch a model's files while they
+        # are being read (a redownload, say) asks these as well.
+        #
+        # More than one claim can stand at once. The model lock serializes
+        # the loads themselves, but a second click lands its claim while the
+        # first load is still running, and a claim numbered this way is only
+        # ever given back by the load that took it.
+        self._load_claims: dict[int, str] = {}
+        self._next_claim = 0
+        # Guards the claims, so that taking one and reading them are each a
+        # single step for handlers running on several workers.
+        self._claims_lock = threading.Lock()
         # Downloads under way right now, by model ID, so a second request for
         # the same model can follow the first instead of racing it for the
         # same files.
@@ -2233,33 +2242,54 @@ class ModelManager:
             if self.active_downloads.get(checked_id) is progress:
                 del self.active_downloads[checked_id]
 
-    def reserve_load(self, model_id: str) -> str:
-        """Name the model a load is about to bring in, and return its ID.
+    @property
+    def loading_id(self) -> str | None:
+        """The model a load is bringing in right now, or ``None``.
 
-        A caller that runs :meth:`load` on another thread claims the load here
-        first. The worker names it only once it reaches ``load``, and the
-        model lock is taken later still, so until then a removal or a
+        The most recently claimed one when two loads overlap; ask
+        :meth:`is_loading` about a particular model rather than comparing
+        against this.
+        """
+
+        with self._claims_lock:
+            return next(reversed(self._load_claims.values()), None)
+
+    def is_loading(self, model_id: str) -> bool:
+        """Whether a load of ``model_id`` is claimed and not finished."""
+
+        checked_id = validate_model_id(model_id)
+        with self._claims_lock:
+            return checked_id in self._load_claims.values()
+
+    def reserve_load(self, model_id: str) -> tuple[str, int]:
+        """Claim a load of ``model_id``: its checked ID and the claim number.
+
+        Claimed before waiting for the model lock, not after: a load queued
+        behind a long generation is a load under way for the whole wait. A
+        caller that runs :meth:`load` on another thread claims it here first,
+        because the worker names the load only once it reaches ``load`` and
+        takes the lock later still, and in that window a removal or a
         redownload would find the manager idle and move the snapshot out from
-        under the load. Claiming it in the handler closes that window, the way
-        :meth:`reserve_download` closes the same one for downloads.
+        under the load. This is what :meth:`reserve_download` is for
+        downloads.
 
-        The caller must release the reservation if the worker never runs;
-        ``load`` itself gives it back when it returns or raises.
+        The claim number is what gives the claim back, so two overlapping
+        loads cannot clear each other's. Whoever takes one must release it:
+        ``load`` releases its own, and a caller that claimed a load for
+        another thread releases that claim when the thread is done with it.
         """
 
         checked_id = validate_model_id(model_id)
-        self.loading_id = checked_id
-        return checked_id
+        with self._claims_lock:
+            self._next_claim += 1
+            self._load_claims[self._next_claim] = checked_id
+            return checked_id, self._next_claim
 
-    def release_load(self, model_id: str) -> None:
-        """Give up a load reservation that no load will honour.
+    def release_load(self, claim: int) -> None:
+        """Give back one claim, leaving any other load's standing."""
 
-        Left alone when the slot has since been claimed for another model, so
-        one handler's cleanup cannot cancel another's reservation.
-        """
-
-        if self.loading_id == validate_model_id(model_id):
-            self.loading_id = None
+        with self._claims_lock:
+            self._load_claims.pop(claim, None)
 
     def find_cached(self, model_id: str) -> Path:
         """The complete local snapshot of ``model_id``, without going online.
@@ -2286,16 +2316,14 @@ class ModelManager:
 
         import torch
 
-        # Recorded before waiting for the lock, not after: a load queued
-        # behind a long generation is a load under way for the whole wait.
-        # A caller on another thread will have named it already through
-        # reserve_load; naming it again is the same answer.
-        checked_id = self.reserve_load(model_id)
+        # A caller on another thread will have claimed this load already;
+        # this claim is the manager's own, released whatever happens.
+        checked_id, claim = self.reserve_load(model_id)
         try:
             with self._lock:
                 return self._load_locked(checked_id, local_path, torch, progress)
         finally:
-            self.loading_id = None
+            self.release_load(claim)
 
     def _load_locked(
         self,
@@ -2422,13 +2450,13 @@ class ModelManager:
         try:
             if self.model_id == checked_id:
                 raise ModelLoaded(f"{checked_id} is loaded in memory.")
-            if self.loading_id is not None:
+            claimed = self.loading_id
+            if claimed is not None:
                 # A load claimed on another thread that has not reached the
                 # lock yet. The lock alone would let this deletion through in
                 # the window between the claim and the first weight.
                 raise ModelBusy(
-                    f"{checked_id} cannot be removed while {self.loading_id} "
-                    "is being loaded."
+                    f"{checked_id} cannot be removed while {claimed} is being loaded."
                 )
             with self._downloads_lock:
                 if checked_id in self.active_downloads:

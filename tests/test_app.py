@@ -406,24 +406,19 @@ class LoadCardTests(unittest.TestCase):
 
     MODEL = "allenai/Olmo-3-7B-Think"
 
-    class Manager:
-        """A manager whose load does whatever the test hands it."""
+    class Manager(ModelManager):
+        """A manager whose load does whatever the test hands it.
 
-        active_downloads: dict = {}
+        The real claim bookkeeping is kept, so the card's own reservation is
+        the one under test.
+        """
 
         def __init__(self, work):
+            super().__init__()
             self._work = work
-            self.loading_id = None
 
         def find_cached(self, model_id):
             return Path("/cache/models--allenai--Olmo-3-7B-Think/snapshots/abc")
-
-        def reserve_load(self, model_id):
-            self.loading_id = model_id
-            return model_id
-
-        def release_load(self, model_id):
-            self.loading_id = None
 
         def load(self, model_id, path, progress=None):
             return self._work(progress)
@@ -566,7 +561,7 @@ class LoadCardTests(unittest.TestCase):
 
         class Manager(self.Manager):
             def reserve_load(self, model_id):
-                order.append(("reserved", model_id))
+                order.append(("claimed", model_id))
                 return super().reserve_load(model_id)
 
             def load(self, model_id, path, progress=None):
@@ -577,7 +572,8 @@ class LoadCardTests(unittest.TestCase):
 
         list(app.load_cached_model(self.MODEL))
 
-        self.assertEqual(order, [("reserved", self.MODEL), ("loaded", self.MODEL)])
+        self.assertEqual(order, [("claimed", self.MODEL), ("loaded", self.MODEL)])
+        self.assertIsNone(app.MANAGER.loading_id, "given back when the load ends")
 
     def test_a_worker_that_cannot_start_gives_the_claim_back(self):
         app.MANAGER = ModelManager()
