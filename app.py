@@ -3052,7 +3052,6 @@ NAV_TILE_CSS = "\n".join(
 )
 
 CSS = f"""
-.gradio-container {{ max-width: none !important; }}
 #hero, #models-hero, #settings-hero {{ padding: 0.5rem 0 0.2rem; }}
 #hero h1, #models-hero h1, #settings-hero h1 {{ font-size: 2.1rem; margin-bottom: 0.25rem; }}
 #model-status {{ min-height: 128px; }}
@@ -3253,7 +3252,13 @@ def show_page(page: str):
 
 
 def build_app() -> gr.Blocks:
-    with gr.Blocks(title="Chatlab", css=CSS, theme=gr.themes.Soft()) as demo:
+    # Gradio otherwise caps the page at one of a handful of widths and centers
+    # it, which leaves a band of empty room down each side on a wide screen.
+    # The shell wants every pixel: the two side panes are a fixed width, so the
+    # width the cap was holding back goes to the chat and the panel beside it.
+    with gr.Blocks(
+        title="Chatlab", css=CSS, theme=gr.themes.Soft(), fill_width=True
+    ) as demo:
         conversation_state = gr.State([])
         metrics_state = gr.State(empty_metrics())
         prompt_metrics_state = gr.State(empty_metrics())
