@@ -1399,6 +1399,40 @@ class DefaultModelOfferTests(unittest.TestCase):
 
         self.assertTrue(any("Finishing the download" in card for card in self.cards))
 
+    def test_a_model_already_loaded_is_not_loaded_again(self):
+        # A press queued behind another runs after it, by which time the job
+        # may be done. Loading is not idempotent - the manager empties memory
+        # and reads the weights again - so for the default that would cost a
+        # 15 GB re-read and a gap where nothing is loaded.
+        class Ready:
+            model_id = settings.DEFAULT_MODEL_ID
+            loaded = True
+
+        original = app.MANAGER
+        app.MANAGER = Ready()
+        try:
+            load, fetch = self.run_setup(cached=True)
+        finally:
+            app.MANAGER = original
+
+        load.assert_not_called()
+        fetch.assert_not_called()
+        self.assertTrue(any("Already loaded" in card for card in self.cards))
+
+    def test_another_model_being_loaded_does_not_count_as_done(self):
+        class Other:
+            model_id = "org/something-else"
+            loaded = True
+
+        original = app.MANAGER
+        app.MANAGER = Other()
+        try:
+            load, _fetch = self.run_setup(cached=True)
+        finally:
+            app.MANAGER = original
+
+        load.assert_called_once_with(settings.DEFAULT_MODEL_ID)
+
     def test_an_uncached_default_is_downloaded(self):
         load, fetch = self.run_setup(cached=False)
 
@@ -1417,10 +1451,13 @@ class DefaultModelOfferTests(unittest.TestCase):
         # The download's progress and any failure land on the Models page, so
         # the press goes there rather than leaving the reader on a chat page
         # that looks like nothing happened.
-        model_id, row, _detail, page, *panes = app.start_default_model()
+        model_id, offer, row, _detail, page, *panes = app.start_default_model()
 
         self.assertEqual(model_id, settings.DEFAULT_MODEL_ID)
         self.assertEqual(page, app.MODELS_PAGE)
+        # Pressed once is enough; the badge's timer would not get here before
+        # a second press in this tab could.
+        self.assertFalse(offer["interactive"])
         self.assertEqual(
             [update["visible"] for update in panes], [False, False, True, False]
         )

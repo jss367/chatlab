@@ -1643,6 +1643,8 @@ class PageLayoutTests(unittest.TestCase):
             setup.outputs,
             [
                 self.labelled("Hugging Face model ID"),
+                # Pressed once is enough, before the timer could get here.
+                offer,
                 # A row picked earlier outranks the ID box, so it goes.
                 self.labelled("Downloaded models"),
                 self.by_id("my-model-detail"),

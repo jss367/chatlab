@@ -985,6 +985,22 @@ def setup_default_model(hf_token: str):
     hold when the chain reaches this step.
     """
 
+    # A press that arrives while another is already under way waits its turn
+    # in Gradio's queue rather than running beside it, and by the time it
+    # runs the first may have finished the job. Loading is not idempotent -
+    # the manager empties memory and reads the weights again - so for the
+    # default model that redundant press costs a 15 GB re-read and a gap
+    # where nothing is loaded. Nothing here can stop the press being made,
+    # since the second tab's offer is only refreshed on the badge's timer;
+    # what it can do is cost nothing.
+    if MANAGER.model_id == settings.DEFAULT_MODEL_ID and MANAGER.loaded:
+        yield status_card(
+            "Already loaded",
+            f"`{settings.DEFAULT_MODEL_ID}` is in memory and ready.",
+            "success",
+        )
+        return
+
     if default_model_cached():
         if (yield from load_cached_model(settings.DEFAULT_MODEL_ID)):
             return
@@ -1012,6 +1028,10 @@ def start_default_model():
 
     return (
         settings.DEFAULT_MODEL_ID,
+        # Pressed once is enough. The badge's timer would get here within a
+        # couple of seconds, but not before a second press in this tab; the
+        # next refresh hides the button or gives it back.
+        gr.update(interactive=False),
         *clear_my_model_selection(),
         *go_to_models(),
     )
@@ -4911,6 +4931,7 @@ def build_app() -> gr.Blocks:
                 None,
                 [
                     model_id,
+                    default_model_button,
                     my_models,
                     my_model_detail,
                     nav,
