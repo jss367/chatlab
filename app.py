@@ -2853,7 +2853,8 @@ def ask_clear_chat(turns: list[dict] | None, forks: dict | None):
     """
 
     hidden = gr.update(visible=False)
-    others = max(len(copy_forks(forks)["branches"]) - 1, 0)
+    forks = copy_forks(forks)
+    others = max(len(forks["branches"]) - 1, 0)
     if not turns and not others:
         return NOTHING_TO_CLEAR, hidden, ""
     if others:
@@ -2863,11 +2864,15 @@ def ask_clear_chat(turns: list[dict] | None, forks: dict | None):
         )
     else:
         loss = "the conversation on screen"
+    advice = (
+        " To remove only this one, use **🗑️ Delete** in the conversations pane."
+        if forks["active"] != MAIN_BRANCH
+        else ""
+    )
     return (
         gr.skip(),
         gr.update(visible=True),
-        f"Clear {loss}? This cannot be undone. To remove only this one, "
-        "use **🗑️ Delete** in the conversations pane.",
+        f"Clear {loss}? This cannot be undone.{advice}",
     )
 
 
@@ -3119,7 +3124,7 @@ def delete_fork(
         return fork_refused(
             turns,
             forks,
-            "The main conversation cannot be deleted. Use Clear to empty it.",
+            "The main conversation cannot be deleted. Clear all empties every conversation.",
         )
 
     del forks["branches"][name]

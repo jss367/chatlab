@@ -1228,7 +1228,17 @@ class ClearConfirmationTests(unittest.TestCase):
         self.assertEqual(panel, {"visible": True, "__type__": "update"})
         self.assertIn("2 others", question)
         self.assertIn("cannot be undone", question)
-        # And points at the control that takes only this one.
+        # Delete refuses the main conversation, so do not send the reader there.
+        self.assertNotIn("Delete", question)
+
+    def test_a_deletable_conversation_offers_delete_as_the_narrower_action(self):
+        forks = self.forks("Fork 1", "Fork 2")
+        forks["active"] = "Fork 1"
+
+        _status, _panel, question = app.ask_clear_chat(self.turns(), forks)
+
+        self.assertIn("2 others", question)
+        self.assertIn("To remove only this one", question)
         self.assertIn("Delete", question)
 
     def test_one_other_conversation_is_named_in_the_singular(self):
