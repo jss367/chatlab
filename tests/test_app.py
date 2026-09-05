@@ -1,3 +1,4 @@
+import html
 import threading
 import time
 import unittest
@@ -8,6 +9,7 @@ import gradio as gr
 import numpy as np
 
 import app
+import settings
 from model_runtime import (
     MODEL_WEIGHTS,
     PROMPT_SCORE_LIMIT,
@@ -935,3 +937,447 @@ class DownloadStatusTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MetricGlossaryTests(unittest.TestCase):
+    """Every measurement in the detail panel says what it is on hover.
+
+    The names mean nothing on first reading, and the README that explains
+    them is not where the reader is. Attaching the sentence to the name puts
+    the answer where the question is - including for a screen reader, which
+    reads an ``abbr`` title out.
+    """
+
+    def scored(self) -> dict:
+        log_probs = np.log(np.array([0.75, 0.25]))
+        return build_metric(
+            position=1,
+            token_id=0,
+            token_text="a",
+            fallback_text="a",
+            raw_log_probabilities=log_probs,
+            sampled_probabilities=np.exp(log_probs),
+            decode_token=str,
+        ).to_dict()
+
+    def test_each_measurement_carries_its_meaning(self):
+        detail, _rows = app.describe_token(self.scored())
+
+        for name, meaning in app.METRIC_GLOSSARY.items():
+            with self.subTest(metric=name):
+                self.assertIn(f">{name}</abbr>", detail)
+                # Escaped once, into an attribute: an apostrophe in a
+                # sentence must not be able to close it.
+                self.assertIn(html.escape(meaning, quote=True), detail)
+
+    def test_a_meaning_with_a_quote_in_it_stays_inside_the_attribute(self):
+        # The sentences are written by hand today, but they are strings in a
+        # dict; a quotation mark in one would otherwise end the attribute
+        # early and spill the rest into the markup.
+        with mock.patch.dict(
+            app.METRIC_GLOSSARY, {"Surprise": 'the "surprise" of it'}, clear=False
+        ):
+            self.assertEqual(
+                app.metric_term("Surprise"),
+                '<abbr title="the &quot;surprise&quot; of it">Surprise</abbr>',
+            )
+
+    def test_an_unscored_token_says_why_instead_of_listing_measurements(self):
+        detail, _rows = app.describe_token(
+            unscored_metric(
+                position=1, token_id=7, token_text="<s>", fallback_text="<s>"
+            ).to_dict()
+        )
+
+        self.assertNotIn("<abbr", detail)
+
+
+class HintTests(unittest.TestCase):
+    """The panels' explanations fold to one line."""
+
+    def test_a_hint_is_a_disclosure_that_starts_closed(self):
+        folded = app.hint("What branching does", "It keeps the response.")
+
+        self.assertTrue(folded.startswith('<details class="hint">'))
+        self.assertNotIn("open", folded[: folded.index(">") + 1])
+        self.assertIn("<summary>What branching does</summary>", folded)
+        self.assertIn("It keeps the response.", folded)
+
+
+class SamplingSummaryTests(unittest.TestCase):
+    """The sampling accordion wears its own values, so it reads without opening."""
+
+    def test_the_summary_names_every_knob_behind_it(self):
+        summary = app.sampling_label(0.8, 0.95, 50, 1024)
+
+        self.assertIn("temperature 0.8", summary)
+        self.assertIn("top-p 0.95", summary)
+        self.assertIn("top-k 50", summary)
+        self.assertIn("1,024 new tokens", summary)
+
+    def test_a_disabled_top_k_is_left_out_rather_than_shown_as_zero(self):
+        # "top-k 0" reads as a setting of zero, which is the opposite of what
+        # it means: zero is the control switched off.
+        summary = app.sampling_label(1.0, 1.0, 0, 256)
+
+        self.assertNotIn("top-k", summary)
+        self.assertIn("temperature 1", summary)
+
+    def test_the_summary_is_an_accordion_label_update(self):
+        self.assertEqual(
+            app.update_sampling_label(0.8, 0.95, 50, 1024),
+            {"label": app.sampling_label(0.8, 0.95, 50, 1024), "__type__": "update"},
+        )
+
+
+class ScoreBudgetTests(unittest.TestCase):
+    """The count under the Score text box, which turns a refusal into a number."""
+
+    class Counting:
+        loaded = True
+
+        def __init__(self, answer, load_id="stub/model#1"):
+            self.answer = answer
+            self.load_id = load_id
+            self.asked = []
+
+        def count_score_tokens(self, text, *, context="", use_chat_template=False):
+            self.asked.append((text, context, use_chat_template))
+            return self.answer
+
+    def budget(self, manager, context="", text="some text", template=False) -> str:
+        original = app.MANAGER
+        app.MANAGER = manager
+        try:
+            shown, _load_id = app.score_token_count(context, text, template)
+            return shown
+        finally:
+            app.MANAGER = original
+
+    def test_the_count_travels_with_the_load_it_was_counted_against(self):
+        # A tokenizer belongs to the weights in memory, so a number counted
+        # under one load says nothing about the next.
+        original = app.MANAGER
+        app.MANAGER = self.Counting((12, 4096), load_id="stub/model#7")
+        try:
+            self.assertEqual(
+                app.score_token_count("", "some text", False),
+                ("12 of 4,096 tokens.", "stub/model#7"),
+            )
+        finally:
+            app.MANAGER = original
+
+    def test_an_empty_box_is_not_counted_at_all(self):
+        counting = self.Counting((0, 4096))
+
+        self.assertEqual(self.budget(counting, text=""), app.SCORE_COUNT_HINT)
+        self.assertEqual(counting.asked, [])
+
+    def test_a_passage_within_the_limit_reads_as_a_fraction_of_it(self):
+        self.assertEqual(self.budget(self.Counting((1200, 4096))), "1,200 of 4,096 tokens.")
+
+    def test_a_passage_over_the_limit_says_so_before_the_press(self):
+        budget = self.budget(self.Counting((5000, 4096)))
+
+        self.assertIn("failure-text", budget)
+        self.assertIn("5,000 tokens, above the 4,096", budget)
+        self.assertIn("smaller pieces", budget)
+
+    def test_a_count_that_cannot_be_had_says_so_rather_than_guessing(self):
+        # No model, or one mid-response. A wrong number would be worse than
+        # none: the whole point of the line is that it matches the check.
+        self.assertEqual(self.budget(self.Counting(None)), app.SCORE_COUNT_UNKNOWN)
+
+    def test_the_count_is_asked_for_exactly_what_would_be_scored(self):
+        counting = self.Counting((10, 4096))
+
+        self.budget(counting, context="before", text="passage", template=True)
+
+        self.assertEqual(counting.asked, [("passage", "before", True)])
+
+
+class ScoreBudgetRecoveryTests(unittest.TestCase):
+    """The count that gave up has to come back on its own.
+
+    A count asked for during a reply cannot have the model lock and says so.
+    Nothing about that message corrects itself: the reply ends, the model
+    goes idle, and the box still reads "not mid-response" until something is
+    typed into it. The badge's timer is what un-sticks it.
+    """
+
+    class Counting:
+        loaded = True
+
+        def __init__(self, answer, load_id="stub/model#1"):
+            self.answer = answer
+            self.load_id = load_id
+            self.asked = 0
+
+        def count_score_tokens(self, text, *, context="", use_chat_template=False):
+            self.asked += 1
+            return self.answer
+
+    def recover(self, manager, shown, counted_load="stub/model#1"):
+        original = app.MANAGER
+        app.MANAGER = manager
+        try:
+            return app.recover_score_budget(
+                shown, counted_load, "", "some text", False
+            )
+        finally:
+            app.MANAGER = original
+
+    def test_a_count_that_is_stuck_is_recomputed(self):
+        counting = self.Counting((12, 4096))
+
+        recovered, load_id = self.recover(counting, app.SCORE_COUNT_UNKNOWN)
+
+        self.assertEqual(recovered, "12 of 4,096 tokens.")
+        self.assertEqual(load_id, "stub/model#1")
+        self.assertEqual(counting.asked, 1)
+
+    def test_a_model_swapped_out_from_another_tab_is_recounted(self):
+        # The handlers that recompute on a load or an unload only reach the
+        # tab that asked. This tab would otherwise go on advertising a number
+        # counted under the old tokenizer, against the old context limit,
+        # under the new model's badge.
+        counting = self.Counting((12, 512), load_id="other/model#1")
+
+        recovered, load_id = self.recover(
+            counting, "99 of 4,096 tokens.", counted_load="stub/model#1"
+        )
+
+        self.assertEqual(recovered, "12 of 512 tokens.")
+        self.assertEqual(load_id, "other/model#1")
+
+    def test_an_unloaded_model_takes_the_count_down(self):
+        counting = self.Counting(None, load_id=None)
+
+        recovered, load_id = self.recover(
+            counting, "99 of 4,096 tokens.", counted_load="stub/model#1"
+        )
+
+        self.assertEqual(recovered, app.SCORE_COUNT_UNKNOWN)
+        self.assertIsNone(load_id)
+
+    def test_a_count_that_is_fine_is_not_asked_for_again(self):
+        # This runs every couple of seconds, so the ordinary case must not
+        # pay for an encoding.
+        counting = self.Counting((12, 4096))
+
+        for shown in ("12 of 4,096 tokens.", app.SCORE_COUNT_HINT, ""):
+            with self.subTest(shown=shown):
+                self.assertEqual(
+                    self.recover(counting, shown), (gr.skip(), gr.skip())
+                )
+        self.assertEqual(counting.asked, 0)
+
+    def test_a_count_that_is_still_stuck_publishes_nothing(self):
+        # Still mid-response, or still no model. Rewriting the same message
+        # every tick would put a change event on the wire for nothing.
+        counting = self.Counting(None)
+
+        self.assertEqual(
+            self.recover(
+                counting, app.SCORE_COUNT_UNKNOWN, counted_load=counting.load_id
+            ),
+            (gr.skip(), gr.skip()),
+        )
+
+    def test_recovery_reads_the_boxes_it_would_score(self):
+        # The recomputed count has to describe what is in the boxes now, not
+        # what was there when the count gave up.
+        (listener,) = [
+            fn
+            for fn in app.build_app().fns.values()
+            if getattr(fn.fn, "__name__", None) == "recover_score_budget"
+        ]
+
+        self.assertEqual(len(listener.inputs), 5)
+        self.assertEqual(listener.outputs, listener.inputs[:2])
+        self.assertEqual(listener.show_progress, "hidden")
+
+
+class ClearConfirmationTests(unittest.TestCase):
+    """Clear deletes every conversation, so it asks first.
+
+    It sits one button away from Undo and looks the same, and nothing brings
+    the conversations back. Removing a model from disk already asks; this is
+    the same question about the same kind of loss.
+    """
+
+    def forks(self, *names) -> dict:
+        branches = {"Main": [], **{name: [] for name in names}}
+        return {"active": "Main", "branches": branches}
+
+    def turns(self) -> list[dict]:
+        return [{"role": "user", "content": "hello"}]
+
+    def test_an_empty_app_has_nothing_to_clear_and_asks_nothing(self):
+        status, panel, question = app.ask_clear_chat([], self.forks())
+
+        self.assertEqual(status, app.NOTHING_TO_CLEAR)
+        self.assertEqual(panel, {"visible": False, "__type__": "update"})
+        self.assertEqual(question, "")
+
+    def test_the_question_counts_the_other_conversations_it_would_take(self):
+        _status, panel, question = app.ask_clear_chat(
+            self.turns(), self.forks("Fork 1", "Fork 2")
+        )
+
+        self.assertEqual(panel, {"visible": True, "__type__": "update"})
+        self.assertIn("2 others", question)
+        self.assertIn("cannot be undone", question)
+        # Delete refuses the main conversation, so do not send the reader there.
+        self.assertNotIn("Delete", question)
+
+    def test_a_deletable_conversation_offers_delete_as_the_narrower_action(self):
+        forks = self.forks("Fork 1", "Fork 2")
+        forks["active"] = "Fork 1"
+
+        _status, _panel, question = app.ask_clear_chat(self.turns(), forks)
+
+        self.assertIn("2 others", question)
+        self.assertIn("To remove only this one", question)
+        self.assertIn("Delete", question)
+
+    def test_one_other_conversation_is_named_in_the_singular(self):
+        _status, _panel, question = app.ask_clear_chat(
+            self.turns(), self.forks("Fork 1")
+        )
+
+        self.assertIn("1 other?", question)
+
+    def test_a_lone_conversation_is_described_without_a_count(self):
+        _status, _panel, question = app.ask_clear_chat(self.turns(), self.forks())
+
+        self.assertIn("the conversation on screen?", question)
+        self.assertNotIn("other", question)
+
+    def test_asking_never_clears_anything(self):
+        # The question is the whole of what the Clear button does. Nothing in
+        # this handler touches the conversation, so a reader who opens it and
+        # walks away still has everything.
+        turns = self.turns()
+        forks = self.forks("Fork 1")
+
+        app.ask_clear_chat(turns, forks)
+
+        self.assertEqual(turns, self.turns())
+        self.assertEqual(forks, self.forks("Fork 1"))
+
+    def test_confirming_clears_and_closes_the_question(self):
+        result = app.clear_chat()
+
+        self.assertEqual(result[-1], {"visible": False, "__type__": "update"})
+        self.assertEqual(result[0], [])
+
+    def test_cancelling_only_closes_the_question(self):
+        self.assertEqual(app.hide_clear_confirm(), {"visible": False, "__type__": "update"})
+
+
+class DefaultModelSelectionTests(unittest.TestCase):
+    def test_selecting_default_opens_models_without_loading_or_downloading(self):
+        # A second tab may already have loaded its choice when this click runs.
+        # Navigation must leave that model alone even for a repeated click.
+        manager = ModelManager()
+        manager.model_id, manager.device_name = "org/new-choice", "CPU"
+        manager.model = manager.tokenizer = object()
+        with (
+            mock.patch.object(app, "MANAGER", manager),
+            mock.patch.object(manager, "load") as load,
+            mock.patch.object(manager, "download") as download,
+            mock.patch.object(app, "cache_status") as cache,
+        ):
+            for _ in range(2):
+                result = app.select_default_model()
+                model_id, row, detail, search, search_detail = result[:5]
+                status, confirmation, pending, page, *panes = result[5:]
+                self.assertEqual(model_id, settings.DEFAULT_MODEL_ID)
+                self.assertIsNone(row["value"])
+                self.assertEqual(app.chosen_model(model_id, row["value"]), model_id)
+                self.assertEqual(detail, app.NO_CACHED_MODEL_SELECTED)
+                self.assertIsNone(search["value"])
+                self.assertEqual(search_detail, app.NO_RESULT_SELECTED)
+                self.assertFalse(confirmation["visible"])
+                self.assertIsNone(pending)
+                self.assertEqual(page, app.MODELS_PAGE)
+                self.assertEqual(
+                    [update["visible"] for update in panes], [False, False, True, False]
+                )
+                self.assertEqual(manager.model_id, "org/new-choice")
+                self.assertTrue(manager.loaded)
+                self.assertIn(settings.DEFAULT_MODEL_ID, status)
+                self.assertIn("Load cached", status)
+                self.assertIn("Download and load", status)
+                self.assertIn(app.DEFAULT_MODEL_DOWNLOAD, status)
+            load.assert_not_called()
+            download.assert_not_called()
+            cache.assert_not_called()
+
+    def cached_load(self, *, error=None):
+        # Exercise the real cached handler; mock only cache and weight I/O.
+        def load(*args):
+            yield "loading progress"
+            if error is not None:
+                raise error
+            return "CPU"
+
+        with (
+            mock.patch.object(
+                app, "cache_status", return_value=CacheStatus(cached_bytes=1)
+            ),
+            mock.patch.object(
+                app.MANAGER, "find_cached", return_value=Path("/unused/cache")
+            ),
+            mock.patch.object(app, "stream_load", side_effect=load),
+            mock.patch.object(app, "stream_download") as download,
+        ):
+            cards = list(app.load_cached_model(settings.DEFAULT_MODEL_ID))
+            download.assert_not_called()
+        return cards
+
+    def test_explicit_cached_load_works_without_a_download(self):
+        cards = self.cached_load()
+        self.assertIn("Model ready", cards[-1])
+        self.assertIn(settings.DEFAULT_MODEL_ID, cards[-1])
+
+    def test_cached_memory_failure_keeps_its_error_without_retrying_online(self):
+        cards = self.cached_load(
+            error=RuntimeError("Insufficient memory: close applications")
+        )
+        self.assertIn("Could not load cached model", cards[-1])
+        self.assertIn("Insufficient memory", cards[-1])
+        self.assertFalse(any("Finishing the download" in card for card in cards))
+
+    def test_incomplete_cache_explains_explicit_recovery_without_downloading(self):
+        cards = self.cached_load(
+            error=app.IncompleteSnapshotError("Missing local files", "/unused/cache")
+        )
+        self.assertIn("Download unfinished", cards[-1])
+        self.assertIn("Download and load", cards[-1])
+
+    def test_explicit_download_and_load_still_runs_both_steps(self):
+        actions = []
+
+        def download(model_id, token):
+            actions.append(("download", model_id))
+            yield "download progress"
+            return Path("/unused/cache")
+
+        def load(model_id, path):
+            actions.append(("load", model_id))
+            yield "load progress"
+            return "CPU"
+
+        with (
+            mock.patch.object(app, "cache_status", return_value=CacheStatus()),
+            mock.patch.object(app, "stream_download", side_effect=download),
+            mock.patch.object(app, "stream_load", side_effect=load),
+        ):
+            cards = list(app.download_and_load_model(settings.DEFAULT_MODEL_ID, ""))
+        self.assertEqual(
+            actions,
+            [("download", settings.DEFAULT_MODEL_ID), ("load", settings.DEFAULT_MODEL_ID)],
+        )
+        self.assertIn("Model ready", cards[-1])

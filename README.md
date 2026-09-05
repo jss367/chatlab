@@ -22,7 +22,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
-- Enter sends a message and Shift+Enter starts a new line, with a setting to swap them
+- Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response that is still being written from anywhere on the Chat page
 - Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
 - Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
@@ -118,7 +118,9 @@ the Settings page is the direct way to bound it.
 
 ## The pages
 
-A thin pane at the far left switches between three pages. **Chat** is the conversation, with the conversations pane beside it and the token panel to its right. **Models** is everything about which model is running. **Settings**, at the bottom of the pane, is how every reply is prompted, sampled, and measured.
+A pane at the far left switches between three pages, each tile an icon above the page's name. **Chat** is the conversation, with the conversations pane beside it and the token panel to its right. **Models** is everything about which model is running. **Settings**, at the bottom of the pane, is how every reply is prompted and measured.
+
+A badge above the tabs names the model that would answer. Until one is loaded, **Set up the default model** opens Models with the default selected, and **Choose another** opens Models to browse. Selecting the default does not start a download or replace a loaded model. On Models, choose **Load cached** to use local files without a network check, or **Download and load** to fetch and load the model. A full default-model download is about 15 GB; the setup guidance states this before you start. Progress and any load errors appear on the Models page.
 
 ### Models
 
@@ -128,7 +130,9 @@ A thin pane at the far left switches between three pages. **Chat** is the conver
 
 ### Settings
 
-The system prompt, assistant prefill, and reasoning options; the sampling, analysis, and input controls described below; and the context limit under **Memory**. Settings apply to the next reply on any conversation.
+The system prompt, assistant prefill, and reasoning options; the analysis and input controls described below; and the context limit under **Memory**. Settings apply to the next reply on any conversation.
+
+The sampling controls are **not** here. Temperature, top-p, top-k, the response length and the seed are what gets moved between one retry and the next, so they sit under the message box on the Chat page, in a **Sampling** section that wears its own values: the summary reads without opening it. They are saved between sessions like everything else.
 
 Every setting is saved as you change it, and read back the next time the app
 starts. They live in one file:
@@ -204,7 +208,7 @@ On the Chat page, the pane beside the nav lists every conversation. Each entry s
 
 The token count is the size of the conversation as the model last saw it: every token in the prompt behind the latest reply - system prompt, transcript, and chat template - plus every token of the reply, reasoning included. It updates as a reply streams, so a reply that is stopped part way shows how far it got. The count belongs to the reply the model generated, and a conversation loaded from an older file, or whose only replies were typed in by hand, says so instead of showing a number. A conversation answered by more than one model names each of them, most recent first.
 
-**➕ New** puts the conversation on screen away and starts an empty one. **🌿 Fork** copies the conversation into a new fork and switches to it, so you can ask something different without losing the original. **🗑️ Delete** removes the conversation on screen and returns to the main one, which cannot be deleted; **🗑️ Clear** under the chat empties it, and removes every other conversation with it.
+**➕ New** puts the conversation on screen away and starts an empty one. **🌿 Fork** copies the conversation into a new fork and switches to it, so you can ask something different without losing the original. **🗑️ Delete** removes the conversation on screen and returns to the main one, which cannot be deleted; **🗑️ Clear all** under the chat empties it and removes every other conversation with it, which is why it asks first and names how many it would take.
 
 Click a message before pressing Fork to fork at that point. Forking at a reply keeps the conversation through that reply, ready for a different next question. Forking at one of your own messages keeps what came before it and puts the message back in the input box so it can be reworded, the same shape **Undo** gives.
 
@@ -242,6 +246,8 @@ By default that reasoning is **not** sent back to the model on the next turn. Th
 - **Sampling shift** is `log2(sampling probability / raw probability)`: how far your temperature, top-k, and top-p settings moved that token away from the raw model.
 - **Probability mass above it** is the combined raw probability of every token ranked above the generated token.
 
+Each of these names carries its own sentence in the token detail panel, so hovering one — or reaching it with a screen reader — says what the number is without leaving the page.
+
 **Color tokens by** repaints the strip without regenerating anything. Rank, surprise, and entropy are magnitudes and share one light-to-dark blue ramp; sampling shift is a diverging red-to-blue scale around no change. Quantized model weights can slightly change logits, probabilities, and ranks.
 
 Under each response are its headline numbers — perplexity, mean surprise, the share of tokens the model ranked first, mean entropy — and a trace of surprise across the response, so a stretch where the model lost the thread is visible at a glance. Long responses are grouped into bins, with the range inside each bin shaded.
@@ -252,7 +258,7 @@ After a response finishes, open **Export full metric trace** under the conversat
 
 Every prompt token is measured against the distribution the model held one step earlier, during the same pass that fills the key-value cache, so it costs nothing extra to see how predictable your own prompt was. They appear under **Prompt and context tokens**; the first token has nothing before it, so it is left unscored. Turn the measurement off in **Sampling, analysis, and input controls** if you do not want it, and note that only the most recent 1,024 tokens of a very long prompt are scored.
 
-The **Score text** tab measures text the model did not generate. Paste it, optionally give it context first, and one forward pass reports the same numbers for every token — useful for comparing two prompts, checking how memorized a passage is, or evaluating a response that came from somewhere else. Scoring is capped at 4,096 tokens per run.
+The **Score text** tab measures text the model did not generate. Paste it, optionally give it context first, and one forward pass reports the same numbers for every token — useful for comparing two prompts, checking how memorized a passage is, or evaluating a response that came from somewhere else. Scoring is capped at 4,096 tokens per run, or at the model's shorter positional limit. A line under the box counts what is in it against that cap as it is typed, using the same encoding the check itself uses, so a passage too large to score says so before the press rather than after it.
 
 ## Releasing a new version
 

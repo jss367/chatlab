@@ -2397,3 +2397,132 @@ class OutOfMemoryTests(unittest.TestCase):
             manager.inspect([1, 2, 3], 2)
         self.assertNotIsInstance(caught.exception, OutOfMemoryError)
         self.assertEqual(manager.released, 2)
+
+
+class CountScoreTokensTests(unittest.TestCase):
+    """The live count under the Score text box.
+
+    Scoring refuses a passage above the model's limit, and it does so after
+    the paste, the press and the wait. This is the same arithmetic done while
+    the passage is still being written, so the number on screen is the number
+    that will be judged - which means it has to come from the encoding the
+    check itself uses, not an estimate beside it.
+    """
+
+    def manager(self, **config) -> ModelManager:
+        manager = ModelManager()
+        manager.tokenizer = FakeTokenizer()
+        manager.model = Model(Config(**config)) if config else Model(Config())
+        return manager
+
+    def test_a_passage_is_counted_against_the_flat_limit(self):
+        manager = self.manager()
+
+        count, limit = manager.count_score_tokens("one two three")
+
+        self.assertEqual(limit, SCORE_TOKEN_LIMIT)
+        # The opening special, three words, and the two spaces between them:
+        # the passage's own encoding, which is what scoring will measure.
+        self.assertEqual(count, 6)
+
+    def test_the_context_is_counted_with_the_text_it_precedes(self):
+        # Both halves go into the same pass, so both spend the same budget.
+        manager = self.manager()
+
+        with_context, _ = manager.count_score_tokens("two", context="one ")
+        alone, _ = manager.count_score_tokens("two")
+
+        self.assertGreater(with_context, alone)
+
+    def test_a_short_context_window_lowers_the_limit_it_reports(self):
+        manager = self.manager(max_position_embeddings=512)
+
+        _count, limit = manager.count_score_tokens("one")
+
+        self.assertEqual(limit, 512)
+
+    def test_an_empty_box_counts_nothing_but_still_names_the_limit(self):
+        manager = self.manager()
+
+        self.assertEqual(manager.count_score_tokens(""), (0, SCORE_TOKEN_LIMIT))
+
+    def test_nothing_loaded_has_no_answer_rather_than_a_wrong_one(self):
+        self.assertIsNone(ModelManager().count_score_tokens("one two"))
+
+    def test_the_encoding_does_not_run_under_the_model_lock(self):
+        # The lock is held only to read the tokenizer, the limit and the load
+        # they belong to. Encoding under it was the real hazard: a generation
+        # claims its slot before it goes for the lock, so a keystroke landing
+        # in that window could keep a reply waiting for as long as tokenizing
+        # a large paste took.
+        manager = self.manager()
+        held = []
+
+        class WatchesTheLock(FakeTokenizer):
+            def __call__(self, text, **kwargs):
+                held.append(manager._lock.locked())
+                return super().__call__(text, **kwargs)
+
+        manager.tokenizer = WatchesTheLock()
+
+        self.assertIsNotNone(manager.count_score_tokens("one two"))
+
+        self.assertTrue(held, "the tokenizer was never asked")
+        self.assertFalse(any(held), "the lock was held while encoding")
+        self.assertFalse(manager._lock.locked())
+
+    def test_a_load_landing_mid_count_throws_the_count_away(self):
+        # Encoding outside the lock means the weights can change under it,
+        # and a number from the wrong tokenizer is worse than no number.
+        manager = self.manager()
+
+        class LoadsUnderneath(FakeTokenizer):
+            def __call__(self, text, **kwargs):
+                manager.load_count += 1
+                return super().__call__(text, **kwargs)
+
+        manager.tokenizer = LoadsUnderneath()
+
+        self.assertIsNone(manager.count_score_tokens("one two"))
+
+    def test_a_reserved_generation_is_not_talked_over(self):
+        # A generation claims the slot before it goes for the model lock, so
+        # in between the lock is free. Taking it then would tokenize however
+        # much text has been pasted while an operation the interface already
+        # reports as running waits behind a keystroke.
+        manager = self.manager()
+        self.assertTrue(manager.reserve_generation())
+        try:
+            self.assertFalse(manager._lock.locked(), "the lock is free here")
+            self.assertIsNone(manager.count_score_tokens("one two"))
+        finally:
+            manager.release_generation()
+        self.assertIsNotNone(manager.count_score_tokens("one two"))
+
+    def test_a_busy_model_is_not_waited_on(self):
+        # The count answers a box being typed into. Blocking on the model lock
+        # would hang the keystroke behind a whole generation, so a held lock
+        # means no answer this time and another chance on the next character.
+        manager = self.manager()
+        manager._lock.acquire()
+        try:
+            self.assertIsNone(manager.count_score_tokens("one two"))
+        finally:
+            manager._lock.release()
+        # And the lock is left as it was found, so the next count works.
+        self.assertIsNotNone(manager.count_score_tokens("one two"))
+
+    def test_text_that_tokenizes_to_nothing_has_no_answer_either(self):
+        # score_text refuses a passage that produces no tokens, so reporting
+        # it as a confident zero would read as room to spare. Pressing Score
+        # text explains the refusal properly; a half-typed passage is not yet
+        # worth complaining about.
+        class RefusesEverything(FakeTokenizer):
+            def __call__(self, text, **kwargs):
+                raise ValueError("this tokenizer will not encode that")
+
+        manager = self.manager()
+        manager.tokenizer = RefusesEverything()
+
+        self.assertIsNone(manager.count_score_tokens("one two"))
+        self.assertFalse(manager._lock.locked())

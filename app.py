@@ -84,6 +84,8 @@ except ImportError:  # huggingface_hub before 1.x had no such check
         pass
 
 
+# Disclose the default model's download size before an explicit download.
+DEFAULT_MODEL_DOWNLOAD = "about 15 GB"
 MANAGER = ModelManager()
 
 # How often the download card is redrawn. Every frame is a message to the
@@ -99,16 +101,20 @@ LOAD_POLL_SECONDS = 0.5
 RATE_WINDOW_SECONDS = 15.0
 
 DOWNLOAD_BAR_WIDTH = 24
-# The two left panes' widths in pixels. The thin pane at the far left picks
-# the page and holds nothing but an icon per page; the conversations pane
-# beside it shows with Chat only, and is wide enough for a model ID and a
-# token count while leaving the conversation most of the screen.
-NAV_PANE_WIDTH = 56
+# The two left panes' widths in pixels. The pane at the far left picks the
+# page and holds an icon and a name per page; the conversations pane beside
+# it shows with Chat only, and is wide enough for a model ID and a token
+# count while leaving the conversation most of the screen.
+#
+# Wide enough for the longest page name at the tile's small type. With three
+# pages there is nothing to be won by hiding those names: the pane would save
+# a handful of pixels and cost a reader the only signpost on the screen.
+NAV_PANE_WIDTH = 72
 CONVERSATION_PANE_WIDTH = 340
 CHAT_PAGE, MODELS_PAGE, SETTINGS_PAGE = PAGES = ("Chat", "Models", "Settings")
-# Each nav tile is an icon, which is what lets the pane be this thin. The
-# page's name stays on the tile for the browser to read out; the stylesheet
-# hides it, draws the icon in its place, and pops the name up on hover.
+# Each nav tile shows an icon above the page's own name. The name is the
+# label's own text, so it is what a screen reader reads; the stylesheet draws
+# the icon in front of it and keeps it out of that reading.
 NAV_ICONS = {
     CHAT_PAGE: "💬",
     MODELS_PAGE: "🧠",
@@ -145,6 +151,68 @@ TEMPLATE_CAVEAT = (
     "Plain text, not a chat turn: this model has no chat template, so the "
     "context was measured as ordinary characters in front of the text."
 )
+
+
+def hint(summary: str, detail: str) -> str:
+    """A one-line disclosure: the question on screen, the answer on demand.
+
+    The panels carry more explanation than they have room for, and a
+    paragraph held permanently open competes for attention with the control
+    it is there to explain. ``<details>`` is the browser's own answer to
+    that and needs no script: the summary is a line, and the reader who
+    wants the paragraph opens it.
+
+    The detail is written as markup rather than markdown, because markdown is
+    not processed inside a raw HTML block; ``<strong>`` stands in for the
+    asterisks a caption would otherwise use.
+    """
+
+    return f'<details class="hint"><summary>{summary}</summary>{detail}</details>'
+
+
+# What each measurement in the token detail means, in one sentence. The panel
+# names them and the README explains them, which leaves a reader holding the
+# name with nowhere to ask; these are attached to the names themselves so the
+# answer is where the question is.
+METRIC_GLOSSARY = {
+    "Raw rank": (
+        "Where this token sat in the model's unmodified distribution. "
+        "Rank 1 was the model's first choice."
+    ),
+    "Raw model probability": (
+        "The probability the model gave this token before temperature, "
+        "top-k or top-p touched it."
+    ),
+    "Actual sampling probability": (
+        "The probability it was really drawn with, after temperature, "
+        "top-k and top-p."
+    ),
+    "Surprise": (
+        "-log2(probability), in bits. Larger values are less expected."
+    ),
+    "Distribution entropy": (
+        "How undecided the model was across the whole distribution, in bits. "
+        "Surprise says how unexpected the choice was; entropy says how open "
+        "the question was before it."
+    ),
+    "Top-1 margin": (
+        "The probability gap between the model's first and second choice."
+    ),
+    "Sampling shift": (
+        "log2(sampling probability / raw probability): how far your "
+        "temperature, top-k and top-p moved this token from the raw model."
+    ),
+    "Probability mass above it": (
+        "The combined raw probability of every token ranked above this one."
+    ),
+}
+
+
+def metric_term(name: str) -> str:
+    """A measurement's name with its meaning attached, for the detail panel."""
+
+    meaning = html.escape(METRIC_GLOSSARY[name], quote=True)
+    return f'<abbr title="{meaning}">{name}</abbr>'
 
 
 def status_card(title: str, detail: str, tone: str = "neutral") -> str:
@@ -586,6 +654,8 @@ def download_model(model_id: str, hf_token: str, selected: str | None = None):
 
 
 def download_and_load_model(model_id: str, hf_token: str, selected: str | None = None):
+    """Download and load the model explicitly selected on the Models page."""
+
     model_id = chosen_model(model_id, selected)
     started = time.monotonic()
     try:
@@ -636,6 +706,8 @@ def incomplete_snapshot_detail(model_id: str, error: Exception) -> str:
 
 
 def load_cached_model(model_id: str, selected: str | None = None):
+    """Load the selected model from local files, preserving any load error."""
+
     cleaned = chosen_model(model_id, selected)
     active = MANAGER.active_downloads.get(cleaned)
     if active is not None:
@@ -736,7 +808,18 @@ def model_badge(state: str, text: str) -> str:
     )
 
 
-def loaded_model_badge() -> str:
+def model_snapshot() -> tuple[str | None, str | None, str | None]:
+    """The load under way, the model in memory, and its device, read once.
+
+    Reuse these values so the badge and setup links render from the same
+    readings. This is display state, not an atomic snapshot or a reservation
+    of the model for a later action.
+    """
+
+    return MANAGER.loading_id, MANAGER.model_id, MANAGER.device_name
+
+
+def loaded_model_badge(snapshot=None) -> str:
     """Name the model in memory, the one being loaded, or neither.
 
     A model in memory is named ahead of any load. A load counts itself as
@@ -752,12 +835,14 @@ def loaded_model_badge() -> str:
     Each attribute is read once and kept rather than asked again to fill in
     the text: a load can finish, or empty memory, between two reads, which
     would leave the badge saying "Loading None" or naming a model loaded on
-    None.
+    None. ``snapshot`` is how a caller that has to agree with this badge
+    about something else shares the one reading; see
+    :func:`refresh_model_badge`.
     """
 
-    loading = MANAGER.loading_id
-    model_id = MANAGER.model_id
-    device = MANAGER.device_name
+    loading, model_id, device = (
+        model_snapshot() if snapshot is None else snapshot
+    )
     if model_id and device:
         return model_badge("ready", f"{model_id} · loaded on {device}")
     if loading:
@@ -766,15 +851,16 @@ def loaded_model_badge() -> str:
 
 
 def refresh_model_badge():
-    """The badge, plus the button that only shows while there is no model.
+    """Refresh the badge and the setup links from the same reading.
 
-    A load in progress hides the button too: the Models page is already busy
-    bringing that model in, so sending the reader there would suggest work
-    that is under way needs starting.
+    Setup links navigate without loading anything, so downloads do not need
+    to disable them. Hide them when a model is loaded or a load is pending.
     """
 
-    have_model = MANAGER.loaded or MANAGER.loading_id
-    return loaded_model_badge(), gr.update(visible=not have_model)
+    snapshot = model_snapshot()
+    loading, model_id, device = snapshot
+    links = gr.update(visible=not ((model_id and device) or loading))
+    return loaded_model_badge(snapshot), links, links
 
 
 def go_to_models():
@@ -787,6 +873,32 @@ def go_to_models():
     """
 
     return MODELS_PAGE, *show_page(MODELS_PAGE)
+
+
+def select_default_model():
+    """Select the default and open Models; loading requires a separate click.
+
+    Update the ID, both model selections and removal confirmation together.
+    Programmatic ID changes do not fire the typing listener that normally
+    clears the selected row, which would otherwise override this ID.
+    """
+
+    return (
+        settings.DEFAULT_MODEL_ID,
+        *clear_my_model_selection(),
+        gr.update(value=None),
+        NO_RESULT_SELECTED,
+        status_card(
+            "Default model selected",
+            f"`{settings.DEFAULT_MODEL_ID}` is selected. "
+            "Choose **Load cached** to use local files, or **Download and load** "
+            f"to fetch the model ({DEFAULT_MODEL_DOWNLOAD} for a full download) "
+            "and load it. If local files are incomplete, **Download and load** "
+            "can fetch the rest.",
+        ),
+        *hide_remove_confirm(),
+        *go_to_models(),
+    )
 
 
 # The side pane's model lists.
@@ -899,9 +1011,9 @@ def select_my_model(selected: str | None):
 def clear_my_model_selection():
     """Drop the My Models selection, because a typed ID names its own model.
 
-    Runs when the reader types in the ID box or picks a search result, so the
-    two controls never disagree on screen and ``chosen_model`` has one answer
-    to give. It is a round trip like any other, which is the window
+    Runs when the reader types in the ID box, picks a search result, or selects
+    the default, so ``chosen_model`` uses that ID rather than a previous row.
+    It is a round trip like any other, which is the window
     ``chosen_model`` describes rather than closes.
     """
 
@@ -1312,16 +1424,19 @@ def describe_token(metric: dict) -> tuple[str, list[list]]:
             [],
         )
 
+    # Every measurement here has a name that means nothing on first reading,
+    # so each name carries its own sentence: hovering it, or reaching it with
+    # a screen reader, says what the number is.
     summary = (
         f"### {where} {metric['position']}: `{token_repr}`\n\n"
-        f"- **Raw rank:** {metric['raw_rank']:,}\n"
-        f"- **Raw model probability:** {metric['raw_probability']:.5%}\n"
-        f"- **Actual sampling probability:** {metric['sampling_probability']:.5%}\n"
-        f"- **Surprise:** {metric['surprise_bits']:.2f} bits\n"
-        f"- **Distribution entropy:** {metric['entropy_bits']:.2f} bits\n"
-        f"- **Top-1 margin:** {metric['top1_margin']:.2%} between the model's first and second choice\n"
-        f"- **Sampling shift:** {metric['sampling_shift_bits']:+.2f} bits versus the raw model\n"
-        f"- **Probability mass above it:** {metric['probability_mass_above']:.2%}\n"
+        f"- **{metric_term('Raw rank')}:** {metric['raw_rank']:,}\n"
+        f"- **{metric_term('Raw model probability')}:** {metric['raw_probability']:.5%}\n"
+        f"- **{metric_term('Actual sampling probability')}:** {metric['sampling_probability']:.5%}\n"
+        f"- **{metric_term('Surprise')}:** {metric['surprise_bits']:.2f} bits\n"
+        f"- **{metric_term('Distribution entropy')}:** {metric['entropy_bits']:.2f} bits\n"
+        f"- **{metric_term('Top-1 margin')}:** {metric['top1_margin']:.2%} between the model's first and second choice\n"
+        f"- **{metric_term('Sampling shift')}:** {metric['sampling_shift_bits']:+.2f} bits versus the raw model\n"
+        f"- **{metric_term('Probability mass above it')}:** {metric['probability_mass_above']:.2%}\n"
         f"- **Token ID:** {metric['token_id']:,}"
     )
     rows = [
@@ -2720,12 +2835,62 @@ def undo_message(event: gr.UndoData, turns, scale_name: str = DEFAULT_COLOR_SCAL
     return undo_from(position, turns, scale_name)
 
 
+# Clear is the one control that reaches past the conversation on screen: it
+# empties this one and deletes every other conversation with it, and nothing
+# brings them back. Undo sits one button away and looks the same, so the
+# press is easy to make by accident. Removing a model from disk already asks
+# first; this is the same question about the same kind of loss, and it asks
+# it the same way - a panel that names what is about to go, and a button that
+# is the only thing that actually clears.
+
+NOTHING_TO_CLEAR = "There is nothing to clear."
+
+
+def ask_clear_chat(turns: list[dict] | None, forks: dict | None):
+    """Open the confirmation for Clear, or say there is nothing to clear.
+
+    Returns the status line, the panel's visibility and its question. The
+    count is taken here only to word the question; the clearing itself takes
+    whatever is on screen when it runs.
+    """
+
+    hidden = gr.update(visible=False)
+    forks = copy_forks(forks)
+    others = max(len(forks["branches"]) - 1, 0)
+    if not turns and not others:
+        return NOTHING_TO_CLEAR, hidden, ""
+    if others:
+        loss = (
+            f"the conversation on screen and {others} other"
+            f"{'s' if others != 1 else ''}"
+        )
+    else:
+        loss = "the conversation on screen"
+    advice = (
+        " To remove only this one, use **🗑️ Delete** in the conversations pane."
+        if forks["active"] != MAIN_BRANCH
+        else ""
+    )
+    return (
+        gr.skip(),
+        gr.update(visible=True),
+        f"Clear {loss}? This cannot be undone.{advice}",
+    )
+
+
+def hide_clear_confirm():
+    return gr.update(visible=False)
+
+
 def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
     """Empty everything the conversation owns.
 
     Clear cancels a running generation (see ``cancels`` on its listener), and a
     cancelled ``generate_reply`` never reaches its final yield, so this has to
     restore the Send button itself exactly as Stop does.
+
+    Reached from the confirmation panel alone, which this closes on its way
+    out; the Clear button itself only opens that panel.
     """
 
     strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
@@ -2737,7 +2902,7 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
         [],
         strip,
         metrics,
-        "Conversation cleared.",
+        "Every conversation cleared.",
         *send_stop_buttons(False),
         NO_TOKEN_SELECTED,
         [],
@@ -2749,6 +2914,7 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
         {},
         forks,
         conversation_list_update(forks, []),
+        gr.update(visible=False),
     )
 
 
@@ -2960,7 +3126,7 @@ def delete_fork(
         return fork_refused(
             turns,
             forks,
-            "The main conversation cannot be deleted. Use Clear to empty it.",
+            "The main conversation cannot be deleted. Clear all empties every conversation.",
         )
 
     del forks["branches"][name]
@@ -3385,21 +3551,18 @@ def reset_inspection(insight: dict | None):
     return charts.EMPTY_LENS, charts.EMPTY_ATTENTION, None, INSPECT_HINT
 
 
-# One pair of rules per tile: the icon it shows, and the name it pops up.
-# Gradio stamps each option's text on its label as data-testid, which is the
-# only hook a Radio gives CSS.
+# One rule per tile: the icon drawn above the page's own name. Gradio stamps
+# each option's text on its label as data-testid, which is the only hook a
+# Radio gives CSS.
 #
-# Both are drawn on the label, so both would otherwise join the radio's
-# accessible name and have a screen reader read "speech balloon Chat", or
-# "speech balloon Chat Chat" once the tooltip is up. The empty string after
-# the slash is the generated text's alternative text, which keeps the pair of
-# them out of the name and leaves the page's own name to stand for the tile.
+# The icon is drawn on the label, so it would otherwise join the radio's
+# accessible name and have a screen reader read "speech balloon Chat". The
+# empty string after the slash is the generated text's alternative text,
+# which keeps it out of the name and leaves the page's own name to stand for
+# the tile - the same name that is now printed under it.
 NAV_TILE_CSS = "\n".join(
     f'#nav label[data-testid="{name}-radio-label"]::before '
-    f'{{ content: "{NAV_ICONS[name]}" / ""; }}\n'
-    f'#nav label[data-testid="{name}-radio-label"]:hover::after,\n'
-    f'#nav label[data-testid="{name}-radio-label"]:has(input:focus-visible)::after '
-    f'{{ content: "{name}" / ""; }}'
+    f'{{ content: "{NAV_ICONS[name]}" / ""; }}'
     for name in PAGES
 )
 
@@ -3412,7 +3575,9 @@ CSS = f"""
    there is nothing loaded. Both keep their own width and sit on one line. */
 #model-bar {{ flex-wrap: nowrap; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }}
 #model-bar #model-badge {{ flex: 0 1 auto; width: auto; min-width: 0; }}
-#model-bar #load-model {{ flex: 0 0 auto; width: auto; min-width: 0; }}
+#model-bar #load-model, #model-bar #default-model {{
+  flex: 0 0 auto; width: auto; min-width: 0;
+}}
 .model-badge {{
   display: inline-flex; align-items: center; gap: 0.45rem;
   padding: 0.3rem 0.75rem; border-radius: 999px;
@@ -3435,9 +3600,6 @@ CSS = f"""
 #nav-pane, #conversation-pane {{
   position: sticky; top: 0; align-self: flex-start; max-height: 100vh;
 }}
-/* Both panes are sticky, so each is its own stacking context and the later
-   one would paint over the nav's tooltip. Lift the nav above it. */
-#nav-pane {{ z-index: 5; }}
 #nav-pane {{
   flex: 0 0 {NAV_PANE_WIDTH}px !important; min-width: {NAV_PANE_WIDTH}px !important;
   height: 100vh; padding: 0.6rem 0.5rem 0.6rem 0;
@@ -3453,33 +3615,23 @@ CSS = f"""
    selected tile is filled, and the last tile (Settings) is pushed to the
    bottom. */
 #nav-pane > *, #nav, #nav .wrap {{ height: 100%; }}
-/* Gradio's fieldset scrolls its own content, which would cut the tooltip off
-   at the tile's edge. */
 #nav {{ overflow: visible !important; }}
 #nav .wrap {{ flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 0.3rem; }}
+/* Each tile stacks the icon over the page's name, so the name is on screen
+   rather than a hover away. Three pages is not a number worth hiding. */
 #nav label {{
   position: relative;
-  justify-content: center; text-align: center; padding: 0.55rem 0.2rem;
-  font-size: 1.3rem; line-height: 1.25; border-radius: 8px; box-shadow: none;
+  display: flex; flex-direction: column; align-items: center; gap: 0.15rem;
+  justify-content: center; text-align: center; padding: 0.5rem 0.15rem;
+  line-height: 1.2; border-radius: 8px; box-shadow: none;
   background: transparent;
   /* The selected tile is outlined; the others hold the same border in
      transparent so picking a page does not nudge the icons. */
   border: 1px solid transparent;
 }}
-/* The page name is still on the tile, an inch out of sight, so the browser
-   reads it out and the icon that ::before draws sits where it was. */
-#nav label span {{
-  position: absolute; width: 1px; height: 1px; overflow: hidden;
-  clip-path: inset(50%);
-}}
-/* Hover or keyboard focus brings the name back as a bubble beside the tile. */
-#nav label::after {{
-  position: absolute; left: calc(100% + 0.5rem); top: 50%;
-  transform: translateY(-50%);
-  padding: 0.25rem 0.5rem; border-radius: 6px; white-space: nowrap;
-  font-size: 0.8rem; font-weight: 500; line-height: 1.3; pointer-events: none;
-  background: var(--body-text-color); color: var(--background-fill-primary);
-}}
+#nav label::before {{ font-size: 1.3rem; line-height: 1.1; }}
+/* The label's own text, which is also what a screen reader reads for it. */
+#nav label span {{ font-size: 0.7rem; font-weight: 500; }}
 {NAV_TILE_CSS}
 #nav label:hover {{ background: var(--background-fill-secondary); }}
 #nav label.selected {{
@@ -3511,6 +3663,12 @@ CSS = f"""
   border: 1px solid #d97706; border-radius: 8px; padding: 0.4rem 0.6rem;
   background: rgba(217, 119, 6, 0.09);
 }}
+/* Clear deletes every conversation, so it asks first, in the same amber
+   panel the model removal uses. */
+.clear-confirm {{
+  border: 1px solid #d97706; border-radius: 8px; padding: 0.4rem 0.6rem;
+  background: rgba(217, 119, 6, 0.09);
+}}
 .model-detail {{ font-size: 0.85rem; }}
 .model-detail p, .model-detail ul, .model-detail li {{ margin: 0.15rem 0; }}
 .model-detail code {{ word-break: break-all; }}
@@ -3521,6 +3679,20 @@ CSS = f"""
 #token-strip .category-label, #prompt-strip .category-label {{ color: #0b0b0b; }}
 .footer-note {{ color: var(--body-text-color-subdued); font-size: 0.9rem; }}
 .scale-caption {{ color: var(--body-text-color-subdued); font-size: 0.85rem; }}
+
+/* An explanation folded to one line. The panels have more to say than they
+   have room for, and a paragraph held open competes with the control it
+   describes, so the summary is a line and the paragraph is a click. */
+.hint {{ color: var(--body-text-color-subdued); font-size: 0.85rem; }}
+.hint summary {{ cursor: pointer; width: fit-content; }}
+.hint summary:hover {{ color: var(--body-text-color); }}
+.hint[open] summary {{ margin-bottom: 0.25rem; }}
+/* A measurement's name in the detail panel carries its meaning as a title.
+   The dotted underline is what says there is something to hover. */
+abbr[title] {{ text-decoration: underline dotted; cursor: help; }}
+/* The live count under the Score text box, and the message that stands in
+   for it when the model cannot be asked. */
+.token-budget {{ color: var(--body-text-color-subdued); font-size: 0.85rem; }}
 
 /* A failure says so twice: in the status line, where it stays, and in a toast
    over the page, where it cannot be missed. The line is boxed in red with a
@@ -3629,6 +3801,48 @@ CSS = f"""
 """
 
 
+# Escape stops a running generation. Stop is a button that only exists while
+# a response is streaming, so calling it off means finding it first, and a
+# reader who wants a runaway response to end wants it to end now. Gradio has
+# no key binding of its own, so the shortcut is a listener attached once on
+# load.
+#
+# It presses the button rather than reaching past it, which keeps one path
+# through the cancellation: whatever Stop does, Escape does.
+#
+# Whether the button is in the document is the whole test, and it is an exact
+# one. Gradio does not hide a component whose ``visible`` is false, it leaves
+# it out of the page altogether, so the button is there while a response is
+# streaming and gone at every other moment - including inside the message
+# box, where Escape must fall through to whatever the browser makes of it.
+#
+# What must NOT be tested is whether the button can be seen. It is laid out
+# inside the Chat tab, so switching to Score text leaves it in the page with
+# a hidden ancestor and no offset parent - and that is exactly the moment a
+# reader is most likely to reach for the key, being away from the button
+# they would otherwise press. Switching to Models or Settings unmounts the
+# chat page entirely and takes the button with it; nothing here can reach a
+# button that is not in the document, and there is no way to stop a response
+# from those pages by any other means either.
+#
+# A modifier held down means the reader is asking the browser for something
+# else, so those are left alone.
+SHORTCUT_JS = """
+() => {
+  if (window.__chatlabShortcuts) { return; }
+  window.__chatlabShortcuts = true;
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') { return; }
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) { return; }
+    const stop = document.querySelector('#stop-button');
+    if (!stop) { return; }
+    event.preventDefault();
+    stop.click();
+  });
+}
+"""
+
+
 # Gradio's Textbox sends on Enter only when it is a single-line box, and on
 # Shift+Enter when it has more than one line, so the "Enter sends" preference
 # is expressed by choosing the box's starting height. The box grows to
@@ -3653,6 +3867,135 @@ def message_box_settings(enter_sends: bool) -> dict:
 
 def set_message_box_keys(enter_sends: bool):
     return gr.update(**message_box_settings(enter_sends))
+
+
+# ------------------------------------------------------- the sampling summary
+#
+# Temperature, top-p and the response length are what a reader reaches for
+# between one retry and the next, so they sit on the Chat page rather than
+# behind the nav. Folded away they would still be a trip to open, so the
+# accordion wears its own settings: the numbers read without a click, and the
+# click is only needed to change one.
+
+
+def sampling_label(temperature, top_p, top_k, max_new_tokens) -> str:
+    """The sampling accordion's own summary of what it holds."""
+
+    filtering = f"top-p {float(top_p):g}"
+    if int(top_k or 0):
+        filtering = f"{filtering} · top-k {int(top_k)}"
+    return (
+        f"Sampling · temperature {float(temperature):g} · {filtering} · "
+        f"up to {int(max_new_tokens):,} new tokens"
+    )
+
+
+def update_sampling_label(temperature, top_p, top_k, max_new_tokens):
+    return gr.update(label=sampling_label(temperature, top_p, top_k, max_new_tokens))
+
+
+# ---------------------------------------------------- the scored token budget
+#
+# Scoring refuses a passage above the model's limit, and it refuses it after
+# the paste, the press and the wait. The count under the box is the same
+# arithmetic done early: it uses the encoding the check itself uses, so the
+# number on screen is the number that will be judged.
+
+SCORE_COUNT_HINT = "Paste some text to see how many tokens it comes to."
+SCORE_COUNT_UNKNOWN = (
+    "The token count needs a loaded model that is not mid-response."
+)
+
+# Every listener that writes the count shares this queue, and so runs one at a
+# time and in the order the requests were sent.
+#
+# Gradio's concurrency limit is per event, not across events, so without this
+# the timer's recovery and a keystroke's count are free to overlap - and they
+# contend for the same model lock, so overlapping means one of them loses it
+# and publishes the "not mid-response" message. Whichever finished last would
+# then be on screen, which can be the one computed for the older passage. That
+# is worse than the message it replaces: a count that does not describe the
+# box is exactly what this line exists to rule out, and the recovery below
+# leaves any numeric count alone, so a wrong one would stay until the next
+# edit. In one queue the fresher request is always the one sent later, and so
+# always the one that publishes last.
+SCORE_BUDGET_QUEUE = "score-budget"
+
+# And one for the sampling summary, for the same reason. Four sliders is four
+# listeners, and always_last coalesces each on its own; across them Gradio
+# orders nothing. Each handler reads all four values as they were when its
+# request was sent, so two sliders moved in quick succession can finish out of
+# order and leave the label describing the older pair - and it is only
+# rewritten by the next change, so it would stay that way.
+SAMPLING_LABEL_QUEUE = "sampling-label"
+
+
+def score_token_count(context: str, text: str, use_chat_template: bool):
+    """The count for the box, and the load it was counted against.
+
+    The second half is what lets a count be told from a stale one. A
+    tokenizer belongs to the weights in memory, so a number counted under one
+    load says nothing about the next, and ``load_id`` is how the rest of the
+    app already names "these weights, this time".
+    """
+
+    load_id = MANAGER.load_id
+    if not text:
+        return SCORE_COUNT_HINT, load_id
+    counted = MANAGER.count_score_tokens(
+        text, context=context or "", use_chat_template=bool(use_chat_template)
+    )
+    if counted is None:
+        return SCORE_COUNT_UNKNOWN, load_id
+    count, limit = counted
+    if count > limit:
+        return (
+            f'<span class="failure-text">{count:,} tokens, above the '
+            f"{limit:,} this model can score in one pass. Score it in "
+            "smaller pieces.</span>",
+            load_id,
+        )
+    return f"{count:,} of {limit:,} tokens.", load_id
+
+
+def recover_score_budget(
+    shown: str, counted_load, context: str, text: str, use_chat_template: bool
+):
+    """Recount when the shown number has gone wrong, or could have.
+
+    Two things put it wrong, and neither corrects itself.
+
+    A count asked for during a reply cannot have the model lock and says so.
+    The reply ends, the model goes idle, and the box still reads "not
+    mid-response" until something is typed into it. Every path out of a
+    generation would have to remember to recompute - the ordinary end of
+    one, Stop, and the four handlers that cancel one - and a path added later
+    would have to remember too.
+
+    The other is a model swapped out from another tab. The handlers that
+    recompute on a load or an unload only reach the tab that asked for it,
+    which is the whole reason the badge is on a timer rather than published
+    by those handlers alone. A tab left showing a number counted under the
+    old tokenizer, against the old context limit, would go on advertising it
+    under the new model's badge.
+
+    So the recovery is driven from that same timer, and guarded on both: the
+    message that gives up, and the load the number was counted against. In
+    every other state this returns without asking, and asking is itself cheap
+    while it would still fail, since an unloaded model and a held lock both
+    refuse before any encoding happens.
+    """
+
+    if shown != SCORE_COUNT_UNKNOWN and counted_load == MANAGER.load_id:
+        return gr.skip(), gr.skip()
+    recovered, load_id = score_token_count(context, text, use_chat_template)
+    if recovered == shown and load_id == counted_load:
+        return gr.skip(), gr.skip()
+    return recovered, load_id
+
+
+# The listeners below and the ones on the boxes themselves share
+# SCORE_BUDGET_QUEUE; see the comment there for why that is not optional.
 
 
 def show_page(page: str):
@@ -3783,6 +4126,9 @@ def build_app() -> gr.Blocks:
         context_ids_state = gr.State((*empty_metrics(), None))
         inspect_target = gr.State(None)
         insight_state = gr.State(None)
+        # Which load the scored token count on screen was counted against, so
+        # a model swapped out from another tab can be told from this one.
+        score_budget_load = gr.State(None)
 
         with gr.Row(elem_id="shell"):
             # The thin pane at the far left picks the page: Chat, Models, or
@@ -3815,11 +4161,15 @@ def build_app() -> gr.Blocks:
                     fork_button = gr.Button("🌿 Fork", size="sm", min_width=60)
                     delete_fork_button = gr.Button("🗑️ Delete", size="sm", min_width=60)
                 gr.Markdown(
-                    "Each entry names the model that replied and the size of the "
-                    "conversation in tokens: the prompt behind its latest reply plus "
-                    "the reply itself. New starts an empty chat. Fork copies the "
-                    "conversation on screen; click a message first to fork at that "
-                    "point.",
+                    hint(
+                        "What the entries say",
+                        "Each entry names the model that replied and the size of "
+                        "the conversation in tokens: the prompt behind its latest "
+                        "reply plus the reply itself. <strong>New</strong> starts "
+                        "an empty chat. <strong>Fork</strong> copies the "
+                        "conversation on screen; click a message first to fork at "
+                        "that point.",
+                    ),
                     elem_classes=["scale-caption"],
                 )
 
@@ -3832,15 +4182,22 @@ def build_app() -> gr.Blocks:
                 )
 
                 # The badge sits above the tabs, so both Chat and Score text
-                # say which model would answer. The button beside it is the
-                # way out when none is: the nav tiles are icons, and their
-                # names only appear on hover.
+                # say which model would answer. Beside it, while none is
+                # loaded, are links to set up the default or choose another
+                # model on the Models page.
                 with gr.Row(elem_id="model-bar"):
                     model_badge_view = gr.HTML(
                         loaded_model_badge(), elem_id="model-badge"
                     )
+                    default_model_button = gr.Button(
+                        "Set up the default model",
+                        variant="primary",
+                        size="sm",
+                        visible=not MANAGER.loaded,
+                        elem_id="default-model",
+                    )
                     load_model_button = gr.Button(
-                        "Load a model",
+                        "Choose another",
                         size="sm",
                         visible=not MANAGER.loaded,
                         elem_id="load-model",
@@ -3868,12 +4225,106 @@ def build_app() -> gr.Blocks:
                                 )
                                 with gr.Row():
                                     send_button = gr.Button("Send", variant="primary")
+                                    # Escape presses this; see SHORTCUT_JS,
+                                    # which finds it by this id.
                                     stop_button = gr.Button(
-                                        "Stop", variant="stop", visible=False
+                                        "Stop",
+                                        variant="stop",
+                                        visible=False,
+                                        elem_id="stop-button",
                                     )
-                                    retry_button = gr.Button("🔁 Retry")
-                                    undo_button = gr.Button("↩️ Undo last")
-                                    clear_button = gr.Button("🗑️ Clear")
+                                    # The three give up their usual minimum
+                                    # width to stay on Send's row. Left to
+                                    # wrap, the last of them takes a line of
+                                    # its own and reads as the widest, most
+                                    # important button under the box.
+                                    retry_button = gr.Button("🔁 Retry", min_width=110)
+                                    undo_button = gr.Button("↩️ Undo last", min_width=110)
+                                    # Named for what it takes: this empties
+                                    # the conversation on screen and deletes
+                                    # every other one with it.
+                                    clear_button = gr.Button("🗑️ Clear all", min_width=110)
+                                with gr.Column(
+                                    visible=False,
+                                    elem_id="clear-confirm",
+                                    elem_classes=["clear-confirm"],
+                                ) as clear_confirm:
+                                    clear_question = gr.Markdown("")
+                                    with gr.Row():
+                                        confirm_clear_button = gr.Button(
+                                            "Clear everything", variant="stop", size="sm"
+                                        )
+                                        cancel_clear_button = gr.Button(
+                                            "Cancel", size="sm"
+                                        )
+
+                                # The knobs reached for between one retry and
+                                # the next, on the page where the retrying
+                                # happens. The accordion's label carries their
+                                # values, so it does not have to be opened to
+                                # be read.
+                                # The knobs reached for between one retry and
+                                # the next, on the page where the retrying
+                                # happens. The accordion's label carries their
+                                # values, so it does not have to be opened to
+                                # be read - and it starts from the saved
+                                # settings, so a reopened app reads back what
+                                # it was left set to rather than the defaults.
+                                with gr.Accordion(
+                                    sampling_label(
+                                        saved.temperature,
+                                        saved.top_p,
+                                        saved.top_k,
+                                        saved.max_new_tokens,
+                                    ),
+                                    open=False,
+                                ) as sampling_accordion:
+                                    with gr.Row():
+                                        temperature = gr.Slider(
+                                            0,
+                                            2,
+                                            value=saved.temperature,
+                                            step=0.05,
+                                            label="Temperature",
+                                        )
+                                        top_p = gr.Slider(
+                                            0.05,
+                                            1,
+                                            value=saved.top_p,
+                                            step=0.01,
+                                            label="Top-p",
+                                        )
+                                    with gr.Row():
+                                        top_k = gr.Slider(
+                                            0,
+                                            200,
+                                            value=saved.top_k,
+                                            step=1,
+                                            label="Top-k (0 disables)",
+                                        )
+                                        # The ceiling is the context limit: a
+                                        # response cannot be longer than a
+                                        # prompt is allowed to be.
+                                        max_new_tokens = gr.Slider(
+                                            1,
+                                            saved.prefill_token_limit,
+                                            value=saved.max_new_tokens,
+                                            step=1,
+                                            label="Maximum new tokens",
+                                        )
+                                    with gr.Row():
+                                        seed = gr.Number(
+                                            value=saved.seed,
+                                            precision=0,
+                                            minimum=0,
+                                            label="Random seed",
+                                            info="Updated after each response so you can reproduce it.",
+                                        )
+                                        randomize_seed = gr.Checkbox(
+                                            value=saved.randomize_seed,
+                                            label="🎲 New seed each response",
+                                            info="Turn off to lock the seed and reproduce a response exactly.",
+                                        )
                                 with gr.Row():
                                     save_button = gr.Button("💾 Save conversation")
                                     load_upload = gr.UploadButton(
@@ -3904,8 +4355,15 @@ def build_app() -> gr.Blocks:
                                             size="sm",
                                         )
                                     gr.Markdown(
-                                        "Exports include every token metric and all recorded "
-                                        "alternatives for the latest completed response.",
+                                        hint(
+                                            "What the export holds",
+                                            "Every token metric and all recorded "
+                                            "alternatives for the latest completed "
+                                            "response. JSON keeps the nested "
+                                            "alternatives; CSV gives one row per "
+                                            "token and spreads them into numbered "
+                                            "columns.",
+                                        ),
                                         elem_classes=["footer-note"],
                                     )
 
@@ -3933,6 +4391,14 @@ def build_app() -> gr.Blocks:
                                     label="Text to score",
                                     placeholder="Paste the text you want measured…",
                                     lines=8,
+                                )
+                                # Scoring refuses a passage above the model's
+                                # limit. This is the same count, made while
+                                # the passage is still being written.
+                                score_budget = gr.Markdown(
+                                    SCORE_COUNT_HINT,
+                                    elem_id="score-budget",
+                                    elem_classes=["token-budget"],
                                 )
                                 score_button = gr.Button("Score text", variant="primary")
                                 score_status = gr.Markdown("Nothing scored yet.")
@@ -3965,9 +4431,12 @@ def build_app() -> gr.Blocks:
                         with gr.Row():
                             branch_button = gr.Button("🌱 Branch from token", size="sm")
                         gr.Markdown(
-                            "Branching keeps the response up to the selected token, puts "
-                            "the alternative in its place, and lets the model continue "
-                            "from there.",
+                            hint(
+                                "What branching does",
+                                "Branching keeps the response up to the selected "
+                                "token, puts the alternative in its place, and "
+                                "lets the model continue from there.",
+                            ),
                             elem_classes=["scale-caption"],
                         )
                         with gr.Row():
@@ -3984,9 +4453,16 @@ def build_app() -> gr.Blocks:
                                 "✏️ Branch with text", size="sm", scale=0, min_width=160
                             )
                         gr.Markdown(
-                            "The typed text replaces the selected token exactly as written, "
-                            "whether or not the model would ever have chosen it, and the "
-                            "model continues from there.",
+                            hint(
+                                "What typed text does",
+                                "The typed text replaces the selected token "
+                                "exactly as written, whether or not the model "
+                                "would ever have chosen it, and the model "
+                                "continues from there. Include a leading space "
+                                "if the word needs one; text this tokenizer "
+                                "cannot reproduce exactly at that position is "
+                                "refused rather than approximated.",
+                            ),
                             elem_classes=["scale-caption"],
                         )
                         with gr.Accordion("Layers and attention", open=False):
@@ -4020,8 +4496,14 @@ def build_app() -> gr.Blocks:
                             )
 
                 gr.Markdown(
-                    "Rank and raw probability come from the unmodified model distribution. "
-                    "Sampling probability includes temperature, top-k, and top-p. Quantized models may produce slightly different ranks.",
+                    hint(
+                        "How to read these numbers",
+                        "Rank and raw probability come from the unmodified model "
+                        "distribution. Sampling probability includes temperature, "
+                        "top-k, and top-p. Quantized models may produce slightly "
+                        "different ranks. Hover any measurement's name in the "
+                        "detail panel for what it means.",
+                    ),
                     elem_classes=["footer-note"],
                 )
 
@@ -4097,7 +4579,9 @@ def build_app() -> gr.Blocks:
                             show_label=False,
                             elem_classes=["model-list"],
                         )
-                        my_model_detail = gr.Markdown("", elem_classes=["model-detail"])
+                        my_model_detail = gr.Markdown(
+                            "", elem_id="my-model-detail", elem_classes=["model-detail"]
+                        )
                         with gr.Row():
                             redownload_button = gr.Button("⬇️ Redownload", size="sm")
                             remove_button = gr.Button("🗑️ Remove", size="sm")
@@ -4117,8 +4601,15 @@ def build_app() -> gr.Blocks:
             with gr.Column(
                 scale=1, visible=False, elem_id="settings-page"
             ) as settings_page:
+                # Sampling lives on the Chat page: temperature and the
+                # response length are what a reader moves between one retry
+                # and the next, and leaving the conversation to reach them
+                # broke that loop. What is left here is what is set once and
+                # then left alone.
                 gr.Markdown(
-                    "# Settings\nHow every reply is prompted, sampled, and measured.",
+                    "# Settings\nHow every reply is prompted and measured. The "
+                    "sampling controls are on the Chat page, under the message "
+                    "box, because they are moved between one reply and the next.",
                     elem_id="settings-hero",
                 )
                 with gr.Row():
@@ -4148,45 +4639,21 @@ def build_app() -> gr.Blocks:
                             info="Off by default. Think models write a fresh reasoning block each turn, so replaying old ones burns context and usually hurts the next answer.",
                         )
 
+                    with gr.Column():
                         gr.Markdown("## Input")
                         enter_sends = gr.Checkbox(
                             value=saved.enter_sends,
                             label="Enter sends the message",
                             info="Shift+Enter starts a new line. Turn off to swap the two.",
                         )
+                        gr.Markdown(
+                            "Escape stops a response that is still being written, "
+                            "from anywhere on the Chat page - including the message "
+                            "box and the Score text tab.",
+                            elem_classes=["scale-caption"],
+                        )
 
-                    with gr.Column():
-                        gr.Markdown("## Sampling and analysis")
-                        temperature = gr.Slider(
-                            0, 2, value=saved.temperature, step=0.05, label="Temperature"
-                        )
-                        top_p = gr.Slider(
-                            0.05, 1, value=saved.top_p, step=0.01, label="Top-p"
-                        )
-                        top_k = gr.Slider(
-                            0, 200, value=saved.top_k, step=1, label="Top-k (0 disables)"
-                        )
-                        # The ceiling is the context limit: a response cannot
-                        # be longer than a prompt is allowed to be.
-                        max_new_tokens = gr.Slider(
-                            1,
-                            saved.prefill_token_limit,
-                            value=saved.max_new_tokens,
-                            step=1,
-                            label="Maximum new tokens",
-                        )
-                        seed = gr.Number(
-                            value=saved.seed,
-                            precision=0,
-                            minimum=0,
-                            label="Random seed",
-                            info="Updated after each response so you can reproduce it.",
-                        )
-                        randomize_seed = gr.Checkbox(
-                            value=saved.randomize_seed,
-                            label="🎲 New seed each response",
-                            info="Turn off to lock the seed and reproduce a response exactly.",
-                        )
+                        gr.Markdown("## Analysis")
                         analyze_prompt = gr.Checkbox(
                             value=saved.analyze_prompt,
                             label="Measure prompt tokens",
@@ -4219,10 +4686,28 @@ def build_app() -> gr.Blocks:
         nav.change(
             show_page, nav, [conversation_pane, chat_page, models_page, settings_page]
         )
+        # The scored token count follows the boxes as they are typed into.
+        # always_last coalesces a burst of keystrokes into the one count that
+        # matters, and the progress bar is hidden because a spinner on every
+        # keystroke would be worse than the number is good.
+        score_budget_inputs = [score_context, score_input, use_chat_template]
+        # The count travels with the load it was counted against; see
+        # recover_score_budget for what that is for.
+        score_budget_outputs = [score_budget, score_budget_load]
+        for control in score_budget_inputs:
+            control.change(
+                score_token_count,
+                score_budget_inputs,
+                score_budget_outputs,
+                trigger_mode="always_last",
+                show_progress="hidden",
+                concurrency_id=SCORE_BUDGET_QUEUE,
+            )
+
         # The badge is refreshed on the way to the chat page as well, so a
         # load started a moment ago shows as one in progress rather than as
         # the "no model" state the page was left in.
-        badge_outputs = [model_badge_view, load_model_button]
+        badge_outputs = [model_badge_view, default_model_button, load_model_button]
         nav.change(refresh_model_badge, None, badge_outputs)
         demo.load(refresh_model_badge, None, badge_outputs)
         # And on a timer, so a tab that did not start the load hears about it
@@ -4235,6 +4720,18 @@ def build_app() -> gr.Blocks:
         badge_timer.tick(
             refresh_model_badge, None, badge_outputs, show_progress="hidden"
         )
+        # The same timer un-sticks the scored token count. A count asked for
+        # during a reply gives up, and nothing about that message corrects
+        # itself once the reply ends; see recover_score_budget, which is why
+        # this is one listener rather than one on every path out of a
+        # generation.
+        badge_timer.tick(
+            recover_score_budget,
+            [score_budget, score_budget_load, *score_budget_inputs],
+            score_budget_outputs,
+            show_progress="hidden",
+            concurrency_id=SCORE_BUDGET_QUEUE,
+        )
         load_model_button.click(
             go_to_models,
             None,
@@ -4245,27 +4742,71 @@ def build_app() -> gr.Blocks:
         # the cache afterwards, so My Models never shows a stale list.
         models_inputs = [my_models, sort_models]
         models_outputs = [my_models, my_model_detail, my_models_summary]
-        download_button.click(
-            download_model, [model_id, hf_token, my_models], model_status
-        ).then(refresh_my_models, models_inputs, models_outputs)
-        # These three are the handlers that change what is in memory, so each
-        # ends by rewriting the chat page's badge as well.
-        download_load_button.click(
-            download_and_load_model, [model_id, hf_token, my_models], model_status
-        ).then(refresh_my_models, models_inputs, models_outputs).then(
-            refresh_model_badge, None, badge_outputs
+
+        # Refresh model-dependent displays after explicit model actions.
+        # The timer also catches changes from other tabs, but this updates
+        # the badge and token count immediately in the tab that acted.
+        def rescan(event, *, reloads: bool = True):
+            """Rescan the cache after ``event``, and re-read what the model feeds."""
+
+            event = event.then(refresh_my_models, models_inputs, models_outputs)
+            if not reloads:
+                return event
+            return event.then(refresh_model_badge, None, badge_outputs).then(
+                score_token_count,
+                score_budget_inputs,
+                score_budget_outputs,
+                show_progress="hidden",
+                concurrency_id=SCORE_BUDGET_QUEUE,
+            )
+
+        # Download-only changes the cache without changing the loaded model.
+        rescan(
+            download_button.click(
+                download_model, [model_id, hf_token, my_models], model_status
+            )
         )
-        cached_button.click(
-            load_cached_model, [model_id, my_models], model_status
-        ).then(refresh_my_models, models_inputs, models_outputs).then(
-            refresh_model_badge, None, badge_outputs
+        rescan(
+            download_load_button.click(
+                download_and_load_model, [model_id, hf_token, my_models], model_status
+            )
         )
-        unload_button.click(unload_model, outputs=model_status).then(
-            refresh_my_models, models_inputs, models_outputs
-        ).then(refresh_model_badge, None, badge_outputs)
+        rescan(
+            cached_button.click(
+                load_cached_model, [model_id, my_models], model_status
+            )
+        )
+        rescan(unload_button.click(unload_model, outputs=model_status))
+        # A manual refresh and a new sort order reorder a list; neither
+        # changes what is on disk or in memory, which is all the badge and the
+        # count ask about.
         refresh_models_button.click(refresh_my_models, models_inputs, models_outputs)
         sort_models.input(refresh_my_models, models_inputs, models_outputs)
         demo.load(refresh_my_models, models_inputs, models_outputs)
+        # Escape stops a running generation, from anywhere on the page.
+        demo.load(None, None, None, js=SHORTCUT_JS)
+
+        # Selecting a default is navigation only. The Models page owns the
+        # explicit download and load actions, including their errors.
+        default_model_button.click(
+            select_default_model,
+            None,
+            [
+                model_id,
+                my_models,
+                my_model_detail,
+                search_results,
+                search_detail,
+                model_status,
+                remove_confirm,
+                pending_removal,
+                nav,
+                conversation_pane,
+                chat_page,
+                models_page,
+                settings_page,
+            ],
+        )
         # .input rather than .change: the refresh above also sets the radio,
         # and a .change listener would rewrite the model ID box on each rescan.
         my_models.input(select_my_model, my_models, [model_id, my_model_detail])
@@ -4277,9 +4818,11 @@ def build_app() -> gr.Blocks:
         confirm_outputs = [remove_confirm, pending_removal]
         my_models.input(hide_remove_confirm, None, confirm_outputs)
         model_id.input(hide_remove_confirm, None, confirm_outputs)
-        redownload_button.click(
-            redownload_my_model, [my_models, hf_token], model_status
-        ).then(refresh_my_models, models_inputs, models_outputs)
+        rescan(
+            redownload_button.click(
+                redownload_my_model, [my_models, hf_token], model_status
+            )
+        )
         remove_button.click(
             ask_remove_my_model,
             my_models,
@@ -4287,9 +4830,11 @@ def build_app() -> gr.Blocks:
         )
         # The confirm button deletes the model the question named, never the
         # radio's current value: see ask_remove_my_model.
-        confirm_remove_button.click(
-            remove_my_model, pending_removal, [model_status, *confirm_outputs]
-        ).then(refresh_my_models, models_inputs, models_outputs)
+        rescan(
+            confirm_remove_button.click(
+                remove_my_model, pending_removal, [model_status, *confirm_outputs]
+            )
+        )
         cancel_remove_button.click(hide_remove_confirm, None, confirm_outputs)
 
         search_outputs = [search_results, search_detail, search_results_state]
@@ -4303,6 +4848,27 @@ def build_app() -> gr.Blocks:
             [model_id, search_detail],
         ).then(clear_my_model_selection, None, [my_models, my_model_detail])
         enter_sends.change(set_message_box_keys, enter_sends, prompt)
+
+        # The sampling accordion wears its own values.
+        #
+        # On change rather than on release, even though a slider fires
+        # continuously while it is dragged. Gradio dispatches release from
+        # pointerup alone, so a slider moved with the arrow keys - which is
+        # how it is moved without a mouse - changes its value and never
+        # reports a release, and the summary would sit there describing the
+        # settings as they were. always_last is what makes change affordable
+        # instead: a drag's worth of them collapses to the one that matters,
+        # and the label only has to be right once the slider stops.
+        sampling_controls = [temperature, top_p, top_k, max_new_tokens]
+        for control in sampling_controls:
+            control.change(
+                update_sampling_label,
+                sampling_controls,
+                sampling_accordion,
+                trigger_mode="always_last",
+                show_progress="hidden",
+                concurrency_id=SAMPLING_LABEL_QUEUE,
+            )
 
         settings_inputs = [
             system_prompt,
@@ -4347,15 +4913,32 @@ def build_app() -> gr.Blocks:
         # The context limit is committed rather than saved as it is typed: the
         # handler writes a clamped value back, which mid-word would fight the
         # typing.
+        # Lowering it can pull the response length down with it, which the
+        # sampling summary names, so the label follows that too.
         for event in (prefill_token_limit.blur, prefill_token_limit.submit):
             event(
                 remember_prefill_limit,
                 [prefill_token_limit, max_new_tokens],
                 [prefill_token_limit, max_new_tokens],
-            )
+            ).then(
+            update_sampling_label,
+            sampling_controls,
+            sampling_accordion,
+            concurrency_id=SAMPLING_LABEL_QUEUE,
+        )
         # A page load is where the file is read back, so reloading the browser
-        # shows what was saved rather than what the app started with.
-        demo.load(restore_settings, None, [*persisted_inputs, prefill_token_limit])
+        # shows what was saved rather than what the app started with. The
+        # sampling summary is rebuilt from whatever came back, since the label
+        # the accordion was built with describes the file as it was read at
+        # startup, not as it is now.
+        demo.load(
+            restore_settings, None, [*persisted_inputs, prefill_token_limit]
+        ).then(
+            update_sampling_label,
+            sampling_controls,
+            sampling_accordion,
+            concurrency_id=SAMPLING_LABEL_QUEUE,
+        )
         # The order every generation handler publishes in; see
         # CHAT_OUTPUT_NAMES.
         chat_outputs = [
@@ -4454,7 +5037,25 @@ def build_app() -> gr.Blocks:
             undo_outputs,
             cancels=running,
         )
+        # Clear asks before it takes anything, so the button that opens the
+        # question does nothing else - it neither clears nor cancels. The
+        # confirm button is the one that does both.
         clear_button.click(
+            ask_clear_chat,
+            [conversation_state, forks_state],
+            [generation_status, clear_confirm, clear_question],
+        )
+        cancel_clear_button.click(hide_clear_confirm, None, clear_confirm)
+        # The question names how many conversations it would take, and that
+        # count is read when it is asked. Anything that adds or removes one
+        # withdraws it rather than leaving a stale promise above a button
+        # that would take more than the promise says - the same reason
+        # choosing another model withdraws the removal question. Pressing
+        # Clear again re-asks with the numbers as they are now.
+        for control in (new_button, fork_button, delete_fork_button):
+            control.click(hide_clear_confirm, None, clear_confirm)
+        conversation_list.input(hide_clear_confirm, None, clear_confirm)
+        confirm_clear_button.click(
             clear_chat,
             inputs=color_scale,
             outputs=[
@@ -4475,6 +5076,7 @@ def build_app() -> gr.Blocks:
                 trace_state,
                 forks_state,
                 conversation_list,
+                clear_confirm,
             ],
             cancels=running,
         )

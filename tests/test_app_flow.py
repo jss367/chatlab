@@ -80,8 +80,9 @@ CHAT_OUTPUTS = len(app.CHAT_OUTPUT_NAMES)
 # the prompt strip and its state and note, the two charts, and the export.
 PANEL_OUTPUTS = 6
 UNDO_OUTPUTS = 10 + PANEL_OUTPUTS
-# Clear also resets the forks and their picker.
-CLEAR_OUTPUTS = 9 + PANEL_OUTPUTS + 2
+# Clear also resets the forks and their picker, and closes the
+# confirmation panel that sent it.
+CLEAR_OUTPUTS = 9 + PANEL_OUTPUTS + 3
 LOAD_OUTPUTS = 10 + PANEL_OUTPUTS
 
 
@@ -2727,8 +2728,10 @@ class ForkTests(unittest.TestCase):
     def test_clear_resets_the_forks(self):
         result = app.clear_chat()
         self.assertEqual(len(result), CLEAR_OUTPUTS)
-        self.assertEqual(result[-2], new_forks())
-        self.assertEqual(names_of(result[-1]), [MAIN_BRANCH])
+        self.assertEqual(result[-3], new_forks())
+        self.assertEqual(names_of(result[-2]), [MAIN_BRANCH])
+        # And closes the confirmation that asked for it.
+        self.assertEqual(result[-1], gr.update(visible=False))
 
     def test_a_forked_conversation_can_be_continued(self):
         forked = app.fork_conversation(self.turns(), new_forks(), None)

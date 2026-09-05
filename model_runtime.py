@@ -3751,6 +3751,79 @@ class ModelManager:
                 # be what got measured: its own allocation, or nothing at
                 # all if it unloaded first.
                 self._run_device_bytes = reserved_bytes()
+
+    def count_score_tokens(
+        self,
+        text: str,
+        *,
+        context: str = "",
+        use_chat_template: bool = False,
+    ) -> tuple[int, int] | None:
+        """How many tokens :meth:`score_text` would measure, and its limit.
+
+        ``None`` where the count cannot be had at this instant: nothing is
+        loaded, a generation has the floor, the model lock is held, the model
+        changed while this was working, or the tokenizer refuses the text.
+        This answers a box being typed into, and waiting behind a running
+        generation would hang the keystroke rather than the number; a caller
+        with no answer says so and asks again on the next one.
+
+        The lock is held only long enough to read the tokenizer, the limit
+        and the load they belong to. The encoding itself - the one part whose
+        cost grows with what has been pasted - runs outside it, against the
+        tokenizer object already in hand. Holding the lock across it was the
+        real hazard: a generation claims its slot before it goes for the
+        lock, so between the :attr:`busy` check below and the acquire there
+        is a window in which a keystroke could take the lock and then keep a
+        reply waiting for as long as tokenizing a large paste took. That
+        window still exists and always will, but what it now costs is three
+        attribute reads.
+
+        Encoding outside the lock means a load can land mid-count, so the
+        load is read again afterwards and a count from the wrong weights is
+        dropped rather than reported. The tokenizer in hand stays valid
+        either way - an unload drops the manager's reference, not the object
+        - so the worst case is work thrown away, never a torn read.
+
+        A tokenizer that refuses the passage outright is one of those "not
+        now" cases rather than a failure to report: pressing **Score text**
+        runs the same encoding and explains what went wrong properly, and a
+        half-typed passage is not yet worth complaining about.
+        """
+
+        if not self.loaded or self.busy:
+            return None
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            if not self.loaded:
+                return None
+            tokenizer = self.tokenizer
+            limit = score_token_limit(self.model)
+            counted_load = self.load_id
+        finally:
+            self._lock.release()
+
+        if not text:
+            return 0, limit
+        try:
+            split = encode_for_scoring(
+                tokenizer,
+                text,
+                context=context,
+                use_chat_template=use_chat_template,
+            )
+        except Exception:
+            return None
+        if not split.text_ids:
+            # Text that tokenizes to nothing is what score_text refuses, and
+            # reporting it as a confident zero would read as room to spare
+            # rather than as the refusal it is.
+            return None
+        if self.load_id != counted_load:
+            return None
+        return len(split.context_ids) + len(split.text_ids), limit
+
     @_guards_device_memory
     def score_text(
         self,

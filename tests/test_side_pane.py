@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -1118,31 +1119,55 @@ class ModelBadgeTests(unittest.TestCase):
 
     def test_a_loaded_model_is_named_with_its_device(self):
         self.load()
-        badge, button = app.refresh_model_badge()
+        badge, offer, button = app.refresh_model_badge()
 
         self.assertIn('data-state="ready"', badge)
         self.assertIn(OLMO, badge)
         self.assertIn("Apple Metal (MPS)", badge)
-        # Nothing to go to the Models page for.
+        # Nothing to go to the Models page for, and nothing to offer.
         self.assertFalse(button["visible"])
+        self.assertFalse(offer["visible"])
 
     def test_no_model_says_so_and_offers_the_way_to_the_models_page(self):
-        badge, button = app.refresh_model_badge()
+        badge, offer, button = app.refresh_model_badge()
 
         self.assertIn('data-state="empty"', badge)
         self.assertIn(app.NO_MODEL_BADGE, badge)
         self.assertTrue(button["visible"])
+        self.assertTrue(offer["visible"])
+
+    def test_downloads_leave_the_setup_links_available(self):
+        # These links only navigate, including while the default is fetching.
+        for model_id in (settings.DEFAULT_MODEL_ID, "org/something-else"):
+            with self.subTest(model_id=model_id):
+                self.manager.active_downloads[model_id] = object()
+                _badge, offer, button = app.refresh_model_badge()
+                self.assertTrue(offer["visible"])
+                self.assertTrue(button["visible"])
+                self.assertNotIn("interactive", offer)
+
+    def test_a_download_alone_does_not_claim_a_model_is_coming(self):
+        # Download only ends by telling the reader to load the cached model;
+        # nothing is read into memory. A badge saying "loading" would promise
+        # a model that never arrives and then fall back to "No model loaded".
+        self.manager.active_downloads[settings.DEFAULT_MODEL_ID] = object()
+
+        badge, _offer, _button = app.refresh_model_badge()
+
+        self.assertIn('data-state="empty"', badge)
+        self.assertIn(app.NO_MODEL_BADGE, badge)
 
     def test_a_load_under_way_names_the_model_coming_in(self):
         # model_id is cleared for the whole of a load, so the badge reads
         # loading_id and reports the minutes in between as a load.
         self.manager.reserve_load(OLMO)
 
-        badge, button = app.refresh_model_badge()
+        badge, offer, button = app.refresh_model_badge()
 
         self.assertIn('data-state="loading"', badge)
         self.assertIn(f"Loading {OLMO}", badge)
         self.assertFalse(button["visible"])
+        self.assertFalse(offer["visible"])
 
     def test_a_second_load_finishing_leaves_the_first_one_showing(self):
         # Two loads can be under way at once, and the one that finishes
@@ -1152,11 +1177,12 @@ class ModelBadgeTests(unittest.TestCase):
         _second_id, second = self.manager.reserve_load("org/second")
         self.manager.release_load(second)
 
-        badge, button = app.refresh_model_badge()
+        badge, offer, button = app.refresh_model_badge()
 
         self.assertIn('data-state="loading"', badge)
         self.assertIn(f"Loading {OLMO}", badge)
         self.assertFalse(button["visible"])
+        self.assertFalse(offer["visible"])
 
     def test_a_load_waiting_its_turn_leaves_the_answering_model_named(self):
         # A load counts itself as under way before it waits for the model
@@ -1166,7 +1192,7 @@ class ModelBadgeTests(unittest.TestCase):
         self.load()
         self.manager.reserve_load("org/second")
 
-        badge, button = app.refresh_model_badge()
+        badge, offer, button = app.refresh_model_badge()
 
         self.assertIn('data-state="ready"', badge)
         self.assertIn(OLMO, badge)
@@ -1183,7 +1209,7 @@ class ModelBadgeTests(unittest.TestCase):
         self.manager.model_id = None
         self.manager.device_name = None
 
-        badge, button = app.refresh_model_badge()
+        badge, offer, button = app.refresh_model_badge()
 
         self.assertIn('data-state="loading"', badge)
         self.assertIn("Loading org/second", badge)
@@ -1211,17 +1237,24 @@ class PageLayoutTests(unittest.TestCase):
     ON_SETTINGS_PAGE = [
         "System prompt",
         "Send previous reasoning back to the model",
+        "Measure prompt tokens",
+        "Enter sends the message",
+        "Context limit (tokens)",
+    ]
+    # Sampling sits with the conversation, not behind the nav: these are what
+    # a reader moves between one retry and the next.
+    ON_CHAT_PAGE = [
+        "Conversation",
+        "Message",
+        "Color tokens by",
+        "Text to score",
         "Temperature",
         "Top-p",
         "Top-k (0 disables)",
         "Maximum new tokens",
         "Random seed",
         "🎲 New seed each response",
-        "Measure prompt tokens",
-        "Enter sends the message",
-        "Context limit (tokens)",
     ]
-    ON_CHAT_PAGE = ["Conversation", "Message", "Color tokens by", "Text to score"]
 
     def setUp(self):
         self.demo = app.build_app()
@@ -1274,23 +1307,30 @@ class PageLayoutTests(unittest.TestCase):
         self.assertTrue(self.demo.fill_width)
 
     def test_the_nav_pane_is_thin(self):
-        self.assertLessEqual(app.NAV_PANE_WIDTH, 64)
+        # Wide enough for the longest page name at the tile's small type,
+        # and no wider: the pane is a signpost, not a sidebar.
+        self.assertLessEqual(app.NAV_PANE_WIDTH, 96)
         self.assertEqual(self.by_id("nav-pane").min_width, app.NAV_PANE_WIDTH)
 
-    def test_each_nav_tile_shows_an_icon_and_names_itself_on_hover(self):
+    def test_each_nav_tile_shows_an_icon_above_the_page_name(self):
         for page in app.PAGES:
             with self.subTest(page=page):
                 tile = f'#nav label[data-testid="{page}-radio-label"]'
-                # The empty alternative text keeps the icon and the tooltip
-                # out of what a screen reader reads for the tile.
+                # The empty alternative text keeps the icon out of what a
+                # screen reader reads; the label's own text stands for the
+                # tile, and is now printed under the icon rather than hidden.
                 self.assertIn(
                     f'{tile}::before {{ content: "{app.NAV_ICONS[page]}" / ""; }}',
                     app.CSS,
                 )
-                self.assertIn(f"{tile}:hover::after", app.CSS)
-                self.assertIn(f'{{ content: "{page}" / ""; }}', app.CSS)
-        # The name stays on the tile, out of sight, for the browser to read out.
-        self.assertIn("#nav label span {", app.CSS)
+        self.assertIn("#nav label span { font-size:", app.CSS)
+
+    def test_the_nav_names_are_on_screen_rather_than_a_hover_away(self):
+        # Three pages is not a number worth hiding. Nothing clips the name
+        # out of sight, and no tooltip stands in for it.
+        self.assertNotIn("clip-path: inset(50%)", app.CSS)
+        self.assertNotIn("#nav label::after", app.CSS)
+        self.assertNotIn(":hover::after", app.CSS)
 
     def test_only_the_chat_page_starts_visible(self):
         self.assertTrue(self.by_id("chat-page").visible)
@@ -1323,6 +1363,20 @@ class PageLayoutTests(unittest.TestCase):
             if getattr(fn.fn, "__name__", None) == name
         ]
 
+    def cancelled_by(self, trigger) -> set:
+        """Event indices cancelled by anything bound to ``trigger``.
+
+        Gradio records a listener's ``cancels`` against the target rather
+        than the handler, so this reads every function on that target.
+        """
+
+        return {
+            index
+            for fn in self.demo.fns.values()
+            if fn.targets == [trigger]
+            for index in fn.cancels
+        }
+
     def test_the_badge_sits_above_the_chat_page_tabs(self):
         chat_page = self.by_id("chat-page")
         badge = self.by_id("model-badge")
@@ -1340,12 +1394,42 @@ class PageLayoutTests(unittest.TestCase):
         # the page load draws the badge first, switching pages catches a load
         # that started while the chat page was out of sight, and the timer
         # catches one another tab started.
-        listeners = self.listeners("refresh_model_badge")
-        self.assertEqual(len(listeners), 6)
-        for listener in listeners:
-            self.assertEqual(
-                listener.outputs, [self.by_id("model-badge"), self.by_id("load-model")]
-            )
+        # The three that change memory, the download that only changes what
+        # is on disk, redownload and a confirmed removal, plus the page
+        # load, the nav and the timer.
+        self.assertEqual(len(self.listeners("refresh_model_badge")), 9)
+
+    def test_the_timer_also_un_sticks_the_scored_token_count(self):
+        # A count asked for during a reply gives up and says so, and that
+        # message does not correct itself when the reply ends. Rather than
+        # ask every path out of a generation to remember, the badge's timer
+        # carries the recovery - guarded so the ordinary tick costs nothing.
+        timers = [
+            block for block in self.demo.blocks.values() if isinstance(block, gr.Timer)
+        ]
+        (recovery,) = self.listeners("recover_score_budget")
+
+        self.assertEqual(recovery.targets, [(timers[0]._id, "tick")])
+        self.assertEqual(recovery.inputs[0], self.by_id("score-budget"))
+        self.assertEqual(recovery.outputs[0], self.by_id("score-budget"))
+        # The count and the load it was counted against travel together.
+        self.assertIsInstance(recovery.inputs[1], gr.State)
+        self.assertEqual(recovery.outputs, recovery.inputs[:2])
+
+    def test_everything_that_writes_the_count_shares_one_queue(self):
+        # Gradio's concurrency limit is per event, not across events, so
+        # without a shared id the timer's recovery and a keystroke's count
+        # can overlap - and they contend for the same model lock, so one of
+        # them loses it and publishes the "not mid-response" message. The
+        # loser finishing last would leave a count that does not describe the
+        # box, which is the one thing this line exists to rule out.
+        budget = self.by_id("score-budget")
+        writers = [fn for fn in self.demo.fns.values() if budget in fn.outputs]
+
+        self.assertGreater(len(writers), 1)
+        self.assertEqual(
+            {fn.concurrency_id for fn in writers}, {app.SCORE_BUDGET_QUEUE}
+        )
 
     def test_the_badge_asks_again_on_a_timer(self):
         # The manager is one object for the whole process, but a handler's
@@ -1392,7 +1476,7 @@ class PageLayoutTests(unittest.TestCase):
     def test_every_model_change_rescans_the_cache(self):
         # Download, download-and-load, load cached, unload, redownload,
         # confirmed removal, the refresh button, a new sort order, and the
-        # page load: each ends in a rescan.
+        # page load each rescan. Selecting the default only navigates.
         self.assertEqual(len(self.listeners("refresh_my_models")), 9)
 
     def test_every_load_reads_the_my_models_selection(self):
@@ -1452,6 +1536,252 @@ class PageLayoutTests(unittest.TestCase):
         self.assertIsNot(pending, radio)
         self.assertIn(pending, ask.outputs)
         self.assertIn(pending, remove.outputs)
+
+    def test_clear_asks_before_it_takes_every_conversation(self):
+        # Clear reaches past the conversation on screen: it deletes every
+        # other one too, and nothing brings them back. The button only opens
+        # the question; the confirm button is the one that clears, and so the
+        # only one that cancels the running generators.
+        (ask,) = self.listeners("ask_clear_chat")
+        (clear,) = self.listeners("clear_chat")
+        cancel = next(
+            fn
+            for fn in self.listeners("hide_clear_confirm")
+            if self.demo.blocks[fn.targets[0][0]].value == "Cancel"
+        )
+        buttons = {
+            self.demo.blocks[block_id].value: fn
+            for fn in (ask, clear, cancel)
+            for block_id, _ in fn.targets
+        }
+        self.assertIs(buttons["🗑️ Clear all"], ask)
+        self.assertIs(buttons["Clear everything"], clear)
+        self.assertIs(buttons["Cancel"], cancel)
+        # Cancelling is recorded against the target rather than the handler,
+        # so it is read the way ClearCancelsGenerationTests reads it.
+        self.assertFalse(self.cancelled_by(ask.targets[0]))
+        self.assertTrue(self.cancelled_by(clear.targets[0]))
+
+    def test_changing_the_conversations_withdraws_the_clear_question(self):
+        # The question names how many conversations it would take, counted
+        # when it was asked. Left open across a New or a Fork it would
+        # promise less than "Clear everything" would take - and that promise
+        # is the whole reason the question exists.
+        withdrawals = self.listeners("hide_clear_confirm")
+        triggered_by = {fn.targets[0][0] for fn in withdrawals}
+        buttons = {
+            self.demo.blocks[block_id].value
+            for block_id in triggered_by
+            if isinstance(self.demo.blocks[block_id], gr.Button)
+        }
+
+        self.assertEqual(buttons, {"Cancel", "➕ New", "🌿 Fork", "🗑️ Delete"})
+        # Switching conversations counts too, and it is the list itself.
+        self.assertIn(self.by_id("conversation-list")._id, triggered_by)
+        for fn in withdrawals:
+            self.assertEqual(fn.outputs, [self.by_id("clear-confirm")])
+
+    def test_the_clear_button_is_named_for_everything_it_takes(self):
+        # "Clear" alone reads as emptying the chat on screen, which is what
+        # Delete does. This one takes the lot.
+        (ask,) = self.listeners("ask_clear_chat")
+        ((block_id, _),) = ask.targets
+
+        self.assertEqual(self.demo.blocks[block_id].value, "🗑️ Clear all")
+
+    def test_the_offer_sits_beside_the_badge_that_says_it_is_needed(self):
+        # The badge names the missing model; the offer is what to do about
+        # it, and both belong where the reader already is.
+        offer = self.by_id("default-model")
+
+        self.assertTrue(self.within(offer, self.by_id("chat-page")))
+        self.assertTrue(self.within(offer, self.by_id("model-bar")))
+        (setup,) = self.listeners("select_default_model")
+        self.assertEqual(setup.targets, [(offer._id, "click")])
+        self.assertEqual(offer.value, "Set up the default model")
+        # No chained handler may turn this navigation back into automatic I/O.
+        self.assertFalse(any(
+            dependency["trigger_after"] == setup._id
+            for dependency in self.demo.config["dependencies"]
+        ))
+        # It switches the pages itself, for the reason go_to_models gives: a
+        # Radio set by a handler reports no change, so setting the nav alone
+        # would tick Models and leave the chat page on screen.
+        self.assertEqual(
+            setup.outputs,
+            [
+                self.labelled("Hugging Face model ID"),
+                # A row picked earlier outranks the ID box, so it goes.
+                self.labelled("Downloaded models"),
+                self.by_id("my-model-detail"),
+                self.labelled("Search results"),
+                self.listeners("select_search_result")[0].outputs[1],
+                self.by_id("model-status"),
+                self.listeners("hide_remove_confirm")[0].outputs[0],
+                self.listeners("hide_remove_confirm")[0].outputs[1],
+                self.by_id("nav"),
+                self.by_id("conversation-pane"),
+                self.by_id("chat-page"),
+                self.by_id("models-page"),
+                self.by_id("settings-page"),
+            ],
+        )
+
+    def test_the_offer_is_published_wherever_the_badge_is(self):
+        # Setup links share the badge's visibility decision in every tab.
+        listeners = self.listeners("refresh_model_badge")
+        self.assertTrue(listeners)
+        for listener in listeners:
+            self.assertEqual(
+                listener.outputs,
+                [
+                    self.by_id("model-badge"),
+                    self.by_id("default-model"),
+                    self.by_id("load-model"),
+                ],
+            )
+
+    def test_escape_is_wired_to_the_stop_button_by_its_id(self):
+        # The shortcut presses the button rather than reaching past it, so
+        # whatever Stop does, Escape does. It needs the id to find it.
+        stop = next(
+            block
+            for block in self.demo.blocks.values()
+            if getattr(block, "value", None) == "Stop"
+        )
+
+        self.assertEqual(stop.elem_id, "stop-button")
+        self.assertIn("#stop-button", app.SHORTCUT_JS)
+        # Whether the button is in the document is the whole test. Gradio
+        # leaves a component whose visible is false out of the page, so its
+        # presence is the generation state itself. Testing whether it can be
+        # *seen* would drop the key on the Score text tab, where the button
+        # is still in the page with a hidden ancestor - the moment a reader
+        # is most likely to reach for it, being away from the button.
+        self.assertNotIn("offsetParent", app.SHORTCUT_JS)
+        self.assertNotIn("offsetWidth", app.SHORTCUT_JS)
+        self.assertNotIn("getBoundingClientRect", app.SHORTCUT_JS)
+        self.assertNotIn("checkVisibility", app.SHORTCUT_JS)
+        self.assertTrue(
+            any(fn.js == app.SHORTCUT_JS for fn in self.demo.fns.values()),
+            "nothing attaches the keyboard shortcut on load",
+        )
+
+    def test_the_sampling_accordion_starts_showing_the_saved_values(self):
+        # The summary is only worth having if it is right before anything is
+        # touched, which means the label and the sliders read one set of
+        # numbers - and that set is the saved settings, not a second copy of
+        # the defaults that could drift from them.
+        accordion = next(
+            block
+            for block in self.demo.blocks.values()
+            if isinstance(block, gr.Accordion)
+            and (block.label or "").startswith("Sampling")
+        )
+        saved = settings.load()
+
+        self.assertEqual(
+            accordion.label,
+            app.sampling_label(
+                saved.temperature, saved.top_p, saved.top_k, saved.max_new_tokens
+            ),
+        )
+        for label, value in [
+            ("Temperature", saved.temperature),
+            ("Top-p", saved.top_p),
+            ("Top-k (0 disables)", saved.top_k),
+            ("Maximum new tokens", saved.max_new_tokens),
+        ]:
+            with self.subTest(control=label):
+                self.assertEqual(self.labelled(label).value, value)
+                self.assertTrue(self.within(self.labelled(label), accordion))
+        # The response length cannot outrun the context limit.
+        self.assertEqual(
+            self.labelled("Maximum new tokens").maximum, saved.prefill_token_limit
+        )
+
+    def test_the_sampling_summary_follows_every_slider(self):
+        # A slider fires continuously while it is dragged; the label only has
+        # to be right once it is let go.
+        sliders = [
+            self.labelled(label)
+            for label in ("Temperature", "Top-p", "Top-k (0 disables)", "Maximum new tokens")
+        ]
+        listeners = self.listeners("update_sampling_label")
+        # A page load's target has no block, so look the ids up by hand.
+        by_id = {slider._id: slider for slider in sliders}
+        moved = [fn for fn in listeners if fn.targets[0][0] in by_id]
+
+        self.assertEqual([by_id[fn.targets[0][0]] for fn in moved], sliders)
+        for fn in listeners:
+            self.assertEqual(fn.inputs, sliders)
+        # The other three are the paths that move a slider without anyone
+        # touching it: the settings file read back on load, and the context
+        # limit committed, which can pull the response length down with it.
+        self.assertEqual(len(listeners) - len(moved), 3)
+
+    def test_everything_that_writes_the_summary_shares_one_queue(self):
+        # always_last coalesces each slider's own requests; across four
+        # listeners Gradio orders nothing. Each handler reads all four values
+        # as they were when its request was sent, so two sliders moved in
+        # quick succession can finish out of order and leave the label
+        # describing the older pair - and only the next change rewrites it.
+        accordion = next(
+            block
+            for block in self.demo.blocks.values()
+            if isinstance(block, gr.Accordion)
+            and (block.label or "").startswith("Sampling")
+        )
+        writers = [fn for fn in self.demo.fns.values() if accordion in fn.outputs]
+
+        self.assertGreater(len(writers), 1)
+        self.assertEqual(
+            {fn.concurrency_id for fn in writers}, {app.SAMPLING_LABEL_QUEUE}
+        )
+        # And it is its own queue, not shared with the token count, which
+        # costs an encoding and would make the label wait behind it.
+        self.assertNotEqual(app.SAMPLING_LABEL_QUEUE, app.SCORE_BUDGET_QUEUE)
+
+    def test_the_sampling_summary_follows_a_slider_moved_by_keyboard(self):
+        # Gradio dispatches release from pointerup alone, so a slider moved
+        # with the arrow keys - which is how it is moved without a mouse -
+        # changes its value and never reports a release. Listening for
+        # release would leave the summary describing the old settings for
+        # anyone not using a pointer.
+        sliders = {
+            self.labelled(label)._id
+            for label in ("Temperature", "Top-p", "Top-k (0 disables)", "Maximum new tokens")
+        }
+
+        for fn in self.listeners("update_sampling_label"):
+            block_id, event = fn.targets[0]
+            if block_id in sliders:
+                with self.subTest(slider=self.demo.blocks[block_id].label):
+                    self.assertEqual(event, "change")
+                    # A drag fires change on every step, so they coalesce.
+                    self.assertEqual(fn.trigger_mode, "always_last")
+
+    def test_the_scored_token_count_follows_every_box_that_feeds_it(self):
+        # The count has to match what would actually be scored, so a change
+        # to the context or the chat-template box moves it too.
+        boxes = [
+            self.labelled("Context (optional)"),
+            self.labelled("Text to score"),
+            self.labelled("Treat the context as a chat message"),
+        ]
+        listeners = self.listeners("score_token_count")
+        typed = [fn for fn in listeners if fn.trigger_mode == "always_last"]
+
+        self.assertEqual([self.demo.blocks[fn.targets[0][0]] for fn in typed], boxes)
+        for fn in listeners:
+            self.assertEqual(fn.inputs, boxes)
+        # A different tokenizer counts the same passage differently and a
+        # different model has its own limit, so every handler that changes
+        # what is loaded recomputes the count rather than leaving the old
+        # model's answer under the box.
+        self.assertEqual(
+            len(listeners) - len(typed), len(self.listeners("refresh_my_models")) - 3
+        )
 
     def test_choosing_a_model_writes_the_id_box(self):
         box = self.labelled("Hugging Face model ID")
