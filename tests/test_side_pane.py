@@ -1614,6 +1614,8 @@ class PageLayoutTests(unittest.TestCase):
                 # A row picked earlier outranks the ID box, so it goes.
                 self.labelled("Downloaded models"),
                 self.by_id("my-model-detail"),
+                self.labelled("Search results"),
+                self.listeners("select_search_result")[0].outputs[1],
                 self.by_id("model-status"),
                 self.listeners("hide_remove_confirm")[0].outputs[0],
                 self.listeners("hide_remove_confirm")[0].outputs[1],

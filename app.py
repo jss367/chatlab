@@ -878,7 +878,7 @@ def go_to_models():
 def select_default_model():
     """Select the default and open Models; loading requires a separate click.
 
-    Update the ID, cached-model selection and removal confirmation together.
+    Update the ID, both model selections and removal confirmation together.
     Programmatic ID changes do not fire the typing listener that normally
     clears the selected row, which would otherwise override this ID.
     """
@@ -886,6 +886,8 @@ def select_default_model():
     return (
         settings.DEFAULT_MODEL_ID,
         *clear_my_model_selection(),
+        gr.update(value=None),
+        NO_RESULT_SELECTED,
         status_card(
             "Default model selected",
             f"`{settings.DEFAULT_MODEL_ID}` is selected. "
@@ -4793,6 +4795,8 @@ def build_app() -> gr.Blocks:
                 model_id,
                 my_models,
                 my_model_detail,
+                search_results,
+                search_detail,
                 model_status,
                 remove_confirm,
                 pending_removal,

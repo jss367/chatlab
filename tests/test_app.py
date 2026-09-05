@@ -1291,11 +1291,14 @@ class DefaultModelSelectionTests(unittest.TestCase):
         ):
             for _ in range(2):
                 result = app.select_default_model()
-                model_id, row, detail, status, confirmation, pending, page, *panes = result
+                model_id, row, detail, search, search_detail = result[:5]
+                status, confirmation, pending, page, *panes = result[5:]
                 self.assertEqual(model_id, settings.DEFAULT_MODEL_ID)
                 self.assertIsNone(row["value"])
                 self.assertEqual(app.chosen_model(model_id, row["value"]), model_id)
                 self.assertEqual(detail, app.NO_CACHED_MODEL_SELECTED)
+                self.assertIsNone(search["value"])
+                self.assertEqual(search_detail, app.NO_RESULT_SELECTED)
                 self.assertFalse(confirmation["visible"])
                 self.assertIsNone(pending)
                 self.assertEqual(page, app.MODELS_PAGE)
