@@ -1368,15 +1368,27 @@ class DefaultModelOfferTests(unittest.TestCase):
         # the cached load's last frame and this handler resuming. Asking the
         # manager then would call a successful load a failure, download the
         # default again, and put it back over the model that other tab
-        # deliberately chose. Nothing here reads the manager at all.
-        class Swapped:
-            model_id = "org/chosen-in-another-tab"
-            load_id = "org/chosen-in-another-tab#1"
+        # deliberately chose. The load's own answer is what is read.
+        manager = self.Holding()
+
+        def cached_half(*_args, **_kwargs):
+            yield "cached card"
+            # The other tab lands while this generator is between frames.
+            manager.model_id = "org/chosen-in-another-tab"
+            manager.device_name = "CPU"
+            return True
 
         original = app.MANAGER
-        app.MANAGER = Swapped()
+        app.MANAGER = manager
         try:
-            _load, fetch = self.run_setup(cached=True)
+            with mock.patch.object(app, "default_model_cached", return_value=True):
+                with mock.patch.object(
+                    app, "load_cached_model", side_effect=cached_half
+                ):
+                    with mock.patch.object(
+                        app, "download_and_load_model"
+                    ) as fetch:
+                        list(app.setup_default_model("token"))
         finally:
             app.MANAGER = original
 
@@ -1399,37 +1411,53 @@ class DefaultModelOfferTests(unittest.TestCase):
 
         self.assertTrue(any("Finishing the download" in card for card in self.cards))
 
-    def test_a_model_already_loaded_is_not_loaded_again(self):
-        # A press queued behind another runs after it, by which time the job
-        # may be done. Loading is not idempotent - the manager empties memory
-        # and reads the weights again - so for the default that would cost a
-        # 15 GB re-read and a gap where nothing is loaded.
-        class Ready:
-            model_id = settings.DEFAULT_MODEL_ID
-            loaded = True
+    class Holding:
+        """A manager holding, or bringing in, whatever the test says."""
 
+        def __init__(self, model_id=None, device=None, loading_id=None):
+            self.model_id = model_id
+            self.device_name = device
+            self.loading_id = loading_id
+
+    def setup_against(self, manager):
         original = app.MANAGER
-        app.MANAGER = Ready()
+        app.MANAGER = manager
         try:
-            load, fetch = self.run_setup(cached=True)
+            return self.run_setup(cached=True)
         finally:
             app.MANAGER = original
 
-        load.assert_not_called()
-        fetch.assert_not_called()
-        self.assertTrue(any("Already loaded" in card for card in self.cards))
+    def test_a_press_stands_down_once_anything_is_loaded(self):
+        # The offer is only ever shown because nothing is loaded, and a press
+        # can wait in the queue long enough for that to stop being true. Any
+        # model counts: loading is not idempotent, so acting on a stale press
+        # costs a 15 GB re-read and a gap where nothing is loaded.
+        for name, manager in [
+            (
+                "the default itself",
+                self.Holding(settings.DEFAULT_MODEL_ID, "Apple Metal (MPS)"),
+            ),
+            ("some other model", self.Holding("org/chosen-later", "CPU")),
+            ("another model on its way in", self.Holding(loading_id="org/incoming")),
+        ]:
+            with self.subTest(holding=name):
+                load, fetch = self.setup_against(manager)
+                load.assert_not_called()
+                fetch.assert_not_called()
 
-    def test_another_model_being_loaded_does_not_count_as_done(self):
-        class Other:
-            model_id = "org/something-else"
-            loaded = True
+    def test_standing_down_says_which_model_was_left_alone(self):
+        # Replacing somebody's newer, deliberate choice is worse than doing
+        # nothing, so the card names what it found rather than going quiet.
+        self.setup_against(self.Holding("org/chosen-later", "CPU"))
 
-        original = app.MANAGER
-        app.MANAGER = Other()
-        try:
-            load, _fetch = self.run_setup(cached=True)
-        finally:
-            app.MANAGER = original
+        self.assertTrue(
+            any("org/chosen-later" in card and "left alone" in card
+                for card in self.cards)
+        )
+
+    def test_an_empty_machine_is_still_set_up(self):
+        # The guard must not swallow the ordinary press it exists beside.
+        load, _fetch = self.setup_against(self.Holding())
 
         load.assert_called_once_with(settings.DEFAULT_MODEL_ID)
 

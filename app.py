@@ -985,20 +985,26 @@ def setup_default_model(hf_token: str):
     hold when the chain reaches this step.
     """
 
-    # A press that arrives while another is already under way waits its turn
-    # in Gradio's queue rather than running beside it, and by the time it
-    # runs the first may have finished the job. Loading is not idempotent -
-    # the manager empties memory and reads the weights again - so for the
-    # default model that redundant press costs a 15 GB re-read and a gap
-    # where nothing is loaded. Nothing here can stop the press being made,
-    # since the second tab's offer is only refreshed on the badge's timer;
-    # what it can do is cost nothing.
-    if MANAGER.model_id == settings.DEFAULT_MODEL_ID and MANAGER.loaded:
-        yield status_card(
-            "Already loaded",
-            f"`{settings.DEFAULT_MODEL_ID}` is in memory and ready.",
-            "success",
+    # The offer is only ever shown because nothing is loaded, and a press
+    # can wait in Gradio's queue long enough for that to stop being true -
+    # behind another press of the same button, or beside a Models-page load
+    # that is not queued against it at all. So the reason for the press is
+    # checked again here, at the moment it would act.
+    #
+    # Any model counts, not just this one. Loading is not idempotent: the
+    # manager empties memory and reads the weights back, so acting on a
+    # stale press means a 15 GB re-read and a gap where nothing is loaded -
+    # and where the model it lands on was somebody's newer, deliberate
+    # choice, replacing it is worse than doing nothing at all.
+    loading, model_id, device = model_snapshot()
+    if loading or (model_id and device):
+        held = model_id if model_id and device else loading
+        detail = (
+            f"`{held}` is already in memory."
+            if held == settings.DEFAULT_MODEL_ID
+            else f"`{held}` is loaded now, so it has been left alone."
         )
+        yield status_card("Nothing to do", detail, "success")
         return
 
     if default_model_cached():
