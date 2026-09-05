@@ -1360,7 +1360,7 @@ class DefaultModelOfferTests(unittest.TestCase):
         # check: a stall at best, and a failure with no network at all.
         load, fetch = self.run_setup(cached=True)
 
-        load.assert_called_once_with(settings.DEFAULT_MODEL_ID)
+        self.assertEqual(load.call_args.args, (settings.DEFAULT_MODEL_ID,))
         fetch.assert_not_called()
 
     def test_the_load_is_believed_over_whatever_is_loaded_afterwards(self):
@@ -1401,7 +1401,7 @@ class DefaultModelOfferTests(unittest.TestCase):
         # reader asked for a working model and the rest is one fetch away.
         load, fetch = self.run_setup(cached=True, cached_load_works=False)
 
-        load.assert_called_once_with(settings.DEFAULT_MODEL_ID)
+        self.assertEqual(load.call_args.args, (settings.DEFAULT_MODEL_ID,))
         self.assertEqual(fetch.call_args.args, (settings.DEFAULT_MODEL_ID, "token"))
 
     def test_the_fallback_says_what_it_is_doing(self):
@@ -1487,6 +1487,52 @@ class DefaultModelOfferTests(unittest.TestCase):
         self.assertEqual(loaded, [], "the newer choice was replaced")
         self.assertTrue(any("org/chosen-later" in card for card in cards))
 
+    def test_a_choice_made_while_the_cache_is_read_is_not_overridden(self):
+        # Reading from the cache is quick but not instant, and it yields a
+        # frame before it starts. Both routes into memory take the same veto;
+        # only one of them taking it is how this was missed the first time.
+        manager = self.Holding()
+        loaded = []
+
+        def cached_half(model_id, selected=None, *, before_load=None):
+            yield "finding cached model"
+            manager.model_id, manager.device_name = "org/chosen-later", "CPU"
+            abandoned = before_load()
+            if abandoned is not None:
+                yield abandoned
+                return False
+            loaded.append(model_id)
+            return True
+
+        original = app.MANAGER
+        app.MANAGER = manager
+        try:
+            with mock.patch.object(app, "default_model_cached", return_value=True):
+                with mock.patch.object(
+                    app, "load_cached_model", side_effect=cached_half
+                ):
+                    with mock.patch.object(
+                        app, "download_and_load_model"
+                    ) as fetch:
+                        cards = list(app.setup_default_model("token"))
+        finally:
+            app.MANAGER = original
+
+        self.assertEqual(loaded, [], "the newer choice was replaced")
+        self.assertTrue(any("org/chosen-later" in card for card in cards))
+        # And an abandoned cached load is not a reason to go downloading.
+        fetch.assert_not_called()
+
+    def test_both_routes_into_memory_take_the_same_veto(self):
+        import inspect
+
+        for name in ("load_cached_model", "download_and_load_model"):
+            with self.subTest(route=name):
+                signature = inspect.signature(getattr(app, name))
+                parameter = signature.parameters["before_load"]
+                self.assertIsNone(parameter.default)
+                self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+
     def test_an_empty_machine_still_loads_after_the_download(self):
         # The veto must not refuse the ordinary case it exists beside.
         manager = self.Holding()
@@ -1522,7 +1568,7 @@ class DefaultModelOfferTests(unittest.TestCase):
         # The guard must not swallow the ordinary press it exists beside.
         load, _fetch = self.setup_against(self.Holding())
 
-        load.assert_called_once_with(settings.DEFAULT_MODEL_ID)
+        self.assertEqual(load.call_args.args, (settings.DEFAULT_MODEL_ID,))
 
     def test_an_uncached_default_is_downloaded(self):
         load, fetch = self.run_setup(cached=False)

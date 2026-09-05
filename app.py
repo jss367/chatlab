@@ -728,8 +728,16 @@ def incomplete_snapshot_detail(model_id: str, error: Exception) -> str:
     )
 
 
-def load_cached_model(model_id: str, selected: str | None = None):
+def load_cached_model(
+    model_id: str, selected: str | None = None, *, before_load=None
+):
     """Load a model already on disk, and say whether it ended up in memory.
+
+    ``before_load`` is the same veto :func:`download_and_load_model` takes,
+    asked immediately before the weights are claimed: a card to abandon the
+    load, or None to go on. Reading from the cache is quick but not
+    instant, and it yields a frame before it starts, which is a client round
+    trip in which somebody else's choice can land.
 
     The ``bool`` this returns is for ``yield from`` callers, which have to
     know whether the load worked and cannot ask the manager afterwards: a
@@ -787,6 +795,11 @@ def load_cached_model(model_id: str, selected: str | None = None):
             "error",
         )
         return False
+    if before_load is not None:
+        abandoned = before_load()
+        if abandoned is not None:
+            yield abandoned
+            return False
     try:
         path = MANAGER.find_cached(cleaned)
         started = time.monotonic()
@@ -1045,13 +1058,33 @@ def setup_default_model(hf_token: str):
     # stale press means a 15 GB re-read and a gap where nothing is loaded -
     # and where the model it lands on was somebody's newer, deliberate
     # choice, replacing it is worse than doing nothing at all.
-    held = taken_by()
-    if held:
-        yield stood_down(held)
+    def still_wanted():
+        """Whether to go on, asked wherever the machine is about to be taken.
+
+        One reading, for the same reason model_snapshot takes one.
+        """
+
+        held = taken_by()
+        return stood_down(held) if held else None
+
+    refused = still_wanted()
+    if refused is not None:
+        yield refused
         return
 
     if default_model_cached():
-        if (yield from load_cached_model(settings.DEFAULT_MODEL_ID)):
+        if (
+            yield from load_cached_model(
+                settings.DEFAULT_MODEL_ID, before_load=still_wanted
+            )
+        ):
+            return
+        # It did not load, and the two reasons want opposite answers. A
+        # cache short of something is what the download below is for; a
+        # machine taken while the cache was being read is not, and going on
+        # to fetch would end in the same stand-down after a needless 15 GB.
+        # The veto has already said so on screen, so this only leaves.
+        if still_wanted() is not None:
             return
         yield status_card(
             "Finishing the download",
@@ -1063,12 +1096,6 @@ def setup_default_model(hf_token: str):
     # minutes, which is long enough for someone to go to the Models page and
     # choose for themselves; the machine is taken at the end of that wait,
     # not at the start, so that is where the question belongs.
-    def still_wanted():
-        """One reading, for the same reason model_snapshot takes one."""
-
-        held = taken_by()
-        return stood_down(held) if held else None
-
     yield from download_and_load_model(
         settings.DEFAULT_MODEL_ID, hf_token, before_load=still_wanted
     )
