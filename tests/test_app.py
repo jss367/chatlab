@@ -1402,7 +1402,7 @@ class DefaultModelOfferTests(unittest.TestCase):
         load, fetch = self.run_setup(cached=True, cached_load_works=False)
 
         load.assert_called_once_with(settings.DEFAULT_MODEL_ID)
-        fetch.assert_called_once_with(settings.DEFAULT_MODEL_ID, "token")
+        self.assertEqual(fetch.call_args.args, (settings.DEFAULT_MODEL_ID, "token"))
 
     def test_the_fallback_says_what_it_is_doing(self):
         # A second progress card appearing unexplained would read as the
@@ -1455,6 +1455,69 @@ class DefaultModelOfferTests(unittest.TestCase):
                 for card in self.cards)
         )
 
+    def test_a_choice_made_during_the_download_is_not_overridden(self):
+        # A 15 GB fetch runs for minutes, long enough for someone to go to
+        # the Models page and choose for themselves. The machine is taken at
+        # the end of that wait, so the question is asked there too - the
+        # entry check cannot see a choice that had not been made yet.
+        manager = self.Holding()
+        loaded = []
+
+        def download_half(model_id, token, selected=None, *, before_load=None):
+            yield "downloading"
+            # Somebody picks their own model while the files come down.
+            manager.model_id, manager.device_name = "org/chosen-later", "CPU"
+            abandoned = before_load()
+            if abandoned is not None:
+                yield abandoned
+                return
+            loaded.append(model_id)
+
+        original = app.MANAGER
+        app.MANAGER = manager
+        try:
+            with mock.patch.object(app, "default_model_cached", return_value=False):
+                with mock.patch.object(
+                    app, "download_and_load_model", side_effect=download_half
+                ):
+                    cards = list(app.setup_default_model("token"))
+        finally:
+            app.MANAGER = original
+
+        self.assertEqual(loaded, [], "the newer choice was replaced")
+        self.assertTrue(any("org/chosen-later" in card for card in cards))
+
+    def test_an_empty_machine_still_loads_after_the_download(self):
+        # The veto must not refuse the ordinary case it exists beside.
+        manager = self.Holding()
+        loaded = []
+
+        def download_half(model_id, token, selected=None, *, before_load=None):
+            yield "downloading"
+            if before_load() is None:
+                loaded.append(model_id)
+
+        original = app.MANAGER
+        app.MANAGER = manager
+        try:
+            with mock.patch.object(app, "default_model_cached", return_value=False):
+                with mock.patch.object(
+                    app, "download_and_load_model", side_effect=download_half
+                ):
+                    list(app.setup_default_model("token"))
+        finally:
+            app.MANAGER = original
+
+        self.assertEqual(loaded, [settings.DEFAULT_MODEL_ID])
+
+    def test_a_reader_who_named_a_model_is_not_second_guessed(self):
+        # The Models page passes no veto: naming a model is the choice, so
+        # nothing that lands during its download outranks it.
+        import inspect
+
+        signature = inspect.signature(app.download_and_load_model)
+        self.assertIsNone(signature.parameters["before_load"].default)
+
     def test_an_empty_machine_is_still_set_up(self):
         # The guard must not swallow the ordinary press it exists beside.
         load, _fetch = self.setup_against(self.Holding())
@@ -1464,7 +1527,7 @@ class DefaultModelOfferTests(unittest.TestCase):
     def test_an_uncached_default_is_downloaded(self):
         load, fetch = self.run_setup(cached=False)
 
-        fetch.assert_called_once_with(settings.DEFAULT_MODEL_ID, "token")
+        self.assertEqual(fetch.call_args.args, (settings.DEFAULT_MODEL_ID, "token"))
         load.assert_not_called()
 
     def test_the_offer_cannot_be_redirected_by_the_id_box(self):

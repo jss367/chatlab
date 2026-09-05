@@ -655,7 +655,25 @@ def download_model(model_id: str, hf_token: str, selected: str | None = None):
     )
 
 
-def download_and_load_model(model_id: str, hf_token: str, selected: str | None = None):
+def download_and_load_model(
+    model_id: str,
+    hf_token: str,
+    selected: str | None = None,
+    *,
+    before_load=None,
+):
+    """Fetch ``model_id`` and read it into memory.
+
+    ``before_load`` is asked, once the files are down and before anything is
+    read, whether to go on. It returns a card to abandon the load, or None to
+    proceed. A download can run for many minutes, and a caller whose reason
+    for starting one may have expired by then needs a say at the point the
+    machine is actually taken, not only when the button was pressed - see
+    :func:`setup_default_model`, which is the one caller that has that
+    problem. A reader who asked for this model by name on the Models page
+    does not: they named it, so it wins, and they pass nothing.
+    """
+
     model_id = chosen_model(model_id, selected)
     started = time.monotonic()
     try:
@@ -666,6 +684,11 @@ def download_and_load_model(model_id: str, hf_token: str, selected: str | None =
     yield status_card(*describe_cache(model_id, before), "working")
     try:
         path = yield from stream_download(model_id, hf_token)
+        if before_load is not None:
+            abandoned = before_load()
+            if abandoned is not None:
+                yield abandoned
+                return
         fetched = describe_fetched(
             before, cache_status(model_id), time.monotonic() - started
         )
@@ -949,6 +972,32 @@ def default_model_offer() -> str:
     return f"⬇️ Download the default model ({DEFAULT_MODEL_DOWNLOAD})"
 
 
+def taken_by() -> str | None:
+    """The model holding the machine, or on its way in, or None.
+
+    The offer only appears because nothing is loaded. This is that same
+    condition asked as a question, so the two places that need it - before
+    the press acts, and again before it takes the machine - are asking one
+    thing rather than two that have to be kept in step.
+    """
+
+    loading, model_id, device = model_snapshot()
+    if model_id and device:
+        return model_id
+    return loading
+
+
+def stood_down(held: str) -> str:
+    """Say the offer found the machine occupied and left it that way."""
+
+    detail = (
+        f"`{held}` is already in memory."
+        if held == settings.DEFAULT_MODEL_ID
+        else f"`{held}` is loaded now, so it has been left alone."
+    )
+    return status_card("Nothing to do", detail, "success")
+
+
 def setup_default_model(hf_token: str):
     """Bring the default model in, by whichever route its files call for.
 
@@ -996,15 +1045,9 @@ def setup_default_model(hf_token: str):
     # stale press means a 15 GB re-read and a gap where nothing is loaded -
     # and where the model it lands on was somebody's newer, deliberate
     # choice, replacing it is worse than doing nothing at all.
-    loading, model_id, device = model_snapshot()
-    if loading or (model_id and device):
-        held = model_id if model_id and device else loading
-        detail = (
-            f"`{held}` is already in memory."
-            if held == settings.DEFAULT_MODEL_ID
-            else f"`{held}` is loaded now, so it has been left alone."
-        )
-        yield status_card("Nothing to do", detail, "success")
+    held = taken_by()
+    if held:
+        yield stood_down(held)
         return
 
     if default_model_cached():
@@ -1016,7 +1059,19 @@ def setup_default_model(hf_token: str):
             "not everything needed to load them. Fetching the rest…",
             "working",
         )
-    yield from download_and_load_model(settings.DEFAULT_MODEL_ID, hf_token)
+    # And asked again once the files are down. A 15 GB fetch runs for
+    # minutes, which is long enough for someone to go to the Models page and
+    # choose for themselves; the machine is taken at the end of that wait,
+    # not at the start, so that is where the question belongs.
+    def still_wanted():
+        """One reading, for the same reason model_snapshot takes one."""
+
+        held = taken_by()
+        return stood_down(held) if held else None
+
+    yield from download_and_load_model(
+        settings.DEFAULT_MODEL_ID, hf_token, before_load=still_wanted
+    )
 
 
 def start_default_model():
