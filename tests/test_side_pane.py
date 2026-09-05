@@ -1134,37 +1134,17 @@ class ModelBadgeTests(unittest.TestCase):
         self.assertIn('data-state="empty"', badge)
         self.assertIn(app.NO_MODEL_BADGE, badge)
         self.assertTrue(button["visible"])
-        # And the offer beside it says which way it would go.
         self.assertTrue(offer["visible"])
-        self.assertEqual(offer["value"], app.default_model_offer())
 
-    def test_the_offer_waits_out_a_download_of_its_own_model(self):
-        # loading_id is only set once the files are all in, so a 15 GB fetch
-        # would otherwise leave the offer live for its whole duration and a
-        # second press would queue a second setup behind the first. It is
-        # disabled rather than taken away: a button that says what it is
-        # waiting for beats one that vanishes.
-        self.manager.active_downloads[settings.DEFAULT_MODEL_ID] = object()
-
-        _badge, offer, button = app.refresh_model_badge()
-
-        self.assertTrue(offer["visible"])
-        self.assertFalse(offer["interactive"])
-        self.assertIn("Downloading", offer["value"])
-        # The way to the Models page is never the thing to take away.
-        self.assertTrue(button["visible"])
-
-    def test_a_download_of_another_model_leaves_the_offer_alone(self):
-        # Download and Redownload on the Models page fetch without loading
-        # anything, and can be a long fetch of some quite different model.
-        # That is no reason to disable the way out of an empty chat page.
-        self.manager.active_downloads["org/something-else"] = object()
-
-        _badge, offer, button = app.refresh_model_badge()
-
-        self.assertTrue(offer["interactive"])
-        self.assertEqual(offer["value"], app.default_model_offer())
-        self.assertTrue(button["visible"])
+    def test_downloads_leave_the_setup_links_available(self):
+        # These links only navigate, including while the default is fetching.
+        for model_id in (settings.DEFAULT_MODEL_ID, "org/something-else"):
+            with self.subTest(model_id=model_id):
+                self.manager.active_downloads[model_id] = object()
+                _badge, offer, button = app.refresh_model_badge()
+                self.assertTrue(offer["visible"])
+                self.assertTrue(button["visible"])
+                self.assertNotIn("interactive", offer)
 
     def test_a_download_alone_does_not_claim_a_model_is_coming(self):
         # Download only ends by telling the reader to load the cached model;
@@ -1176,23 +1156,6 @@ class ModelBadgeTests(unittest.TestCase):
 
         self.assertIn('data-state="empty"', badge)
         self.assertIn(app.NO_MODEL_BADGE, badge)
-
-    def test_the_active_download_is_read_under_the_downloads_lock(self):
-        # A worker finishing removes its entry, and picking through the
-        # dictionary while that happens is how "changed size during
-        # iteration" is raised - at exactly the download-to-load moment.
-        self.manager._downloads_lock.acquire()
-        try:
-            held = threading.Thread(
-                target=lambda: self.manager.is_downloading(OLMO)
-            )
-            held.start()
-            held.join(timeout=0.2)
-            self.assertTrue(held.is_alive(), "the read did not wait for the lock")
-        finally:
-            self.manager._downloads_lock.release()
-        held.join(timeout=2)
-        self.assertFalse(held.is_alive())
 
     def test_a_load_under_way_names_the_model_coming_in(self):
         # model_id is cleared for the whole of a load, so the badge reads
@@ -1432,9 +1395,9 @@ class PageLayoutTests(unittest.TestCase):
         # that started while the chat page was out of sight, and the timer
         # catches one another tab started.
         # The three that change memory, the download that only changes what
-        # is on disk, redownload, a confirmed removal and the offer's own
-        # chain, plus the page load, the nav and the timer.
-        self.assertEqual(len(self.listeners("refresh_model_badge")), 10)
+        # is on disk, redownload and a confirmed removal, plus the page
+        # load, the nav and the timer.
+        self.assertEqual(len(self.listeners("refresh_model_badge")), 9)
 
     def test_the_timer_also_un_sticks_the_scored_token_count(self):
         # A count asked for during a reply gives up and says so, and that
@@ -1512,10 +1475,9 @@ class PageLayoutTests(unittest.TestCase):
 
     def test_every_model_change_rescans_the_cache(self):
         # Download, download-and-load, load cached, unload, redownload,
-        # confirmed removal, the banner's own setup of the default model,
-        # the refresh button, a new sort order, and the page load: each ends
-        # in a rescan.
-        self.assertEqual(len(self.listeners("refresh_my_models")), 10)
+        # confirmed removal, the refresh button, a new sort order, and the
+        # page load each rescan. Selecting the default only navigates.
+        self.assertEqual(len(self.listeners("refresh_my_models")), 9)
 
     def test_every_load_reads_the_my_models_selection(self):
         # The ID box lags a row selection by a server round trip, so a button
@@ -1634,8 +1596,14 @@ class PageLayoutTests(unittest.TestCase):
 
         self.assertTrue(self.within(offer, self.by_id("chat-page")))
         self.assertTrue(self.within(offer, self.by_id("model-bar")))
-        (setup,) = self.listeners("start_default_model")
+        (setup,) = self.listeners("select_default_model")
         self.assertEqual(setup.targets, [(offer._id, "click")])
+        self.assertEqual(offer.value, "Set up the default model")
+        # No chained handler may turn this navigation back into automatic I/O.
+        self.assertFalse(any(
+            dependency["trigger_after"] == setup._id
+            for dependency in self.demo.config["dependencies"]
+        ))
         # It switches the pages itself, for the reason go_to_models gives: a
         # Radio set by a handler reports no change, so setting the nav alone
         # would tick Models and leave the chat page on screen.
@@ -1643,11 +1611,12 @@ class PageLayoutTests(unittest.TestCase):
             setup.outputs,
             [
                 self.labelled("Hugging Face model ID"),
-                # Pressed once is enough, before the timer could get here.
-                offer,
                 # A row picked earlier outranks the ID box, so it goes.
                 self.labelled("Downloaded models"),
                 self.by_id("my-model-detail"),
+                self.by_id("model-status"),
+                self.listeners("hide_remove_confirm")[0].outputs[0],
+                self.listeners("hide_remove_confirm")[0].outputs[1],
                 self.by_id("nav"),
                 self.by_id("conversation-pane"),
                 self.by_id("chat-page"),
@@ -1657,10 +1626,7 @@ class PageLayoutTests(unittest.TestCase):
         )
 
     def test_the_offer_is_published_wherever_the_badge_is(self):
-        # What the offer would do depends on what is on disk, which a
-        # download changes. It rides the badge's own refresh, so the timer
-        # that keeps the badge honest in every open tab keeps the offer
-        # honest too.
+        # Setup links share the badge's visibility decision in every tab.
         listeners = self.listeners("refresh_model_badge")
         self.assertTrue(listeners)
         for listener in listeners:

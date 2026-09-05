@@ -120,7 +120,7 @@ the Settings page is the direct way to bound it.
 
 A pane at the far left switches between three pages, each tile an icon above the page's name. **Chat** is the conversation, with the conversations pane beside it and the token panel to its right. **Models** is everything about which model is running. **Settings**, at the bottom of the pane, is how every reply is prompted and measured.
 
-A badge above the tabs names the model that would answer. Until one is loaded it says so, and two buttons appear beside it: the default model in one press — a load if it is already in the cache, a download of about 15 GB if it is not, said on the button before it is pressed — or **Choose another**, for the Models page. Either opens Models, which is where the progress and any failure are reported.
+A badge above the tabs names the model that would answer. Until one is loaded, **Set up the default model** opens Models with the default selected, and **Choose another** opens Models to browse. Selecting the default does not start a download or replace a loaded model. On Models, choose **Load cached** to use local files without a network check, or **Download and load** to fetch and load the model. A full default-model download is about 15 GB; the setup guidance states this before you start. Progress and any load errors appear on the Models page.
 
 ### Models
 

@@ -84,9 +84,7 @@ except ImportError:  # huggingface_hub before 1.x had no such check
         pass
 
 
-# The size of the default model's full weights, said before the download
-# starts rather than after. The model bar offers that download in one press,
-# and 15 GB is not a thing to find out about halfway through.
+# Disclose the default model's download size before an explicit download.
 DEFAULT_MODEL_DOWNLOAD = "about 15 GB"
 MANAGER = ModelManager()
 
@@ -655,24 +653,8 @@ def download_model(model_id: str, hf_token: str, selected: str | None = None):
     )
 
 
-def download_and_load_model(
-    model_id: str,
-    hf_token: str,
-    selected: str | None = None,
-    *,
-    before_load=None,
-):
-    """Fetch ``model_id`` and read it into memory.
-
-    ``before_load`` is asked, once the files are down and before anything is
-    read, whether to go on. It returns a card to abandon the load, or None to
-    proceed. A download can run for many minutes, and a caller whose reason
-    for starting one may have expired by then needs a say at the point the
-    machine is actually taken, not only when the button was pressed - see
-    :func:`setup_default_model`, which is the one caller that has that
-    problem. A reader who asked for this model by name on the Models page
-    does not: they named it, so it wins, and they pass nothing.
-    """
+def download_and_load_model(model_id: str, hf_token: str, selected: str | None = None):
+    """Download and load the model explicitly selected on the Models page."""
 
     model_id = chosen_model(model_id, selected)
     started = time.monotonic()
@@ -684,11 +666,6 @@ def download_and_load_model(
     yield status_card(*describe_cache(model_id, before), "working")
     try:
         path = yield from stream_download(model_id, hf_token)
-        if before_load is not None:
-            abandoned = before_load()
-            if abandoned is not None:
-                yield abandoned
-                return
         fetched = describe_fetched(
             before, cache_status(model_id), time.monotonic() - started
         )
@@ -728,24 +705,8 @@ def incomplete_snapshot_detail(model_id: str, error: Exception) -> str:
     )
 
 
-def load_cached_model(
-    model_id: str, selected: str | None = None, *, before_load=None
-):
-    """Load a model already on disk, and say whether it ended up in memory.
-
-    ``before_load`` is the same veto :func:`download_and_load_model` takes,
-    asked immediately before the weights are claimed: a card to abandon the
-    load, or None to go on. Reading from the cache is quick but not
-    instant, and it yields a frame before it starts, which is a client round
-    trip in which somebody else's choice can land.
-
-    The ``bool`` this returns is for ``yield from`` callers, which have to
-    know whether the load worked and cannot ask the manager afterwards: a
-    load started in another tab can replace ``model_id`` in the moment
-    between this generator's last frame and the caller resuming, and reading
-    it then would call this load a failure and undo the other tab's choice.
-    Gradio drops the value; only :func:`setup_default_model` reads it.
-    """
+def load_cached_model(model_id: str, selected: str | None = None):
+    """Load the selected model from local files, preserving any load error."""
 
     cleaned = chosen_model(model_id, selected)
     active = MANAGER.active_downloads.get(cleaned)
@@ -762,7 +723,7 @@ def load_cached_model(
             "Click **Download and load** to follow the download and load the model when it finishes.",
             "working",
         )
-        return False
+        return
 
     name = f"`{cleaned}`"
     yield status_card("Finding cached model", f"Looking for {name} locally…", "working")
@@ -770,7 +731,7 @@ def load_cached_model(
         status = cache_status(cleaned)
     except ValueError as error:
         yield failure_card("Could not load cached model", html.escape(str(error)))
-        return False
+        return
     if status.missing_files:
         yield status_card(
             "Download incomplete",
@@ -779,7 +740,7 @@ def load_cached_model(
             "Use **Download and load** to fetch the rest.",
             "error",
         )
-        return False
+        return
     if not status.present:
         yield status_card(
             "Not cached",
@@ -787,19 +748,14 @@ def load_cached_model(
             "Use **Download and load** to fetch it.",
             "error",
         )
-        return False
+        return
     if status.unsupported:
         yield status_card(
             "Unsupported model",
             f"{name} is on disk ({describe_on_disk(status)}) but is {UNSUPPORTED_REASON}",
             "error",
         )
-        return False
-    if before_load is not None:
-        abandoned = before_load()
-        if abandoned is not None:
-            yield abandoned
-            return False
+        return
     try:
         path = MANAGER.find_cached(cleaned)
         started = time.monotonic()
@@ -808,17 +764,16 @@ def load_cached_model(
         yield failure_card(
             "Download unfinished", incomplete_snapshot_detail(cleaned, error)
         )
-        return False
+        return
     except Exception as error:
         yield failure_card("Could not load cached model", html.escape(str(error)))
-        return False
+        return
     yield status_card(
         "Model ready",
         f"{name} is loaded on **{device}** "
         f"({time.monotonic() - started:.1f} seconds).",
         "success",
     )
-    return True
 
 
 def unload_model():
@@ -856,10 +811,9 @@ def model_badge(state: str, text: str) -> str:
 def model_snapshot() -> tuple[str | None, str | None, str | None]:
     """The load under way, the model in memory, and its device, read once.
 
-    One reading, because the three move together and a caller that asks
-    twice can be told two different stories: a load finishing between two
-    questions leaves nothing loading and nothing loaded, which is neither
-    true before nor after.
+    Reuse these values so the badge and setup links render from the same
+    readings. This is display state, not an atomic snapshot or a reservation
+    of the model for a later action.
     """
 
     return MANAGER.loading_id, MANAGER.model_id, MANAGER.device_name
@@ -897,53 +851,16 @@ def loaded_model_badge(snapshot=None) -> str:
 
 
 def refresh_model_badge():
-    """The badge, plus the two buttons that only show while there is no model.
+    """Refresh the badge and the setup links from the same reading.
 
-    A load in progress hides them: the Models page is already busy bringing
-    that model in, so offering to start one would suggest work that is under
-    way needs starting.
-
-    A download is different, and only the offer cares about it. The manager
-    sets ``loading_id`` only once the files are all in and the weights start
-    being read, so a 15 GB fetch would otherwise leave the offer up for its
-    whole duration, and pressing it again would queue a second setup behind
-    the first. But the offer is disabled rather than taken away, and only
-    for a download of the model it offers: **Download** and **Redownload**
-    on the Models page fetch without loading anything, and can be a long
-    fetch of some quite different model, which is no reason to take the way
-    out of an empty chat page off the screen. Saying what the button is
-    waiting for beats it vanishing, too.
-
-    The offer's label is re-read here rather than baked in at build time,
-    because what pressing it would do depends on what is on disk, and a
-    download finished on the Models page changes that answer. The timer that
-    calls this is what keeps the answer current in every open tab.
+    Setup links navigate without loading anything, so downloads do not need
+    to disable them. Hide them when a model is loaded or a load is pending.
     """
 
     snapshot = model_snapshot()
     loading, model_id, device = snapshot
-    # The badge and the buttons decide from one reading, and from the same
-    # condition, so what is on screen cannot disagree with itself. Asking the
-    # manager twice let a load finishing in between answer "nothing loading"
-    # and "nothing loaded" to two questions that were both about to be true:
-    # the badge, rendered afterwards, then read the finished load and said
-    # ready, beside an offer still inviting a press that would replace the
-    # model that had just arrived - and the timer only comes round again two
-    # seconds later.
-    if (model_id and device) or loading:
-        hidden = gr.update(visible=False)
-        return loaded_model_badge(snapshot), hidden, hidden
-    if MANAGER.is_downloading(settings.DEFAULT_MODEL_ID):
-        offer = gr.update(
-            visible=True,
-            interactive=False,
-            value="⏳ Downloading the default model…",
-        )
-    else:
-        offer = gr.update(
-            visible=True, interactive=True, value=default_model_offer()
-        )
-    return loaded_model_badge(snapshot), offer, gr.update(visible=True)
+    links = gr.update(visible=not ((model_id and device) or loading))
+    return loaded_model_badge(snapshot), links, links
 
 
 def go_to_models():
@@ -958,169 +875,26 @@ def go_to_models():
     return MODELS_PAGE, *show_page(MODELS_PAGE)
 
 
-# ------------------------------------------------- the default model's offer
-#
-# The badge below says whether a model is loaded. This is what to do about it
-# when none is: the default model in one press, saying first whether that
-# means a load from the cache or a download, and how large the download is.
-# Without it the only route to a model was the Models page, which a reader
-# has to know exists before the app does anything at all.
+def select_default_model():
+    """Select the default and open Models; loading requires a separate click.
 
-
-def default_model_cached() -> bool:
-    """Whether the default model is whole on disk, so loading it needs no network."""
-
-    try:
-        status = cache_status(settings.DEFAULT_MODEL_ID)
-    except (ValueError, OSError):
-        return False
-    return status.present and not status.missing_files and not status.unsupported
-
-
-def default_model_offer() -> str:
-    """What pressing the offer would do, said on the button before it is pressed."""
-
-    if default_model_cached():
-        return "⚡ Load the default model"
-    return f"⬇️ Download the default model ({DEFAULT_MODEL_DOWNLOAD})"
-
-
-def taken_by() -> str | None:
-    """The model holding the machine, or on its way in, or None.
-
-    The offer only appears because nothing is loaded. This is that same
-    condition asked as a question, so the two places that need it - before
-    the press acts, and again before it takes the machine - are asking one
-    thing rather than two that have to be kept in step.
-    """
-
-    loading, model_id, device = model_snapshot()
-    if model_id and device:
-        return model_id
-    return loading
-
-
-def stood_down(held: str) -> str:
-    """Say the offer found the machine occupied and left it that way."""
-
-    detail = (
-        f"`{held}` is already in memory."
-        if held == settings.DEFAULT_MODEL_ID
-        else f"`{held}` is loaded now, so it has been left alone."
-    )
-    return status_card("Nothing to do", detail, "success")
-
-
-def setup_default_model(hf_token: str):
-    """Bring the default model in, by whichever route its files call for.
-
-    A model already whole on disk is loaded from the cache. Going through the
-    download path for it would reach ``snapshot_download`` for a Hub update
-    check, which is a stall at best and a failure with no network at all -
-    and the button has just promised an immediate local load.
-
-    "Whole", though, is only as good as what can be checked from outside.
-    :func:`model_runtime.missing_files` deliberately looks at the config and
-    the weights alone, because which tokenizer files a repo ships varies too
-    much to guess and a wrong "incomplete" verdict on a good cache would be
-    worse than a load error. So a download cut off after the weights but
-    before the tokenizer looks complete here and fails in
-    ``from_pretrained``. On the Models page that is a fair answer to an
-    explicit request for a cached load; from this button it would be a dead
-    end, since the reader asked for a working model and the files to fix it
-    are one fetch away.
-
-    So a cached load that says it did not load falls through to the download,
-    which resumes whatever the snapshot lacks. When the cache really was
-    complete and the load failed for another reason - memory, above all -
-    that fetch finds nothing to do and the same failure is reported by the
-    second attempt, at the cost of one Hub round trip.
-
-    It is the load's own answer that is read, not the manager's ``model_id``.
-    A load started in another tab can replace that between this generator's
-    last frame and this line, and inferring failure from it would send a
-    successful load down the download path and put the default model back
-    over the one the other tab deliberately chose.
-
-    The model ID is taken from the settings default rather than from the ID
-    box, so the button cannot be redirected by whatever the box happens to
-    hold when the chain reaches this step.
-    """
-
-    # The offer is only ever shown because nothing is loaded, and a press
-    # can wait in Gradio's queue long enough for that to stop being true -
-    # behind another press of the same button, or beside a Models-page load
-    # that is not queued against it at all. So the reason for the press is
-    # checked again here, at the moment it would act.
-    #
-    # Any model counts, not just this one. Loading is not idempotent: the
-    # manager empties memory and reads the weights back, so acting on a
-    # stale press means a 15 GB re-read and a gap where nothing is loaded -
-    # and where the model it lands on was somebody's newer, deliberate
-    # choice, replacing it is worse than doing nothing at all.
-    def still_wanted():
-        """Whether to go on, asked wherever the machine is about to be taken.
-
-        One reading, for the same reason model_snapshot takes one.
-        """
-
-        held = taken_by()
-        return stood_down(held) if held else None
-
-    refused = still_wanted()
-    if refused is not None:
-        yield refused
-        return
-
-    if default_model_cached():
-        if (
-            yield from load_cached_model(
-                settings.DEFAULT_MODEL_ID, before_load=still_wanted
-            )
-        ):
-            return
-        # It did not load, and the two reasons want opposite answers. A
-        # cache short of something is what the download below is for; a
-        # machine taken while the cache was being read is not, and going on
-        # to fetch would end in the same stand-down after a needless 15 GB.
-        # The veto has already said so on screen, so this only leaves.
-        if still_wanted() is not None:
-            return
-        yield status_card(
-            "Finishing the download",
-            f"The cache holds the weights for `{settings.DEFAULT_MODEL_ID}` but "
-            "not everything needed to load them. Fetching the rest…",
-            "working",
-        )
-    # And asked again once the files are down. A 15 GB fetch runs for
-    # minutes, which is long enough for someone to go to the Models page and
-    # choose for themselves; the machine is taken at the end of that wait,
-    # not at the start, so that is where the question belongs.
-    yield from download_and_load_model(
-        settings.DEFAULT_MODEL_ID, hf_token, before_load=still_wanted
-    )
-
-
-def start_default_model():
-    """Name the default model, drop any picked row, and open the page for it.
-
-    Dropping the row is not decoration. ``chosen_model`` gives a My Models
-    selection precedence over the ID box, and the listener that would
-    normally clear it is bound to ``model_id.input``, which Gradio fires for
-    a reader's typing and not for a box written by a handler. A row picked
-    earlier would therefore survive this press and take the next **Load
-    cached** or **Download and load** with it, against a box plainly showing
-    the default. The selection is dropped here rather than chained after, so
-    the box and the row are never out of step with each other.
+    Update the ID, cached-model selection and removal confirmation together.
+    Programmatic ID changes do not fire the typing listener that normally
+    clears the selected row, which would otherwise override this ID.
     """
 
     return (
         settings.DEFAULT_MODEL_ID,
-        # Pressed once is enough. The badge's timer would get here within a
-        # couple of seconds, but not before a second press in this tab; the
-        # next refresh hides the button or gives it back.
-        gr.update(interactive=False),
         *clear_my_model_selection(),
+        status_card(
+            "Default model selected",
+            f"`{settings.DEFAULT_MODEL_ID}` is selected. "
+            "Choose **Load cached** to use local files, or **Download and load** "
+            f"to fetch the model ({DEFAULT_MODEL_DOWNLOAD} for a full download) "
+            "and load it. If local files are incomplete, **Download and load** "
+            "can fetch the rest.",
+        ),
+        *hide_remove_confirm(),
         *go_to_models(),
     )
 
@@ -1235,9 +1009,9 @@ def select_my_model(selected: str | None):
 def clear_my_model_selection():
     """Drop the My Models selection, because a typed ID names its own model.
 
-    Runs when the reader types in the ID box or picks a search result, so the
-    two controls never disagree on screen and ``chosen_model`` has one answer
-    to give. It is a round trip like any other, which is the window
+    Runs when the reader types in the ID box, picks a search result, or selects
+    the default, so ``chosen_model`` uses that ID rather than a previous row.
+    It is a round trip like any other, which is the window
     ``chosen_model`` describes rather than closes.
     """
 
@@ -4402,14 +4176,14 @@ def build_app() -> gr.Blocks:
 
                 # The badge sits above the tabs, so both Chat and Score text
                 # say which model would answer. Beside it, while none is
-                # loaded, are the two ways out: the default model in one
-                # press, or the Models page to choose another.
+                # loaded, are links to set up the default or choose another
+                # model on the Models page.
                 with gr.Row(elem_id="model-bar"):
                     model_badge_view = gr.HTML(
                         loaded_model_badge(), elem_id="model-badge"
                     )
                     default_model_button = gr.Button(
-                        default_model_offer(),
+                        "Set up the default model",
                         variant="primary",
                         size="sm",
                         visible=not MANAGER.loaded,
@@ -4962,13 +4736,9 @@ def build_app() -> gr.Blocks:
         models_inputs = [my_models, sort_models]
         models_outputs = [my_models, my_model_detail, my_models_summary]
 
-        # Loading, unloading and downloading all change what the chat page's
-        # badge and its offer should say, and they change what the scored
-        # token count would come to - a different tokenizer counts a passage
-        # differently, and a different model has its own context limit. The
-        # badge has a timer to keep it honest, but the count does not: it
-        # costs an encoding, so it is recomputed here, where the model
-        # actually changed, rather than every couple of seconds.
+        # Refresh model-dependent displays after explicit model actions.
+        # The timer also catches changes from other tabs, but this updates
+        # the badge and token count immediately in the tab that acted.
         def rescan(event, *, reloads: bool = True):
             """Rescan the cache after ``event``, and re-read what the model feeds."""
 
@@ -4983,8 +4753,7 @@ def build_app() -> gr.Blocks:
                 concurrency_id=SCORE_BUDGET_QUEUE,
             )
 
-        # A download alone brings nothing into memory, but it does decide
-        # whether the offer reads "load" or "download" next time.
+        # Download-only changes the cache without changing the loaded model.
         rescan(
             download_button.click(
                 download_model, [model_id, hf_token, my_models], model_status
@@ -5010,25 +4779,24 @@ def build_app() -> gr.Blocks:
         # Escape stops a running generation, from anywhere on the page.
         demo.load(None, None, None, js=SHORTCUT_JS)
 
-        # The offer beside the badge: bring the default model in, and open the
-        # Models page on the way, because that is where its progress and any
-        # failure are reported.
-        rescan(
-            default_model_button.click(
-                start_default_model,
-                None,
-                [
-                    model_id,
-                    default_model_button,
-                    my_models,
-                    my_model_detail,
-                    nav,
-                    conversation_pane,
-                    chat_page,
-                    models_page,
-                    settings_page,
-                ],
-            ).then(setup_default_model, hf_token, model_status)
+        # Selecting a default is navigation only. The Models page owns the
+        # explicit download and load actions, including their errors.
+        default_model_button.click(
+            select_default_model,
+            None,
+            [
+                model_id,
+                my_models,
+                my_model_detail,
+                model_status,
+                remove_confirm,
+                pending_removal,
+                nav,
+                conversation_pane,
+                chat_page,
+                models_page,
+                settings_page,
+            ],
         )
         # .input rather than .change: the refresh above also sets the radio,
         # and a .change listener would rewrite the model ID box on each rescan.

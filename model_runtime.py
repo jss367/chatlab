@@ -2299,18 +2299,6 @@ class ModelManager:
             return None
         return f"{self.model_id}#{self.load_count}"
 
-    def is_downloading(self, model_id: str) -> bool:
-        """Whether ``model_id``'s files are being fetched right now.
-
-        Taken under the downloads lock, which is what guards that dictionary:
-        a worker finishing removes its entry, and a reader picking through
-        the dictionary while that happens is how "changed size during
-        iteration" is raised, at exactly the moment a download ends.
-        """
-
-        with self._downloads_lock:
-            return model_id.strip() in self.active_downloads
-
     @property
     def busy(self) -> bool:
         """True while the generation slot is reserved.
