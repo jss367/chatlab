@@ -8,6 +8,7 @@ from pathlib import Path
 
 import settings
 import settings_sandbox
+import tiny_tokenizer
 from model_runtime import (
     MIN_MODEL_POSITION_LIMIT,
     MODEL_WEIGHTS,
@@ -848,24 +849,13 @@ class ContextSplitTests(unittest.TestCase):
         self.assertFalse(split.seam_verified)
 
 
-def _gpt2_or_none():
-    """The cached GPT-2 tokenizer, or ``None`` where it is not on this machine.
-
-    The vocabulary is the point: a real one where the literal
-    ``<|endoftext|>`` a reader might paste and the id a post-processor would
-    append are the same token, which is the case the fake tokenizers can only
-    assert into being.
-    """
-
-    try:
-        from transformers import AutoTokenizer
-
-        return AutoTokenizer.from_pretrained("gpt2", local_files_only=True)
-    except Exception:  # noqa: BLE001 - no tokenizer on this machine is fine
-        return None
-
-
-GPT2 = _gpt2_or_none()
+# A real byte-level vocabulary is the point of the tests below: one where the
+# literal ``<|endoftext|>`` a reader might paste and the id a post-processor
+# would append are the same token, which is the case the fake tokenizers can
+# only assert into being. It is trained on the spot rather than read out of
+# the Hugging Face cache, so the tests do not depend on what one machine has
+# downloaded.
+REAL = tiny_tokenizer.build()
 
 
 class WrappedWithoutOffsets:
@@ -900,13 +890,12 @@ class WrappedWithoutOffsets:
         return self._inner.decode(list(ids), **kwargs)
 
 
-@unittest.skipIf(GPT2 is None, "the GPT-2 tokenizer is not cached on this machine")
 class RealVocabularyTests(unittest.TestCase):
     """The all-special case with a real vocabulary behind it."""
 
     def tokenizer(self):
-        closer = [int(GPT2.eos_token_id)]
-        return WrappedWithoutOffsets(GPT2, closer, list(closer))
+        closer = [int(REAL.eos_token_id)]
+        return WrappedWithoutOffsets(REAL, closer, list(closer))
 
     def test_a_passage_of_nothing_but_specials_scores_the_pasted_one(self):
         # The reader pasted <|endoftext|> and nothing else, so the ids are
@@ -914,7 +903,7 @@ class RealVocabularyTests(unittest.TestCase):
         # the same number. The scored token is theirs, and the closer the
         # post-processor wrote is not scored.
         tokenizer = self.tokenizer()
-        eos = int(GPT2.eos_token_id)
+        eos = int(REAL.eos_token_id)
         self.assertEqual(
             tokenizer("<|endoftext|>").input_ids, [eos, eos, eos]
         )
@@ -928,7 +917,7 @@ class RealVocabularyTests(unittest.TestCase):
 
     def test_an_ordinary_appended_closer_still_comes_off(self):
         tokenizer = self.tokenizer()
-        eos = int(GPT2.eos_token_id)
+        eos = int(REAL.eos_token_id)
         context_ids, text_ids, *_ = split_context_and_text(
             tokenizer, "the cat sat on the ", "mat"
         )
@@ -938,7 +927,7 @@ class RealVocabularyTests(unittest.TestCase):
         # The token that straddles the seam carries the context's trailing
         # space with it, and is scored as part of the text, as it is
         # everywhere else.
-        self.assertEqual(GPT2.decode(text_ids), " mat")
+        self.assertEqual(REAL.decode(text_ids), " mat")
 
 
 class ScoringEncodeTests(unittest.TestCase):

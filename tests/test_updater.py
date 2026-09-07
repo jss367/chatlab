@@ -140,10 +140,13 @@ class BundleTests(unittest.TestCase):
 
     def test_remove_stale_work_dirs_only_sweeps_dead_owners(self):
         current = self.make_bundle("ChatLab.app", "old")
-        tmp_root = self.root / "tmp"; tmp_root.mkdir()
+        tmp_root = self.root / "tmp"
+        tmp_root.mkdir()
 
         def staging(parent, name, owner):
-            path = parent / name; path.mkdir(); (path / "big.zip").write_text("x")
+            path = parent / name
+            path.mkdir()
+            (path / "big.zip").write_text("x")
             if owner is not None:
                 (path / updater.WORK_DIR_OWNER_FILE).write_text(owner)
             return path
@@ -155,7 +158,8 @@ class BundleTests(unittest.TestCase):
         ours = staging(self.root, "chatlab-update-d", str(os.getpid()))
         unclaimed = staging(self.root, "chatlab-update-e", None)
         garbage = staging(self.root, "chatlab-update-f", "not-a-pid")
-        unrelated = self.root / "chatlab-updates.txt"; unrelated.write_text("keep")
+        unrelated = self.root / "chatlab-updates.txt"
+        unrelated.write_text("keep")
 
         with mock.patch.object(updater.tempfile, "gettempdir", return_value=str(tmp_root)):
             updater.remove_stale_work_dirs(current)
@@ -167,7 +171,8 @@ class BundleTests(unittest.TestCase):
 
     def test_install_update_claims_its_work_dir(self):
         current = self.make_bundle("ChatLab.app", "old")
-        work = self.root / "work"; work.mkdir()
+        work = self.root / "work"
+        work.mkdir()
         seen = {}
 
         def fake_download(rel, dest, progress, cancelled=None):
@@ -263,7 +268,8 @@ class BundleTests(unittest.TestCase):
         with self.assertRaisesRegex(updater.UpdateError, "does not publish a checksum"):
             updater.fetch_checksum(self.RELEASE)
         release = updater.ReleaseInfo("0.3.0", "a.zip", "u", None, "r", checksum_url="https://x/a.zip.sha256")
-        response = mock.MagicMock(); response.__enter__.return_value = response
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
         response.read.return_value = (" " + "ab" * 32 + "  a.zip\n").encode()
         with mock.patch.object(updater, "urlopen", return_value=response):
             self.assertEqual(updater.fetch_checksum(release), "ab" * 32)

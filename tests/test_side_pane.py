@@ -374,7 +374,6 @@ class LoadingIdTests(unittest.TestCase):
     def test_a_load_waiting_for_the_lock_is_already_named(self):
         # A generation holds the lock for as long as its reply takes; the
         # load queued behind it must count as under way from the click.
-        import threading
 
         manager = ModelManager()
         manager._lock.acquire()
@@ -471,7 +470,6 @@ class LoadingIdTests(unittest.TestCase):
         # must leave the other's name in place: otherwise the chat badge
         # goes back to "No model loaded" halfway through a load, and offers
         # the reader a button to start one more.
-        import threading
 
         manager = ModelManager()
         second = "org/second"
@@ -535,7 +533,6 @@ class LoadingIdTests(unittest.TestCase):
         # be the order the lock is handed out in: a thread can be set aside
         # between the two steps. The badge has to name the load that is
         # really reading weights, not the one that claimed last.
-        import threading
 
         manager = ModelManager()
         reading = threading.Event()
