@@ -18,6 +18,7 @@ import gradio as gr
 from gradio.utils import get_upload_folder
 
 import charts
+import library
 import settings
 from conversation import (
     CHAT_PREFIX,
@@ -2934,7 +2935,7 @@ def conversation_list_update(forks: dict, turns: list[dict] | None):
 
 
 def refresh_conversation_list(turns: list[dict] | None, forks: dict | None):
-    """Redraw the list from state, for the paths that do not publish it.
+    """Redraw the list from state, and save what it shows.
 
     Sending, retrying, editing, undoing and loading all write the conversation
     state without knowing about the list, and a streaming reply rewrites it on
@@ -2942,9 +2943,46 @@ def refresh_conversation_list(turns: list[dict] | None, forks: dict | None):
     thread the list through every one of those handlers, this listens to the
     state itself: Gradio fires a State's change event only when the stored
     value's hash differs, so it runs exactly when the labels could have changed.
+
+    The same moment is when the conversations are worth saving, so the file
+    on disk is rewritten here too. It is small - text and a few counts per
+    turn, no measurements - so a write per streaming frame costs nothing the
+    frame itself does not already cost.
     """
 
-    return conversation_list_update(copy_forks(forks), turns)
+    forks = copy_forks(forks)
+    library.write(library.as_seen(forks, turns))
+    return conversation_list_update(forks, turns)
+
+
+def remember_forks(turns: list[dict] | None, forks: dict | None) -> None:
+    """Save the pane when the set of branches changes.
+
+    Forking, starting a new chat, switching, deleting and clearing all write
+    ``forks``, and most of them write the conversation too; but a switch
+    between two empty branches, or a new chat started from an empty one,
+    leaves the conversation state's hash where it was and the listener above
+    silent. This one listens to the forks themselves.
+    """
+
+    library.write(library.as_seen(forks, turns))
+
+
+def restore_conversations():
+    """Bring the saved conversations back when the page loads.
+
+    A reload rebuilds the page from empty state, and this is what puts the
+    conversations pane and the active branch back the way they were. The
+    token panel is not restored: the measurements described one response as
+    one model produced it, and the page has no model loaded yet.
+    """
+
+    forks = library.read()
+    if forks is None:
+        return (gr.skip(),) * 4
+    turns = copy_turns(forks["branches"][forks["active"]])
+    messages, _ = display_messages(turns)
+    return messages, turns, forks, conversation_list_update(forks, turns)
 
 
 # --------------------------------------------------------------------- forks
@@ -5139,6 +5177,19 @@ def build_app() -> gr.Blocks:
             refresh_conversation_list,
             [conversation_state, forks_state],
             conversation_list,
+        )
+        forks_state.change(remember_forks, [conversation_state, forks_state], None)
+        # The saved conversations come back first, so the listeners above
+        # have something to describe. A page with nothing saved is left as
+        # it was built. Like every other path that replaces the conversation,
+        # this cancels a generation still running - the one a reload
+        # interrupted, whose frames would otherwise land on the restored
+        # transcript.
+        demo.load(
+            restore_conversations,
+            None,
+            [chatbot, conversation_state, forks_state, conversation_list],
+            cancels=running,
         )
 
         save_button.click(

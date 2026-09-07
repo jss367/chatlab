@@ -431,7 +431,9 @@ def branch_choices(forks: dict | None, turns: list[dict] | None) -> list[tuple[s
 # --------------------------------------------------------------- save / load
 
 
-def to_json(turns: list[dict] | None, *, system_prompt: str = "") -> str:
+def turn_entries(turns: list[dict] | None) -> list[dict]:
+    """The turns as a file spells them: text, reasoning and the counts behind a reply."""
+
     entries = []
     for turn in turns or []:
         entry = {
@@ -445,24 +447,12 @@ def to_json(turns: list[dict] | None, *, system_prompt: str = "") -> str:
             if isinstance(value, kind) and not isinstance(value, bool):
                 entry[key] = value
         entries.append(entry)
-    payload = {
-        "format": SAVE_FORMAT,
-        "system_prompt": system_prompt or "",
-        "turns": entries,
-    }
-    return json.dumps(payload, indent=2, ensure_ascii=False)
+    return entries
 
 
-def from_json(payload: str) -> tuple[list[dict], str]:
-    try:
-        data = json.loads(payload)
-    except json.JSONDecodeError as error:
-        raise ValueError(f"That file is not valid JSON: {error}") from error
+def turns_from_entries(raw_turns) -> list[dict]:
+    """Turns read back from :func:`turn_entries`, or ``ValueError`` for anything else."""
 
-    if not isinstance(data, dict) or data.get("format") != SAVE_FORMAT:
-        raise ValueError(f"Expected a {SAVE_FORMAT} file saved by this app.")
-
-    raw_turns = data.get("turns")
     if not isinstance(raw_turns, list):
         raise ValueError("The saved file has no list of turns.")
 
@@ -488,6 +478,28 @@ def from_json(payload: str) -> tuple[list[dict], str]:
                 raise ValueError(f"Turn {key} cannot be negative.")
             turn[key] = value
         turns.append(turn)
+    return turns
+
+
+def to_json(turns: list[dict] | None, *, system_prompt: str = "") -> str:
+    payload = {
+        "format": SAVE_FORMAT,
+        "system_prompt": system_prompt or "",
+        "turns": turn_entries(turns),
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def from_json(payload: str) -> tuple[list[dict], str]:
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"That file is not valid JSON: {error}") from error
+
+    if not isinstance(data, dict) or data.get("format") != SAVE_FORMAT:
+        raise ValueError(f"Expected a {SAVE_FORMAT} file saved by this app.")
+
+    turns = turns_from_entries(data.get("turns"))
 
     system_prompt = data.get("system_prompt", "")
     if not isinstance(system_prompt, str):

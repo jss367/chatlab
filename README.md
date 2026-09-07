@@ -22,6 +22,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
+- Every conversation kept between sessions in one JSON file, so a reload or a restart brings the pane back as it was
 - Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response that is still being written from anywhere on the Chat page
 - Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
 - Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it
@@ -213,6 +214,26 @@ The token count is the size of the conversation as the model last saw it: every 
 Click a message before pressing Fork to fork at that point. Forking at a reply keeps the conversation through that reply, ready for a different next question. Forking at one of your own messages keeps what came before it and puts the message back in the input box so it can be reworded, the same shape **Undo** gives.
 
 Each conversation has its own transcript, but the token panel describes only the response on screen: switching conversations clears it until the next response. **💾 Save conversation** writes the conversation on screen.
+
+Every conversation in the pane is kept between sessions. The whole pane -
+the active conversation and every other branch - is written to one file as it
+changes, a streaming reply included, and read back when the page loads, so a
+browser reload, a restart or a crash brings it back where it was. A reply
+that was still streaming when the page went away is kept as far as it got.
+The file is:
+
+```
+~/.local/share/chatlab/conversations.json
+```
+
+`XDG_DATA_HOME` moves the directory and `CHATLAB_LIBRARY_PATH` names the file
+outright, the same two knobs the settings file answers to. It is written whole
+and swapped into place, so a crash mid-write leaves the previous copy rather
+than half of a new one. The token measurements are not in it: they describe a
+response as one model produced it, so a restored conversation comes back with
+an empty token panel until its next reply. **💾 Save conversation** is still
+the way to hand one conversation to someone else, and **📂 Load conversation**
+brings such a file in.
 
 ## Layers and attention
 

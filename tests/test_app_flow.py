@@ -20,6 +20,7 @@ from conversation import (
 from model_runtime import GenerationUpdate, ModelChanged, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
 
+import library
 import settings
 import settings_sandbox
 from test_streaming import ChatTemplateTokenizer, SentencePieceTokenizer, loaded_manager
@@ -2933,6 +2934,73 @@ class ConversationListWiringTests(unittest.TestCase):
             with self.subTest(handler=name):
                 self.assertIn(radio, self.named(name).outputs)
 
+    def test_the_saved_conversations_come_back_when_the_page_loads(self):
+        restore = self.named("restore_conversations")
+        state, _metrics, _context = self.named("stop_generation").inputs
+        forks = self.named("remember_forks").inputs[1]
+        self.assertEqual(restore.targets, [(self.demo._id, "load")])
+        self.assertEqual(restore.inputs, [])
+        self.assertEqual(restore.outputs[1:], [state, forks, self.conversation_list()])
+
+    def test_a_change_to_the_forks_saves_them(self):
+        remember = self.named("remember_forks")
+        state, _metrics, _context = self.named("stop_generation").inputs
+        forks = remember.inputs[1]
+        self.assertEqual(remember.targets, [(forks._id, "change")])
+        self.assertEqual(remember.inputs, [state, forks])
+        self.assertEqual(remember.outputs, [])
+
+
+class ConversationLibraryTests(unittest.TestCase):
+    """What the pane shows is written as it changes and read back on load."""
+
+    def setUp(self):
+        self.path = library.library_path()
+        if self.path.exists():
+            self.path.unlink()
+
+    def test_a_redraw_writes_the_pane_as_seen(self):
+        forks = new_forks()
+        forks["branches"]["Chat 2"] = [make_turn("user", "other")]
+        forks["active"] = "Chat 2"
+        on_screen = [make_turn("user", "other"), make_turn("assistant", "reply", "")]
+
+        app.refresh_conversation_list(on_screen, forks)
+
+        saved = library.read(self.path)
+        self.assertEqual(saved["active"], "Chat 2")
+        self.assertEqual(saved["branches"][MAIN_BRANCH], [])
+        self.assertEqual([turn["content"] for turn in saved["branches"]["Chat 2"]], ["other", "reply"])
+
+    def test_a_change_of_forks_writes_them_too(self):
+        forks = new_forks()
+        forks["branches"]["Fork 1"] = []
+        app.remember_forks([], forks)
+
+        self.assertEqual(list(library.read(self.path)["branches"]), [MAIN_BRANCH, "Fork 1"])
+
+    def test_nothing_saved_leaves_the_page_as_built(self):
+        self.assertEqual(app.restore_conversations(), (gr.skip(),) * 4)
+
+    def test_the_active_branch_is_put_back_on_screen(self):
+        forks = {
+            "active": "Fork 1",
+            "branches": {
+                MAIN_BRANCH: [make_turn("user", "first")],
+                "Fork 1": [make_turn("user", "hi"), make_turn("assistant", "there", "")],
+            },
+        }
+        library.write(forks, self.path)
+
+        messages, turns, restored, update = app.restore_conversations()
+
+        self.assertEqual([turn["content"] for turn in turns], ["hi", "there"])
+        self.assertTrue(turns[-1]["reasoning_closed"])
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(restored["active"], "Fork 1")
+        self.assertEqual(update["value"], "Fork 1")
+        self.assertEqual([name for _label, name in update["choices"]], [MAIN_BRANCH, "Fork 1"])
+
 
 class CancelWiringTests(unittest.TestCase):
     """Anything that replaces the conversation must cancel a running generation.
@@ -3023,6 +3091,7 @@ class CancelWiringTests(unittest.TestCase):
                 "switch_fork",
                 "delete_fork",
                 "new_conversation",
+                "restore_conversations",
             },
         )
 
