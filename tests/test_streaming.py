@@ -299,6 +299,14 @@ class GenerateStreamingTests(unittest.TestCase):
             updates.append((update.text, len(update.metrics)))
         return updates
 
+    def test_a_response_gives_back_what_the_last_inspection_kept(self):
+        manager = loaded_manager([0, 1, EOS_ID])
+        manager._inspect_cache = (manager.load_id, [0, 1], object())
+
+        self.collect(manager)
+
+        self.assertIsNone(manager._inspect_cache)
+
     def test_a_forced_prefix_from_an_earlier_load_is_refused_before_any_token(self):
         manager = loaded_manager([0, 1, 2, EOS_ID])
         stale = manager.load_id

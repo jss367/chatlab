@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -2280,6 +2280,9 @@ class ModelManager:
         # generation at a time.
         self._run_note: tuple[str | None, int] | None = None
         self._run_device_bytes: int | None = None
+        # The key-value cache the last inspection left behind, with the load
+        # it belongs to and the tokens it covers. See _inspect_cache_for().
+        self._inspect_cache: tuple[str, list[int], Any] | None = None
 
     @property
     def loaded(self) -> bool:
@@ -2690,6 +2693,7 @@ class ModelManager:
     def _unload_locked(self, torch) -> None:
         """Clear the loaded model while the caller holds ``_lock``."""
 
+        self._inspect_cache = None
         self.model = None
         self.tokenizer = None
         self.model_id = None
@@ -2697,6 +2701,62 @@ class ModelManager:
         self.device_name = None
         gc.collect()
         self._release_device_cache(torch)
+
+    def _drop_inspect_cache(self) -> None:
+        """Forget the cache the last inspection kept, and give its memory back."""
+
+        if self._inspect_cache is None:
+            return
+        self._inspect_cache = None
+        self._release_device_cache()
+
+    def _inspect_cache_for(self, needed: list[int]):
+        """A key-value cache holding exactly ``needed``, reusing the last one where it can.
+
+        Clicking through the tokens of one response asks about the same
+        sequence again and again, and the cache the previous click built
+        covers most of the next one. The kept cache is used as it stands when
+        the tokens match, extended when the new click is further along, and
+        cut back with ``crop()`` when it is earlier. A different sequence, a
+        cache from another load, or one that cannot be cropped is thrown away
+        and rebuilt from nothing. Called under the model lock.
+        """
+
+        kept = self._inspect_cache
+        self._inspect_cache = None
+        if kept is not None:
+            load_id, ids, cache = kept
+            shared = min(len(ids), len(needed))
+            if (
+                load_id != self.load_id
+                or cache is None
+                or ids[:shared] != needed[:shared]
+                or (len(ids) > len(needed) and not hasattr(cache, "crop"))
+            ):
+                kept = None
+
+        if kept is None:
+            self._release_device_cache()
+            ids, cache = [], None
+        else:
+            _, ids, cache = kept
+            if len(ids) > len(needed):
+                cache.crop(len(ids) - len(needed))
+                ids = ids[: len(needed)]
+
+        if len(ids) == len(needed):
+            return cache
+        # Collect nothing: only the cache is wanted.
+        _, cache, _ = self._prefill(
+            needed[len(ids) :],
+            segments=[""] * (len(needed) - len(ids)),
+            positions=list(range(len(ids), len(needed))),
+            score_from=len(needed),
+            collect_from=len(needed),
+            past_key_values=cache,
+            cached=len(ids),
+        )
+        return cache
 
     @staticmethod
     def _release_device_cache(torch=None) -> None:
@@ -3238,6 +3298,8 @@ class ModelManager:
         score_from: int,
         collect_from: int = 0,
         sample: Callable[[np.ndarray], np.ndarray] | None = None,
+        past_key_values=None,
+        cached: int = 0,
     ):
         """Run the model over ``token_ids`` a chunk at a time.
 
@@ -3246,6 +3308,11 @@ class ModelManager:
         token except the first is measured against the distribution the model
         held one step earlier, so the same pass that warms the cache also
         explains the prompt.
+
+        ``past_key_values`` is a cache already holding ``cached`` tokens that
+        precede ``token_ids``; the pass continues from it rather than from an
+        empty one. The metrics and positions still describe ``token_ids``
+        alone.
 
         Tokens before ``collect_from`` get no metric at all, which is how a
         prompt the reader chose not to measure stays out of the results while
@@ -3264,7 +3331,6 @@ class ModelManager:
         model = self.model
         device = next(model.parameters()).device
         metrics: list[dict] = []
-        past_key_values = None
         carry: np.ndarray | None = None
         total = len(token_ids)
 
@@ -3275,7 +3341,9 @@ class ModelManager:
             )
             outputs = model(
                 input_ids=chunk,
-                attention_mask=torch.ones((1, end), dtype=torch.long, device=device),
+                attention_mask=torch.ones(
+                    (1, cached + end), dtype=torch.long, device=device
+                ),
                 past_key_values=past_key_values,
                 use_cache=True,
             )
@@ -3493,6 +3561,9 @@ class ModelManager:
                 assert self.tokenizer is not None
                 model = self.model
                 tokenizer = self.tokenizer
+                # A response is where memory runs short, so what the last
+                # inspection kept is given back before the prompt is fed.
+                self._drop_inspect_cache()
                 # Read here, under the lock, alongside the weights: this is the
                 # only place the two are guaranteed to agree, which is what makes
                 # the stamp on each update worth trusting.
@@ -3842,6 +3913,7 @@ class ModelManager:
 
             assert self.tokenizer is not None
             tokenizer = self.tokenizer
+            self._drop_inspect_cache()
             # Whitespace is worth measuring: how expected a paragraph break or
             # an indent was is a real question for a token explorer, and the
             # tokenizer turns those characters into ordinary tokens. Only a
@@ -4022,16 +4094,9 @@ class ModelManager:
             device = next(model.parameters()).device
             token_id = ids[index]
 
-            past_key_values = None
-            if index > 1:
-                # Collect nothing: only the cache is wanted.
-                _, past_key_values, _ = self._prefill(
-                    ids[: index - 1],
-                    segments=[""] * (index - 1),
-                    positions=list(range(index - 1)),
-                    score_from=index,
-                    collect_from=index,
-                )
+            # Everything before the predicting token, from the last click's
+            # cache where the sequence allows it.
+            past_key_values = self._inspect_cache_for(ids[: index - 1])
 
             with self._eager_attention():
                 outputs = model(
@@ -4103,6 +4168,12 @@ class ModelManager:
                 }
                 for position in range(index)
             ]
+            # The step above appended the predicting token, so the cache now
+            # covers the sequence through it. Kept for the next click; a
+            # response or a scoring pass takes it back (see _drop_inspect_cache).
+            produced = getattr(outputs, "past_key_values", None)
+            if produced is not None and self.load_id is not None:
+                self._inspect_cache = (self.load_id, ids[:index], produced)
             del outputs, past_key_values
             return TokenInsight(
                 index=index,
