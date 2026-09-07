@@ -72,6 +72,14 @@ MIN_MODEL_POSITION_LIMIT = 16
 MEMORY_HEADROOM_BYTES = 4 * 1024**3
 
 # Bytes per parameter for the dtypes a checkpoint or a load can use.
+# The bit width each quantized precision packs a linear weight into, and the
+# group of weights that share one scale and one bias. Transformers' Metal
+# quantizer does the packing on the way in and runs the fused
+# dequantize-and-multiply kernels from the Hub, so this is Apple Metal only:
+# on another device the weights are loaded whole and the choice noted.
+QUANTIZED_BITS = {"8-bit": 8, "4-bit": 4}
+QUANTIZATION_GROUP_SIZE = 64
+
 DTYPE_BYTES = {
     "float64": 8,
     "float32": 4,
@@ -502,6 +510,30 @@ def estimate_loaded_bytes(
     return int(weight_bytes * loaded / stored)
 
 
+def estimate_quantized_bytes(
+    weight_bytes: int,
+    checkpoint_dtype: str | None,
+    bits: int,
+    embedding_params: int | None,
+    group_size: int = QUANTIZATION_GROUP_SIZE,
+) -> int:
+    """Memory the weights take once the linear layers are quantized to ``bits``.
+
+    Each packed weight costs ``bits`` and each group of ``group_size`` of them
+    a half-precision scale and bias. The embeddings and the output head are
+    left as they are, so a model whose vocabulary is a large share of its
+    parameters saves less than the bit width alone would suggest.
+    ``embedding_params`` is how many parameters those matrices hold, or
+    ``None`` to treat every parameter as quantized.
+    """
+
+    half = estimate_loaded_bytes(weight_bytes, checkpoint_dtype, "float16")
+    params = half / 2
+    embedding = min(float(embedding_params or 0), params)
+    per_param = bits / 8 + 2 * 2 / group_size
+    return int(embedding * 2 + (params - embedding) * per_param)
+
+
 def system_memory() -> tuple[int | None, int | None]:
     """Total and currently available physical memory in bytes, where known.
 
@@ -854,6 +886,24 @@ def _read_config(snapshot: Path | None) -> tuple[str | None, str | None]:
         architecture if isinstance(architecture, str) else None,
         dtype if isinstance(dtype, str) else None,
     )
+
+
+def _embedding_params(snapshot: Path | None) -> int | None:
+    """Parameters in the embedding and output matrices, from the config, or ``None``."""
+
+    if snapshot is None:
+        return None
+    try:
+        config = json.loads((snapshot / "config.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    vocab, hidden = config.get("vocab_size"), config.get("hidden_size")
+    if not isinstance(vocab, int) or not isinstance(hidden, int) or vocab <= 0 or hidden <= 0:
+        return None
+    tied = config.get("tie_word_embeddings", False) is True
+    return vocab * hidden * (1 if tied else 2)
 
 
 def _newest_write(folder: Path, snapshot: Path | None) -> float | None:
@@ -2223,6 +2273,7 @@ class ModelManager:
         self.model_id: str | None = None
         self.local_path: Path | None = None
         self.device_name: str | None = None
+        self.precision: str | None = None
         # Counts successful loads, so state produced under one set of weights
         # can be told from state produced under the next even when both came
         # from the same repository ID (a re-download at a newer revision).
@@ -2493,12 +2544,18 @@ class ModelManager:
         )
 
     def load(
-        self, model_id: str, local_path: Path, progress: LoadProgress | None = None
+        self,
+        model_id: str,
+        local_path: Path,
+        progress: LoadProgress | None = None,
+        precision: str = "full",
     ) -> str:
         """Read ``model_id`` into memory from ``local_path``, and say where it landed.
 
         Blocks until the last weight is in; ``progress`` is how a caller on
-        another thread watches it happen.
+        another thread watches it happen. ``precision`` is one of
+        :data:`settings.WEIGHT_PRECISIONS`; a quantized choice is honoured
+        on Apple Metal and noted, then ignored, elsewhere.
         """
 
         import torch
@@ -2510,7 +2567,9 @@ class ModelManager:
         checked_id, claim = self.reserve_load(model_id)
         try:
             with self._lock, self._reading_weights(checked_id):
-                return self._load_locked(checked_id, local_path, torch, progress)
+                return self._load_locked(
+                    checked_id, local_path, torch, progress, precision=precision
+                )
         finally:
             self.release_load(claim)
 
@@ -2520,6 +2579,7 @@ class ModelManager:
         local_path: Path,
         torch,
         progress: LoadProgress | None = None,
+        precision: str = "full",
     ) -> str:
         """Bring ``model_id`` in from ``local_path`` while the caller holds ``_lock``."""
 
@@ -2527,6 +2587,7 @@ class ModelManager:
 
         progress = progress or LoadProgress()
         self._unload_locked(torch)
+        bits = QUANTIZED_BITS.get(precision)
         if torch.cuda.is_available():
             backend = "cuda"
             dtype = (
@@ -2538,6 +2599,15 @@ class ModelManager:
         else:
             backend = "cpu"
             dtype = torch.float32
+        if bits is not None and backend != "mps":
+            logger.info(
+                "Loading %s with full weights: %s weights need Apple Metal, not %s",
+                model_id,
+                precision,
+                backend,
+            )
+            bits = None
+        precision = precision if bits is not None else "full"
         # The cap goes on before the check rather than before the load, so
         # the check can refuse a model that fits the machine but not the
         # allocator's half of it. Otherwise a 25 GB checkpoint on an idle
@@ -2549,6 +2619,7 @@ class ModelManager:
             str(dtype).replace("torch.", ""),
             backend,
             ceiling=ceiling,
+            bits=bits,
         )
         # Bytes are counted only where the device keeps a total to count
         # them against; elsewhere the loader's own steps are all there is.
@@ -2567,6 +2638,31 @@ class ModelManager:
                         low_cpu_mem_usage=True,
                     )
                     device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
+                elif backend == "mps" and bits is not None:
+                    # The quantizer packs each weight as it lands, and wants
+                    # to land it on the device it will run on: a CPU stop on
+                    # the way is refused, so this is the one Metal load that
+                    # goes through device_map. The output head and the
+                    # embeddings are left in half precision, which is what
+                    # keeps the logit lens reading through the real head.
+                    from transformers import MetalConfig
+
+                    try:
+                        model = AutoModelForCausalLM.from_pretrained(
+                            local_path,
+                            local_files_only=True,
+                            dtype=dtype,
+                            device_map="mps",
+                            quantization_config=MetalConfig(
+                                bits=bits, group_size=QUANTIZATION_GROUP_SIZE
+                            ),
+                        )
+                    except ImportError as error:
+                        raise RuntimeError(
+                            f"{precision} weights need the kernels package: "
+                            f"run `pip install kernels` and load again. ({error})"
+                        ) from error
+                    device_name = f"Apple Metal (MPS), {precision} weights"
                 elif backend == "mps":
                     # Into host memory and across afterwards, rather than
                     # materialized on the device with device_map="mps". The
@@ -2594,10 +2690,11 @@ class ModelManager:
             # Before the cache goes back, so the figure is what the device was
             # holding when the load gave up rather than what survived cleanup.
             logger.warning(
-                "Load of %s as %s on %s failed: %s estimated, %s held on the "
-                "device, %s free beforehand, device ceiling %s (%s)",
+                "Load of %s as %s (%s weights) on %s failed: %s estimated, %s held "
+                "on the device, %s free beforehand, device ceiling %s (%s)",
                 model_id,
                 str(dtype).replace("torch.", ""),
+                precision,
                 backend,
                 memory_note(estimated),
                 memory_note(reserved_bytes(torch)),
@@ -2620,15 +2717,17 @@ class ModelManager:
         self.model_id = model_id
         self.local_path = local_path
         self.device_name = device_name
+        self.precision = precision
         self.load_count += 1
         # The one record of what a load cost. Without it a later memory
         # failure cannot be told from a leak, a second copy of the weights, or
         # a machine that was already full when the load began.
         logger.info(
-            "Loaded %s as %s on %s: %s estimated, %s held on the device, "
-            "%s free beforehand, device ceiling %s",
+            "Loaded %s as %s (%s weights) on %s: %s estimated, %s held on the "
+            "device, %s free beforehand, device ceiling %s",
             model_id,
             str(dtype).replace("torch.", ""),
+            precision,
             device_name,
             memory_note(estimated),
             memory_note(reserved_bytes(torch)),
@@ -2699,6 +2798,7 @@ class ModelManager:
         self.model_id = None
         self.local_path = None
         self.device_name = None
+        self.precision = None
         gc.collect()
         self._release_device_cache(torch)
 
@@ -2776,6 +2876,7 @@ class ModelManager:
         load_dtype: str,
         backend: str,
         ceiling: int | None = None,
+        bits: int | None = None,
     ) -> tuple[int | None, int | None]:
         """Refuse a load that cannot fit, before any weight is read.
 
@@ -2801,7 +2902,15 @@ class ModelManager:
         if weight_bytes is None:
             return None, None
         _architecture, checkpoint_dtype = _read_config(local_path)
-        estimated = estimate_loaded_bytes(weight_bytes, checkpoint_dtype, load_dtype)
+        if bits is None:
+            estimated = estimate_loaded_bytes(weight_bytes, checkpoint_dtype, load_dtype)
+        else:
+            # What the quantizer will leave on the device, not what the file
+            # holds: the check is against the loaded size, and a 4-bit load
+            # of a checkpoint the machine could not hold whole is the point.
+            estimated = estimate_quantized_bytes(
+                weight_bytes, checkpoint_dtype, bits, _embedding_params(local_path)
+            )
         if backend == "cuda":
             total, available = offload_pool(cuda_memory(), system_memory())
             pool = "the GPU plus this machine"

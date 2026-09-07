@@ -29,6 +29,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
 - An attention view showing which earlier tokens the model looked at when predicting it
 - Apple Metal, NVIDIA CUDA, and CPU loading
+- 8-bit and 4-bit weights on Apple Metal, so a 7B model fits a 16 GB Mac
 
 The default model is [`allenai/Olmo-3-7B-Think`](https://huggingface.co/allenai/Olmo-3-7B-Think). Its full weights require a download of roughly 15 GB. Other Hugging Face causal language models with built-in Transformers support can also work.
 
@@ -107,8 +108,15 @@ leaves the allocator alone. The cache a response used is handed back when it
 finishes, so the process returns to the model's own size between requests.
 
 Each load and each response is recorded in the log with the model, the
-estimate, what the device ended up holding and what was free beforehand,
-which is what makes a memory failure readable after the fact.
+weight precision, the estimate, what the device ended up holding and what was
+free beforehand, which is what makes a memory failure readable after the fact.
+
+When the weights will not fit, **Weight precision** on the Models page is the
+first thing to try. At 4 bits the default 7B model's linear layers shrink from
+about 14 GB to under 4 GB, and the whole model, embeddings included, to
+roughly 5 GB, which is what lets it run on a 16 GB Mac. The refusal above is
+made against the quantized size, so a checkpoint the machine could not hold
+whole is let through when the quantized weights fit.
 
 What a conversation costs is mostly its key-value cache, which grows with
 every token and is held for as long as the answer runs. How fast it grows is
@@ -125,7 +133,7 @@ A badge above the tabs names the model that would answer. Until one is loaded, *
 
 ### Models
 
-- **Model** holds the model ID and token boxes and the download, load, and unload buttons, with the status card under them. The card follows a download file by file and byte by byte, and then the load in the same shape: how many of the weights have been read, how much of the model is on the device, the speed, and how long is left. Reading 15 GB of cached weights into memory takes half a minute or so, and the card says so rather than sitting still.
+- **Model** holds the model ID and token boxes, the **Weight precision** choice, and the download, load, and unload buttons, with the status card under them. **Full (16-bit)** loads the checkpoint as it is. **8-bit** and **4-bit** quantize the linear layers on the way in, on Apple Metal only: the weights take about a half or a quarter of the memory, generation runs on fused Metal kernels fetched from the Hub the first time, and the embeddings and output head are left in half precision so the logit lens still reads through the real head. Accuracy drops a little, most at 4 bits; the token measurements describe the quantized model, which is the one answering. Another device loads full weights whatever is chosen, and says so in the log. The choice is saved and applies to the next load. The card follows a download file by file and byte by byte, and then the load in the same shape: how many of the weights have been read, how much of the model is on the device, the speed, and how long is left. Reading 15 GB of cached weights into memory takes half a minute or so, and the card says so rather than sitting still.
 - **My Models** lists every model in the Hugging Face cache with its size on disk. **Sort by** orders the list newest download first, by name, or by size in either direction. A model short of files is marked *incomplete* and tinted amber, one that is whole but not a Transformers language model (a diffusers pipeline, a CTranslate2 or ONNX export) *unsupported*, and the one in memory *loaded*. Selecting one shows its file count, architecture and weight type from its `config.json`, revision, when it was last downloaded, and its folder, and puts its ID in the model box ready for **Load cached**. **Redownload** fetches whatever the selected model still lacks, resuming partial files rather than starting over; on a complete model it checks the Hub for updated files. **Remove** deletes the selected model's folder from the cache after a confirmation; a model that is loaded or still downloading has to be unloaded or finished first. The list rescans after every download, load, unload, and removal, and **Refresh** rescans it by hand.
 - **Model search** searches the Hub for text-generation models with Transformers support, most downloaded first. Each result shows its parameter count and recent downloads; selecting one adds its license, likes, last update, whether it is gated, and whether any of it is already on disk, and puts its ID in the model box ready for **Download and load**.
 
@@ -158,10 +166,11 @@ prompt may carry and, with it, the ceiling on the response length. Every
 reply is measured against it, a branch and an ordinary answer alike, and a
 conversation that has grown past it is refused before anything is allocated
 rather than run until the machine gives out. The file
-holds two keys with no control beside the others: `model_id`, the model the
-Models page opens with, which `OLMO_MODEL_ID` still overrides for one run,
-and `mps_memory_fraction`, the Apple Metal cap described under
-[Memory](#memory), which is read when a model is loaded.
+holds three keys whose controls are not on this page: `model_id`, the model
+the Models page opens with, which `OLMO_MODEL_ID` still overrides for one run,
+`weight_precision`, the Models page's **Weight precision** choice (`full`,
+`8-bit` or `4-bit`), and `mps_memory_fraction`, the Apple Metal cap described
+under [Memory](#memory), which is read when a model is loaded.
 
 ## Working with a conversation
 

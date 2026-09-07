@@ -473,11 +473,12 @@ def load_detail(
     return f"{name}\n\n`{progress_bar(shown)}` {percent}%\n\n{figures}"
 
 
-def stream_load(model_id: str, path: Path):
+def stream_load(model_id: str, path: Path, precision: str = "full"):
     """Yield a status card every half second until ``model_id`` is in memory.
 
     Returns the device it landed on, so a caller writes
     ``device = yield from stream_load(...)``. A failed load raises here.
+    ``precision`` is the weight precision chosen on the Models page.
 
     The load runs on its own thread, as a download does: ``from_pretrained``
     blocks until the last weight, and a handler that blocked with it could
@@ -489,7 +490,7 @@ def stream_load(model_id: str, path: Path):
 
     def work() -> None:
         try:
-            outcome["device"] = MANAGER.load(model_id, path, progress)
+            outcome["device"] = MANAGER.load(model_id, path, progress, precision=precision)
         except BaseException as error:
             outcome["error"] = error
         finally:
@@ -654,7 +655,9 @@ def download_model(model_id: str, hf_token: str, selected: str | None = None):
     )
 
 
-def download_and_load_model(model_id: str, hf_token: str, selected: str | None = None):
+def download_and_load_model(
+    model_id: str, hf_token: str, selected: str | None = None, precision: str = "full"
+):
     """Download and load the model explicitly selected on the Models page."""
 
     model_id = chosen_model(model_id, selected)
@@ -675,7 +678,7 @@ def download_and_load_model(model_id: str, hf_token: str, selected: str | None =
             f"{fetched} Moving `{model_id.strip()}` onto the best available device…",
             "working",
         )
-        device = yield from stream_load(model_id, path)
+        device = yield from stream_load(model_id, path, precision)
     except Exception as error:
         yield failure_card("Model setup failed", html.escape(str(error)))
         return
@@ -706,7 +709,9 @@ def incomplete_snapshot_detail(model_id: str, error: Exception) -> str:
     )
 
 
-def load_cached_model(model_id: str, selected: str | None = None):
+def load_cached_model(
+    model_id: str, selected: str | None = None, precision: str = "full"
+):
     """Load the selected model from local files, preserving any load error."""
 
     cleaned = chosen_model(model_id, selected)
@@ -760,7 +765,7 @@ def load_cached_model(model_id: str, selected: str | None = None):
     try:
         path = MANAGER.find_cached(cleaned)
         started = time.monotonic()
-        device = yield from stream_load(cleaned, path)
+        device = yield from stream_load(cleaned, path, precision)
     except IncompleteSnapshotError as error:
         yield failure_card(
             "Download unfinished", incomplete_snapshot_detail(cleaned, error)
@@ -4061,6 +4066,7 @@ PERSISTED_SETTING_NAMES = (
     "color_scale",
     "enter_sends",
     "model_id",
+    "weight_precision",
 )
 
 
@@ -4567,6 +4573,22 @@ def build_app() -> gr.Blocks:
                             type="password",
                             placeholder="Only needed for gated or private models",
                         )
+                        weight_precision = gr.Radio(
+                            choices=[
+                                ("Full (16-bit)", "full"),
+                                ("8-bit", "8-bit"),
+                                ("4-bit", "4-bit"),
+                            ],
+                            value=saved.weight_precision,
+                            label="Weight precision",
+                            info=(
+                                "On Apple Metal, 8-bit and 4-bit weights take about a "
+                                "half and a quarter of the memory of full weights, at a "
+                                "small cost in accuracy; the first quantized load fetches "
+                                "the Metal kernels from the Hub. Other devices load full "
+                                "weights whatever is chosen. Applies to the next load."
+                            ),
+                        )
                         with gr.Row():
                             download_load_button = gr.Button(
                                 "Download and load", variant="primary", size="sm"
@@ -4806,12 +4828,16 @@ def build_app() -> gr.Blocks:
         )
         rescan(
             download_load_button.click(
-                download_and_load_model, [model_id, hf_token, my_models], model_status
+                download_and_load_model,
+                [model_id, hf_token, my_models, weight_precision],
+                model_status,
             )
         )
         rescan(
             cached_button.click(
-                load_cached_model, [model_id, my_models], model_status
+                load_cached_model,
+                [model_id, my_models, weight_precision],
+                model_status,
             )
         )
         rescan(unload_button.click(unload_model, outputs=model_status))
@@ -4924,7 +4950,7 @@ def build_app() -> gr.Blocks:
         chat_inputs = [prompt, conversation_state, *settings_inputs]
 
         # Everything saved between sessions, in PERSISTED_SETTING_NAMES order.
-        persisted_inputs = [*settings_inputs, enter_sends, model_id]
+        persisted_inputs = [*settings_inputs, enter_sends, model_id, weight_precision]
         for control in (
             system_prompt,
             keep_reasoning,
@@ -4938,6 +4964,7 @@ def build_app() -> gr.Blocks:
             color_scale,
             enter_sends,
             model_id,
+            weight_precision,
         ):
             control.change(remember_settings, persisted_inputs, None)
         # The seed box is the one control the app writes to itself: a finished

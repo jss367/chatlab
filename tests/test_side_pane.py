@@ -361,7 +361,7 @@ class LoadingIdTests(unittest.TestCase):
         manager = ModelManager()
         seen = []
 
-        def fake_load(model_id, local_path, torch, progress=None):
+        def fake_load(model_id, local_path, torch, progress=None, precision="full"):
             seen.append((manager.loading_id, manager._lock.locked()))
             return "CPU"
 
@@ -379,7 +379,7 @@ class LoadingIdTests(unittest.TestCase):
         manager._lock.acquire()
         entered = threading.Event()
 
-        def fake_load(model_id, local_path, torch, progress=None):
+        def fake_load(model_id, local_path, torch, progress=None, precision="full"):
             entered.set()
             return "CPU"
 
@@ -403,7 +403,7 @@ class LoadingIdTests(unittest.TestCase):
     def test_a_failed_load_clears_the_loading_id(self):
         manager = ModelManager()
 
-        def fail(model_id, local_path, torch, progress=None):
+        def fail(model_id, local_path, torch, progress=None, precision="full"):
             raise RuntimeError("gpu fell over")
 
         with mock.patch.object(manager, "_load_locked", fail):
@@ -478,7 +478,7 @@ class LoadingIdTests(unittest.TestCase):
         let_first_finish = threading.Event()
         let_second_finish = threading.Event()
 
-        def fake_load(model_id, local_path, torch, progress=None):
+        def fake_load(model_id, local_path, torch, progress=None, precision="full"):
             if model_id == OLMO:
                 in_first.set()
                 let_first_finish.wait(5)
@@ -538,7 +538,7 @@ class LoadingIdTests(unittest.TestCase):
         reading = threading.Event()
         let_it_finish = threading.Event()
 
-        def fake_load(model_id, local_path, torch, progress=None):
+        def fake_load(model_id, local_path, torch, progress=None, precision="full"):
             reading.set()
             let_it_finish.wait(5)
             return "CPU"
@@ -1975,7 +1975,7 @@ class SavedSettingsTests(unittest.TestCase):
 
     def test_saving_a_setting_writes_the_file(self):
         self.build_with()
-        values = dict(zip(app.PERSISTED_SETTING_NAMES, [None] * 13))
+        values = dict(zip(app.PERSISTED_SETTING_NAMES, [None] * len(app.PERSISTED_SETTING_NAMES)))
         values.update(settings.current().to_mapping())
         values["temperature"] = 0.1
         app.remember_settings(
@@ -2093,6 +2093,7 @@ class SavedSettingsTests(unittest.TestCase):
                         "Color tokens by",
                         "Enter sends the message",
                         "Hugging Face model ID",
+                        "Weight precision",
                     ]
                 ),
                 self.labelled("Context limit (tokens)"),

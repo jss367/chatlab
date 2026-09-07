@@ -5,6 +5,8 @@ gradio>=5.20,<6
 # through the caller's tqdm_class; the download card shows only file counts
 # on anything older.
 huggingface-hub>=1.1
+# Fetches the Metal kernels the 8-bit and 4-bit weight precisions run on.
+kernels>=0.16
 numpy>=1.26
 torch>=2.5
 transformers>=4.57,<6

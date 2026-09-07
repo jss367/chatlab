@@ -1,10 +1,12 @@
 import json
 import re
 import shutil
+import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import settings
 import settings_sandbox
@@ -1773,7 +1775,7 @@ class LoadProgressTests(unittest.TestCase):
         progress = LoadProgress()
         seen = []
 
-        def fake_load(model_id, local_path, torch, load_progress=None):
+        def fake_load(model_id, local_path, torch, load_progress=None, precision="full"):
             seen.append(load_progress)
             return "CPU"
 
@@ -1781,6 +1783,105 @@ class LoadProgressTests(unittest.TestCase):
             manager.load("org/model", Path("/snap"), progress)
 
         self.assertEqual(seen, [progress])
+
+
+class QuantizedLoadTests(unittest.TestCase):
+    """What the loader asks transformers for, per device and precision."""
+
+    def load_with(self, precision, mps: bool):
+        from model_runtime import ModelManager
+
+        manager = ModelManager()
+        calls = []
+
+        def from_pretrained(path, **kwargs):
+            calls.append(kwargs)
+            model = mock.MagicMock()
+            model.to.return_value = model
+            return model
+
+        fake_torch = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(is_available=lambda: False),
+            backends=types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: mps)),
+            float16="torch.float16",
+            float32="torch.float32",
+        )
+        transformers = types.SimpleNamespace(
+            AutoModelForCausalLM=types.SimpleNamespace(from_pretrained=from_pretrained),
+            AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda *a, **k: object()),
+            MetalConfig=lambda **kwargs: ("metal", kwargs),
+        )
+        with (
+            mock.patch.dict(sys.modules, {"transformers": transformers}),
+            mock.patch.object(manager, "_cap_mps_memory", return_value=None),
+            mock.patch.object(manager, "_check_memory", return_value=(None, None)) as check,
+            mock.patch.object(manager, "_release_device_cache"),
+            mock.patch("model_runtime.allocated_bytes", return_value=None),
+        ):
+            device = manager._load_locked("org/model", Path("/snap"), fake_torch, precision=precision)
+        return manager, device, calls, check
+
+    def test_a_quantized_load_on_metal_goes_through_the_metal_quantizer(self):
+        manager, device, calls, check = self.load_with("4-bit", mps=True)
+
+        self.assertEqual(device, "Apple Metal (MPS), 4-bit weights")
+        self.assertEqual(manager.precision, "4-bit")
+        (kwargs,) = calls
+        self.assertEqual(kwargs["device_map"], "mps")
+        self.assertEqual(kwargs["quantization_config"], ("metal", {"bits": 4, "group_size": 64}))
+        self.assertEqual(check.call_args.kwargs["bits"], 4)
+
+    def test_full_weights_on_metal_are_loaded_as_before(self):
+        manager, device, calls, check = self.load_with("full", mps=True)
+
+        self.assertEqual(device, "Apple Metal (MPS)")
+        self.assertEqual(manager.precision, "full")
+        (kwargs,) = calls
+        self.assertNotIn("quantization_config", kwargs)
+        self.assertNotIn("device_map", kwargs)
+        self.assertIsNone(check.call_args.kwargs["bits"])
+
+    def test_a_quantized_choice_off_metal_loads_full_weights_and_says_so(self):
+        with self.assertLogs("model_runtime", level="INFO") as logs:
+            manager, device, calls, check = self.load_with("8-bit", mps=False)
+
+        self.assertEqual(device, "CPU")
+        self.assertEqual(manager.precision, "full")
+        (kwargs,) = calls
+        self.assertNotIn("quantization_config", kwargs)
+        self.assertIsNone(check.call_args.kwargs["bits"])
+        self.assertTrue(any("need Apple Metal" in line for line in logs.output))
+
+    def test_a_missing_kernels_package_is_explained(self):
+        from model_runtime import ModelManager
+
+        manager = ModelManager()
+
+        def from_pretrained(path, **kwargs):
+            raise ImportError("Metal quantization requires kernels: `pip install kernels`")
+
+        fake_torch = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(is_available=lambda: False),
+            backends=types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True)),
+            float16="torch.float16",
+            float32="torch.float32",
+        )
+        transformers = types.SimpleNamespace(
+            AutoModelForCausalLM=types.SimpleNamespace(from_pretrained=from_pretrained),
+            AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda *a, **k: object()),
+            MetalConfig=lambda **kwargs: kwargs,
+        )
+        with (
+            mock.patch.dict(sys.modules, {"transformers": transformers}),
+            mock.patch.object(manager, "_cap_mps_memory", return_value=None),
+            mock.patch.object(manager, "_check_memory", return_value=(None, None)),
+            mock.patch.object(manager, "_release_device_cache"),
+            mock.patch("model_runtime.allocated_bytes", return_value=None),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                manager._load_locked("org/model", Path("/snap"), fake_torch, precision="4-bit")
+        self.assertIn("pip install kernels", str(caught.exception))
+        self.assertFalse(manager.loaded)
 
 
 class AllocatedBytesTests(unittest.TestCase):
@@ -1888,6 +1989,37 @@ class MemoryGuardTests(unittest.TestCase):
         # Unknown on either side: assume the file's own size.
         self.assertEqual(estimate_loaded_bytes(1000, None, "float16"), 1000)
         self.assertEqual(estimate_loaded_bytes(1000, "int4", "float16"), 1000)
+
+    def test_the_quantized_estimate_leaves_the_embeddings_whole(self):
+        from model_runtime import estimate_quantized_bytes
+
+        # 1000 half-precision parameters, 200 of them in the embeddings.
+        # 4-bit: 200 x 2 bytes + 800 x (0.5 + 4/64) bytes.
+        self.assertEqual(estimate_quantized_bytes(2000, "bfloat16", 4, 200), 400 + 450)
+        # 8-bit: 200 x 2 + 800 x (1 + 4/64).
+        self.assertEqual(estimate_quantized_bytes(2000, "bfloat16", 8, 200), 400 + 850)
+        # A float32 checkpoint is halved on the way in first.
+        self.assertEqual(estimate_quantized_bytes(4000, "float32", 4, 200), 400 + 450)
+        # Unknown embeddings: everything is quantized.
+        self.assertEqual(estimate_quantized_bytes(2000, "bfloat16", 4, None), 562)
+        # Embeddings larger than the model itself cannot be: capped.
+        self.assertEqual(estimate_quantized_bytes(2000, "bfloat16", 4, 5000), 2000)
+
+    def test_the_embedding_size_is_read_from_the_config(self):
+        from model_runtime import _embedding_params
+
+        snapshot = self._snapshot({})
+        (snapshot / "config.json").write_text(
+            json.dumps({"vocab_size": 100, "hidden_size": 8, "tie_word_embeddings": False})
+        )
+        self.assertEqual(_embedding_params(snapshot), 1600)
+        (snapshot / "config.json").write_text(
+            json.dumps({"vocab_size": 100, "hidden_size": 8, "tie_word_embeddings": True})
+        )
+        self.assertEqual(_embedding_params(snapshot), 800)
+        (snapshot / "config.json").write_text(json.dumps({"vocab_size": "many"}))
+        self.assertIsNone(_embedding_params(snapshot))
+        self.assertIsNone(_embedding_params(None))
 
     def test_a_model_larger_than_the_machine_is_refused(self):
         from model_runtime import InsufficientMemoryError, check_memory_for_load

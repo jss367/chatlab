@@ -2951,6 +2951,40 @@ class ConversationListWiringTests(unittest.TestCase):
         self.assertEqual(remember.outputs, [])
 
 
+class WeightPrecisionWiringTests(unittest.TestCase):
+    """The precision radio feeds both load buttons and is saved like a setting."""
+
+    def setUp(self):
+        self.demo = app.build_app()
+
+    def named(self, name):
+        return next(
+            fn for fn in self.demo.fns.values() if getattr(fn.fn, "__name__", None) == name
+        )
+
+    def radio(self):
+        return next(
+            block
+            for block in self.demo.blocks.values()
+            if isinstance(block, gr.Radio) and block.label == "Weight precision"
+        )
+
+    def test_both_load_handlers_read_the_radio_last(self):
+        radio = self.radio()
+        for name in ("download_and_load_model", "load_cached_model"):
+            with self.subTest(handler=name):
+                self.assertIs(self.named(name).inputs[-1], radio)
+
+    def test_the_radio_offers_the_three_precisions_and_starts_on_the_saved_one(self):
+        radio = self.radio()
+        self.assertEqual([value for _label, value in radio.choices], list(settings.WEIGHT_PRECISIONS))
+        self.assertEqual(radio.value, settings.current().weight_precision)
+
+    def test_the_radio_is_one_of_the_persisted_settings(self):
+        self.assertIn(self.radio(), self.named("restore_settings").outputs)
+        self.assertEqual(app.PERSISTED_SETTING_NAMES[-1], "weight_precision")
+
+
 class ConversationLibraryTests(unittest.TestCase):
     """What the pane shows is written as it changes and read back on load."""
 
