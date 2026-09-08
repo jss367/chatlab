@@ -1913,7 +1913,9 @@ class MemoryGuardTests(unittest.TestCase):
 
         with self.assertRaises(InsufficientMemoryError) as caught:
             check_memory_for_load("org/mid", 30 * self.GB, 48 * self.GB, 20 * self.GB)
-        self.assertIn("only 20.0 GB is free right now", str(caught.exception))
+        self.assertIn("ChatLab estimates 20.0 GB available", str(caught.exception))
+        self.assertIn("4.0 GB of safety reserve", str(caught.exception))
+        self.assertNotIn("free right now", str(caught.exception))
 
     def test_headroom_is_kept_beside_the_weights(self):
         from model_runtime import InsufficientMemoryError, check_memory_for_load
@@ -2095,12 +2097,7 @@ class MemoryGuardTests(unittest.TestCase):
 
 
 class DarwinAvailableMemoryTests(unittest.TestCase):
-    """What counts as free is what can be handed over without paging.
-
-    ``vm_stat``'s counters overlap and none of them measures the one thing
-    wanted here, so these tests are about never claiming a page twice and
-    never claiming one that needs swap.
-    """
+    """Reclaim file cache at normal pressure, retaining a stricter fallback."""
 
     # A real reading from a 48 GB Mac deep in swap, where the inactive queue
     # is smaller than the machine's anonymous total and so could be all
@@ -2118,11 +2115,18 @@ Anonymous pages:                             1440383.
 """
     DISJOINT = 147787 + 149733 + 73270
 
-    def _available(self, output):
+    def _available(self, output, pressure="2"):
         import model_runtime
 
         saved = model_runtime._run_quietly
-        model_runtime._run_quietly = lambda command: output
+        def run(command):
+            if command == ["vm_stat"]:
+                return output
+            if command == ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"]:
+                return pressure
+            raise AssertionError(f"Unexpected command: {command}")
+
+        model_runtime._run_quietly = run
         try:
             return model_runtime._darwin_available_memory()
         finally:
@@ -2162,11 +2166,76 @@ Anonymous pages:                             1440383.
             self._available(self.VM_STAT),
         )
 
+    def test_normal_pressure_credits_file_cache_without_counting_speculative_twice(self):
+        self.assertEqual(
+            self._available(self.VM_STAT, pressure="1\n"),
+            (147787 + 73270 + 925706) * 16384,
+        )
+
+    def test_a_small_model_on_a_cache_heavy_mac_passes_only_at_normal_pressure(self):
+        from model_runtime import InsufficientMemoryError, check_memory_for_load
+
+        # The user's 48 GB Mac: the old estimate was only 2.1 GB, despite
+        # 9.7 GB of pageable file-backed memory. No model is actually loaded.
+        reading = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free: 3693.
+Pages speculative: 52662.
+Pages purgeable: 79907.
+Pages inactive: 1113319.
+Anonymous pages: 1680799.
+File-backed pages: 638406.
+Pages occupied by compressor: 514962.
+Swapouts: 8624257.
+"""
+        gb = 1024**3
+        check_memory_for_load(
+            "org/small", int(2.8 * gb), 48 * gb,
+            self._available(reading, pressure="1"),
+        )
+        for pressure in ("2", "4", "", "unknown", "0", "8"):
+            with self.subTest(pressure=pressure):
+                with self.assertRaises(InsufficientMemoryError):
+                    check_memory_for_load(
+                        "org/small", int(2.8 * gb), 48 * gb,
+                        self._available(reading, pressure=pressure),
+                    )
+
+    def test_normal_pressure_still_refuses_a_model_that_exceeds_available_memory(self):
+        from model_runtime import InsufficientMemoryError, check_memory_for_load
+
+        with self.assertRaises(InsufficientMemoryError):
+            check_memory_for_load(
+                "org/large", 20 * 1024**3, 48 * 1024**3,
+                self._available(self.VM_STAT, pressure="1"),
+            )
+
+    def test_missing_cache_counters_keep_the_conservative_estimate(self):
+        for label in ("File-backed pages", "Pages speculative"):
+            reading = re.sub(rf"{label}:.*\n", "", self.VM_STAT)
+            with self.subTest(label=label):
+                self.assertEqual(
+                    self._available(reading, pressure="1"), self._available(reading)
+                )
+
+    def test_file_credit_cannot_subtract_from_the_baseline(self):
+        self.assertEqual(
+            self._available(self._swap("File-backed pages", 5), pressure="1"),
+            self.DISJOINT * 16384,
+        )
+
+    def test_normal_pressure_does_not_count_the_inactive_file_floor_twice(self):
+        reading = self._swap("Anonymous pages", 400000)
+        self.assertEqual(
+            self._available(reading, pressure="1"),
+            (147787 + 73270 + 925706) * 16384,
+        )
+
     def test_an_exhausted_machine_answers_zero_rather_than_unknown(self):
         # None means unmeasured, and an unmeasured machine is let through. A
         # machine with nothing left must not read as one of those.
         empty = re.sub(r"(Pages|File-backed pages|Anonymous pages)(.*?):\s*\d+\.", r"\1\2: 0.", self.VM_STAT)
         self.assertEqual(self._available(empty), 0)
+        self.assertEqual(self._available(empty, pressure="1"), 0)
 
     def test_output_without_a_page_size_says_nothing(self):
         self.assertIsNone(self._available("nothing useful here"))

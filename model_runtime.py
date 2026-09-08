@@ -538,38 +538,20 @@ def _run_quietly(command: list[str]) -> str:
 
 
 def _darwin_available_memory() -> int | None:
-    """Memory a load can take without pushing the machine into swap.
+    """Estimate available memory, allowing file-cache reclaim at normal pressure.
 
-    ``vm_stat``'s counters are not a partition, so the arithmetic here is
-    chosen to never claim a page twice and never claim one that needs swap.
-    Three of them are disjoint and count in full:
+    Free, speculative and purgeable pages form the conservative baseline.
+    Under normal macOS pressure, also credit the pageable file-backed total,
+    subtracting speculative pages already counted in that total. This is an
+    estimate: some file pages are active or dirty, so the load guard still
+    keeps its working reserve. Anonymous and compressed pages are not credit.
 
-    - ``Pages free``, which is nobody's.
-    - ``Pages speculative``, the read-ahead cache, its own queue.
-    - ``Pages purgeable``, which the kernel may throw away on demand. These
-      sit inside the active and inactive queues rather than beside them, but
-      purgeable memory is anonymous, so they do not overlap the file-page
-      credit below.
+    With elevated or unknown pressure, use only the baseline plus the floor
+    of file pages in the inactive queue: ``max(0, inactive - anonymous)``.
+    This avoids assuming active file pages can be reclaimed cheaply while
+    the machine is struggling. Swap occupancy alone is not current pressure.
 
-    The inactive queue is the hard one. It mixes file pages, which are
-    reclaimed without touching swap, with dirty anonymous pages, which are
-    reclaimed by writing them out - the storm this figure exists to prevent.
-    Counting it whole is what makes ``memory_pressure`` useless here: it
-    reported 87% of this machine free while 10.6 GB of its 12 GB of swap was
-    in use.
-
-    ``File-backed pages`` cannot bound the file part of that queue, because
-    it counts active file pages too and ``vm_stat`` does not say how many.
-    ``Anonymous pages`` can, from the other side: the queue cannot hold more
-    anonymous pages than the machine has, so at least
-    ``inactive - anonymous`` of it is file pages. That is a floor rather than
-    a ceiling, which is the right direction for a guard - it credits a
-    machine whose inactive queue is mostly cache, and credits nothing when
-    the queue could be all dirty anonymous pages.
-
-    ``None`` means the platform said nothing usable, which the caller treats
-    as "unmeasured" and lets the load through. A machine with genuinely no
-    reclaimable pages therefore has to answer 0, not ``None``.
+    ``None`` means unmeasured; a measured exhausted machine must return 0.
     """
 
     output = _run_quietly(["vm_stat"])
@@ -589,7 +571,16 @@ def _darwin_available_memory() -> int | None:
     total = sum(pages for pages in reclaimable if pages is not None)
 
     inactive, anonymous = count("Pages inactive"), count("Anonymous pages")
-    if inactive is not None and anonymous is not None:
+    files, speculative = count("File-backed pages"), count("Pages speculative")
+    pressure = _run_quietly(
+        ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"]
+    ).strip()
+    # This sysctl exports dispatch flags (normal=1, warning=2, critical=4),
+    # not XNU's internal enum (whose normal value is 0).
+    # https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_memorystatus_notify.c
+    if pressure == "1" and files is not None and speculative is not None:
+        total += max(0, files - speculative)
+    elif inactive is not None and anonymous is not None:
         total += max(0, inactive - anonymous)
     return total * int(size.group(1))
 
@@ -709,15 +700,17 @@ def check_memory_for_load(
     if total is not None and needed > total:
         raise InsufficientMemoryError(
             f"{model_id} needs about {format_memory(estimated_bytes)} of memory plus "
-            f"{format_memory(headroom)} of working room, and {pool} has "
+            f"{format_memory(headroom)} of safety reserve, and {pool} has "
             f"{format_memory(total)} in total. Choose a smaller model."
         )
     if available is not None and needed > available:
         raise InsufficientMemoryError(
             f"{model_id} needs about {format_memory(estimated_bytes)} of memory plus "
-            f"{format_memory(headroom)} of working room, but only "
-            f"{format_memory(available)} is free right now. Close other "
-            "applications and try again."
+            f"{format_memory(headroom)} of safety reserve. ChatLab estimates "
+            f"{format_memory(available)} available within its memory safety limits "
+            "and stopped this load to reduce the risk of heavy paging. "
+            "Wait for memory pressure to fall, close memory-heavy applications, "
+            "or choose a smaller model."
         )
 
 
