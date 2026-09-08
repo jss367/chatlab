@@ -2064,7 +2064,7 @@ class MemoryGuardTests(unittest.TestCase):
         (line,) = [entry for entry in logged.output if "Refused" in entry]
         self.assertIn("org/model", line)
         self.assertIn("8.0 GB estimated", line)
-        self.assertIn("2.0 GB free", line)
+        self.assertIn("2.0 GB estimated available", line)
 
     def test_the_check_reports_the_memory_it_expects_the_weights_to_take(self):
         # The figure a load counts its own progress towards, so the two can

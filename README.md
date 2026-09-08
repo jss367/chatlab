@@ -111,8 +111,8 @@ leaves the allocator alone. The cache a response used is handed back when it
 finishes, so the process returns to the model's own size between requests.
 
 Each load and each response is recorded in the log with the model, the
-estimate, what the device ended up holding and what was free beforehand,
-which is what makes a memory failure readable after the fact.
+estimate, what the device ended up holding and the estimated memory available
+beforehand, which is what makes a memory failure readable after the fact.
 
 What a conversation costs is mostly its key-value cache, which grows with
 every token and is held for as long as the answer runs. How fast it grows is

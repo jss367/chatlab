@@ -669,7 +669,7 @@ def _sum_known(*figures: int | None) -> int | None:
 def offload_pool(
     gpu: tuple[int | None, int | None], host: tuple[int | None, int | None]
 ) -> tuple[int | None, int | None]:
-    """Total and free memory a CUDA load can spread over: the cards plus the host.
+    """Total and estimated available memory across the CUDA cards and host.
 
     ``device_map="auto"`` fills the graphics cards first and places whatever
     is left on the CPU, so a model that outgrows the cards still loads when
@@ -2585,7 +2585,7 @@ class ModelManager:
             # holding when the load gave up rather than what survived cleanup.
             logger.warning(
                 "Load of %s as %s on %s failed: %s estimated, %s held on the "
-                "device, %s free beforehand, device ceiling %s (%s)",
+                "device, %s estimated available beforehand, device ceiling %s (%s)",
                 model_id,
                 str(dtype).replace("torch.", ""),
                 backend,
@@ -2616,7 +2616,7 @@ class ModelManager:
         # a machine that was already full when the load began.
         logger.info(
             "Loaded %s as %s on %s: %s estimated, %s held on the device, "
-            "%s free beforehand, device ceiling %s",
+            "%s estimated available beforehand, device ceiling %s",
             model_id,
             str(dtype).replace("torch.", ""),
             device_name,
@@ -2713,9 +2713,9 @@ class ModelManager:
         """Refuse a load that cannot fit, before any weight is read.
 
         Returns the memory the weights are expected to take, which is also
-        what a load counts its own progress towards, and the free memory it
-        judged that against so the caller can record it. Both are ``None``
-        when the snapshot could not be measured.
+        what a load counts its own progress towards, and the availability
+        estimate it judged that against so the caller can record it. Both
+        are ``None`` when the snapshot could not be measured.
 
         On CUDA the weights fill the graphics cards and ``device_map="auto"``
         places the rest on the CPU, so the cards plus the machine's memory is
@@ -2755,7 +2755,7 @@ class ModelManager:
             # explaining afterwards, and the caller turns it into a status
             # card that the log never sees.
             logger.warning(
-                "Refused %s as %s on %s: %s estimated, %s free of %s in %s",
+                "Refused %s as %s on %s: %s estimated, %s estimated available of %s in %s",
                 model_id,
                 load_dtype,
                 backend,
