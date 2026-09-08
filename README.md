@@ -88,10 +88,15 @@ A model has to fit in memory with room to spare: the weights, the key-value
 cache that grows with every token of a conversation, the app itself, and the
 rest of the system all share it, and on Apple silicon the GPU draws from the
 same pool. Before reading any weights, ChatLab estimates the loaded size from
-the checkpoint and refuses a model that would not leave about 4 GB free,
-saying so in the status card instead of letting the machine page itself into a
-freeze. What counts as free is what macOS can hand over without writing to
-swap, so a machine that looks idle but is already paging is treated as full.
+the checkpoint and requires a 4 GB safety reserve beside the weights.
+On macOS, the available-memory estimate includes reclaimable file cache when
+the system reports normal memory pressure. When pressure is elevated or cannot
+be read, it uses a stricter estimate: free, speculative and purgeable pages,
+plus only the part of the inactive queue known to be file-backed. Anonymous
+and compressed memory are not counted as available. Existing swap usage alone
+does not block a load. These are estimates intended to reduce heavy paging,
+not guarantees that a load will fit; a refusal states ChatLab's safety budget
+rather than claiming the machine has run out of free RAM.
 On CUDA the weights fill the graphics cards first and the rest is placed in
 the machine's own memory, so that check is made against the two together. On
 Apple Metal it also caps what PyTorch may allocate at half the machine's
@@ -108,8 +113,9 @@ leaves the allocator alone. The cache a response used is handed back when it
 finishes, so the process returns to the model's own size between requests.
 
 Each load and each response is recorded in the log with the model, the
-weight precision, the estimate, what the device ended up holding and what was
-free beforehand, which is what makes a memory failure readable after the fact.
+weight precision, the estimate, what the device ended up holding and the
+estimated memory available beforehand, which is what makes a memory failure
+readable after the fact.
 
 When the weights will not fit, **Weight precision** on the Models page is the
 first thing to try. At 4 bits the default 7B model's linear layers shrink from
