@@ -9,6 +9,7 @@ import gradio as gr
 import numpy as np
 
 import app
+from ui import runtime
 import charts
 from conversation import (
     MAIN_BRANCH,
@@ -106,9 +107,9 @@ def select(index):
 
 class ChatFlowTests(unittest.TestCase):
     def setUp(self):
-        self.original = app.MANAGER
-        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
-        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
 
     def last(self, stream):
         frames = list(stream)
@@ -138,7 +139,7 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(final[TRACE]["sampling"]["forced_prefix_tokens"], 1)
 
     def test_literal_reasoning_tags_in_a_prefill_remain_visible(self):
-        app.MANAGER = loaded_manager(
+        runtime.MANAGER = loaded_manager(
             [0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS
         )
         settings = dict(FIXED, assistant_prefill="<think>Hello</think>")
@@ -155,7 +156,7 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(frames[-1][STOP], gr.update(visible=False))
 
     def test_reasoning_is_split_out_of_the_answer(self):
-        app.MANAGER = loaded_manager([0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        runtime.MANAGER = loaded_manager([0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
         final = self.last(app.chat("hi", [], *SETTINGS))[-1]
         reply = final[TURNS][1]
         self.assertEqual(reply["reasoning"], "Hello")
@@ -176,7 +177,7 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(final[STATUS], "Enter a message first.")
 
     def test_no_model_loaded_keeps_the_message(self):
-        app.MANAGER = self.original
+        runtime.MANAGER = self.original
         final = self.last(app.chat("hi", [], *SETTINGS))[-1]
         self.assertEqual(final[PROMPT], "hi")
         self.assertEqual(final[TURNS], [])
@@ -308,7 +309,7 @@ class ChatFlowTests(unittest.TestCase):
     def test_editing_a_user_turn_keeps_history_when_no_model_is_loaded(self):
         """A refused edit must not truncate the conversation it cannot replace."""
 
-        app.MANAGER = self.original  # nothing loaded
+        runtime.MANAGER = self.original  # nothing loaded
         turns = [
             make_turn("user", "one"),
             make_turn("assistant", "first"),
@@ -326,7 +327,7 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(final[STATUS], "Download and load a model first.")
 
     def test_retrying_keeps_history_when_no_model_is_loaded(self):
-        app.MANAGER = self.original
+        runtime.MANAGER = self.original
         turns = [make_turn("user", "one"), make_turn("assistant", "first")]
         final = self.last(app.retry_last("", turns, *SETTINGS))[-1]
         self.assertEqual([turn["content"] for turn in final[TURNS]], ["one", "first"])
@@ -353,7 +354,7 @@ class ChatFlowTests(unittest.TestCase):
             def release_generation(self):  # pragma: no cover - never reached
                 raise AssertionError("released a slot it never held")
 
-        app.MANAGER = Sniped()
+        runtime.MANAGER = Sniped()
         turns = [make_turn("user", "one"), make_turn("assistant", "reply")]
         event = gr.EditData(
             None, {"index": 1, "previous_value": "reply", "value": "fixed"}
@@ -372,7 +373,7 @@ class ChatFlowTests(unittest.TestCase):
         )
         final = self.last(app.edit_message(event, "", turns, *SETTINGS))[-1]
         self.assertEqual([turn["content"] for turn in final[TURNS]], ["one", "fixed"])
-        self.assertFalse(app.MANAGER.busy, "the slot must not leak")
+        self.assertFalse(runtime.MANAGER.busy, "the slot must not leak")
 
     def test_a_cancelled_assistant_edit_releases_the_slot(self):
         turns = [make_turn("user", "one"), make_turn("assistant", "reply")]
@@ -382,7 +383,7 @@ class ChatFlowTests(unittest.TestCase):
         stream = app.edit_message(event, "", turns, *SETTINGS)
         next(stream)
         stream.close()
-        self.assertFalse(app.MANAGER.busy, "GeneratorExit must release the slot")
+        self.assertFalse(runtime.MANAGER.busy, "GeneratorExit must release the slot")
 
     def test_editing_a_reasoning_block_leaves_the_answer_alone(self):
         turns = [make_turn("user", "one"), make_turn("assistant", "answer", "thought")]
@@ -448,7 +449,7 @@ class ChatFlowTests(unittest.TestCase):
                 raise RuntimeError("out of memory")
                 yield  # pragma: no cover - makes this a generator
 
-        app.MANAGER = Exploding()
+        runtime.MANAGER = Exploding()
         final = self.last(app.chat("hi", [], *SETTINGS))[-1]
         self.assertEqual([turn["role"] for turn in final[TURNS]], ["user"])
         self.assertIn("out of memory", final[STATUS])
@@ -461,17 +462,17 @@ class ChatFlowTests(unittest.TestCase):
             yield GenerationUpdate(
                 text="Let me add two and two",
                 metrics=[],
-                load_id=app.MANAGER.load_id,
+                load_id=runtime.MANAGER.load_id,
                 reasoning_prefilled=True,
             )
             yield GenerationUpdate(
                 text="Let me add two and two.</think>Four.",
                 metrics=[],
-                load_id=app.MANAGER.load_id,
+                load_id=runtime.MANAGER.load_id,
                 reasoning_prefilled=True,
             )
 
-        app.MANAGER.generate = thinking
+        runtime.MANAGER.generate = thinking
         frames = self.last(app.chat("hi", [], *SETTINGS))
 
         # frames[0] is the pre-generation snapshot, frames[1] the first update.
@@ -488,10 +489,10 @@ class ChatFlowTests(unittest.TestCase):
     def test_a_plain_reply_never_streams_as_reasoning(self):
         def plain(*_args, **_kwargs):
             yield GenerationUpdate(
-                text="Four.", metrics=[], load_id=app.MANAGER.load_id
+                text="Four.", metrics=[], load_id=runtime.MANAGER.load_id
             )
 
-        app.MANAGER.generate = plain
+        runtime.MANAGER.generate = plain
         final = self.last(app.chat("hi", [], *SETTINGS))[-1]
         self.assertEqual(final[TURNS][1]["reasoning"], "")
         self.assertEqual(final[TURNS][1]["content"], "Four.")
@@ -499,11 +500,11 @@ class ChatFlowTests(unittest.TestCase):
     def test_a_failure_after_some_tokens_keeps_them(self):
         def failing(*_args, **_kwargs):
             yield GenerationUpdate(
-                text="<think>Hmm", metrics=[], load_id=app.MANAGER.load_id
+                text="<think>Hmm", metrics=[], load_id=runtime.MANAGER.load_id
             )
             raise RuntimeError("gpu fell over")
 
-        app.MANAGER.generate = failing
+        runtime.MANAGER.generate = failing
         final = self.last(app.chat("hi", [], *SETTINGS))[-1]
         self.assertEqual([turn["role"] for turn in final[TURNS]], ["user", "assistant"])
         reply = final[TURNS][1]
@@ -680,9 +681,9 @@ class TokenSelectionTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.original = app.MANAGER
-        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
-        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
 
     def respond(self, turns=()):
         """Stream one whole response and return its frames."""
@@ -810,9 +811,9 @@ class AnalysisPanelTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.original = app.MANAGER
-        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
-        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
 
     def respond(self):
         return list(app.chat("hi", [], *SETTINGS))
@@ -858,11 +859,11 @@ class AnalysisPanelTests(unittest.TestCase):
     def test_a_failed_response_is_not_exportable(self):
         def failing(*_args, **_kwargs):
             yield GenerationUpdate(
-                text="Hmm", metrics=[], load_id=app.MANAGER.load_id
+                text="Hmm", metrics=[], load_id=runtime.MANAGER.load_id
             )
             raise RuntimeError("gpu fell over")
 
-        app.MANAGER.generate = failing
+        runtime.MANAGER.generate = failing
         frames = list(app.chat("hi", [], *SETTINGS))
         self.assertEqual(frames[0][TRACE], {})
         for frame in frames[1:]:
@@ -920,9 +921,9 @@ class CancellationTests(unittest.TestCase):
     """What the Stop button does: Gradio closes the running generator."""
 
     def setUp(self):
-        self.original = app.MANAGER
-        app.MANAGER = loaded_manager([2, 3], THINK_PIECES, THINK_EOS)
-        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
 
     def test_closing_mid_stream_releases_the_model_lock(self):
         settings = dict(FIXED, max_new_tokens=8192)
@@ -931,9 +932,9 @@ class CancellationTests(unittest.TestCase):
         next(stream)
         stream.close()
 
-        acquired = app.MANAGER._lock.acquire(blocking=False)
+        acquired = runtime.MANAGER._lock.acquire(blocking=False)
         self.assertTrue(acquired, "the model lock survived cancellation")
-        app.MANAGER._lock.release()
+        runtime.MANAGER._lock.release()
 
     def test_the_partial_response_is_kept(self):
         settings = dict(FIXED, max_new_tokens=8192)
@@ -947,7 +948,7 @@ class CancellationTests(unittest.TestCase):
         self.assertGreater(len(frame[STRIP]), 0)
 
     def test_stopping_inside_a_think_block_closes_the_reasoning(self):
-        app.MANAGER = loaded_manager([0, 2, 3], THINK_PIECES, THINK_EOS)
+        runtime.MANAGER = loaded_manager([0, 2, 3], THINK_PIECES, THINK_EOS)
         settings = dict(FIXED, max_new_tokens=8192)
         stream = app.chat("hi", [], *settings.values())
         next(stream)
@@ -1227,7 +1228,7 @@ class BusyRefusalTests(unittest.TestCase):
     class HeldLock:
         """A generation flag that reads as held but never blocks.
 
-        Really acquiring app.MANAGER._generating would model a running
+        Really acquiring runtime.MANAGER._generating would model a running
         generation more literally, but then deleting a refusal would deadlock
         these tests instead of failing them. Reporting the flag as held and
         every reservation as lost leaves the manager otherwise usable, so a
@@ -1248,12 +1249,12 @@ class BusyRefusalTests(unittest.TestCase):
             raise AssertionError("released a reservation that was never taken")
 
     def setUp(self):
-        self.original = app.MANAGER
-        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
-        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
         # ModelManager.busy reads this flag, so the real property is exercised.
-        app.MANAGER._generating = self.HeldLock()
-        self.assertTrue(app.MANAGER.busy)
+        runtime.MANAGER._generating = self.HeldLock()
+        self.assertTrue(runtime.MANAGER.busy)
 
     def turns(self):
         """The conversation as it looked when the second click was queued."""
@@ -1334,12 +1335,12 @@ class BusyFlagTests(unittest.TestCase):
     """The flag the refusal reads has to follow a real generation."""
 
     def setUp(self):
-        self.original = app.MANAGER
-        app.MANAGER = loaded_manager([2, 3], THINK_PIECES, THINK_EOS)
-        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
 
     def test_an_idle_manager_is_not_busy(self):
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
 
     def streaming(self, message="hi", turns=None):
         """A generation parked on its first frame, closed when the test ends."""
@@ -1361,22 +1362,22 @@ class BusyFlagTests(unittest.TestCase):
         """
 
         stream = self.streaming()
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
         next(stream)
-        self.assertTrue(app.MANAGER.busy, "the first frame left the slot free")
+        self.assertTrue(runtime.MANAGER.busy, "the first frame left the slot free")
 
     def test_the_manager_is_busy_while_streaming(self):
         stream = self.streaming()
         next(stream)
         next(stream)
-        self.assertTrue(app.MANAGER.busy)
+        self.assertTrue(runtime.MANAGER.busy)
         # Stop closes the generator, which unwinds generate_reply() and frees it.
         stream.close()
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
 
     def test_a_finished_generation_leaves_the_manager_free(self):
         list(app.chat("hi", [], *SETTINGS))
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
 
     def test_a_failed_generation_leaves_the_manager_free(self):
         """The reservation outlives the runtime, so its release must too.
@@ -1387,16 +1388,16 @@ class BusyFlagTests(unittest.TestCase):
 
         def failing(*_args, **_kwargs):
             yield GenerationUpdate(
-                text="Hmm", metrics=[], load_id=app.MANAGER.load_id
+                text="Hmm", metrics=[], load_id=runtime.MANAGER.load_id
             )
             raise RuntimeError("gpu fell over")
 
-        app.MANAGER.generate = failing
+        runtime.MANAGER.generate = failing
         stream = app.chat("hi", [], *SETTINGS)
         next(stream)
-        self.assertTrue(app.MANAGER.busy)
+        self.assertTrue(runtime.MANAGER.busy)
         list(stream)
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
 
     def test_cancelling_the_first_frame_frees_the_slot(self):
         """Stop before a single token: the reservation is already outstanding."""
@@ -1404,7 +1405,7 @@ class BusyFlagTests(unittest.TestCase):
         stream = self.streaming()
         next(stream)
         stream.close()
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
 
     def test_a_cancelled_generation_does_not_wedge_the_app(self):
         """The regression to fear: every later Send refused, forever."""
@@ -1416,16 +1417,16 @@ class BusyFlagTests(unittest.TestCase):
         final = list(app.chat("again", [], *SETTINGS))[-1]
         self.assertNotEqual(final[STATUS], app.BUSY_STATUS)
         self.assertEqual([turn["role"] for turn in final[TURNS]], ["user", "assistant"])
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
 
     def test_cancelling_still_releases_the_model_lock(self):
         stream = self.streaming()
         next(stream)
         stream.close()
 
-        acquired = app.MANAGER._lock.acquire(blocking=False)
+        acquired = runtime.MANAGER._lock.acquire(blocking=False)
         self.assertTrue(acquired, "the model lock survived cancellation")
-        app.MANAGER._lock.release()
+        runtime.MANAGER._lock.release()
 
     def test_a_direct_generate_call_reserves_the_slot_itself(self):
         """Nothing above generate() has reserved anything here.
@@ -1436,7 +1437,7 @@ class BusyFlagTests(unittest.TestCase):
         generate_reply() normally holds on its behalf.
         """
 
-        stream = app.MANAGER.generate(
+        stream = runtime.MANAGER.generate(
             [{"role": "user", "content": "hi"}],
             temperature=0.0,
             top_p=1.0,
@@ -1446,9 +1447,9 @@ class BusyFlagTests(unittest.TestCase):
         )
         self.addCleanup(stream.close)
         next(stream)
-        self.assertTrue(app.MANAGER.busy)
+        self.assertTrue(runtime.MANAGER.busy)
         stream.close()
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
 
 
 class FirstFrameWindowTests(unittest.TestCase):
@@ -1464,9 +1465,9 @@ class FirstFrameWindowTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.original = app.MANAGER
-        app.MANAGER = loaded_manager([2, 3], THINK_PIECES, THINK_EOS)
-        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
 
     def stale(self):
         """The conversation as it looked before the running generation began."""
@@ -1546,11 +1547,11 @@ class EmptyResponseTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.original = app.MANAGER
-        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.original = runtime.MANAGER
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
 
     def use(self, script, pieces=THINK_PIECES, eos_id=THINK_EOS):
-        app.MANAGER = loaded_manager(script, pieces, eos_id)
+        runtime.MANAGER = loaded_manager(script, pieces, eos_id)
 
     def reply(self, turns=None, message="hi"):
         frames = list(app.chat(message, turns if turns is not None else [], *SETTINGS))
@@ -1632,13 +1633,13 @@ class IdleRefusalButtonTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.original = app.MANAGER
-        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
-        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
 
     def unloaded(self):
-        app.MANAGER = self.original
-        self.assertFalse(app.MANAGER.loaded)
+        runtime.MANAGER = self.original
+        self.assertFalse(runtime.MANAGER.loaded)
 
     def assert_idle_refusal(self, stream, status):
         frames = list(stream)
@@ -1760,9 +1761,9 @@ class BranchFromTokenTests(unittest.TestCase):
     """Replay a response up to a token, swap in an alternative, and continue."""
 
     def setUp(self):
-        self.original = app.MANAGER
-        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
-        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
 
     def respond(self):
         return list(app.chat("hi", [], *SETTINGS))
@@ -1783,11 +1784,11 @@ class BranchFromTokenTests(unittest.TestCase):
             self.assertEqual(frame[BRANCH_SOURCE], gr.skip())
         self.assertEqual(
             frames[-1][BRANCH_SOURCE],
-            (frames[-1][METRICS][0], app.MANAGER.load_id),
+            (frames[-1][METRICS][0], runtime.MANAGER.load_id),
         )
 
     def test_a_load_finishing_before_the_final_snapshot_cannot_claim_the_tokens(self):
-        manager = app.MANAGER
+        manager = runtime.MANAGER
         real_generate = manager.generate
         producing_load_id = manager.load_id
 
@@ -1874,11 +1875,11 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertIn("Branched at token 2", last[STATUS])
         self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 2)
         self.assertEqual(
-            last[BRANCH_SOURCE], (last[METRICS][0], app.MANAGER.load_id)
+            last[BRANCH_SOURCE], (last[METRICS][0], runtime.MANAGER.load_id)
         )
 
     def test_branching_preserves_literal_assistant_prefill_tags(self):
-        app.MANAGER = loaded_manager(
+        runtime.MANAGER = loaded_manager(
             [0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS
         )
         settings = dict(FIXED, assistant_prefill="<think>Hello</think>")
@@ -1908,7 +1909,7 @@ class BranchFromTokenTests(unittest.TestCase):
         )
 
     def test_a_replacement_inside_the_prefill_is_not_literal(self):
-        app.MANAGER = loaded_manager(
+        runtime.MANAGER = loaded_manager(
             [0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS
         )
         settings = dict(FIXED, assistant_prefill="<think>Hello</think>")
@@ -1980,7 +1981,7 @@ class BranchFromTokenTests(unittest.TestCase):
     def test_branching_is_refused_while_a_response_is_generating(self):
         final = self.respond()[-1]
         _detail, pick = self.pick_alternative(final)
-        self.assertTrue(app.MANAGER.reserve_generation())
+        self.assertTrue(runtime.MANAGER.reserve_generation())
         try:
             frames = list(
                 app.branch_from(
@@ -1988,7 +1989,7 @@ class BranchFromTokenTests(unittest.TestCase):
                 )
             )
         finally:
-            app.MANAGER.release_generation()
+            runtime.MANAGER.release_generation()
         self.assertEqual(frames[0][STATUS], app.BUSY_STATUS)
         self.assertEqual(frames[0][TURNS], gr.skip())
 
@@ -1999,7 +2000,7 @@ class BranchFromTokenTests(unittest.TestCase):
         frame = next(stream)
         stream.close()
         producing_load_id = frame[CONTEXT_IDS][2]
-        app.MANAGER.load_count += 1
+        runtime.MANAGER.load_count += 1
         *_rest, source = app.stop_generation(
             frame[TURNS], frame[METRICS], frame[CONTEXT_IDS]
         )
@@ -2040,7 +2041,7 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 2)
         self.assertTrue(last[TURNS][-1]["content"].startswith("HelloHello"))
         self.assertEqual(
-            last[BRANCH_SOURCE], (last[METRICS][0], app.MANAGER.load_id)
+            last[BRANCH_SOURCE], (last[METRICS][0], runtime.MANAGER.load_id)
         )
 
     def test_typed_text_may_span_several_tokens(self):
@@ -2062,7 +2063,7 @@ class BranchFromTokenTests(unittest.TestCase):
     def test_whitespace_before_a_typed_terminal_stop_is_kept(self):
         pieces = ["Hello", " ", "<eos>"]
         eos = pieces.index("<eos>")
-        app.MANAGER = loaded_manager([0, eos], pieces, eos)
+        runtime.MANAGER = loaded_manager([0, eos], pieces, eos)
         final = self.respond()[-1]
 
         last = self.branch_text(final, " <eos>", strip_index=0)[-1]
@@ -2109,7 +2110,7 @@ class BranchFromTokenTests(unittest.TestCase):
         final = self.respond()[-1]
         # Loading leaves the old response strip on screen, but its token IDs
         # belong to the tokenizer that produced it, even for a same-ID reload.
-        app.MANAGER.load_count += 1
+        runtime.MANAGER.load_count += 1
         frames = self.branch_text(final, "Hello")
         self.assertEqual(len(frames), 1)
         self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
@@ -2125,7 +2126,7 @@ class BranchFromTokenTests(unittest.TestCase):
         call, which is exactly that window.
         """
 
-        manager = app.MANAGER
+        manager = runtime.MANAGER
         real = getattr(manager, method_name)
 
         def reloaded_first(*args, **kwargs):
@@ -2140,7 +2141,7 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertEqual(last[TURNS], final[TURNS])
         self.assertEqual(last[SEND], gr.update(visible=True))
         self.assertEqual(last[STOP], gr.update(visible=False))
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
 
     def test_a_load_landing_before_the_encoding_leaves_the_conversation_alone(
         self,
@@ -2175,23 +2176,23 @@ class BranchFromTokenTests(unittest.TestCase):
     def record_encodings(self, seen):
         """Wrap encode_replacement() to note whether the slot is held at the call."""
 
-        real = app.MANAGER.encode_replacement
+        real = runtime.MANAGER.encode_replacement
 
         def observe(*args, **kwargs):
-            seen.append(app.MANAGER.busy)
+            seen.append(runtime.MANAGER.busy)
             return real(*args, **kwargs)
 
-        app.MANAGER.encode_replacement = observe
+        runtime.MANAGER.encode_replacement = observe
 
     def test_typed_text_is_refused_while_a_response_is_generating(self):
         final = self.respond()[-1]
         encodings = []
         self.record_encodings(encodings)
-        self.assertTrue(app.MANAGER.reserve_generation())
+        self.assertTrue(runtime.MANAGER.reserve_generation())
         try:
             frames = self.branch_text(final, "Hello")
         finally:
-            app.MANAGER.release_generation()
+            runtime.MANAGER.release_generation()
         self.assertEqual(len(frames), 1)
         self.assertEqual(frames[0][STATUS], app.BUSY_STATUS)
         self.assertEqual(frames[0][TURNS], gr.skip())
@@ -2216,7 +2217,7 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertEqual(encodings, [True])
         self.assertNotEqual(frames[-1][STATUS], app.BUSY_STATUS)
         self.assertTrue(frames[-1][TURNS][-1]["content"].startswith("Hello"))
-        self.assertFalse(app.MANAGER.busy, "the slot must not leak")
+        self.assertFalse(runtime.MANAGER.busy, "the slot must not leak")
 
     def test_typed_text_against_a_strip_replaced_as_the_slot_is_taken_is_refused(
         self,
@@ -2229,7 +2230,7 @@ class BranchFromTokenTests(unittest.TestCase):
         """
 
         final = self.respond()[-1]
-        manager = app.MANAGER
+        manager = runtime.MANAGER
         real = manager.reserve_generation
 
         def replace_strips_first():
@@ -2260,9 +2261,9 @@ class BranchFromTokenTests(unittest.TestCase):
         )
         first = next(stream)
         self.assertIn("Generating", first[STATUS])
-        self.assertTrue(app.MANAGER.busy)
+        self.assertTrue(runtime.MANAGER.busy)
         stream.close()
-        self.assertFalse(app.MANAGER.busy, "GeneratorExit must release the slot")
+        self.assertFalse(runtime.MANAGER.busy, "GeneratorExit must release the slot")
 
     def test_a_load_landing_before_a_picked_replay_leaves_the_conversation_alone(
         self,
@@ -2279,7 +2280,7 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertBranchRefusedByReload(frames, final)
 
     def test_typed_text_keeps_literal_prefill_tags_before_it(self):
-        app.MANAGER = loaded_manager(
+        runtime.MANAGER = loaded_manager(
             [0, 2, 1, 3, THINK_EOS], THINK_PIECES, THINK_EOS
         )
         settings = dict(FIXED, assistant_prefill="<think>Hello</think>")
@@ -2316,8 +2317,8 @@ class BranchFromTokenTests(unittest.TestCase):
             "<eos>",
         ]
         eos = pieces.index("<eos>")
-        app.MANAGER = loaded_manager([0, 0, 0, 0, 4, eos], pieces, eos)
-        app.MANAGER.tokenizer = ChatTemplateTokenizer(
+        runtime.MANAGER = loaded_manager([0, 0, 0, 0, 4, eos], pieces, eos)
+        runtime.MANAGER.tokenizer = ChatTemplateTokenizer(
             "\nassistant: <think>", pieces=pieces, eos_id=eos
         )
         settings = dict(FIXED, assistant_prefill="Prefill")
@@ -2343,7 +2344,7 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertEqual(len(frames), 1)
         self.assertEqual(frames[0][STATUS], app.BRANCH_REASONING_CLOSE)
         self.assertEqual(frames[0][TURNS], original[TURNS])
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
 
     def test_typed_branch_after_the_reasoning_close_stays_in_default_context(self):
         original, settings = self.reasoning_prefill_response()
@@ -2351,8 +2352,8 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertTrue(all(m.get("automatic_reasoning_close") for m in metrics[:3]))
         self.assertNotIn("automatic_reasoning_close", metrics[3])
         selected = app.remember_selection(original[METRICS], select(3))
-        app.MANAGER.model.script = [0, 0, 0, 0, 6, 7]
-        app.MANAGER.model.step = 0
+        runtime.MANAGER.model.script = [0, 0, 0, 0, 6, 7]
+        runtime.MANAGER.model.step = 0
 
         branched = list(
             app.branch_with_text(
@@ -2379,7 +2380,7 @@ class BranchFromTokenTests(unittest.TestCase):
     def marker_response(self):
         pieces = ["Hello", " world", "<think>", "</think>", "<thi", "<eos>"]
         eos = pieces.index("<eos>")
-        app.MANAGER = loaded_manager([0, 1, eos], pieces, eos)
+        runtime.MANAGER = loaded_manager([0, 1, eos], pieces, eos)
         return self.respond()[-1]
 
     def test_typed_reasoning_markers_are_literal_replacement_text(self):
@@ -2412,8 +2413,8 @@ class BranchFromTokenTests(unittest.TestCase):
         final = self.marker_response()
         # The branch prefill has three input positions (prompt, kept token,
         # replacement). Its next distribution emits a real reasoning block.
-        app.MANAGER.model.script = [0, 0, 2, 0, 3, 1, 5]
-        app.MANAGER.model.step = 0
+        runtime.MANAGER.model.script = [0, 0, 2, 0, 3, 1, 5]
+        runtime.MANAGER.model.step = 0
         last = self.branch_text(final, "</think>")[-1]
         reply = last[TURNS][-1]
 
@@ -2445,7 +2446,7 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertEqual(last[TURNS][-1]["content"], "Hello<think>Hello</think>")
         self.assertEqual(last[TURNS][-1]["reasoning"], "")
         metrics = metrics_of(last[METRICS])
-        self.assertEqual(metrics[-1]["token_id"], app.MANAGER.tokenizer.eos_token_id)
+        self.assertEqual(metrics[-1]["token_id"], runtime.MANAGER.tokenizer.eos_token_id)
         self.assertTrue(all(metric.get("literal_text") for metric in metrics[1:]))
 
     def sentencepiece_response(self):
@@ -2453,8 +2454,8 @@ class BranchFromTokenTests(unittest.TestCase):
 
         pieces = ["\u2581Hello", "\u2581world", "world", "\u2581", "!", "<eos>"]
         eos = pieces.index("<eos>")
-        app.MANAGER = loaded_manager([0, 4, eos], pieces, eos)
-        app.MANAGER.tokenizer = SentencePieceTokenizer(pieces, eos)
+        runtime.MANAGER = loaded_manager([0, 4, eos], pieces, eos)
+        runtime.MANAGER.tokenizer = SentencePieceTokenizer(pieces, eos)
         final = self.respond()[-1]
         self.assertEqual(final[TURNS][-1]["content"], "Hello!")
         return final
@@ -2478,9 +2479,9 @@ class BranchFromTokenTests(unittest.TestCase):
     def test_a_hidden_kept_special_does_not_erase_a_typed_sentencepiece_space(self):
         pieces = ["\u2581<pad>", "\u2581world", "world", "\u2581", "!", "<eos>"]
         pad, space_world, _world, space, bang, eos = range(len(pieces))
-        app.MANAGER = loaded_manager([pad, bang, eos], pieces, eos)
-        app.MANAGER.tokenizer = SentencePieceTokenizer(pieces, eos)
-        app.MANAGER.tokenizer.all_special_ids = [pad, eos]
+        runtime.MANAGER = loaded_manager([pad, bang, eos], pieces, eos)
+        runtime.MANAGER.tokenizer = SentencePieceTokenizer(pieces, eos)
+        runtime.MANAGER.tokenizer.all_special_ids = [pad, eos]
         final = self.respond()[-1]
         self.assertEqual(final[TURNS][-1]["content"], "!")
 
@@ -2496,13 +2497,13 @@ class BranchFromTokenTests(unittest.TestCase):
         self, final, expected_status, repeats=15
     ):
         calls = []
-        real_generate = app.MANAGER.generate
+        real_generate = runtime.MANAGER.generate
 
         def observe(*args, **kwargs):
             calls.append(True)
             return real_generate(*args, **kwargs)
 
-        app.MANAGER.generate = observe
+        runtime.MANAGER.generate = observe
         frames = self.branch_text(final, "Hello" * repeats)
 
         self.assertEqual(
@@ -2511,11 +2512,11 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertIn(expected_status, frames[0][STATUS])
         self.assertEqual(frames[0][TURNS], final[TURNS])
         self.assertEqual(calls, [])
-        self.assertFalse(app.MANAGER.busy, "a refusal must give the slot back")
+        self.assertFalse(runtime.MANAGER.busy, "a refusal must give the slot back")
 
     def test_a_replacement_past_the_model_window_preserves_the_old_response(self):
         final = self.respond()[-1]
-        app.MANAGER.model.config = type(
+        runtime.MANAGER.model.config = type(
             "Config", (), {"max_position_embeddings": 16}
         )()
 
@@ -2523,24 +2524,24 @@ class BranchFromTokenTests(unittest.TestCase):
 
     def test_a_replacement_that_leaves_too_little_room_preserves_the_old_response(self):
         final = self.respond()[-1]
-        app.MANAGER.model.config = type(
+        runtime.MANAGER.model.config = type(
             "Config", (), {"max_position_embeddings": 16}
         )()
         calls = []
-        real_generate = app.MANAGER.generate
+        real_generate = runtime.MANAGER.generate
 
         def observe(*args, **kwargs):
             calls.append(True)
             return real_generate(*args, **kwargs)
 
-        app.MANAGER.generate = observe
+        runtime.MANAGER.generate = observe
         frames = self.branch_text(final, "Hello" * 8)
 
         self.assertEqual(len(frames), 1)
         self.assertIn("need 17 positions", frames[0][STATUS])
         self.assertEqual(frames[0][TURNS], final[TURNS])
         self.assertEqual(calls, [])
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
 
     def test_a_replacement_past_the_application_cap_preserves_the_old_response(self):
         final = self.respond()[-1]
@@ -2563,8 +2564,8 @@ class BranchFromTokenTests(unittest.TestCase):
             "<eos>",
         ]
         eos = pieces.index("<eos>")
-        app.MANAGER = loaded_manager([1, 2, 5, eos], pieces, eos)
-        app.MANAGER.tokenizer = SentencePieceTokenizer(pieces, eos)
+        runtime.MANAGER = loaded_manager([1, 2, 5, eos], pieces, eos)
+        runtime.MANAGER.tokenizer = SentencePieceTokenizer(pieces, eos)
         final = self.respond()[-1]
         self.assertEqual(final[TURNS][-1]["content"], "Hello!")
 
@@ -2598,9 +2599,9 @@ class ForkTests(unittest.TestCase):
     """Copy the transcript into a second fork and move between them."""
 
     def setUp(self):
-        self.original = app.MANAGER
-        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
-        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
 
     def turns(self):
         return [
@@ -2788,9 +2789,9 @@ class ConversationListTests(unittest.TestCase):
     """The pane lists every conversation with its model and token count."""
 
     def setUp(self):
-        self.original = app.MANAGER
-        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
-        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
 
     def test_a_reply_records_the_model_and_its_token_counts(self):
         frames = list(app.chat("hi", [], *SETTINGS))
@@ -2819,8 +2820,8 @@ class ConversationListTests(unittest.TestCase):
         self.assertNotIn("model", opening[TURNS][-1])
         # What load() leaves behind, minus the weights: the fakes stand in for
         # both models.
-        app.MANAGER.model_id = "other/model"
-        app.MANAGER.load_count += 1
+        runtime.MANAGER.model_id = "other/model"
+        runtime.MANAGER.load_count += 1
         rest = list(frames)
         reply = rest[-1][TURNS][-1]
         self.assertEqual(reply["model"], "other/model")
@@ -2831,7 +2832,7 @@ class ConversationListTests(unittest.TestCase):
             if isinstance(frame[CONTEXT_IDS], tuple) and frame[CONTEXT_IDS][1]
         )
         self.assertEqual(load, "other/model#1")
-        self.assertEqual(load, app.MANAGER.load_id)
+        self.assertEqual(load, runtime.MANAGER.load_id)
 
     def test_the_counts_grow_with_the_stream(self):
         # A reply stopped part way keeps the count it had reached, since every
@@ -3175,9 +3176,9 @@ class LayerInspectionTests(unittest.TestCase):
     """The logit lens and attention panel behind the Inspect layers button."""
 
     def setUp(self):
-        self.original = app.MANAGER
-        app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
-        self.addCleanup(setattr, app, "MANAGER", self.original)
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
         self.calls = []
         self.load_ids = []
 
@@ -3201,7 +3202,7 @@ class LayerInspectionTests(unittest.TestCase):
                 decided_at=0,
             )
 
-        app.MANAGER.inspect = fake_inspect
+        runtime.MANAGER.inspect = fake_inspect
 
     def inspect(self, *args):
         """The last frame of the inspection handler, which streams like Send."""
@@ -3232,7 +3233,7 @@ class LayerInspectionTests(unittest.TestCase):
         stamp, ids, load = frames[1][CONTEXT_IDS]
         self.assertEqual(stamp, frames[1][METRICS][0])
         self.assertEqual(ids, [0])
-        self.assertEqual(load, app.MANAGER.load_id)
+        self.assertEqual(load, runtime.MANAGER.load_id)
         # Later frames leave the ids alone: the prompt never changes mid-stream.
         self.assertEqual(frames[-1][CONTEXT_IDS], gr.skip())
 
@@ -3241,7 +3242,7 @@ class LayerInspectionTests(unittest.TestCase):
         stamp, ids, load = result[10]
         self.assertEqual(stamp, result[1][0])
         self.assertEqual(ids, [])
-        self.assertEqual(load, app.MANAGER.load_id)
+        self.assertEqual(load, runtime.MANAGER.load_id)
 
     def test_a_response_token_is_inspected_in_its_full_sequence(self):
         final = self.finished()
@@ -3253,7 +3254,7 @@ class LayerInspectionTests(unittest.TestCase):
         )
         self.assertEqual(self.calls, [([0, 2, 3, THINK_EOS], 2, 1)])
         # The load id goes along so the runtime can check it under its lock.
-        self.assertEqual(self.load_ids, [app.MANAGER.load_id])
+        self.assertEqual(self.load_ids, [runtime.MANAGER.load_id])
         self.assertIn("logit-lens", lens)
         self.assertIn("attention-view", attention)
         self.assertEqual(slider, gr.update(maximum=2, value=0))
@@ -3262,13 +3263,13 @@ class LayerInspectionTests(unittest.TestCase):
 
     def test_an_output_only_lens_says_why_in_the_status(self):
         final = self.finished()
-        real_inspect = app.MANAGER.inspect
+        real_inspect = runtime.MANAGER.inspect
 
         def output_only(sequence, index, *, context_count=0, load_id=None):
             insight = real_inspect(sequence, index, context_count=context_count)
             return replace(insight, layers=insight.layers[-1:], decided_at=None)
 
-        app.MANAGER.inspect = output_only
+        runtime.MANAGER.inspect = output_only
         target = app.remember_inspect_target("response")(final[METRICS], select(1))
         lens, *_rest, status = self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
@@ -3314,7 +3315,7 @@ class LayerInspectionTests(unittest.TestCase):
         def refuse(*_args, **_kwargs):
             raise RuntimeError("out of memory")
 
-        app.MANAGER.inspect = refuse
+        runtime.MANAGER.inspect = refuse
         target = app.remember_inspect_target("response")(final[METRICS], select(0))
         lens, *_rest, status = self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
@@ -3352,13 +3353,13 @@ class LayerInspectionTests(unittest.TestCase):
     def test_a_running_generation_is_not_interrupted(self):
         final = self.finished()
         target = app.remember_inspect_target("response")(final[METRICS], select(0))
-        self.assertTrue(app.MANAGER.reserve_generation())
+        self.assertTrue(runtime.MANAGER.reserve_generation())
         try:
             *_rest, status = self.inspect(
                 target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
             )
         finally:
-            app.MANAGER.release_generation()
+            runtime.MANAGER.release_generation()
         self.assertEqual(status, app.INSPECT_BUSY)
         self.assertEqual(self.calls, [])
 
@@ -3368,24 +3369,24 @@ class LayerInspectionTests(unittest.TestCase):
         seen = []
 
         def observe(sequence, index, *, context_count=0, load_id=None):
-            seen.append(app.MANAGER.busy)
+            seen.append(runtime.MANAGER.busy)
             return self.fake(sequence, index, context_count=context_count)
 
-        self.fake, app.MANAGER.inspect = app.MANAGER.inspect, observe
+        self.fake, runtime.MANAGER.inspect = runtime.MANAGER.inspect, observe
         self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
         self.assertEqual(seen, [True])
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
 
         def fail(*_args, **_kwargs):
             raise RuntimeError("boom")
 
-        app.MANAGER.inspect = fail
+        runtime.MANAGER.inspect = fail
         self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
 
     def test_the_slot_is_held_until_the_readout_has_been_delivered(self):
         final = self.finished()
@@ -3397,9 +3398,9 @@ class LayerInspectionTests(unittest.TestCase):
         # Gradio resumes the generator only once the browser has this frame,
         # so a Send arriving in the meantime still finds the slot taken.
         self.assertIn("logit-lens", first[0])
-        self.assertTrue(app.MANAGER.busy)
+        self.assertTrue(runtime.MANAGER.busy)
         self.assertEqual(list(frames), [])
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
 
     def test_a_readout_delivered_after_the_strips_were_replaced_is_taken_down(self):
         final = self.finished()
@@ -3418,12 +3419,12 @@ class LayerInspectionTests(unittest.TestCase):
         self.assertIsNone(insight)
         self.assertEqual(status, app.INSPECT_GONE)
         self.assertEqual(list(frames), [])
-        self.assertFalse(app.MANAGER.busy)
+        self.assertFalse(runtime.MANAGER.busy)
 
     def test_a_strip_replaced_during_the_pass_is_not_described(self):
         final = self.finished()
         target = app.remember_inspect_target("response")(final[METRICS], select(0))
-        original = app.MANAGER.inspect
+        original = runtime.MANAGER.inspect
 
         def replace_strips(sequence, index, *, context_count=0, load_id=None):
             # Clear, Undo and friends do not take the generation slot; they
@@ -3431,7 +3432,7 @@ class LayerInspectionTests(unittest.TestCase):
             app.new_metrics_generation()
             return original(sequence, index, context_count=context_count)
 
-        app.MANAGER.inspect = replace_strips
+        runtime.MANAGER.inspect = replace_strips
         lens, *_rest, insight, status = self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
@@ -3444,7 +3445,7 @@ class LayerInspectionTests(unittest.TestCase):
         target = app.remember_inspect_target("response")(final[METRICS], select(0))
         # Loading leaves the strips on screen. Re-downloading the same model
         # ID can bring newer weights, so even a same-ID reload is a new load.
-        app.MANAGER.load_count += 1
+        runtime.MANAGER.load_count += 1
         *_rest, status = self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )
@@ -3458,7 +3459,7 @@ class LayerInspectionTests(unittest.TestCase):
         def reloaded(*_args, **_kwargs):
             raise ModelChanged("reloaded")
 
-        app.MANAGER.inspect = reloaded
+        runtime.MANAGER.inspect = reloaded
         lens, *_rest, status = self.inspect(
             target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
         )

@@ -1,0 +1,421 @@
+"""The conversations pane: the list, forks, saving and loading, and the library on disk."""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from uuid import uuid4
+
+import gradio as gr
+from gradio.utils import get_upload_folder
+
+import charts
+import library
+from conversation import (
+    CHAT_PREFIX,
+    MAIN_BRANCH,
+    branch_choices,
+    copy_forks,
+    copy_turns,
+    display_messages,
+    fork_at,
+    from_json,
+    locate,
+    next_branch_name,
+    next_fork_name,
+    to_json,
+)
+from token_metrics import (
+    DEFAULT_COLOR_SCALE,
+)
+from trace_export import write_private_text
+from ui.common import (
+    NO_TOKEN_SELECTED,
+    failure_status,
+    finalize_partial,
+    send_stop_buttons,
+)
+from ui.panel import (
+    cleared_strips,
+    event_index,
+)
+
+
+def conversation_list_update(forks: dict, turns: list[dict] | None):
+    """Redraw the list, with the active branch's turns read from ``turns``."""
+
+    return gr.update(choices=branch_choices(forks, turns), value=forks["active"])
+
+
+def refresh_conversation_list(turns: list[dict] | None, forks: dict | None):
+    """Redraw the list from state, and save what it shows.
+
+    Sending, retrying, editing, undoing and loading all write the conversation
+    state without knowing about the list, and a streaming reply rewrites it on
+    every frame, which is where the token count and model tag move. Rather than
+    thread the list through every one of those handlers, this listens to the
+    state itself: Gradio fires a State's change event only when the stored
+    value's hash differs, so it runs exactly when the labels could have changed.
+
+    The same moment is when the conversations are worth saving, so the file
+    on disk is rewritten here too. It is small - text and a few counts per
+    turn, no measurements - so a write per streaming frame costs nothing the
+    frame itself does not already cost.
+    """
+
+    forks = copy_forks(forks)
+    library.write(library.as_seen(forks, turns))
+    return conversation_list_update(forks, turns)
+
+
+def remember_forks(turns: list[dict] | None, forks: dict | None) -> None:
+    """Save the pane when the set of branches changes.
+
+    Forking, starting a new chat, switching, deleting and clearing all write
+    ``forks``, and most of them write the conversation too; but a switch
+    between two empty branches, or a new chat started from an empty one,
+    leaves the conversation state's hash where it was and the listener above
+    silent. This one listens to the forks themselves.
+    """
+
+    library.write(library.as_seen(forks, turns))
+
+
+def restore_conversations():
+    """Bring the saved conversations back when the page loads.
+
+    A reload rebuilds the page from empty state, and this is what puts the
+    conversations pane and the active branch back the way they were. The
+    token panel is not restored: the measurements described one response as
+    one model produced it, and the page has no model loaded yet.
+    """
+
+    forks = library.read()
+    if forks is None:
+        return (gr.skip(),) * 4
+    turns = copy_turns(forks["branches"][forks["active"]])
+    messages, _ = display_messages(turns)
+    return messages, turns, forks, conversation_list_update(forks, turns)
+
+
+def remember_message(turns: list[dict] | None, event: gr.SelectData):
+    """Keep the chatbot message a click landed on, for the Fork button.
+
+    The content rides along so a click that has gone stale - the conversation
+    was edited or extended underneath it - is recognized when Fork is pressed,
+    instead of forking at whatever message now sits at that index.
+    """
+
+    try:
+        index = event_index(event)
+    except (TypeError, ValueError):
+        return None
+    if locate(turns, index) is None:
+        return None
+    return {"index": index, "content": event.value}
+
+
+def selected_turn(turns: list[dict], selected: dict | None) -> tuple[int, str] | None:
+    """The turn a remembered chatbot click still points at, if it still does."""
+
+    if not selected:
+        return None
+    found = locate(turns, selected.get("index"))
+    if found is None:
+        return None
+    messages, _ = display_messages(turns)
+    shown = messages[int(selected["index"])]["content"]
+    remembered = selected.get("content")
+    if isinstance(remembered, str) and remembered.strip() != str(shown).strip():
+        return None
+    return found
+
+
+def panel_reset(scale_name: str):
+    """Empty the token panel for a conversation that just changed underneath it."""
+
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
+        scale_name
+    )
+    return (
+        strip,
+        metrics,
+        NO_TOKEN_SELECTED,
+        [],
+        prompt_strip,
+        prompt_metrics,
+        prompt_note,
+        charts.summary_tiles({}),
+        charts.EMPTY_CHART,
+        {},
+    )
+
+
+PANEL_KEPT = (gr.skip(),) * 10
+
+
+def fork_refused(turns: list[dict], forks: dict, status: str):
+    """Change nothing but the picker, which goes back on the active fork.
+
+    Like every fork handler this runs after cancelling any generation (see the
+    ``cancels`` on its listeners), so it still has to restore the Send button
+    and close out the turn the cancelled generator left behind.
+    """
+
+    turns = copy_turns(turns)
+    finalize_partial(turns)
+    messages, _ = display_messages(turns)
+    return (
+        gr.skip(),
+        messages,
+        turns,
+        gr.skip(),
+        conversation_list_update(forks, turns),
+        status,
+        *send_stop_buttons(False),
+        *PANEL_KEPT,
+    )
+
+
+def fork_conversation(
+    turns: list[dict] | None,
+    forks: dict | None,
+    selected: dict | None,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
+    """Copy the conversation into a new fork and switch to it.
+
+    With a message selected, the copy stops there (see ``fork_at``); otherwise
+    the whole transcript is copied. A whole copy keeps the token panel, since
+    the response it describes is still the last one on screen; a truncated
+    copy loses it, the response having gone with the cut.
+
+    Forking cancels a running generation, as Undo, Clear and Load do, so the
+    turn that generator left behind is closed out here before it is copied.
+    """
+
+    forks = copy_forks(forks)
+    turns = copy_turns(turns)
+    finalize_partial(turns)
+    forks["branches"][forks["active"]] = copy_turns(turns)
+    found = selected_turn(turns, selected)
+    forked, box_text = fork_at(turns, found)
+    name = next_fork_name(forks)
+    forks["branches"][name] = copy_turns(forked)
+    forks["active"] = name
+    messages, _ = display_messages(forked)
+
+    truncated = len(forked) < len(turns)
+    if truncated:
+        status = (
+            f"Forked at message {found[0] + 1} into {name}. "
+            "Send a message to take it somewhere else."
+        )
+    else:
+        status = (
+            f"Copied the conversation into {name}. Edit or undo a message, or "
+            "send a new one, to take it somewhere else."
+        )
+    return (
+        gr.skip() if box_text is None else box_text,
+        messages,
+        forked,
+        forks,
+        conversation_list_update(forks, forked),
+        status,
+        *send_stop_buttons(False),
+        *(panel_reset(scale_name) if truncated else PANEL_KEPT),
+    )
+
+
+def switch_fork(
+    name: str | None,
+    turns: list[dict] | None,
+    forks: dict | None,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
+    """Put the conversation on screen away and bring another fork out."""
+
+    forks = copy_forks(forks)
+    if name not in forks["branches"]:
+        return fork_refused(turns, forks, "That fork no longer exists.")
+    if name == forks["active"]:
+        return fork_refused(turns, forks, f"Already on {name}.")
+
+    turns = copy_turns(turns)
+    finalize_partial(turns)
+    forks["branches"][forks["active"]] = turns
+    forks["active"] = name
+    target = copy_turns(forks["branches"][name])
+    messages, _ = display_messages(target)
+    count = len(target)
+    return (
+        gr.skip(),
+        messages,
+        target,
+        forks,
+        conversation_list_update(forks, target),
+        f"Switched to {name} ({count} message{'s' if count != 1 else ''}).",
+        *send_stop_buttons(False),
+        *panel_reset(scale_name),
+    )
+
+
+def delete_fork(
+    turns: list[dict] | None,
+    forks: dict | None,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
+    """Drop the active fork and go back to the main conversation."""
+
+    forks = copy_forks(forks)
+    name = forks["active"]
+    if name == MAIN_BRANCH:
+        return fork_refused(
+            turns,
+            forks,
+            "The main conversation cannot be deleted. Clear all empties every conversation.",
+        )
+
+    del forks["branches"][name]
+    forks["active"] = MAIN_BRANCH
+    target = copy_turns(forks["branches"].setdefault(MAIN_BRANCH, []))
+    messages, _ = display_messages(target)
+    return (
+        gr.skip(),
+        messages,
+        target,
+        forks,
+        conversation_list_update(forks, target),
+        f"Deleted {name}. Back on {MAIN_BRANCH}.",
+        *send_stop_buttons(False),
+        *panel_reset(scale_name),
+    )
+
+
+def new_conversation(
+    turns: list[dict] | None,
+    forks: dict | None,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+):
+    """Put the conversation on screen away and start an empty one.
+
+    Unlike Fork, nothing is copied: the new chat begins with no turns, so the
+    next message is measured against the system prompt alone. The message box
+    is left as it is, since whatever is typed there is likely meant for the
+    new chat. Starting one cancels a running generation, as every branch
+    change does, so the turn that generator left behind is closed out before
+    it is put away.
+    """
+
+    forks = copy_forks(forks)
+    turns = copy_turns(turns)
+    finalize_partial(turns)
+    forks["branches"][forks["active"]] = turns
+    name = next_branch_name(forks, CHAT_PREFIX)
+    forks["branches"][name] = []
+    forks["active"] = name
+    return (
+        gr.skip(),
+        [],
+        [],
+        forks,
+        conversation_list_update(forks, []),
+        f"Started {name}. Send a message to begin it.",
+        *send_stop_buttons(False),
+        *panel_reset(scale_name),
+    )
+
+
+def save_conversation(turns, system_prompt):
+    if not turns:
+        return gr.update(value=None, visible=False), "There is nothing to save yet."
+
+    # Gradio only serves files it created or was told to allow, so the saved
+    # conversation has to live inside its upload folder.
+    directory = Path(get_upload_folder()) / "chatlab-conversations"
+    directory.mkdir(parents=True, exist_ok=True)
+    # The timestamp only resolves to the second, and every session shares this
+    # upload folder, so a random suffix keeps two saves from landing on the same
+    # path and silently overwriting each other's download.
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    path = directory / f"conversation-{stamp}-{uuid4().hex[:8]}.json"
+    # A transcript is the reader's own writing, and the upload folder is shared:
+    # on Linux it is /tmp/gradio, which every account on the machine can read.
+    # write_private_text() makes the file owner-only before it holds a word of
+    # the conversation, so there is no moment for another account to open it.
+    # write_trace_export() writes its export the same way.
+    write_private_text(path, to_json(turns, system_prompt=system_prompt))
+    return (
+        gr.update(value=str(path), visible=True),
+        f"Saved {len(turns)} message{'s' if len(turns) != 1 else ''}.",
+    )
+
+
+def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE):
+    """Replace the conversation with a saved one.
+
+    A failed load keeps the conversation already on screen, so a bad file
+    cannot wipe it, and leaves the token panel describing it alone. Loading
+    cancels any generation still running, so the buttons are restored here for
+    the same reason Clear restores them: a cancelled generator never reaches
+    its final yield. For the same reason the kept conversation has to be
+    finalized like Stop does - the cancelled generator left its last turn with
+    a pending reasoning block, which would spin for the rest of the session,
+    or empty if the cancel landed before the first token.
+    """
+
+    def keep_current(status):
+        """Return the conversation the cancelled generator left behind."""
+
+        kept = copy_turns(turns)
+        finalize_partial(kept)
+        messages, _ = display_messages(kept)
+        return (
+            messages,
+            kept,
+            gr.skip(),
+            gr.skip(),
+            gr.skip(),
+            status,
+            gr.skip(),
+            gr.skip(),
+            *send_stop_buttons(False),
+            *(gr.skip(),) * 6,
+        )
+
+    if not file_path:
+        return keep_current("No file chosen.")
+    try:
+        loaded, system_prompt = from_json(Path(file_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return keep_current(failure_status("Could not load that file", str(error)))
+
+    # A successful load replaces the conversation wholesale, so whatever the
+    # cancelled generator left behind goes with it and needs no finalizing.
+    turns = loaded
+    messages, _ = display_messages(turns)
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
+        scale_name
+    )
+    # The selected token described a response from the conversation being
+    # replaced, so it goes with it, exactly as Clear and Undo reset it. The
+    # charts and the export measured that response too, and a loaded
+    # conversation has no measurements of its own to put in their place.
+    return (
+        messages,
+        turns,
+        system_prompt,
+        strip,
+        metrics,
+        f"Loaded {len(turns)} message{'s' if len(turns) != 1 else ''}.",
+        NO_TOKEN_SELECTED,
+        [],
+        *send_stop_buttons(False),
+        prompt_strip,
+        prompt_metrics,
+        prompt_note,
+        charts.summary_tiles({}),
+        charts.EMPTY_CHART,
+        {},
+    )
