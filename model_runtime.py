@@ -2261,6 +2261,33 @@ class LoadProgress:
         return LoadSnapshot(bytes_done, total, steps_done, steps_total)
 
 
+def _cache_can_crop(cache, held: int) -> bool:
+    """Whether ``cache``, holding ``held`` tokens, can be cut back and still be right.
+
+    A full-attention layer keeps every key and value, so cutting the tail off
+    leaves exactly the prefix. A sliding-window layer keeps only its last
+    ``sliding_window`` entries: once the sequence has reached the window,
+    earlier entries are gone, and no cut can bring them back for a position
+    that would have attended to them. Transformers refuses the crop outright
+    in that case. Such a cache is rebuilt from the start instead. A cache
+    that cannot say which layers slide, or how wide the window is, is not
+    trusted either.
+    """
+
+    if not hasattr(cache, "crop"):
+        return False
+    sliding = getattr(cache, "is_sliding", None) or []
+    layers = getattr(cache, "layers", None) or []
+    for index, is_sliding in enumerate(sliding):
+        if not is_sliding:
+            continue
+        layer = layers[index] if index < len(layers) else None
+        window = getattr(layer, "sliding_window", None)
+        if not isinstance(window, int) or held >= window:
+            return False
+    return True
+
+
 class ModelManager:
     """Own the single in-memory model used by the local application."""
 
@@ -2842,7 +2869,7 @@ class ModelManager:
                 load_id != self.load_id
                 or cache is None
                 or ids[:shared] != needed[:shared]
-                or (len(ids) > len(needed) and not hasattr(cache, "crop"))
+                or (len(ids) > len(needed) and not _cache_can_crop(cache, len(ids)))
             ):
                 kept = None
 
