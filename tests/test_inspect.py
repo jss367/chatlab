@@ -16,7 +16,12 @@ class FakeConfig:
 
 
 class FakeCache:
-    """A key-value cache that only remembers how many tokens it holds."""
+    """A key-value cache that only remembers how many tokens it holds.
+
+    ``crop`` follows ``DynamicCache.crop`` in Transformers 4.57 through 5.x:
+    a negative count removes that many tokens, and a positive one is the
+    older "length to keep" form, a no-op when the cache is already shorter.
+    """
 
     def __init__(self):
         self.length = 0
@@ -24,7 +29,11 @@ class FakeCache:
 
     def crop(self, tokens_to_remove: int) -> None:
         self.crops.append(tokens_to_remove)
-        self.length -= tokens_to_remove
+        if tokens_to_remove > 0:
+            if tokens_to_remove >= self.length:
+                return
+            tokens_to_remove = self.length - tokens_to_remove
+        self.length -= abs(tokens_to_remove)
 
 
 class FakeLensModel(torch.nn.Module):
@@ -332,7 +341,10 @@ class InspectTests(unittest.TestCase):
         manager.inspect(ids, 4)
 
         self.assertEqual(manager.model.fed, [1])
-        self.assertEqual(manager._inspect_cache[2].crops, [1])
+        # The cache held the four tokens the first click read and wrote; the
+        # second needs the three before the predicting one, so one comes off.
+        self.assertEqual(manager._inspect_cache[2].crops, [-1])
+        self.assertEqual(manager._inspect_cache[2].length, 4)
 
     def test_an_earlier_click_crops_the_cache_instead_of_rebuilding_it(self):
         manager = lens_manager([1, 2, 3, 4, 5, 6, 7])
@@ -345,8 +357,11 @@ class InspectTests(unittest.TestCase):
         manager.inspect(ids, 2)
 
         self.assertEqual(manager.model.fed, [1])
-        self.assertEqual(cache.crops, [5])
+        # Six tokens held, one needed before the predicting token: five off,
+        # then the predicting token is read into the cache.
+        self.assertEqual(cache.crops, [-5])
         self.assertEqual(manager._inspect_cache[1], ids[:2])
+        self.assertEqual(cache.length, 2)
 
     def test_a_different_sequence_rebuilds_the_cache(self):
         manager = lens_manager([1, 2, 3, 4, 5])

@@ -2841,7 +2841,10 @@ class ModelManager:
         else:
             _, ids, cache = kept
             if len(ids) > len(needed):
-                cache.crop(len(ids) - len(needed))
+                # A negative count removes that many tokens from the end. A
+                # positive one is the older "length to keep" form, which
+                # Transformers 5.x warns about and 5.18 drops.
+                cache.crop(-(len(ids) - len(needed)))
                 ids = ids[: len(needed)]
 
         if len(ids) == len(needed):
