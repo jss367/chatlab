@@ -16,7 +16,10 @@ did, a save is merged into the file one branch at a time: a branch only the
 file knows stays, and where both hold one the copy that changed more
 recently wins. A branch a page deleted stays deleted, and the file remembers
 the deletion so a page still holding the branch does not put it back - see
-:func:`merge`.
+:func:`merge`. Within one process the whole read-merge-replace is done under
+a lock, so two handlers saving at once cannot each merge into the same old
+copy and the second replace the first's work; two processes on one file are
+not protected against each other.
 
 Where it lives::
 
@@ -33,7 +36,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+from contextlib import suppress
 from pathlib import Path
+from uuid import uuid4
 
 from conversation import (
     MAIN_BRANCH,
@@ -51,6 +57,12 @@ LIBRARY_PATH_ENV = "CHATLAB_LIBRARY_PATH"
 XDG_DATA_ENV = "XDG_DATA_HOME"
 LIBRARY_DIRECTORY = "chatlab"
 LIBRARY_FILENAME = "conversations.json"
+
+# Held across the whole of write(): read the file, merge, stage, replace. The
+# two listeners in app.py that save both run on Gradio's worker threads, and
+# without this each could merge into the same old copy of the file and the
+# later replace would drop what the earlier had merged in.
+_WRITE_LOCK = threading.Lock()
 
 
 def library_path() -> Path:
@@ -238,17 +250,22 @@ def write(forks: dict | None, path: Path | None = None) -> Path | None:
     """
 
     target = path or library_path()
-    text = dump(merge(forks, read(target)))
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
+    with _WRITE_LOCK:
+        text = dump(merge(forks, read(target)))
         # Into a sibling first and then over the old file in one rename, so
-        # the file on disk is always a complete one. The sibling carries
-        # this process's id, so two instances writing at once do not tread
-        # on each other's half-written copy.
-        staging = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-        write_private_text(staging, text)
-        os.replace(staging, target)
-    except OSError as error:
-        logger.warning("Could not save the conversations to %s: %s", target, error)
-        return None
+        # the file on disk is always a complete one. The sibling's name is
+        # unique to this write, so two writes - from this process or
+        # another - never stage into, or rename away, each other's copy.
+        staging = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            write_private_text(staging, text)
+            os.replace(staging, target)
+        except OSError as error:
+            logger.warning("Could not save the conversations to %s: %s", target, error)
+            # Whatever of the staged copy got as far as disk is not left
+            # beside the file; the failure may have been before any of it did.
+            with suppress(OSError):
+                staging.unlink()
+            return None
     return target

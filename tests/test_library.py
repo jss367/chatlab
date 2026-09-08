@@ -2,6 +2,7 @@ import json
 import os
 import stat
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -118,6 +119,15 @@ class RoundTripTests(unittest.TestCase):
 
         with self.assertLogs(library.logger, level="WARNING"):
             self.assertIsNone(library.write(new_forks(), blocked / "conversations.json"))
+
+    def test_a_replace_that_fails_leaves_no_staging_file_behind(self):
+        library.write(new_forks(), self.path)
+
+        with mock.patch("library.os.replace", side_effect=OSError("no")):
+            with self.assertLogs(library.logger, level="WARNING"):
+                self.assertIsNone(library.write(new_forks(), self.path))
+
+        self.assertEqual([entry.name for entry in self.path.parent.iterdir()], [self.path.name])
 
     def test_an_unknown_active_branch_falls_back_to_the_first(self):
         restored = library.parse(
@@ -308,6 +318,37 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(raw["branches"][0]["updated"], EARLIER)
         self.assertEqual(raw["forgotten"], {"Fork 1": LATER})
         self.assertEqual(library.read(self.path)["updated"], {MAIN_BRANCH: EARLIER, "Fork 1": LATER})
+
+    def test_two_threads_saving_at_once_keep_each_others_branches(self):
+        # Two listeners save from Gradio's worker threads at the same moment,
+        # each with a different branch changed. Every read-merge-replace must
+        # run whole, or the later replace drops what the earlier merged in.
+        rounds = 40
+        barrier = threading.Barrier(2)
+        failures = []
+
+        def saver(name: str) -> None:
+            mine = stamped(MAIN_BRANCH, Main="hi", **{name: f"{name} 0"})
+            for round_number in range(rounds):
+                put_branch(mine, name, [make_turn("user", f"{name} {round_number}")])
+                barrier.wait()
+                if library.write(mine, self.path) is None:
+                    failures.append(name)
+
+        threads = [threading.Thread(target=saver, args=(name,)) for name in ("Chat 2", "Fork 1")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(failures, [])
+        saved = library.read(self.path)
+        self.assertEqual(set(saved["branches"]), {MAIN_BRANCH, "Chat 2", "Fork 1"})
+        self.assertEqual(
+            first_messages(saved),
+            {MAIN_BRANCH: "hi", "Chat 2": f"Chat 2 {rounds - 1}", "Fork 1": f"Fork 1 {rounds - 1}"},
+        )
+        self.assertEqual([entry.name for entry in self.path.parent.iterdir()], [self.path.name])
 
     def test_a_bad_stamp_or_forgotten_list_is_refused(self):
         with self.assertRaises(ValueError):
