@@ -7,7 +7,10 @@ from pathlib import Path
 from unittest import mock
 
 import library
-from conversation import MAIN_BRANCH, make_turn, new_forks
+from conversation import MAIN_BRANCH, drop_branch, make_turn, new_forks, put_branch
+
+EARLIER = "2026-09-01T10:00:00.000000+00:00"
+LATER = "2026-09-01T11:00:00.000000+00:00"
 
 
 def reply(content: str, model: str = "org/model", prompt_tokens: int = 10) -> dict:
@@ -173,9 +176,155 @@ class AsSeenTests(unittest.TestCase):
         # A copy, not a view: the state must not be mutated by saving it.
         self.assertEqual(forks["branches"]["Fork 1"][0]["content"], "stale")
         self.assertEqual(len(forks["branches"]["Fork 1"]), 1)
+        # The branch on screen changed, so it is stamped; the other is not.
+        self.assertEqual(list(seen["updated"]), ["Fork 1"])
+
+    def test_an_unchanged_active_branch_keeps_its_stamp(self):
+        turns = [make_turn("user", "same")]
+        forks = {"active": MAIN_BRANCH, "branches": {MAIN_BRANCH: turns}, "updated": {MAIN_BRANCH: EARLIER}}
+
+        seen = library.as_seen(forks, [make_turn("user", "same")])
+
+        self.assertEqual(seen["updated"], {MAIN_BRANCH: EARLIER})
 
     def test_nothing_at_all_is_the_empty_main_conversation(self):
         self.assertEqual(library.as_seen(None, None), new_forks())
+
+
+def stamped(active: str, **branches) -> dict:
+    """Forks whose every branch is stamped ``EARLIER``; ``branches`` maps names to first messages."""
+
+    return {
+        "active": active,
+        "branches": {name: [make_turn("user", text)] for name, text in branches.items()},
+        "updated": {name: EARLIER for name in branches},
+    }
+
+
+def first_messages(forks: dict) -> dict:
+    return {name: turns[0]["content"] if turns else None for name, turns in forks["branches"].items()}
+
+
+class MergeTests(unittest.TestCase):
+    """Two pages saving to one file keep each other's work.
+
+    Each page holds the pane as it was when it loaded, so a save from one
+    must not replace what the other has saved since. The stamps decide.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "conversations.json"
+
+    def test_a_branch_this_page_never_saw_survives_its_save(self):
+        # The other page started Chat 2 after this one loaded.
+        library.write(stamped(MAIN_BRANCH, Main="hi", **{"Chat 2": "other"}), self.path)
+        mine = stamped(MAIN_BRANCH, Main="hi")
+        mine["updated"][MAIN_BRANCH] = LATER
+
+        library.write(mine, self.path)
+
+        saved = library.read(self.path)
+        self.assertEqual(list(saved["branches"]), [MAIN_BRANCH, "Chat 2"])
+        self.assertEqual(saved["branches"]["Chat 2"][0]["content"], "other")
+        self.assertEqual(saved["updated"]["Chat 2"], EARLIER)
+
+    def test_the_newer_copy_of_a_branch_wins_either_way(self):
+        library.write(stamped(MAIN_BRANCH, Main="theirs"), self.path)
+
+        mine = stamped(MAIN_BRANCH, Main="mine")
+        mine["updated"][MAIN_BRANCH] = LATER
+        library.write(mine, self.path)
+        self.assertEqual(first_messages(library.read(self.path)), {MAIN_BRANCH: "mine"})
+
+        stale = stamped(MAIN_BRANCH, Main="stale")
+        library.write(stale, self.path)
+        self.assertEqual(first_messages(library.read(self.path)), {MAIN_BRANCH: "mine"})
+
+    def test_a_copy_with_no_stamp_loses_to_a_dated_one(self):
+        # A page that never touched the branch cannot claim it.
+        library.write(stamped(MAIN_BRANCH, Main="dated"), self.path)
+        mine = {"active": MAIN_BRANCH, "branches": {MAIN_BRANCH: [make_turn("user", "undated")]}}
+
+        library.write(mine, self.path)
+
+        self.assertEqual(first_messages(library.read(self.path)), {MAIN_BRANCH: "dated"})
+
+    def test_a_deleted_branch_is_not_brought_back(self):
+        both = stamped(MAIN_BRANCH, Main="hi", **{"Fork 1": "gone"})
+        library.write(both, self.path)
+
+        mine = dict(both, branches=dict(both["branches"]), updated=dict(both["updated"]))
+        drop_branch(mine, "Fork 1")
+        library.write(mine, self.path)
+        self.assertEqual(list(library.read(self.path)["branches"]), [MAIN_BRANCH])
+
+        # The other page still holds Fork 1 as it was, and saves.
+        library.write(both, self.path)
+        saved = library.read(self.path)
+        self.assertEqual(list(saved["branches"]), [MAIN_BRANCH])
+        # The deletion is remembered in the file for the next such save.
+        self.assertIn("Fork 1", json.loads(self.path.read_text())["forgotten"])
+        self.assertEqual(saved["updated"]["Fork 1"], mine["updated"]["Fork 1"])
+
+    def test_a_branch_changed_after_its_deletion_comes_back(self):
+        both = stamped(MAIN_BRANCH, Main="hi", **{"Fork 1": "gone"})
+        library.write(both, self.path)
+        mine = dict(both, branches=dict(both["branches"]), updated=dict(both["updated"]))
+        drop_branch(mine, "Fork 1")
+        library.write(mine, self.path)
+
+        theirs = dict(both, branches=dict(both["branches"]), updated=dict(both["updated"]))
+        put_branch(theirs, "Fork 1", [make_turn("user", "revived")])
+        library.write(theirs, self.path)
+
+        saved = library.read(self.path)
+        self.assertEqual(saved["branches"]["Fork 1"][0]["content"], "revived")
+        self.assertNotIn("Fork 1", json.loads(self.path.read_text())["forgotten"])
+
+    def test_the_order_is_this_pages_then_the_files(self):
+        library.write(stamped("Chat 2", Main="hi", **{"Chat 2": "b", "Fork 1": "c"}), self.path)
+        mine = stamped("Fork 3", Main="hi", **{"Fork 3": "d"})
+
+        library.write(mine, self.path)
+
+        saved = library.read(self.path)
+        self.assertEqual(list(saved["branches"]), [MAIN_BRANCH, "Fork 3", "Chat 2", "Fork 1"])
+        self.assertEqual(saved["active"], "Fork 3")
+
+    def test_a_first_save_needs_no_file(self):
+        mine = stamped(MAIN_BRANCH, Main="hi")
+        self.assertEqual(library.merge(mine, None), mine)
+        library.write(mine, self.path)
+        self.assertEqual(first_messages(library.read(self.path)), {MAIN_BRANCH: "hi"})
+
+    def test_stamps_and_deletions_round_trip_through_the_file(self):
+        forks = stamped(MAIN_BRANCH, Main="hi")
+        forks["updated"]["Fork 1"] = LATER
+        library.write(forks, self.path)
+
+        raw = json.loads(self.path.read_text())
+        self.assertEqual(raw["branches"][0]["updated"], EARLIER)
+        self.assertEqual(raw["forgotten"], {"Fork 1": LATER})
+        self.assertEqual(library.read(self.path)["updated"], {MAIN_BRANCH: EARLIER, "Fork 1": LATER})
+
+    def test_a_bad_stamp_or_forgotten_list_is_refused(self):
+        with self.assertRaises(ValueError):
+            library.parse(
+                json.dumps(
+                    {
+                        "format": library.LIBRARY_FORMAT,
+                        "branches": [{"name": "A", "turns": [], "updated": 5}],
+                    }
+                )
+            )
+        with self.assertRaises(ValueError):
+            library.parse(
+                json.dumps(
+                    {"format": library.LIBRARY_FORMAT, "branches": [], "forgotten": ["A"]}
+                )
+            )
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ guessing.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
@@ -241,7 +242,16 @@ def model_messages(
 
 
 def new_forks() -> dict:
-    return {"active": MAIN_BRANCH, "branches": {MAIN_BRANCH: []}}
+    """The pane with nothing in it: the empty main conversation, never yet saved.
+
+    ``updated`` holds, per branch name, when this page last changed that
+    branch, as :func:`branch_stamp` writes it. A name in it with no branch
+    under ``branches`` is one this page deleted, and when. Both are what lets
+    two pages writing the same file keep each other's work - see
+    ``library.merge``.
+    """
+
+    return {"active": MAIN_BRANCH, "branches": {MAIN_BRANCH: []}, "updated": {}}
 
 
 def copy_forks(forks: dict | None) -> dict:
@@ -252,7 +262,40 @@ def copy_forks(forks: dict | None) -> dict:
             name: copy_turns(turns) for name, turns in forks.get("branches", {}).items()
         }
         or {MAIN_BRANCH: []},
+        "updated": dict(forks.get("updated") or {}),
     }
+
+
+def branch_stamp() -> str:
+    """Now, as the ``updated`` entries spell it.
+
+    UTC, always with microseconds, so that two stamps compare as strings the
+    way they compare as times.
+    """
+
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def put_branch(forks: dict, name: str, turns: list[dict] | None) -> None:
+    """Store ``turns`` as branch ``name``, and stamp it if that changes what is saved.
+
+    A branch put back exactly as it was - the conversation on screen written
+    into the pane on the way to another branch, say - keeps the stamp it had,
+    so a copy of it that another page has changed since still wins.
+    """
+
+    turns = copy_turns(turns)
+    before = forks["branches"].get(name)
+    if before is None or turn_entries(before) != turn_entries(turns):
+        forks["updated"][name] = branch_stamp()
+    forks["branches"][name] = turns
+
+
+def drop_branch(forks: dict, name: str) -> None:
+    """Remove branch ``name`` and record when, so no other page's copy brings it back."""
+
+    del forks["branches"][name]
+    forks["updated"][name] = branch_stamp()
 
 
 def next_branch_name(forks: dict, prefix: str) -> str:

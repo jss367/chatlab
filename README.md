@@ -229,7 +229,13 @@ the active conversation and every other branch - is written to one file as it
 changes, a streaming reply included, and read back when the page loads, so a
 browser reload, a restart or a crash brings it back where it was. A reply
 that was still streaming when the page went away is kept as far as it got.
-The file is:
+Two windows on the same file - two tabs, or a reload beside the tab it
+replaced - do not write over each other: each save is merged into the file
+one conversation at a time, a conversation only the file knows stays, and
+where both windows have one the more recent change wins. Deleting a
+conversation in one window removes it from the file even while the other
+still shows it. There is no live sync between windows: each shows the pane as
+it was when it loaded, and a reload brings it up to date. The file is:
 
 ```
 ~/.local/share/chatlab/conversations.json

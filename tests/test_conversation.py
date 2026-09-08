@@ -8,10 +8,12 @@ from conversation import (
     TITLE_LIMIT,
     branch_choices,
     branch_label,
+    branch_stamp,
     branch_title,
     copy_forks,
     describe_branch,
     display_messages,
+    drop_branch,
     forget_measurements,
     fork_at,
     from_json,
@@ -22,6 +24,7 @@ from conversation import (
     new_forks,
     next_branch_name,
     next_fork_name,
+    put_branch,
     short_model_name,
     split_reasoning,
     to_json,
@@ -264,6 +267,43 @@ class ForkTests(unittest.TestCase):
 
     def test_copying_nothing_gives_a_fresh_set(self):
         self.assertEqual(copy_forks(None), new_forks())
+
+    def test_putting_a_branch_stamps_it_only_when_what_is_saved_changes(self):
+        forks = new_forks()
+        put_branch(forks, MAIN_BRANCH, self.turns())
+        first = forks["updated"][MAIN_BRANCH]
+
+        # The same turns again, with a measurement the file does not keep.
+        again = self.turns()
+        again[0]["surprise"] = 0.5
+        put_branch(forks, MAIN_BRANCH, again)
+        self.assertEqual(forks["updated"][MAIN_BRANCH], first)
+
+        put_branch(forks, MAIN_BRANCH, self.turns()[:1])
+        self.assertGreater(forks["updated"][MAIN_BRANCH], first)
+        self.assertEqual(len(forks["branches"][MAIN_BRANCH]), 1)
+
+    def test_a_new_branch_is_stamped_and_copied(self):
+        forks = new_forks()
+        turns = self.turns()
+        put_branch(forks, "Fork 1", turns)
+        turns[0]["content"] = "changed"
+        self.assertEqual(forks["branches"]["Fork 1"][0]["content"], "one")
+        self.assertIn("Fork 1", forks["updated"])
+
+    def test_dropping_a_branch_leaves_the_time_it_went(self):
+        forks = new_forks()
+        put_branch(forks, "Fork 1", [])
+        made = forks["updated"]["Fork 1"]
+        drop_branch(forks, "Fork 1")
+        self.assertEqual(list(forks["branches"]), [MAIN_BRANCH])
+        self.assertGreater(forks["updated"]["Fork 1"], made)
+
+    def test_the_stamp_orders_as_a_string(self):
+        first = branch_stamp()
+        second = branch_stamp()
+        self.assertGreaterEqual(second, first)
+        self.assertTrue(first.endswith("+00:00"))
 
     def test_no_selection_copies_the_whole_conversation(self):
         turns = self.turns()

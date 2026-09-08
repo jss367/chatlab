@@ -2729,10 +2729,21 @@ class ForkTests(unittest.TestCase):
     def test_clear_resets_the_forks(self):
         result = app.clear_chat()
         self.assertEqual(len(result), CLEAR_OUTPUTS)
-        self.assertEqual(result[-3], new_forks())
+        self.assertEqual(result[-3]["active"], MAIN_BRANCH)
+        self.assertEqual(result[-3]["branches"], {MAIN_BRANCH: []})
         self.assertEqual(names_of(result[-2]), [MAIN_BRANCH])
         # And closes the confirmation that asked for it.
         self.assertEqual(result[-1], gr.update(visible=False))
+
+    def test_clear_marks_every_branch_it_knew_as_gone(self):
+        forked = app.fork_conversation(self.turns(), new_forks(), None)
+        result = app.clear_chat(app.DEFAULT_COLOR_SCALE, forked[FORK_STATE])
+        forks = result[-3]
+        # The main conversation is emptied now and Fork 1 deleted now, so a
+        # save merges as a change to each rather than as a stale copy.
+        self.assertEqual(forks["branches"], {MAIN_BRANCH: []})
+        self.assertEqual(set(forks["updated"]), {MAIN_BRANCH, "Fork 1"})
+        self.assertGreater(forks["updated"]["Fork 1"], forked[FORK_STATE]["updated"]["Fork 1"])
 
     def test_a_forked_conversation_can_be_continued(self):
         forked = app.fork_conversation(self.turns(), new_forks(), None)

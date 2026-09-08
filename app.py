@@ -25,9 +25,11 @@ from conversation import (
     MAIN_BRANCH,
     THINK_CLOSE,
     branch_choices,
+    branch_stamp,
     copy_forks,
     copy_turns,
     display_messages,
+    drop_branch,
     forget_measurements,
     fork_at,
     from_json,
@@ -38,6 +40,7 @@ from conversation import (
     new_forks,
     next_branch_name,
     next_fork_name,
+    put_branch,
     split_reasoning,
     to_json,
     user_index_at_or_before,
@@ -2888,7 +2891,7 @@ def hide_clear_confirm():
     return gr.update(visible=False)
 
 
-def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
+def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE, forks: dict | None = None):
     """Empty everything the conversation owns.
 
     Clear cancels a running generation (see ``cancels`` on its listener), and a
@@ -2897,12 +2900,20 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
 
     Reached from the confirmation panel alone, which this closes on its way
     out; the Clear button itself only opens that panel.
+
+    Every branch this page knew of is marked as changed now - the main one
+    emptied, the rest deleted - so the saved file lets go of them rather than
+    handing them back on the next save. A branch another page added since
+    this one loaded was not in the question Clear asked, and is left to it.
     """
 
     strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
         scale_name
     )
+    known = copy_forks(forks)["branches"]
     forks = new_forks()
+    stamp = branch_stamp()
+    forks["updated"] = {name: stamp for name in (MAIN_BRANCH, *known)}
     return (
         [],
         [],
@@ -2951,8 +2962,8 @@ def refresh_conversation_list(turns: list[dict] | None, forks: dict | None):
 
     The same moment is when the conversations are worth saving, so the file
     on disk is rewritten here too. It is small - text and a few counts per
-    turn, no measurements - so a write per streaming frame costs nothing the
-    frame itself does not already cost.
+    turn, no measurements - so reading and rewriting it once per streaming
+    frame costs nothing the frame itself does not already cost.
     """
 
     forks = copy_forks(forks)
@@ -3092,11 +3103,11 @@ def fork_conversation(
     forks = copy_forks(forks)
     turns = copy_turns(turns)
     finalize_partial(turns)
-    forks["branches"][forks["active"]] = copy_turns(turns)
+    put_branch(forks, forks["active"], turns)
     found = selected_turn(turns, selected)
     forked, box_text = fork_at(turns, found)
     name = next_fork_name(forks)
-    forks["branches"][name] = copy_turns(forked)
+    put_branch(forks, name, forked)
     forks["active"] = name
     messages, _ = display_messages(forked)
 
@@ -3139,7 +3150,7 @@ def switch_fork(
 
     turns = copy_turns(turns)
     finalize_partial(turns)
-    forks["branches"][forks["active"]] = turns
+    put_branch(forks, forks["active"], turns)
     forks["active"] = name
     target = copy_turns(forks["branches"][name])
     messages, _ = display_messages(target)
@@ -3172,7 +3183,7 @@ def delete_fork(
             "The main conversation cannot be deleted. Clear all empties every conversation.",
         )
 
-    del forks["branches"][name]
+    drop_branch(forks, name)
     forks["active"] = MAIN_BRANCH
     target = copy_turns(forks["branches"].setdefault(MAIN_BRANCH, []))
     messages, _ = display_messages(target)
@@ -3206,9 +3217,9 @@ def new_conversation(
     forks = copy_forks(forks)
     turns = copy_turns(turns)
     finalize_partial(turns)
-    forks["branches"][forks["active"]] = turns
+    put_branch(forks, forks["active"], turns)
     name = next_branch_name(forks, CHAT_PREFIX)
-    forks["branches"][name] = []
+    put_branch(forks, name, [])
     forks["active"] = name
     return (
         gr.skip(),
@@ -5122,7 +5133,7 @@ def build_app() -> gr.Blocks:
         conversation_list.input(hide_clear_confirm, None, clear_confirm)
         confirm_clear_button.click(
             clear_chat,
-            inputs=color_scale,
+            inputs=[color_scale, forks_state],
             outputs=[
                 chatbot,
                 conversation_state,
