@@ -885,22 +885,61 @@ def _read_config(snapshot: Path | None) -> tuple[str | None, str | None]:
     )
 
 
+# Where a config spells its hidden width when not as ``hidden_size``: GPT-2
+# and its descendants, MPT and Falcon, Bloom. Transformers' own config classes
+# resolve these, and are asked first; the list is the fallback for a config
+# they cannot load.
+HIDDEN_SIZE_ALIASES = ("hidden_size", "n_embd", "d_model", "hidden_dim", "model_dim")
+
+
+def _embedding_params_from(config: Mapping[str, Any]) -> int | None:
+    """Parameters in the embedding and output matrices, from a config's fields, or ``None``."""
+
+    vocab = config.get("vocab_size")
+    hidden = next(
+        (config[name] for name in HIDDEN_SIZE_ALIASES if isinstance(config.get(name), int)),
+        None,
+    )
+    if not isinstance(vocab, int) or hidden is None or vocab <= 0 or hidden <= 0:
+        return None
+    tied = config.get("tie_word_embeddings", False) is True
+    return vocab * hidden * (1 if tied else 2)
+
+
 def _embedding_params(snapshot: Path | None) -> int | None:
-    """Parameters in the embedding and output matrices, from the config, or ``None``."""
+    """Parameters in the embedding and output matrices, or ``None`` when the config will not say.
+
+    The quantizer leaves these matrices in half precision, so the estimate a
+    quantized load is checked against needs their size. Transformers' config
+    class for the architecture is asked first, since it knows the field the
+    width is stored under; the raw file, read under the common aliases, is
+    the fallback for an architecture it cannot load.
+    """
 
     if snapshot is None:
         return None
+    try:
+        from transformers import AutoConfig
+
+        loaded = AutoConfig.from_pretrained(snapshot, local_files_only=True)
+        params = _embedding_params_from(
+            {
+                "vocab_size": getattr(loaded, "vocab_size", None),
+                "hidden_size": getattr(loaded, "hidden_size", None),
+                "tie_word_embeddings": getattr(loaded, "tie_word_embeddings", False),
+            }
+        )
+        if params is not None:
+            return params
+    except Exception:  # noqa: BLE001 - any failure here falls through to the file
+        pass
     try:
         config = json.loads((snapshot / "config.json").read_text())
     except (OSError, ValueError):
         return None
     if not isinstance(config, dict):
         return None
-    vocab, hidden = config.get("vocab_size"), config.get("hidden_size")
-    if not isinstance(vocab, int) or not isinstance(hidden, int) or vocab <= 0 or hidden <= 0:
-        return None
-    tied = config.get("tie_word_embeddings", False) is True
-    return vocab * hidden * (1 if tied else 2)
+    return _embedding_params_from(config)
 
 
 def _newest_write(folder: Path, snapshot: Path | None) -> float | None:

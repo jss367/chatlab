@@ -2052,6 +2052,28 @@ class MemoryGuardTests(unittest.TestCase):
         self.assertIsNone(_embedding_params(snapshot))
         self.assertIsNone(_embedding_params(None))
 
+    def test_the_width_is_read_under_the_names_other_architectures_use(self):
+        from model_runtime import _embedding_params, _embedding_params_from
+
+        # GPT-2 spells it n_embd, MPT d_model. Transformers resolves both
+        # through its config classes when the file names the architecture.
+        self.assertEqual(
+            _embedding_params_from({"vocab_size": 100, "n_embd": 8, "tie_word_embeddings": True}), 800
+        )
+        self.assertEqual(_embedding_params_from({"vocab_size": 100, "d_model": 8}), 1600)
+        self.assertIsNone(_embedding_params_from({"vocab_size": 100}))
+
+        snapshot = self._snapshot({})
+        (snapshot / "config.json").write_text(
+            json.dumps({"model_type": "gpt2", "vocab_size": 100, "n_embd": 8})
+        )
+        # GPT-2 ties its embeddings by default, which the config class knows
+        # and the raw file does not say.
+        self.assertEqual(_embedding_params(snapshot), 800)
+        # A file with no architecture at all still reads under the aliases.
+        (snapshot / "config.json").write_text(json.dumps({"vocab_size": 100, "d_model": 8}))
+        self.assertEqual(_embedding_params(snapshot), 1600)
+
     def test_a_model_larger_than_the_machine_is_refused(self):
         from model_runtime import InsufficientMemoryError, check_memory_for_load
 
