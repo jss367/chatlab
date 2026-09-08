@@ -1852,6 +1852,37 @@ class QuantizedLoadTests(unittest.TestCase):
         self.assertIsNone(check.call_args.kwargs["bits"])
         self.assertTrue(any("need Apple Metal" in line for line in logs.output))
 
+    def test_a_transformers_without_the_quantizer_is_explained(self):
+        from model_runtime import ModelManager
+
+        manager = ModelManager()
+        fake_torch = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(is_available=lambda: False),
+            backends=types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True)),
+            float16="torch.float16",
+            float32="torch.float32",
+        )
+        # A 4.57-era transformers: no MetalConfig to import.
+        transformers = types.SimpleNamespace(
+            __version__="4.57.1",
+            AutoModelForCausalLM=types.SimpleNamespace(
+                from_pretrained=lambda *a, **k: self.fail("must not reach the loader")
+            ),
+            AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda *a, **k: object()),
+        )
+        with (
+            mock.patch.dict(sys.modules, {"transformers": transformers}),
+            mock.patch.object(manager, "_cap_mps_memory", return_value=None),
+            mock.patch.object(manager, "_check_memory", return_value=(None, None)),
+            mock.patch.object(manager, "_release_device_cache"),
+            mock.patch("model_runtime.allocated_bytes", return_value=None),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                manager._load_locked("org/model", Path("/snap"), fake_torch, precision="8-bit")
+        self.assertIn("transformers 5.3 or newer", str(caught.exception))
+        self.assertIn("4.57.1", str(caught.exception))
+        self.assertFalse(manager.loaded)
+
     def test_a_missing_kernels_package_is_explained(self):
         from model_runtime import ModelManager
 

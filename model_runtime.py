@@ -79,6 +79,10 @@ MEMORY_HEADROOM_BYTES = 4 * 1024**3
 # on another device the weights are loaded whole and the choice noted.
 QUANTIZED_BITS = {"8-bit": 8, "4-bit": 4}
 QUANTIZATION_GROUP_SIZE = 64
+# The first Transformers release that ships MetalConfig. Older releases still
+# run everything else, so requirements.txt keeps its lower floor and a
+# quantized load on one of them is refused by name.
+METAL_QUANTIZATION_TRANSFORMERS = "5.3"
 
 DTYPE_BYTES = {
     "float64": 8,
@@ -2638,7 +2642,21 @@ class ModelManager:
                     # goes through device_map. The output head and the
                     # embeddings are left in half precision, which is what
                     # keeps the logit lens reading through the real head.
-                    from transformers import MetalConfig
+                    try:
+                        from transformers import MetalConfig
+                    except ImportError as error:
+                        # requirements.txt admits 4.57, which predates the
+                        # quantizer; the rest of the app runs there, so the
+                        # floor stays and the choice is refused with the
+                        # version it needs rather than a bare ImportError.
+                        import transformers
+
+                        raise RuntimeError(
+                            f"{precision} weights need transformers "
+                            f"{METAL_QUANTIZATION_TRANSFORMERS} or newer; this "
+                            f"is {transformers.__version__}. Run `pip install "
+                            f"-U transformers` and load again."
+                        ) from error
 
                     try:
                         model = AutoModelForCausalLM.from_pretrained(
