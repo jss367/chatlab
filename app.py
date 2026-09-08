@@ -2951,7 +2951,7 @@ def conversation_list_update(forks: dict, turns: list[dict] | None):
 
 
 def refresh_conversation_list(turns: list[dict] | None, forks: dict | None):
-    """Redraw the list from state, and save what it shows.
+    """Redraw the list from state, and write the conversation on screen into the forks.
 
     Sending, retrying, editing, undoing and loading all write the conversation
     state without knowing about the list, and a streaming reply rewrites it on
@@ -2960,25 +2960,33 @@ def refresh_conversation_list(turns: list[dict] | None, forks: dict | None):
     state itself: Gradio fires a State's change event only when the stored
     value's hash differs, so it runs exactly when the labels could have changed.
 
-    The same moment is when the conversations are worth saving, so the file
-    on disk is rewritten here too. It is small - text and a few counts per
-    turn, no measurements - so reading and rewriting it once per streaming
-    frame costs nothing the frame itself does not already cost.
+    The same moment is when the active branch has changed, so the forks are
+    handed back with the conversation on screen written into it and stamped
+    as changed now (see ``library.as_seen``). The stamp has to live in the
+    forks state, not just in the file: it is what decides, when this page
+    later puts the branch away or saves again, whether its copy or one another
+    page has saved since is the newer - so it must record when the branch
+    changed here, not when this page next happened to save it. Saving itself
+    is left to ``remember_forks`` below, which the forks' change fires, so
+    each frame is written once.
     """
 
-    forks = copy_forks(forks)
-    library.write(library.as_seen(forks, turns))
-    return conversation_list_update(forks, turns)
+    seen = library.as_seen(forks, turns)
+    return conversation_list_update(seen, turns), seen
 
 
 def remember_forks(turns: list[dict] | None, forks: dict | None) -> None:
-    """Save the pane when the set of branches changes.
+    """Save the pane whenever the forks change. This is the one place the file is written.
 
-    Forking, starting a new chat, switching, deleting and clearing all write
-    ``forks``, and most of them write the conversation too; but a switch
-    between two empty branches, or a new chat started from an empty one,
-    leaves the conversation state's hash where it was and the listener above
-    silent. This one listens to the forks themselves.
+    The forks change on every path that matters: the listener above hands
+    them back whenever the conversation changes, and forking, starting a new
+    chat, switching, deleting and clearing write them directly - including
+    the changes that leave the conversation state's hash where it was, a
+    switch between two empty branches, say, which the listener above never
+    sees. The conversation on screen is written in once more on the way, in
+    case the forks are a frame behind it. The file is small - text and a few
+    counts per turn, no measurements - so rewriting it once per streaming
+    frame costs nothing the frame itself does not already cost.
     """
 
     library.write(library.as_seen(forks, turns))
@@ -5214,8 +5222,10 @@ def build_app() -> gr.Blocks:
         conversation_state.change(
             refresh_conversation_list,
             [conversation_state, forks_state],
-            conversation_list,
+            [conversation_list, forks_state],
         )
+        # And the forks' change, which the listener above fires in turn, is
+        # where the file is written - once per change, whichever path made it.
         forks_state.change(remember_forks, [conversation_state, forks_state], None)
         # The saved conversations come back first, so the listeners above
         # have something to describe. A page with nothing saved is left as

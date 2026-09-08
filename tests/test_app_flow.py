@@ -2858,7 +2858,7 @@ class ConversationListTests(unittest.TestCase):
 
     def test_the_refreshed_list_names_the_model_and_the_size(self):
         last = list(app.chat("hi", [], *SETTINGS))[-1]
-        update = app.refresh_conversation_list(last[TURNS], new_forks())
+        update, _forks = app.refresh_conversation_list(last[TURNS], new_forks())
         reply = last[TURNS][-1]
         total = reply["prompt_tokens"] + reply["generated_tokens"]
         self.assertEqual(names_of(update), [MAIN_BRANCH])
@@ -2870,12 +2870,17 @@ class ConversationListTests(unittest.TestCase):
         forks["branches"][MAIN_BRANCH] = [make_turn("user", "stale")]
         forks["branches"]["Fork 1"] = [make_turn("user", "other")]
         forks["active"] = "Fork 1"
-        update = app.refresh_conversation_list([make_turn("user", "live")], forks)
+        update, seen = app.refresh_conversation_list([make_turn("user", "live")], forks)
         self.assertEqual(
             labels_of(update),
             ["Main · stale\nNo replies yet", "Fork 1 · live\nNo replies yet"],
         )
         self.assertEqual(update["value"], "Fork 1")
+        # The forks come back with the live turns written in and stamped, so
+        # the state carries when the branch changed; the input is untouched.
+        self.assertEqual(seen["branches"]["Fork 1"][0]["content"], "live")
+        self.assertEqual(list(seen["updated"]), ["Fork 1"])
+        self.assertEqual(forks["branches"]["Fork 1"][0]["content"], "other")
 
     def test_a_loaded_conversation_keeps_its_tags(self):
         last = list(app.chat("hi", [], *SETTINGS))[-1]
@@ -2929,8 +2934,9 @@ class ConversationListWiringTests(unittest.TestCase):
     def test_a_change_to_the_conversation_state_redraws_the_list(self):
         refresh = self.named("refresh_conversation_list")
         state, _metrics, _context = self.named("stop_generation").inputs
+        forks = self.named("remember_forks").inputs[1]
         self.assertEqual(refresh.targets, [(state._id, "change")])
-        self.assertEqual(refresh.outputs, [self.conversation_list()])
+        self.assertEqual(refresh.outputs, [self.conversation_list(), forks])
 
     def test_picking_an_entry_switches_to_it(self):
         switch = self.named("switch_fork")
@@ -3004,18 +3010,44 @@ class ConversationLibraryTests(unittest.TestCase):
         if self.path.exists():
             self.path.unlink()
 
-    def test_a_redraw_writes_the_pane_as_seen(self):
+    def test_a_redraw_hands_the_pane_as_seen_to_the_forks_which_are_then_saved(self):
         forks = new_forks()
         forks["branches"]["Chat 2"] = [make_turn("user", "other")]
         forks["active"] = "Chat 2"
         on_screen = [make_turn("user", "other"), make_turn("assistant", "reply", "")]
 
-        app.refresh_conversation_list(on_screen, forks)
+        _update, seen = app.refresh_conversation_list(on_screen, forks)
+        # The redraw itself writes nothing; the forks' change does.
+        self.assertFalse(self.path.exists())
+        app.remember_forks(on_screen, seen)
 
         saved = library.read(self.path)
         self.assertEqual(saved["active"], "Chat 2")
         self.assertEqual(saved["branches"][MAIN_BRANCH], [])
         self.assertEqual([turn["content"] for turn in saved["branches"]["Chat 2"]], ["other", "reply"])
+        self.assertEqual(list(saved["updated"]), ["Chat 2"])
+
+    def test_a_branch_put_away_later_does_not_outrank_a_newer_copy_of_it(self):
+        # Two tabs on one file. Tab A edits Main and saves; tab B edits Main
+        # and saves after it; then A starts a new chat, which puts its copy of
+        # Main away, without having touched Main since. B's copy is the newer
+        # and must stay, so the stamp A puts Main away with has to be the
+        # time A changed it, not the time A put it away.
+        a_forks = new_forks()
+        a_turns = [make_turn("user", "A's edit")]
+        _update, a_forks = app.refresh_conversation_list(a_turns, a_forks)
+        app.remember_forks(a_turns, a_forks)
+
+        b_turns = [make_turn("user", "B's later edit")]
+        _update, b_forks = app.refresh_conversation_list(b_turns, new_forks())
+        app.remember_forks(b_turns, b_forks)
+
+        fresh = app.new_conversation(a_turns, a_forks)
+        app.remember_forks(fresh[FORK_TURNS], fresh[FORK_STATE])
+
+        saved = library.read(self.path)
+        self.assertEqual([turn["content"] for turn in saved["branches"][MAIN_BRANCH]], ["B's later edit"])
+        self.assertEqual(list(saved["branches"]), [MAIN_BRANCH, "Chat 1"])
 
     def test_a_change_of_forks_writes_them_too(self):
         forks = new_forks()

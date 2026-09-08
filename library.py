@@ -79,12 +79,14 @@ def library_path() -> Path:
 def as_seen(forks: dict | None, turns: list[dict] | None) -> dict:
     """The pane as the reader sees it: ``forks`` with the active branch read from ``turns``.
 
-    The active branch's entry in ``forks`` is stale by design - the handlers
-    only write it back when switching away - so the conversation on screen is
-    the truth for that one branch and ``forks`` for every other. The active
-    branch is stamped as changed now only if it differs from that entry, so
-    a page that has done nothing to it does not claim it over another page
-    that has.
+    The conversation on screen is the truth for the active branch and
+    ``forks`` for every other: the handlers that change the conversation do
+    not touch ``forks``, and its entry for the active branch is brought up to
+    date from the screen afterwards, by ``refresh_conversation_list`` in
+    ``app.py``. The active branch is stamped as changed now only if it
+    differs from that entry, so the stamp records when the branch changed,
+    not when it was next saved, and a page that has done nothing to it does
+    not claim it over another page that has.
     """
 
     forks = copy_forks(forks)
