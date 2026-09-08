@@ -2977,6 +2977,29 @@ class ConversationListWiringTests(unittest.TestCase):
         self.assertEqual(restore.inputs, [])
         self.assertEqual(restore.outputs[1:], [state, forks, self.conversation_list()])
 
+    def test_everything_that_rewrites_the_forks_runs_on_one_queue(self):
+        # A redraw queued by a streaming frame must not run after a click on
+        # New with the pane as it was before the click. Sharing one
+        # concurrency id makes Gradio run them in order, reading the states
+        # as they are when each runs.
+        names = (
+            "refresh_conversation_list",
+            "remember_forks",
+            "fork_conversation",
+            "new_conversation",
+            "switch_fork",
+            "delete_fork",
+            "clear_chat",
+            "restore_conversations",
+            "load_conversation",
+        )
+        for name in names:
+            with self.subTest(handler=name):
+                self.assertEqual(self.named(name).concurrency_id, app.CONVERSATION_PANE_QUEUE)
+        # The streaming handlers hold their own slot for a whole reply; the
+        # redraw has to run between their frames, so they stay off this queue.
+        self.assertNotEqual(self.named("chat").concurrency_id, app.CONVERSATION_PANE_QUEUE)
+
     def test_a_change_to_the_forks_saves_them(self):
         remember = self.named("remember_forks")
         state, _metrics, _context = self.named("stop_generation").inputs
