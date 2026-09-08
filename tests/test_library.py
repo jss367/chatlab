@@ -359,6 +359,47 @@ class MergeTests(unittest.TestCase):
 
         self.assertEqual(library.taken_names(self.path), {MAIN_BRANCH, "Chat 2", "Fork 1"})
 
+    def test_a_claimed_name_is_spoken_for_before_the_branch_is_saved(self):
+        tab_a = stamped(MAIN_BRANCH, Main="hi")
+        tab_b = stamped(MAIN_BRANCH, Main="hi")
+
+        first = library.claim_name(tab_a, "Chat", self.path)
+        second = library.claim_name(tab_b, "Chat", self.path)
+
+        self.assertEqual((first, second), ("Chat 1", "Chat 2"))
+        saved = library.read(self.path)
+        self.assertEqual(saved["branches"]["Chat 1"], [])
+        self.assertEqual(saved["branches"]["Chat 2"], [])
+        # Neither page's own copy of the pane was touched.
+        self.assertNotIn("Chat 1", tab_a["branches"])
+
+    def test_claims_from_many_threads_never_collide(self):
+        import threading
+
+        pages = [stamped(MAIN_BRANCH, Main="hi") for _ in range(8)]
+        barrier = threading.Barrier(len(pages))
+        names: list[str] = []
+
+        def claim(page):
+            barrier.wait()
+            names.append(library.claim_name(page, "Chat", self.path))
+
+        threads = [threading.Thread(target=claim, args=(page,)) for page in pages]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(sorted(names), [f"Chat {n}" for n in range(1, 9)])
+        self.assertEqual(len(set(names)), len(pages))
+
+    def test_a_claim_steps_over_a_forgotten_name(self):
+        forks = stamped(MAIN_BRANCH, Main="hi")
+        forks["updated"]["Chat 1"] = LATER
+        library.write(forks, self.path)
+
+        self.assertEqual(library.claim_name(stamped(MAIN_BRANCH, Main="hi"), "Chat", self.path), "Chat 2")
+
     def test_a_bad_stamp_or_forgotten_list_is_refused(self):
         with self.assertRaises(ValueError):
             library.parse(

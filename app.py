@@ -22,6 +22,7 @@ import library
 import settings
 from conversation import (
     CHAT_PREFIX,
+    FORK_PREFIX,
     MAIN_BRANCH,
     THINK_CLOSE,
     branch_choices,
@@ -38,8 +39,6 @@ from conversation import (
     make_turn,
     model_messages,
     new_forks,
-    next_branch_name,
-    next_fork_name,
     put_branch,
     split_reasoning,
     to_json,
@@ -3114,7 +3113,7 @@ def fork_conversation(
     put_branch(forks, forks["active"], turns)
     found = selected_turn(turns, selected)
     forked, box_text = fork_at(turns, found)
-    name = next_fork_name(forks, library.taken_names())
+    name = library.claim_name(forks, FORK_PREFIX)
     put_branch(forks, name, forked)
     forks["active"] = name
     messages, _ = display_messages(forked)
@@ -3228,7 +3227,7 @@ def new_conversation(
     put_branch(forks, forks["active"], turns)
     # The names in the file count too, so a chat another page started since
     # this one loaded is not given a twin the merge would take for it.
-    name = next_branch_name(forks, CHAT_PREFIX, library.taken_names())
+    name = library.claim_name(forks, CHAT_PREFIX)
     put_branch(forks, name, [])
     forks["active"] = name
     return (

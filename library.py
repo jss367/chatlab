@@ -44,6 +44,7 @@ from uuid import uuid4
 from conversation import (
     MAIN_BRANCH,
     copy_forks,
+    next_branch_name,
     put_branch,
     turn_entries,
     turns_from_entries,
@@ -258,6 +259,30 @@ def taken_names(path: Path | None = None) -> set[str]:
     return set(forks["branches"]) | set(forks["updated"])
 
 
+def _replace(target: Path, text: str) -> bool:
+    """Put ``text`` in place of ``target`` in one rename; ``False`` if it could not be.
+
+    Into a sibling first and then over the old file, so the file on disk is
+    always a complete one. The sibling's name is unique to this write, so two
+    writes - from this process or another - never stage into, or rename
+    away, each other's copy. Called with ``_WRITE_LOCK`` held.
+    """
+
+    staging = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        write_private_text(staging, text)
+        os.replace(staging, target)
+    except OSError as error:
+        logger.warning("Could not save the conversations to %s: %s", target, error)
+        # Whatever of the staged copy got as far as disk is not left beside
+        # the file; the failure may have been before any of it did.
+        with suppress(OSError):
+            staging.unlink()
+        return False
+    return True
+
+
 def write(forks: dict | None, path: Path | None = None) -> Path | None:
     """Merge the pane into the file on disk and return the path; ``None`` if it could not be.
 
@@ -269,21 +294,30 @@ def write(forks: dict | None, path: Path | None = None) -> Path | None:
 
     target = path or library_path()
     with _WRITE_LOCK:
-        text = dump(merge(forks, read(target)))
-        # Into a sibling first and then over the old file in one rename, so
-        # the file on disk is always a complete one. The sibling's name is
-        # unique to this write, so two writes - from this process or
-        # another - never stage into, or rename away, each other's copy.
-        staging = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            write_private_text(staging, text)
-            os.replace(staging, target)
-        except OSError as error:
-            logger.warning("Could not save the conversations to %s: %s", target, error)
-            # Whatever of the staged copy got as far as disk is not left
-            # beside the file; the failure may have been before any of it did.
-            with suppress(OSError):
-                staging.unlink()
+        if not _replace(target, dump(merge(forks, read(target)))):
             return None
     return target
+
+
+def claim_name(forks: dict | None, prefix: str, path: Path | None = None) -> str:
+    """Pick the next free ``<prefix> N`` and write it into the file before letting go.
+
+    Choosing a name and saving the branch that bears it are two steps, and
+    two pages that start a chat between each other's saves would both read
+    the same file, both choose ``Chat 1``, and :func:`merge` would then take
+    the two for one branch and keep only one. Here the name is chosen and an
+    empty branch written under it in one go, with the lock every save takes,
+    so the next page to look sees it spoken for. The page's own save then
+    fills the branch in. A file that cannot be written still yields a name;
+    the save that follows will say why in the log.
+    """
+
+    forks = copy_forks(forks)
+    target = path or library_path()
+    with _WRITE_LOCK:
+        on_disk = read(target)
+        taken = set(on_disk["branches"]) | set(on_disk["updated"]) if on_disk else set()
+        name = next_branch_name(forks, prefix, taken)
+        put_branch(forks, name, [])
+        _replace(target, dump(merge(forks, on_disk)))
+    return name
