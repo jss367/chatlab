@@ -25,6 +25,7 @@ guessing.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from datetime import datetime, timezone
 
 THINK_OPEN = "<think>"
@@ -298,17 +299,23 @@ def drop_branch(forks: dict, name: str) -> None:
     forks["updated"][name] = branch_stamp()
 
 
-def next_branch_name(forks: dict, prefix: str) -> str:
-    """The first ``<prefix> N`` not already taken, so deleting one never renames another."""
+def next_branch_name(forks: dict, prefix: str, taken: Iterable[str] = ()) -> str:
+    """The first ``<prefix> N`` not already taken, so deleting one never renames another.
 
+    ``taken`` is further names to step over - those the saved file has spoken
+    for, as ``library.taken_names`` lists them - so a branch another page
+    started since this one loaded is not given a twin.
+    """
+
+    used = set(forks["branches"]) | set(taken)
     number = 1
-    while f"{prefix} {number}" in forks["branches"]:
+    while f"{prefix} {number}" in used:
         number += 1
     return f"{prefix} {number}"
 
 
-def next_fork_name(forks: dict) -> str:
-    return next_branch_name(forks, FORK_PREFIX)
+def next_fork_name(forks: dict, taken: Iterable[str] = ()) -> str:
+    return next_branch_name(forks, FORK_PREFIX, taken)
 
 
 def fork_at(

@@ -2601,6 +2601,11 @@ class ForkTests(unittest.TestCase):
         self.original = app.MANAGER
         app.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
         self.addCleanup(setattr, app, "MANAGER", self.original)
+        # New branches are named around what the saved file holds, so start
+        # each test with nothing saved.
+        self.path = library.library_path()
+        if self.path.exists():
+            self.path.unlink()
 
     def turns(self):
         return [
@@ -2609,6 +2614,19 @@ class ForkTests(unittest.TestCase):
             make_turn("user", "two"),
             make_turn("assistant", "second"),
         ]
+
+    def test_a_new_branch_is_not_named_after_one_another_page_saved(self):
+        # The other page started Chat 1 and Fork 1 after this one loaded, and
+        # this page's forks know nothing of them.
+        other = new_forks()
+        other["branches"]["Chat 1"] = [make_turn("user", "theirs")]
+        other["branches"]["Fork 1"] = []
+        library.write(other, self.path)
+
+        fresh = app.new_conversation(self.turns(), new_forks())
+        self.assertEqual(fresh[FORK_STATE]["active"], "Chat 2")
+        forked = app.fork_conversation(self.turns(), new_forks(), None)
+        self.assertEqual(forked[FORK_STATE]["active"], "Fork 2")
 
     def test_forking_copies_the_conversation_into_a_new_fork(self):
         result = app.fork_conversation(self.turns(), new_forks(), None)

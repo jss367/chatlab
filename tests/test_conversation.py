@@ -258,6 +258,13 @@ class ForkTests(unittest.TestCase):
         self.assertEqual(next_branch_name(forks, "Chat"), "Chat 2")
         self.assertEqual(next_branch_name(forks, "Fork"), "Fork 2")
 
+    def test_names_the_file_has_spoken_for_are_stepped_over_too(self):
+        forks = new_forks()
+        self.assertEqual(next_branch_name(forks, "Chat", {"Chat 1", "Fork 1"}), "Chat 2")
+        self.assertEqual(next_fork_name(forks, {"Chat 1", "Fork 1"}), "Fork 2")
+        forks["branches"]["Chat 2"] = []
+        self.assertEqual(next_branch_name(forks, "Chat", {"Chat 1"}), "Chat 3")
+
     def test_copying_forks_detaches_every_turn(self):
         forks = new_forks()
         forks["branches"][MAIN_BRANCH] = self.turns()

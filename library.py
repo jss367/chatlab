@@ -242,6 +242,22 @@ def read(path: Path | None = None) -> dict | None:
         return None
 
 
+def taken_names(path: Path | None = None) -> set[str]:
+    """The branch names the file on disk has spoken for: those it holds and those it has forgotten.
+
+    For naming a new branch. Two pages that each start a chat before seeing
+    the other's save would otherwise both call it ``Chat 1``, and
+    :func:`merge` would take the two for one branch and keep only one. A
+    forgotten name is avoided too, so a new branch does not answer to the
+    name of one another page may still hold.
+    """
+
+    forks = read(path)
+    if forks is None:
+        return set()
+    return set(forks["branches"]) | set(forks["updated"])
+
+
 def write(forks: dict | None, path: Path | None = None) -> Path | None:
     """Merge the pane into the file on disk and return the path; ``None`` if it could not be.
 

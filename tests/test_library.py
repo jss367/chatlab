@@ -350,6 +350,15 @@ class MergeTests(unittest.TestCase):
         )
         self.assertEqual([entry.name for entry in self.path.parent.iterdir()], [self.path.name])
 
+    def test_the_names_the_file_has_spoken_for(self):
+        self.assertEqual(library.taken_names(self.path), set())
+
+        forks = stamped(MAIN_BRANCH, Main="hi", **{"Chat 2": "b"})
+        forks["updated"]["Fork 1"] = LATER
+        library.write(forks, self.path)
+
+        self.assertEqual(library.taken_names(self.path), {MAIN_BRANCH, "Chat 2", "Fork 1"})
+
     def test_a_bad_stamp_or_forgotten_list_is_refused(self):
         with self.assertRaises(ValueError):
             library.parse(

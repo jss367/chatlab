@@ -3114,7 +3114,7 @@ def fork_conversation(
     put_branch(forks, forks["active"], turns)
     found = selected_turn(turns, selected)
     forked, box_text = fork_at(turns, found)
-    name = next_fork_name(forks)
+    name = next_fork_name(forks, library.taken_names())
     put_branch(forks, name, forked)
     forks["active"] = name
     messages, _ = display_messages(forked)
@@ -3226,7 +3226,9 @@ def new_conversation(
     turns = copy_turns(turns)
     finalize_partial(turns)
     put_branch(forks, forks["active"], turns)
-    name = next_branch_name(forks, CHAT_PREFIX)
+    # The names in the file count too, so a chat another page started since
+    # this one loaded is not given a twin the merge would take for it.
+    name = next_branch_name(forks, CHAT_PREFIX, library.taken_names())
     put_branch(forks, name, [])
     forks["active"] = name
     return (
