@@ -1,3 +1,5 @@
+import asyncio
+import copy
 import inspect
 import os
 import stat
@@ -284,7 +286,7 @@ class ChatFlowTests(unittest.TestCase):
         frames = self.last(app.chat("hi", [], *SETTINGS))
         self.assertEqual(strip_of(frames[0][STRIP]), [])
         self.assertEqual(frames[0][DETAIL], app.NO_TOKEN_SELECTED)
-        self.assertEqual(frames[0][ALTS], [])
+        self.assertEqual(strip_of(frames[0][ALTS]), [])
         # Later frames only append to the strip, so a token picked mid-stream
         # stays valid and its details are left alone.
         for frame in frames[1:]:
@@ -295,7 +297,46 @@ class ChatFlowTests(unittest.TestCase):
         turns = [make_turn("user", "one"), make_turn("assistant", "stale")]
         frames = self.last(app.retry_last("", turns, *SETTINGS))
         self.assertEqual(frames[0][DETAIL], app.NO_TOKEN_SELECTED)
-        self.assertEqual(frames[0][ALTS], [])
+        self.assertEqual(strip_of(frames[0][ALTS]), [])
+
+    def test_streaming_skip_does_not_delete_the_rendered_table_data(self):
+        # The browser retains the table value by reference. Gradio's client
+        # applies the next stream patch in place, even for a skipped output.
+        # Exercise real postprocessing and diffs: a bare [] reset used to
+        # turn into delete(data), delete(headers), then crash the table render.
+        demo = app.build_app()
+        listener = next(fn for fn in demo.fns.values() if fn.fn is app.chat)
+        frames = self.last(app.chat("hi", [], *SETTINGS))
+
+        async def wire_frames():
+            state = gr.blocks.SessionState(demo)
+            return [
+                await demo.postprocess_data(listener, frame, state)
+                for frame in frames[:2]
+            ]
+
+        first, second = asyncio.run(wire_frames())
+        demo.handle_streaming_diffs(listener, first, "table-regression", 1, final=False)
+        patch = demo.handle_streaming_diffs(
+            listener, second, "table-regression", 1, final=False
+        )[ALTS]
+        client_value = copy.deepcopy(first[ALTS])
+        rendered_table = client_value.get("value", client_value)
+        expected = copy.deepcopy(rendered_table)
+        self.assertEqual(rendered_table["data"], [])
+
+        # These two frames only add/delete dictionary properties. Match the
+        # client's in-place edits, including the alias held by the renderer.
+        for action, path, value in patch:
+            target = client_value
+            for key in path[:-1]:
+                target = target[key]
+            if action == "delete":
+                del target[path[-1]]
+            else:
+                self.assertEqual(action, "add")
+                target[path[-1]] = value
+        self.assertEqual(rendered_table, expected)
 
     def test_a_refused_send_keeps_the_token_diagnostics(self):
         # gr.skip() leaves the previous response's panel on screen.
