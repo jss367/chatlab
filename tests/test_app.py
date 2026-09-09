@@ -939,6 +939,34 @@ class DownloadStatusTests(unittest.TestCase):
         self.assertIn("Download failed", cards[0])
         self.assertIn("organization/model-name", cards[0])
 
+    def test_model_actions_report_cache_io_failures_without_starting_work(self):
+        for handler, args, title in (
+            (models_page.download_model, ("",), "Download failed"),
+            (models_page.download_and_load_model, ("",), "Model setup failed"),
+            (models_page.load_cached_model, (), "Could not load cached model"),
+        ):
+            with (
+                self.subTest(handler=handler.__name__),
+                mock.patch.object(runtime, "MANAGER", ModelManager()),
+                mock.patch.object(models_page, "cache_status", side_effect=PermissionError("Permission denied: <cache>")),
+                mock.patch.object(models_page, "stream_download") as download,
+                mock.patch.object(models_page, "stream_load") as load,
+            ):
+                cards = list(handler(self.MODEL, *args))
+                self.assertIn(title, cards[-1])
+                self.assertIn("Permission denied: &lt;cache&gt;", cards[-1])
+                download.assert_not_called()
+                load.assert_not_called()
+
+    def test_download_reports_cache_io_failure_after_fetching(self):
+        with (
+            mock.patch.object(models_page, "cache_status", side_effect=[CacheStatus(), OSError("Cache drive disconnected")]),
+            mock.patch.object(models_page, "stream_download", return_value=iter(())),
+        ):
+            cards = list(models_page.download_model(self.MODEL, ""))
+        self.assertIn("Download failed", cards[-1])
+        self.assertIn("Cache drive disconnected", cards[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

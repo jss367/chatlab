@@ -391,23 +391,74 @@ def chosen_model(model_id: str, selected: str | None) -> str:
     return (selected or model_id or "").strip()
 
 
+def refresh_model_actions(model_id: str, selected: str | None):
+    """Show the actions appropriate to the chosen model's local files.
+
+    A downloaded model is also named by kind, because this panel is where a
+    reader asks what they can do with the model in front of them and the two
+    kinds are driven from different pages. Without it, selecting an image
+    pipeline offers **Load cached** and says nothing about the answer
+    arriving on the Images page rather than in the chat.
+    """
+
+    cleaned = chosen_model(model_id, selected)
+    try:
+        cached = cache_status(cleaned) if cleaned else CacheStatus()
+    except ValueError as error:
+        return (
+            html.escape(str(error)),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False, variant="secondary"),
+        )
+    except OSError:
+        # Keep local loading available if the cache cannot be inspected;
+        # its handler can explain the actual error when clicked.
+        return (
+            "Could not check downloaded files.",
+            gr.update(visible=True),
+            gr.update(visible=True),
+            gr.update(visible=True, variant="secondary"),
+        )
+    if cached.complete:
+        detail = f"**Downloaded** · Ready to load from disk. {where_to_use(cached.kind)}"
+        if runtime.MANAGER.model_id == cleaned:
+            detail = (
+                "**Downloaded · Loaded now** · Load cached again to apply a new "
+                f"precision. {where_to_use(cached.kind)}"
+            )
+    elif cached.unsupported:
+        detail = "**Downloaded · Unsupported** · ChatLab cannot load this model's format."
+    elif cached.present:
+        detail = "**Download incomplete** · Download and load will fetch the remaining files."
+    else:
+        detail = "**Not downloaded** · Download the model to use it." if cleaned else "Enter a model ID or select a model."
+    download = not (cached.complete or cached.unsupported)
+    return (
+        detail,
+        gr.update(visible=download),
+        gr.update(visible=download),
+        gr.update(visible=cached.complete, variant="primary" if cached.complete else "secondary"),
+    )
+
+
 def download_model(model_id: str, hf_token: str, selected: str | None = None):
     model_id = chosen_model(model_id, selected)
     started = time.monotonic()
     try:
         before = cache_status(model_id)
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         yield failure_card("Download failed", html.escape(str(error)))
         return
     yield status_card(*describe_cache(model_id, before), "working")
     try:
         path = yield from stream_download(model_id, hf_token)
+        elapsed = time.monotonic() - started
+        fetched = describe_fetched(before, cache_status(model_id), elapsed)
     except Exception as error:
         yield failure_card("Download failed", html.escape(str(error)))
         return
 
-    elapsed = time.monotonic() - started
-    fetched = describe_fetched(before, cache_status(model_id), elapsed)
     yield status_card(
         "Download complete",
         f"{fetched} `{model_id.strip()}` is cached in `{path}`. "
@@ -425,7 +476,7 @@ def download_and_load_model(
     started = time.monotonic()
     try:
         before = cache_status(model_id)
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         yield failure_card("Model setup failed", html.escape(str(error)))
         return
     yield status_card(*describe_cache(model_id, before), "working")
@@ -500,7 +551,7 @@ def load_cached_model(
     yield status_card("Finding cached model", f"Looking for {name} locally…", "working")
     try:
         status = cache_status(cleaned)
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         yield failure_card("Could not load cached model", html.escape(str(error)))
         return
     if status.missing_files:
@@ -803,8 +854,8 @@ def describe_cached_model(entry: CachedModel) -> str:
         verdict = f"**Unsupported:** {UNSUPPORTED_REASON}"
     else:
         verdict = (
-            "**Ready to load.** Use **Load cached** to bring it into memory. "
-            f"{where_to_use(entry.status.kind)}"
+            "**Downloaded · Ready to load.** Use **Load cached** to bring it "
+            f"into memory. {where_to_use(entry.status.kind)}"
         )
     facts = [("On disk", describe_on_disk(entry.status))]
     if entry.files:
@@ -836,13 +887,18 @@ def my_models_summary(models: list[CachedModel]) -> str:
     return f"{count} · {total} on disk in {root}"
 
 
-def refresh_my_models(selected: str | None, order: str | None = DEFAULT_MODEL_SORT):
-    """Rescan the cache; keep the selection, or fall back to the loaded model."""
+def refresh_my_models(
+    selected: str | None,
+    order: str | None = DEFAULT_MODEL_SORT,
+    model_id: str | None = None,
+):
+    """Keep the selected row or typed ID; default to the loaded model at startup."""
 
     models = sort_cached_models(list_cached_models(), order)
     ids = [entry.model_id for entry in models]
     if selected not in ids:
-        selected = runtime.MANAGER.model_id if runtime.MANAGER.model_id in ids else None
+        fallback = model_id.strip() if model_id is not None else runtime.MANAGER.model_id
+        selected = fallback if fallback in ids else None
     choices = [(cached_model_label(entry), entry.model_id) for entry in models]
     if selected is None:
         detail = NO_CACHED_MODEL_SELECTED if models else ""
@@ -1103,6 +1159,8 @@ def describe_hub_model(result: HubModel) -> str:
             "same files: this repo is neither a Transformers language model nor "
             "a diffusers pipeline."
         )
+    elif cached.complete:
+        lines.append("Already downloaded: use **Load cached** to bring it into memory.")
     else:
         lines.append("Its ID is in the model ID box: use **Download and load** to fetch it.")
     return "\n".join(lines)
