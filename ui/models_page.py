@@ -383,6 +383,40 @@ def chosen_model(model_id: str, selected: str | None) -> str:
     return (selected or model_id or "").strip()
 
 
+def refresh_model_actions(model_id: str, selected: str | None):
+    """Show the actions appropriate to the chosen model's local files."""
+
+    cleaned = chosen_model(model_id, selected)
+    try:
+        cached = cache_status(cleaned) if cleaned else CacheStatus()
+    except (OSError, ValueError):
+        # Keep local loading available if the cache cannot be inspected;
+        # its handler can explain the actual error when clicked.
+        return (
+            "Could not check downloaded files.",
+            gr.update(visible=True),
+            gr.update(visible=True),
+            gr.update(visible=True, variant="secondary"),
+        )
+    if cached.complete:
+        detail = "**Downloaded** · Ready to load from disk."
+        if runtime.MANAGER.model_id == cleaned:
+            detail = "**Downloaded · Loaded now** · Load cached again to apply a new precision."
+    elif cached.unsupported:
+        detail = "**Downloaded · Unsupported** · ChatLab cannot load this model's format."
+    elif cached.present:
+        detail = "**Download incomplete** · Download and load will fetch the remaining files."
+    else:
+        detail = "**Not downloaded** · Download the model to use it." if cleaned else "Enter a model ID or select a model."
+    download = not (cached.complete or cached.unsupported)
+    return (
+        detail,
+        gr.update(visible=download),
+        gr.update(visible=download),
+        gr.update(visible=cached.complete, variant="primary" if cached.complete else "secondary"),
+    )
+
+
 def download_model(model_id: str, hf_token: str, selected: str | None = None):
     model_id = chosen_model(model_id, selected)
     started = time.monotonic()
@@ -712,7 +746,7 @@ def describe_cached_model(entry: CachedModel) -> str:
     elif entry.status.unsupported:
         verdict = f"**Unsupported:** {UNSUPPORTED_REASON}"
     else:
-        verdict = "**Ready to load.** Use **Load cached** to bring it into memory."
+        verdict = "**Downloaded · Ready to load.** Use **Load cached** to bring it into memory."
     facts = [("On disk", describe_on_disk(entry.status))]
     if entry.files:
         facts.append(("Files", f"{entry.files} in the current snapshot"))
@@ -1001,6 +1035,8 @@ def describe_hub_model(result: HubModel) -> str:
             "Its ID is in the model ID box, but downloading again would fetch the "
             "same files: this repo is not a Transformers language model."
         )
+    elif cached.complete:
+        lines.append("Already downloaded: use **Load cached** to bring it into memory.")
     else:
         lines.append("Its ID is in the model ID box: use **Download and load** to fetch it.")
     return "\n".join(lines)

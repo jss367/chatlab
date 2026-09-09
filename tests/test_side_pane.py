@@ -62,6 +62,50 @@ def lay_out(root: str, model_id: str, files: dict[str, bytes]) -> Path:
     return folder
 
 
+class ModelActionTests(unittest.TestCase):
+    def test_downloaded_selection_offers_local_loading(self):
+        with mock.patch.object(models_page, "cache_status", return_value=CacheStatus(cached_bytes=100)) as status:
+            detail, download_load, download, load = models_page.refresh_model_actions(
+                "org/old-id", "org/downloaded"
+            )
+        status.assert_called_once_with("org/downloaded")
+        self.assertIn("Downloaded", detail)
+        self.assertFalse(download_load["visible"])
+        self.assertFalse(download["visible"])
+        self.assertTrue(load["visible"])
+        self.assertEqual(load["variant"], "primary")
+
+    def test_missing_and_partial_models_keep_download_actions(self):
+        for cached, expected in (
+            (CacheStatus(), "Not downloaded"),
+            (CacheStatus(cached_bytes=100, missing_files=(MODEL_WEIGHTS,)), "Download incomplete"),
+        ):
+            with self.subTest(cached=cached), mock.patch.object(models_page, "cache_status", return_value=cached):
+                detail, download_load, download, load = models_page.refresh_model_actions("org/model", None)
+            self.assertIn(expected, detail)
+            self.assertTrue(download_load["visible"])
+            self.assertTrue(download["visible"])
+            self.assertFalse(load["visible"])
+
+    def test_unsupported_download_does_not_offer_to_fetch_the_same_files(self):
+        with mock.patch.object(models_page, "cache_status", return_value=CacheStatus(cached_bytes=100, unsupported=True)):
+            detail, *buttons = models_page.refresh_model_actions("org/model", None)
+        self.assertIn("Unsupported", detail)
+        self.assertTrue(all(not button["visible"] for button in buttons))
+
+    def test_loaded_model_can_be_reloaded_with_new_precision(self):
+        with mock.patch.object(models_page, "cache_status", return_value=CacheStatus(cached_bytes=100)), mock.patch.object(runtime.MANAGER, "model_id", "org/model"):
+            detail, _, _, load = models_page.refresh_model_actions("org/model", None)
+        self.assertIn("Loaded now", detail)
+        self.assertTrue(load["visible"])
+
+    def test_cache_read_failure_preserves_local_load_for_error_reporting(self):
+        with mock.patch.object(models_page, "cache_status", side_effect=OSError("offline disk")):
+            detail, _, _, load = models_page.refresh_model_actions("org/model", None)
+        self.assertIn("Could not check", detail)
+        self.assertTrue(load["visible"])
+
+
 class FormatCountTests(unittest.TestCase):
     def test_counts_read_like_the_hub_pages(self):
         for count, text in [
@@ -1053,6 +1097,8 @@ class ModelSearchPaneTests(unittest.TestCase):
 
         self.assertIn("Already cached", detail)
         self.assertIn("15.0 GB cached", detail)
+        self.assertIn("Load cached", detail)
+        self.assertNotIn("Download and load", detail)
 
     def test_a_cached_result_of_another_kind_is_not_called_partly_cached(self):
         models_page.cache_status = lambda model_id: CacheStatus(
@@ -1476,6 +1522,29 @@ class PageLayoutTests(unittest.TestCase):
         # confirmed removal, the refresh button, a new sort order, and the
         # page load each rescan. Selecting the default only navigates.
         self.assertEqual(len(self.listeners("refresh_my_models")), 9)
+
+    def test_model_actions_follow_selections_and_cache_refreshes(self):
+        listeners = self.listeners("refresh_model_actions")
+        radio = self.labelled("Downloaded models")
+        model_id = self.labelled("Hugging Face model ID")
+        for control in (radio, model_id):
+            self.assertTrue(any(fn.targets == [(control._id, "change")] for fn in listeners))
+        for fn in listeners:
+            self.assertEqual(fn.inputs, [model_id, radio])
+            self.assertEqual(fn.outputs[0], self.by_id("model-availability"))
+            self.assertEqual(
+                [button.value for button in fn.outputs[1:]],
+                ["Download and load", "Download only", "Load cached"],
+            )
+        refresh_ids = {fn._id for fn in self.listeners("refresh_my_models")}
+        chained = [
+            dependency for dependency in self.demo.config["dependencies"]
+            if dependency["id"] in {fn._id for fn in listeners}
+            and dependency["trigger_after"] in refresh_ids
+        ]
+        # All six mutations, manual refresh, and startup refresh the controls
+        # even when the radio's selected value stays the same.
+        self.assertEqual(len(chained), 8)
 
     def test_every_load_reads_the_my_models_selection(self):
         # The ID box lags a row selection by a server round trip, so a button

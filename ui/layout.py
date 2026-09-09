@@ -77,6 +77,7 @@ from ui.models_page import (
     load_cached_model,
     loaded_model_badge,
     redownload_my_model,
+    refresh_model_actions,
     refresh_model_badge,
     refresh_my_models,
     remove_my_model,
@@ -579,6 +580,9 @@ def build_app() -> gr.Blocks:
                                 "weights whatever is chosen. Applies to the next load."
                             ),
                         )
+                        model_availability = gr.Markdown(
+                            "Checking downloaded files…", elem_id="model-availability"
+                        )
                         with gr.Row():
                             download_load_button = gr.Button(
                                 "Download and load", variant="primary", size="sm"
@@ -792,6 +796,25 @@ def build_app() -> gr.Blocks:
         # the cache afterwards, so My Models never shows a stale list.
         models_inputs = [my_models, sort_models]
         models_outputs = [my_models, my_model_detail, my_models_summary]
+        action_inputs = [model_id, my_models]
+        action_outputs = [
+            model_availability, download_load_button, download_button, cached_button
+        ]
+
+        # Include programmatic selections (search, default, and rescans).
+        # The selected row takes precedence, just as it does for a load.
+        for control in action_inputs:
+            control.change(
+                refresh_model_actions, action_inputs, action_outputs,
+                show_progress="hidden", trigger_mode="always_last",
+                concurrency_id="model-actions",
+            )
+
+        def refresh_actions(event):
+            return event.then(
+                refresh_model_actions, action_inputs, action_outputs,
+                show_progress="hidden", concurrency_id="model-actions",
+            )
 
         # Refresh model-dependent displays after explicit model actions.
         # The timer also catches changes from other tabs, but this updates
@@ -800,6 +823,7 @@ def build_app() -> gr.Blocks:
             """Rescan the cache after ``event``, and re-read what the model feeds."""
 
             event = event.then(refresh_my_models, models_inputs, models_outputs)
+            event = refresh_actions(event)
             if not reloads:
                 return event
             return event.then(refresh_model_badge, None, badge_outputs).then(
@@ -834,9 +858,11 @@ def build_app() -> gr.Blocks:
         # A manual refresh and a new sort order reorder a list; neither
         # changes what is on disk or in memory, which is all the badge and the
         # count ask about.
-        refresh_models_button.click(refresh_my_models, models_inputs, models_outputs)
+        refresh_actions(
+            refresh_models_button.click(refresh_my_models, models_inputs, models_outputs)
+        )
         sort_models.input(refresh_my_models, models_inputs, models_outputs)
-        demo.load(refresh_my_models, models_inputs, models_outputs)
+        refresh_actions(demo.load(refresh_my_models, models_inputs, models_outputs))
         # Escape stops a running generation, from anywhere on the page.
         demo.load(None, None, None, js=SHORTCUT_JS)
 
