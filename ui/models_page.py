@@ -14,7 +14,9 @@ import gradio as gr
 import settings
 from model_runtime import (
     DEFAULT_MODEL_SORT,
+    IMAGE_KIND,
     MODEL_WEIGHTS,
+    TEXT_KIND,
     CachedModel,
     CacheStatus,
     DownloadSnapshot,
@@ -226,12 +228,16 @@ def load_detail(
     return f"{name}\n\n`{progress_bar(shown)}` {percent}%\n\n{figures}"
 
 
-def stream_load(model_id: str, path: Path, precision: str = "full"):
+def stream_load(
+    model_id: str, path: Path, precision: str = "full", kind: str = TEXT_KIND
+):
     """Yield a status card every half second until ``model_id`` is in memory.
 
     Returns the device it landed on, so a caller writes
     ``device = yield from stream_load(...)``. A failed load raises here.
     ``precision`` is the weight precision chosen on the Models page.
+    ``kind`` is the snapshot's own verdict on what it holds, so a diffusers
+    pipeline is read by the pipeline loader and a checkpoint by the text one.
 
     The load runs on its own thread, as a download does: ``from_pretrained``
     blocks until the last weight, and a handler that blocked with it could
@@ -243,7 +249,9 @@ def stream_load(model_id: str, path: Path, precision: str = "full"):
 
     def work() -> None:
         try:
-            outcome["device"] = runtime.MANAGER.load(model_id, path, progress, precision=precision)
+            outcome["device"] = runtime.MANAGER.load(
+                model_id, path, progress, precision=precision, kind=kind
+            )
         except BaseException as error:
             outcome["error"] = error
         finally:
@@ -431,7 +439,10 @@ def download_and_load_model(
             f"{fetched} Moving `{model_id.strip()}` onto the best available device…",
             "working",
         )
-        device = yield from stream_load(model_id, path, precision)
+        # Read after the download rather than before it: what the repo turns
+        # out to hold is only knowable once its files are here.
+        fetched_status = cache_status(model_id)
+        device = yield from stream_load(model_id, path, precision, fetched_status.kind)
     except Exception as error:
         yield failure_card("Model setup failed", html.escape(str(error)))
         return
@@ -439,7 +450,8 @@ def download_and_load_model(
     elapsed = time.monotonic() - started
     yield status_card(
         "Model ready",
-        f"`{model_id.strip()}` is loaded on **{device}** ({elapsed:.1f} seconds total).",
+        f"`{model_id.strip()}` is loaded on **{device}** ({elapsed:.1f} seconds "
+        f"total). {where_to_use(fetched_status.kind)}",
         "success",
     )
 
@@ -518,7 +530,7 @@ def load_cached_model(
     try:
         path = runtime.MANAGER.find_cached(cleaned)
         started = time.monotonic()
-        device = yield from stream_load(cleaned, path, precision)
+        device = yield from stream_load(cleaned, path, precision, status.kind)
     except IncompleteSnapshotError as error:
         yield failure_card(
             "Download unfinished", incomplete_snapshot_detail(cleaned, error)
@@ -530,13 +542,13 @@ def load_cached_model(
     yield status_card(
         "Model ready",
         f"{name} is loaded on **{device}** "
-        f"({time.monotonic() - started:.1f} seconds).",
+        f"({time.monotonic() - started:.1f} seconds). {where_to_use(status.kind)}",
         "success",
     )
 
 
 def unload_model():
-    if not runtime.MANAGER.loaded:
+    if not runtime.MANAGER.in_memory:
         return status_card("No model loaded", "There is nothing to unload.")
     runtime.MANAGER.unload()
     return status_card("Model unloaded", "Model memory has been released.", "success")
@@ -568,19 +580,33 @@ def model_badge(state: str, text: str) -> str:
     )
 
 
-def model_snapshot() -> tuple[str | None, str | None, str | None]:
-    """The load under way, the model in memory, and its device, read once.
+def model_snapshot() -> tuple[str | None, str | None, str | None, str]:
+    """The load under way, the model in memory, its device and its kind, read once.
 
     Reuse these values so the badge and setup links render from the same
     readings. This is display state, not an atomic snapshot or a reservation
     of the model for a later action.
+
+    The kind is read from what is really in memory rather than from what the
+    last load was asked for, so it can never disagree with the object a page
+    would go on to use.
     """
 
-    return runtime.MANAGER.loading_id, runtime.MANAGER.model_id, runtime.MANAGER.device_name
+    return (
+        runtime.MANAGER.loading_id,
+        runtime.MANAGER.model_id,
+        runtime.MANAGER.device_name,
+        IMAGE_KIND if runtime.MANAGER.image_loaded else TEXT_KIND,
+    )
 
 
-def loaded_model_badge(snapshot=None) -> str:
+def loaded_model_badge(snapshot=None, *, kind: str = TEXT_KIND) -> str:
     """Name the model in memory, the one being loaded, or neither.
+
+    ``kind`` is the kind of model the page asking can use. A model of the
+    other kind is named and set apart rather than hidden: the Chat page
+    saying "no model loaded" while an image pipeline filled the machine's
+    memory would send a reader to load a second one on top of it.
 
     A model in memory is named ahead of any load. A load counts itself as
     under way before it waits for the model lock, so asking for a second
@@ -600,27 +626,53 @@ def loaded_model_badge(snapshot=None) -> str:
     :func:`refresh_model_badge`.
     """
 
-    loading, model_id, device = (
+    loading, model_id, device, loaded_kind = (
         model_snapshot() if snapshot is None else snapshot
     )
     if model_id and device:
-        return model_badge("ready", f"{model_id} · loaded on {device}")
+        if loaded_kind == kind:
+            return model_badge("ready", f"{model_id} · loaded on {device}")
+        return model_badge(
+            "other",
+            f"{model_id} · {KIND_NAMES.get(loaded_kind, 'model')}, not used here",
+        )
     if loading:
         return model_badge("loading", f"Loading {loading}…")
     return model_badge("empty", NO_MODEL_BADGE)
 
 
-def refresh_model_badge():
-    """Refresh the badge and the setup links from the same reading.
+def _setup_links(snapshot, kind: str):
+    """Whether a page's own "choose a model" links belong on screen.
+
+    Hidden once that page has a model it can use, or while any load is
+    pending. A model of the other kind leaves them showing, because from
+    that page there is still a model to go and load.
 
     Setup links navigate without loading anything, so downloads do not need
-    to disable them. Hide them when a model is loaded or a load is pending.
+    to disable them.
     """
 
+    loading, model_id, device, loaded_kind = snapshot
+    ready = bool(model_id and device and loaded_kind == kind)
+    return gr.update(visible=not (ready or bool(loading)))
+
+
+def refresh_model_badge():
+    """Refresh the Chat page's badge and setup links from the same reading."""
+
     snapshot = model_snapshot()
-    loading, model_id, device = snapshot
-    links = gr.update(visible=not ((model_id and device) or loading))
-    return loaded_model_badge(snapshot), links, links
+    links = _setup_links(snapshot, TEXT_KIND)
+    return loaded_model_badge(snapshot, kind=TEXT_KIND), links, links
+
+
+def refresh_image_badge():
+    """Refresh the Images page's badge and its own setup link."""
+
+    snapshot = model_snapshot()
+    return (
+        loaded_model_badge(snapshot, kind=IMAGE_KIND),
+        _setup_links(snapshot, IMAGE_KIND),
+    )
 
 
 def go_to_models():
@@ -665,10 +717,23 @@ def select_default_model():
 NO_CACHED_MODEL_SELECTED = "Select a model to see its details and put it in the model ID box."
 
 
-SEARCH_HINT = (
-    "Search Hugging Face for text-generation models Transformers can load. "
-    "Selecting a result puts its ID in the model ID box; **Download and load** fetches it."
-)
+# The search is scoped to one kind at a time, because the hub's own filters
+# are: a text-generation search and a text-to-image one are different
+# queries, not one query with a wider net.
+SEARCH_KINDS = (("Text models", TEXT_KIND), ("Image models", IMAGE_KIND))
+
+SEARCH_HINTS = {
+    TEXT_KIND: (
+        "Searching Hugging Face for text-generation models Transformers can load. "
+        "Selecting a result puts its ID in the model ID box; **Download and load** fetches it."
+    ),
+    IMAGE_KIND: (
+        "Searching Hugging Face for text-to-image diffusers pipelines. "
+        "Selecting a result puts its ID in the model ID box; **Download and load** fetches it."
+    ),
+}
+
+SEARCH_HINT = SEARCH_HINTS[TEXT_KIND]
 
 
 NO_RESULT_SELECTED = "Select a result to see its details."
@@ -681,17 +746,42 @@ def format_timestamp(stamp: float | None) -> str:
 
 
 UNSUPPORTED_REASON = (
-    "not a Transformers language model: its files are all here, but its weights "
-    "are laid out for another framework (a diffusers pipeline, a CTranslate2 or "
-    "ONNX export, say) and there is no `model.safetensors` or `pytorch_model.bin` "
-    "at the top of the repo, so ChatLab cannot load it."
+    "not a model ChatLab loads: its files are all here, but its weights are "
+    "laid out for another framework (a CTranslate2 or ONNX export, say). "
+    "ChatLab loads two kinds - a Transformers causal language model, which "
+    "has a `model.safetensors` or `pytorch_model.bin` at the top of the repo, "
+    "and a diffusers image pipeline, which has a `model_index.json` - and "
+    "this repo is neither."
 )
+
+
+# What each kind of model is, in the fewest words that distinguish them, for
+# the list and the cards.
+KIND_NAMES = {TEXT_KIND: "text model", IMAGE_KIND: "image model"}
+
+
+def where_to_use(kind: str) -> str:
+    """Which page a freshly loaded model is used on, so nobody has to guess.
+
+    The two kinds are loaded from the same place and driven from different
+    ones, which is exactly the sort of thing a reader should be told at the
+    moment it becomes true rather than left to find.
+    """
+
+    if kind == IMAGE_KIND:
+        return "It draws pictures: go to the **Images** page to use it."
+    return "It answers with tokens: go to the **Chat** page to use it."
 
 
 def cached_model_label(entry: CachedModel) -> str:
     """``org/name · 15 GB``, flagged when it is loaded or short of files."""
 
     label = f"{entry.model_id} · {format_bytes(entry.size_bytes)}"
+    if entry.status.kind == IMAGE_KIND:
+        # Only the image models are flagged. Text models are the majority and
+        # the default, so labelling both kinds would put a word on every row
+        # to distinguish the exception.
+        label += " · image"
     if entry.status.missing_files:
         label += " · incomplete"
     elif entry.status.unsupported:
@@ -712,10 +802,14 @@ def describe_cached_model(entry: CachedModel) -> str:
     elif entry.status.unsupported:
         verdict = f"**Unsupported:** {UNSUPPORTED_REASON}"
     else:
-        verdict = "**Ready to load.** Use **Load cached** to bring it into memory."
+        verdict = (
+            "**Ready to load.** Use **Load cached** to bring it into memory. "
+            f"{where_to_use(entry.status.kind)}"
+        )
     facts = [("On disk", describe_on_disk(entry.status))]
     if entry.files:
         facts.append(("Files", f"{entry.files} in the current snapshot"))
+    facts.append(("Kind", KIND_NAMES.get(entry.status.kind, "not loadable here")))
     if entry.architecture:
         model_type = entry.architecture
         if entry.dtype:
@@ -987,7 +1081,14 @@ def describe_hub_model(result: HubModel) -> str:
     except (OSError, ValueError):
         cached = CacheStatus()
     if cached.complete:
-        facts.append(("Already cached", f"{describe_on_disk(cached)}, ready to load"))
+        facts.append(
+            (
+                "Already cached",
+                f"{describe_on_disk(cached)}, ready to load as "
+                f"{'an' if cached.kind == IMAGE_KIND else 'a'} "
+                f"{KIND_NAMES.get(cached.kind, 'model')}",
+            )
+        )
     elif cached.unsupported:
         facts.append(
             ("Already cached", f"{describe_on_disk(cached)}, but not a model ChatLab can load")
@@ -999,22 +1100,24 @@ def describe_hub_model(result: HubModel) -> str:
     if cached.unsupported:
         lines.append(
             "Its ID is in the model ID box, but downloading again would fetch the "
-            "same files: this repo is not a Transformers language model."
+            "same files: this repo is neither a Transformers language model nor "
+            "a diffusers pipeline."
         )
     else:
         lines.append("Its ID is in the model ID box: use **Download and load** to fetch it.")
     return "\n".join(lines)
 
 
-def search_models(query: str, hf_token: str):
-    """Search the hub and list the results; nothing is selected yet."""
+def search_models(query: str, hf_token: str, kind: str = TEXT_KIND):
+    """Search the hub for models of one kind; nothing is selected yet."""
 
     cleared = gr.update(choices=[], value=None)
+    hint = SEARCH_HINTS.get(kind, SEARCH_HINT)
     cleaned = query.strip()
     if not cleaned:
-        return cleared, SEARCH_HINT, {}
+        return cleared, hint, {}
     try:
-        results = search_hub_models(cleaned, hf_token)
+        results = search_hub_models(cleaned, hf_token, kind=kind)
     except Exception as error:
         return (
             cleared,
@@ -1022,9 +1125,10 @@ def search_models(query: str, hf_token: str):
             {},
         )
     if not results:
+        described = "text-to-image pipelines" if kind == IMAGE_KIND else "text-generation models"
         return (
             cleared,
-            f"No text-generation models matched `{html.escape(cleaned)}`.",
+            f"No {described} matched `{html.escape(cleaned)}`.",
             {},
         )
     choices = [(hub_model_label(result), result.model_id) for result in results]

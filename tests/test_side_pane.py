@@ -18,7 +18,9 @@ from ui import models_page, runtime
 import model_runtime
 import settings
 from model_runtime import (
+    IMAGE_KIND,
     MODEL_WEIGHTS,
+    TEXT_KIND,
     CachedModel,
     CacheStatus,
     DownloadProgress,
@@ -362,7 +364,9 @@ class LoadingIdTests(unittest.TestCase):
         manager = ModelManager()
         seen = []
 
-        def fake_load(model_id, local_path, torch, progress=None, precision="full"):
+        def fake_load(
+            model_id, local_path, torch, progress=None, precision="full", kind=TEXT_KIND
+        ):
             seen.append((manager.loading_id, manager._lock.locked()))
             return "CPU"
 
@@ -380,7 +384,9 @@ class LoadingIdTests(unittest.TestCase):
         manager._lock.acquire()
         entered = threading.Event()
 
-        def fake_load(model_id, local_path, torch, progress=None, precision="full"):
+        def fake_load(
+            model_id, local_path, torch, progress=None, precision="full", kind=TEXT_KIND
+        ):
             entered.set()
             return "CPU"
 
@@ -404,7 +410,9 @@ class LoadingIdTests(unittest.TestCase):
     def test_a_failed_load_clears_the_loading_id(self):
         manager = ModelManager()
 
-        def fail(model_id, local_path, torch, progress=None, precision="full"):
+        def fail(
+            model_id, local_path, torch, progress=None, precision="full", kind=TEXT_KIND
+        ):
             raise RuntimeError("gpu fell over")
 
         with mock.patch.object(manager, "_load_locked", fail):
@@ -479,7 +487,9 @@ class LoadingIdTests(unittest.TestCase):
         let_first_finish = threading.Event()
         let_second_finish = threading.Event()
 
-        def fake_load(model_id, local_path, torch, progress=None, precision="full"):
+        def fake_load(
+            model_id, local_path, torch, progress=None, precision="full", kind=TEXT_KIND
+        ):
             if model_id == OLMO:
                 in_first.set()
                 let_first_finish.wait(5)
@@ -539,7 +549,9 @@ class LoadingIdTests(unittest.TestCase):
         reading = threading.Event()
         let_it_finish = threading.Event()
 
-        def fake_load(model_id, local_path, torch, progress=None, precision="full"):
+        def fake_load(
+            model_id, local_path, torch, progress=None, precision="full", kind=TEXT_KIND
+        ):
             reading.set()
             let_it_finish.wait(5)
             return "CPU"
@@ -592,9 +604,18 @@ PARTIAL = cached(
 )
 
 UNSUPPORTED = cached(
-    "runwayml/stable-diffusion-v1-5",
-    status=CacheStatus(cached_bytes=5_500_000_000, unsupported=True),
+    # A CTranslate2 export: whole on disk and not a model of either kind.
+    # Not a diffusers pipeline, which is now one of the kinds that load.
+    "org/olmo-ct2",
+    status=CacheStatus(cached_bytes=5_500_000_000, kind=""),
     architecture=None,
+    dtype=None,
+)
+
+PIPELINE = cached(
+    "stable-diffusion-v1-5/stable-diffusion-v1-5",
+    status=CacheStatus(cached_bytes=5_500_000_000, kind=IMAGE_KIND),
+    architecture="StableDiffusionPipeline",
     dtype=None,
 )
 
@@ -698,9 +719,32 @@ class MyModelsPaneTests(unittest.TestCase):
             radio["choices"][0][0], f"{UNSUPPORTED.model_id} · 5.5 GB · unsupported"
         )
         self.assertIn("Unsupported", detail)
-        self.assertIn("not a Transformers language model", detail)
+        self.assertIn("not a model ChatLab loads", detail)
         self.assertNotIn("Incomplete", detail)
         self.assertNotIn("Download and load", detail)
+
+    def test_an_image_pipeline_is_listed_as_one_and_points_at_the_images_page(self):
+        self.entries = [PIPELINE]
+
+        radio, _, _ = app.refresh_my_models(None)
+        _, detail = app.select_my_model(PIPELINE.model_id)
+
+        self.assertEqual(
+            radio["choices"][0][0], f"{PIPELINE.model_id} · 5.5 GB · image"
+        )
+        self.assertIn("Ready to load", detail)
+        self.assertIn("**Images** page", detail)
+        self.assertIn("**Kind:** image model", detail)
+        self.assertNotIn("Unsupported", detail)
+
+    def test_a_text_model_is_not_flagged_with_a_kind_in_the_list(self):
+        # Text models are the majority and the default: a word on every row
+        # to distinguish the exception would put one on every row.
+        radio, _, _ = app.refresh_my_models(None)
+        labels = dict((value, label) for label, value in radio["choices"])
+
+        self.assertNotIn("· image", labels[OLMO])
+        self.assertNotIn("· text", labels[OLMO])
 
     def test_a_refresh_keeps_the_selection(self):
         radio, detail, _ = app.refresh_my_models("org/partial")
@@ -971,8 +1015,8 @@ class ModelSearchPaneTests(unittest.TestCase):
             or setattr(models_page, "cache_status", original_status)
         )
 
-    def search(self, query, hf_token):
-        self.queries.append((query, hf_token))
+    def search(self, query, hf_token, kind=TEXT_KIND):
+        self.queries.append((query, hf_token, kind))
         if isinstance(self.results, Exception):
             raise self.results
         return list(self.results)
@@ -980,7 +1024,7 @@ class ModelSearchPaneTests(unittest.TestCase):
     def test_results_are_listed_with_size_and_popularity(self):
         radio, detail, state = app.search_models("  olmo 3 ", "tok")
 
-        self.assertEqual(self.queries, [("olmo 3", "tok")])
+        self.assertEqual(self.queries, [("olmo 3", "tok", TEXT_KIND)])
         self.assertEqual(
             radio["choices"],
             [
@@ -1056,7 +1100,7 @@ class ModelSearchPaneTests(unittest.TestCase):
 
     def test_a_cached_result_of_another_kind_is_not_called_partly_cached(self):
         models_page.cache_status = lambda model_id: CacheStatus(
-            cached_bytes=5_500_000_000, unsupported=True
+            cached_bytes=5_500_000_000, kind=""
         )
         _, _, state = app.search_models("olmo", "")
 
@@ -1219,6 +1263,56 @@ class ModelBadgeTests(unittest.TestCase):
 
         self.assertIn("&lt;script&gt;", app.loaded_model_badge())
 
+    def load_pipeline(self):
+        self.manager.pipeline = object()
+        self.manager.kind = IMAGE_KIND
+        self.manager.model_id = "org/pipe"
+        self.manager.device_name = "Apple Metal (MPS)"
+
+    def test_an_image_model_is_ready_on_images_and_the_wrong_kind_on_chat(self):
+        # Something is in memory, so neither page shows the empty state; the
+        # Chat page saying "no model loaded" would send a reader off to load
+        # a second model on top of the one filling the machine.
+        self.load_pipeline()
+
+        chat, offer, button = app.refresh_model_badge()
+        images, image_button = app.refresh_image_badge()
+
+        self.assertIn('data-state="ready"', images)
+        self.assertIn("org/pipe", images)
+        self.assertIn("Apple Metal (MPS)", images)
+        self.assertFalse(image_button["visible"])
+
+        self.assertIn('data-state="other"', chat)
+        self.assertIn("image model, not used here", chat)
+        # From the Chat page there is still a model to go and load.
+        self.assertTrue(offer["visible"])
+        self.assertTrue(button["visible"])
+
+    def test_a_text_model_is_the_wrong_kind_on_the_images_page(self):
+        self.load()
+
+        images, image_button = app.refresh_image_badge()
+
+        self.assertIn('data-state="other"', images)
+        self.assertIn("text model, not used here", images)
+        self.assertTrue(image_button["visible"])
+
+    def test_neither_page_offers_a_setup_link_while_a_load_is_pending(self):
+        self.manager.reserve_load(OLMO)
+
+        images, image_button = app.refresh_image_badge()
+
+        self.assertIn('data-state="loading"', images)
+        self.assertFalse(image_button["visible"])
+
+    def test_nothing_loaded_reads_the_same_on_both_pages(self):
+        images, image_button = app.refresh_image_badge()
+
+        self.assertIn('data-state="empty"', images)
+        self.assertIn(app.NO_MODEL_BADGE, images)
+        self.assertTrue(image_button["visible"])
+
 
 class PageLayoutTests(unittest.TestCase):
     """The nav picks a page: the model controls sit on Models, the settings on
@@ -1238,6 +1332,22 @@ class PageLayoutTests(unittest.TestCase):
         "Measure prompt tokens",
         "Enter sends the message",
         "Context limit (tokens)",
+    ]
+    # Everything about drawing a picture is on Images, including its own
+    # sliders: the Chat page's sampling controls say nothing to a diffusion
+    # model, and these say nothing to a language one.
+    ON_IMAGES_PAGE = [
+        "Prompt",
+        "Negative prompt",
+        "Picture",
+        "Denoising steps",
+        "Guidance scale",
+        "Size",
+        "Seed",
+        "Randomize seed",
+        "Record cross-attention",
+        "Step",
+        "Prompt tokens — click one for its map",
     ]
     # Sampling sits with the conversation, not behind the nav: these are what
     # a reader moves between one retry and the next.
@@ -1286,16 +1396,19 @@ class PageLayoutTests(unittest.TestCase):
             ("models-page", self.ON_MODELS_PAGE),
             ("settings-page", self.ON_SETTINGS_PAGE),
             ("chat-page", self.ON_CHAT_PAGE),
+            ("images-page", self.ON_IMAGES_PAGE),
         ]:
             container = self.by_id(page)
             for label in labels:
                 with self.subTest(page=page, label=label):
                     self.assertTrue(self.within(self.labelled(label), container))
 
-    def test_the_nav_offers_the_three_pages_and_starts_on_chat(self):
+    def test_the_nav_offers_every_page_and_starts_on_chat(self):
         nav = self.by_id("nav")
         self.assertIsInstance(nav, gr.Radio)
-        self.assertEqual([value for _, value in nav.choices], ["Chat", "Models", "Settings"])
+        self.assertEqual(
+            [value for _, value in nav.choices], ["Chat", "Images", "Models", "Settings"]
+        )
         self.assertEqual(nav.value, "Chat")
         self.assertTrue(self.within(nav, self.by_id("nav-pane")))
 
@@ -1324,7 +1437,7 @@ class PageLayoutTests(unittest.TestCase):
         self.assertIn("#nav label span { font-size:", app.CSS)
 
     def test_the_nav_names_are_on_screen_rather_than_a_hover_away(self):
-        # Three pages is not a number worth hiding. Nothing clips the name
+        # Four pages is not a number worth hiding. Nothing clips the name
         # out of sight, and no tooltip stands in for it.
         self.assertNotIn("clip-path: inset(50%)", app.CSS)
         self.assertNotIn("#nav label::after", app.CSS)
@@ -1333,6 +1446,7 @@ class PageLayoutTests(unittest.TestCase):
     def test_only_the_chat_page_starts_visible(self):
         self.assertTrue(self.by_id("chat-page").visible)
         self.assertTrue(self.by_id("conversation-pane").visible)
+        self.assertFalse(self.by_id("images-page").visible)
         self.assertFalse(self.by_id("models-page").visible)
         self.assertFalse(self.by_id("settings-page").visible)
 
@@ -1344,15 +1458,17 @@ class PageLayoutTests(unittest.TestCase):
             [
                 self.by_id("conversation-pane"),
                 self.by_id("chat-page"),
+                self.by_id("images-page"),
                 self.by_id("models-page"),
                 self.by_id("settings-page"),
             ],
         )
         shown = lambda page: [update["visible"] for update in app.show_page(page)]
         # The conversations pane comes and goes with Chat.
-        self.assertEqual(shown("Chat"), [True, True, False, False])
-        self.assertEqual(shown("Models"), [False, False, True, False])
-        self.assertEqual(shown("Settings"), [False, False, False, True])
+        self.assertEqual(shown("Chat"), [True, True, False, False, False])
+        self.assertEqual(shown("Images"), [False, False, True, False, False])
+        self.assertEqual(shown("Models"), [False, False, False, True, False])
+        self.assertEqual(shown("Settings"), [False, False, False, False, True])
 
     def listeners(self, name):
         return [
@@ -1450,25 +1566,33 @@ class PageLayoutTests(unittest.TestCase):
         # the badge every couple of seconds.
         self.assertEqual(ticks[0].show_progress, "hidden")
 
-    def test_the_badge_button_sends_the_nav_to_the_models_page(self):
-        (listener,) = self.listeners("go_to_models")
-        self.assertEqual(listener.targets, [(self.by_id("load-model")._id, "click")])
-        # The button switches the pages itself: a Radio set by a handler
-        # reports no change, so the nav's own handler would not run.
-        self.assertEqual(
-            listener.outputs,
-            [
-                self.by_id("nav"),
-                self.by_id("conversation-pane"),
-                self.by_id("chat-page"),
-                self.by_id("models-page"),
-                self.by_id("settings-page"),
-            ],
-        )
-        page, *panes = app.go_to_models()
+    def test_the_badge_buttons_send_the_nav_to_the_models_page(self):
+        # One on the Chat page and one on Images: each page's badge says a
+        # model it can use is missing, and each offers the way to load one.
+        panes = [
+            self.by_id("nav"),
+            self.by_id("conversation-pane"),
+            self.by_id("chat-page"),
+            self.by_id("images-page"),
+            self.by_id("models-page"),
+            self.by_id("settings-page"),
+        ]
+        buttons = {"load-model", "image-load-model"}
+        found = set()
+        for listener in self.listeners("go_to_models"):
+            ((block_id, event),) = listener.targets
+            self.assertEqual(event, "click")
+            found.add(self.demo.blocks[block_id].elem_id)
+            # The button switches the pages itself: a Radio set by a handler
+            # reports no change, so the nav's own handler would not run.
+            self.assertEqual(listener.outputs, panes)
+        self.assertEqual(found, buttons)
+
+        page, *updates = app.go_to_models()
         self.assertEqual(page, "Models")
         self.assertEqual(
-            [update["visible"] for update in panes], [False, False, True, False]
+            [update["visible"] for update in updates],
+            [False, False, False, True, False],
         )
 
     def test_every_model_change_rescans_the_cache(self):
@@ -1620,6 +1744,7 @@ class PageLayoutTests(unittest.TestCase):
                 self.by_id("nav"),
                 self.by_id("conversation-pane"),
                 self.by_id("chat-page"),
+                self.by_id("images-page"),
                 self.by_id("models-page"),
                 self.by_id("settings-page"),
             ],
@@ -1638,6 +1763,75 @@ class PageLayoutTests(unittest.TestCase):
                     self.by_id("load-model"),
                 ],
             )
+
+    def test_the_images_badge_is_refreshed_on_the_same_three_occasions(self):
+        # Arriving at the page, opening it, and the timer that tells a tab
+        # which did not start a load about it.
+        listeners = self.listeners("refresh_image_badge")
+        outputs = [self.by_id("image-model-badge"), self.by_id("image-load-model")]
+        for listener in listeners:
+            self.assertEqual(listener.outputs, outputs)
+        self.assertEqual(len(listeners), 3)
+
+        triggers = {listener.targets[0] for listener in listeners}
+        timers = [
+            block for block in self.demo.blocks.values() if isinstance(block, gr.Timer)
+        ]
+        self.assertIn((self.by_id("nav")._id, "change"), triggers)
+        self.assertIn((timers[0]._id, "tick"), triggers)
+        # The timer's own refresh does not put a pending shimmer on the badge
+        # every couple of seconds; nobody asked it anything.
+        ticks = [
+            listener
+            for listener in listeners
+            if listener.targets == [(timers[0]._id, "tick")]
+        ]
+        self.assertEqual([listener.show_progress for listener in ticks], ["hidden"])
+
+    def test_stop_drawing_does_not_cancel_the_generator_that_publishes_the_run(self):
+        # The pipeline runs on its own thread and would keep running with the
+        # generator gone, taking every recorded step with it. So Stop sets an
+        # event the run checks between steps, and the generator itself
+        # publishes the stopped run.
+        (stop,) = self.listeners("stop_drawing")
+        ((block_id, event),) = stop.targets
+
+        self.assertEqual(event, "click")
+        self.assertEqual(self.demo.blocks[block_id].elem_id, "stop-drawing")
+        self.assertEqual(stop.cancels, [])
+        (draw,) = self.listeners("draw")
+        self.assertNotIn(draw._id, self.cancelled_by((block_id, event)))
+
+    def test_moving_the_step_repaints_the_frame_the_shading_and_the_map(self):
+        # Attention moves between steps as much as the picture does, so these
+        # cannot be allowed to disagree about which step is on screen.
+        (select,) = self.listeners("select_step")
+
+        self.assertEqual(select.targets, [(self.by_id("image-step")._id, "release")])
+        self.assertEqual(
+            select.outputs,
+            [
+                self.by_id("image-trajectory"),
+                self.by_id("image-prompt-strip"),
+                self.by_id("image-attention-note"),
+                self.by_id("image-attention"),
+            ],
+        )
+        self.assertIs(select.inputs[1], self.by_id("image-step"))
+
+    def test_clicking_a_prompt_token_is_remembered_before_the_map_is_drawn(self):
+        # The click's index has to land in the state the map reads, so the
+        # map follows the step slider afterwards without another click.
+        (remember,) = self.listeners("remember_token")
+        (token_state,) = remember.outputs
+        (paint,) = self.listeners("select_token")
+
+        self.assertEqual(
+            remember.targets, [(self.by_id("image-prompt-strip")._id, "select")]
+        )
+        self.assertEqual(paint.inputs[1], token_state)
+        self.assertEqual(paint.outputs, [self.by_id("image-attention")])
+        self.assertEqual(paint.trigger_after, remember._id)
 
     def test_escape_is_wired_to_the_stop_button_by_its_id(self):
         # The shortcut presses the button rather than reaching past it, so

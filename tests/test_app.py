@@ -479,7 +479,7 @@ class DownloadCardTests(unittest.TestCase):
                 finish.wait(5)
                 return Path("/cache/snap")
 
-            def load(self, model_id, local_path, progress=None, precision="full"):
+            def load(self, model_id, local_path, progress=None, precision="full", kind="text"):
                 return "cpu"
 
         runtime.MANAGER = Manager()
@@ -567,7 +567,7 @@ class DownloadManager(FakeDownloads):
         self.downloads += 1
         return Path("/cache/models--allenai--Olmo-3-7B-Think/snapshots/abc")
 
-    def load(self, model_id, path, progress=None, precision="full"):
+    def load(self, model_id, path, progress=None, precision="full", kind="text"):
         return "mps"
 
 
@@ -590,7 +590,7 @@ class LoadCardTests(unittest.TestCase):
         def find_cached(self, model_id):
             return Path("/cache/models--allenai--Olmo-3-7B-Think/snapshots/abc")
 
-        def load(self, model_id, path, progress=None, precision="full"):
+        def load(self, model_id, path, progress=None, precision="full", kind="text"):
             return self._work(progress)
 
     def setUp(self):
@@ -734,7 +734,7 @@ class LoadCardTests(unittest.TestCase):
                 order.append(("claimed", model_id))
                 return super().reserve_load(model_id)
 
-            def load(self, model_id, path, progress=None, precision="full"):
+            def load(self, model_id, path, progress=None, precision="full", kind="text"):
                 order.append(("loaded", self.loading_id))
                 return "CPU"
 
@@ -831,8 +831,13 @@ class DownloadStatusTests(unittest.TestCase):
         self.assertIn("nothing new was fetched", cards[-1])
 
     def test_download_and_load_carries_the_same_wording(self):
+        # Three readings: before the download, after it for the wording, and
+        # once more for the kind the loader is handed. See
+        # download_and_load_model.
         cached = CacheStatus(cached_bytes=15_000_000_000)
-        cards = self.run_handler(app.download_and_load_model, [cached, cached], "")
+        cards = self.run_handler(
+            app.download_and_load_model, [cached, cached, cached], ""
+        )
 
         self.assertIn("already in the Hugging Face cache", cards[0])
         self.assertIn("nothing new was fetched", cards[1])
@@ -887,12 +892,12 @@ class DownloadStatusTests(unittest.TestCase):
     def test_load_cached_refuses_a_repo_of_another_kind(self):
         cards = self.run_handler(
             app.load_cached_model,
-            [CacheStatus(cached_bytes=5_500_000_000, unsupported=True)],
+            [CacheStatus(cached_bytes=5_500_000_000, kind="")],
         )
 
         self.assertIn("Unsupported model", cards[-1])
         self.assertIn("5.5 GB cached", cards[-1])
-        self.assertIn("not a Transformers language model", cards[-1])
+        self.assertIn("not a model ChatLab loads", cards[-1])
         self.assertNotIn("Download incomplete", cards[-1])
 
     def test_a_download_stopped_between_shards_is_announced_as_resumed(self):
@@ -1303,7 +1308,8 @@ class DefaultModelSelectionTests(unittest.TestCase):
                 self.assertIsNone(pending)
                 self.assertEqual(page, app.MODELS_PAGE)
                 self.assertEqual(
-                    [update["visible"] for update in panes], [False, False, True, False]
+                    [update["visible"] for update in panes],
+                    [False, False, False, True, False],
                 )
                 self.assertEqual(manager.model_id, "org/new-choice")
                 self.assertTrue(manager.loaded)
@@ -1364,7 +1370,7 @@ class DefaultModelSelectionTests(unittest.TestCase):
             yield "download progress"
             return Path("/unused/cache")
 
-        def load(model_id, path, precision="full"):
+        def load(model_id, path, precision="full", kind="text"):
             actions.append(("load", model_id))
             yield "load progress"
             return "CPU"

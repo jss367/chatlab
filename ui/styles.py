@@ -61,8 +61,9 @@ html, body {{ height: 100%; overflow: hidden; }}
   align-items: stretch; overflow: hidden;
 }}
 #nav-pane, #conversation-pane, #chat-page, #chat-workspace, #inspector-pane,
+#images-page, #images-workspace, #image-inspector,
 #models-page, #settings-page {{ box-sizing: border-box; min-height: 0; flex-wrap: nowrap; }}
-#nav-pane, #conversation-pane, #inspector-pane {{
+#nav-pane, #conversation-pane, #inspector-pane, #image-inspector {{
   background: var(--background-fill-secondary);
 }}
 #nav-pane {{
@@ -98,6 +99,32 @@ html, body {{ height: 100%; overflow: hidden; }}
   height: 100%; overflow-y: auto; overscroll-behavior-y: contain;
   padding: 24px 32px;
 }}
+
+/* The Images page is the chat layout with a picture where the transcript
+   goes: the workspace scrolls on the left, the readings scroll beside it. */
+#images-page {{ min-width: 0 !important; height: 100%; gap: 0; }}
+#images-columns {{
+  height: 100%; min-height: 0; gap: 0; flex-wrap: nowrap;
+  align-items: stretch; overflow: hidden;
+}}
+#images-workspace {{
+  flex: 1 1 0 !important; min-width: 0 !important; height: 100%;
+  padding: 16px 24px; gap: 10px;
+  overflow-y: auto; overscroll-behavior-y: contain;
+}}
+#image-inspector {{
+  flex: 0 0 clamp(310px, 30vw, 440px) !important; min-width: 0 !important;
+  height: 100%; padding: 18px 18px 28px; gap: 18px;
+  overflow-y: auto; overscroll-behavior-y: contain;
+  border-left: 1px solid var(--border-color-primary);
+}}
+#images-workspace > *, #image-inspector > * {{ flex: 0 0 auto; }}
+#image-inspector .block {{ background: transparent; }}
+#image-inspector .inspector-section {{ padding: 0; border-radius: 0; }}
+#image-inspector .form {{ border: 0; box-shadow: none; background: transparent; }}
+#image-status {{ font-size: 12px; color: var(--body-text-color-subdued); }}
+#image-output img {{ max-height: 60vh; object-fit: contain; }}
+#search-kind {{ margin-bottom: 6px; }}
 #conversations-heading h2, #inspector-heading h2 {{
   font-size: 15px; line-height: 24px; font-weight: 600; margin: 0;
 }}
@@ -105,12 +132,18 @@ html, body {{ height: 100%; overflow: hidden; }}
 #hero h1 {{ font-size: 18px; line-height: 26px; font-weight: 600; margin: 0; }}
 #models-hero, #settings-hero {{ padding: 0 0 12px; }}
 #models-hero h1, #settings-hero h1 {{ font-size: 24px; margin-bottom: 6px; }}
+#images-hero {{ padding: 0; }}
+#images-hero h1 {{ font-size: 18px; line-height: 26px; font-weight: 600; margin: 0; }}
+#images-hero p {{ font-size: 12px; color: var(--body-text-color-subdued); margin: 2px 0 0; }}
 #model-status {{ min-height: 128px; }}
 
 /* The model badge stays small and wraps with its actions in narrow columns. */
-#model-bar {{ flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; }}
-#model-bar #model-badge {{ flex: 0 1 auto; width: auto; min-width: 0; padding: 0; }}
-#model-bar #load-model, #model-bar #default-model {{
+#model-bar, #image-model-bar {{ flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; }}
+#model-bar #model-badge, #image-model-bar #image-model-badge {{
+  flex: 0 1 auto; width: auto; min-width: 0; padding: 0;
+}}
+#model-bar #load-model, #model-bar #default-model,
+#image-model-bar #image-load-model {{
   flex: 0 0 auto; width: auto; min-width: 0; font-size: 12px;
 }}
 .model-badge {{
@@ -125,6 +158,9 @@ html, body {{ height: 100%; overflow: hidden; }}
 .model-badge[data-state="ready"] .model-badge-dot {{ background: #16a34a; }}
 .model-badge[data-state="loading"] .model-badge-dot,
 .model-badge[data-state="empty"] .model-badge-dot {{ background: #d97706; }}
+/* A model of the other kind: something is loaded, so it is not the empty
+   state, but not something this page can use, so it is not the ready one. */
+.model-badge[data-state="other"] .model-badge-dot {{ background: #64748b; }}
 
 /* The transcript uses the remaining height, keeping its composer in reach. */
 #conversation-tabs {{ flex: 1 0 0; min-height: 420px; display: flex; flex-direction: column; }}
@@ -351,6 +387,27 @@ abbr[title] {{ text-decoration: underline dotted; cursor: help; }}
 }}
 .viz-value {{ color: var(--viz-ink); font-size: 1.25rem; line-height: 1.2; }}
 .viz-label {{ color: var(--viz-muted); font-size: 0.72rem; text-transform: lowercase; }}
+
+/* A chart with two series names them under its title rather than in a box
+   over the plot, where a legend would sit on the lines it explains. */
+.viz-key {{ display: inline-flex; align-items: center; gap: 0.25rem; margin-right: 0.6rem; }}
+.viz-swatch {{ width: 0.7rem; height: 2px; border-radius: 1px; display: inline-block; }}
+.viz-swatch-line {{ background: var(--viz-line); }}
+
+/* One frame of the denoising trajectory. Held at the pane's width and left
+   to the browser's own smooth upscaling: the frame is a small preview of a
+   latent, so pixelating it would claim a detail it does not have. */
+.trajectory-frame {{
+  width: 100%; height: auto; display: block; border-radius: 8px;
+  background: var(--background-fill-primary);
+}}
+
+/* The picture with a cross-attention map over it: two images stacked, so
+   the pixels underneath stay the pipeline's own and the map stays a layer
+   that can be seen through. */
+.attention-stack {{ position: relative; line-height: 0; border-radius: 8px; overflow: hidden; }}
+.attention-stack img {{ width: 100%; height: auto; display: block; }}
+.attention-stack img + img {{ position: absolute; inset: 0; }}
 
 .viz-line-faint {{ stroke: var(--viz-band); stroke-width: 1.5; }}
 .viz-marker {{ stroke: var(--viz-muted); stroke-width: 1; stroke-dasharray: 3 3; }}

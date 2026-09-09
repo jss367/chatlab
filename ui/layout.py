@@ -13,6 +13,7 @@ from conversation import (
 )
 from model_runtime import (
     DEFAULT_MODEL_SORT,
+    IMAGE_KIND,
     MODEL_SORT_ORDERS,
 )
 from token_metrics import (
@@ -31,6 +32,9 @@ from ui.common import (
     show_page,
     status_card,
 )
+from token_metrics import (
+    PROMPT_ATTENTION_SCALE,
+)
 from ui.conversations import (
     delete_fork,
     fork_conversation,
@@ -42,6 +46,18 @@ from ui.conversations import (
     restore_conversations,
     save_conversation,
     switch_fork,
+)
+from ui.images_page import (
+    NO_ATTENTION,
+    NO_TRAJECTORY,
+    PROMPT_STRIP_LABEL,
+    draw,
+    remember_committed_image_seed,
+    remember_image_settings,
+    remember_token,
+    select_step,
+    select_token,
+    stop_drawing,
 )
 from ui.generation import (
     ask_clear_chat,
@@ -67,6 +83,7 @@ from ui.inspection import (
 from ui.models_page import (
     BADGE_REFRESH_SECONDS,
     SEARCH_HINT,
+    SEARCH_KINDS,
     ask_remove_my_model,
     clear_my_model_selection,
     download_and_load_model,
@@ -76,6 +93,7 @@ from ui.models_page import (
     load_cached_model,
     loaded_model_badge,
     redownload_my_model,
+    refresh_image_badge,
     refresh_model_badge,
     refresh_my_models,
     remove_my_model,
@@ -487,6 +505,173 @@ def build_app() -> gr.Blocks:
                             )
 
             with gr.Column(
+                scale=1, visible=False, elem_id="images-page"
+            ) as images_page:
+                with gr.Row(equal_height=True, elem_id="images-columns"):
+                    with gr.Column(scale=3, min_width=320, elem_id="images-workspace"):
+                        gr.Markdown(
+                            "# Images\nDraw a picture with a diffusion model, and "
+                            "watch what it did while it drew.",
+                            elem_id="images-hero",
+                        )
+                        # The same badge the Chat page carries, asking about the
+                        # same one model in memory; this one asks whether it is
+                        # a model that can draw.
+                        with gr.Row(elem_id="image-model-bar"):
+                            image_badge_view = gr.HTML(
+                                loaded_model_badge(kind=IMAGE_KIND),
+                                elem_id="image-model-badge",
+                            )
+                            image_load_button = gr.Button(
+                                "Choose an image model",
+                                variant="primary",
+                                size="sm",
+                                visible=not runtime.MANAGER.image_loaded,
+                                elem_id="image-load-model",
+                            )
+                        image_prompt = gr.Textbox(
+                            label="Prompt",
+                            lines=2,
+                            placeholder="A red bicycle leaning on a harbour wall at dawn",
+                            elem_id="image-prompt",
+                        )
+                        image_negative = gr.Textbox(
+                            value=saved.image_negative_prompt,
+                            label="Negative prompt",
+                            lines=1,
+                            placeholder="What to steer away from — blurry, watermark…",
+                            info=(
+                                "What the unconditional half of every step is "
+                                "prompted with. The guidance pull is measured "
+                                "against it, so this changes the trace as well "
+                                "as the picture."
+                            ),
+                        )
+                        with gr.Row():
+                            draw_button = gr.Button(
+                                "Draw", variant="primary", min_width=70
+                            )
+                            stop_draw_button = gr.Button(
+                                "Stop",
+                                variant="stop",
+                                visible=False,
+                                elem_id="stop-drawing",
+                            )
+                        image_status = gr.Markdown(
+                            "Ready.", elem_id="image-status"
+                        )
+                        image_output = gr.Image(
+                            label="Picture",
+                            type="pil",
+                            interactive=False,
+                            show_label=False,
+                            elem_id="image-output",
+                        )
+                        with gr.Accordion("Drawing settings", open=False):
+                            with gr.Row():
+                                image_steps = gr.Slider(
+                                    settings.IMAGE_STEPS_RANGE[0],
+                                    settings.IMAGE_STEPS_RANGE[1],
+                                    value=saved.image_steps,
+                                    step=1,
+                                    label="Denoising steps",
+                                )
+                                image_guidance = gr.Slider(
+                                    settings.IMAGE_GUIDANCE_RANGE[0],
+                                    settings.IMAGE_GUIDANCE_RANGE[1],
+                                    value=saved.image_guidance,
+                                    step=0.5,
+                                    label="Guidance scale",
+                                    info="At 1 or below there is no guidance, and no pull to measure.",
+                                )
+                            with gr.Row():
+                                image_size = gr.Dropdown(
+                                    choices=[
+                                        (f"{size} × {size}", size)
+                                        for size in settings.IMAGE_SIZES
+                                    ],
+                                    value=saved.image_size,
+                                    label="Size",
+                                )
+                                image_seed = gr.Number(
+                                    value=saved.image_seed,
+                                    label="Seed",
+                                    precision=0,
+                                    minimum=settings.SEED_FLOOR,
+                                )
+                                image_randomize = gr.Checkbox(
+                                    value=saved.image_randomize_seed,
+                                    label="Randomize seed",
+                                )
+                            image_record_attention = gr.Checkbox(
+                                value=True,
+                                label="Record cross-attention",
+                                info=(
+                                    "The one reading that costs time: the "
+                                    "pipeline's own attention kernel never "
+                                    "builds the probabilities, so they are "
+                                    "computed again alongside. Turn it off for "
+                                    "the pipeline's own speed and keep the "
+                                    "trajectory and the guidance trace."
+                                ),
+                            )
+
+                    with gr.Column(scale=2, min_width=300, elem_id="image-inspector"):
+                        # Which run the readouts belong to, the step being
+                        # looked at, and the prompt token last clicked.
+                        image_run_state = gr.State(None)
+                        image_token_state = gr.State(None)
+                        with gr.Accordion(
+                            "Denoising trajectory",
+                            open=True,
+                            elem_classes=["inspector-section"],
+                        ):
+                            image_step = gr.Slider(
+                                1,
+                                1,
+                                value=1,
+                                step=1,
+                                label="Step",
+                                interactive=False,
+                                elem_id="image-step",
+                                info="Scrub through the run. The token shading and the map follow.",
+                            )
+                            image_trajectory = gr.HTML(
+                                NO_TRAJECTORY, elem_id="image-trajectory"
+                            )
+                        with gr.Accordion(
+                            "Guidance and movement",
+                            open=True,
+                            elem_classes=["inspector-section"],
+                        ):
+                            image_tiles = gr.HTML(
+                                charts.EMPTY_IMAGE_TILES, elem_id="image-tiles"
+                            )
+                            image_chart = gr.HTML(
+                                charts.EMPTY_DENOISING_CHART, elem_id="image-chart"
+                            )
+                        with gr.Accordion(
+                            "Prompt attention",
+                            open=True,
+                            elem_classes=["inspector-section"],
+                        ):
+                            image_strip = gr.HighlightedText(
+                                label=PROMPT_STRIP_LABEL,
+                                color_map=PROMPT_ATTENTION_SCALE.color_map,
+                                show_legend=True,
+                                combine_adjacent=False,
+                                elem_id="image-prompt-strip",
+                            )
+                            image_note = gr.Markdown(
+                                "",
+                                elem_id="image-attention-note",
+                                elem_classes=["scale-caption"],
+                            )
+                            image_overlay = gr.HTML(
+                                NO_ATTENTION, elem_id="image-attention"
+                            )
+
+            with gr.Column(
                 scale=1, visible=False, elem_id="models-page"
             ) as models_page:
                 gr.Markdown(
@@ -540,6 +725,15 @@ def build_app() -> gr.Blocks:
                         )
 
                         gr.Markdown("## Model search")
+                        # One kind at a time, because the hub's own filters
+                        # are; see SEARCH_KINDS.
+                        search_kind = gr.Radio(
+                            choices=list(SEARCH_KINDS),
+                            value=SEARCH_KINDS[0][1],
+                            show_label=False,
+                            container=False,
+                            elem_id="search-kind",
+                        )
                         with gr.Row():
                             search_query = gr.Textbox(
                                 label="Search Hugging Face",
@@ -679,7 +873,9 @@ def build_app() -> gr.Blocks:
                         )
 
         nav.change(
-            show_page, nav, [conversation_pane, chat_page, models_page, settings_page]
+            show_page,
+            nav,
+            [conversation_pane, chat_page, images_page, models_page, settings_page],
         )
         # The scored token count follows the boxes as they are typed into.
         # always_last coalesces a burst of keystrokes into the one count that
@@ -730,8 +926,94 @@ def build_app() -> gr.Blocks:
         load_model_button.click(
             go_to_models,
             None,
-            [nav, conversation_pane, chat_page, models_page, settings_page],
+            [nav, conversation_pane, chat_page, images_page, models_page, settings_page],
         )
+        image_load_button.click(
+            go_to_models,
+            None,
+            [nav, conversation_pane, chat_page, images_page, models_page, settings_page],
+        )
+
+        # ------------------------------------------------------------- Images
+        # Every image handler publishes in this order; see IMAGE_OUTPUT_NAMES.
+        image_outputs = [
+            image_status,
+            draw_button,
+            stop_draw_button,
+            image_seed,
+            image_output,
+            image_run_state,
+            image_step,
+            image_trajectory,
+            image_tiles,
+            image_chart,
+            image_strip,
+            image_note,
+            image_overlay,
+            image_token_state,
+        ]
+        image_inputs = [
+            image_prompt,
+            image_negative,
+            image_steps,
+            image_guidance,
+            image_size,
+            image_seed,
+            image_randomize,
+            image_record_attention,
+        ]
+        draw_button.click(draw, image_inputs, image_outputs)
+        # Stop is not a cancel. The pipeline runs on its own thread and would
+        # keep running with the generator gone, so the button sets the event
+        # the run checks between steps and the generator publishes the
+        # stopped run itself, trajectory and all. Cancelling it would throw
+        # away the steps that had been recorded.
+        stop_draw_button.click(stop_drawing, None, image_status)
+
+        # The step slider moves the frame, the shading and the map together;
+        # see select_step for why they cannot be allowed to disagree.
+        image_step.release(
+            select_step,
+            [image_run_state, image_step, image_token_state],
+            [image_trajectory, image_strip, image_note, image_overlay],
+        )
+        image_strip.select(remember_token, None, image_token_state).then(
+            select_token,
+            [image_run_state, image_token_state, image_step],
+            image_overlay,
+        )
+
+        # The Images badge is refreshed on the same three occasions the Chat
+        # one is, and for the same reasons: arriving at the page, opening it,
+        # and the timer that tells a tab which did not start a load about it.
+        image_badge_outputs = [image_badge_view, image_load_button]
+        nav.change(refresh_image_badge, None, image_badge_outputs)
+        demo.load(refresh_image_badge, None, image_badge_outputs)
+        badge_timer.tick(
+            refresh_image_badge, None, image_badge_outputs, show_progress="hidden"
+        )
+
+        image_settings_inputs = [
+            image_negative,
+            image_steps,
+            image_guidance,
+            image_size,
+            image_seed,
+            image_randomize,
+        ]
+        for control in (
+            image_negative,
+            image_steps,
+            image_guidance,
+            image_size,
+            image_randomize,
+        ):
+            control.change(remember_image_settings, image_settings_inputs, None)
+        # The seed box is written to by a finished picture, so only the
+        # reader being done editing it commits what it holds; the Chat page's
+        # seed follows the same rule for the same reason.
+        for event in (image_seed.blur, image_seed.submit):
+            event(remember_committed_image_seed, image_settings_inputs, None)
 
         # Every handler that can change what is on disk or in memory rescans
         # the cache afterwards, so My Models never shows a stale list.
@@ -802,6 +1084,7 @@ def build_app() -> gr.Blocks:
                 nav,
                 conversation_pane,
                 chat_page,
+                images_page,
                 models_page,
                 settings_page,
             ],
@@ -837,8 +1120,13 @@ def build_app() -> gr.Blocks:
         cancel_remove_button.click(hide_remove_confirm, None, confirm_outputs)
 
         search_outputs = [search_results, search_detail, search_results_state]
-        search_button.click(search_models, [search_query, hf_token], search_outputs)
-        search_query.submit(search_models, [search_query, hf_token], search_outputs)
+        search_inputs = [search_query, hf_token, search_kind]
+        search_button.click(search_models, search_inputs, search_outputs)
+        search_query.submit(search_models, search_inputs, search_outputs)
+        # Switching kinds re-runs the query rather than leaving the other
+        # kind's results under the new label. With an empty box it just
+        # replaces the hint, which is what says which hub filter is on.
+        search_kind.input(search_models, search_inputs, search_outputs)
         # Picking a search result names a model too, so it withdraws the My
         # Models selection the same way typing an ID does.
         search_results.input(

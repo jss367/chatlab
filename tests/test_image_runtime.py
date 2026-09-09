@@ -1,0 +1,824 @@
+"""Recognizing, sizing and running a diffusers pipeline."""
+
+import json
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import numpy
+import torch
+
+import image_runtime
+import settings_sandbox
+from fake_pipeline import FakePipeline, FakeTokenizer
+from image_runtime import ImageRequest
+from model_runtime import (
+    IMAGE_KIND,
+    MODEL_WEIGHTS,
+    TEXT_KIND,
+    ModelBusy,
+    ModelManager,
+    cache_status,
+    is_pipeline,
+    pipeline_class,
+    pipeline_components,
+    pipeline_missing_files,
+    pipeline_weight_bytes,
+    weight_bytes_for,
+)
+
+
+def setUpModule():
+    settings_sandbox.start()
+
+
+def tearDownModule():
+    settings_sandbox.stop()
+
+
+MODEL = "stable-diffusion-v1-5/stable-diffusion-v1-5"
+
+# What a Stable Diffusion repo's index really looks like, trimmed: the
+# component pairs, the pipeline class, and a component the repo shipped
+# without, which is written as a pair of nulls rather than left out.
+INDEX = {
+    "_class_name": "StableDiffusionPipeline",
+    "_diffusers_version": "0.31.0",
+    "requires_safety_checker": True,
+    "safety_checker": [None, None],
+    "scheduler": ["diffusers", "PNDMScheduler"],
+    "text_encoder": ["transformers", "CLIPTextModel"],
+    "tokenizer": ["transformers", "CLIPTokenizer"],
+    "unet": ["diffusers", "UNet2DConditionModel"],
+    "vae": ["diffusers", "AutoencoderKL"],
+}
+
+
+class PipelineLayoutTests(unittest.TestCase):
+    """Reading a diffusers snapshot from the outside, without loading it."""
+
+    def snapshot(self, root: str, files: dict[str, bytes]) -> Path:
+        """A cache folder holding one snapshot of ``files``, as the hub lays it out."""
+
+        folder = Path(root) / f"models--{MODEL.replace('/', '--')}"
+        (folder / "refs").mkdir(parents=True)
+        (folder / "refs" / "main").write_text("abc")
+        snapshot = folder / "snapshots" / "abc"
+        for name, content in files.items():
+            (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
+            (snapshot / name).write_bytes(content)
+        return snapshot
+
+    def whole(self) -> dict[str, bytes]:
+        return {
+            "model_index.json": json.dumps(INDEX).encode(),
+            "scheduler/scheduler_config.json": b"{}",
+            "text_encoder/config.json": b"{}",
+            "text_encoder/model.safetensors": b"e" * 400,
+            "tokenizer/tokenizer_config.json": b"{}",
+            "tokenizer/vocab.json": b"{}",
+            "unet/config.json": b"{}",
+            "unet/diffusion_pytorch_model.safetensors": b"u" * 1000,
+            "vae/config.json": b"{}",
+            "vae/diffusion_pytorch_model.safetensors": b"v" * 200,
+        }
+
+    def test_a_pipeline_is_recognized_by_its_index_and_read_from_it(self):
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, self.whole())
+
+            self.assertTrue(is_pipeline(snapshot))
+            self.assertEqual(pipeline_class(snapshot), "StableDiffusionPipeline")
+            # The nulls and the underscored keys are not components, and the
+            # order is the index's own.
+            self.assertEqual(
+                pipeline_components(snapshot),
+                ("scheduler", "text_encoder", "tokenizer", "unet", "vae"),
+            )
+
+    def test_a_whole_pipeline_is_an_image_model_ready_to_load(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, self.whole())
+            status = cache_status(MODEL, Path(root))
+
+            self.assertEqual(status.kind, IMAGE_KIND)
+            self.assertFalse(status.unsupported)
+            self.assertTrue(status.complete)
+            self.assertEqual(status.missing_files, ())
+
+    def test_a_component_folder_that_never_arrived_is_missing(self):
+        files = {
+            name: content
+            for name, content in self.whole().items()
+            if not name.startswith("vae/")
+        }
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, files)
+            status = cache_status(MODEL, Path(root))
+
+            self.assertEqual(status.kind, IMAGE_KIND)
+            self.assertEqual(status.missing_files, ("vae/",))
+            self.assertFalse(status.complete)
+
+    def test_a_component_folder_without_its_weights_is_missing_them(self):
+        files = self.whole()
+        del files["unet/diffusion_pytorch_model.safetensors"]
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, files)
+            status = cache_status(MODEL, Path(root))
+
+            self.assertEqual(status.missing_files, (f"unet/{MODEL_WEIGHTS}",))
+
+    def test_a_folder_with_no_config_of_its_own_needs_no_weights(self):
+        """The tokenizer and the scheduler keep a config under a name of
+        their own and no weights at all, so absence there is not a gap."""
+
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, self.whole())
+
+            self.assertEqual(pipeline_missing_files(snapshot), ())
+            self.assertEqual(
+                sorted(entry.name for entry in (snapshot / "tokenizer").iterdir()),
+                ["tokenizer_config.json", "vocab.json"],
+            )
+
+    def test_a_pipeline_is_sized_by_the_one_weight_set_it_will_load(self):
+        """A repo often ships a half-precision set beside the full one, and
+        ``from_pretrained`` reads one of them. Counting both would double
+        every component and refuse loads that fit."""
+
+        files = self.whole()
+        files["unet/diffusion_pytorch_model.fp16.safetensors"] = b"h" * 500
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, files)
+
+            # The plain safetensors set, not it plus the variant.
+            self.assertEqual(pipeline_weight_bytes(snapshot), 400 + 1000 + 200)
+            self.assertEqual(weight_bytes_for(snapshot, IMAGE_KIND), 1600)
+
+    def test_a_pipeline_shipping_only_a_variant_is_sized_by_that(self):
+        files = self.whole()
+        files["unet/diffusion_pytorch_model.fp16.safetensors"] = files.pop(
+            "unet/diffusion_pytorch_model.safetensors"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, files)
+
+            self.assertEqual(pipeline_weight_bytes(snapshot), 1600)
+
+    def test_a_shard_number_is_not_read_as_a_variant(self):
+        files = self.whole()
+        del files["unet/diffusion_pytorch_model.safetensors"]
+        files["unet/diffusion_pytorch_model-00001-of-00002.safetensors"] = b"u" * 600
+        files["unet/diffusion_pytorch_model-00002-of-00002.safetensors"] = b"u" * 400
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, files)
+
+            # Both shards are the one set and are summed.
+            self.assertEqual(pipeline_weight_bytes(snapshot), 1600)
+
+    def test_a_text_checkpoint_is_still_a_text_model(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(
+                root,
+                {
+                    "config.json": b'{"model_type": "olmo3"}',
+                    "model.safetensors": b"w" * 100,
+                },
+            )
+            status = cache_status(MODEL, Path(root))
+
+            self.assertEqual(status.kind, TEXT_KIND)
+            self.assertTrue(status.complete)
+
+    def test_the_pipeline_class_stands_in_for_an_architecture(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, self.whole())
+            from model_runtime import list_cached_models
+
+            (entry,) = list_cached_models(Path(root))
+
+            self.assertEqual(entry.architecture, "StableDiffusionPipeline")
+            # A pipeline's components need not share a dtype and the index
+            # names none, so none is claimed.
+            self.assertIsNone(entry.dtype)
+
+    def test_an_unreadable_index_is_a_pipeline_that_cannot_be_measured(self):
+        files = self.whole()
+        files["model_index.json"] = b"not json"
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, files)
+
+            self.assertTrue(is_pipeline(snapshot))
+            self.assertEqual(pipeline_components(snapshot), ())
+            self.assertIsNone(pipeline_weight_bytes(snapshot))
+            self.assertIsNone(pipeline_class(snapshot))
+
+
+class PreviewTests(unittest.TestCase):
+    """Turning a latent into a frame a person can look at."""
+
+    def test_a_frame_is_scaled_to_the_preview_size_keeping_its_shape(self):
+        latent = torch.randn(4, 8, 16)
+        image = image_runtime.latent_preview(latent, "sd", size=64)
+
+        self.assertEqual(image.size, (64, 32))
+        self.assertEqual(image.mode, "RGB")
+
+    def test_a_latent_with_an_unmeasured_channel_count_still_draws(self):
+        """A 16-channel latent has no factors here. Its first three channels
+        are not red, green and blue, but they do move with the picture."""
+
+        image = image_runtime.latent_preview(torch.randn(16, 8, 8), "sd", size=32)
+
+        self.assertEqual(image.size, (32, 32))
+
+    def test_a_flat_latent_does_not_divide_by_its_own_zero_spread(self):
+        image = image_runtime.latent_preview(torch.zeros(4, 8, 8), "sd", size=16)
+
+        self.assertEqual(image.size, (16, 16))
+
+    def test_a_frame_is_written_as_jpeg_and_a_heat_map_as_png(self):
+        """Every frame travels with the run, and PNG cannot compress noise;
+        the maps stay PNG because they need their alpha channel."""
+
+        frame = image_runtime.latent_preview(torch.randn(4, 8, 8), "sd", size=32)
+
+        self.assertTrue(
+            image_runtime.data_uri(frame, quality=80).startswith("data:image/jpeg;base64,")
+        )
+        self.assertTrue(image_runtime.data_uri(frame).startswith("data:image/png;base64,"))
+
+    def test_a_heat_map_is_scaled_to_the_picture_and_keeps_its_alpha(self):
+        import base64
+        import io
+
+        from PIL import Image
+
+        weights = numpy.zeros((4, 4), dtype="float32")
+        weights[1, 1] = 1.0
+        uri = image_runtime.heat_overlay(weights, 32, 24)
+        raw = base64.b64decode(uri.split(",", 1)[1])
+        overlay = Image.open(io.BytesIO(raw))
+
+        self.assertEqual(overlay.size, (32, 24))
+        self.assertEqual(overlay.mode, "RGBA")
+        # The strongest cell's own centre is nearly opaque; a corner the
+        # map gave nothing to is nearly clear.
+        self.assertGreater(overlay.getpixel((12, 9))[3], 180)
+        self.assertLess(overlay.getpixel((30, 22))[3], 60)
+        # One hue throughout: opacity is the only channel carrying a value.
+        for channel, value in enumerate(image_runtime.HEAT_COLOR):
+            self.assertAlmostEqual(overlay.getpixel((12, 9))[channel], value, delta=2)
+
+    def test_an_empty_map_does_not_divide_by_its_own_zero_ceiling(self):
+        uri = image_runtime.heat_overlay(numpy.zeros((4, 4), dtype="float32"), 8, 8)
+
+        self.assertTrue(uri.startswith("data:image/png;base64,"))
+
+    def test_the_latent_family_comes_from_the_pipeline_class(self):
+        class StableDiffusionXLPipeline:
+            pass
+
+        class StableDiffusionPipeline:
+            pass
+
+        self.assertEqual(image_runtime.latent_family(StableDiffusionXLPipeline()), "sdxl")
+        self.assertEqual(image_runtime.latent_family(StableDiffusionPipeline()), "sd")
+
+
+class GuidanceReaderTests(unittest.TestCase):
+    """Reading the classifier-free guidance split out of a denoiser's output."""
+
+    def reading(self, sample):
+        reader = image_runtime.GuidanceReader()
+        reader(None, None, (sample,))
+        return reader.take()
+
+    def test_a_guided_batch_gives_the_vector_the_prompt_added(self):
+        uncond = torch.zeros(1, 1, 2, 2)
+        cond = torch.full((1, 1, 2, 2), 3.0)
+        cond_norm, uncond_norm, delta = self.reading(torch.cat([uncond, cond]))
+
+        self.assertAlmostEqual(uncond_norm, 0.0, places=5)
+        self.assertAlmostEqual(cond_norm, 6.0, places=5)
+        self.assertAlmostEqual(delta, 6.0, places=5)
+
+    def test_an_unguided_batch_has_no_second_prediction_to_compare(self):
+        cond_norm, uncond_norm, delta = self.reading(torch.full((1, 1, 2, 2), 3.0))
+
+        self.assertAlmostEqual(cond_norm, 6.0, places=5)
+        self.assertIsNone(uncond_norm)
+        self.assertIsNone(delta)
+
+    def test_an_output_object_is_read_through_its_sample(self):
+        reader = image_runtime.GuidanceReader()
+        sample = torch.cat([torch.zeros(1, 1, 2, 2), torch.full((1, 1, 2, 2), 3.0)])
+        reader(None, None, type("Output", (), {"sample": sample})())
+
+        self.assertAlmostEqual(reader.take()[2], 6.0, places=5)
+
+    def test_a_reading_is_cleared_when_it_is_taken(self):
+        reader = image_runtime.GuidanceReader()
+        reader(None, None, (torch.ones(2, 1, 2, 2),))
+        reader.take()
+
+        self.assertEqual(reader.take(), (None, None, None))
+
+    def test_an_output_with_nothing_readable_in_it_is_ignored(self):
+        reader = image_runtime.GuidanceReader()
+        reader(None, None, None)
+
+        self.assertEqual(reader.calls, 0)
+        self.assertEqual(reader.take(), (None, None, None))
+
+
+class AttentionReaderTests(unittest.TestCase):
+    """Turning cross-attention probabilities into one map per prompt token."""
+
+    def reader(self, tokens=3, size=4):
+        return image_runtime.AttentionReader(tokens, size)
+
+    def probabilities(self, queries=4, keys=5, heads=2, batch=2):
+        """A softmaxed ``[batch * heads, queries, keys]``, as a module gives it."""
+
+        return torch.softmax(torch.randn(batch * heads, queries, keys), dim=-1)
+
+    def test_a_step_of_maps_sums_to_one_at_every_cell(self):
+        reader = self.reader(tokens=3, size=4)
+        probabilities = self.probabilities(queries=16, keys=8)
+        reader._total += reader._grid(probabilities[2:], torch)
+        reader._modules += 1
+        reader.recorded = 1
+        reader.flush()
+
+        maps = reader.collected()
+        # Three token rows plus the padding row; see PADDING_ROW.
+        self.assertEqual(maps.shape, (1, 4, 4, 4))
+        numpy.testing.assert_allclose(maps[0].sum(axis=0), numpy.ones((4, 4)), atol=1e-5)
+
+    def test_the_keys_past_the_prompt_are_summed_into_the_padding_row(self):
+        reader = self.reader(tokens=2, size=2)
+        # Every query gives all its attention to key 4, which is padding.
+        probabilities = torch.zeros(2, 4, 6)
+        probabilities[:, :, 4] = 1.0
+        grid = reader._grid(probabilities, torch)
+
+        numpy.testing.assert_allclose(grid[:2], numpy.zeros((2, 2, 2)), atol=1e-6)
+        numpy.testing.assert_allclose(grid[2], numpy.ones((2, 2)), atol=1e-6)
+
+    def test_a_query_grid_that_is_not_square_is_refused(self):
+        reader = self.reader()
+
+        with self.assertRaises(ValueError):
+            reader._grid(self.probabilities(queries=5, batch=1), torch)
+
+    def test_a_step_with_nothing_recorded_keeps_an_empty_map(self):
+        reader = self.reader()
+        reader.flush()
+
+        self.assertEqual(len(reader.steps), 1)
+        # collected() still answers None: no module was ever read, so there
+        # is nothing to show rather than a run of zeroes to puzzle over.
+        self.assertIsNone(reader.collected())
+
+    def test_a_module_this_cannot_read_is_counted_and_left_out(self):
+        reader = self.reader()
+        reader.record(object(), torch.zeros(1, 4, 4), torch.zeros(1, 5, 4))
+
+        self.assertEqual(reader.skipped, 1)
+        self.assertEqual(reader.recorded, 0)
+        self.assertEqual(reader.too_large, 0)
+
+    def test_the_budget_is_on_the_matrix_rather_than_the_query_count(self):
+        """How many queries is too many depends on the model: a UNet that
+        downsamples before its first attention layer asks about a quarter of
+        the pixels one that does not asks about, and a resolution cap tight
+        enough for the second refuses every layer of the first."""
+
+        from diffusers.models.attention_processor import Attention
+
+        reader = self.reader(tokens=3, size=4)
+        attn = Attention(query_dim=8, cross_attention_dim=8, heads=2, dim_head=4)
+        queries = 4096
+
+        # Well inside the budget: 1 x 2 heads x 4096 x 77 x 4 bytes is 2.5 MB.
+        reader.record(attn, torch.randn(1, queries, 8), torch.randn(1, 77, 8))
+        self.assertEqual(reader.recorded, 1)
+        self.assertEqual(reader.too_large, 0)
+
+        # The same query count with a key sequence long enough to blow it.
+        keys = image_runtime.MAX_ATTENTION_BYTES // (2 * queries * 4) + 1
+        reader.record(attn, torch.randn(1, queries, 8), torch.randn(1, keys, 8))
+        self.assertEqual(reader.recorded, 1)
+        self.assertEqual(reader.too_large, 1)
+
+
+class RunTests(unittest.TestCase):
+    """A whole run against a pipeline shaped like a real one."""
+
+    def run_pipeline(self, pipeline=None, **overrides):
+        request = ImageRequest(
+            **{
+                "prompt": "a red bicycle",
+                "steps": 4,
+                "guidance_scale": 7.5,
+                "seed": 1,
+                "width": 32,
+                "height": 32,
+                **overrides,
+            }
+        )
+        return image_runtime.run(pipeline or FakePipeline(), request)
+
+    def test_a_run_reports_one_reading_per_step_the_scheduler_really_ran(self):
+        # Five steps for four asked for: a scheduler can add one of its own,
+        # and the readings are what happened rather than what was requested.
+        run = self.run_pipeline(FakePipeline(steps_run=5), steps=4)
+
+        self.assertEqual(run.steps_done, 5)
+        self.assertEqual([reading.step for reading in run.readings], [1, 2, 3, 4, 5])
+        self.assertFalse(run.stopped)
+        self.assertIsNotNone(run.image)
+        self.assertEqual(run.image.size, (32, 32))
+
+    def test_the_first_step_has_no_movement_to_report(self):
+        run = self.run_pipeline()
+
+        self.assertIsNone(run.readings[0].latent_change)
+        self.assertTrue(all(r.latent_change is not None for r in run.readings[1:]))
+
+    def test_a_guided_run_measures_the_pull_and_an_unguided_one_does_not(self):
+        guided = self.run_pipeline()
+        unguided = self.run_pipeline(guidance_scale=1.0)
+
+        for reading in guided.readings:
+            self.assertIsNotNone(reading.guidance_norm)
+            self.assertIsNotNone(reading.guidance_share)
+        for reading in unguided.readings:
+            self.assertIsNone(reading.guidance_norm)
+            self.assertIsNone(reading.guidance_share)
+            self.assertIsNotNone(reading.cond_norm)
+
+    def test_every_step_carries_a_frame(self):
+        run = self.run_pipeline()
+
+        for reading in run.readings:
+            self.assertTrue(reading.preview.startswith("data:image/jpeg;base64,"))
+
+    def test_the_prompt_tokens_key_the_maps_and_lose_the_word_marker(self):
+        run = self.run_pipeline()
+
+        self.assertEqual(
+            [token["text"] for token in run.tokens],
+            ["<|startoftext|>", "a", "red", "bicycle", "<|endoftext|>"],
+        )
+        self.assertTrue(run.tokens[0]["special"])
+        self.assertFalse(run.tokens[1]["special"])
+        self.assertEqual(
+            run.attention.shape,
+            (run.steps_done, len(run.tokens) + 1, image_runtime.MAP_SIZE, image_runtime.MAP_SIZE),
+        )
+        self.assertEqual(run.attention_note, "")
+
+    def test_the_shares_over_the_prompt_and_the_padding_sum_to_one(self):
+        run = self.run_pipeline()
+        shares = image_runtime.token_shares(run)
+
+        self.assertEqual(len(shares), len(run.tokens))
+        self.assertAlmostEqual(
+            sum(shares) + image_runtime.padding_share(run), 1.0, places=4
+        )
+
+    def test_a_step_can_be_asked_for_on_its_own_or_averaged(self):
+        run = self.run_pipeline()
+
+        averaged = image_runtime.step_maps(run, 0)
+        first = image_runtime.step_maps(run, 1)
+        numpy.testing.assert_allclose(averaged, run.attention.mean(axis=0))
+        numpy.testing.assert_allclose(first, run.attention[0])
+        # Out of range falls back to the average rather than raising.
+        numpy.testing.assert_allclose(image_runtime.step_maps(run, 999), averaged)
+
+    def test_one_token_map_can_be_read_and_the_padding_sits_past_it(self):
+        run = self.run_pipeline()
+
+        self.assertEqual(
+            image_runtime.token_map(run, 1).shape,
+            (image_runtime.MAP_SIZE, image_runtime.MAP_SIZE),
+        )
+        self.assertIsNotNone(image_runtime.token_map(run, len(run.tokens)))
+        self.assertIsNone(image_runtime.token_map(run, len(run.tokens) + 1))
+        self.assertIsNone(image_runtime.token_map(run, -1))
+
+    def test_turning_attention_off_keeps_the_rest_and_says_why(self):
+        run = self.run_pipeline(record_attention=False)
+
+        self.assertIsNone(run.attention)
+        self.assertEqual(run.tokens, [])
+        self.assertIn("not recorded", run.attention_note)
+        self.assertEqual(run.steps_done, 4)
+        self.assertTrue(all(r.guidance_share is not None for r in run.readings))
+
+    def test_a_model_too_large_to_map_says_so_and_says_what_to_do(self):
+        # Silently handing back no maps was the bug: the budget is there to
+        # bound one allocation, not to refuse the reading.
+        pipeline = FakePipeline()
+        with mock.patch.object(image_runtime, "MAX_ATTENTION_BYTES", 8):
+            run = self.run_pipeline(pipeline, steps=2)
+
+        self.assertIsNone(run.attention)
+        self.assertIn("larger than the", run.attention_note)
+        self.assertIn("Draw a smaller picture", run.attention_note)
+        # The picture itself is unaffected: the maps are read alongside.
+        self.assertIsNotNone(run.image)
+        self.assertEqual(run.steps_done, 2)
+
+    def test_a_pipeline_whose_attention_was_never_reached_reports_no_tokens(self):
+        """The tokens are only there to key the maps. A strip with nothing to
+        shade it by and nothing behind a click is worse than the note."""
+
+        pipeline = FakePipeline()
+        pipeline.unet.ask_the_prompt = lambda encoder_hidden_states: None
+
+        run = self.run_pipeline(pipeline, steps=2)
+
+        self.assertIsNone(run.attention)
+        self.assertEqual(run.tokens, [])
+        self.assertIn("No cross-attention module", run.attention_note)
+        self.assertEqual(run.steps_done, 2)
+
+    def test_a_pipeline_with_no_tokenizer_has_no_tokens_to_map(self):
+        pipeline = FakePipeline()
+        pipeline.tokenizer = None
+
+        run = self.run_pipeline(pipeline)
+
+        self.assertIsNone(run.attention)
+        self.assertIn("no tokenizer", run.attention_note)
+        self.assertEqual(run.steps_done, 4)
+
+    def test_a_stop_between_steps_keeps_the_trajectory_and_drops_the_picture(self):
+        stop = threading.Event()
+        pipeline = FakePipeline()
+        request = ImageRequest(prompt="a red bicycle", steps=6, seed=1, width=32, height=32)
+
+        def halt(reading):
+            if reading.step == 2:
+                stop.set()
+
+        run = image_runtime.run(pipeline, request, cancel=stop, on_step=halt)
+
+        self.assertTrue(run.stopped)
+        self.assertEqual(run.steps_done, 2)
+        self.assertIsNone(run.image)
+
+    def test_the_pipeline_is_left_as_it_was_found(self):
+        """The hook and the recording processors are the run's own, so a
+        second run does not stack another layer on the first one's."""
+
+        pipeline = FakePipeline()
+        before = pipeline.unet.attn_processors
+
+        self.run_pipeline(pipeline)
+
+        after = pipeline.unet.attn_processors
+        self.assertEqual(list(after), list(before))
+        for name, processor in after.items():
+            self.assertIs(processor, before[name])
+        self.assertFalse(pipeline.unet._forward_hooks)
+
+    def test_a_run_is_stamped_with_the_load_that_drew_it(self):
+        run = image_runtime.run(
+            FakePipeline(),
+            ImageRequest(prompt="x", steps=2, seed=1, width=32, height=32),
+            model_id="org/pipe",
+            load_id="org/pipe#3",
+        )
+
+        self.assertEqual(run.model_id, "org/pipe")
+        self.assertEqual(run.load_id, "org/pipe#3")
+        self.assertGreater(run.seconds, 0)
+
+    def test_only_the_arguments_the_pipeline_takes_are_passed(self):
+        class Fixed(FakePipeline):
+            def __call__(self, prompt=None, num_inference_steps=30, callback_on_step_end=None):
+                for step in range(num_inference_steps):
+                    callback_on_step_end(self, step, 10, {"latents": torch.randn(1, 4, 4, 4)})
+                return type("Output", (), {"images": []})()
+
+        run = self.run_pipeline(Fixed(), steps=2)
+
+        self.assertEqual(run.steps_done, 2)
+        self.assertIsNone(run.image)
+
+
+class GuidanceSummaryTests(unittest.TestCase):
+    """The headline numbers a finished run is described by."""
+
+    def readings(self, shares, changes):
+        return [
+            image_runtime.StepReading(
+                step=position + 1,
+                timestep=100 - position,
+                preview="",
+                latent_change=change,
+                uncond_norm=1.0 if share is not None else None,
+                guidance_norm=share,
+                guidance_share=share,
+            )
+            for position, (share, change) in enumerate(zip(shares, changes))
+        ]
+
+    def test_the_settled_step_is_where_the_movement_stopped_mattering(self):
+        # Moves of 0.4, 0.5, 0.02 and 0.01: from step 4 on, nothing moved
+        # more than a tenth of the largest move.
+        summary = image_runtime.guidance_summary(
+            self.readings([0.2] * 5, [None, 0.4, 0.5, 0.02, 0.01])
+        )
+
+        self.assertEqual(summary["step_count"], 5)
+        self.assertEqual(summary["settled_step"], 4)
+        self.assertAlmostEqual(summary["final_latent_change"], 0.01)
+
+    def test_the_peak_pull_is_named_with_its_own_step(self):
+        summary = image_runtime.guidance_summary(
+            self.readings([0.1, 0.9, 0.2], [None, 0.5, 0.1])
+        )
+
+        self.assertAlmostEqual(summary["peak_guidance_share"], 0.9)
+        self.assertEqual(summary["peak_guidance_step"], 2)
+        self.assertAlmostEqual(summary["mean_guidance_share"], 0.4)
+
+    def test_an_unguided_run_is_summarized_without_a_pull(self):
+        summary = image_runtime.guidance_summary(
+            self.readings([None, None], [None, 0.3])
+        )
+
+        self.assertEqual(summary["step_count"], 2)
+        self.assertNotIn("mean_guidance_share", summary)
+        self.assertAlmostEqual(summary["final_latent_change"], 0.3)
+
+    def test_no_readings_at_all_is_an_empty_summary(self):
+        self.assertEqual(image_runtime.guidance_summary([]), {"step_count": 0})
+
+
+class ManagerImageRunTests(unittest.TestCase):
+    """What the manager guards around an image run."""
+
+    def loaded(self) -> ModelManager:
+        manager = ModelManager()
+        manager.pipeline = FakePipeline()
+        manager.kind = IMAGE_KIND
+        manager.model_id = "org/pipe"
+        manager.device_name = "CPU"
+        return manager
+
+    def request(self, **overrides):
+        return ImageRequest(
+            **{"prompt": "a red bicycle", "steps": 2, "seed": 1, "width": 32, "height": 32, **overrides}
+        )
+
+    def test_a_pipeline_in_memory_is_loaded_without_being_a_text_model(self):
+        manager = self.loaded()
+
+        self.assertTrue(manager.image_loaded)
+        self.assertFalse(manager.loaded)
+        self.assertTrue(manager.in_memory)
+        self.assertEqual(manager.load_id, "org/pipe#0")
+
+    def test_a_run_holds_the_lock_and_the_slot_and_gives_both_back(self):
+        manager = self.loaded()
+
+        run = manager.generate_image(self.request())
+
+        self.assertEqual(run.steps_done, 2)
+        self.assertEqual(run.load_id, "org/pipe#0")
+        self.assertFalse(manager.busy)
+        self.assertFalse(manager._lock.locked())
+
+    def test_a_second_run_is_refused_rather_than_queued(self):
+        manager = self.loaded()
+        self.assertTrue(manager.reserve_generation())
+        self.addCleanup(manager.release_generation)
+
+        with self.assertRaises(ModelBusy):
+            manager.generate_image(self.request())
+
+    def test_running_out_of_memory_advises_something_a_reader_can_see(self):
+        # A conversation and a response length mean nothing to someone who
+        # was drawing a picture.
+        from model_runtime import OutOfMemoryError
+
+        class Full(FakePipeline):
+            def __call__(self, *args, **kwargs):
+                raise RuntimeError("MPS backend out of memory")
+
+        manager = self.loaded()
+        manager.pipeline = Full()
+
+        with self.assertRaises(OutOfMemoryError) as caught:
+            manager.generate_image(self.request())
+
+        message = str(caught.exception)
+        self.assertIn("Draw a smaller picture", message)
+        self.assertIn("lower the step count", message)
+        self.assertNotIn("conversation", message)
+        self.assertFalse(manager.busy)
+
+    def test_a_run_without_a_pipeline_says_so_and_frees_the_slot(self):
+        manager = ModelManager()
+
+        with self.assertRaisesRegex(RuntimeError, "No image model is loaded"):
+            manager.generate_image(self.request())
+
+        self.assertFalse(manager.busy)
+        self.assertFalse(manager._lock.locked())
+
+    def test_unloading_clears_the_pipeline_and_the_kind(self):
+        manager = self.loaded()
+
+        manager.unload()
+
+        self.assertIsNone(manager.pipeline)
+        self.assertIsNone(manager.kind)
+        self.assertFalse(manager.in_memory)
+        self.assertIsNone(manager.load_id)
+
+    def test_a_run_can_be_stopped_from_another_thread(self):
+        manager = self.loaded()
+        stop = threading.Event()
+
+        def halt(reading):
+            stop.set()
+
+        run = manager.generate_image(self.request(steps=6), cancel=stop, on_step=halt)
+
+        self.assertTrue(run.stopped)
+        self.assertEqual(run.steps_done, 1)
+        self.assertFalse(manager.busy)
+
+
+class PipelineLoaderTests(unittest.TestCase):
+    """What the loader asks diffusers for, and what it refuses to ask."""
+
+    def test_a_quantized_precision_is_noted_and_not_applied_to_a_pipeline(self):
+        """The Metal quantizer is Transformers' own, and a pipeline is
+        several models of which only some are Transformers ones."""
+
+        import model_runtime
+
+        manager = ModelManager()
+        calls = []
+
+        def from_pretrained(path, **kwargs):
+            calls.append(kwargs)
+            return FakePipeline()
+
+        pipeline_module = type("DiffusionPipeline", (), {"from_pretrained": from_pretrained})
+        fake_diffusers = type("diffusers", (), {"DiffusionPipeline": pipeline_module})
+
+        with (
+            mock.patch.dict("sys.modules", {"diffusers": fake_diffusers}),
+            mock.patch.object(model_runtime, "weight_bytes_for", return_value=10),
+            # A machine with room, so the check under test is the precision
+            # rather than whoever's laptop is running the suite.
+            mock.patch.object(
+                model_runtime, "system_memory", return_value=(64 * 1024**3, 32 * 1024**3)
+            ),
+            mock.patch.object(torch.cuda, "is_available", return_value=False),
+            mock.patch.object(torch.backends.mps, "is_available", return_value=True),
+            mock.patch.object(ModelManager, "_cap_mps_memory", return_value=None),
+        ):
+            manager.load(
+                "org/pipe", Path("/snap"), precision="4-bit", kind=IMAGE_KIND
+            )
+
+        self.assertEqual(manager.kind, IMAGE_KIND)
+        self.assertEqual(manager.precision, "full")
+        self.assertNotIn("quantization_config", calls[0])
+        self.assertEqual(calls[0]["torch_dtype"], torch.float16)
+        self.assertTrue(calls[0]["local_files_only"])
+        self.assertTrue(manager.image_loaded)
+        self.assertFalse(manager.loaded)
+        self.assertEqual(manager.pipeline.device, "mps")
+        self.assertEqual(manager.device_name, "Apple Metal (MPS)")
+
+
+class TokenizerTests(unittest.TestCase):
+    """Reading the prompt's tokens off a pipeline."""
+
+    def test_a_tokenizer_that_will_not_answer_costs_the_maps_only(self):
+        class Broken(FakeTokenizer):
+            def __call__(self, text, truncation=True, **kwargs):
+                raise ValueError("no vocabulary")
+
+        pipeline = FakePipeline(tokenizer=Broken())
+
+        self.assertEqual(image_runtime.prompt_tokens(pipeline, "a red bicycle"), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

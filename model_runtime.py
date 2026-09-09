@@ -160,6 +160,25 @@ WEIGHT_FORMATS = (
     ("pytorch_model.bin", "pytorch_model.bin.index.json"),
 )
 
+# The two kinds of model ChatLab loads. A text model is one checkpoint at the
+# root of the snapshot and answers with tokens; an image model is a diffusers
+# pipeline, a folder per component, and answers with a picture. They share
+# the cache, the download, the memory ceiling and the one slot in memory, and
+# part company at the loader and at the page that drives them.
+TEXT_KIND = "text"
+IMAGE_KIND = "image"
+
+# A diffusers pipeline announces itself with this file, which also names
+# every component folder it is made of.
+PIPELINE_INDEX = "model_index.json"
+
+# Where a pipeline component keeps its weights. Only the folders that hold a
+# ``config.json`` are models at all: the tokenizer, the scheduler and the
+# feature extractor each keep a config of their own name and no weights, so
+# absence there is not a missing file.
+COMPONENT_CONFIG = "config.json"
+COMPONENT_WEIGHT_SUFFIXES = (".safetensors", ".bin")
+
 
 @dataclass(frozen=True)
 class CacheStatus:
@@ -168,13 +187,13 @@ class CacheStatus:
     ``missing_files`` names what the ``main`` snapshot still lacks before the
     model can load, and is the one verdict on that: a cache another tool
     filled with only the config and tokenizer, or a download stopped between
-    shards, has finished blobs but no model. ``unsupported`` says the snapshot
-    is whole but is not a Transformers language model at all (a diffusers
-    pipeline, a CTranslate2 or ONNX export, a folder of SAE weights): nothing
-    is missing, ChatLab just cannot load it. ``cached_bytes`` counts finished
-    files; ``partial_files`` and ``partial_bytes`` count the ``.incomplete``
-    blobs a cut-off download left behind, which ``snapshot_download`` resumes
-    rather than restarts. Those are a size estimate, not a verdict: the blob
+    shards, has finished blobs but no model. ``kind`` says which of the two
+    kinds of model it is (:data:`TEXT_KIND` or :data:`IMAGE_KIND`), and is
+    empty for a snapshot that is whole but neither (a CTranslate2 or ONNX
+    export, a folder of SAE weights): nothing is missing, ChatLab just cannot
+    load it. ``cached_bytes`` counts finished files; ``partial_files`` and
+    ``partial_bytes`` count the ``.incomplete`` blobs a cut-off download left
+    behind, which ``snapshot_download`` resumes rather than restarts. Those are a size estimate, not a verdict: the blob
     folder is shared by every revision of the repo, so a stray partial may
     belong to another revision or to a file the model never loads, and a
     partial the snapshot does need already shows up in ``missing_files``,
@@ -185,11 +204,17 @@ class CacheStatus:
     partial_files: int = 0
     partial_bytes: int = 0
     missing_files: tuple[str, ...] = ()
-    unsupported: bool = False
+    kind: str = TEXT_KIND
 
     @property
     def present(self) -> bool:
         return self.cached_bytes > 0 or self.partial_files > 0
+
+    @property
+    def unsupported(self) -> bool:
+        """Whole, but not a model of either kind ChatLab can load."""
+
+        return not self.kind
 
     @property
     def complete(self) -> bool:
@@ -270,17 +295,18 @@ TRAINER_ARTIFACTS = re.compile(
 def foreign_weights(snapshot: Path, *, transformers_config: bool) -> bool:
     """Whether the snapshot holds weights laid out for something other than Transformers.
 
-    A diffusers pipeline announces itself with ``model_index.json``. Otherwise
-    the evidence is a weight file where ``from_pretrained`` would never look:
+    The evidence is a weight file where ``from_pretrained`` would never look:
     at the root under a name that is not a checkpoint or a shard (CTranslate2's
     ``model.bin``, an ``model.onnx``), or in a subfolder. When the root
     ``config.json`` is a Transformers one, only a foreign format in a
     subfolder counts, since such repos often ship extras like
     ``original/consolidated.00.pth`` beside the checkpoint they are missing.
+
+    A diffusers pipeline is also weights in subfolders, and would answer
+    yes here; :func:`judge_snapshot` recognizes it by its
+    ``model_index.json`` before asking, because ChatLab loads that kind.
     """
 
-    if (snapshot / "model_index.json").is_file():
-        return True
     checkpoints = {name for pair in WEIGHT_FORMATS for name in pair}
     for entry in snapshot.rglob("*"):
         if not entry.is_file() or entry.suffix not in WEIGHT_SUFFIXES:
@@ -300,30 +326,188 @@ def foreign_weights(snapshot: Path, *, transformers_config: bool) -> bool:
     return False
 
 
-def judge_snapshot(snapshot: Path | None) -> tuple[tuple[str, ...], bool]:
-    """``(missing_files, unsupported)`` for what the snapshot holds.
+def judge_snapshot(snapshot: Path | None) -> tuple[tuple[str, ...], str]:
+    """``(missing_files, kind)`` for what the snapshot holds.
 
     ``missing_files`` are the files ``from_pretrained`` needs before it can
-    load: only the config and the weights are checked, since which tokenizer
-    files a repo ships varies too much to know from the outside, and a wrong
-    "incomplete" verdict on a good cache would be worse than a generic load
-    error. A snapshot with no Transformers checkpoint at its root but weights
-    laid out for another framework (diffusers, CTranslate2, ONNX, SAE
-    weights) is not a cut-off download and is ``unsupported`` instead, with
-    nothing reported missing. Absence alone is never that verdict: a snapshot
-    holding only a tokenizer, or only a config, is incomplete.
+    load: for a text model only the config and the weights are checked, since
+    which tokenizer files a repo ships varies too much to know from the
+    outside, and a wrong "incomplete" verdict on a good cache would be worse
+    than a generic load error. ``kind`` is :data:`TEXT_KIND` or
+    :data:`IMAGE_KIND`, and empty for a snapshot with no Transformers
+    checkpoint at its root but weights laid out for a framework ChatLab does
+    not run (CTranslate2, ONNX, a folder of SAE weights): that is not a
+    cut-off download, and nothing is reported missing for it. Absence alone
+    is never that verdict: a snapshot holding only a tokenizer, or only a
+    config, is incomplete.
+
+    The pipeline check comes first, because a diffusers repo keeps its
+    weights in subfolders and has no checkpoint at its root, which is
+    exactly the shape :func:`foreign_weights` reads as another framework.
     """
 
     if snapshot is None:
-        return ("config.json", MODEL_WEIGHTS), False
+        return ("config.json", MODEL_WEIGHTS), TEXT_KIND
+    if is_pipeline(snapshot):
+        return pipeline_missing_files(snapshot), IMAGE_KIND
     has_checkpoint = any(
         (snapshot / name).is_file() for pair in WEIGHT_FORMATS for name in pair
     )
     if not has_checkpoint and foreign_weights(
         snapshot, transformers_config=is_transformers_config(snapshot / "config.json")
     ):
-        return (), True
-    return missing_files(snapshot), False
+        return (), ""
+    return missing_files(snapshot), TEXT_KIND
+
+
+def is_pipeline(snapshot: Path) -> bool:
+    """Whether the snapshot is a diffusers pipeline rather than one checkpoint."""
+
+    return (snapshot / PIPELINE_INDEX).is_file()
+
+
+def pipeline_components(snapshot: Path) -> tuple[str, ...]:
+    """The component subfolders ``model_index.json`` names, in its own order.
+
+    A pipeline is a handful of models that run in sequence, one folder each,
+    and the index is the list. Its other entries are skipped: the keys that
+    begin with an underscore are the pipeline's own class and version, and a
+    component the repo ships without (a safety checker it left out) is
+    written as a pair of nulls rather than dropped.
+    """
+
+    try:
+        index = json.loads((snapshot / PIPELINE_INDEX).read_text())
+    except (OSError, ValueError):
+        return ()
+    if not isinstance(index, dict):
+        return ()
+    return tuple(
+        name
+        for name, value in index.items()
+        if not name.startswith("_")
+        and isinstance(value, list)
+        and len(value) == 2
+        and all(isinstance(part, str) and part for part in value)
+    )
+
+
+def pipeline_class(snapshot: Path) -> str | None:
+    """The pipeline class ``model_index.json`` names, for the model list."""
+
+    try:
+        index = json.loads((snapshot / PIPELINE_INDEX).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(index, dict):
+        return None
+    name = index.get("_class_name")
+    return name if isinstance(name, str) and name else None
+
+
+def _component_weights(folder: Path) -> list[Path]:
+    """The weight files one component folder holds, whatever their variant."""
+
+    if not folder.is_dir():
+        return []
+    return [
+        entry
+        for entry in folder.iterdir()
+        if entry.is_file() and entry.suffix in COMPONENT_WEIGHT_SUFFIXES
+    ]
+
+
+def pipeline_missing_files(snapshot: Path) -> tuple[str, ...]:
+    """The files a pipeline snapshot needs before ``from_pretrained`` can load it.
+
+    Each component the index names must have its folder, and each folder
+    that holds a ``config.json`` must have weights beside it. The folders
+    without one are the tokenizer, the scheduler and the feature extractor,
+    which keep a config under a name of their own and no weights at all, so
+    for those the folder's presence is the whole check. Which variant of the
+    weights is there is not checked: a repo that ships only the half
+    precision set loads from it.
+    """
+
+    missing: list[str] = []
+    for name in pipeline_components(snapshot):
+        folder = snapshot / name
+        if not folder.is_dir():
+            missing.append(f"{name}/")
+            continue
+        if (folder / COMPONENT_CONFIG).is_file() and not _component_weights(folder):
+            missing.append(f"{name}/{MODEL_WEIGHTS}")
+    return tuple(missing)
+
+
+# A weight file's variant, as diffusers spells it: the part between the name
+# and the suffix in ``diffusion_pytorch_model.fp16.safetensors``. A repo often
+# ships both a full-precision and a half-precision set of the same component,
+# and counting both would double the component's measured size.
+_VARIANT = re.compile(r"^(?P<stem>.+?)(?:\.(?P<variant>[^.]+))?\.(?P<suffix>[^.]+)$")
+
+
+def _weight_variant(name: str) -> tuple[str, str]:
+    """``(variant, suffix)`` for a weight file name; the variant is empty for the plain set.
+
+    A shard is ``...-00001-of-00002.safetensors``, whose middle part is not a
+    variant, so the shard numbering is stripped before the name is read.
+    """
+
+    stripped = SHARD_NAME.sub(lambda match: f".{match.group(1)}", name)
+    found = _VARIANT.match(stripped)
+    if found is None:
+        return "", ""
+    return found.group("variant") or "", found.group("suffix") or ""
+
+
+def _loaded_variant_bytes(files: list[Path]) -> int:
+    """The bytes of the one weight set a component will really load.
+
+    Grouped by variant and format, because ``from_pretrained`` reads one
+    group and ignores the rest. The plain safetensors set is preferred, then
+    the plain PyTorch one, the same order diffusers looks in; a repo that
+    ships only a variant (half precision alone, say) is measured by its
+    largest group, which is the upper bound on what a load can read.
+    """
+
+    groups: dict[tuple[str, str], int] = {}
+    for entry in files:
+        try:
+            size = entry.stat().st_size
+        except OSError:
+            continue
+        group = _weight_variant(entry.name)
+        groups[group] = groups.get(group, 0) + size
+    for preferred in (("", "safetensors"), ("", "bin")):
+        if preferred in groups:
+            return groups[preferred]
+    return max(groups.values(), default=0)
+
+
+def pipeline_weight_bytes(snapshot: Path) -> int | None:
+    """Bytes of the weights a pipeline load will read, or ``None``.
+
+    The sum over the component folders, each measured by the one weight set
+    it will really load; see :func:`_loaded_variant_bytes`. ``None`` when the
+    index cannot be read, which leaves the loader to give its own error.
+    """
+
+    components = pipeline_components(snapshot)
+    if not components:
+        return None
+    return sum(
+        _loaded_variant_bytes(_component_weights(snapshot / name))
+        for name in components
+    )
+
+
+def weight_bytes_for(snapshot: Path, kind: str) -> int | None:
+    """Bytes of the weights a load of this kind will read, or ``None``."""
+
+    if kind == IMAGE_KIND:
+        return pipeline_weight_bytes(snapshot)
+    return snapshot_weight_bytes(snapshot)
 
 
 def missing_files(snapshot: Path) -> tuple[str, ...]:
@@ -383,8 +567,8 @@ def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
                 cached += entry.stat().st_size
     if cached == 0 and partial_files == 0:
         return CacheStatus()
-    missing, unsupported = judge_snapshot(snapshot)
-    return CacheStatus(cached, partial_files, partial_bytes, missing, unsupported)
+    missing, kind = judge_snapshot(snapshot)
+    return CacheStatus(cached, partial_files, partial_bytes, missing, kind)
 
 
 def folder_bytes(folder: Path) -> int:
@@ -823,22 +1007,32 @@ def first_line(error: BaseException) -> str:
     return lines[0][:200] if lines else f"no message from {type(error).__name__}"
 
 
-def out_of_memory_message(error: BaseException) -> str:
+# What to try, per kind of run: the advice has to name something the reader
+# is actually looking at. A conversation and a response length mean nothing
+# to someone who was drawing a picture, and a step count and a size mean
+# nothing to someone mid-reply.
+OUT_OF_MEMORY_ADVICE = {
+    TEXT_KIND: "Shorten the conversation or the text, lower the response length",
+    IMAGE_KIND: "Draw a smaller picture, lower the step count",
+}
+
+
+def out_of_memory_message(error: BaseException, kind: str = TEXT_KIND) -> str:
     """One readable sentence for a backend's out-of-memory failure."""
 
+    advice = OUT_OF_MEMORY_ADVICE.get(kind, OUT_OF_MEMORY_ADVICE[TEXT_KIND])
     return (
-        "The model ran out of memory. Shorten the conversation or the text, "
-        "lower the response length, or load a smaller model. "
+        f"The model ran out of memory. {advice}, or load a smaller model. "
         f"({first_line(error)})"
     )
 
 
-def _reraise_out_of_memory(error: BaseException) -> None:
+def _reraise_out_of_memory(error: BaseException, kind: str = TEXT_KIND) -> None:
     """Re-raise a backend failure, as :class:`OutOfMemoryError` when that is what it was."""
 
     if isinstance(error, OutOfMemoryError) or not is_out_of_memory_error(error):
         raise error
-    raise OutOfMemoryError(out_of_memory_message(error)) from error
+    raise OutOfMemoryError(out_of_memory_message(error, kind)) from error
 
 
 def _guards_device_memory(method):
@@ -865,6 +1059,12 @@ def _guards_device_memory(method):
 def _read_config(snapshot: Path | None) -> tuple[str | None, str | None]:
     if snapshot is None:
         return None, None
+    if is_pipeline(snapshot):
+        # A pipeline has no architecture of its own: each component folder
+        # keeps a config, and what names the model is the class the index
+        # says to build. Its dtype is the components' business too, and they
+        # need not agree, so none is reported.
+        return pipeline_class(snapshot), None
     # The config is another repo's file, so nothing about its shape is
     # trusted: a config that is not an object, or an ``architectures`` that is
     # not a list, reads as an unknown architecture rather than an error.
@@ -1162,14 +1362,27 @@ class HubModel:
     license: str | None = None
 
 
-def search_hub_models(
-    query: str, hf_token: str | None = None, limit: int = SEARCH_LIMIT
-) -> list[HubModel]:
-    """Search the hub for text-generation models Transformers can load.
+# What the hub calls each kind of model ChatLab loads, as a pipeline tag and
+# the library that has to support it. The filters are the ones the
+# application itself imposes, so a result is never a dead end: a
+# text-generation repo without Transformers support, or a text-to-image one
+# that is not a diffusers pipeline, could not be loaded here.
+HUB_FILTERS = {
+    TEXT_KIND: ("text-generation", "transformers"),
+    IMAGE_KIND: ("text-to-image", "diffusers"),
+}
 
-    The filter is the one the application itself imposes: only causal
-    language models with built-in Transformers support load here, so results
-    from other libraries would be dead ends. Sorted by recent downloads.
+
+def search_hub_models(
+    query: str,
+    hf_token: str | None = None,
+    limit: int = SEARCH_LIMIT,
+    kind: str = TEXT_KIND,
+) -> list[HubModel]:
+    """Search the hub for models of one kind that ChatLab can load.
+
+    ``kind`` is :data:`TEXT_KIND` or :data:`IMAGE_KIND`, and picks the hub
+    filters; see :data:`HUB_FILTERS`. Sorted by recent downloads.
     """
 
     from huggingface_hub import HfApi
@@ -1177,11 +1390,12 @@ def search_hub_models(
     cleaned = query.strip()
     if not cleaned:
         return []
+    pipeline_tag, library = HUB_FILTERS.get(kind, HUB_FILTERS[TEXT_KIND])
     token = hf_token.strip() if hf_token and hf_token.strip() else None
     found = HfApi().list_models(
         search=cleaned,
-        pipeline_tag="text-generation",
-        filter="transformers",
+        pipeline_tag=pipeline_tag,
+        filter=library,
         sort="downloads",
         limit=limit,
         expand=[
@@ -2327,12 +2541,152 @@ def _cache_can_crop(cache, held: int) -> bool:
     return True
 
 
+# What the loaders hand back: the causal LM and its tokenizer for a text
+# model, the pipeline for an image one, and the device to report either way.
+# One shape for both, so the load's own bookkeeping does not have to know
+# which of them ran.
+LoadedModel = tuple[Any, Any, Any, str]
+
+
+def _read_text_model(
+    local_path: Path, torch, backend: str, dtype, bits: int | None, precision: str
+) -> LoadedModel:
+    """Read one causal-LM checkpoint out of ``local_path`` onto ``backend``."""
+
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
+    if backend == "cuda":
+        model = AutoModelForCausalLM.from_pretrained(
+            local_path,
+            local_files_only=True,
+            dtype=dtype,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+        )
+        device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
+    elif backend == "mps" and bits is not None:
+        # The quantizer packs each weight as it lands, and wants to land it
+        # on the device it will run on: a CPU stop on the way is refused, so
+        # this is the one Metal load that goes through device_map. The output
+        # head and the embeddings are left in half precision, which is what
+        # keeps the logit lens reading through the real head.
+        try:
+            from transformers import MetalConfig
+        except ImportError as error:
+            # requirements.txt admits 4.57, which predates the quantizer; the
+            # rest of the app runs there, so the floor stays and the choice
+            # is refused with the version it needs rather than a bare
+            # ImportError.
+            import transformers
+
+            raise RuntimeError(
+                f"{precision} weights need transformers "
+                f"{METAL_QUANTIZATION_TRANSFORMERS} or newer; this "
+                f"is {transformers.__version__}. Run `pip install "
+                f"-U transformers` and load again."
+            ) from error
+
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                local_path,
+                local_files_only=True,
+                dtype=dtype,
+                device_map="mps",
+                quantization_config=MetalConfig(
+                    bits=bits, group_size=QUANTIZATION_GROUP_SIZE
+                ),
+            )
+        except ImportError as error:
+            raise RuntimeError(
+                f"{precision} weights need the kernels package: "
+                f"run `pip install kernels` and load again. ({error})"
+            ) from error
+        device_name = f"Apple Metal (MPS), {precision} weights"
+    elif backend == "mps":
+        # Into host memory and across afterwards, rather than materialized on
+        # the device with device_map="mps". The checkpoint is converted on the
+        # way in, and Metal does that conversion with one cast kernel per
+        # tensor: on torch 2.14, Olmo-3-7B loaded in 15 seconds this way (12
+        # to read and convert, 3 to copy across) and had not finished after
+        # seven minutes the other way.
+        model = AutoModelForCausalLM.from_pretrained(
+            local_path,
+            local_files_only=True,
+            dtype=dtype,
+            low_cpu_mem_usage=True,
+        ).to("mps")
+        device_name = "Apple Metal (MPS)"
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            local_path,
+            local_files_only=True,
+            dtype=dtype,
+            low_cpu_mem_usage=True,
+        )
+        device_name = "CPU"
+    return model, tokenizer, None, device_name
+
+
+# The first diffusers release whose DiffusionPipeline takes a local folder
+# with local_files_only and returns a pipeline with callback_on_step_end.
+# Older releases run everything else in the app, so requirements.txt keeps no
+# floor of its own for them and an image load says which version it needs.
+PIPELINE_DIFFUSERS = "0.31"
+
+
+def _read_pipeline(
+    local_path: Path, torch, backend: str, dtype, bits: int | None, precision: str
+) -> LoadedModel:
+    """Read a diffusers pipeline out of ``local_path`` onto ``backend``.
+
+    Built from ``model_index.json``, so whichever pipeline the repo ships is
+    the one that runs and its components come as it laid them out. Read into
+    host memory and moved across afterwards for the reason the text loader
+    gives: Metal converts a checkpoint's dtype far faster on the way in than
+    it materializes one already on the device.
+
+    ``bits`` and ``precision`` are accepted and unused. A pipeline is several
+    models, only some of them Transformers ones, so the caller has already
+    cleared a quantized choice and noted that it did; the signature matches
+    the text loader's so the load itself need not tell them apart.
+    """
+
+    del bits, precision
+    try:
+        from diffusers import DiffusionPipeline
+    except ImportError as error:
+        raise RuntimeError(
+            "Image models need the diffusers package: run "
+            f"`pip install 'diffusers>={PIPELINE_DIFFUSERS}'` and load again. "
+            f"({error})"
+        ) from error
+
+    pipeline = DiffusionPipeline.from_pretrained(
+        local_path, local_files_only=True, torch_dtype=dtype
+    )
+    device = {"cuda": "cuda", "mps": "mps"}.get(backend)
+    if device is not None:
+        pipeline = pipeline.to(device)
+    device_name = {
+        "cuda": lambda: f"CUDA ({torch.cuda.get_device_name(0)})",
+        "mps": lambda: "Apple Metal (MPS)",
+    }.get(backend, lambda: "CPU")()
+    return None, None, pipeline, device_name
+
+
 class ModelManager:
     """Own the single in-memory model used by the local application."""
 
     def __init__(self) -> None:
         self.model = None
         self.tokenizer = None
+        # The diffusers pipeline, when the model in memory is an image model.
+        # It stands apart from ``model`` rather than sharing the slot because
+        # everything that generates text asks :attr:`loaded`, and a pipeline
+        # answering that question yes would be fed tokens.
+        self.pipeline = None
+        self.kind: str | None = None
         self.model_id: str | None = None
         self.local_path: Path | None = None
         self.device_name: str | None = None
@@ -2400,7 +2754,21 @@ class ModelManager:
 
     @property
     def loaded(self) -> bool:
+        """Whether a text model is in memory, ready to be fed tokens."""
+
         return self.model is not None and self.tokenizer is not None
+
+    @property
+    def image_loaded(self) -> bool:
+        """Whether an image pipeline is in memory, ready to be given a prompt."""
+
+        return self.pipeline is not None
+
+    @property
+    def in_memory(self) -> bool:
+        """Whether a model of either kind is in memory."""
+
+        return self.loaded or self.image_loaded
 
     @property
     def load_id(self) -> str | None:
@@ -2409,10 +2777,11 @@ class ModelManager:
         Two loads of the same repository ID can hold different snapshots, so
         anything that must be read back by the model that produced it is
         stamped with this rather than the ID alone. ``None`` when nothing is
-        loaded.
+        loaded, of either kind: an image run's readings are stamped with this
+        too, so a picture's maps can be told from the next load's.
         """
 
-        if not self.loaded:
+        if not self.in_memory:
             return None
         return f"{self.model_id}#{self.load_count}"
 
@@ -2612,13 +2981,23 @@ class ModelManager:
         local_path: Path,
         progress: LoadProgress | None = None,
         precision: str = "full",
+        kind: str = TEXT_KIND,
     ) -> str:
         """Read ``model_id`` into memory from ``local_path``, and say where it landed.
 
         Blocks until the last weight is in; ``progress`` is how a caller on
         another thread watches it happen. ``precision`` is one of
         :data:`settings.WEIGHT_PRECISIONS`; a quantized choice is honoured
-        on Apple Metal and noted, then ignored, elsewhere.
+        on Apple Metal and noted, then ignored, elsewhere. ``kind`` picks the
+        loader: :data:`TEXT_KIND` reads one causal-LM checkpoint,
+        :data:`IMAGE_KIND` reads a diffusers pipeline. It comes from the
+        snapshot on disk (:func:`judge_snapshot`), not from the reader, so a
+        repo of one kind is never read as the other.
+
+        One model is in memory at a time whichever kind it is: the two share
+        the device, and on Apple silicon the GPU draws from the same pool as
+        everything else, so holding a 7B model and an image pipeline at once
+        is how the machine ends up paging.
         """
 
         import torch
@@ -2631,7 +3010,12 @@ class ModelManager:
         try:
             with self._lock, self._reading_weights(checked_id):
                 return self._load_locked(
-                    checked_id, local_path, torch, progress, precision=precision
+                    checked_id,
+                    local_path,
+                    torch,
+                    progress,
+                    precision=precision,
+                    kind=kind,
                 )
         finally:
             self.release_load(claim)
@@ -2643,10 +3027,9 @@ class ModelManager:
         torch,
         progress: LoadProgress | None = None,
         precision: str = "full",
+        kind: str = TEXT_KIND,
     ) -> str:
         """Bring ``model_id`` in from ``local_path`` while the caller holds ``_lock``."""
-
-        from transformers import AutoModelForCausalLM, AutoTokenizer
 
         progress = progress or LoadProgress()
         self._unload_locked(torch)
@@ -2670,6 +3053,19 @@ class ModelManager:
                 backend,
             )
             bits = None
+        if bits is not None and kind == IMAGE_KIND:
+            # The Metal quantizer is Transformers' own, and a pipeline is
+            # several models of which only some are Transformers ones. Rather
+            # than quantize a part of it and report a precision that only
+            # held for the text encoder, an image load takes its weights
+            # whole and says so.
+            logger.info(
+                "Loading %s with full weights: %s weights are for text models, "
+                "not diffusers pipelines",
+                model_id,
+                precision,
+            )
+            bits = None
         precision = precision if bits is not None else "full"
         # The cap goes on before the check rather than before the load, so
         # the check can refuse a model that fits the machine but not the
@@ -2683,86 +3079,18 @@ class ModelManager:
             backend,
             ceiling=ceiling,
             bits=bits,
+            kind=kind,
         )
         # Bytes are counted only where the device keeps a total to count
         # them against; elsewhere the loader's own steps are all there is.
         if allocated_bytes(backend, torch) is not None:
             progress.measure_bytes(estimated, lambda: allocated_bytes(backend, torch))
-        tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
-
         try:
             with progress.watch():
-                if backend == "cuda":
-                    model = AutoModelForCausalLM.from_pretrained(
-                        local_path,
-                        local_files_only=True,
-                        dtype=dtype,
-                        device_map="auto",
-                        low_cpu_mem_usage=True,
-                    )
-                    device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
-                elif backend == "mps" and bits is not None:
-                    # The quantizer packs each weight as it lands, and wants
-                    # to land it on the device it will run on: a CPU stop on
-                    # the way is refused, so this is the one Metal load that
-                    # goes through device_map. The output head and the
-                    # embeddings are left in half precision, which is what
-                    # keeps the logit lens reading through the real head.
-                    try:
-                        from transformers import MetalConfig
-                    except ImportError as error:
-                        # requirements.txt admits 4.57, which predates the
-                        # quantizer; the rest of the app runs there, so the
-                        # floor stays and the choice is refused with the
-                        # version it needs rather than a bare ImportError.
-                        import transformers
-
-                        raise RuntimeError(
-                            f"{precision} weights need transformers "
-                            f"{METAL_QUANTIZATION_TRANSFORMERS} or newer; this "
-                            f"is {transformers.__version__}. Run `pip install "
-                            f"-U transformers` and load again."
-                        ) from error
-
-                    try:
-                        model = AutoModelForCausalLM.from_pretrained(
-                            local_path,
-                            local_files_only=True,
-                            dtype=dtype,
-                            device_map="mps",
-                            quantization_config=MetalConfig(
-                                bits=bits, group_size=QUANTIZATION_GROUP_SIZE
-                            ),
-                        )
-                    except ImportError as error:
-                        raise RuntimeError(
-                            f"{precision} weights need the kernels package: "
-                            f"run `pip install kernels` and load again. ({error})"
-                        ) from error
-                    device_name = f"Apple Metal (MPS), {precision} weights"
-                elif backend == "mps":
-                    # Into host memory and across afterwards, rather than
-                    # materialized on the device with device_map="mps". The
-                    # checkpoint is converted on the way in, and Metal does
-                    # that conversion with one cast kernel per tensor: on
-                    # torch 2.14, Olmo-3-7B loaded in 15 seconds this way
-                    # (12 to read and convert, 3 to copy across) and had not
-                    # finished after seven minutes the other way.
-                    model = AutoModelForCausalLM.from_pretrained(
-                        local_path,
-                        local_files_only=True,
-                        dtype=dtype,
-                        low_cpu_mem_usage=True,
-                    ).to("mps")
-                    device_name = "Apple Metal (MPS)"
-                else:
-                    model = AutoModelForCausalLM.from_pretrained(
-                        local_path,
-                        local_files_only=True,
-                        dtype=dtype,
-                        low_cpu_mem_usage=True,
-                    )
-                    device_name = "CPU"
+                read = _read_pipeline if kind == IMAGE_KIND else _read_text_model
+                model, tokenizer, pipeline, device_name = read(
+                    local_path, torch, backend, dtype, bits, precision
+                )
         except (RuntimeError, MemoryError) as error:
             # Before the cache goes back, so the figure is what the device was
             # holding when the load gave up rather than what survived cleanup.
@@ -2788,9 +3116,12 @@ class ModelManager:
                 ) from error
             raise
 
-        model.eval()
+        if model is not None:
+            model.eval()
         self.model = model
         self.tokenizer = tokenizer
+        self.pipeline = pipeline
+        self.kind = kind
         self.model_id = model_id
         self.local_path = local_path
         self.device_name = device_name
@@ -2872,6 +3203,8 @@ class ModelManager:
         self._inspect_cache = None
         self.model = None
         self.tokenizer = None
+        self.pipeline = None
+        self.kind = None
         self.model_id = None
         self.local_path = None
         self.device_name = None
@@ -2957,6 +3290,7 @@ class ModelManager:
         backend: str,
         ceiling: int | None = None,
         bits: int | None = None,
+        kind: str = TEXT_KIND,
     ) -> tuple[int | None, int | None]:
         """Refuse a load that cannot fit, before any weight is read.
 
@@ -2976,9 +3310,16 @@ class ModelManager:
         Metal is less than the machine holds. Whichever of the two is smaller
         is what the weights have to fit inside, so a model too big for the
         allocator is refused here rather than part way through reading it.
+
+        ``kind`` picks which weights are measured: one checkpoint at the root
+        for a text model, the sum over the component folders for an image
+        pipeline. A pipeline's index names no dtype and its components need
+        not share one, so an image load is measured as though the files were
+        already in the dtype it loads as, which is what a repo shipping
+        half-precision weights for a half-precision load really does.
         """
 
-        weight_bytes = snapshot_weight_bytes(local_path)
+        weight_bytes = weight_bytes_for(local_path, kind)
         if weight_bytes is None:
             return None, None
         _architecture, checkpoint_dtype = _read_config(local_path)
@@ -4011,6 +4352,85 @@ class ModelManager:
                 # be what got measured: its own allocation, or nothing at
                 # all if it unloaded first.
                 self._run_device_bytes = reserved_bytes()
+
+    def generate_image(
+        self,
+        request,
+        *,
+        cancel=None,
+        on_step=None,
+    ):
+        """Draw ``request`` with the pipeline in memory, and report what happened.
+
+        Blocks until the picture is finished; ``on_step`` is called with each
+        step's readings from this thread, which is how a caller watching from
+        another one shows the trajectory arriving. ``request`` is an
+        :class:`image_runtime.ImageRequest` and the answer an
+        :class:`image_runtime.ImageRun`.
+
+        Holds the same two things a text generation holds: the generation
+        slot, so two runs cannot start at once, and the model lock, so a load
+        or an unload cannot pull the pipeline out from under one. Which means
+        a reply and a picture exclude each other, as they must - there is one
+        model in memory and one device under it.
+
+        The run is stamped with the load that drew it, so a maps-and-steps
+        readout can be told apart from one the next load produced.
+        """
+
+        import image_runtime
+
+        if not self.reserve_generation():
+            raise ModelBusy("The model is busy. Wait for the current run to finish.")
+        started = time.monotonic()
+        run = None
+        try:
+            with self._lock:
+                if self.pipeline is None:
+                    raise RuntimeError("No image model is loaded.")
+                run = image_runtime.run(
+                    self.pipeline,
+                    request,
+                    cancel=cancel,
+                    on_step=on_step,
+                    model_id=self.model_id,
+                    load_id=self.load_id,
+                )
+                return run
+        except (RuntimeError, MemoryError) as error:
+            # A picture is the largest single allocation the app makes, so
+            # running out of memory is the failure worth naming; everything
+            # else is the pipeline's own error, passed through.
+            _reraise_out_of_memory(error, IMAGE_KIND)
+            raise
+        finally:
+            self.release_generation()
+            self._log_image_run(run, request, time.monotonic() - started)
+            # The largest thing a run allocates is the pipeline's own
+            # activations, and the previews and maps it leaves behind are the
+            # caller's now; give the allocator's blocks back rather than hold
+            # them until the next run.
+            self._release_device_cache()
+
+    def _log_image_run(self, run, request, seconds: float) -> None:
+        """Record what a picture cost, whatever its outcome. One line per run."""
+
+        try:
+            logger.info(
+                "Drew %s steps of %s at %sx%s for %s in %.1fs: guidance %s, "
+                "%s held on the device%s",
+                0 if run is None else run.steps_done,
+                request.steps,
+                request.width,
+                request.height,
+                self.model_id or "no model",
+                seconds,
+                request.guidance_scale,
+                memory_note(reserved_bytes()),
+                "" if run is not None and not run.stopped else ", stopped",
+            )
+        except Exception:  # noqa: BLE001 - a log line must not break a run
+            logger.debug("Could not record the image run", exc_info=True)
 
     def count_score_tokens(
         self,

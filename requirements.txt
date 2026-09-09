@@ -1,4 +1,8 @@
 accelerate>=1.2
+# The image models: a diffusers pipeline is the second kind of model ChatLab
+# loads. 0.31 is the first release whose pipelines all take
+# callback_on_step_end, which is how the denoising trajectory is read.
+diffusers>=0.31
 # Sidebar arrived in 5.14, so the floor already covers the side pane.
 gradio>=5.20,<6
 # 1.1 is the first release whose snapshot_download reports byte progress
@@ -8,6 +12,10 @@ huggingface-hub>=1.1
 # Fetches the Metal kernels the 8-bit and 4-bit weight precisions run on.
 kernels>=0.16
 numpy>=1.26
+# Pillow arrives with gradio, and the image runtime writes the trajectory
+# frames and the attention maps through it directly. 10.1 is the release
+# whose fromarray infers the mode from the array's own shape.
+pillow>=10.1
 torch>=2.5
 # 5.3 is the first release with the Metal quantizer behind the 8-bit and
 # 4-bit weight precisions; everything else runs on 4.57, so that stays the

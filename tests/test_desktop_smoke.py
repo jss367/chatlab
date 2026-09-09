@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import transformers
 
-from desktop_smoke import smoke_test_metal
+from desktop_smoke import smoke_test_metal, smoke_test_pipelines
 
 
 @unittest.skipUnless(hasattr(transformers, "MetalConfig"), "Metal requires transformers>=5.3")
@@ -44,6 +44,37 @@ class DesktopMetalSmokeTests(unittest.TestCase):
             self.assertRaisesRegex(RuntimeError, "missing compatible kernels or its metadata"),
         ):
             smoke_test_metal()
+
+
+class DesktopPipelineSmokeTests(unittest.TestCase):
+    """The same runner has to catch a bundle built without diffusers."""
+
+    def test_the_runner_checks_every_class_an_image_repo_can_name(self):
+        output = StringIO()
+        with redirect_stdout(output):
+            smoke_test_pipelines()
+
+        self.assertIn("pipeline class checks passed", output.getvalue())
+
+    def test_the_runner_names_the_classes_a_bundle_left_out(self):
+        # These are reached by name out of model_index.json, so a bundle can
+        # be built without them and nothing fails until a user loads a model.
+        import diffusers
+
+        with (
+            patch.object(diffusers, "StableDiffusionXLPipeline", None),
+            self.assertRaisesRegex(RuntimeError, "StableDiffusionXLPipeline"),
+        ):
+            smoke_test_pipelines()
+
+    def test_the_runner_fails_when_attention_cannot_be_read(self):
+        from diffusers.models.attention_processor import Attention
+
+        with (
+            patch.object(Attention, "get_attention_scores", None),
+            self.assertRaisesRegex(RuntimeError, "cannot report attention"),
+        ):
+            smoke_test_pipelines()
 
 
 if __name__ == "__main__":
