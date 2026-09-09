@@ -26,7 +26,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import queue
+import threading
 import time
+from dataclasses import replace
 from itertools import chain
 from typing import Any, Iterator
 from uuid import uuid4
@@ -59,6 +62,19 @@ LOGPROB_FLOOR = -9999.0
 ROLES = ("system", "user", "assistant")
 
 
+# How many frames may wait ahead of the client. Two is enough to keep the
+# model working while one is being written out, and small enough that a slow
+# reader does not let the frames pile up.
+FRAME_BUFFER = 2
+
+# How long the generation waits for a client that has stopped reading before
+# it gives up, closes the runtime's generator and gives the model back. A
+# streaming response has no other way to learn that nobody is listening.
+ABANDONED_AFTER_SECONDS = 60.0
+
+_DONE = object()
+
+
 class ApiError(Exception):
     """A request that cannot be answered, and the status that says why."""
 
@@ -67,6 +83,86 @@ class ApiError(Exception):
         self.status = status
         self.message = message
         self.kind = kind
+
+
+class Frames:
+    """The runtime's frames, produced on a thread of their own.
+
+    Every forward pass of one generation has to run on one thread.
+    :meth:`ModelManager.generate` wraps its work in ``torch.inference_mode``,
+    which is thread-local, and Starlette advances a synchronous streaming
+    iterator through its own thread pool without promising the same worker
+    twice. A frame that resumed the generator on another worker would run
+    with gradients enabled - building an autograd graph through the
+    key-value cache for as long as the response lasted - and would hand the
+    guard's exit to a thread that never entered it, leaving inference mode
+    switched on for whatever that worker did next.
+
+    So the generator is iterated here, on one thread, and the frames cross to
+    the response through a queue. The metrics are copied on the way: the list
+    on the update belongs to the generator, which goes on appending to it.
+
+    The generation slot is released here too, when the generator is done with
+    the model, rather than by whoever reads the last frame.
+    """
+
+    def __init__(self, stream: Iterator) -> None:
+        self._frames: queue.Queue = queue.Queue(maxsize=FRAME_BUFFER)
+        self._stream = stream
+        self._worker = threading.Thread(
+            target=self._run, name="chatlab-api-generation", daemon=True
+        )
+        self._worker.start()
+
+    def _run(self) -> None:
+        try:
+            for update in self._stream:
+                held = replace(update, metrics=list(update.metrics))
+                try:
+                    self._frames.put(held, timeout=ABANDONED_AFTER_SECONDS)
+                except queue.Full:
+                    # Nobody is reading. Closing the generator from the
+                    # thread that owns it raises GeneratorExit inside it, so
+                    # its own cleanup runs: the cache goes back and the model
+                    # lock is let go.
+                    logger.info("Abandoned a streaming response nobody was reading")
+                    self._stream.close()
+                    return
+            self._frames.put(_DONE)
+        except BaseException as error:  # noqa: BLE001 - handed to the reader
+            self._frames.put(error)
+        finally:
+            runtime.MANAGER.release_generation()
+
+    def first(self):
+        """The opening frame, or the failure that stopped it from arriving.
+
+        Everything a request can be refused for - a prompt past the context
+        limit, a prefill the tokenizer cannot reproduce, a model that has
+        gone - is raised on the way to the first frame, so it is read before
+        the response is chosen. Streaming a refusal as an event inside a 200
+        would tell a client the request had succeeded.
+        """
+
+        opening = self._frames.get()
+        if isinstance(opening, BaseException):
+            raise opening
+        if opening is _DONE:
+            raise ApiError(
+                500, "The model produced nothing at all.", "server_error"
+            )
+        return opening
+
+    def rest(self) -> Iterator:
+        """Every frame after the first, in order."""
+
+        while True:
+            item = self._frames.get()
+            if item is _DONE:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
 
 
 def error_response(error: ApiError) -> JSONResponse:
@@ -419,28 +515,20 @@ def build_router() -> APIRouter:
             answer_prefill=prefill,
             load_id=load_id,
         )
-        # The first frame is drawn here rather than inside the response,
-        # because everything a request can be refused for - a prompt past the
-        # context limit, a prefill the tokenizer cannot reproduce, a model
-        # that has gone - is raised on the way to it. Streaming those as an
-        # event inside a 200 would tell a client the request succeeded.
+        # One thread owns the generator from here on; see Frames. It also
+        # gives the generation slot back when the model is done with, so
+        # nothing below releases it.
+        produced = Frames(stream)
         try:
-            first = next(stream)
-        except StopIteration:
-            runtime.MANAGER.release_generation()
-            return error_response(
-                ApiError(500, "The model produced nothing at all.", "server_error")
-            )
+            first = produced.first()
         except ApiError as error:
-            runtime.MANAGER.release_generation()
             return error_response(error)
         except Exception as error:
-            runtime.MANAGER.release_generation()
             return error_response(refusal(error))
         # The weights that answered, read under the model lock rather than
         # from the manager afterwards.
         model_id = first.model_id or model_id
-        frames = chain([first], stream)
+        frames = chain([first], produced.rest())
         if streaming:
             return StreamingResponse(
                 stream_completion(
@@ -472,8 +560,6 @@ def build_router() -> APIRouter:
             )
         except ApiError as error:
             return error_response(error)
-        finally:
-            runtime.MANAGER.release_generation()
 
     @router.post("/chatlab/score")
     def score(body: dict = Body(default_factory=dict)):
@@ -708,6 +794,11 @@ def stream_completion(
     stream wants only what is new, so each frame is diffed against the last.
     Reasoning goes to ``reasoning_content`` and the answer to ``content``, so
     a client that shows only the answer never has to strip the markers.
+
+    Nothing here releases the generation slot: the frames come from a thread
+    that owns the generator and gives the model back itself, which is also
+    what happens when a client stops reading part way through. See
+    :class:`Frames`.
     """
 
     sent_answer = sent_reasoning = ""
@@ -781,8 +872,6 @@ def stream_completion(
         failure = refusal(error)
         yield f"data: {json.dumps({'error': {'message': failure.message, 'type': failure.kind}})}\n\n"
         yield "data: [DONE]\n\n"
-    finally:
-        runtime.MANAGER.release_generation()
 
 
 def attach(app) -> None:

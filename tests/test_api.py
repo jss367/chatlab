@@ -1,6 +1,8 @@
 """The local HTTP API: what it answers, and what it refuses."""
 
 import json
+import threading
+import time
 import unittest
 from dataclasses import replace
 
@@ -823,6 +825,107 @@ class StreamingTests(ApiTestCase):
 
         self.assertEqual(frames[-1]["error"]["type"], "server_error")
         self.assertFalse(self.manager.busy)
+
+
+class FramesTests(ApiTestCase):
+    """The frames of one generation, produced on a thread of their own."""
+
+    def test_every_frame_is_produced_on_one_thread(self):
+        # torch.inference_mode is thread-local and Starlette advances a
+        # streaming iterator through its thread pool without promising the
+        # same worker twice, so a generation that hopped threads would run
+        # its forward passes with gradients enabled.
+        threads = []
+
+        def generate(messages, **kwargs):
+            for text in ("a", "ab", "abc"):
+                threads.append(threading.get_ident())
+                yield update(text)
+
+        self.manager.generate = generate
+
+        response = self.post(
+            messages=[{"role": "user", "content": "hi"}], stream=True
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(threads), 3)
+        self.assertEqual(len(set(threads)), 1)
+        self.assertNotIn(threading.get_ident(), threads)
+
+    def test_a_frame_is_copied_before_it_crosses(self):
+        # The metrics list on an update belongs to the generator, which goes
+        # on appending to it: a frame read after the next one was produced
+        # would otherwise carry the later frame's tokens.
+        live = [metric(1, "one")]
+
+        def generate(messages, **kwargs):
+            yield update("one", metrics=live)
+            live.append(metric(2, "two"))
+            yield update("one two", metrics=live)
+
+        produced = api.Frames(generate([]))
+
+        first = produced.first()
+        rest = list(produced.rest())
+
+        self.assertEqual(len(first.metrics), 1)
+        self.assertEqual(len(rest[0].metrics), 2)
+
+    def test_the_slot_is_given_back_by_the_thread_that_generated(self):
+        def generate(messages, **kwargs):
+            yield update("one")
+
+        self.manager.reserve_generation()
+        produced = api.Frames(generate([]))
+        produced.first()
+        list(produced.rest())
+
+        for _ in range(200):
+            if not self.manager.busy:
+                break
+            time.sleep(0.01)
+        self.assertFalse(self.manager.busy)
+
+    def test_a_stream_nobody_reads_is_abandoned_and_the_model_given_back(self):
+        # A streaming response has no other way to learn that the client has
+        # gone. The generator is closed from the thread that owns it, so its
+        # own cleanup runs.
+        closed = threading.Event()
+
+        def generate(messages, **kwargs):
+            try:
+                for index in range(50):
+                    yield update("x" * (index + 1))
+            except GeneratorExit:
+                closed.set()
+                raise
+
+        original = api.ABANDONED_AFTER_SECONDS
+        api.ABANDONED_AFTER_SECONDS = 0.05
+        self.addCleanup(setattr, api, "ABANDONED_AFTER_SECONDS", original)
+
+        self.manager.reserve_generation()
+        produced = api.Frames(generate([]))
+        produced.first()  # and then nothing reads the rest
+
+        self.assertTrue(closed.wait(timeout=5))
+        for _ in range(200):
+            if not self.manager.busy:
+                break
+            time.sleep(0.01)
+        self.assertFalse(self.manager.busy)
+
+    def test_a_generation_that_produces_nothing_says_so(self):
+        def generate(messages, **kwargs):
+            return
+            yield  # pragma: no cover - never reached
+
+        produced = api.Frames(generate([]))
+
+        with self.assertRaises(api.ApiError) as caught:
+            produced.first()
+        self.assertEqual(caught.exception.status, 500)
 
 
 class ScoreTests(ApiTestCase):

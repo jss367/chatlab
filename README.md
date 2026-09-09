@@ -370,7 +370,11 @@ model is refused by name, and a request that passes that check is bound to
 the load it was checked against: a load that lands before the first token is
 refused rather than answered by weights the request did not name. Only one generation runs at a time, as in the
 interface, and a second request is told the model is busy rather than queued
-behind an answer thousands of tokens long. There is no authentication, and
+behind an answer thousands of tokens long. Each generation runs on one thread
+of its own and its frames cross to the response through a queue, so a
+streaming answer is never resumed on a different worker; a client that stops
+reading is noticed within a minute, and the model is handed back rather than
+held by a response nobody is listening to. There is no authentication, and
 there is none on the interface either: both are served on the loopback address
 and anything that can reach one can already do everything the other can.
 
