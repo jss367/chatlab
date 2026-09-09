@@ -40,12 +40,14 @@ def build_page(context):
 The host passes `extension_api.ExtensionContext`:
 
 - `models`: the model service; obtain exclusive access with `open_session()`.
-- `tokens`: the shared `TokenInspector`, with `color_map`, `strip(metrics)` and `describe(metric)`.
+- `tokens`: the shared `TokenInspector`, with `color_map`, `strip(metrics)`, `describe(metric)` and `selections()` for dated token selection.
 - `data_dir`: an extension-specific directory. Create it only when writing data.
 - `navigation`: the host navigation service; call `context.navigation.open_models(button)` during page construction to make a Gradio button open model loading. The host updates the sidebar selection and all page visibility together.
 - `api_version`: the version supplied by this host.
 
 ### Generating
+
+For an interactive token strip, create one `selections = context.tokens.selections()` controller per view. Store its session ID using `gr.State(value=selections.new_session, delete_callback=selections.forget)`. `selections.view(session_id, response_identity, metrics)` returns a stamped metrics payload and a flag telling the UI to clear its selected-token details when the response changes. Keep the identity stable while appending tokens to that response. Pass the stamped payload to `selections.inspect(session_id, payload, event)` in the strip's selection callback: it discards delayed clicks from replaced responses. Current stamps stay in the controller, outside Gradio's event input snapshots, and are isolated from other browser sessions, extension views and core Chat.
 
 ```python
 with context.models.open_session() as session:

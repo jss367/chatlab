@@ -9,11 +9,12 @@ import copy
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from trace_export import write_private_text
 
 API_VERSION = 1
-__all__ = ["API_VERSION", "ExtensionContext", "ModelService", "GenerationSession", "TokenInspector", "NavigationService", "write_private_text"]
+__all__ = ["API_VERSION", "ExtensionContext", "ModelService", "GenerationSession", "TokenInspector", "TokenSelections", "NavigationService", "write_private_text"]
 
 
 class ModelService:
@@ -131,6 +132,56 @@ class TokenInspector:
     def describe(self, metric):
         from ui.panel import describe_token
         return describe_token(metric)
+
+    def selections(self):
+        """Create an independent selection controller for one extension view."""
+        return TokenSelections(self)
+
+
+class TokenSelections:
+    """Date token snapshots against live, per-session server state.
+
+    Store new_session as a gr.State callable and forget as its delete_callback.
+    Only the stable session ID and stamped metrics travel through Gradio inputs;
+    the current view/stamp remains here, outside event input snapshots.
+    """
+    def __init__(self, inspector):
+        self._inspector = inspector
+        self._sessions = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def new_session():
+        return uuid4().hex
+
+    def forget(self, session_id):
+        with self._lock:
+            self._sessions.pop(session_id, None)
+
+    def view(self, session_id, view_id, metrics):
+        """Stamp a strip; changed is true when its detail panel must be cleared."""
+        with self._lock:
+            previous = self._sessions.get(session_id)
+            changed = previous is None or previous[0] != view_id
+            stamp = uuid4().hex if changed else previous[1]
+            self._sessions[session_id] = (view_id, stamp)
+        return (stamp, metrics), changed
+
+    def inspect(self, session_id, payload, event):
+        import gradio as gr
+        stamp, metrics = payload
+        def current():
+            with self._lock:
+                active = self._sessions.get(session_id)
+                return active is not None and active[1] == stamp
+        if not current():
+            return gr.skip(), gr.skip()
+        index = event.index[0] if isinstance(event.index, (list, tuple)) else event.index
+        if not isinstance(index, int) or not 0 <= index < len(metrics):
+            return "Select a token in the current response.", []
+        result = self._inspector.describe(metrics[index])
+        # Formatting may overlap a stream update or replay switch.
+        return result if current() else (gr.skip(), gr.skip())
 
 
 class NavigationService:

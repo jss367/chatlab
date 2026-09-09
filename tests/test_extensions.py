@@ -14,7 +14,7 @@ import gradio as gr
 import app
 import settings
 import settings_sandbox
-from extension_api import ModelService, NavigationService
+from extension_api import ModelService, NavigationService, TokenInspector
 from extensions.registry import ExtensionSpec, LoadedExtension, load_enabled
 from ui.extensions_page import save_extensions
 
@@ -64,6 +64,48 @@ class FakeManager:
 
 
 OPTIONS = dict(temperature=.7, top_p=1., top_k=0, max_new_tokens=10, seed=7)
+
+
+class TokenSelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.inspector = TokenInspector()
+        self.inspector.describe = mock.Mock(side_effect=lambda metric: (str(metric['token_id']), []))
+        self.selections = self.inspector.selections()
+        self.session = self.selections.new_session()
+        self.click = SimpleNamespace(index=0)
+
+    def test_old_click_is_rejected_after_response_or_replay_switch(self):
+        old, changed = self.selections.view(self.session, 'response-1', [{'token_id': 1}])
+        self.assertTrue(changed)
+        self.assertEqual(self.selections.inspect(self.session, old, self.click), ('1', []))
+        appended, changed = self.selections.view(self.session, 'response-1', [{'token_id': 1}, {'token_id': 2}])
+        self.assertFalse(changed)
+        self.assertEqual(old[0], appended[0])
+        self.selections.view(self.session, 'response-2', [{'token_id': 3}])
+        self.assertEqual(self.selections.inspect(self.session, old, self.click), (gr.skip(), gr.skip()))
+        self.selections.view(self.session, 'response-1', [{'token_id': 1}])
+        self.assertEqual(self.selections.inspect(self.session, old, self.click), (gr.skip(), gr.skip()))
+
+    def test_sessions_views_and_core_chat_are_isolated(self):
+        from ui.panel import current_metrics_generation
+        core_stamp = current_metrics_generation()
+        old, _ = self.selections.view(self.session, 'first', [{'token_id': 1}])
+        another_session = self.selections.new_session()
+        self.assertNotEqual(another_session, self.session)
+        self.selections.view(another_session, 'second', [{'token_id': 2}])
+        self.inspector.selections().view(self.session, 'other-view', [])
+        self.assertEqual(current_metrics_generation(), core_stamp)
+        self.assertEqual(self.selections.inspect(self.session, old, self.click), ('1', []))
+        self.selections.forget(self.session)
+        self.assertEqual(self.selections.inspect(self.session, old, self.click), (gr.skip(), gr.skip()))
+
+    def test_response_replaced_while_formatting_drops_result(self):
+        old, _ = self.selections.view(self.session, 'first', [{'token_id': 1}])
+        def delayed_description(metric):
+            self.selections.view(self.session, 'second', [])
+            return 'Old token', []
+        self.inspector.describe.side_effect = delayed_description
+        self.assertEqual(self.selections.inspect(self.session, old, self.click), (gr.skip(), gr.skip()))
 
 
 class RuntimeBoundaryTests(unittest.TestCase):
@@ -211,6 +253,7 @@ class ExtensionSettingsTests(unittest.TestCase):
         try:
             nav = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'nav')
             self.assertEqual([value for _, value in nav.choices], ['Chat', 'Maze', 'Models', 'Settings'])
+            self.assertTrue(any(getattr(b, 'elem_id', None) == 'maze-run' for b in demo.blocks.values()))
         finally:
             demo.close()
         save_extensions([], ['maze_experiments'])

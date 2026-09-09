@@ -9,6 +9,9 @@ from extensions.maze_experiments.maze import Maze, apply_call, call_text, genera
 from extensions.maze_experiments.runner import Episode, from_payload, stream_episode
 from model_runtime import ModelManager
 from extension_api import ModelService
+from extension_api import TokenInspector
+from extensions.maze_experiments.page import views
+import gradio as gr
 
 CONFIG = dict(supplied_moves=0, interrupt_after=0, interruption_text="Distracted", prefix_tokens=2,
               temperature=.7, sampling_seed=99, per_turn_tokens=100, token_budget=300, attempt_budget=10)
@@ -53,6 +56,27 @@ class Manager:
 
 
 class MazeTests(unittest.TestCase):
+    def test_new_response_reset_and_replay_clear_selection_but_streaming_preserves_it(self):
+        selections = TokenInspector().selections()
+        session = selections.new_session()
+        ep = Episode(MAZE, CONFIG)
+        metric = dict(token_id=1, display_text='a', text='a', scored=False)
+        turn = dict(metrics=[metric], text='a', forced_prefix_tokens=0, finish_reason='stop')
+        ep.turns = [turn]
+        first = views(ep, False, selections, session)
+        self.assertEqual(first[-2:], ('Select a model-generated token above.', []))
+        ep.turns[0]['metrics'].append(metric)
+        streamed = views(ep, False, selections, session)
+        self.assertEqual(streamed[-2:], (gr.skip(), gr.skip()))
+        self.assertEqual(first[7][0], streamed[7][0])
+        ep.turns.append(copy.deepcopy(turn))
+        second = views(ep, False, selections, session)
+        replay = views(ep, False, selections, session, index=0)
+        reset = views(Episode(MAZE, CONFIG), False, selections, session)
+        for frame in (second, replay, reset):
+            self.assertEqual(frame[-2:], ('Select a model-generated token above.', []))
+        self.assertEqual(len({frame[7][0] for frame in (first, second, replay, reset)}), 4)
+
     def test_browser_sessions_have_independent_episode_state(self):
         original = Episode(MAZE, CONFIG)
         duplicate = copy.deepcopy(original)

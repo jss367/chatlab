@@ -99,17 +99,19 @@ def timeline(ep):
     return rows
 
 
-def views(ep, reveal, index=None, animate=False):
+def views(ep, reveal, selections, session_id, index=None, animate=False):
     if index is None:
         index = len(ep.turns) - 1
     t = ep.turns[index] if 0 <= index < len(ep.turns) else {}
     metrics = t.get("metrics", [])
     forced = t.get("forced_prefix_tokens", 0)
+    stamped, changed = selections.view(session_id, (ep.run_id, id(ep), index), metrics[forced:])
     origin = "Inside the template's open reasoning block" if t.get("reasoning_prefilled") else "At the beginning of the assistant response"
     note = (f"**Supplied interruption · {forced} tokens** · {origin}.\n\n" if forced else "No supplied interruption in this response.")
     return (board(ep, index, reveal, animate), status(ep), TOKENS.strip(metrics[forced:]),
-            t.get("text", ""), note, t.get("prefix_text", ""), timeline(ep), metrics[forced:],
-            gr.update(choices=[("Initial / supplied history", -1)] + [(f"Response {i+1}" + (" · interruption" if t.get("prefix_ids") else ""), i) for i, t in enumerate(ep.turns)], value=index))
+            t.get("text", ""), note, t.get("prefix_text", ""), timeline(ep), stamped,
+            gr.update(choices=[("Initial / supplied history", -1)] + [(f"Response {i+1}" + (" · interruption" if t.get("prefix_ids") else ""), i) for i, t in enumerate(ep.turns)], value=index),
+            "Select a model-generated token above." if changed else gr.skip(), [] if changed else gr.skip())
 
 
 def _build_page(context):
@@ -118,7 +120,9 @@ def _build_page(context):
                           token_budget=8192, attempt_budget=32)
     initial = Episode(generate(), default_config)
     episode = gr.State(initial)
-    metrics_state = gr.State([])
+    selections = context.tokens.selections()
+    selection_session = gr.State(value=selections.new_session, delete_callback=selections.forget)
+    metrics_state = gr.State((None, []))
     gr.Markdown("# Maze workbench\nWatch a model navigate, interrupt its response, and inspect what happens next.")
     with gr.Row():
         with gr.Column(scale=5, min_width=310):
@@ -172,10 +176,10 @@ def _build_page(context):
                 upload = gr.File(label="Load a saved run for replay", file_types=[".json"], type="filepath")
             gr.Markdown("Exploratory tool: movement requires a completed, valid `move` call. Text claiming movement does not move the character. A natural end without a call ends the episode. After interruption, recovery allows 1,024 sampled tokens / 4 attempts. Run JSON records prompts, token IDs, probabilities, supplied text, actions and settings. The current tool parser supports Qwen-style `<tool_call>` responses. This view does not train a model.")
             models = gr.Button("Choose / load model", size="sm")
-    outputs = [maze_board, state_text, strip, raw, prefix_note, prefix_text, events, metrics_state, turn_picker]
+    outputs = [maze_board, state_text, strip, raw, prefix_note, prefix_text, events, metrics_state, turn_picker, detail, alternatives]
     controls = [size, seed, distance, openness, supplied, after, text, prefix, temperature, sampling_seed, per_turn, budget, attempts]
 
-    def prepare_episode(ep, show, *values):
+    def prepare_episode(ep, show, session_id, *values):
         if ep.busy:
             raise gr.Error("Stop or pause this episode before starting another.")
         n, s, d, o, supplied_n, trigger, passage_text, count, temp, sample_seed, per, total, tries = values
@@ -185,13 +189,13 @@ def _build_page(context):
                           sampling_seed=int(sample_seed), per_turn_tokens=int(per), token_budget=int(total), attempt_budget=int(tries)))
         except (ValueError, TypeError) as exc:
             raise gr.Error(str(exc)) from exc
-        return (new, *views(new, show), None)
+        return (new, *views(new, show, selections, session_id), None)
 
-    def play(ep, show, single=False):
+    def play(ep, show, session_id, single=False):
         last_board = None
         try:
             for current in stream_episode(ep, context.models, single_step=single, save_dir=runs_dir(context)):
-                rendered = list(views(current, show, animate=True))
+                rendered = list(views(current, show, selections, session_id, animate=True))
                 if rendered[0] == last_board:
                     rendered[0] = gr.skip()
                 else:
@@ -199,10 +203,10 @@ def _build_page(context):
                 yield tuple(rendered)
         except ValueError as exc:
             gr.Warning(str(exc))
-            yield views(ep, show)
+            yield views(ep, show, selections, session_id)
 
-    def one_step(ep, show):
-        yield from play(ep, show, True)
+    def one_step(ep, show, session_id):
+        yield from play(ep, show, session_id, True)
 
     def command(ep, kind):
         try:
@@ -217,10 +221,10 @@ def _build_page(context):
         gr.Info({"pause": "Will pause after the current response.", "stop": "Stopping; partial actions will not execute.", "interrupt": "Interruption queued for the next response."}[kind])
         return status(ep)
 
-    def inspect(ep, show, i):
+    def inspect(ep, show, i, session_id):
         if ep.busy:
             raise gr.Error("Pause the episode before selecting a response to replay.")
-        return views(ep, show, int(i if i is not None else -1))
+        return views(ep, show, selections, session_id, int(i if i is not None else -1))
 
     def export(ep):
         if ep.busy:
@@ -228,7 +232,7 @@ def _build_page(context):
         ep.save(runs_dir(context))
         return str(ep.export())
 
-    def load(path, ep, show):
+    def load(path, ep, show, session_id):
         if ep.busy:
             raise gr.Error("Pause or stop this episode before loading a replay.")
         if not path:
@@ -237,29 +241,26 @@ def _build_page(context):
             if Path(path).stat().st_size > 50_000_000:
                 raise ValueError("Run files must be smaller than 50 MB.")
             replay = from_payload(json.loads(Path(path).read_text()))
-            rendered = views(replay, show)
+            rendered = views(replay, show, selections, session_id)
         except (ValueError, TypeError, KeyError, IndexError, OSError) as exc:
             raise gr.Error(f"Could not load run: {exc}") from exc
         return (replay, *rendered)
 
-    def select_token(metrics, evt: gr.SelectData):
-        index = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
-        if not isinstance(index, int) or not 0 <= index < len(metrics):
-            return "Select a token in the current response.", []
-        return context.tokens.describe(metrics[index])
+    def select_token(session_id, metrics, evt: gr.SelectData):
+        return selections.inspect(session_id, metrics, evt)
 
-    prepare.click(prepare_episode, [episode, reveal, *controls], [episode, *outputs, download], concurrency_id="maze", show_progress="hidden")
-    run.click(play, [episode, reveal], outputs, concurrency_id="maze", show_progress="hidden")
-    step.click(one_step, [episode, reveal], outputs, concurrency_id="maze", show_progress="hidden")
+    prepare.click(prepare_episode, [episode, reveal, selection_session, *controls], [episode, *outputs, download], concurrency_id="maze", show_progress="hidden")
+    run.click(play, [episode, reveal, selection_session], outputs, concurrency_id="maze", show_progress="hidden")
+    step.click(one_step, [episode, reveal, selection_session], outputs, concurrency_id="maze", show_progress="hidden")
     pause.click(lambda ep: command(ep, "pause"), episode, state_text, queue=False)
     stop.click(lambda ep: command(ep, "stop"), episode, state_text, queue=False)
     interrupt.click(lambda ep: command(ep, "interrupt"), episode, state_text, queue=False)
     passage.input(lambda name: "" if name == "None" else PASSAGES.get(name, ""), passage, text, queue=False)
     reveal.input(lambda ep, show, i: board(ep, None if ep.busy else int(i if i is not None else -1), show), [episode, reveal, turn_picker], maze_board, queue=False)
-    turn_picker.input(inspect, [episode, reveal, turn_picker], outputs, show_progress="hidden")
-    strip.select(select_token, metrics_state, [detail, alternatives], queue=False, show_progress="hidden")
+    turn_picker.input(inspect, [episode, reveal, turn_picker, selection_session], outputs, show_progress="hidden")
+    strip.select(select_token, [selection_session, metrics_state], [detail, alternatives], queue=False, show_progress="hidden")
     save.click(export, episode, download, show_progress="hidden")
-    upload.upload(load, [upload, episode, reveal], [episode, *outputs], show_progress="hidden")
+    upload.upload(load, [upload, episode, reveal, selection_session], [episode, *outputs], show_progress="hidden")
     context.navigation.open_models(models)
 
 
