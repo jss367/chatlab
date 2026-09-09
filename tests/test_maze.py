@@ -266,6 +266,43 @@ class MazeTests(unittest.TestCase):
         self.assertIsNone(ep.resumed)
         self.assertFalse(manager.busy)
 
+    def test_stop_on_completed_frame_does_not_start_another_response(self):
+        for single_step in (False, True):
+            with self.subTest(single_step=single_step):
+                ep = Episode(MAZE, CONFIG)
+                manager = Manager([('\n' + call_text(MAZE.maze_id, 'east'), [8, 0])])
+                for frame in stream_episode(ep, manager, single_step=single_step):
+                    if frame.turns and frame.turns[-1]['finish_reason'] == 'stop':
+                        ep.request_stop()
+                self.assertEqual(ep.phase, 'stopped')
+                self.assertEqual(len(manager.calls), 1)
+                self.assertEqual(len(ep.turns), 1)
+                self.assertEqual(ep.sampled_tokens, 2)
+                self.assertFalse(manager.busy)
+
+    def test_stop_during_response_gap_does_not_generate_more_tokens(self):
+        ep = Episode(MAZE, CONFIG)
+        manager = Manager([('\n' + call_text(MAZE.maze_id, 'east'), [8, 0])])
+        with mock.patch('extensions.maze_experiments.runner.time.sleep', side_effect=lambda _: ep.request_stop()):
+            list(stream_episode(ep, manager))
+        self.assertEqual(ep.phase, 'stopped')
+        self.assertEqual(len(manager.calls), 1)
+        self.assertEqual(len(ep.turns), 1)
+        self.assertEqual(ep.sampled_tokens, 2)
+
+    def test_stop_on_opening_frame_never_invokes_generation(self):
+        ep = Episode(MAZE, CONFIG)
+        manager = Manager([])
+        stream = stream_episode(ep, manager)
+        next(stream)
+        ep.request_stop()
+        list(stream)
+        self.assertEqual(ep.phase, 'stopped')
+        self.assertEqual(manager.calls, [])
+        self.assertEqual(ep.sampled_tokens, 0)
+        self.assertEqual(ep.turns[0]['finish_reason'], 'user_stopped')
+        self.assertFalse(manager.busy)
+
     def test_export_uses_a_private_temporary_file(self):
         ep = Episode(MAZE, CONFIG)
         path = ep.export()

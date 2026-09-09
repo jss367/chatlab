@@ -214,6 +214,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
 
     try:
         while episode.phase == "running":
+            if episode.stop_requested:
+                episode.phase, episode.detail = "stopped", "Stopped by you before the next response."
+                break
             if manager.load_id != episode.load_id:
                 raise ValueError("The model changed during this episode. Start a new episode with the selected model.")
             forced = interrupted_prefix(episode, manager)
@@ -234,6 +237,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
                     "position_before": list(episode.position), "started_at": time.time(), "finish_reason": None}
             episode.turns.append(turn)
             yield episode
+            if episode.stop_requested:
+                finish_turn(episode, turn, set(), limit)
+                break
             stop_ids = manager.stop_token_ids
             generator = manager.generate(
                 episode.messages, temperature=episode.config["temperature"], top_p=1., top_k=0,
@@ -259,6 +265,8 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             yield episode
             if episode.phase in TERMINAL:
                 break
+            if episode.stop_requested:
+                continue
             if single_step or episode.pause_requested:
                 episode.phase = "paused"
                 episode.detail += " Paused before the next response."
