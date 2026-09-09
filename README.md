@@ -348,15 +348,19 @@ has to strip `<think>` markers. A trailing assistant message is the assistant
 prefill: the reply must begin with that text, and its tokens are measured as
 replayed rather than sampled.
 
-With `logprobs`, every token carries its own `logprob` and the alternatives
-`top_logprobs` asked for, and beside them, under `chatlab`, the same
+With `logprobs`, every token carries its own `logprob`, its bytes, and the
+alternatives `top_logprobs` asked for, and beside them, under `chatlab`, the same
 measurements the token panel shows: raw rank, raw and sampling probability,
 surprise, entropy, the top-1 margin, the probability mass above it, and the
 sampling shift. `chatlab.summary` comes with every response whether or not
 the tokens do - perplexity, mean surprise, the share the model ranked first -
 and `prompt_logprobs: true` adds the prompt's own tokens under
 `chatlab.prompt_tokens`, in the response or in the stream's closing event. The token that ended the response is measured and
-counted like any other, even though it is not part of the text.
+counted like any other, even though it is not part of the text. A token
+holding part of a character - a byte-level tokenizer splits one over several
+- reports `bytes` as null rather than the bytes of the replacement character
+it decodes to on its own; the text itself is assembled from the tokens
+together and is unaffected.
 
 `POST /v1/chatlab/score` is the **Score text** tab: give it `text` and
 optionally `context`, and it measures every token in one forward pass. It is

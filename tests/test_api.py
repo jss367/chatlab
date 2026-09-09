@@ -565,6 +565,31 @@ class CompletionShapeTests(ApiTestCase):
         self.assertEqual([entry["token"] for entry in first["top_logprobs"]], ["Hello", "Hi"])
         self.assertAlmostEqual(first["top_logprobs"][1]["logprob"], -1.2039728043259361)
 
+    def test_half_a_character_reports_no_bytes_rather_than_the_wrong_ones(self):
+        # A byte-level tokenizer splits one character over several tokens,
+        # and each decodes alone as the replacement character. Encoding that
+        # would report its three bytes as the model's own, which is worse for
+        # a client aligning on the field than saying nothing.
+        self.manager.updates = [
+            update(
+                "caf\u00e9",
+                metrics=[metric(1, "\ufffd", candidates=(("\ufffd", 0.2), ("x", 0.1)))],
+            )
+        ]
+
+        # The helper lists the token itself first, then the alternatives.
+        body = self.answer(logprobs=True, top_logprobs=3)
+
+        entry = body["choices"][0]["logprobs"]["content"][0]
+        self.assertIsNone(entry["bytes"])
+        self.assertEqual(
+            [alternative["bytes"] for alternative in entry["top_logprobs"]],
+            [None, None, list(b"x")],
+        )
+        # And the answer itself is unaffected: it is assembled from the
+        # tokens together, which is where the character comes back whole.
+        self.assertEqual(body["choices"][0]["message"]["content"], "caf\u00e9")
+
     def test_an_impossible_token_is_floored_rather_than_infinite(self):
         # JSON has no negative infinity every client can read.
         self.manager.updates = [update("Hello", metrics=[metric(1, "Hello", 0.0)])]

@@ -417,6 +417,22 @@ CHATLAB_TOKEN_FIELDS = (
 )
 
 
+def token_bytes(text: str) -> list[int] | None:
+    """The bytes behind a token's text, or ``None`` where they cannot be told.
+
+    A byte-level tokenizer splits one character over several tokens, and each
+    of those decodes on its own as the replacement character. Encoding that
+    would report the replacement character's own three bytes as though the
+    model had produced them, which is worse than saying nothing: the field
+    exists for clients reconstructing or aligning text, and OpenAI's own
+    schema allows it to be null. The text itself is unaffected - it is
+    assembled from the tokens together, which is where the character comes
+    back whole.
+    """
+
+    return None if UNSTABLE_CHARACTER in text else list(text.encode("utf-8"))
+
+
 def token_entry(metric: dict, top_logprobs: int = 0) -> dict:
     """One token as ``logprobs.content`` spells it, ChatLab's numbers included."""
 
@@ -424,12 +440,12 @@ def token_entry(metric: dict, top_logprobs: int = 0) -> dict:
     entry = {
         "token": text,
         "logprob": logprob_of(metric.get("raw_probability")),
-        "bytes": list(text.encode("utf-8")),
+        "bytes": token_bytes(text),
         "top_logprobs": [
             {
                 "token": candidate.get("text") or "",
                 "logprob": logprob_of(candidate.get("probability")),
-                "bytes": list((candidate.get("text") or "").encode("utf-8")),
+                "bytes": token_bytes(candidate.get("text") or ""),
             }
             for candidate in (metric.get("top_candidates") or [])[:top_logprobs]
         ],
