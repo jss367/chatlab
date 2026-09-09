@@ -3382,6 +3382,17 @@ class ConversationSamplingTests(unittest.TestCase):
 
         self.assertEqual(self.held(result[FORK_STATE], "Fork 1"), self.OWN)
 
+    def test_clearing_everything_lets_go_of_the_sampling_too(self):
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
+
+        cleared = app.clear_chat(DEFAULT_COLOR_SCALE, forks)[-3]
+
+        self.assertEqual(cleared["sampling"], {})
+        # Stamped, so the copy on disk does not look like the newer of the
+        # two and pin the emptied conversation again.
+        self.assertIn(MAIN_BRANCH, cleared["sampling_updated"])
+
     def test_switching_back_brings_the_sampling_back(self):
         forks = new_forks()
         put_branch(forks, "Fork 1", [])

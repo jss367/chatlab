@@ -141,9 +141,12 @@ def dump(forks: dict | None) -> str:
         sampling = sampling_entry(forks["sampling"].get(name))
         if sampling:
             entry["sampling"] = sampling
-            stamp = forks["sampling_updated"].get(name)
-            if stamp:
-                entry["sampling_updated"] = stamp
+        # Written whether or not there is sampling beside it: a stamp on its
+        # own says the sampling was taken away, and another page holding an
+        # older copy must not put it back.
+        stamp = forks["sampling_updated"].get(name)
+        if stamp:
+            entry["sampling_updated"] = stamp
         if name in updated:
             entry["updated"] = updated[name]
         branches.append(entry)
@@ -200,13 +203,15 @@ def parse(payload: str) -> dict:
             kept = sampling_entry(held)
             if kept:
                 sampling[name] = kept
-                stamp = entry.get("sampling_updated")
-                if stamp is not None:
-                    if not isinstance(stamp, str):
-                        raise ValueError(
-                            f"The branch {name!r} has a sampling time that is not a string."
-                        )
-                    sampling_updated[name] = stamp
+        # Read whether or not any sampling came with it: on its own it says
+        # the sampling was taken away, and when it was.
+        sampling_stamp = entry.get("sampling_updated")
+        if sampling_stamp is not None:
+            if not isinstance(sampling_stamp, str):
+                raise ValueError(
+                    f"The branch {name!r} has a sampling time that is not a string."
+                )
+            sampling_updated[name] = sampling_stamp
         turns = turns_from_entries(entry.get("turns"))
         # A response that was still streaming when the file was written is
         # kept as far as it got, and closed, so its reasoning block does not
@@ -290,12 +295,15 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
             # page that made it: it must not win the transcript, and the
             # newer transcript must not undo its slider.
             side = newer(name, "sampling_updated")
+            stamp = side["sampling_updated"].get(name)
+            if stamp:
+                # Kept even where that side has no sampling: the stamp is
+                # then a removal, and it has to outlive this merge or the
+                # next page still holding the old entry would put it back.
+                sampling_updated[name] = stamp
             held = side["sampling"].get(name)
             if held:
                 sampling[name] = held
-                stamp = side["sampling_updated"].get(name)
-                if stamp:
-                    sampling_updated[name] = stamp
         stamp = winner["updated"].get(name)
         if stamp:
             updated[name] = stamp

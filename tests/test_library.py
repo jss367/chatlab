@@ -10,6 +10,7 @@ from unittest import mock
 import library
 from conversation import (
     MAIN_BRANCH,
+    branch_stamp,
     copy_forks,
     drop_branch,
     make_turn,
@@ -267,6 +268,29 @@ class SamplingFileTests(unittest.TestCase):
         written = json.loads(self.path.read_text())["branches"][0]["sampling"]
         self.assertEqual(written["repetition_penalty"], 1.15)
         self.assertEqual(written["temperature"], 0.0)
+
+    def test_sampling_taken_away_does_not_come_back(self):
+        # Clear leaves the main conversation empty and unpinned. Its sampling
+        # is merged on its own time, so without a stamp of its own the file's
+        # older copy looks like the newer of the two and pins it again.
+        pinned = stamped(MAIN_BRANCH, Main="hi")
+        put_branch_sampling(pinned, MAIN_BRANCH, self.SAMPLING)
+        library.write(pinned, self.path)
+
+        cleared = new_forks()
+        stamp = branch_stamp()
+        cleared["updated"] = {MAIN_BRANCH: stamp}
+        cleared["sampling_updated"] = {MAIN_BRANCH: stamp}
+        library.write(cleared, self.path)
+
+        restored = library.read(self.path)
+
+        self.assertEqual(restored["sampling"], {})
+        # And the removal outlives the merge, so a page still holding the old
+        # entry cannot put it back on the next save.
+        self.assertIn(MAIN_BRANCH, restored["sampling_updated"])
+        library.write(pinned, self.path)
+        self.assertEqual(library.read(self.path)["sampling"], {})
 
     def test_sampling_that_is_not_an_object_is_not_a_file_this_app_wrote(self):
         library.write(stamped(MAIN_BRANCH, Main="hi"), self.path)
