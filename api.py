@@ -557,15 +557,25 @@ def refusal(error: Exception) -> ApiError:
     return ApiError(500, str(error) or error.__class__.__name__, "server_error")
 
 
+# What a byte-level tokenizer decodes an incomplete character as. A frame can
+# land between the tokens of one character, and the decoder shows the bytes so
+# far as this; the next frame replaces it with the character. A delta already
+# sent cannot be replaced, so it is withheld until the character is whole.
+UNSTABLE_CHARACTER = "\ufffd"
+
+
 def answer_and_reasoning(update, streaming: bool = False) -> tuple[str, str]:
     """The visible answer and the reasoning block, split as the chat splits them.
 
-    ``streaming`` withholds a reasoning marker that has only half arrived, as
-    the chat does. A frame can end on the ``<`` of ``<think>``, and a delta
-    already sent cannot be taken back: without this the client would append
-    that fragment as answer text and the assembled stream would differ from
-    the response the same generation returns whole. The last frame is split
-    without it, so the withheld characters are released at the end.
+    ``streaming`` withholds whatever the next frame may yet change: a
+    reasoning marker that has only half arrived, as the chat does, and the
+    replacement character a byte-level tokenizer decodes half of a character
+    as. A frame can end on the ``<`` of ``<think>`` or between the two tokens
+    of an ``é``, and a delta already sent cannot be taken back: without this
+    the client would append the fragment and the assembled stream would
+    differ from the response the same generation returns whole. The last
+    frame is split without it, so the withheld characters are released at the
+    end.
     """
 
     reasoning, answer, _closed = split_reasoning(
@@ -573,6 +583,9 @@ def answer_and_reasoning(update, streaming: bool = False) -> tuple[str, str]:
         streaming=streaming,
         reasoning_prefilled=update.reasoning_prefilled,
     )
+    if streaming:
+        answer = answer.rstrip(UNSTABLE_CHARACTER)
+        reasoning = reasoning.rstrip(UNSTABLE_CHARACTER)
     return answer, reasoning
 
 

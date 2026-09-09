@@ -714,6 +714,36 @@ class StreamingTests(ApiTestCase):
         self.assertEqual(answer, "world")
         self.assertEqual(reasoning, "Hello")
 
+    def test_half_a_character_is_withheld_until_it_is_whole(self):
+        # A byte-level tokenizer splits "e" over two tokens, and a frame can
+        # land between them: the decoder shows the bytes so far as U+FFFD and
+        # the next frame replaces it. A delta already sent cannot be
+        # replaced, so it waits.
+        self.manager.updates = [
+            update("caf\ufffd", metrics=[metric(1, "caf")]),
+            update("caf\u00e9", metrics=[metric(1, "caf"), metric(2, "\u00e9")]),
+        ]
+
+        frames = self.frames()
+
+        answer = "".join(
+            frame["choices"][0]["delta"].get("content", "") for frame in frames
+        )
+        self.assertEqual(answer, "caf\u00e9")
+        self.assertNotIn("\ufffd", answer)
+
+    def test_a_character_still_half_arrived_at_the_end_is_released(self):
+        # Whatever the last frame withheld is emitted by the closing frame,
+        # so the stream still adds up to the text the response holds.
+        self.manager.updates = [update("caf\ufffd", metrics=[metric(1, "caf")])]
+
+        frames = self.frames()
+
+        answer = "".join(
+            frame["choices"][0]["delta"].get("content", "") for frame in frames
+        )
+        self.assertEqual(answer, "caf\ufffd")
+
     def test_the_assembled_stream_is_the_answer_the_whole_response_gives(self):
         # Whatever the last frame withheld is released in the closing frame,
         # so a client that concatenates the deltas has what a client that

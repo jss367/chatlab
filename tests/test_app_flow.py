@@ -3170,11 +3170,18 @@ class ConversationSamplingTests(unittest.TestCase):
             for fn in demo.fns.values()
             if getattr(fn.fn, "__name__", None) == "remember_branch_sampling"
         ]
+        sliders = [fn for fn in listeners if fn.targets[0][0] is not None]
 
-        self.assertEqual(len(listeners), len(settings.CONVERSATION_SAMPLING))
+        self.assertEqual(len(sliders), len(settings.CONVERSATION_SAMPLING))
         self.assertEqual(
-            {event for fn in listeners for _block, event in fn.targets}, {"input"}
+            {event for fn in sliders for _block, event in fn.targets}, {"input"}
         )
+        # The context limit committed can clamp the response length, and that
+        # clamp belongs to the conversation too. It is chained onto that
+        # commit rather than hung off a control, so it has no target of its
+        # own - Gradio records it as a "then" with no block: blur and submit,
+        # one each.
+        self.assertEqual(len(listeners) - len(sliders), 2)
 
     def test_a_control_reporting_what_the_conversation_already_holds_writes_nothing(self):
         forks = new_forks()

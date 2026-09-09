@@ -1086,16 +1086,27 @@ def build_app() -> gr.Blocks:
         # Lowering it can pull the response length down with it, which the
         # sampling summary names, so the label follows that too.
         for event in (prefill_token_limit.blur, prefill_token_limit.submit):
-            event(
+            committed = event(
                 remember_prefill_limit,
                 [prefill_token_limit, max_new_tokens],
                 [prefill_token_limit, max_new_tokens],
             ).then(
-            update_sampling_label,
-            sampling_controls,
-            sampling_accordion,
-            concurrency_id=SAMPLING_LABEL_QUEUE,
-        )
+                update_sampling_label,
+                sampling_controls,
+                sampling_accordion,
+                concurrency_id=SAMPLING_LABEL_QUEUE,
+            )
+            # The clamp is the reader lowering the limit, so it belongs to the
+            # conversation like a slider they moved by hand. Without this the
+            # conversation would keep the longer length and put it back the
+            # next time it was switched to, undoing the clamp.
+            committed.then(
+                remember_branch_sampling,
+                [forks_state, *sampling_controls],
+                forks_state,
+                show_progress="hidden",
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
         # A page load is where the file is read back, so reloading the browser
         # shows what was saved rather than what the app started with. The
         # sampling summary is rebuilt from whatever came back, since the label
