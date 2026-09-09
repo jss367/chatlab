@@ -141,6 +141,7 @@ def finish_turn(episode, turn, stop_ids, max_tokens):
     text = turn["text"]
     if turn.get("reasoning_prefilled"):
         text = "<think>" + text
+    assistant_content = text
     # Tool-looking text inside reasoning is not an external action.
     import re
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
@@ -170,7 +171,7 @@ def finish_turn(episode, turn, stop_ids, max_tokens):
     else:
         episode.detail = "Rejected call: " + event["error"].replace("_", " ") + ". The position did not change."
     episode.messages.extend([
-        {"role": "assistant", "content": turn["text"]},
+        {"role": "assistant", "content": assistant_content},
         {"role": "tool", "content": json.dumps(episode.maze.state(episode.position, event["error"]), separators=(",", ":"))},
     ])
     if event["arrived"]:

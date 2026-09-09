@@ -19,6 +19,7 @@ class Manager:
     loaded = True
     model_id = "test/model"
     load_id = "test-load"
+    reasoning_prefilled = False
     tokenizer = SimpleNamespace(encode=lambda s, **kw: list(s.encode()), decode=lambda ids, **kw: bytes(ids).decode())
 
     def __init__(self, replies):
@@ -47,7 +48,7 @@ class Manager:
         prefix = kwargs["forced_ids"]
         metrics = [{"token_id": t} for t in prefix + ids]
         yield SimpleNamespace(text=self.tokenizer.decode(prefix) + text, metrics=metrics, prompt_ids=[10, 20],
-                              forced_prefix_tokens=len(prefix), reasoning_prefilled=False,
+                              forced_prefix_tokens=len(prefix), reasoning_prefilled=self.reasoning_prefilled,
                               load_id=self.load_id, model_id=self.model_id)
 
 
@@ -112,6 +113,25 @@ class MazeTests(unittest.TestCase):
         self.assertFalse(ep.resumed)
         self.assertEqual(len(manager.calls), 1)
         self.assertEqual(ep.position, MAZE.start)
+
+    def test_template_reasoning_is_restored_in_next_turn_history(self):
+        for prefilled in (False, True):
+            with self.subTest(reasoning_prefilled=prefilled):
+                ep = Episode(MAZE, CONFIG | {"interruption_text": ""})
+                thought = "Consider this move:\n" + call_text(MAZE.maze_id, "south")
+                suffix = thought + "\n</think>\n" + call_text(MAZE.maze_id, "east")
+                raw = suffix if prefilled else "<think>" + suffix
+                manager = Manager([(raw, [8, 0]), (raw, [8, 0])])
+                manager.reasoning_prefilled = prefilled
+                list(stream_episode(ep, manager))
+                self.assertEqual(ep.phase, "arrived")
+                self.assertEqual(ep.tool_attempts, 2)
+                self.assertEqual(manager.calls[1][0][-2], {
+                    "role": "assistant", "content": "<think>" + suffix,
+                })
+                # Replay keeps actual emitted text; only templated history is reconstructed.
+                self.assertEqual(ep.turns[0]["text"], raw)
+                self.assertEqual(ep.payload()["messages"][-2]["content"], "<think>" + suffix)
 
     def test_unfinished_and_thought_calls_do_not_move(self):
         for text, ids, phase in ((call_text(MAZE.maze_id, "east"), [8], "budget"),
