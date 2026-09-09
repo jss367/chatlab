@@ -719,7 +719,7 @@ NO_CACHED_MODEL_SELECTED = "Select a model to see its details and put it in the 
 
 
 SEARCH_HINT = (
-    "Search Hugging Face for text-generation models Transformers can load. "
+    "Search Hugging Face for language models Transformers can load. "
     "Selecting a result puts its ID in the model ID box; **Download and load** fetches it."
 )
 
@@ -1264,7 +1264,7 @@ def search_models(query: str, hf_token: str, precision: str | None = None):
     if not results:
         return (
             cleared,
-            f"No text-generation models matched `{html.escape(cleaned)}`.",
+            f"No language models matched `{html.escape(cleaned)}`.",
             {},
         )
     fits = hub_fits(results, precision)
