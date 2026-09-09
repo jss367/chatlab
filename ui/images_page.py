@@ -70,17 +70,21 @@ NO_ATTENTION = (
 PROMPT_STRIP_LABEL = "Prompt tokens — click one for its map"
 
 
-# The stop button's channel to the run. One event rather than one per run
-# because the manager admits one run at a time, and it is cleared as each run
-# starts, so a stop that arrived while nothing was running does not carry
-# over and kill the next picture at its first step.
-_STOP = threading.Event()
+NOTHING_TO_STOP = "Nothing is being drawn."
 
 
 def stop_drawing():
-    """Ask the running image run to stop after the step it is on."""
+    """Ask the image run that is drawing to stop after the step it is on.
 
-    _STOP.set()
+    The manager owns the token, not this page: button visibility is per
+    browser tab, so a second tab can press Draw while the first is still
+    drawing, and a token this page cleared as each draw started would lose
+    the first tab's cancellation even though the second draw is refused.
+    See :meth:`model_runtime.ModelManager.stop_image_run`.
+    """
+
+    if not runtime.MANAGER.stop_image_run():
+        return NOTHING_TO_STOP
     return "Stopping after this step…"
 
 
@@ -326,14 +330,13 @@ def draw(
         height=int(size),
         record_attention=bool(record_attention),
     )
-    _STOP.clear()
     readings: list = []
     outcome: dict = {}
 
     def work() -> None:
         try:
             outcome["run"] = runtime.MANAGER.generate_image(
-                request, cancel=_STOP, on_step=readings.append
+                request, on_step=readings.append
             )
         except BaseException as error:  # noqa: BLE001 - reported on the page
             outcome["error"] = error
@@ -427,14 +430,25 @@ def _drawing_status(readings: list, request: ImageRequest, started: float) -> st
 
 
 def _finished_status(run) -> str:
-    if run.stopped:
+    """What the run did, in one line, measured off the picture it produced.
+
+    The size comes from the image rather than from the request, because a
+    fixed-size pipeline takes no width or height and draws at its own
+    (see :func:`image_runtime._call_arguments`); reporting what was asked
+    for would have the only summary of the run claiming 512×512 for a
+    256×256 result. A stopped run has no image, so it reports what it was
+    asked for and says there is no picture.
+    """
+
+    if run.stopped or run.image is None:
         return (
             f"Stopped after {run.steps_done} steps. The trajectory so far was "
             "kept; there is no finished picture."
         )
+    width, height = run.image.size
     return (
         f"Drawn in {run.seconds:.1f}s · {run.steps_done} steps · "
-        f"{run.request.width}×{run.request.height} · seed {run.request.seed}"
+        f"{width}×{height} · seed {run.request.seed}"
     )
 
 

@@ -28,6 +28,7 @@ from model_runtime import (
     pipeline_class,
     pipeline_components,
     pipeline_missing_files,
+    pipeline_variant,
     pipeline_weight_bytes,
     weight_bytes_for,
 )
@@ -218,6 +219,42 @@ class PipelineLayoutTests(unittest.TestCase):
             # The plain safetensors set, not it plus the variant.
             self.assertEqual(pipeline_weight_bytes(snapshot), 400 + 1000 + 200)
             self.assertEqual(weight_bytes_for(snapshot, IMAGE_KIND), 1600)
+
+    def test_a_variant_only_repo_is_loaded_by_asking_for_that_variant(self):
+        """The halves have to agree: pipeline_missing_files already calls
+        such a snapshot complete, so a load that did not name the variant
+        would fail on weights diffusers never looked for."""
+
+        files = self.whole()
+        files["unet/diffusion_pytorch_model.fp16.safetensors"] = files.pop(
+            "unet/diffusion_pytorch_model.safetensors"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, files)
+
+            self.assertEqual(pipeline_variant(snapshot), "fp16")
+            self.assertEqual(cache_status(MODEL, Path(root)).missing_files, ())
+
+    def test_a_repo_with_plain_weights_asks_for_no_variant(self):
+        # Which is what diffusers wants asked of it in the common case.
+        with tempfile.TemporaryDirectory() as root:
+            self.assertIsNone(pipeline_variant(self.snapshot(root, self.whole())))
+
+    def test_the_variant_named_is_the_one_the_largest_component_needs(self):
+        # Components need not agree, and diffusers falls back to the plain
+        # files for any that lacks the variant.
+        files = self.whole()
+        files["unet/diffusion_pytorch_model.fp16.safetensors"] = files.pop(
+            "unet/diffusion_pytorch_model.safetensors"
+        )
+        files["vae/diffusion_pytorch_model.bf16.safetensors"] = files.pop(
+            "vae/diffusion_pytorch_model.safetensors"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, files)
+
+            # The unet is the larger of the two.
+            self.assertEqual(pipeline_variant(snapshot), "fp16")
 
     def test_a_pipeline_shipping_only_a_variant_is_sized_by_that(self):
         files = self.whole()
@@ -990,18 +1027,57 @@ class ManagerImageRunTests(unittest.TestCase):
         self.assertFalse(manager.in_memory)
         self.assertIsNone(manager.load_id)
 
-    def test_a_run_can_be_stopped_from_another_thread(self):
+    def test_a_run_can_be_stopped_through_the_manager(self):
         manager = self.loaded()
-        stop = threading.Event()
 
-        def halt(reading):
-            stop.set()
-
-        run = manager.generate_image(self.request(steps=6), cancel=stop, on_step=halt)
+        run = manager.generate_image(
+            self.request(steps=6), on_step=lambda reading: manager.stop_image_run()
+        )
 
         self.assertTrue(run.stopped)
         self.assertEqual(run.steps_done, 1)
         self.assertFalse(manager.busy)
+
+    def test_stopping_with_nothing_drawing_says_so_and_leaves_no_token_behind(self):
+        """A Stop pressed while nothing is running must not be inherited by
+        the next run, and a refused Draw must not clear a running one's."""
+
+        manager = self.loaded()
+
+        self.assertFalse(manager.stop_image_run())
+        # And the next run is unaffected by that press.
+        run = manager.generate_image(self.request(steps=3))
+
+        self.assertFalse(run.stopped)
+        self.assertEqual(run.steps_done, 3)
+
+    def test_the_token_belongs_to_the_run_holding_the_slot(self):
+        # Two tabs: the first is drawing and has pressed Stop; the second
+        # presses Draw and is refused. The refusal must not lose the first
+        # tab's cancellation, which is what a page-owned token did.
+        manager = self.loaded()
+        refused: list = []
+
+        def second_tab(reading):
+            manager.stop_image_run()
+            try:
+                manager.generate_image(self.request(steps=2))
+            except ModelBusy as error:
+                refused.append(error)
+
+        run = manager.generate_image(self.request(steps=6), on_step=second_tab)
+
+        self.assertEqual(len(refused), 1)
+        self.assertTrue(run.stopped)
+        self.assertEqual(run.steps_done, 1)
+
+    def test_the_token_is_gone_once_the_run_ends(self):
+        manager = self.loaded()
+
+        manager.generate_image(self.request(steps=2))
+
+        self.assertIsNone(manager._image_cancel)
+        self.assertFalse(manager.stop_image_run())
 
 
 class PipelineLoaderTests(unittest.TestCase):
@@ -1066,6 +1142,18 @@ class PipelineLoaderTests(unittest.TestCase):
         # And the check was told which kind it was sizing.
         self.assertEqual(check.call_args.kwargs["kind"], IMAGE_KIND)
         self.assertIsNone(check.call_args.kwargs["bits"])
+
+    def test_the_variant_a_repo_needs_reaches_diffusers(self):
+        with mock.patch.object(model_runtime, "pipeline_variant", return_value="fp16"):
+            _manager, _device, calls, _check = self.load_pipeline()
+
+        self.assertEqual(calls[0]["variant"], "fp16")
+
+    def test_a_plain_repo_is_not_given_a_variant_to_look_for(self):
+        with mock.patch.object(model_runtime, "pipeline_variant", return_value=None):
+            _manager, _device, calls, _check = self.load_pipeline()
+
+        self.assertNotIn("variant", calls[0])
 
     def test_a_pipeline_on_the_cpu_is_read_as_float32_and_stays_there(self):
         manager, device, calls, _check = self.load_pipeline(mps=False)

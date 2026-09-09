@@ -34,7 +34,6 @@ class ImagePageTestCase(unittest.TestCase):
         original = runtime.MANAGER
         runtime.MANAGER = self.manager
         self.addCleanup(lambda: setattr(runtime, "MANAGER", original))
-        images_page._STOP.clear()
 
     def load_pipeline(self):
         self.manager.pipeline = FakePipeline()
@@ -179,6 +178,25 @@ class DrawTests(ImagePageTestCase):
         self.assertEqual(run.request.negative_prompt, "blurry")
         self.assertEqual(run.image.size, (64, 64))
 
+    def test_the_status_reports_the_size_of_the_picture_that_came_out(self):
+        """A fixed-size pipeline takes no width or height and draws at its
+        own, so reporting the request would have the only summary of the run
+        claiming a size the picture never had."""
+
+        class Fixed(FakePipeline):
+            def __call__(self, *args, **kwargs):
+                result = super().__call__(*args, **{**kwargs, "width": 96, "height": 64})
+                return result
+
+        self.load_pipeline()
+        self.manager.pipeline = Fixed()
+
+        last = self.frames(size=512)[-1]
+
+        self.assertEqual(last[ROW["image"]].size, (96, 64))
+        self.assertIn("96×64", last[ROW["status"]])
+        self.assertNotIn("512×512", last[ROW["status"]])
+
     def test_the_prompt_is_trimmed_before_it_is_drawn(self):
         self.load_pipeline()
 
@@ -227,23 +245,30 @@ class DrawTests(ImagePageTestCase):
         self.assertIn("Step 1 of 1", last[ROW["trajectory"]])
 
     def test_a_stop_left_over_from_before_does_not_kill_the_next_picture(self):
-        # Nothing was running when Stop was pressed, so the event is still
-        # set; draw() clears it as it starts rather than dying at step one.
+        # There is no run to stop, so the press has nothing to set and
+        # cannot be inherited by the draw that follows it.
         self.load_pipeline()
-        images_page.stop_drawing()
 
+        self.assertEqual(images_page.stop_drawing(), images_page.NOTHING_TO_STOP)
         run, _ = self.run_of()
 
         self.assertFalse(run.stopped)
         self.assertEqual(run.steps_done, 3)
 
-    def test_the_stop_button_only_says_so(self):
+    def test_the_stop_button_asks_the_running_run_and_says_which(self):
         # It is not a cancel: the pipeline runs on its own thread and would
         # keep running with the generator gone, taking the recorded steps
-        # with it.
+        # with it. And the token is the manager's, not this page's, so a
+        # press with nothing drawing says so rather than arming anything.
+        self.load_pipeline()
+
+        self.assertEqual(images_page.stop_drawing(), images_page.NOTHING_TO_STOP)
+
+        asked: list = []
+        self.manager.stop_image_run = lambda: asked.append(True) or True
         status = images_page.stop_drawing()
 
-        self.assertTrue(images_page._STOP.is_set())
+        self.assertEqual(len(asked), 1)
         self.assertIn("Stopping", status)
 
 
@@ -357,13 +382,9 @@ class ReadoutTests(ImagePageTestCase):
         )
 
     def test_a_stopped_run_has_no_picture_to_lay_a_map_over(self):
-        import threading
-
-        stop = threading.Event()
         run = self.manager.generate_image(
             ImageRequest(prompt="a red bicycle", steps=6, seed=1, width=32, height=32),
-            cancel=stop,
-            on_step=lambda reading: stop.set(),
+            on_step=lambda reading: self.manager.stop_image_run(),
         )
 
         self.assertIn("stopped before it finished", images_page.attention_overlay(run, 1))

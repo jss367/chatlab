@@ -645,6 +645,48 @@ def pipeline_dtype(snapshot: Path) -> str | None:
     return None if best is None else best[1]
 
 
+def _component_variants(folder: Path) -> set[str]:
+    """The weight variants one component folder ships, ``""`` for the plain set."""
+
+    return {
+        variant
+        for variant, _suffix in (
+            _weight_variant(entry.name) for entry in _component_weights(folder)
+        )
+    }
+
+
+def pipeline_variant(snapshot: Path) -> str | None:
+    """The variant a load has to ask diffusers for, or ``None`` for the plain set.
+
+    ``from_pretrained`` looks for unsuffixed weights unless it is told a
+    variant, so a repo that ships only ``...fp16.safetensors`` cannot be
+    loaded without one. :func:`pipeline_missing_files` already calls such a
+    snapshot complete and :func:`_loaded_variant_bytes` already sizes it by
+    the set it has, so without this the two halves disagree: a model
+    advertised as ready to load would fail on weights diffusers never looked
+    for.
+
+    ``None`` when every weight-bearing component has a plain set, which is
+    the common case and what diffusers wants asked of it. Otherwise the
+    variant of the largest component that has no plain set. Components need
+    not agree, and diffusers falls back to the plain files for any component
+    that lacks the variant, so naming the one the biggest component needs is
+    what gets a mixed repo loaded.
+    """
+
+    needed: tuple[int, str] | None = None
+    for name in pipeline_components(snapshot):
+        folder = snapshot / name
+        variants = _component_variants(folder)
+        if not variants or "" in variants:
+            continue
+        size = _loaded_variant_bytes(_component_weights(folder))
+        if needed is None or size > needed[0]:
+            needed = (size, sorted(variants)[0])
+    return None if needed is None else needed[1]
+
+
 def weight_bytes_for(snapshot: Path, kind: str) -> int | None:
     """Bytes of the weights a load of this kind will read, or ``None``."""
 
@@ -2789,6 +2831,10 @@ def _read_pipeline(
     gives: Metal converts a checkpoint's dtype far faster on the way in than
     it materializes one already on the device.
 
+    A repo that ships only variant-named weights is asked for that variant,
+    because otherwise ``from_pretrained`` looks for the unsuffixed files it
+    does not have; see :func:`pipeline_variant`.
+
     ``bits`` and ``precision`` are accepted and unused. A pipeline is several
     models, only some of them Transformers ones, so the caller has already
     cleared a quantized choice and noted that it did; the signature matches
@@ -2805,8 +2851,12 @@ def _read_pipeline(
             f"({error})"
         ) from error
 
+    variant = pipeline_variant(local_path)
     pipeline = DiffusionPipeline.from_pretrained(
-        local_path, local_files_only=True, torch_dtype=dtype
+        local_path,
+        local_files_only=True,
+        torch_dtype=dtype,
+        **({"variant": variant} if variant else {}),
     )
     device = {"cuda": "cuda", "mps": "mps"}.get(backend)
     if device is not None:
@@ -2894,6 +2944,13 @@ class ModelManager:
         # The key-value cache the last inspection left behind, with the load
         # it belongs to and the tokens it covers. See _inspect_cache_for().
         self._inspect_cache: tuple[str, list[int], Any] | None = None
+        # How Stop reaches the image run that is drawing right now, and only
+        # that one. It belongs to the run holding the generation slot rather
+        # than to the page, because button visibility is per browser tab: a
+        # second tab can press Draw while the first is still drawing, and a
+        # token the page owned would be cleared by that second attempt even
+        # though it is refused, losing the first tab's cancellation.
+        self._image_cancel: threading.Event | None = None
 
     @property
     def loaded(self) -> bool:
@@ -4510,13 +4567,22 @@ class ModelManager:
                 # all if it unloaded first.
                 self._run_device_bytes = reserved_bytes()
 
-    def generate_image(
-        self,
-        request,
-        *,
-        cancel=None,
-        on_step=None,
-    ):
+    def stop_image_run(self) -> bool:
+        """Ask the image run that is drawing to stop, and say whether one was.
+
+        The token belongs to the run holding the generation slot, so a Stop
+        pressed while nothing is drawing is a no-op rather than something a
+        later run inherits, and a second tab's refused Draw cannot clear the
+        first tab's cancellation.
+        """
+
+        cancel = self._image_cancel
+        if cancel is None:
+            return False
+        cancel.set()
+        return True
+
+    def generate_image(self, request, *, on_step=None):
         """Draw ``request`` with the pipeline in memory, and report what happened.
 
         Blocks until the picture is finished; ``on_step`` is called with each
@@ -4531,6 +4597,11 @@ class ModelManager:
         a reply and a picture exclude each other, as they must - there is one
         model in memory and one device under it.
 
+        The cancel token is made here rather than handed in, and published
+        only once the slot is held: see :meth:`stop_image_run`. So a caller
+        that loses the race for the slot never touches the running run's
+        token, and the token is gone again the moment the run ends.
+
         The run is stamped with the load that drew it, so a maps-and-steps
         readout can be told apart from one the next load produced.
         """
@@ -4541,6 +4612,8 @@ class ModelManager:
             raise ModelBusy("The model is busy. Wait for the current run to finish.")
         started = time.monotonic()
         run = None
+        cancel = threading.Event()
+        self._image_cancel = cancel
         try:
             with self._lock:
                 if self.pipeline is None:
@@ -4561,6 +4634,7 @@ class ModelManager:
             _reraise_out_of_memory(error, IMAGE_KIND)
             raise
         finally:
+            self._image_cancel = None
             self.release_generation()
             self._log_image_run(run, request, time.monotonic() - started)
             # The largest thing a run allocates is the pipeline's own

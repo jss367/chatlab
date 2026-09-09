@@ -146,6 +146,7 @@ from ui.images_page import (
     NO_ATTENTION,
     NO_IMAGE_MODEL,
     NO_TRAJECTORY,
+    NOTHING_TO_STOP,
     PROMPT_STRIP_LABEL,
     TEXT_MODEL_LOADED,
     attention_note,
