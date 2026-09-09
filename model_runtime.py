@@ -1146,6 +1146,28 @@ def remove_cached_model(model_id: str, cache_dir: Path | None = None) -> int:
 # push the search box off the pane.
 SEARCH_LIMIT = 20
 
+# The pipeline tags a model ChatLab can load is found under. A plain language
+# model is tagged "text-generation", but one that also takes pictures or sound
+# is tagged for what it reads rather than what it writes - google/gemma-4-E4B-it
+# is "any-to-any" - and Transformers maps those architectures to
+# AutoModelForCausalLM just the same, so they load here and belong in the
+# results. Asking the hub for "text-generation" alone hid every one of them.
+SEARCH_PIPELINE_TAGS = ("text-generation", "any-to-any", "image-text-to-text")
+
+# Repository tags that mark weights laid out for another runtime. MLX repos
+# carry the same pipeline tag and the same "transformers" library as the
+# model they were converted from, and their weights are in safetensors files,
+# but the numbers inside are quantized MLX's way and AutoModelForCausalLM
+# cannot read them - lmstudio-community publishes four of gemma-4-E4B-it
+# alone, so leaving them in would bury the model they came from.
+SEARCH_FOREIGN_TAGS = frozenset({"mlx"})
+
+# How many results to ask the hub for per result shown. The tags above are
+# checked here rather than by the hub, so a search whose most-downloaded
+# matches are all embedding or speech models would come back short if the
+# request were only as long as the list.
+SEARCH_OVERFETCH = 4
+
 
 @dataclass(frozen=True)
 class HubModel:
@@ -1165,11 +1187,16 @@ class HubModel:
 def search_hub_models(
     query: str, hf_token: str | None = None, limit: int = SEARCH_LIMIT
 ) -> list[HubModel]:
-    """Search the hub for text-generation models Transformers can load.
+    """Search the hub for language models Transformers can load.
 
-    The filter is the one the application itself imposes: only causal
-    language models with built-in Transformers support load here, so results
-    from other libraries would be dead ends. Sorted by recent downloads.
+    The filter is the one the application itself imposes: only models with
+    built-in Transformers support load here, so results laid out for another
+    framework would be dead ends. Of those, the ones kept are the ones whose
+    pipeline tag is in :data:`SEARCH_PIPELINE_TAGS` - a model that writes
+    text, whatever else it can read - less the conversions to another runtime
+    that :data:`SEARCH_FOREIGN_TAGS` names. A repository the hub has no tag
+    for is left out rather than guessed at; its ID can still be typed into
+    the model ID box. Sorted by recent downloads.
     """
 
     from huggingface_hub import HfApi
@@ -1180,10 +1207,9 @@ def search_hub_models(
     token = hf_token.strip() if hf_token and hf_token.strip() else None
     found = HfApi().list_models(
         search=cleaned,
-        pipeline_tag="text-generation",
         filter="transformers",
         sort="downloads",
-        limit=limit,
+        limit=limit * SEARCH_OVERFETCH,
         expand=[
             "downloads",
             "likes",
@@ -1198,9 +1224,13 @@ def search_hub_models(
     )
     results = []
     for info in found:
+        if getattr(info, "pipeline_tag", None) not in SEARCH_PIPELINE_TAGS:
+            continue
+        tags = getattr(info, "tags", None) or []
+        if not SEARCH_FOREIGN_TAGS.isdisjoint(tags):
+            continue
         safetensors = getattr(info, "safetensors", None)
         parameters = getattr(safetensors, "total", None) if safetensors else None
-        tags = getattr(info, "tags", None) or []
         licenses = [tag[len("license:") :] for tag in tags if tag.startswith("license:")]
         modified = getattr(info, "last_modified", None)
         results.append(
@@ -1216,6 +1246,8 @@ def search_hub_models(
                 license=licenses[0] if licenses else None,
             )
         )
+        if len(results) == limit:
+            break
     return results
 
 

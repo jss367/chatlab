@@ -15,6 +15,7 @@ from model_runtime import (
     MIN_MODEL_POSITION_LIMIT,
     MODEL_WEIGHTS,
     SCORE_TOKEN_LIMIT,
+    SEARCH_OVERFETCH,
     ModelManager,
     cache_status,
     encode_for_scoring,
@@ -22,6 +23,7 @@ from model_runtime import (
     generation_prefill_token_limit,
     list_cached_models,
     score_token_limit,
+    search_hub_models,
     split_context_and_text,
     validate_model_id,
 )
@@ -2769,3 +2771,118 @@ class CountScoreTokensTests(unittest.TestCase):
 
         self.assertIsNone(manager.count_score_tokens("one two"))
         self.assertFalse(manager._lock.locked())
+
+
+def hub_result(model_id, pipeline_tag, **extra):
+    """One entry the way ``list_models`` hands it over, tags and all."""
+
+    fields = {
+        "id": model_id,
+        "pipeline_tag": pipeline_tag,
+        "downloads": 1000,
+        "likes": 1,
+        "library_name": "transformers",
+        "last_modified": None,
+        "safetensors": None,
+        "gated": False,
+        "tags": [],
+    }
+    fields.update(extra)
+    return types.SimpleNamespace(**fields)
+
+
+class HubSearchTests(unittest.TestCase):
+    """Which of the hub's answers reach the Model search list."""
+
+    def setUp(self):
+        self.calls = []
+        self.found = []
+
+        def list_models(**kwargs):
+            self.calls.append(kwargs)
+            return list(self.found)
+
+        api = mock.Mock()
+        api.list_models.side_effect = list_models
+        patched = mock.patch("huggingface_hub.HfApi", return_value=api)
+        patched.start()
+        self.addCleanup(patched.stop)
+
+    def test_a_multimodal_model_is_listed_beside_a_plain_one(self):
+        # google/gemma-4-E4B-it writes text like any other model here, and
+        # Transformers loads it through AutoModelForCausalLM, but the hub
+        # tags it for the pictures and sound it also reads. Keeping only
+        # "text-generation" hid it and every model like it.
+        self.found = [
+            hub_result("google/gemma-4-E4B-it", "any-to-any"),
+            hub_result("Qwen/Qwen3-VL-8B-Instruct", "image-text-to-text"),
+            hub_result("allenai/Olmo-3-7B-Think", "text-generation"),
+        ]
+
+        found = search_hub_models("gemma")
+
+        self.assertEqual(
+            [result.model_id for result in found],
+            ["google/gemma-4-E4B-it", "Qwen/Qwen3-VL-8B-Instruct", "allenai/Olmo-3-7B-Think"],
+        )
+
+    def test_the_hub_is_not_asked_to_do_the_filtering(self):
+        # The tag is checked here, so asking the hub for one would throw the
+        # rest away before they could be. It is asked for more than the list
+        # shows instead, because some of what comes back is dropped.
+        search_hub_models("gemma", limit=5)
+
+        (call,) = self.calls
+        self.assertNotIn("pipeline_tag", call)
+        self.assertEqual(call["filter"], "transformers")
+        self.assertEqual(call["limit"], 5 * SEARCH_OVERFETCH)
+
+    def test_a_model_that_writes_no_text_is_left_out(self):
+        self.found = [
+            hub_result("sentence-transformers/all-MiniLM-L6-v2", "feature-extraction"),
+            hub_result("openai/whisper-large-v3", "automatic-speech-recognition"),
+            hub_result("some-body/untagged-weights", None),
+            hub_result("allenai/Olmo-3-7B-Think", "text-generation"),
+        ]
+
+        found = search_hub_models("olmo")
+
+        self.assertEqual([result.model_id for result in found], ["allenai/Olmo-3-7B-Think"])
+
+    def test_a_conversion_to_another_runtime_is_left_out(self):
+        # An MLX conversion looks like the model it came from in every field
+        # the search reads - same pipeline tag, same library, weights in
+        # safetensors files - and lmstudio-community publishes one per
+        # precision, so the four of them would crowd out google's own.
+        self.found = [
+            hub_result(
+                "lmstudio-community/gemma-4-E4B-it-MLX-4bit",
+                "any-to-any",
+                tags=["transformers", "safetensors", "mlx"],
+            ),
+            hub_result(
+                "google/gemma-4-E4B-it",
+                "any-to-any",
+                tags=["transformers", "safetensors"],
+            ),
+        ]
+
+        found = search_hub_models("gemma")
+
+        self.assertEqual([result.model_id for result in found], ["google/gemma-4-E4B-it"])
+
+    def test_the_list_stops_at_the_limit(self):
+        # More matches than the pane shows: the extras were fetched to make
+        # up for what the tag check drops, not to lengthen the list.
+        self.found = [hub_result(f"org/model-{n}", "text-generation") for n in range(30)]
+
+        found = search_hub_models("model", limit=3)
+
+        self.assertEqual(
+            [result.model_id for result in found],
+            ["org/model-0", "org/model-1", "org/model-2"],
+        )
+
+    def test_an_empty_query_does_not_go_online(self):
+        self.assertEqual(search_hub_models("   "), [])
+        self.assertEqual(self.calls, [])
