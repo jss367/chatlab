@@ -232,6 +232,32 @@ class PipelineLayoutTests(unittest.TestCase):
             self.assertEqual(status.missing_files, ())
             self.assertTrue(status.complete)
 
+    def test_shards_without_their_index_are_a_gap_not_a_whole_set(self):
+        """Diffusers finds a sharded checkpoint through its index and
+        nothing else, so a download that left the shards but not the index
+        has weights that cannot be discovered."""
+
+        files = self.whole()
+        del files["unet/diffusion_pytorch_model.safetensors"]
+        files["unet/diffusion_pytorch_model-00001-of-00002.safetensors"] = b"u" * 500
+        files["unet/diffusion_pytorch_model-00002-of-00002.safetensors"] = b"u" * 500
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, files)
+            status = cache_status(MODEL, Path(root))
+
+            self.assertEqual(
+                status.missing_files,
+                ("unet/diffusion_pytorch_model.safetensors.index.json",),
+            )
+            self.assertFalse(status.complete)
+
+    def test_an_unsharded_weight_file_needs_no_index(self):
+        # The ordinary case: one file, nothing to discover.
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, self.whole())
+
+            self.assertEqual(cache_status(MODEL, Path(root)).missing_files, ())
+
     def test_an_index_that_cannot_be_read_counts_as_missing_weights(self):
         files = self.whole()
         del files["unet/diffusion_pytorch_model.safetensors"]
@@ -723,6 +749,37 @@ class KindAwareFitTests(unittest.TestCase):
             for_images.available, min(self.ONE_CARD[1], self.HOST[1]) + held
         )
         self.assertEqual(for_images.pool, "both this GPU and this machine")
+
+    def test_a_tighter_pool_reclaims_only_the_card_it_lands_on(self):
+        """allocated_bytes sums across the cards, which is what a text model
+        spread by device_map="auto" holds and the wrong figure for the one
+        card a pipeline is about to land on."""
+
+        from ui import models_page, runtime
+
+        across_both = 12 * 1024**3
+        on_this_card = 5 * 1024**3
+        on_cuda = model_runtime.DeviceProfile(
+            backend="cuda",
+            total=self.ALL_CARDS[0] + self.HOST[0],
+            available=self.ALL_CARDS[1] + self.HOST[1],
+            pool="the GPU plus this machine",
+            held=across_both,
+            held_here=on_this_card,
+        )
+        cards, card, host = self.memory()
+        with (
+            cards,
+            card,
+            host,
+            mock.patch.object(models_page, "device_profile", return_value=on_cuda),
+            mock.patch.object(runtime.MANAGER, "loaded_bytes", across_both),
+        ):
+            for_images = models_page.replacement_profile(IMAGE_KIND)
+
+        self.assertEqual(
+            for_images.available, min(self.ONE_CARD[1], self.HOST[1]) + on_this_card
+        )
 
     def test_a_tighter_pool_reclaims_only_what_the_allocator_reports(self):
         """A text model that device_map="auto" spread across the card and
@@ -1307,6 +1364,27 @@ class RunTests(unittest.TestCase):
         self.assertEqual(run.model_id, "org/pipe")
         self.assertEqual(run.load_id, "org/pipe#3")
         self.assertGreater(run.seconds, 0)
+
+    def test_a_pipeline_taking_varargs_is_given_everything(self):
+        """Its signature names only "args" and "kwargs", so filtering by
+        name would hand it nothing - not even the prompt - and it would fail
+        or quietly draw its defaults."""
+
+        seen = {}
+
+        class Anything(FakePipeline):
+            def __call__(self, *args, **kwargs):
+                seen.update(kwargs)
+                return super().__call__(**kwargs)
+
+        run = self.run_pipeline(Anything(), steps=2, guidance_scale=3.0)
+
+        self.assertEqual(seen["prompt"], "a red bicycle")
+        self.assertEqual(seen["num_inference_steps"], 2)
+        self.assertEqual(seen["guidance_scale"], 3.0)
+        self.assertIsNotNone(seen["generator"])
+        self.assertIsNotNone(seen["callback_on_step_end"])
+        self.assertEqual(run.steps_done, 2)
 
     def test_only_the_arguments_the_pipeline_takes_are_passed(self):
         class Fixed(FakePipeline):

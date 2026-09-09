@@ -747,10 +747,19 @@ def _call_arguments(pipeline, request: ImageRequest, generator, callback) -> dic
         "callback_on_step_end_tensor_inputs": ["latents"],
     }
     try:
-        accepted = set(inspect.signature(pipeline.__call__).parameters)
+        parameters = inspect.signature(pipeline.__call__).parameters
     except (TypeError, ValueError):
         return offered
-    return {name: value for name, value in offered.items() if name in accepted}
+    if any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        # A pipeline declared as ``(*args, **kwargs)`` takes every keyword
+        # there is, but its signature names only ``args`` and ``kwargs``, so
+        # filtering by name would hand it nothing - not even the prompt -
+        # and it would fail or quietly draw its defaults.
+        return offered
+    return {name: value for name, value in offered.items() if name in parameters}
 
 
 def run(

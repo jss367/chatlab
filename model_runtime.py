@@ -452,6 +452,12 @@ def _component_index(folder: Path, variant: str = "") -> Path | None:
     return None
 
 
+def _shard_index_name(shard: Path) -> str:
+    """The index file a shard belongs to, by the name diffusers looks for."""
+
+    return f"{SHARD_NAME.sub(lambda match: f'.{match.group(1)}', shard.name)}.index.json"
+
+
 def _missing_shards(index: Path) -> tuple[str, ...]:
     """The shards ``index`` names that are not beside it, or the index itself.
 
@@ -527,8 +533,16 @@ def pipeline_missing_files(snapshot: Path) -> tuple[str, ...]:
         index = _component_index(folder, variant)
         if index is not None:
             missing.extend(f"{name}/{shard}" for shard in _missing_shards(index))
-        elif not _component_weights(folder):
+            continue
+        weights = _component_weights(folder)
+        if not weights:
             missing.append(f"{name}/{MODEL_WEIGHTS}")
+        elif all(SHARD_NAME.search(entry.name) for entry in weights):
+            # Shards and no index. Diffusers finds a sharded checkpoint
+            # through its index and nothing else, so a download that left
+            # the shards but not the index has weights that cannot be
+            # discovered - which is a gap, not a whole unsharded set.
+            missing.append(f"{name}/{_shard_index_name(weights[0])}")
     return tuple(missing)
 
 
@@ -1146,18 +1160,27 @@ def cuda_device_memory(torch=None) -> tuple[int | None, int | None]:
     return int(total), int(free)
 
 
-def allocated_bytes(backend: str, torch=None) -> int | None:
+def allocated_bytes(backend: str, torch=None, device_only: bool = False) -> int | None:
     """Bytes of live tensors on ``backend``'s device, or ``None`` where unknown.
 
     CUDA and Metal each keep a running total in their allocator, which is how
     far a load has got measured in bytes. Host memory keeps no such figure, so
     a load onto the CPU is followed by the loader's own step count instead.
+
+    ``device_only`` narrows the CUDA reading to the current card. The sum is
+    what a text model spread by ``device_map="auto"`` really holds, and the
+    wrong figure for anything asking what one card would get back: a model
+    across two cards would credit the whole of it to the one an image
+    pipeline is about to land on. Everywhere else there is one device and
+    the two readings agree.
     """
 
     if torch is None:
         import torch
     try:
         if backend == "cuda":
+            if device_only:
+                return int(torch.cuda.memory_allocated(torch.cuda.current_device()))
             devices = range(int(torch.cuda.device_count()))
             return sum(int(torch.cuda.memory_allocated(index)) for index in devices)
         if backend == "mps":
@@ -1494,6 +1517,17 @@ class DeviceProfile:
     """Live tensors on the device: the loaded model, and any cache beside it.
 
     ``None`` where the device keeps no such figure, which is host memory.
+    Summed across the cards on CUDA, because that is what a text model
+    spread by ``device_map="auto"`` holds; see :attr:`held_here` for the one
+    card an image pipeline would land on.
+    """
+
+    held_here: int | None = None
+    """Live tensors on the one device a load would land on.
+
+    The same as :attr:`held` everywhere but a multi-card CUDA host, where
+    that one sums across the cards. What a tighter pool may count as coming
+    back; see :meth:`reclaimable`.
     """
 
     @property
@@ -1563,7 +1597,10 @@ class DeviceProfile:
         """
 
         if self.pool.startswith("both "):
-            return self.held or 0
+            # The card's own figure, not the sum across the cards: a model
+            # spread over two of them frees only its share on the one an
+            # image pipeline is about to land on.
+            return self.held_here if self.held_here is not None else (self.held or 0)
         return max(self.held or 0, estimated or 0)
 
 DEVICE_LABELS = {"mps": "Apple Metal (MPS)", "cpu": "CPU"}
@@ -1611,6 +1648,7 @@ def device_profile(torch=None) -> DeviceProfile:
         recommended=budget.recommended,
         fraction=budget.fraction,
         held=allocated_bytes(backend, torch),
+        held_here=allocated_bytes(backend, torch, device_only=True),
     )
 
 

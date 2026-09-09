@@ -167,6 +167,30 @@ class ModelListTests(ApiTestCase):
         self.assertTrue(listed["chatlab"]["loaded"])
         self.assertEqual(listed["chatlab"]["size_bytes"], 1000)
 
+    def test_an_image_pipeline_is_not_offered_as_a_chat_model(self):
+        """This is the OpenAI-compatible list and every route beside it
+        completes a chat, so a pipeline here would be offered for something
+        it cannot do - and marked loaded while loaded_model() reported
+        nothing, since that asks for a text model."""
+
+        entries = [
+            CachedModel(
+                model_id="fake/model", status=CacheStatus(cached_bytes=1000)
+            ),
+            CachedModel(
+                model_id="org/pipe",
+                status=CacheStatus(cached_bytes=2000, kind=model_runtime.IMAGE_KIND),
+                architecture="StableDiffusionPipeline",
+            ),
+        ]
+        original = api.list_cached_models
+        api.list_cached_models = lambda: entries
+        self.addCleanup(setattr, api, "list_cached_models", original)
+
+        body = self.client.get("/v1/models").json()
+
+        self.assertEqual([entry["id"] for entry in body["data"]], ["fake/model"])
+
     def test_the_list_reads_what_is_loaded_once(self):
         # A load landing part way through the list would otherwise mark two
         # models loaded, and a client could not tell which will answer.
