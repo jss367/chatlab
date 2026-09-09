@@ -431,3 +431,7 @@ Developer ID is the step that would let clients verify who built them.
 ```
 
 The application deliberately leaves `trust_remote_code` disabled. Models that require executing custom repository code will not load unless their architecture is supported directly by Transformers.
+
+## Optional extensions
+
+Specialized tools can be enabled under **Settings → Extensions** and take effect after restarting ChatLab. **Maze experiments** adds an interactive navigation workbench with interruptions, token inspection and saved-run replay. It is bundled and disabled by default. See [the extension guide](EXTENSIONS.md) and [the Maze workbench guide](MAZE_WORKBENCH.md).

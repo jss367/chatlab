@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import html
+
 import gradio as gr
 
 import charts
@@ -22,6 +25,9 @@ from token_metrics import (
 )
 from trace_export import write_trace_export
 from ui import runtime
+from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
+from extensions.registry import load_enabled
+from ui.extensions_page import build_extension_settings, data_directory, extension_css, restore_extensions
 from ui.common import (
     CHAT_PAGE,
     CONVERSATION_PANE_WIDTH,
@@ -157,12 +163,14 @@ def build_app() -> gr.Blocks:
     # the hardware panel on the Settings page - are the fuller reading for it
     # by the time a reader looks.
     warm_device()
+    extensions, extension_errors = load_enabled(saved.enabled_extensions)
+    page_choices = [PAGES[0], *(ext.spec.page_label for ext in extensions), *PAGES[1:]]
     # Gradio otherwise caps the page at one of a handful of widths and centers
     # it, which leaves a band of empty room down each side on a wide screen.
     # The shell wants every pixel: the two side panes are a fixed width, so the
     # width the cap was holding back goes to the chat and the panel beside it.
     with gr.Blocks(
-        title="ChatLab", css=CSS, theme=THEME, fill_width=True
+        title="ChatLab", css=CSS + extension_css(extensions), theme=THEME, fill_width=True
     ) as demo:
         conversation_state = gr.State([])
         metrics_state = gr.State(empty_metrics())
@@ -199,7 +207,7 @@ def build_app() -> gr.Blocks:
             # the bottom.
             with gr.Column(scale=0, min_width=NAV_PANE_WIDTH, elem_id="nav-pane"):
                 nav = gr.Radio(
-                    choices=list(PAGES),
+                    choices=page_choices,
                     value=CHAT_PAGE,
                     show_label=False,
                     container=False,
@@ -595,6 +603,24 @@ def build_app() -> gr.Blocks:
                                 elem_id="prompt-strip",
                             )
 
+            extension_pages = []
+            extension_model_buttons = []
+            navigation = NavigationService(extension_model_buttons.append)
+            for extension in extensions:
+                with gr.Column(scale=1, visible=False, elem_classes=["extension-page"]) as extension_page:
+                    context = ExtensionContext(
+                        models=ModelService(lambda: runtime.MANAGER), tokens=TokenInspector(),
+                        data_dir=data_directory(extension.spec.id), navigation=navigation,
+                    )
+                    try:
+                        extension.build_page(context)
+                    except Exception as exc:
+                        logging.getLogger(__name__).exception("Extension page failed: %s", extension.spec.id)
+                        message = f"{extension.spec.title}: {exc}"
+                        extension_errors.append(message)
+                        gr.Markdown("This extension could not open. " + html.escape(message))
+                extension_pages.append((extension.spec.page_label, extension_page))
+
             with gr.Column(
                 scale=1, visible=False, elem_id="models-page"
             ) as models_page:
@@ -722,6 +748,7 @@ def build_app() -> gr.Blocks:
                     "box, because they are moved between one reply and the next.",
                     elem_id="settings-hero",
                 )
+                extensions_control, extensions_note, active_extensions = build_extension_settings([ext.spec.id for ext in extensions], extension_errors)
                 with gr.Row():
                     with gr.Column():
                         gr.Markdown("## System prompt, reasoning, and prefill")
@@ -821,6 +848,19 @@ def build_app() -> gr.Blocks:
         nav.change(refresh_hardware, None, hardware_view)
         demo.load(refresh_hardware, None, hardware_view)
         refresh_hardware_button.click(refresh_hardware, None, hardware_view)
+        demo.load(restore_extensions, active_extensions, [extensions_control, extensions_note])
+        for label, extension_page in extension_pages:
+            def show_extension(page, expected=label):
+                return gr.update(visible=page == expected)
+            nav.change(show_extension, nav, extension_page)
+        def open_models_from_extension():
+            return (*go_to_models(), *(gr.update(visible=False) for _ in extension_pages))
+        for button in extension_model_buttons:
+            button.click(
+                open_models_from_extension, None,
+                [nav, conversation_pane, chat_page, models_page, settings_page,
+                 *(page for _, page in extension_pages)],
+            )
         # The scored token count follows the boxes as they are typed into.
         # always_last coalesces a burst of keystrokes into the one count that
         # matters, and the progress bar is hidden because a spinner on every
