@@ -620,6 +620,8 @@ def build_router() -> APIRouter:
                     measured,
                     wants,
                     prompt_logprobs,
+                    device=device,
+                    precision=precision,
                 ),
                 media_type="text/event-stream",
             )
@@ -871,6 +873,8 @@ def stream_completion(
     measured: bool,
     wants: int,
     prompt_logprobs: bool = False,
+    device: str | None = None,
+    precision: str | None = None,
 ) -> Iterator[str]:
     """The same answer as it arrives, one event per batch of tokens.
 
@@ -938,6 +942,8 @@ def stream_completion(
             },
             "chatlab": {
                 "seed": sampling["seed"],
+                "device": device,
+                "precision": precision,
                 "replayed_tokens": last.forced_prefix_tokens if last is not None else 0,
                 "summary": summarize(metrics),
             },

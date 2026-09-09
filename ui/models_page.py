@@ -786,11 +786,19 @@ def cached_fit(
     unsupported one will not load whatever the memory says, and the model
     already in memory has answered the question by being there - judging it
     against what is left free would call the loaded model tight.
+
+    Being there only answers for the weights it was read as, though. **Load
+    cached** on the model in memory is how a new precision is applied, so a
+    reader who has moved that radio is asking about a load that has not
+    happened, and the model that fits at four bits may not fit whole.
     """
 
     if entry.status.missing_files or entry.status.unsupported:
         return None
-    if runtime.MANAGER.model_id == entry.model_id:
+    reloading = weight_bits(precision, profile) != weight_bits(
+        runtime.MANAGER.precision, profile
+    )
+    if runtime.MANAGER.model_id == entry.model_id and not reloading:
         return None
     snapshot = snapshot_folder(entry.path) if entry.path is not None else None
     if snapshot is None:

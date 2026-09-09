@@ -832,6 +832,14 @@ class StreamingTests(ApiTestCase):
 
         self.assertNotIn("prompt_tokens", frames[-1]["chatlab"])
 
+    def test_the_stream_names_the_weights_that_answered(self):
+        # A streaming experiment cannot ask afterwards: another load may have
+        # replaced them by then.
+        frames = self.frames()
+
+        self.assertEqual(frames[-1]["chatlab"]["device"], "CPU")
+        self.assertEqual(frames[-1]["chatlab"]["precision"], "full")
+
     def test_the_slot_is_given_back_when_the_stream_ends(self):
         self.frames()
         self.assertFalse(self.manager.busy)

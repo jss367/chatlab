@@ -1018,6 +1018,30 @@ class ModelFitTests(unittest.TestCase):
         for verdict in ("· won't fit", "· tight"):
             self.assertIn(f'[data-testid*="{verdict}"]', app.CSS)
 
+    def test_a_reload_at_another_precision_is_judged_again(self):
+        # Load cached on the model in memory is how a new precision is
+        # applied, so a reader who has moved that radio is asking about a
+        # load that has not happened - and a model that fits at four bits
+        # may not fit whole.
+        self.manager.model_id = OLMO
+        self.manager.device_name = "Apple Metal (MPS), 4-bit weights"
+        self.manager.precision = "4-bit"
+        roomy(self, total_gb=24, available_gb=18)
+
+        # The precision it is loaded at: nothing to ask.
+        self.assertNotIn("tight", self.labels("4-bit")[OLMO])
+        # Whole weights would not fit beside the 4 GB reserve.
+        self.assertIn("· tight", self.labels("full")[OLMO])
+
+    def test_a_reload_where_precision_cannot_apply_is_not_judged_again(self):
+        # Off Metal the radio changes nothing about the load, so moving it
+        # does not turn the loaded model into a question.
+        self.manager.model_id = OLMO
+        self.manager.precision = "full"
+        roomy(self, total_gb=24, available_gb=2, backend="cpu", dtype="float16")
+
+        self.assertNotIn("tight", self.labels("4-bit")[OLMO])
+
     def test_an_incomplete_model_has_no_size_to_judge(self):
         models_page.list_cached_models = lambda: [PARTIAL]
 
