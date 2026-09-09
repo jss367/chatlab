@@ -329,6 +329,48 @@ class PipelineLayoutTests(unittest.TestCase):
             self.assertIsNone(pipeline_variant(snapshot))
             self.assertFalse(model_runtime.pipeline_variant_missing(snapshot))
 
+    def test_shards_are_checked_against_the_variant_the_pipeline_loads(self):
+        """from_pretrained takes one variant for the whole pipeline, so a
+        component with a complete plain index beside an incomplete
+        half-precision one is short of shards for a half-precision load."""
+
+        files = self.whole()
+        # The unet has only fp16, which forces the whole load to fp16.
+        files["unet/diffusion_pytorch_model.fp16.safetensors"] = files.pop(
+            "unet/diffusion_pytorch_model.safetensors"
+        )
+        # The VAE has a complete plain set and an incomplete fp16 one.
+        files["vae/diffusion_pytorch_model.fp16.safetensors.index.json"] = json.dumps(
+            {
+                "weight_map": {
+                    "a": "diffusion_pytorch_model.fp16-00001-of-00002.safetensors",
+                    "b": "diffusion_pytorch_model.fp16-00002-of-00002.safetensors",
+                }
+            }
+        ).encode()
+        files["vae/diffusion_pytorch_model.fp16-00001-of-00002.safetensors"] = b"v" * 100
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, files)
+
+            self.assertEqual(pipeline_variant(snapshot), "fp16")
+            self.assertEqual(
+                cache_status(MODEL, Path(root)).missing_files,
+                ("vae/diffusion_pytorch_model.fp16-00002-of-00002.safetensors",),
+            )
+
+    def test_a_plain_load_is_not_judged_by_a_variant_index(self):
+        # The mirror image: every component has a plain set, so the load is
+        # plain and an incomplete fp16 index beside it is not in the way.
+        files = self.whole()
+        files["vae/diffusion_pytorch_model.fp16.safetensors.index.json"] = json.dumps(
+            {"weight_map": {"a": "diffusion_pytorch_model.fp16-00001-of-00002.safetensors"}}
+        ).encode()
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, files)
+
+            self.assertIsNone(pipeline_variant(snapshot))
+            self.assertEqual(cache_status(MODEL, Path(root)).missing_files, ())
+
     def test_a_pipeline_shipping_only_a_variant_is_sized_by_that(self):
         files = self.whole()
         files["unet/diffusion_pytorch_model.fp16.safetensors"] = files.pop(
@@ -637,22 +679,21 @@ class KindAwareFitTests(unittest.TestCase):
         self.assertEqual(for_images.total, min(self.ONE_CARD[0], self.HOST[0]))
         self.assertEqual(for_images.pool, "both this GPU and this machine")
 
-    def test_switching_pool_keeps_what_the_unload_gives_back(self):
-        """replacement_profile chooses the pool before it reclaims, because
-        for_kind takes a fresh reading of the device: doing it the other way
-        threw away the memory the impending unload releases and marked a
-        pipeline tight that will fit once the load has unloaded."""
+    def profiles_on_cuda(self, held, estimated):
+        """The two replacement profiles a CUDA host would give, per kind.
+
+        The device reading is stood in for so the ordering and the
+        reclamation under test are reached on a machine that has no card.
+        """
 
         from ui import models_page, runtime
 
-        held = 4 * 1024**3
-        # The device reading a CUDA host would give, stood in for so the
-        # ordering under test is reached on a machine that has no card.
         on_cuda = model_runtime.DeviceProfile(
             backend="cuda",
             total=self.ALL_CARDS[0] + self.HOST[0],
             available=self.ALL_CARDS[1] + self.HOST[1],
             pool="the GPU plus this machine",
+            held=held,
         )
         cards, card, host = self.memory()
         with (
@@ -660,10 +701,21 @@ class KindAwareFitTests(unittest.TestCase):
             card,
             host,
             mock.patch.object(models_page, "device_profile", return_value=on_cuda),
-            mock.patch.object(runtime.MANAGER, "loaded_bytes", held),
+            mock.patch.object(runtime.MANAGER, "loaded_bytes", estimated),
         ):
-            for_text = models_page.replacement_profile(TEXT_KIND)
-            for_images = models_page.replacement_profile(IMAGE_KIND)
+            return (
+                models_page.replacement_profile(TEXT_KIND),
+                models_page.replacement_profile(IMAGE_KIND),
+            )
+
+    def test_switching_pool_keeps_what_the_unload_gives_back(self):
+        """replacement_profile chooses the pool before it reclaims, because
+        for_kind takes a fresh reading of the device: doing it the other way
+        threw away the memory the impending unload releases and marked a
+        pipeline tight that will fit once the load has unloaded."""
+
+        held = 4 * 1024**3
+        for_text, for_images = self.profiles_on_cuda(held, held)
 
         # Both carry the reclamation; only the pool differs.
         self.assertEqual(for_text.available, self.ALL_CARDS[1] + self.HOST[1] + held)
@@ -671,6 +723,32 @@ class KindAwareFitTests(unittest.TestCase):
             for_images.available, min(self.ONE_CARD[1], self.HOST[1]) + held
         )
         self.assertEqual(for_images.pool, "both this GPU and this machine")
+
+    def test_a_tighter_pool_reclaims_only_what_the_allocator_reports(self):
+        """A text model that device_map="auto" spread across the card and
+        the machine gives the card back only the part that was on it.
+        Crediting the whole estimate to a pool that is the tighter of the
+        two would call a pipeline a fit that the load then refuses."""
+
+        on_card = 8 * 1024**3
+        whole_model = 20 * 1024**3
+        for_text, for_images = self.profiles_on_cuda(on_card, whole_model)
+
+        # The summed pool really does get the whole model back.
+        self.assertEqual(
+            for_text.available, self.ALL_CARDS[1] + self.HOST[1] + whole_model
+        )
+        # The tighter one gets only what was on the card.
+        self.assertEqual(
+            for_images.available, min(self.ONE_CARD[1], self.HOST[1]) + on_card
+        )
+        self.assertLess(for_images.available, min(self.ONE_CARD[1], self.HOST[1]) + whole_model)
+
+    def test_nothing_loaded_reclaims_nothing_either_way(self):
+        for_text, for_images = self.profiles_on_cuda(None, None)
+
+        self.assertEqual(for_text.available, self.ALL_CARDS[1] + self.HOST[1])
+        self.assertEqual(for_images.available, min(self.ONE_CARD[1], self.HOST[1]))
 
     def test_a_text_model_and_every_other_backend_read_unchanged(self):
         cuda = self.profile("cuda")

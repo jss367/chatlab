@@ -258,6 +258,85 @@ class DrawTests(ImagePageTestCase):
         self.assertFalse(run.stopped)
         self.assertEqual(run.steps_done, 3)
 
+    def test_the_slot_is_reserved_before_the_first_frame_is_published(self):
+        """Gradio does not resume a streaming handler until the browser has
+        the frame, so a run reserved afterwards leaves a round trip in which
+        the page shows Stop over nothing reserved, Stop reports that nothing
+        is drawing, and a load can replace the pipeline that was checked."""
+
+        import threading
+
+        release = threading.Event()
+        self.load_pipeline()
+        self.manager.pipeline = FakePipeline(watcher=lambda step: release.wait(5))
+
+        generator = images_page.draw(
+            "a red bicycle", "", 4, 7.5, 32, 7, False, True
+        )
+        try:
+            first = next(generator)
+
+            # By the time the browser has this frame, the run holds the slot
+            # and its cancel token is live.
+            self.assertTrue(first[ROW["stop"]]["visible"])
+            self.assertTrue(self.manager.busy)
+            self.assertIsNotNone(self.manager._image_cancel)
+            self.assertTrue(self.manager.stop_image_run())
+        finally:
+            release.set()
+            last = list(generator)[-1]
+
+        self.assertTrue(last[ROW["run"]].stopped)
+
+    def test_a_second_draw_is_refused_while_one_is_drawing(self):
+        import threading
+
+        release = threading.Event()
+        self.load_pipeline()
+        self.manager.pipeline = FakePipeline(watcher=lambda step: release.wait(5))
+
+        first_draw = images_page.draw("a red bicycle", "", 4, 7.5, 32, 7, False, True)
+        try:
+            next(first_draw)
+
+            (refused,) = images_page.draw("another", "", 4, 7.5, 32, 7, False, True)
+
+            self.assertIn("Model busy", refused[ROW["status"]])
+            self.assertTrue(refused[ROW["draw"]]["visible"])
+            self.assertFalse(refused[ROW["stop"]]["visible"])
+        finally:
+            release.set()
+            list(first_draw)
+
+    def test_the_run_gives_the_slot_back_itself_when_it_ends(self):
+        # The page cannot release it: the pipeline is on the worker thread
+        # and would still be drawing after the generator was closed.
+        self.load_pipeline()
+
+        run, _ = self.run_of()
+
+        self.assertFalse(run.stopped)
+        self.assertFalse(self.manager.busy)
+        self.assertIsNone(self.manager._image_cancel)
+        self.assertFalse(self.manager.stop_image_run())
+
+    def test_closing_the_handler_asks_the_run_to_wind_down(self):
+        # A closed generator is invisible to the pipeline, so the handler
+        # has to say so on its way out rather than leave it drawing.
+        import threading
+
+        release = threading.Event()
+        self.load_pipeline()
+        self.manager.pipeline = FakePipeline(watcher=lambda step: release.wait(5))
+
+        generator = images_page.draw("a red bicycle", "", 6, 7.5, 32, 7, False, True)
+        next(generator)
+        cancel = self.manager._image_cancel
+        generator.close()
+
+        self.assertTrue(cancel.is_set())
+        release.set()
+
     def test_the_stop_button_asks_the_running_run_and_says_which(self):
         # It is not a cancel: the pipeline runs on its own thread and would
         # keep running with the generator gone, taking the recorded steps

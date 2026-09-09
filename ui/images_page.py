@@ -333,16 +333,52 @@ def draw(
     readings: list = []
     outcome: dict = {}
 
+    # Reserved before the first frame is published, not after. Gradio does
+    # not resume a streaming handler until the browser has been sent that
+    # frame, so a run reserved afterwards leaves a network round trip in
+    # which the page shows a Stop button over nothing, Stop reports that
+    # nothing is drawing, and a load arriving in between replaces the
+    # pipeline this handler checked. The Chat page reserves before its own
+    # first frame for the same reason.
+    try:
+        cancel = runtime.MANAGER.start_image_run()
+    except ModelBusy as error:
+        yield _idle(_failure(error), seed=chosen)
+        return
+
     def work() -> None:
         try:
             outcome["run"] = runtime.MANAGER.generate_image(
-                request, on_step=readings.append
+                request, on_step=readings.append, cancel=cancel
             )
         except BaseException as error:  # noqa: BLE001 - reported on the page
             outcome["error"] = error
 
+    # Started before the first frame as well, so the reservation is never
+    # held by a run that has not begun. The run gives the slot back itself
+    # when it ends; this handler must not, because the pipeline is on that
+    # thread and would still be drawing after the generator was closed.
     worker = threading.Thread(target=work, name="chatlab-draw", daemon=True)
     started = time.monotonic()
+    try:
+        worker.start()
+    except BaseException:
+        # work() never ran, so nothing else will give the slot back.
+        runtime.MANAGER.finish_image_run()
+        raise
+    try:
+        yield from _drawing(worker, readings, outcome, request, started, chosen)
+    except GeneratorExit:
+        # Gradio closed this handler - the browser went away, or something
+        # cancelled it. The pipeline does not notice a closed generator, so
+        # it is asked to wind down; it releases the slot as it does.
+        runtime.MANAGER.stop_image_run()
+        raise
+
+
+def _drawing(worker, readings, outcome, request, started, chosen):
+    """Publish the run's frames, from the first one to the readout."""
+
     yield (
         f"Drawing with seed {chosen}…",
         *send_stop_buttons(True),
@@ -358,7 +394,6 @@ def draw(
         NO_ATTENTION,
         None,
     )
-    worker.start()
     while worker.is_alive():
         worker.join(DRAW_POLL_SECONDS)
         # A copy, because the worker appends to the same list between frames

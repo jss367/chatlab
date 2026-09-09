@@ -417,14 +417,24 @@ def _component_weights(folder: Path) -> list[Path]:
     ]
 
 
-def _component_index(folder: Path) -> Path | None:
+def _component_index(folder: Path, variant: str = "") -> Path | None:
     """The shard index a component will load from, or ``None`` if it has none.
 
     A big component ships its weights as shards with an index listing them,
-    the same as a text checkpoint. Which index matters is the one for the set
-    ``from_pretrained`` will read, so the preference is the same as
-    :func:`_loaded_variant_bytes`': the plain safetensors set, then the plain
-    PyTorch one, then whatever else is there.
+    the same as a text checkpoint. Which index matters is the one
+    ``from_pretrained`` will read, and that depends on the variant the whole
+    pipeline is being loaded as: a component holding both a complete plain
+    index and an incomplete half-precision one is complete for a plain load
+    and short of shards for a half-precision one, so checking the plain
+    index of an fp16 load would call the snapshot whole and then fail inside
+    diffusers.
+
+    So the pipeline's variant comes first, then the plain set - which is
+    what diffusers falls back to for a component that has no such variant.
+    An index for neither means the set being loaded is not sharded, and
+    ``None`` says there is nothing to check shard by shard: matching any
+    index at all would validate a half-precision one against a plain load
+    and report shards missing that the load never asks for.
     """
 
     if not folder.is_dir():
@@ -434,10 +444,12 @@ def _component_index(folder: Path) -> Path | None:
         for entry in sorted(folder.iterdir())
         if entry.is_file() and entry.name.endswith(".index.json")
     }
-    for preferred in (("", "safetensors"), ("", "bin")):
+    preferences = [(variant, "safetensors"), (variant, "bin")] if variant else []
+    preferences += [("", "safetensors"), ("", "bin")]
+    for preferred in preferences:
         if preferred in indexes:
             return indexes[preferred]
-    return next(iter(indexes.values()), None)
+    return None
 
 
 def _missing_shards(index: Path) -> tuple[str, ...]:
@@ -488,21 +500,31 @@ def pipeline_missing_files(snapshot: Path) -> tuple[str, ...]:
     a VAE without one, so a download cut off before it arrived is
     incomplete rather than whole. Absence of both is still the tokenizer and
     the scheduler, and still no gap.
+
+    Every component is checked against the variant the whole pipeline will
+    be loaded as, not against whichever set it happens to prefer on its own:
+    ``from_pretrained`` takes one variant for the lot, so a component with a
+    complete plain index beside an incomplete half-precision one is short of
+    shards for a half-precision load. See :func:`_component_index`.
     """
 
     missing: list[str] = []
     if pipeline_variant_missing(snapshot):
         return (MODEL_WEIGHTS,)
+    variant = pipeline_variant(snapshot) or ""
     for name in pipeline_components(snapshot):
         folder = snapshot / name
         if not folder.is_dir():
             missing.append(f"{name}/")
             continue
         if not (folder / COMPONENT_CONFIG).is_file():
-            if _component_weights(folder) or _component_index(folder) is not None:
+            if (
+                _component_weights(folder)
+                or _component_index(folder, variant) is not None
+            ):
                 missing.append(f"{name}/{COMPONENT_CONFIG}")
             continue
-        index = _component_index(folder)
+        index = _component_index(folder, variant)
         if index is not None:
             missing.extend(f"{name}/{shard}" for shard in _missing_shards(index))
         elif not _component_weights(folder):
@@ -1514,13 +1536,35 @@ class DeviceProfile:
         being live tensors too, and that is freed with the model.
         """
 
-        given = max(self.held or 0, estimated or 0)
+        given = self.reclaimable(estimated)
         if not given:
             return self
         return replace(
             self,
             available=None if self.available is None else self.available + given,
         )
+
+    def reclaimable(self, estimated: int | None = None) -> int:
+        """How much of the loaded model's memory this pool really gets back.
+
+        The larger of the two figures for a pool that is a sum, for the
+        reason :meth:`reclaimed` gives. For a pool that is the tighter of
+        two — an image pipeline on CUDA, see :meth:`for_kind` — only the
+        allocator's figure, because the estimate covers a model that
+        ``device_map="auto"`` may have spread across the card and the
+        machine, and crediting the whole of it to the card would overstate
+        what unloading frees there. Unloading a 20 GB model holding 8 GB of
+        card would otherwise credit the card 20, and a pipeline would be
+        called a fit that the load then refuses.
+
+        Understating it is the safe direction: it can only call a model
+        tight that would have fitted, where overstating sends a reader to a
+        button that refuses them.
+        """
+
+        if self.pool.startswith("both "):
+            return self.held or 0
+        return max(self.held or 0, estimated or 0)
 
 DEVICE_LABELS = {"mps": "Apple Metal (MPS)", "cpu": "CPU"}
 
@@ -5257,6 +5301,35 @@ class ModelManager:
                 # all if it unloaded first.
                 self._run_device_bytes = reserved_bytes()
 
+    def start_image_run(self) -> threading.Event:
+        """Claim the generation slot for an image run and publish its cancel token.
+
+        For a caller that has to hold both *before* it publishes anything,
+        which a streaming handler does: Gradio does not resume it until the
+        browser has been sent its first frame, so a run reserved after that
+        frame leaves a network round trip in which the page shows a Stop
+        button over nothing reserved, ``stop_image_run`` reports that nothing
+        is drawing, and a load arriving in between can replace the pipeline
+        the page checked. The Chat page reserves before its first frame for
+        the same reason; see :meth:`reserve_generation`.
+
+        The caller must release with :meth:`finish_image_run` in a
+        ``finally``. :meth:`generate_image` picks up a run started this way
+        rather than starting a second one.
+        """
+
+        if not self.reserve_generation():
+            raise ModelBusy("The model is busy. Wait for the current run to finish.")
+        cancel = threading.Event()
+        self._image_cancel = cancel
+        return cancel
+
+    def finish_image_run(self) -> None:
+        """Give back what :meth:`start_image_run` took. Pairs with it."""
+
+        self._image_cancel = None
+        self.release_generation()
+
     def stop_image_run(self) -> bool:
         """Ask the image run that is drawing to stop, and say whether one was.
 
@@ -5272,7 +5345,7 @@ class ModelManager:
         cancel.set()
         return True
 
-    def generate_image(self, request, *, on_step=None):
+    def generate_image(self, request, *, on_step=None, cancel=None):
         """Draw ``request`` with the pipeline in memory, and report what happened.
 
         Blocks until the picture is finished; ``on_step`` is called with each
@@ -5292,18 +5365,23 @@ class ModelManager:
         that loses the race for the slot never touches the running run's
         token, and the token is gone again the moment the run ends.
 
+        A caller that had to reserve before it could publish anything has
+        already done both through :meth:`start_image_run` and hands its
+        token back as ``cancel``; this then runs on that reservation and
+        gives it up when the run ends. Handed in rather than guessed at: a
+        slot that is already taken is either that caller's own or another
+        run's, and the two must not be confused.
+
         The run is stamped with the load that drew it, so a maps-and-steps
         readout can be told apart from one the next load produced.
         """
 
         import image_runtime
 
-        if not self.reserve_generation():
-            raise ModelBusy("The model is busy. Wait for the current run to finish.")
+        if cancel is None:
+            cancel = self.start_image_run()
         started = time.monotonic()
         run = None
-        cancel = threading.Event()
-        self._image_cancel = cancel
         try:
             with self._lock:
                 if self.pipeline is None:
@@ -5324,8 +5402,11 @@ class ModelManager:
             _reraise_out_of_memory(error, IMAGE_KIND)
             raise
         finally:
-            self._image_cancel = None
-            self.release_generation()
+            # The run's own end, whoever reserved it: a streaming caller
+            # cannot release the slot itself, because the pipeline is on
+            # this thread and would still be drawing after that caller's
+            # generator was closed.
+            self.finish_image_run()
             self._log_image_run(run, request, time.monotonic() - started)
             # The largest thing a run allocates is the pipeline's own
             # activations, and the previews and maps it leaves behind are the
