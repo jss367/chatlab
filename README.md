@@ -374,7 +374,10 @@ behind an answer thousands of tokens long. Each generation runs on one thread
 of its own and its frames cross to the response through a queue, so a
 streaming answer is never resumed on a different worker; a client that stops
 reading is noticed within a minute, and the model is handed back rather than
-held by a response nobody is listening to. There is no authentication, and
+held by a response nobody is listening to; a client that comes back after
+that is told the response was given up on rather than handed the tokens
+that did arrive as though they were the whole answer. There is no
+authentication, and
 there is none on the interface either: both are served on the loopback address
 and anything that can reach one can already do everything the other can.
 
