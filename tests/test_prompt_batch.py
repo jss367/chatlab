@@ -243,6 +243,57 @@ class BatchExportTests(unittest.TestCase):
 
 
 
+
+class ResolvePromptsTests(unittest.TestCase):
+    """Which prompts a run uses: the file's own, or the box's."""
+
+    def test_a_loaded_prompt_keeps_its_blank_lines(self):
+        # A dataset entry of two paragraphs reads as two prompts once it is
+        # in the box. Running it as two would answer half an entry at a time
+        # and file the measurements under prompts nobody wrote.
+        loaded = ["a passage\n\nand its second paragraph", "another"]
+        text = app.prompts_to_text(loaded)
+
+        self.assertEqual(app.resolve_prompts(text, loaded), loaded)
+        self.assertEqual(len(app.parse_prompts(text)), 3)
+
+    def test_an_edited_box_is_read_as_it_is_written(self):
+        loaded = ["first", "second"]
+        edited = app.prompts_to_text(loaded) + "\n\nthird"
+
+        self.assertEqual(app.resolve_prompts(edited, loaded), ["first", "second", "third"])
+
+    def test_a_box_nothing_was_loaded_into_is_read_as_written(self):
+        self.assertEqual(app.resolve_prompts("one\n\ntwo", []), ["one", "two"])
+        self.assertEqual(app.resolve_prompts("one\n\ntwo", None), ["one", "two"])
+
+    def test_loading_says_when_the_box_cannot_show_a_prompt_whole(self):
+        directory = Path(tempfile.mkdtemp(prefix="chatlab-test-"))
+        self.addCleanup(shutil.rmtree, directory)
+        path = directory / "prompts.jsonl"
+        path.write_text('{"prompt": "one\\n\\ntwo"}\n', encoding="utf-8")
+
+        _text, status, prompts = app.load_prompt_file(str(path), "", [])
+
+        self.assertEqual(prompts, ["one\n\ntwo"])
+        self.assertIn(app.PARAGRAPH_NOTE, status)
+
+    def test_a_run_answers_a_loaded_paragraph_prompt_once(self):
+        original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([0, 1, EOS_ID], PIECES, EOS_ID)
+        self.addCleanup(setattr, runtime, "MANAGER", original)
+        loaded = ["a passage\n\nand its question"]
+
+        frames = list(
+            app.run_prompts(
+                app.prompts_to_text(loaded), loaded, "", "", *SAMPLING
+            )
+        )
+
+        rows = frames[-1][RESULTS]["value"]
+        self.assertEqual(len(rows), 1)
+
+
 class BatchCsvTests(unittest.TestCase):
     """The CSV a run adds to as each prompt finishes."""
 
@@ -343,9 +394,11 @@ class RunPromptsTests(unittest.TestCase):
         runtime.MANAGER = loaded_manager([0, 1, EOS_ID], PIECES, EOS_ID)
         self.addCleanup(setattr, runtime, "MANAGER", self.original)
 
-    def run_batch(self, prompts_text, system_prompt="", prefill=""):
+    def run_batch(self, prompts_text, system_prompt="", prefill="", loaded=()):
         frames = list(
-            app.run_prompts(prompts_text, system_prompt, prefill, *SAMPLING)
+            app.run_prompts(
+                prompts_text, list(loaded), system_prompt, prefill, *SAMPLING
+            )
         )
         self.assertTrue(frames)
         for frame in frames:
@@ -407,6 +460,21 @@ class RunPromptsTests(unittest.TestCase):
         trace = trace_of(final[FILES])
 
         self.assertEqual(trace["sampling"]["assistant_prefill"], "Hello")
+
+    def test_the_replayed_prefix_is_counted_in_the_trace(self):
+        # The prefill's tokens are measured like sampled ones, so a trace
+        # that did not say how many were replayed would have every analysis
+        # read them as the model's own choices.
+        final = self.run_batch("say hello", prefill="Hello")[-1]
+        trace = trace_of(final[FILES])
+
+        self.assertEqual(trace["sampling"]["forced_prefix_tokens"], 1)
+
+    def test_a_response_with_no_prefill_counts_no_replayed_tokens(self):
+        final = self.run_batch("say hello")[-1]
+        trace = trace_of(final[FILES])
+
+        self.assertNotIn("forced_prefix_tokens", trace["sampling"])
 
     def test_the_buttons_swap_for_the_run_and_back_again(self):
         frames = self.run_batch("say hello")
@@ -528,7 +596,7 @@ class RunPromptsTests(unittest.TestCase):
     def test_the_generation_slot_comes_back_when_the_run_is_cancelled(self):
         # Gradio closes the generator where it stood. A slot left reserved
         # there would refuse every reply for the rest of the session.
-        run = app.run_prompts("first\n\nsecond", "", "", *SAMPLING)
+        run = app.run_prompts("first\n\nsecond", [], "", "", *SAMPLING)
         next(run)
         run.close()
 
@@ -536,7 +604,7 @@ class RunPromptsTests(unittest.TestCase):
         runtime.MANAGER.release_generation()
 
     def test_chat_refuses_while_a_batch_holds_the_model(self):
-        run = app.run_prompts("first\n\nsecond", "", "", *SAMPLING)
+        run = app.run_prompts("first\n\nsecond", [], "", "", *SAMPLING)
         self.addCleanup(run.close)
         next(run)
 
@@ -575,7 +643,7 @@ class LoadPromptFileTests(unittest.TestCase):
     def test_a_file_is_added_to_what_is_already_in_the_box(self):
         path = self.write("prompts.txt", "third\n\nfourth")
 
-        text, status = app.load_prompt_file(str(path), "first\n\nsecond")
+        text, status, prompts = app.load_prompt_file(str(path), "first\n\nsecond", [])
 
         self.assertEqual(parse_prompts(text), ["first", "second", "third", "fourth"])
         self.assertIn("Loaded 2 prompts", status)
@@ -583,7 +651,7 @@ class LoadPromptFileTests(unittest.TestCase):
     def test_an_unreadable_file_leaves_the_box_alone(self):
         path = self.write("prompts.jsonl", "not json\n")
 
-        text, status = app.load_prompt_file(str(path), "first")
+        text, status, prompts = app.load_prompt_file(str(path), "first", [])
 
         self.assertEqual(text, gr.skip())
         self.assertIn("Could not read that file", status)
@@ -591,7 +659,7 @@ class LoadPromptFileTests(unittest.TestCase):
     def test_a_file_with_no_prompts_says_so(self):
         path = self.write("prompts.txt", "\n\n   \n")
 
-        text, status = app.load_prompt_file(str(path), "first")
+        text, status, prompts = app.load_prompt_file(str(path), "first", [])
 
         self.assertEqual(text, gr.skip())
         self.assertIn("No prompts", status)

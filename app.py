@@ -279,6 +279,7 @@ from ui.prompts import (
     BATCH_NO_PROMPTS,
     BATCH_OUTPUT_NAMES,
     EXCERPT_LENGTH,
+    PARAGRAPH_NOTE,
     PROMPT_COUNT_HINT,
     batch_directory,
     batch_progress,
@@ -287,6 +288,7 @@ from ui.prompts import (
     excerpt,
     failed_row,
     load_prompt_file,
+    resolve_prompts,
     run_prompts,
     stop_batch,
 )

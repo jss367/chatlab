@@ -316,7 +316,9 @@ The **Score text** tab measures text the model did not generate. Paste it, optio
 
 ## Running a list of prompts
 
-The **Prompts** tab runs an experiment rather than a conversation. Write the prompts into the box with a blank line between them, so a prompt can run to several lines, or press **Load prompts** for a file: `.jsonl` is one prompt per line (a plain string, or an object with a `prompt`, `text`, or `content` field), `.json` is a list of them, and anything else is read as text on the same blank-line rule. A loaded file is added to what is already in the box, and the box is what runs, so the set can be edited first.
+The **Prompts** tab runs an experiment rather than a conversation. Write the prompts into the box with a blank line between them, so a prompt can run to several lines, or press **Load prompts** for a file: `.jsonl` is one prompt per line (a plain string, or an object with a `prompt`, `text`, or `content` field), `.json` is a list of them, and any text file is read on the same blank-line rule. A loaded file is added to what is already in the box, and the box is what runs, so the set can be edited first.
+
+A loaded prompt with a blank line inside it is the one thing the box cannot show whole, since that is how the box separates one prompt from the next. The run uses the file's own prompts while the box still holds what loading them wrote, so a dataset entry of several paragraphs is answered as the one prompt it is; the status line says so when a file contains one. Editing the box hands the reading back to it, blank lines and all.
 
 Each prompt is answered in a conversation of its own. Nothing carries over from the prompt before it: the model sees the system prompt from **Settings**, the prompt, and nothing else. Sampling comes from the controls under the message box, so a batch is measured exactly as a reply typed by hand would be. With **New seed each response** off, every prompt runs on the seed in the box and the run reproduces; with it on, each prompt gets its own seed, and the row and the trace both record which.
 

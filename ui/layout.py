@@ -181,6 +181,11 @@ def build_app() -> gr.Blocks:
         context_ids_state = gr.State((*empty_metrics(), None))
         inspect_target = gr.State(None)
         insight_state = gr.State(None)
+        # The prompts the last file gave, as it gave them. A prompt with a
+        # blank line inside it reads as two once it is in the box, so a run
+        # prefers this list while the box still holds what loading it wrote;
+        # see ui.prompts.resolve_prompts().
+        loaded_prompts_state = gr.State([])
         # Which load the scored token count on screen was counted against, so
         # a model swapped out from another tab can be told from this one.
         score_budget_load = gr.State(None)
@@ -1505,6 +1510,7 @@ def build_app() -> gr.Blocks:
             run_prompts,
             [
                 prompts_box,
+                loaded_prompts_state,
                 system_prompt,
                 assistant_prefill,
                 temperature,
@@ -1529,7 +1535,9 @@ def build_app() -> gr.Blocks:
             show_progress="hidden",
         )
         prompts_upload.upload(
-            load_prompt_file, [prompts_upload, prompts_box], [prompts_box, batch_status]
+            load_prompt_file,
+            [prompts_upload, prompts_box, loaded_prompts_state],
+            [prompts_box, batch_status, loaded_prompts_state],
         )
         color_scale.change(
             recolor,

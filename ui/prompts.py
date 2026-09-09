@@ -67,29 +67,68 @@ def count_prompts(text: str) -> str:
     return f"{count} prompt{'' if count == 1 else 's'}."
 
 
-def load_prompt_file(file_path, text: str):
+PARAGRAPH_NOTE = (
+    "One of them has a blank line inside it. The box separates prompts on "
+    "blank lines, so it cannot show that prompt as one; the run uses the "
+    "file's own prompts as long as the box is left as it was loaded."
+)
+
+
+def load_prompt_file(file_path, text: str, loaded):
     """Put a file of prompts into the box, keeping what is already there.
 
     The box stays the one place the run reads from, so an uploaded file is
     only a way of filling it: what is on screen is what will run, and it can
     be edited first.
+
+    The prompts are also returned as they were read. A prompt with a blank
+    line inside it cannot be told apart from two prompts once it is in the
+    box, and a dataset entry of several paragraphs is exactly that, so the
+    run prefers this list while the box still holds what loading it wrote;
+    see resolve_prompts(). A reader who edits the box gets what the box
+    says, which is the only honest reading of a set they have changed.
     """
 
     if not file_path:
-        return gr.skip(), "No file chosen."
+        return gr.skip(), "No file chosen.", gr.skip()
     try:
         prompts = parse_prompt_file(file_path)
     except (OSError, ValueError) as error:
-        return gr.skip(), failure_status("Could not read that file", str(error))
+        return (
+            gr.skip(),
+            failure_status("Could not read that file", str(error)),
+            gr.skip(),
+        )
     if not prompts:
-        return gr.skip(), f"No prompts in `{Path(file_path).name}`."
+        return gr.skip(), f"No prompts in `{Path(file_path).name}`.", gr.skip()
 
-    existing = parse_prompts(text)
+    # What is already in the box keeps its place at the front, read the way
+    # the box reads it, because that is what a run would have used anyway.
+    kept = resolve_prompts(text, loaded)
+    combined = kept + prompts
     added = f"{len(prompts)} prompt{'' if len(prompts) == 1 else 's'}"
-    return (
-        prompts_to_text(existing + prompts),
-        f"Loaded {added} from `{Path(file_path).name}`.",
-    )
+    status = f"Loaded {added} from `{Path(file_path).name}`."
+    if any("\n\n" in prompt for prompt in combined):
+        status = f"{status} {PARAGRAPH_NOTE}"
+    return prompts_to_text(combined), status, combined
+
+
+def resolve_prompts(text: str, loaded) -> list[str]:
+    """The prompts a run should use: the loaded ones, or the box's own.
+
+    ``loaded`` is what the last file gave, and the box holds what writing
+    that list looks like. While the two still agree the list is used, so a
+    prompt of several paragraphs runs as the one prompt the file said it
+    was rather than as one conversation per paragraph. The moment the box
+    differs it is the reader's own text, and blank lines in it separate
+    prompts as they always have.
+    """
+
+    written = (text or "").strip()
+    prompts = list(loaded or [])
+    if prompts and prompts_to_text(prompts) == written:
+        return prompts
+    return parse_prompts(text)
 
 
 def batch_directory() -> Path:
@@ -142,6 +181,7 @@ def batch_progress(index: int, total: int, tokens: int, started: float) -> str:
 
 def run_prompts(
     prompts_text: str,
+    loaded_prompts,
     system_prompt: str,
     assistant_prefill: str,
     temperature: float,
@@ -167,7 +207,7 @@ def run_prompts(
     if not runtime.MANAGER.loaded:
         yield (BATCH_NO_MODEL,) + refused
         return
-    prompts = parse_prompts(prompts_text)
+    prompts = resolve_prompts(prompts_text, loaded_prompts)
     if not prompts:
         yield (BATCH_NO_PROMPTS,) + refused
         return
@@ -249,6 +289,7 @@ def _run_batch(
         model_id = None
         prefilled = False
         literal_prefill = ""
+        forced_prefix_tokens = 0
         applied_prefill = bool(assistant_prefill)
         try:
             stream = runtime.MANAGER.generate(
@@ -273,6 +314,7 @@ def _run_batch(
                     metrics = list(update.metrics)
                     model_id = update.model_id or model_id
                     prefilled = update.reasoning_prefilled
+                    forced_prefix_tokens = update.forced_prefix_tokens
                     if update.literal_prefill_text:
                         literal_prefill = update.literal_prefill_text
                     yield (
@@ -321,6 +363,12 @@ def _run_batch(
             "max_new_tokens": int(max_new_tokens),
             "seed": used_seed,
         }
+        if forced_prefix_tokens:
+            # The prefill's tokens are measured like any other, so a reader
+            # of the trace would take them for the model's own choices
+            # without being told how many were replayed. ui.generation says
+            # it the same way for a single response.
+            sampling["forced_prefix_tokens"] = forced_prefix_tokens
         if applied_prefill:
             sampling["assistant_prefill"] = assistant_prefill
         rows.append(batch_row(index, prompt, answer, summary, used_seed))
