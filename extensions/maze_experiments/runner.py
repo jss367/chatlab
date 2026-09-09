@@ -239,20 +239,17 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             if manager.load_id != episode.load_id:
                 raise ValueError("The model changed during this episode. Start a new episode with the selected model.")
             forced = interrupted_prefix(episode, manager)
-            if forced:
-                episode.interrupted = True
-                episode.intervention_turn = len(episode.turns)
-                episode.intervention_tokens = episode.sampled_tokens
-                episode.intervention_attempts = episode.tool_attempts
-                episode.detail = "Interruption inserted. Watching for a real movement call."
             limit = min(episode.config["per_turn_tokens"], episode.config["token_budget"] - episode.sampled_tokens)
-            if episode.interrupted and episode.resumed is None:
+            if forced:
+                limit = min(limit, 1024)
+            elif episode.interrupted and episode.resumed is None:
                 limit = min(limit, 1024 - (episode.sampled_tokens - episode.intervention_tokens))
             if limit <= 0:
                 episode.phase, episode.detail = "budget", "The sampled-token budget is exhausted."
                 break
-            turn = {"text": "", "metrics": [], "prompt_ids": [], "forced_prefix_tokens": len(forced),
-                    "prefix_ids": forced, "prefix_text": manager.decode(forced),
+            turn = {"text": "", "metrics": [], "prompt_ids": [], "forced_prefix_tokens": 0,
+                    "prefix_ids": [], "prefix_text": "",
+                    "planned_prefix_ids": forced, "planned_prefix_text": manager.decode(forced),
                     "position_before": list(episode.position), "started_at": time.time(), "finish_reason": None}
             episode.turns.append(turn)
             yield episode
@@ -270,6 +267,16 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
                     turn.update(text=update.text, metrics=copy.deepcopy(update.metrics), prompt_ids=list(update.prompt_ids),
                                 forced_prefix_tokens=update.forced_prefix_tokens, reasoning_prefilled=update.reasoning_prefilled,
                                 load_id=update.load_id, model_id=update.model_id)
+                    # The runtime emits prefix metrics only after prefill has
+                    # consumed them. An opening frame or a failed model call
+                    # alone is not evidence that an interruption was inserted.
+                    if forced and not episode.interrupted and update.forced_prefix_tokens and update.metrics:
+                        episode.interrupted = True
+                        episode.intervention_turn = len(episode.turns) - 1
+                        episode.intervention_tokens = episode.sampled_tokens
+                        episode.intervention_attempts = episode.tool_attempts
+                        episode.detail = "Interruption inserted. Watching for a real movement call."
+                        turn.update(prefix_ids=forced, prefix_text=manager.decode(forced))
                     yield episode
                     if episode.stop_requested:
                         break

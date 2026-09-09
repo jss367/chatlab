@@ -349,6 +349,53 @@ class MazeTests(unittest.TestCase):
         self.assertEqual(ep.sampled_tokens, 0)
         self.assertEqual(ep.turns[0]['finish_reason'], 'user_stopped')
         self.assertFalse(manager.busy)
+        self.assertFalse(ep.interrupted)
+        self.assertIsNone(ep.intervention_turn)
+        self.assertEqual(ep.turns[0]['forced_prefix_tokens'], 0)
+        self.assertEqual(ep.turns[0]['prefix_ids'], [])
+        self.assertEqual(ep.turns[0]['prefix_text'], '')
+        self.assertTrue(ep.turns[0]['planned_prefix_ids'])
+        selections = TokenInspector().selections()
+        rendered = views(ep, False, selections, selections.new_session())
+        self.assertIn('insertion has not been confirmed', rendered[4])
+
+    def test_failure_before_prefix_update_does_not_record_insertion(self):
+        ep = Episode(MAZE, CONFIG)
+        ep.request_interruption()
+        manager = Manager([])
+        with mock.patch.object(manager, 'generate', side_effect=RuntimeError('Prefill failed')):
+            list(stream_episode(ep, manager))
+        self.assertEqual(ep.phase, 'error')
+        self.assertFalse(ep.interrupted)
+        self.assertIsNone(ep.intervention_turn)
+        self.assertEqual(ep.intervention_tokens, 0)
+        self.assertEqual(ep.intervention_attempts, 0)
+        self.assertTrue(ep.manual_intervention)  # A request occurred, but insertion did not.
+        self.assertEqual(ep.turns[0]['prefix_ids'], [])
+        self.assertFalse(manager.busy)
+
+    def test_prefix_only_update_records_consumption_even_if_sampling_fails(self):
+        ep = Episode(MAZE, CONFIG | {'per_turn_tokens': 2048, 'token_budget': 8192})
+        manager = Manager([])
+        def generate(messages, **options):
+            self.assertEqual(options['max_new_tokens'], 1024)
+            prefix = options['forced_ids']
+            yield SimpleNamespace(text=manager.tokenizer.decode(prefix), metrics=[{'token_id': t} for t in prefix],
+                                  prompt_ids=[10], forced_prefix_tokens=len(prefix), reasoning_prefilled=False,
+                                  load_id=manager.load_id, model_id=manager.model_id)
+            raise RuntimeError('Sampling failed')
+        manager.generate = generate
+        list(stream_episode(ep, manager))
+        self.assertEqual(ep.phase, 'error')
+        self.assertTrue(ep.interrupted)
+        self.assertEqual(ep.intervention_turn, 0)
+        self.assertEqual(ep.intervention_tokens, 0)
+        self.assertEqual(ep.intervention_attempts, 0)
+        self.assertEqual(ep.sampled_tokens, 0)
+        self.assertIsNone(ep.resumed)
+        self.assertEqual(ep.turns[0]['prefix_ids'], [68, 105])
+        self.assertEqual(ep.turns[0]['prefix_text'], 'Di')
+        self.assertFalse(manager.busy)
 
     def test_stop_at_startup_lock_handoff_is_not_cleared(self):
         ep = Episode(MAZE, CONFIG)

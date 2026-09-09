@@ -118,8 +118,10 @@ def views(ep, reveal, selections, session_id, index=None, animate=False):
     stamped, changed = selections.view(session_id, (ep.run_id, id(ep), index), metrics[forced:])
     origin = "Inside the template's open reasoning block" if t.get("reasoning_prefilled") else "At the beginning of the assistant response"
     note = (f"**Supplied interruption · {forced} tokens** · {origin}.\n\n" if forced else "No supplied interruption in this response.")
+    if not forced and t.get("planned_prefix_ids"):
+        note = f"**Pending interruption · {len(t['planned_prefix_ids'])} tokens** · Prefix insertion has not been confirmed."
     return (board(ep, index, reveal, animate), status(ep), TOKENS.strip(metrics[forced:]),
-            t.get("text", ""), note, t.get("prefix_text", ""), timeline(ep), stamped,
+            t.get("text", ""), note, t.get("prefix_text") or t.get("planned_prefix_text", ""), timeline(ep), stamped,
             gr.update(choices=[("Initial / supplied history", -1)] + [(f"Response {i+1}" + (" · interruption" if t.get("prefix_ids") else ""), i) for i, t in enumerate(ep.turns)], value=index),
             "Select a model-generated token above." if changed else gr.skip(), [] if changed else gr.skip())
 
@@ -172,7 +174,7 @@ def _build_page(context):
             strip = gr.HighlightedText(label="Model-generated tokens · click to inspect", color_map=context.tokens.color_map,
                                        combine_adjacent=False, show_legend=True, elem_id="maze-tokens")
             prefix_note = gr.Markdown("No supplied interruption in this response.")
-            prefix_text = gr.Textbox(label="Exact supplied prefix", interactive=False, lines=2)
+            prefix_text = gr.Textbox(label="Exact prefix · supplied or pending as noted above", interactive=False, lines=2)
             raw = gr.Textbox(label="Full response · supplied prefix + model output", interactive=False, lines=8, max_lines=16, elem_id="maze-raw")
             with gr.Accordion("Selected token probabilities", open=False):
                 detail = gr.Markdown("Select a model-generated token above.")
