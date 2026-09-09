@@ -2977,28 +2977,28 @@ class ConversationListWiringTests(unittest.TestCase):
         self.assertEqual(restore.inputs, [])
         self.assertEqual(restore.outputs[1:], [state, forks, self.conversation_list()])
 
-    def test_everything_that_rewrites_the_forks_runs_on_one_queue(self):
+    def test_everything_that_rewrites_the_conversation_in_one_step_runs_on_one_queue(self):
         # A redraw queued by a streaming frame must not run after a click on
-        # New with the pane as it was before the click. Sharing one
-        # concurrency id makes Gradio run them in order, reading the states
-        # as they are when each runs.
-        names = (
-            "refresh_conversation_list",
-            "remember_forks",
-            "fork_conversation",
-            "new_conversation",
-            "switch_fork",
-            "delete_fork",
-            "clear_chat",
-            "restore_conversations",
-            "load_conversation",
-        )
-        for name in names:
+        # New with the pane as it was before the click, and Undo must not
+        # publish branch A's shortened transcript into branch B after a
+        # switch. Sharing one concurrency id makes Gradio run them in order,
+        # reading the states as they are when each runs. The rule is derived
+        # rather than listed: every listener that writes the conversation
+        # state and is not a streaming handler is on the queue, and every
+        # streaming handler is off it, since the redraw has to run between
+        # its frames.
+        state, _metrics, _context = self.named("stop_generation").inputs
+        forks = self.named("remember_forks").inputs[1]
+        writers = [fn for fn in self.demo.fns.values() if state in fn.outputs or forks in fn.outputs]
+        self.assertTrue(writers)
+        for fn in writers:
+            name = getattr(fn.fn, "__name__", str(fn))
             with self.subTest(handler=name):
-                self.assertEqual(self.named(name).concurrency_id, app.CONVERSATION_PANE_QUEUE)
-        # The streaming handlers hold their own slot for a whole reply; the
-        # redraw has to run between their frames, so they stay off this queue.
-        self.assertNotEqual(self.named("chat").concurrency_id, app.CONVERSATION_PANE_QUEUE)
+                if inspect.isgeneratorfunction(fn.fn):
+                    self.assertNotEqual(fn.concurrency_id, app.CONVERSATION_PANE_QUEUE)
+                else:
+                    self.assertEqual(fn.concurrency_id, app.CONVERSATION_PANE_QUEUE)
+        self.assertEqual(self.named("remember_forks").concurrency_id, app.CONVERSATION_PANE_QUEUE)
 
     def test_a_change_to_the_forks_saves_them(self):
         remember = self.named("remember_forks")

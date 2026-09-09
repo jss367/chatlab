@@ -3992,8 +3992,9 @@ SCORE_BUDGET_QUEUE = "score-budget"
 # rewritten by the next change, so it would stay that way.
 SAMPLING_LABEL_QUEUE = "sampling-label"
 
-# One queue for everything that rewrites the forks: the branch buttons, the
-# list, Clear all, the loaders, and the two listeners on the states. Gradio
+# One queue for everything that rewrites the forks or the conversation in one
+# step: the branch buttons, the list, Clear all, Undo, Stop, the loaders, and
+# the two listeners on the states. Gradio
 # runs events that share a concurrency id one at a time, in the order they
 # were queued, and reads a State input when the event runs rather than when
 # it was queued. So a redraw queued by a streaming frame can no longer run
@@ -5098,6 +5099,7 @@ def build_app() -> gr.Blocks:
         stop_button.click(
             stop_generation,
             inputs=[conversation_state, metrics_state, context_ids_state],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
             outputs=[
                 chatbot,
                 conversation_state,
@@ -5126,12 +5128,14 @@ def build_app() -> gr.Blocks:
             [conversation_state, color_scale],
             undo_outputs,
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         chatbot.undo(
             undo_message,
             [conversation_state, color_scale],
             undo_outputs,
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         # Clear asks before it takes anything, so the button that opens the
         # question does nothing else - it neither clears nor cancels. The
