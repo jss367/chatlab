@@ -67,6 +67,12 @@ ROLES = ("system", "user", "assistant")
 # reader does not let the frames pile up.
 FRAME_BUFFER = 2
 
+# How long a reader waits on the queue before looking at whether the thread
+# is still producing. Frames arrive when they arrive - a long prompt is
+# several seconds of forward passes - so this is a liveness check rather than
+# a deadline.
+FRAME_WAIT_SECONDS = 1.0
+
 # How long the generation waits for a client that has stopped reading before
 # it gives up, closes the runtime's generator and gives the model back. A
 # streaming response has no other way to learn that nobody is listening.
@@ -109,6 +115,12 @@ class Frames:
     def __init__(self, stream: Iterator) -> None:
         self._frames: queue.Queue = queue.Queue(maxsize=FRAME_BUFFER)
         self._stream = stream
+        # Set when the thread has stopped producing, whichever way it
+        # stopped. A reader waits on the queue and on this together, so it
+        # ends when the thread has: no exit path has to remember to leave a
+        # last item behind, and an abandoned generation whose reader comes
+        # back to a full buffer still finds its way out.
+        self._finished = threading.Event()
         self._worker = threading.Thread(
             target=self._run, name="chatlab-api-generation", daemon=True
         )
@@ -146,6 +158,24 @@ class Frames:
             self._put(error)
         finally:
             runtime.MANAGER.release_generation()
+            self._finished.set()
+
+    def _next(self):
+        """The next item, or ``_DONE`` once the thread has stopped producing.
+
+        Waiting on the queue alone would outlast the thread: a generation
+        abandoned for want of a reader leaves a full buffer and no last item
+        in it, and a reader that came back would drain what was there and
+        then wait for a frame nobody was going to write. So the wait is on
+        the queue and on the thread's own end, whichever comes first.
+        """
+
+        while True:
+            try:
+                return self._frames.get(timeout=FRAME_WAIT_SECONDS)
+            except queue.Empty:
+                if self._finished.is_set():
+                    return _DONE
 
     def first(self):
         """The opening frame, or the failure that stopped it from arriving.
@@ -157,7 +187,7 @@ class Frames:
         would tell a client the request had succeeded.
         """
 
-        opening = self._frames.get()
+        opening = self._next()
         if isinstance(opening, BaseException):
             raise opening
         if opening is _DONE:
@@ -170,7 +200,7 @@ class Frames:
         """Every frame after the first, in order."""
 
         while True:
-            item = self._frames.get()
+            item = self._next()
             if item is _DONE:
                 return
             if isinstance(item, BaseException):

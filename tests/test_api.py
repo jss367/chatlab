@@ -833,6 +833,7 @@ class FramesTests(ApiTestCase):
     def setUp(self):
         super().setUp()
         self.addCleanup(setattr, api, "ABANDONED_AFTER_SECONDS", api.ABANDONED_AFTER_SECONDS)
+        self.addCleanup(setattr, api, "FRAME_WAIT_SECONDS", api.FRAME_WAIT_SECONDS)
 
     def test_every_frame_is_produced_on_one_thread(self):
         # torch.inference_mode is thread-local and Starlette advances a
@@ -956,6 +957,29 @@ class FramesTests(ApiTestCase):
                 break
             time.sleep(0.01)
         self.assertFalse(self.manager.busy)
+
+    def test_a_reader_that_comes_back_to_an_abandoned_generation_is_let_go(self):
+        # Abandonment leaves a full buffer and no last item in it. A reader
+        # that comes back - a client that stalled for a minute and then
+        # resumed - drains what is there and must then be let go rather than
+        # waiting for a frame nobody is going to write.
+        api.ABANDONED_AFTER_SECONDS = 0.05
+        api.FRAME_WAIT_SECONDS = 0.05
+
+        def generate(messages, **kwargs):
+            for index in range(api.FRAME_BUFFER + 3):
+                yield update("x" * (index + 1))
+
+        self.manager.reserve_generation()
+        produced = api.Frames(generate([]))
+        produced.first()
+        for _ in range(200):
+            if not self.manager.busy:
+                break
+            time.sleep(0.01)
+
+        # Whatever was buffered comes out, and then the reader ends.
+        self.assertLessEqual(len(list(produced.rest())), api.FRAME_BUFFER)
 
     def test_a_generation_that_produces_nothing_says_so(self):
         def generate(messages, **kwargs):
