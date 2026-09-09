@@ -251,6 +251,43 @@ class PipelineLayoutTests(unittest.TestCase):
             )
             self.assertFalse(status.complete)
 
+    def test_an_orphan_shard_does_not_make_a_plain_set_available(self):
+        """An orphan shard is not a plain set just because it is named like
+        one. Counting it said a plain load was available, sent
+        pipeline_variant looking for unsuffixed weights, and left a
+        perfectly good fp16 file beside it unused."""
+
+        files = self.whole()
+        del files["unet/diffusion_pytorch_model.safetensors"]
+        # A cut-off plain download beside a complete half-precision file.
+        files["unet/diffusion_pytorch_model-00001-of-00002.safetensors"] = b"u" * 300
+        files["unet/diffusion_pytorch_model.fp16.safetensors"] = b"h" * 900
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, files)
+
+            # The fp16 file is the only usable set, so that is the load.
+            self.assertEqual(pipeline_variant(snapshot), "fp16")
+            self.assertEqual(cache_status(MODEL, Path(root)).missing_files, ())
+
+    def test_an_orphan_shard_of_the_set_being_loaded_is_still_a_gap(self):
+        # The mirror: a complete file of another variant does not make up
+        # for the one actually being read.
+        files = self.whole()
+        del files["unet/diffusion_pytorch_model.safetensors"]
+        files["unet/diffusion_pytorch_model.fp16-00001-of-00002.safetensors"] = b"h" * 300
+        # Another component forces fp16, so fp16 is what the unet loads too.
+        files["vae/diffusion_pytorch_model.fp16.safetensors"] = files.pop(
+            "vae/diffusion_pytorch_model.safetensors"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, files)
+
+            self.assertEqual(pipeline_variant(snapshot), "fp16")
+            self.assertEqual(
+                cache_status(MODEL, Path(root)).missing_files,
+                ("unet/diffusion_pytorch_model.fp16.safetensors.index.json",),
+            )
+
     def test_an_unsharded_weight_file_needs_no_index(self):
         # The ordinary case: one file, nothing to discover.
         with tempfile.TemporaryDirectory() as root:
@@ -818,7 +855,7 @@ class KindAwareFitTests(unittest.TestCase):
         self.assertEqual(for_images.total, min(self.ONE_CARD[0], self.HOST[0]))
         self.assertEqual(for_images.pool, "both this GPU and this machine")
 
-    def profiles_on_cuda(self, held, estimated):
+    def profiles_on_cuda(self, held, estimated, held_here=None, host=None):
         """The two replacement profiles a CUDA host would give, per kind.
 
         The device reading is stood in for so the ordering and the
@@ -827,18 +864,21 @@ class KindAwareFitTests(unittest.TestCase):
 
         from ui import models_page, runtime
 
+        host = host or self.HOST
         on_cuda = model_runtime.DeviceProfile(
             backend="cuda",
-            total=self.ALL_CARDS[0] + self.HOST[0],
-            available=self.ALL_CARDS[1] + self.HOST[1],
+            total=self.ALL_CARDS[0] + host[0],
+            available=self.ALL_CARDS[1] + host[1],
             pool="the GPU plus this machine",
             held=held,
+            held_here=held if held_here is None else held_here,
         )
-        cards, card, host = self.memory()
         with (
-            cards,
-            card,
-            host,
+            mock.patch.object(model_runtime, "cuda_memory", return_value=self.ALL_CARDS),
+            mock.patch.object(
+                model_runtime, "cuda_device_memory", return_value=self.ONE_CARD
+            ),
+            mock.patch.object(model_runtime, "system_memory", return_value=host),
             mock.patch.object(models_page, "device_profile", return_value=on_cuda),
             mock.patch.object(runtime.MANAGER, "loaded_bytes", estimated),
         ):
@@ -848,71 +888,54 @@ class KindAwareFitTests(unittest.TestCase):
             )
 
     def test_switching_pool_keeps_what_the_unload_gives_back(self):
-        """replacement_profile chooses the pool before it reclaims, because
-        for_kind takes a fresh reading of the device: doing it the other way
-        threw away the memory the impending unload releases and marked a
-        pipeline tight that will fit once the load has unloaded."""
+        """A pipeline that will fit once the load has unloaded must not be
+        marked tight for the memory that unload is about to release."""
 
         held = 4 * 1024**3
         for_text, for_images = self.profiles_on_cuda(held, held)
 
-        # Both carry the reclamation; only the pool differs.
         self.assertEqual(for_text.available, self.ALL_CARDS[1] + self.HOST[1] + held)
+        # The card is the tighter side here, so the credit lands on it.
         self.assertEqual(
-            for_images.available, min(self.ONE_CARD[1], self.HOST[1]) + held
+            for_images.available, min(self.ONE_CARD[1] + held, self.HOST[1])
         )
         self.assertEqual(for_images.pool, "both this GPU and this machine")
+
+    def test_each_pool_is_reclaimed_before_they_are_collapsed(self):
+        """Unloading frees card memory on the card. Collapsing first would
+        credit it to whichever pool happened to be smaller: with host memory
+        the tighter side, 6 GB free there would read as 14 after an 8 GB
+        model left the card, and the list would call a replacement a fit
+        that the load then refuses."""
+
+        on_card = 8 * 1024**3
+        cramped_host = (64 * 1024**3, 6 * 1024**3)
+        _text, for_images = self.profiles_on_cuda(
+            on_card, on_card, host=cramped_host
+        )
+
+        # Host memory is the tighter side and gains nothing from the unload.
+        self.assertEqual(for_images.available, cramped_host[1])
+        # Which is emphatically not the collapsed minimum plus the credit.
+        self.assertNotEqual(for_images.available, cramped_host[1] + on_card)
 
     def test_a_tighter_pool_reclaims_only_the_card_it_lands_on(self):
         """allocated_bytes sums across the cards, which is what a text model
         spread by device_map="auto" holds and the wrong figure for the one
         card a pipeline is about to land on."""
 
-        from ui import models_page, runtime
-
         across_both = 12 * 1024**3
         on_this_card = 5 * 1024**3
-        on_cuda = model_runtime.DeviceProfile(
-            backend="cuda",
-            total=self.ALL_CARDS[0] + self.HOST[0],
-            available=self.ALL_CARDS[1] + self.HOST[1],
-            pool="the GPU plus this machine",
-            held=across_both,
-            held_here=on_this_card,
+        _text, for_images = self.profiles_on_cuda(
+            across_both, across_both, held_here=on_this_card
         )
-        cards, card, host = self.memory()
-        with (
-            cards,
-            card,
-            host,
-            mock.patch.object(models_page, "device_profile", return_value=on_cuda),
-            mock.patch.object(runtime.MANAGER, "loaded_bytes", across_both),
-        ):
-            for_images = models_page.replacement_profile(IMAGE_KIND)
 
         self.assertEqual(
-            for_images.available, min(self.ONE_CARD[1], self.HOST[1]) + on_this_card
+            for_images.available, min(self.ONE_CARD[1] + on_this_card, self.HOST[1])
         )
-
-    def test_a_tighter_pool_reclaims_only_what_the_allocator_reports(self):
-        """A text model that device_map="auto" spread across the card and
-        the machine gives the card back only the part that was on it.
-        Crediting the whole estimate to a pool that is the tighter of the
-        two would call a pipeline a fit that the load then refuses."""
-
-        on_card = 8 * 1024**3
-        whole_model = 20 * 1024**3
-        for_text, for_images = self.profiles_on_cuda(on_card, whole_model)
-
-        # The summed pool really does get the whole model back.
-        self.assertEqual(
-            for_text.available, self.ALL_CARDS[1] + self.HOST[1] + whole_model
+        self.assertLess(
+            for_images.available, self.ONE_CARD[1] + across_both
         )
-        # The tighter one gets only what was on the card.
-        self.assertEqual(
-            for_images.available, min(self.ONE_CARD[1], self.HOST[1]) + on_card
-        )
-        self.assertLess(for_images.available, min(self.ONE_CARD[1], self.HOST[1]) + whole_model)
 
     def test_nothing_loaded_reclaims_nothing_either_way(self):
         for_text, for_images = self.profiles_on_cuda(None, None)
@@ -947,6 +970,77 @@ class PreviewTests(unittest.TestCase):
         image = image_runtime.latent_preview(torch.randn(16, 8, 8), "sd", size=32)
 
         self.assertEqual(image.size, (32, 32))
+
+    def test_a_packed_latent_is_unpacked_before_it_is_previewed(self):
+        """Flux hands the callback a [batch, patches, channels] sequence.
+        Read as it comes, the batch axis would be taken for the channels and
+        the frame would be a band of unrelated colour."""
+
+        unpacked = torch.randn(1, 16, 8, 8)
+        seen = {}
+
+        class Packed:
+            vae_scale_factor = 8
+
+            @staticmethod
+            def _unpack_latents(latents, height, width, scale):
+                seen["args"] = (tuple(latents.shape), height, width, scale)
+                return unpacked
+
+        # 16 patches per side of a 4x4 grid, 64 channels: Flux's shape.
+        packed = torch.randn(1, 16, 64)
+        picture = image_runtime._picture_shaped(packed, Packed(), torch)
+
+        self.assertIsNotNone(picture)
+        self.assertEqual(tuple(picture.shape), (16, 8, 8))
+        self.assertEqual(seen["args"], ((1, 16, 64), 64, 64, 8))
+
+    def test_an_ordinary_latent_is_taken_as_it_comes(self):
+        picture = image_runtime._picture_shaped(torch.randn(1, 4, 8, 8), None, torch)
+
+        self.assertEqual(tuple(picture.shape), (4, 8, 8))
+
+    def test_a_sequence_that_cannot_be_unpacked_gets_no_frame(self):
+        """No frames rather than frames showing something else: the page
+        says this is the picture arriving."""
+
+        class NoUnpacker:
+            vae_scale_factor = 8
+
+        packed = torch.randn(1, 16, 64)
+
+        self.assertIsNone(image_runtime._picture_shaped(packed, NoUnpacker(), torch))
+        self.assertIsNone(image_runtime._picture_shaped(packed, None, torch))
+
+    def test_an_unpacker_that_refuses_gets_no_frame_either(self):
+        class Broken:
+            vae_scale_factor = 8
+
+            @staticmethod
+            def _unpack_latents(*args):
+                raise RuntimeError("wrong shape")
+
+        self.assertIsNone(
+            image_runtime._picture_shaped(torch.randn(1, 16, 64), Broken(), torch)
+        )
+
+    def test_a_run_whose_latents_cannot_be_previewed_still_measures_movement(self):
+        # How far a step moved the latent is a length either way, so the
+        # guidance and movement trace survive a frame this cannot draw.
+        class Packed(FakePipeline):
+            def __call__(self, *args, **kwargs):
+                callback = kwargs.get("callback_on_step_end")
+                for step in range(2):
+                    callback(self, step, 10, {"latents": torch.randn(1, 16, 64)})
+                return type("Output", (), {"images": []})()
+
+        run = image_runtime.run(
+            Packed(), ImageRequest(prompt="x", steps=2, width=32, height=32)
+        )
+
+        self.assertEqual(run.steps_done, 2)
+        self.assertEqual([reading.preview for reading in run.readings], ["", ""])
+        self.assertIsNotNone(run.readings[1].latent_change)
 
     def test_a_flat_latent_does_not_divide_by_its_own_zero_spread(self):
         image = image_runtime.latent_preview(torch.zeros(4, 8, 8), "sd", size=16)

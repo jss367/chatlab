@@ -923,14 +923,13 @@ def replacement_profile(kind: str = TEXT_KIND) -> DeviceProfile:
     without that, a 15 GB model already loaded would have every alternative
     marked tight and the button would then load them anyway.
 
-    The pool is chosen before the reclamation, not after: ``for_kind`` takes
-    a fresh reading of the device, which would throw away what the unload is
-    about to give back and mark a pipeline tight that will fit once the load
-    has unloaded. Order matters here, so this owns both steps rather than
-    leaving callers to put them in the right sequence.
+    ``for_kind`` does both the pool and the reclamation, because for a pool
+    that is the tighter of two the unload has to be counted into each side
+    before they are collapsed; doing it afterwards credits card memory to
+    whichever pool happened to be smaller.
     """
 
-    return device_profile().for_kind(kind).reclaimed(runtime.MANAGER.loaded_bytes)
+    return device_profile().for_kind(kind, runtime.MANAGER.loaded_bytes)
 
 
 def cached_fits(

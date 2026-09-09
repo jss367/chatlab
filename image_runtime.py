@@ -806,11 +806,12 @@ def run(
         it really got.
         """
 
-        del pipe
         latents = callback_kwargs.get("latents")
         if latents is not None:
             readings.append(
-                _reading(step, timestep, latents, family, guidance, previous, torch)
+                _reading(
+                    step, timestep, latents, family, guidance, previous, torch, pipe
+                )
             )
             if on_step is not None:
                 on_step(readings[-1])
@@ -871,6 +872,47 @@ def run(
     )
 
 
+def _picture_shaped(latents, pipe, torch):
+    """One image's latent as channels, height and width, or ``None``.
+
+    Most pipelines hand the callback a ``[batch, channels, height, width]``
+    tensor and this is a slice. Flux and the other transformer pipelines
+    hand over a packed ``[batch, patches, channels]`` sequence instead,
+    which has to be unpacked before it means anything spatially: read as it
+    comes, the batch axis would be taken for the channels and the frame
+    would be a thin band of unrelated colour rather than the composition
+    being denoised.
+
+    ``None`` where a sequence cannot be unpacked - the pipeline offers no
+    unpacker, or it refuses these arguments. A run then has no frames rather
+    than a run of frames that show something else, which is the same choice
+    the attention maps make: the page says this is the picture arriving.
+    """
+
+    if latents.ndim == 4:
+        return latents[0]
+    if latents.ndim != 3:
+        return None
+    unpack = getattr(type(pipe), "_unpack_latents", None) if pipe is not None else None
+    scale = getattr(pipe, "vae_scale_factor", None)
+    if unpack is None or not scale:
+        return None
+    # The packed sequence covers the picture two latent cells at a time in
+    # each direction, which is what the patch count has to be read back
+    # through to recover its shape.
+    patches = latents.shape[1]
+    side = int(round(math.sqrt(patches)))
+    if side * side != patches:
+        return None
+    height = width = side * scale * 2
+    try:
+        unpacked = unpack(latents, height, width, scale)
+    except (RuntimeError, ValueError, TypeError, AttributeError):
+        logger.debug("Could not unpack a packed latent for the preview", exc_info=True)
+        return None
+    return unpacked[0] if unpacked.ndim == 4 else None
+
+
 def _refuse_unwatchable(pipeline) -> None:
     """Refuse a pipeline whose steps cannot be watched, before it draws.
 
@@ -900,12 +942,18 @@ def _refuse_unwatchable(pipeline) -> None:
         )
 
 
-def _reading(step, timestep, latents, family, guidance, previous, torch) -> StepReading:
+def _reading(
+    step, timestep, latents, family, guidance, previous, torch, pipe=None
+) -> StepReading:
     """One step's readings, from the latent it left and the hook's last look."""
 
-    latent = latents[0] if latents.ndim == 4 else latents
+    latent = _picture_shaped(latents, pipe, torch)
     with torch.no_grad():
-        flat = latent.detach().to("cpu", torch.float32).flatten()
+        # Measured off the latent as the scheduler left it, packed or not:
+        # how far a step moved it is a length either way, and a sequence
+        # this could not unpack for a picture is still a sequence of the
+        # right size to compare against the last one.
+        flat = latents.detach().to("cpu", torch.float32).flatten()
         length = float(flat.norm())
         before = previous.get("latent")
         change = (
@@ -918,7 +966,11 @@ def _reading(step, timestep, latents, family, guidance, previous, torch) -> Step
     return StepReading(
         step=int(step) + 1,
         timestep=float(timestep),
-        preview=data_uri(latent_preview(latent, family), quality=PREVIEW_QUALITY),
+        preview=(
+            data_uri(latent_preview(latent, family), quality=PREVIEW_QUALITY)
+            if latent is not None
+            else ""
+        ),
         latent_change=change,
         cond_norm=cond,
         uncond_norm=uncond,

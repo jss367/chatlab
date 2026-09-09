@@ -125,6 +125,20 @@ def trajectory_frame(run, step: int) -> str:
         facts.append(f"guidance pull {reading.guidance_share:.3f}")
     if reading.latent_change is not None:
         facts.append(f"moved {reading.latent_change:.3f}")
+    if not reading.preview:
+        # A latent this could not read as a picture; see
+        # image_runtime._picture_shaped. The readings that do not depend on
+        # its shape are still here, so the step keeps its line.
+        return (
+            '<figure class="viz-root" id="trajectory">'
+            f'<figcaption class="viz-title">Step {reading.step} of {len(readings)}'
+            f'<span class="viz-sub">{html.escape(" · ".join(facts))}</span>'
+            "</figcaption>"
+            '<div class="viz-empty">This pipeline packs its latents in a shape '
+            "ChatLab cannot lay out as a picture, so there is no frame for "
+            "this step. The guidance and movement readings above are "
+            "unaffected.</div></figure>"
+        )
     return (
         '<figure class="viz-root" id="trajectory">'
         f'<figcaption class="viz-title">Step {reading.step} of {len(readings)}'

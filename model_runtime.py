@@ -609,15 +609,23 @@ def pipeline_missing_files(snapshot: Path) -> tuple[str, ...]:
         if index is not None:
             missing.extend(f"{name}/{shard}" for shard in _missing_shards(index))
             continue
-        weights = _component_weights(folder)
-        if not weights:
+        # The set this load will read, not whatever else is in the folder:
+        # a complete file of another variant does not make up for the one
+        # being loaded, and an orphan shard of the one being loaded is not
+        # excused by a complete file of another.
+        wanted = [
+            entry
+            for entry in _component_weights(folder)
+            if _weight_variant(entry.name)[0] == variant
+        ] or _component_weights(folder)
+        if not wanted:
             missing.append(f"{name}/{MODEL_WEIGHTS}")
-        elif all(SHARD_NAME.search(entry.name) for entry in weights):
+        elif all(SHARD_NAME.search(entry.name) for entry in wanted):
             # Shards and no index. Diffusers finds a sharded checkpoint
             # through its index and nothing else, so a download that left
             # the shards but not the index has weights that cannot be
             # discovered - which is a gap, not a whole unsharded set.
-            missing.append(f"{name}/{_shard_index_name(weights[0])}")
+            missing.append(f"{name}/{_shard_index_name(wanted[0])}")
     return tuple(missing)
 
 
@@ -799,14 +807,26 @@ def pipeline_loaded_bytes(snapshot: Path, load_dtype: str) -> int | None:
 
 
 def _component_variants(folder: Path) -> set[str]:
-    """The weight variants one component folder ships, ``""`` for the plain set."""
+    """The weight variants one component folder can actually be loaded from.
 
-    return {
-        variant
-        for variant, _suffix in (
-            _weight_variant(entry.name) for entry in _component_weights(folder)
-        )
-    }
+    A variant counts only where its files are a set ``from_pretrained``
+    could read: one unsharded file, or shards with the index that lists
+    them. An orphan shard left by a cut-off download is not a plain set just
+    because it is named like one - counting it would say a plain load is
+    available, send :func:`pipeline_variant` looking for unsuffixed weights,
+    and leave a perfectly good half-precision file beside it unused.
+    """
+
+    grouped: dict[str, list[Path]] = {}
+    for entry in _component_weights(folder):
+        grouped.setdefault(_weight_variant(entry.name)[0], []).append(entry)
+    usable = set()
+    for variant, entries in grouped.items():
+        if any(not SHARD_NAME.search(entry.name) for entry in entries):
+            usable.add(variant)
+        elif _component_index(folder, variant) is not None:
+            usable.add(variant)
+    return usable
 
 
 def pipeline_variant(snapshot: Path) -> str | None:
@@ -1611,21 +1631,51 @@ class DeviceProfile:
 
         return self.backend == "mps"
 
-    def for_kind(self, kind: str) -> DeviceProfile:
-        """The same reading, with the pool the given kind of model would use.
+    def for_kind(self, kind: str, reclaimed: int | None = None) -> DeviceProfile:
+        """The reading a load of this kind would get, with the unload counted in.
 
         Only an image pipeline on CUDA reads differently, and only because it
         is staged in host memory before it is moved onto the card, so it has
         to fit both pools rather than their sum; see :func:`memory_pool`.
-        Everything else is the reading it already is. Kept as a method so a
-        caller judging a list of models can take the two readings it needs
-        once rather than per model - reading host memory is a subprocess.
+        Everything else is :meth:`reclaimed` on the reading it already is.
+
+        The unload is counted into each pool *before* they are collapsed to
+        the tighter one, which is why this does both rather than leaving the
+        caller to call :meth:`reclaimed` afterwards. Unloading frees card
+        memory on the card, and collapsing first would credit it to whichever
+        pool happened to be smaller: with host memory the tighter side, 6 GB
+        free there would read as 14 after an 8 GB model left the card, and
+        the list would call a replacement a fit that the load then refuses.
+
+        Kept as a method so a caller judging a list of models takes the two
+        readings it needs once rather than per model - reading host memory
+        is a subprocess.
         """
 
         if kind != IMAGE_KIND or self.backend != "cuda":
-            return self
-        total, available, pool = memory_pool(self.backend, self.ceiling, kind)
-        return replace(self, total=total, available=available, pool=pool)
+            return self.reclaimed(reclaimed)
+        card_total, card_free = cuda_device_memory()
+        host_total, host_free = system_memory()
+        # What the unload gives back, pool by pool. The card gets its own
+        # allocator figure; host memory gets nothing, because the share of a
+        # spread model that sat there cannot be read from here and guessing
+        # high is what turns a refusal into a promise.
+        if card_free is not None:
+            card_free += self.held_here or 0
+        total, available = _smaller_known(
+            (card_total, card_free), (host_total, host_free)
+        )
+        if self.ceiling is not None:
+            total = self.ceiling if total is None else min(total, self.ceiling)
+            available = (
+                self.ceiling if available is None else min(available, self.ceiling)
+            )
+        return replace(
+            self,
+            total=total,
+            available=available,
+            pool="both this GPU and this machine",
+        )
 
     def reclaimed(self, estimated: int | None = None) -> DeviceProfile:
         """The same reading with the loaded model's memory given back.
@@ -1654,28 +1704,14 @@ class DeviceProfile:
         )
 
     def reclaimable(self, estimated: int | None = None) -> int:
-        """How much of the loaded model's memory this pool really gets back.
+        """How much of the loaded model's memory a summed pool gets back.
 
-        The larger of the two figures for a pool that is a sum, for the
-        reason :meth:`reclaimed` gives. For a pool that is the tighter of
-        two — an image pipeline on CUDA, see :meth:`for_kind` — only the
-        allocator's figure, because the estimate covers a model that
-        ``device_map="auto"`` may have spread across the card and the
-        machine, and crediting the whole of it to the card would overstate
-        what unloading frees there. Unloading a 20 GB model holding 8 GB of
-        card would otherwise credit the card 20, and a pipeline would be
-        called a fit that the load then refuses.
-
-        Understating it is the safe direction: it can only call a model
-        tight that would have fitted, where overstating sends a reader to a
-        button that refuses them.
+        The larger of the two figures, for the reason :meth:`reclaimed`
+        gives. A pool that is the tighter of two does its own arithmetic
+        pool by pool before collapsing them, and does not come through here;
+        see :meth:`for_kind`.
         """
 
-        if self.pool.startswith("both "):
-            # The card's own figure, not the sum across the cards: a model
-            # spread over two of them frees only its share on the one an
-            # image pipeline is about to land on.
-            return self.held_here if self.held_here is not None else (self.held or 0)
         return max(self.held or 0, estimated or 0)
 
 DEVICE_LABELS = {"mps": "Apple Metal (MPS)", "cpu": "CPU"}
