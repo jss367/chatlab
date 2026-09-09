@@ -18,6 +18,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - A **Score text** tab for measuring text the model did not write
 - Perplexity, mean surprise, and a surprise trace for each response
 - Full metric-trace export as JSON or CSV
+- An OpenAI-compatible HTTP API on the same port, so the measurements can be scripted
 - A system prompt, plus temperature, top-p, top-k, seed, and response-length controls
 - Every setting saved to one JSON file you can edit by hand or share between machines
 - Temperature, top-p, top-k and response length kept per conversation, so two forks can be compared at different settings
@@ -308,6 +309,65 @@ After a response finishes, open **Export full metric trace** under the conversat
 Every prompt token is measured against the distribution the model held one step earlier, during the same pass that fills the key-value cache, so it costs nothing extra to see how predictable your own prompt was. They appear under **Prompt and context tokens**; the first token has nothing before it, so it is left unscored. Turn the measurement off in **Sampling, analysis, and input controls** if you do not want it, and note that only the most recent 1,024 tokens of a very long prompt are scored.
 
 The **Score text** tab measures text the model did not generate. Paste it, optionally give it context first, and one forward pass reports the same numbers for every token — useful for comparing two prompts, checking how memorized a passage is, or evaluating a response that came from somewhere else. Scoring is capped at 4,096 tokens per run, or at the model's shorter positional limit. A line under the box counts what is in it against that cap as it is typed, using the same encoding the check itself uses, so a passage too large to score says so before the press rather than after it.
+
+## The local API
+
+Everything ChatLab does to the model in memory is addressable from a script.
+The API is served on the same port as the interface, so if the app is at
+`http://127.0.0.1:7860` then its API is at `http://127.0.0.1:7860/v1`, and any
+OpenAI client can be pointed at it:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:7860/v1", api_key="not-needed")
+answer = client.chat.completions.create(
+    model="allenai/Olmo-3-7B-Think",
+    messages=[{"role": "user", "content": "Name three cities."}],
+    logprobs=True,
+    top_logprobs=5,
+)
+```
+
+`GET /v1/chatlab/status` is the call to make first: it names the model in
+memory, says whether a response is already running, and reports the memory
+figures the hardware panel shows. `GET /v1/models` lists every complete model
+in the cache and marks the loaded one.
+
+`POST /v1/chat/completions` answers a conversation. It takes `messages`,
+`temperature`, `top_p`, `top_k`, `max_tokens`, `seed`, `stream`, `logprobs`
+and `top_logprobs`, and anything left out takes the value the app is set to,
+so a script and the interface answer alike unless the script says otherwise. A
+value outside what ChatLab allows is refused with the nearest it would take
+rather than clamped in silence. Reasoning arrives as `reasoning_content`
+beside the answer's `content`, in the response and in the stream, so nothing
+has to strip `<think>` markers. A trailing assistant message is the assistant
+prefill: the reply must begin with that text, and its tokens are measured as
+replayed rather than sampled.
+
+With `logprobs`, every token carries its own `logprob` and the alternatives
+`top_logprobs` asked for, and beside them, under `chatlab`, the same
+measurements the token panel shows: raw rank, raw and sampling probability,
+surprise, entropy, the top-1 margin, the probability mass above it, and the
+sampling shift. `chatlab.summary` comes with every response whether or not
+the tokens do - perplexity, mean surprise, the share the model ranked first -
+and `prompt_logprobs: true` adds the prompt's own tokens under
+`chatlab.prompt_tokens`. The token that ended the response is measured and
+counted like any other, even though it is not part of the text.
+
+`POST /v1/chatlab/score` is the **Score text** tab: give it `text` and
+optionally `context`, and it measures every token in one forward pass. It is
+the endpoint for running a corpus past a model rather than a passage at a
+time.
+
+The API answers for the model already loaded and never loads one: a load takes
+minutes, replaces what is in memory, and can be refused for want of it, so it
+stays on the Models page where it can be watched. A request naming another
+model is refused by name. Only one generation runs at a time, as in the
+interface, and a second request is told the model is busy rather than queued
+behind an answer thousands of tokens long. There is no authentication, and
+there is none on the interface either: both are served on the loopback address
+and anything that can reach one can already do everything the other can.
 
 ## Releasing a new version
 
