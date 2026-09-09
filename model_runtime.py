@@ -1191,6 +1191,42 @@ def foreign_to_transformers(tags: Iterable[str]) -> bool:
     return not SEARCH_FOREIGN_FORMAT_TAGS.isdisjoint(tags)
 
 
+def causal_lm_model_types() -> Mapping[str, str]:
+    """Transformers' map from a config's ``model_type`` to its causal-LM class.
+
+    Imported when a search asks for it rather than at the top of the module,
+    the way the rest of the heavy imports here are: it reaches torch, and a
+    session that loads a model already knows the cost while one that only
+    reads its own cache should not pay it.
+    """
+
+    from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+
+    return MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+
+
+def loads_as_a_causal_lm(config: Mapping | None, model_types: Mapping[str, str]) -> bool:
+    """Whether ``AutoModelForCausalLM`` has a class for the architecture ``config`` names.
+
+    A pipeline tag says what a model does, not which auto class loads it.
+    LLaVA, BLIP-2, PaliGemma, Idefics and the Qwen-VL models all sit under
+    "image-text-to-text" beside Gemma 4, but only Gemma 4 is in this map:
+    the rest need their own auto class, and would download in full and then
+    fail in :meth:`ModelManager._load_locked`. ``model_type`` is the field
+    ``from_pretrained`` looks itself up by, so this is the same verdict it
+    will reach once the files are on disk, reached before the download. A
+    repository whose config the hub does not carry is left out for the reason
+    an untagged one is: nothing about it says it would load.
+    """
+
+    if not config:
+        return False
+    if config.get("model_type") in model_types:
+        return True
+    classes = set(model_types.values())
+    return any(name in classes for name in config.get("architectures") or ())
+
+
 @dataclass(frozen=True)
 class HubModel:
     """What the hub says about one model, as much as a search result carries."""
@@ -1216,9 +1252,10 @@ def search_hub_models(
     framework would be dead ends. Of those, the ones kept are the ones whose
     pipeline tag is in :data:`SEARCH_PIPELINE_TAGS` - a model that writes
     text, whatever else it can read - less the conversions to another runtime
-    that :func:`foreign_to_transformers` recognises. A repository the hub has
-    no tag for is left out rather than guessed at; its ID can still be typed
-    into the model ID box. Sorted by recent downloads.
+    that :func:`foreign_to_transformers` recognises, and less those whose
+    architecture :func:`loads_as_a_causal_lm` does not accept. A repository
+    the hub has no tag or config for is left out rather than guessed at; its
+    ID can still be typed into the model ID box. Sorted by recent downloads.
 
     The hub is read a page at a time until ``limit`` results are kept, so a
     query whose most-downloaded matches are all rejected here still fills the
@@ -1238,6 +1275,7 @@ def search_hub_models(
         filter="transformers",
         sort="downloads",
         expand=[
+            "config",
             "downloads",
             "likes",
             "pipeline_tag",
@@ -1249,6 +1287,7 @@ def search_hub_models(
         ],
         token=token,
     )
+    model_types = causal_lm_model_types()
     results = []
     for scanned, info in enumerate(found, start=1):
         if scanned > SEARCH_SCAN_LIMIT:
@@ -1257,6 +1296,8 @@ def search_hub_models(
             continue
         tags = getattr(info, "tags", None) or []
         if foreign_to_transformers(tags):
+            continue
+        if not loads_as_a_causal_lm(getattr(info, "config", None), model_types):
             continue
         safetensors = getattr(info, "safetensors", None)
         parameters = getattr(safetensors, "total", None) if safetensors else None

@@ -2774,11 +2774,16 @@ class CountScoreTokensTests(unittest.TestCase):
 
 
 def hub_result(model_id, pipeline_tag, **extra):
-    """One entry the way ``list_models`` hands it over, tags and all."""
+    """One entry the way ``list_models`` hands it over, config and tags and all.
+
+    The config defaults to an architecture ``AutoModelForCausalLM`` loads, so
+    a test that is about something else does not have to say so.
+    """
 
     fields = {
         "id": model_id,
         "pipeline_tag": pipeline_tag,
+        "config": {"model_type": "llama", "architectures": ["LlamaForCausalLM"]},
         "downloads": 1000,
         "likes": 1,
         "library_name": "transformers",
@@ -2814,8 +2819,14 @@ class HubSearchTests(unittest.TestCase):
         # tags it for the pictures and sound it also reads. Keeping only
         # "text-generation" hid it and every model like it.
         self.found = [
-            hub_result("google/gemma-4-E4B-it", "any-to-any"),
-            hub_result("Qwen/Qwen3-VL-8B-Instruct", "image-text-to-text"),
+            hub_result(
+                "google/gemma-4-E4B-it",
+                "any-to-any",
+                config={
+                    "model_type": "gemma4",
+                    "architectures": ["Gemma4ForConditionalGeneration"],
+                },
+            ),
             hub_result("allenai/Olmo-3-7B-Think", "text-generation"),
         ]
 
@@ -2823,8 +2834,59 @@ class HubSearchTests(unittest.TestCase):
 
         self.assertEqual(
             [result.model_id for result in found],
-            ["google/gemma-4-E4B-it", "Qwen/Qwen3-VL-8B-Instruct", "allenai/Olmo-3-7B-Think"],
+            ["google/gemma-4-E4B-it", "allenai/Olmo-3-7B-Think"],
         )
+
+    def test_a_multimodal_model_needing_its_own_auto_class_is_left_out(self):
+        # The pipeline tag says what a model does, not which auto class loads
+        # it: BLIP-2 and LLaVA sit under "image-text-to-text" beside Gemma 4
+        # but need Blip2ForConditionalGeneration and
+        # LlavaForConditionalGeneration. Listing them would download the whole
+        # checkpoint for a load that ends in an unsupported-config error.
+        self.found = [
+            hub_result(
+                "Salesforce/blip2-opt-2.7b",
+                "image-text-to-text",
+                config={
+                    "model_type": "blip-2",
+                    "architectures": ["Blip2ForConditionalGeneration"],
+                },
+            ),
+            hub_result(
+                "llava-hf/llava-1.5-7b-hf",
+                "image-text-to-text",
+                config={
+                    "model_type": "llava",
+                    "architectures": ["LlavaForConditionalGeneration"],
+                },
+            ),
+            hub_result(
+                "google/gemma-4-E4B-it",
+                "any-to-any",
+                config={
+                    "model_type": "gemma4",
+                    "architectures": ["Gemma4ForConditionalGeneration"],
+                },
+            ),
+        ]
+
+        found = search_hub_models("multimodal")
+
+        self.assertEqual([result.model_id for result in found], ["google/gemma-4-E4B-it"])
+
+    def test_an_architecture_answers_for_a_config_with_no_model_type(self):
+        self.found = [
+            hub_result(
+                "org/no-model-type",
+                "text-generation",
+                config={"architectures": ["LlamaForCausalLM"]},
+            ),
+            hub_result("org/no-config-at-all", "text-generation", config=None),
+        ]
+
+        found = search_hub_models("org")
+
+        self.assertEqual([result.model_id for result in found], ["org/no-model-type"])
 
     def test_the_hub_is_not_asked_to_do_the_filtering(self):
         # The tags are checked here, so asking the hub for one pipeline tag
