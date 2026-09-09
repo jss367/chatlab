@@ -768,14 +768,14 @@ def select_default_model():
 NO_CACHED_MODEL_SELECTED = "Select a model to see its details and put it in the model ID box."
 
 
-# The search is scoped to one kind at a time, because the hub's own filters
-# are: a text-generation search and a text-to-image one are different
-# queries, not one query with a wider net.
+# The search is scoped to one kind at a time, because the hub files them
+# under different libraries: a Transformers query and a diffusers one are
+# different searches, not one search with a wider net.
 SEARCH_KINDS = (("Text models", TEXT_KIND), ("Image models", IMAGE_KIND))
 
 SEARCH_HINTS = {
     TEXT_KIND: (
-        "Searching Hugging Face for text-generation models Transformers can load. "
+        "Searching Hugging Face for language models Transformers can load. "
         "Selecting a result puts its ID in the model ID box; **Download and load** fetches it."
     ),
     IMAGE_KIND: (
@@ -1183,7 +1183,9 @@ def search_models(query: str, hf_token: str, kind: str = TEXT_KIND):
             {},
         )
     if not results:
-        described = "text-to-image pipelines" if kind == IMAGE_KIND else "text-generation models"
+        described = (
+            "text-to-image pipelines" if kind == IMAGE_KIND else "language models"
+        )
         return (
             cleared,
             f"No {described} matched `{html.escape(cleaned)}`.",

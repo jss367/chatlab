@@ -1156,7 +1156,7 @@ class ModelSearchPaneTests(unittest.TestCase):
         radio, detail, _ = app.search_models("zzzz", "")
 
         self.assertEqual(radio["choices"], [])
-        self.assertIn("No text-generation models matched", detail)
+        self.assertIn("No language models matched", detail)
         self.assertIn("zzzz", detail)
 
     def test_choosing_a_result_fills_the_id_box_and_describes_it(self):
