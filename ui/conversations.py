@@ -110,6 +110,23 @@ def restore_conversations():
     return messages, turns, forks, conversation_list_update(forks, turns)
 
 
+def sampling_on_screen(values) -> dict:
+    """The sampling the controls are showing, or the saved settings without them.
+
+    The controls are the truth for what the reader has chosen. The settings
+    file catches up a round trip later - it is written by its own listener -
+    so a conversation started or forked in that window and pinned from the
+    file would be pinned to the values the reader had just moved away from,
+    and would then put them back on the controls.
+    """
+
+    if not values:
+        return settings.sampling_values(None)
+    return settings.sampling_values(
+        dict(zip(settings.CONVERSATION_SAMPLING, values, strict=True))
+    )
+
+
 def sampling_updates(forks: dict | None):
     """Put the active conversation's sampling into the controls.
 
@@ -243,6 +260,7 @@ def fork_conversation(
     forks: dict | None,
     selected: dict | None,
     scale_name: str = DEFAULT_COLOR_SCALE,
+    *sampling,
 ):
     """Copy the conversation into a new fork and switch to it.
 
@@ -269,7 +287,10 @@ def fork_conversation(
     # a side carrying no sampling of its own follows the settings file, which
     # the first slider moved on the other side would rewrite: both would then
     # answer alike, which is the one thing the fork was for.
-    inherited = settings.sampling_values(branch_sampling(forks, forks["active"]))
+    held = branch_sampling(forks, forks["active"])
+    inherited = (
+        settings.sampling_values(held) if held else sampling_on_screen(sampling)
+    )
     put_branch_sampling(forks, forks["active"], inherited)
     put_branch_sampling(forks, name, inherited)
     forks["active"] = name
@@ -367,6 +388,7 @@ def new_conversation(
     turns: list[dict] | None,
     forks: dict | None,
     scale_name: str = DEFAULT_COLOR_SCALE,
+    *sampling,
 ):
     """Put the conversation on screen away and start an empty one.
 
@@ -386,10 +408,10 @@ def new_conversation(
     # this one loaded is not given a twin the merge would take for it.
     name = library.claim_name(forks, CHAT_PREFIX)
     put_branch(forks, name, [])
-    # Started from the settings file, and pinned to what it said at the time:
-    # a conversation that went on following the file would be moved by a
-    # slider touched on any other conversation.
-    put_branch_sampling(forks, name, settings.sampling_values(None))
+    # Started from the sampling on screen, and pinned to it: a conversation
+    # that went on following the settings file would be moved by a slider
+    # touched on any other conversation.
+    put_branch_sampling(forks, name, sampling_on_screen(sampling))
     forks["active"] = name
     return (
         gr.skip(),

@@ -1291,7 +1291,13 @@ def build_app() -> gr.Blocks:
         brings_its_sampling(
             fork_button.click(
                 fork_conversation,
-                [conversation_state, forks_state, selected_message, color_scale],
+                [
+                    conversation_state,
+                    forks_state,
+                    selected_message,
+                    color_scale,
+                    *sampling_controls,
+                ],
                 fork_outputs,
                 cancels=running,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
@@ -1300,7 +1306,7 @@ def build_app() -> gr.Blocks:
         brings_its_sampling(
             new_button.click(
                 new_conversation,
-                [conversation_state, forks_state, color_scale],
+                [conversation_state, forks_state, color_scale, *sampling_controls],
                 fork_outputs,
                 cancels=running,
                 concurrency_id=CONVERSATION_PANE_QUEUE,

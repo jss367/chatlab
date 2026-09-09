@@ -3280,6 +3280,53 @@ class ConversationSamplingTests(unittest.TestCase):
 
         self.assertEqual(written, gr.skip())
 
+    def test_a_new_conversation_is_pinned_from_the_controls(self):
+        # The settings file is written by its own listener, a round trip
+        # behind: a conversation started right after a slider was moved and
+        # pinned from the file would be pinned to the value just moved away
+        # from, and would then put it back on the controls.
+        with settings.override(**settings.sampling_defaults()):
+            result = app.new_conversation(
+                [make_turn("user", "one")],
+                new_forks(),
+                DEFAULT_COLOR_SCALE,
+                *self.OWN.values(),
+            )
+
+        started = result[FORK_STATE]
+        self.assertEqual(self.held(started, started["active"]), self.OWN)
+        self.assertEqual(self.values(app.sampling_updates(started)), self.OWN)
+
+    def test_a_fork_of_an_unpinned_conversation_takes_the_controls_too(self):
+        with settings.override(**settings.sampling_defaults()):
+            result = app.fork_conversation(
+                [make_turn("user", "one")],
+                new_forks(),
+                None,
+                DEFAULT_COLOR_SCALE,
+                *self.OWN.values(),
+            )
+
+        forked = result[FORK_STATE]
+        self.assertEqual(self.held(forked, MAIN_BRANCH), self.OWN)
+        self.assertEqual(self.held(forked, "Fork 1"), self.OWN)
+
+    def test_a_fork_of_a_pinned_conversation_keeps_its_sampling(self):
+        # The parent's own entry wins over the controls: the controls are
+        # showing it anyway, and the entry is what the parent answers with.
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
+
+        result = app.fork_conversation(
+            [make_turn("user", "one")],
+            forks,
+            None,
+            DEFAULT_COLOR_SCALE,
+            *settings.sampling_defaults().values(),
+        )
+
+        self.assertEqual(self.held(result[FORK_STATE], "Fork 1"), self.OWN)
+
     def test_switching_back_brings_the_sampling_back(self):
         forks = new_forks()
         put_branch(forks, "Fork 1", [])
