@@ -133,6 +133,29 @@ class MazeTests(unittest.TestCase):
                     self.assertFalse(ep.interrupted)
                     self.assertIsNone(ep.resumed)
 
+    def test_supplied_code_fences_are_rejected_before_they_can_hide_generated_calls(self):
+        for fence in ('```', '~~~'):
+            with self.subTest(fence=fence):
+                # The normal parser must still ignore model-generated fenced examples.
+                self.assertEqual(parse_call(fence + '\n' + call_text(MAZE.maze_id, 'east')), (None, None))
+                ep = Episode(MAZE, CONFIG | {'interruption_text': fence + '\nExample', 'prefix_tokens': 0})
+                manager = Manager([])
+                list(stream_episode(ep, manager))
+                self.assertEqual(ep.phase, 'error')
+                self.assertIn('code fences', ep.detail)
+                self.assertEqual(manager.calls, [])
+                self.assertFalse(ep.interrupted)
+                self.assertFalse(manager.busy)
+
+    def test_ordinary_interruption_prose_with_inline_backticks_remains_allowed(self):
+        ep = Episode(MAZE, CONFIG | {'interruption_text': 'Discuss `inline text` and ~one tilde~.', 'prefix_tokens': 0})
+        manager = Manager([('\n' + call_text(MAZE.maze_id, 'east'), [8, 0])])
+        list(stream_episode(ep, manager, single_step=True))
+        self.assertEqual(ep.phase, 'paused')
+        self.assertEqual(ep.position, (0, 1))
+        self.assertTrue(ep.interrupted)
+        self.assertTrue(ep.resumed)
+
     def test_interruption_rejects_finished_runs_and_replays_without_changing_provenance(self):
         for phase, replay in [(phase, False) for phase in TERMINAL] + [('ready', True), ('paused', True), ('running', True)]:
             with self.subTest(phase=phase, replay=replay):
