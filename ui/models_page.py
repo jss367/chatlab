@@ -899,12 +899,10 @@ def cached_fit(
     snapshot = snapshot_folder(entry.path) if entry.path is not None else None
     if snapshot is None:
         return None
-    # Both the size and the pool depend on the kind: a pipeline has no
-    # checkpoint at its root to measure and, on CUDA, is staged in host
-    # memory before it moves onto the card, so it has to fit both pools.
-    # Without either, every verdict beside an image model would be a
-    # text-shaped guess, which is the disagreement these exist to prevent.
-    profile = profile.for_kind(entry.status.kind)
+    # The size depends on the kind too: a pipeline has no checkpoint at its
+    # root to measure. The pool is already the one for this kind - the
+    # caller chose it, because choosing it here would re-read the device and
+    # discard the memory the impending unload gives back.
     estimated = estimate_snapshot_bytes(
         snapshot,
         profile.dtype or ASSUMED_DTYPE,
@@ -914,7 +912,7 @@ def cached_fit(
     return model_fit(estimated, profile)
 
 
-def replacement_profile() -> DeviceProfile:
+def replacement_profile(kind: str = TEXT_KIND) -> DeviceProfile:
     """The machine as a model about to be loaded would find it.
 
     Every model a verdict is given for is one that would replace whatever is
@@ -922,20 +920,36 @@ def replacement_profile() -> DeviceProfile:
     model fits. So the weights on the device now are counted as available;
     without that, a 15 GB model already loaded would have every alternative
     marked tight and the button would then load them anyway.
+
+    The pool is chosen before the reclamation, not after: ``for_kind`` takes
+    a fresh reading of the device, which would throw away what the unload is
+    about to give back and mark a pipeline tight that will fit once the load
+    has unloaded. Order matters here, so this owns both steps rather than
+    leaving callers to put them in the right sequence.
     """
 
-    return device_profile().reclaimed(runtime.MANAGER.loaded_bytes)
+    return device_profile().for_kind(kind).reclaimed(runtime.MANAGER.loaded_bytes)
 
 
 def cached_fits(
     models: list[CachedModel], precision: str | None
 ) -> dict[str, Fit]:
-    """The fit verdict for each of ``models``, by model ID, read against one profile."""
+    """The fit verdict for each of ``models``, by model ID, one reading per kind.
 
-    profile = replacement_profile()
+    A reading per kind rather than one for the whole list, because an image
+    pipeline on CUDA is judged against a different pool; see
+    :meth:`DeviceProfile.for_kind`. Taken lazily and kept, so a list of only
+    text models still costs the one reading it always did - reading host
+    memory is a subprocess, and this runs on every rescan.
+    """
+
+    profiles: dict[str, DeviceProfile] = {}
     fits = {}
     for entry in models:
-        fit = cached_fit(entry, precision, profile)
+        kind = entry.status.kind or TEXT_KIND
+        if kind not in profiles:
+            profiles[kind] = replacement_profile(kind)
+        fit = cached_fit(entry, precision, profiles[kind])
         if fit is not None:
             fits[entry.model_id] = fit
     return fits
@@ -972,7 +986,7 @@ def hub_fits(
     nothing about how the weights are laid out.
     """
 
-    profile = replacement_profile().for_kind(kind)
+    profile = replacement_profile(kind)
     return {
         result.model_id: hub_fit(result, precision, profile) for result in results
     }
@@ -1435,7 +1449,7 @@ def select_search_result(
             hub_fit(
                 result,
                 precision,
-                replacement_profile().for_kind(results_kind({result.model_id: result})),
+                replacement_profile(results_kind({result.model_id: result})),
             ),
         ),
     )

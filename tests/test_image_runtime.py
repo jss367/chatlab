@@ -637,6 +637,41 @@ class KindAwareFitTests(unittest.TestCase):
         self.assertEqual(for_images.total, min(self.ONE_CARD[0], self.HOST[0]))
         self.assertEqual(for_images.pool, "both this GPU and this machine")
 
+    def test_switching_pool_keeps_what_the_unload_gives_back(self):
+        """replacement_profile chooses the pool before it reclaims, because
+        for_kind takes a fresh reading of the device: doing it the other way
+        threw away the memory the impending unload releases and marked a
+        pipeline tight that will fit once the load has unloaded."""
+
+        from ui import models_page, runtime
+
+        held = 4 * 1024**3
+        # The device reading a CUDA host would give, stood in for so the
+        # ordering under test is reached on a machine that has no card.
+        on_cuda = model_runtime.DeviceProfile(
+            backend="cuda",
+            total=self.ALL_CARDS[0] + self.HOST[0],
+            available=self.ALL_CARDS[1] + self.HOST[1],
+            pool="the GPU plus this machine",
+        )
+        cards, card, host = self.memory()
+        with (
+            cards,
+            card,
+            host,
+            mock.patch.object(models_page, "device_profile", return_value=on_cuda),
+            mock.patch.object(runtime.MANAGER, "loaded_bytes", held),
+        ):
+            for_text = models_page.replacement_profile(TEXT_KIND)
+            for_images = models_page.replacement_profile(IMAGE_KIND)
+
+        # Both carry the reclamation; only the pool differs.
+        self.assertEqual(for_text.available, self.ALL_CARDS[1] + self.HOST[1] + held)
+        self.assertEqual(
+            for_images.available, min(self.ONE_CARD[1], self.HOST[1]) + held
+        )
+        self.assertEqual(for_images.pool, "both this GPU and this machine")
+
     def test_a_text_model_and_every_other_backend_read_unchanged(self):
         cuda = self.profile("cuda")
         metal = self.profile("mps")
@@ -825,6 +860,84 @@ class AttentionReaderTests(unittest.TestCase):
         without = reader._probabilities(attn, hidden, encoder, torch)
 
         self.assertFalse(torch.allclose(with_norms, without, atol=1e-4))
+
+    def test_the_processors_attention_mask_is_applied(self):
+        """A processor given a mask excludes those encoder positions. A map
+        computed without it hands their probability to tokens the picture
+        never attended to."""
+
+        from diffusers.models.attention_processor import Attention
+
+        reader = self.reader(tokens=3, size=4)
+        attn = Attention(query_dim=8, cross_attention_dim=8, heads=2, dim_head=4)
+        hidden = torch.randn(1, 16, 8)
+        encoder = torch.randn(1, 5, 8)
+        # Shaped the way a pipeline builds one - (batch, 1, keys) - with
+        # everything past key 2 excluded, the way a padded prompt is.
+        mask = torch.zeros(1, 1, 5)
+        mask[..., 3:] = float("-inf")
+
+        masked = reader._probabilities(attn, hidden, encoder, torch, mask)
+        unmasked = reader._probabilities(attn, hidden, encoder, torch, None)
+
+        # The excluded positions get no probability at all, and the ones
+        # that remain get more than they did without the mask.
+        self.assertAlmostEqual(float(masked[:, :, 3:].sum()), 0.0, places=5)
+        self.assertGreater(float(unmasked[:, :, 3:].sum()), 0.0)
+        self.assertFalse(torch.allclose(masked, unmasked, atol=1e-4))
+
+    def test_no_mask_is_the_ordinary_case_and_not_a_refusal(self):
+        # A Stable Diffusion prompt passes no mask, and that has to read as
+        # "nothing to apply" rather than as "a mask I could not use".
+        from diffusers.models.attention_processor import Attention
+
+        attn = Attention(query_dim=8, cross_attention_dim=8, heads=2, dim_head=4)
+
+        self.assertIsNone(
+            image_runtime.AttentionReader._prepared_mask(attn, None, 5, 1)
+        )
+
+    def test_a_mask_that_cannot_be_prepared_reports_no_map(self):
+        from diffusers.models.attention_processor import Attention
+
+        reader = self.reader(tokens=3, size=4)
+        attn = Attention(query_dim=8, cross_attention_dim=8, heads=2, dim_head=4)
+        attn.prepare_attention_mask = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("wrong shape")
+        )
+
+        self.assertIsNone(
+            reader._probabilities(
+                attn,
+                torch.randn(1, 16, 8),
+                torch.randn(1, 5, 8),
+                torch,
+                torch.zeros(1, 1, 5),
+            )
+        )
+
+    def test_the_wrapper_hands_the_mask_to_the_recorder(self):
+        # It used to forward the mask to the real processor through kwargs
+        # and leave it out of the recorder, which is how the two came to
+        # describe different attention.
+        seen = {}
+
+        class Recorder:
+            def record(self, attn, hidden, encoder, attention_mask=None):
+                seen["mask"] = attention_mask
+
+        inner_calls = []
+
+        def inner(attn, hidden, encoder=None, mask=None, *args, **kwargs):
+            inner_calls.append(mask)
+            return hidden
+
+        mask = torch.zeros(1, 1, 5)
+        processor = image_runtime.RecordingProcessor(inner, Recorder())
+        processor(object(), torch.randn(1, 16, 8), torch.randn(1, 5, 8), mask)
+
+        self.assertIs(seen["mask"], mask)
+        self.assertIs(inner_calls[0], mask)
 
     def test_a_norm_that_cannot_be_applied_reports_no_map(self):
         # Reported unsupported rather than guessed at: a map that describes

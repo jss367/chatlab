@@ -124,6 +124,12 @@ def usable_seed(seed) -> int:
     return min(max(value, 0), MAX_SEED)
 
 
+# Stands for "there was a mask and it could not be used", which is not the
+# same as there being no mask: the first has to refuse the module and the
+# second is the ordinary case.
+_UNSUPPORTED = object()
+
+
 class Cancelled(RuntimeError):
     """The run was stopped between steps, at the reader's request."""
 
@@ -424,7 +430,9 @@ class AttentionReader:
         # architecture spells attention in a way this cannot read".
         self.too_large = 0
 
-    def record(self, attn, hidden_states, encoder_hidden_states) -> None:
+    def record(
+        self, attn, hidden_states, encoder_hidden_states, attention_mask=None
+    ) -> None:
         """Add one cross-attention module's map for the step under way."""
 
         import torch
@@ -432,7 +440,7 @@ class AttentionReader:
         try:
             with torch.no_grad():
                 probabilities = self._probabilities(
-                    attn, hidden_states, encoder_hidden_states, torch
+                    attn, hidden_states, encoder_hidden_states, torch, attention_mask
                 )
                 if probabilities is None:
                     self.skipped += 1
@@ -447,8 +455,16 @@ class AttentionReader:
             self.skipped += 1
             logger.debug("Could not read a cross-attention module", exc_info=True)
 
-    def _probabilities(self, attn, hidden_states, encoder_hidden_states, torch):
-        """``[heads, queries, tokens]`` for the conditional half, or ``None``."""
+    def _probabilities(
+        self, attn, hidden_states, encoder_hidden_states, torch, attention_mask=None
+    ):
+        """``[heads, queries, tokens]`` for the conditional half, or ``None``.
+
+        ``attention_mask`` is the one the module's own processor was given.
+        It is prepared and applied the same way, because a mask excludes
+        encoder positions from the real attention and a map computed without
+        it describes probabilities the picture was never drawn from.
+        """
 
         if hidden_states.ndim != 3 or encoder_hidden_states.ndim != 3:
             return None
@@ -479,7 +495,12 @@ class AttentionReader:
         query, key = self._normalized(attn, query, key)
         if query is None:
             return None
-        probabilities = scores(query, key)
+        mask = self._prepared_mask(
+            attn, attention_mask, encoder_hidden_states.shape[1], hidden_states.shape[0]
+        )
+        if mask is _UNSUPPORTED:
+            return None
+        probabilities = scores(query, key, mask)
         heads = int(attn.heads)
         batch = probabilities.shape[0] // heads
         if batch < 1:
@@ -489,6 +510,27 @@ class AttentionReader:
         # unguided batch of one is its own conditional half.
         shaped = probabilities.reshape(batch, heads, *probabilities.shape[1:])
         return shaped[-1].to("cpu", torch.float32)
+
+    @staticmethod
+    def _prepared_mask(attn, attention_mask, keys: int, batch: int):
+        """The module's mask, shaped the way its processor shapes it.
+
+        ``None`` when there is no mask, which is the common case for a
+        Stable Diffusion prompt. :data:`_UNSUPPORTED` when there is one that
+        cannot be prepared, which reports no map rather than one that gives
+        the masked positions' probability away.
+        """
+
+        if attention_mask is None:
+            return None
+        prepare = getattr(attn, "prepare_attention_mask", None)
+        if prepare is None:
+            return _UNSUPPORTED
+        try:
+            return prepare(attention_mask, keys, batch)
+        except (RuntimeError, ValueError, TypeError):
+            logger.debug("Could not prepare a module's attention mask", exc_info=True)
+            return _UNSUPPORTED
 
     @staticmethod
     def _normalized(attn, query, key):
@@ -597,11 +639,34 @@ class RecordingProcessor:
         self.inner = inner
         self.reader = reader
 
-    def __call__(self, attn, hidden_states, encoder_hidden_states=None, *args, **kwargs):
+    def __call__(
+        self,
+        attn,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        *args,
+        **kwargs,
+    ):
+        """Record the module's cross-attention, then let its own processor answer.
+
+        ``attention_mask`` is named rather than left in ``kwargs`` because
+        the recorder needs it: a processor given a mask excludes those
+        encoder positions, and a map computed without it hands their
+        probability to tokens the picture never attended to.
+        """
+
         if encoder_hidden_states is not None:
-            self.reader.record(attn, hidden_states, encoder_hidden_states)
+            self.reader.record(
+                attn, hidden_states, encoder_hidden_states, attention_mask
+            )
         return self.inner(
-            attn, hidden_states, encoder_hidden_states, *args, **kwargs
+            attn,
+            hidden_states,
+            encoder_hidden_states,
+            attention_mask,
+            *args,
+            **kwargs,
         )
 
 
