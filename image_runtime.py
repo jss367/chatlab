@@ -701,7 +701,7 @@ def _install_recorders(module, reader: AttentionReader):
 # ------------------------------------------------------------------ the run
 
 
-def prompt_tokens(pipeline, prompt: str) -> list[dict]:
+def prompt_tokens(pipeline, prompt: str, keys: int | None = None) -> list[dict]:
     """The prompt's tokens, in the order cross-attention keys them.
 
     The pipeline's own first tokenizer, because it is the one whose output
@@ -710,13 +710,21 @@ def prompt_tokens(pipeline, prompt: str) -> list[dict]:
     tokenizer's. The end-of-word marker CLIP appends is dropped from the
     text shown and the special tokens are kept, since they carry real
     attention and a reader looking at a map needs to see where it went.
+
+    ``keys`` is how many positions the encoder turned out to key on, where
+    that is fewer than the tokenizer's own default. The tokenizer is asked
+    again at that length rather than the list being sliced: a truncating
+    tokenizer keeps the end-of-text marker in the last position, and a slice
+    puts the next content token there instead, so the final map would be
+    labelled with a word the model discarded.
     """
 
     tokenizer = getattr(pipeline, "tokenizer", None)
     if tokenizer is None:
         return []
+    limit = {"max_length": keys} if keys else {}
     try:
-        ids = tokenizer(prompt, truncation=True).input_ids
+        ids = tokenizer(prompt, truncation=True, **limit).input_ids
         pieces = tokenizer.convert_ids_to_tokens(ids)
     except Exception:  # noqa: BLE001 - a tokenizer that will not answer costs the maps only
         logger.debug("Could not tokenize the prompt for attention maps", exc_info=True)
@@ -786,6 +794,7 @@ def run(
 
     import torch
 
+    refuse_unusable(pipeline)
     _refuse_unwatchable(pipeline)
     started = time.monotonic()
     tokens = prompt_tokens(pipeline, request.prompt) if request.record_attention else []
@@ -853,7 +862,10 @@ def run(
     if maps is not None and reader is not None and reader.keyed is not None:
         # Only the tokens the encoder keyed on; the rest were truncated
         # before the model saw them and have no map to click through to.
-        tokens = tokens[: reader.keyed]
+        # Asked of the tokenizer again at that length rather than sliced, so
+        # the end-of-text marker stays where a truncating tokenizer puts it.
+        retokenized = prompt_tokens(pipeline, request.prompt, reader.keyed)
+        tokens = retokenized[: reader.keyed] or tokens[: reader.keyed]
     return ImageRun(
         request=request,
         readings=readings,
@@ -911,6 +923,49 @@ def _picture_shaped(latents, pipe, torch):
         logger.debug("Could not unpack a packed latent for the preview", exc_info=True)
         return None
     return unpacked[0] if unpacked.ndim == 4 else None
+
+
+class NeedsMoreThanAPrompt(RuntimeError):
+    """The pipeline requires an input besides the prompt, which this page has not."""
+
+
+def refuse_unusable(pipeline) -> None:
+    """Refuse a pipeline that wants more than a prompt, before it draws.
+
+    Read off the pipeline's own ``__call__``: a parameter with no default,
+    other than the prompt itself, is something the caller must supply, and
+    this page has only a prompt. That is what separates a text-to-image
+    pipeline from an img2img, an upscaler or a subject-driven one, and it is
+    exact where :func:`model_runtime.pipeline_draws_from_text` can only
+    guess from the class name - a cache scan reads folders without importing
+    anything, so it has no signature to look at and its list of markers will
+    always be one family behind.
+
+    Both checks stay. The name one keeps such a repo out of the model list,
+    where the alternative is offering it as ready; this one catches the
+    families that list has not heard of, and names the argument it wanted.
+    """
+
+    try:
+        parameters = inspect.signature(pipeline.__call__).parameters
+    except (TypeError, ValueError):
+        return
+    required = [
+        name
+        for name, parameter in parameters.items()
+        if parameter.default is inspect.Parameter.empty
+        and parameter.kind
+        not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        and name not in ("self", "prompt")
+    ]
+    if required:
+        raise NeedsMoreThanAPrompt(
+            f"{type(pipeline).__name__} needs "
+            f"{', '.join(required)} besides the prompt, and the Images page "
+            "has only a prompt to give it. It draws from something else - a "
+            "reference picture, a frame, a subject - so it is not a model "
+            "this page can drive."
+        )
 
 
 def _refuse_unwatchable(pipeline) -> None:

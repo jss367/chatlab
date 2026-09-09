@@ -394,6 +394,9 @@ CONDITIONED_PIPELINES = (
     # for a second pipeline to draw from. It has a tokenizer and a text
     # encoder like any text-to-image pipeline and returns no picture at all.
     "prior",
+    # Subject-driven generation: a reference image and a subject category
+    # beside the prompt.
+    "blip",
 )
 
 # The components a pipeline needs to read a prompt at all. One without them
@@ -416,6 +419,13 @@ def pipeline_draws_from_text(snapshot: Path) -> bool:
     this turns down is reported unsupported rather than offered and then
     failed at the first draw, and its ID can still be typed into the model
     box for a load that says what really went wrong.
+
+    A guess is all it can be from here. Naming the class is the only signal
+    a cache scan has, since it reads folders without importing anything, and
+    a list of markers will always be one family behind. What the pipeline
+    really requires is read off its own ``__call__`` once it is built; see
+    :func:`image_runtime.refuse_unusable`, which is the exact check and the
+    one that catches a family nobody has thought of.
     """
 
     name = (pipeline_class(snapshot) or "").lower()

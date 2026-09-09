@@ -226,6 +226,23 @@ class DrawTests(ImagePageTestCase):
         self.assertFalse(last[ROW["stop"]]["visible"])
         self.assertFalse(self.manager.busy)
 
+    def test_a_model_this_page_cannot_drive_is_refused_not_reported_as_a_fault(self):
+        # A pipeline that wants more than a prompt is a model this page
+        # cannot use, which is the whole answer rather than a crash.
+        class SubjectDriven(FakePipeline):
+            def __call__(self, prompt=None, *, reference_image, **kwargs):
+                return type("Output", (), {"images": []})()
+
+        self.load_pipeline()
+        self.manager.pipeline = SubjectDriven()
+
+        last = self.frames()[-1]
+
+        self.assertIn("Not a model this page can draw with", last[ROW["status"]])
+        self.assertIn("reference_image", last[ROW["status"]])
+        self.assertTrue(last[ROW["draw"]]["visible"])
+        self.assertFalse(self.manager.busy)
+
     def test_stopping_keeps_the_trajectory_and_says_there_is_no_picture(self):
         # Pressing Stop mid-run, from inside the loop: the run checks the
         # event between steps, so the step under way finishes and the ones

@@ -956,7 +956,12 @@ def cached_fits(
     return fits
 
 
-def hub_fit(result: HubModel, precision: str | None, profile: DeviceProfile) -> Fit:
+def hub_fit(
+    result: HubModel,
+    precision: str | None,
+    profile: DeviceProfile,
+    kind: str = TEXT_KIND,
+) -> Fit:
     """Whether ``result`` would load now, judged from the hub's parameter count.
 
     The count is all a search result carries, so the estimate assumes a
@@ -964,6 +969,11 @@ def hub_fit(result: HubModel, precision: str | None, profile: DeviceProfile) -> 
     are packed with everything else. Both are close enough to tell a model
     that fits from one that cannot; the detail says where the figure came
     from.
+
+    An image pipeline is judged at full precision whatever the radio says.
+    The Metal quantizer is Transformers' own and ``_load_locked`` clears the
+    choice for a pipeline, so honouring it here would shrink the estimate
+    for a load that will not shrink and advertise a fit the load refuses.
     """
 
     if not result.parameters:
@@ -971,7 +981,7 @@ def hub_fit(result: HubModel, precision: str | None, profile: DeviceProfile) -> 
     estimated = estimate_parameter_bytes(
         result.parameters,
         profile.dtype or ASSUMED_DTYPE,
-        weight_bits(precision, profile),
+        weight_bits(precision, profile) if kind != IMAGE_KIND else None,
     )
     return model_fit(estimated, profile)
 
@@ -989,7 +999,8 @@ def hub_fits(
 
     profile = replacement_profile(kind)
     return {
-        result.model_id: hub_fit(result, precision, profile) for result in results
+        result.model_id: hub_fit(result, precision, profile, kind)
+        for result in results
     }
 
 
@@ -1451,6 +1462,7 @@ def select_search_result(
                 result,
                 precision,
                 replacement_profile(results_kind({result.model_id: result})),
+                results_kind({result.model_id: result}),
             ),
         ),
     )

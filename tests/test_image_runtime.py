@@ -483,6 +483,18 @@ class PipelineLayoutTests(unittest.TestCase):
                 self.assertFalse(status.complete)
                 self.assertEqual(status.missing_files, ())
 
+    def test_a_subject_driven_pipeline_is_not_an_image_model(self):
+        # BlipDiffusion has a tokenizer and a text encoder and wants a
+        # reference picture and a subject category besides the prompt.
+        files = self.whole()
+        files["model_index.json"] = json.dumps(
+            {**INDEX, "_class_name": "BlipDiffusionPipeline"}
+        ).encode()
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, files)
+
+            self.assertTrue(cache_status(MODEL, Path(root)).unsupported)
+
     def test_a_prior_stage_is_not_an_image_model(self):
         """It takes the prompt and hands back conditioning embeddings for a
         second pipeline to draw from: a tokenizer and a text encoder like
@@ -1505,6 +1517,43 @@ class RunTests(unittest.TestCase):
         # The picture itself is unaffected: the maps are read alongside.
         self.assertIsNotNone(run.image)
         self.assertEqual(run.steps_done, 2)
+
+    def test_a_pipeline_wanting_more_than_a_prompt_is_refused_by_its_signature(self):
+        """The exact check the class-name list cannot make: a parameter with
+        no default other than the prompt is something the caller must
+        supply, and this page has only a prompt."""
+
+        class SubjectDriven(FakePipeline):
+            def __call__(
+                self,
+                prompt=None,
+                reference_image=None,
+                *,
+                source_subject_category,
+                num_inference_steps=30,
+                callback_on_step_end=None,
+            ):
+                return type("Output", (), {"images": []})()
+
+        with self.assertRaises(image_runtime.NeedsMoreThanAPrompt) as caught:
+            self.run_pipeline(SubjectDriven(), steps=2)
+
+        self.assertIn("source_subject_category", str(caught.exception))
+        self.assertIn("SubjectDriven", str(caught.exception))
+
+    def test_an_ordinary_pipeline_passes_the_required_input_check(self):
+        # Everything but the prompt has a default, which is what a
+        # text-to-image pipeline looks like.
+        run = self.run_pipeline(FakePipeline(), steps=2)
+
+        self.assertEqual(run.steps_done, 2)
+
+    def test_a_varargs_pipeline_is_not_refused_for_required_inputs(self):
+        class Anything(FakePipeline):
+            def __call__(self, *args, **kwargs):
+                return super().__call__(**kwargs)
+
+        self.assertEqual(self.run_pipeline(Anything(), steps=2).steps_done, 2)
 
     def test_a_pipeline_that_cannot_be_watched_is_refused_before_it_draws(self):
         """callback_on_step_end carries every frame and is where the

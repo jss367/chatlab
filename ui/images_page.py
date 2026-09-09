@@ -20,7 +20,7 @@ import gradio as gr
 import charts
 import image_runtime
 import settings
-from image_runtime import ImageRequest
+from image_runtime import ImageRequest, NeedsMoreThanAPrompt, Unwatchable
 from model_runtime import ModelBusy
 from token_metrics import PROMPT_ATTENTION_SCALE, UNSCORED_LABEL
 from ui import runtime
@@ -511,8 +511,19 @@ def _run_note(run) -> str:
 
 
 def _failure(error: BaseException) -> str:
+    """The status line for a run that did not produce a picture.
+
+    A refusal is not a fault: a pipeline that wants more than a prompt, or
+    one that cannot report its steps, is a model this page cannot drive and
+    saying so is the whole answer. Those get their own heading and no
+    traceback in the log, which is for the failures worth investigating.
+    """
+
     if isinstance(error, ModelBusy):
         return failure_status("Model busy", str(error))
+    if isinstance(error, (NeedsMoreThanAPrompt, Unwatchable)):
+        logger.info("Refused an image run: %s", error)
+        return failure_status("Not a model this page can draw with", str(error))
     logger.warning("Image run failed", exc_info=error)
     return failure_status("Could not draw the picture", str(error) or repr(error))
 
