@@ -395,23 +395,64 @@ def chosen_model(model_id: str, selected: str | None) -> str:
     return (selected or model_id or "").strip()
 
 
+def refresh_model_actions(model_id: str, selected: str | None):
+    """Show the actions appropriate to the chosen model's local files."""
+
+    cleaned = chosen_model(model_id, selected)
+    try:
+        cached = cache_status(cleaned) if cleaned else CacheStatus()
+    except ValueError as error:
+        return (
+            html.escape(str(error)),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False, variant="secondary"),
+        )
+    except OSError:
+        # Keep local loading available if the cache cannot be inspected;
+        # its handler can explain the actual error when clicked.
+        return (
+            "Could not check downloaded files.",
+            gr.update(visible=True),
+            gr.update(visible=True),
+            gr.update(visible=True, variant="secondary"),
+        )
+    if cached.complete:
+        detail = "**Downloaded** · Ready to load from disk."
+        if runtime.MANAGER.model_id == cleaned:
+            detail = "**Downloaded · Loaded now** · Load cached again to apply a new precision."
+    elif cached.unsupported:
+        detail = "**Downloaded · Unsupported** · ChatLab cannot load this model's format."
+    elif cached.present:
+        detail = "**Download incomplete** · Download and load will fetch the remaining files."
+    else:
+        detail = "**Not downloaded** · Download the model to use it." if cleaned else "Enter a model ID or select a model."
+    download = not (cached.complete or cached.unsupported)
+    return (
+        detail,
+        gr.update(visible=download),
+        gr.update(visible=download),
+        gr.update(visible=cached.complete, variant="primary" if cached.complete else "secondary"),
+    )
+
+
 def download_model(model_id: str, hf_token: str, selected: str | None = None):
     model_id = chosen_model(model_id, selected)
     started = time.monotonic()
     try:
         before = cache_status(model_id)
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         yield failure_card("Download failed", html.escape(str(error)))
         return
     yield status_card(*describe_cache(model_id, before), "working")
     try:
         path = yield from stream_download(model_id, hf_token)
+        elapsed = time.monotonic() - started
+        fetched = describe_fetched(before, cache_status(model_id), elapsed)
     except Exception as error:
         yield failure_card("Download failed", html.escape(str(error)))
         return
 
-    elapsed = time.monotonic() - started
-    fetched = describe_fetched(before, cache_status(model_id), elapsed)
     yield status_card(
         "Download complete",
         f"{fetched} `{model_id.strip()}` is cached in `{path}`. "
@@ -429,7 +470,7 @@ def download_and_load_model(
     started = time.monotonic()
     try:
         before = cache_status(model_id)
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         yield failure_card("Model setup failed", html.escape(str(error)))
         return
     yield status_card(*describe_cache(model_id, before), "working")
@@ -500,7 +541,7 @@ def load_cached_model(
     yield status_card("Finding cached model", f"Looking for {name} locally…", "working")
     try:
         status = cache_status(cleaned)
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         yield failure_card("Could not load cached model", html.escape(str(error)))
         return
     if status.missing_files:
@@ -843,7 +884,7 @@ def describe_cached_model(entry: CachedModel, fit: Fit | None = None) -> str:
     elif entry.status.unsupported:
         verdict = f"**Unsupported:** {UNSUPPORTED_REASON}"
     else:
-        verdict = "**Ready to load.** Use **Load cached** to bring it into memory."
+        verdict = "**Downloaded · Ready to load.** Use **Load cached** to bring it into memory."
     facts = [("On disk", describe_on_disk(entry.status))]
     if fit is not None and fit.known:
         facts.append(("Memory", fit.note))
@@ -879,8 +920,9 @@ def refresh_my_models(
     selected: str | None,
     order: str | None = DEFAULT_MODEL_SORT,
     precision: str | None = None,
+    model_id: str | None = None,
 ):
-    """Rescan the cache; keep the selection, or fall back to the loaded model.
+    """Rescan the cache; keep the selected row or typed ID, or the loaded model.
 
     ``precision`` is the **Weight precision** choice, which decides what each
     model would take in memory and so whether it fits. The list is repainted
@@ -892,7 +934,8 @@ def refresh_my_models(
     fits = cached_fits(models, precision)
     ids = [entry.model_id for entry in models]
     if selected not in ids:
-        selected = runtime.MANAGER.model_id if runtime.MANAGER.model_id in ids else None
+        fallback = model_id.strip() if model_id is not None else runtime.MANAGER.model_id
+        selected = fallback if fallback in ids else None
     choices = [
         (cached_model_label(entry, fits.get(entry.model_id)), entry.model_id)
         for entry in models
@@ -1157,6 +1200,8 @@ def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
             "Its ID is in the model ID box, but downloading again would fetch the "
             "same files: this repo is not a Transformers language model."
         )
+    elif cached.complete:
+        lines.append("Already downloaded: use **Load cached** to bring it into memory.")
     else:
         lines.append("Its ID is in the model ID box: use **Download and load** to fetch it.")
     return "\n".join(lines)
@@ -1167,6 +1212,7 @@ def refresh_after_device(
     selected: str | None,
     order: str | None = DEFAULT_MODEL_SORT,
     precision: str | None = None,
+    model_id: str | None = None,
     result: str | None = None,
     results: dict | None = None,
 ):
@@ -1186,7 +1232,7 @@ def refresh_after_device(
     if known or imported_torch() is None:
         return (gr.skip(),) * 6
     return (
-        *refresh_my_models(selected, order, precision),
+        *refresh_my_models(selected, order, precision, model_id),
         *refresh_search_results(result, results or {}, precision),
         True,
     )

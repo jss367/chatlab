@@ -13,54 +13,163 @@ from ui.inspection import (
 )
 
 
+# Native system typography and restrained controls keep the conversation primary.
+THEME = gr.themes.Base(
+    primary_hue="indigo",
+    neutral_hue="zinc",
+    font=[gr.themes.Font("-apple-system"), "BlinkMacSystemFont", "Segoe UI", "sans-serif"],
+    font_mono=[gr.themes.Font("SFMono-Regular"), "Consolas", "monospace"],
+).set(
+    body_background_fill="white",
+    body_background_fill_dark="*neutral_950",
+    block_background_fill="white",
+    block_background_fill_dark="*neutral_900",
+    block_border_width="0px",
+    block_shadow="none",
+    block_label_background_fill="transparent",
+    block_label_background_fill_dark="transparent",
+    block_label_text_color="*neutral_600",
+    block_label_text_color_dark="*neutral_300",
+    block_label_text_size="*text_sm",
+    block_label_text_weight="500",
+    block_title_text_size="*text_sm",
+    block_title_text_weight="500",
+    button_primary_background_fill="*primary_600",
+    button_primary_background_fill_hover="*primary_700",
+    button_primary_text_color="white",
+    button_secondary_background_fill="white",
+    button_secondary_background_fill_dark="*neutral_800",
+    button_secondary_border_color="*neutral_200",
+    button_secondary_border_color_dark="*neutral_700",
+    button_secondary_shadow="none",
+    input_background_fill="white",
+    input_background_fill_dark="*neutral_950",
+    input_border_color="*neutral_200",
+    input_border_color_dark="*neutral_700",
+    input_shadow="none",
+)
+
+
 CSS = f"""
-/* Keep the navigation close to the window edge; Gradio's default page
-   padding otherwise adds a wide empty gutter beside the narrow pane. */
-.gradio-container .app {{ padding-left: 8px !important; }}
-#hero, #models-hero, #settings-hero {{ padding: 0.5rem 0 0.2rem; }}
-#hero h1, #models-hero h1, #settings-hero h1 {{ font-size: 2.1rem; margin-bottom: 0.25rem; }}
-#model-status {{ min-height: 128px; }}
-
-/* The chat page's model badge and the button that appears beside it when
-   there is nothing loaded. Both keep their own width and sit on one line. */
-#model-bar {{ flex-wrap: nowrap; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }}
-#model-bar #model-badge {{ flex: 0 1 auto; width: auto; min-width: 0; }}
-#model-bar #load-model, #model-bar #default-model {{
-  flex: 0 0 auto; width: auto; min-width: 0;
+/* A viewport-sized shell gives every pane its own scroll boundary. */
+html, body {{ height: 100%; overflow: hidden; }}
+.gradio-container {{ min-height: 0 !important; }}
+.gradio-container .app {{ padding: 0 !important; }}
+.gradio-container footer {{ display: none !important; }}
+#shell {{
+  height: 100dvh; min-height: 0; gap: 0; flex-wrap: nowrap;
+  align-items: stretch; overflow: hidden;
 }}
-.model-badge {{
-  display: inline-flex; align-items: center; gap: 0.45rem;
-  padding: 0.3rem 0.75rem; border-radius: 999px;
-  border: 1px solid var(--border-color-primary);
-  background: var(--block-background-fill);
-  font-size: 0.9rem; font-weight: 500; line-height: 1.3;
-}}
-.model-badge-dot {{ width: 0.55rem; height: 0.55rem; border-radius: 50%; flex: none; }}
-.model-badge[data-state="ready"] .model-badge-dot {{ background: #16a34a; }}
-/* Amber in both themes, the same warning colour an incomplete model gets. */
-.model-badge[data-state="loading"] .model-badge-dot {{ background: #d97706; }}
-.model-badge[data-state="empty"] {{
-  border-color: #d97706; background: rgba(217, 119, 6, 0.09);
-}}
-.model-badge[data-state="empty"] .model-badge-dot {{ background: #d97706; }}
-
-/* The shell is one row: nav, conversations, page. It never wraps, and the two
-   panes keep their widths and stay put while the page scrolls. */
-#shell {{ flex-wrap: nowrap; align-items: stretch; }}
-#nav-pane, #conversation-pane {{
-  position: sticky; top: 0; align-self: flex-start; max-height: 100vh;
+#nav-pane, #conversation-pane, #chat-page, #chat-workspace, #inspector-pane,
+#models-page, #settings-page {{ box-sizing: border-box; min-height: 0; flex-wrap: nowrap; }}
+#nav-pane, #conversation-pane, #inspector-pane {{
+  background: var(--background-fill-secondary);
 }}
 #nav-pane {{
   flex: 0 0 {NAV_PANE_WIDTH}px !important; min-width: {NAV_PANE_WIDTH}px !important;
-  height: 100vh; padding: 0.6rem 0.5rem 0.6rem 0;
+  height: 100%; padding: 12px 6px;
   border-right: 1px solid var(--border-color-primary);
 }}
 #conversation-pane {{
   flex: 0 0 {CONVERSATION_PANE_WIDTH}px !important;
   min-width: {CONVERSATION_PANE_WIDTH}px !important;
-  overflow-y: auto; padding-right: 0.5rem;
+  height: 100%; overflow-y: auto; overscroll-behavior-y: contain;
+  padding: 18px 12px; gap: 12px;
   border-right: 1px solid var(--border-color-primary);
 }}
+#chat-page {{ min-width: 0 !important; height: 100%; gap: 0; }}
+#chat-columns {{
+  height: 100%; min-height: 0; gap: 0; flex-wrap: nowrap;
+  align-items: stretch; overflow: hidden;
+}}
+#chat-workspace {{
+  flex: 1 1 0 !important; min-width: 0 !important; height: 100%;
+  padding: 16px 24px; gap: 10px;
+  overflow-y: auto; overscroll-behavior-y: contain;
+}}
+#inspector-pane {{
+  flex: 0 0 clamp(310px, 27vw, 400px) !important; min-width: 0 !important;
+  height: 100%; padding: 18px 18px 28px; gap: 18px;
+  overflow-y: auto; overscroll-behavior-y: contain;
+  border-left: 1px solid var(--border-color-primary);
+}}
+#inspector-pane > *, #conversation-pane > *, #chat-workspace > * {{ flex: 0 0 auto; }}
+#models-page, #settings-page {{
+  height: 100%; overflow-y: auto; overscroll-behavior-y: contain;
+  padding: 24px 32px;
+}}
+#conversations-heading h2, #inspector-heading h2 {{
+  font-size: 15px; line-height: 24px; font-weight: 600; margin: 0;
+}}
+#hero {{ padding: 0; }}
+#hero h1 {{ font-size: 18px; line-height: 26px; font-weight: 600; margin: 0; }}
+#models-hero, #settings-hero {{ padding: 0 0 12px; }}
+#models-hero h1, #settings-hero h1 {{ font-size: 24px; margin-bottom: 6px; }}
+#model-status {{ min-height: 128px; }}
+
+/* The model badge stays small and wraps with its actions in narrow columns. */
+#model-bar {{ flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; }}
+#model-bar #model-badge {{ flex: 0 1 auto; width: auto; min-width: 0; padding: 0; }}
+#model-bar #load-model, #model-bar #default-model {{
+  flex: 0 0 auto; width: auto; min-width: 0; font-size: 12px;
+}}
+.model-badge {{
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+  padding: 4px 8px; border-radius: 6px;
+  border: 1px solid var(--border-color-primary);
+  background: var(--block-background-fill);
+  font-size: 12px; font-weight: 400; line-height: 1.4;
+  overflow-wrap: anywhere;
+}}
+.model-badge-dot {{ width: 6px; height: 6px; border-radius: 50%; flex: none; }}
+.model-badge[data-state="ready"] .model-badge-dot {{ background: #16a34a; }}
+.model-badge[data-state="loading"] .model-badge-dot,
+.model-badge[data-state="empty"] .model-badge-dot {{ background: #d97706; }}
+
+/* The transcript uses the remaining height, keeping its composer in reach. */
+#conversation-tabs {{ flex: 1 0 0; min-height: 420px; display: flex; flex-direction: column; }}
+#conversation-tabs > .tab-nav {{ flex: none; }}
+#chat-tab {{ flex: 1; min-height: 0; padding: 12px 0 0; border: 0; }}
+#conversation-tabs .tabitem > .column {{ flex-wrap: nowrap; }}
+#chat-tab > .column {{ height: 100%; min-height: 0; gap: 10px; }}
+#chat-tab > .column > * {{ flex: 0 0 auto; }}
+#chat-tab > .column > .form {{ background: transparent; }}
+#conversation {{ flex: 1 1 0 !important; height: auto !important; min-height: 180px; border: 0; background: var(--body-background-fill); }}
+#message-input {{ border: 1px solid var(--border-color-primary); border-radius: 12px !important; padding: 4px; border-width: 1px !important; }}
+#message-input textarea {{ border: 0; box-shadow: none; background: transparent; }}
+#generation-status {{ font-size: 12px; color: var(--body-text-color-subdued); }}
+#conversation-tools {{ max-height: 40vh; overflow-y: auto; overscroll-behavior-y: contain; }}
+#inspector-pane .block {{ background: transparent; }}
+#inspector-pane input, #inspector-pane textarea {{ background: var(--input-background-fill); }}
+#token-alternatives table {{ font-family: var(--font); font-size: 12px; }}
+#token-alternatives td:nth-child(2) {{ font-family: var(--font-mono); }}
+#inspector-pane > .form {{ flex: 0 0 auto !important; }}
+#inspector-pane .inspector-section {{ padding: 0; border-radius: 0; }}
+#inspector-pane .form {{ border: 0; box-shadow: none; background: transparent; }}
+#inspector-pane .label-wrap, #conversation-tools > .label-wrap {{
+  padding: 12px 0; border-top: 1px solid var(--border-color-primary);
+}}
+#shell button {{ box-shadow: none; }}
+#conversation-pane button {{ font-size: 12px; padding: 6px; white-space: nowrap; }}
+#chat-tab button {{ font-size: 13px; }}
+#shell button:focus-visible {{ outline: 2px solid var(--color-accent); outline-offset: 2px; }}
+
+/* Compact windows retain separate scroll areas in two stacked rows. */
+@media (max-width: 1050px) {{
+  #conversation-pane {{ flex-basis: 200px !important; min-width: 200px !important; }}
+  #chat-workspace {{ padding: 16px; }}
+  #inspector-pane {{ flex-basis: 300px !important; padding: 18px 14px; }}
+}}
+@media (max-width: 850px) {{
+  #conversation-pane {{ flex-basis: 160px !important; min-width: 160px !important; }}
+  #chat-columns {{ flex-direction: column; }}
+  #chat-workspace {{ flex: 1 1 60% !important; height: 60%; }}
+  #inspector-pane {{
+    flex: 1 1 40% !important; height: 40%; border-left: 0;
+    border-top: 1px solid var(--border-color-primary);
+  }}
+}}
+
 /* The nav is a Radio drawn as a column of tiles. Its inputs are hidden, the
    selected tile is filled, and the last tile (Settings) is pushed to the
    bottom. */
@@ -130,7 +239,7 @@ CSS = f"""
 .model-detail {{ font-size: 0.85rem; }}
 .model-detail p, .model-detail ul, .model-detail li {{ margin: 0.15rem 0; }}
 .model-detail code {{ word-break: break-all; }}
-#token-strip {{ min-height: 150px; }}
+#token-strip {{ min-height: 110px; }}
 #token-strip span, #prompt-strip span {{ cursor: pointer; border-radius: 5px; }}
 /* Token fills are light in both themes, so their ink is pinned dark. */
 #token-strip .textspan.hl, #prompt-strip .textspan.hl,
@@ -195,10 +304,23 @@ abbr[title] {{ text-decoration: underline dotted; cursor: help; }}
    name and title on the first line, the model and token count on the
    second. Stack the entries and let the break through. */
 #conversation-list .wrap {{ flex-direction: column; align-items: stretch; gap: 0.4rem; }}
-#conversation-list label {{ align-items: flex-start; }}
+#conversation-list {{ background: transparent; padding: 0; }}
+#conversation-list label {{
+  align-items: flex-start; background: transparent; border: 1px solid transparent;
+  border-radius: 8px; padding: 10px; box-shadow: none;
+}}
+#conversation-list label.selected {{
+  background: var(--button-primary-background-fill);
+  border-color: transparent;
+}}
+#conversation-list label.selected span {{ color: white; }}
+#conversation-list label:has(input:focus-visible) {{
+  outline: 2px solid var(--color-accent); outline-offset: 2px;
+}}
+#conversation-list label input {{ position: absolute; opacity: 0; width: 1px; }}
 #conversation-list label input {{ margin-top: 0.3rem; }}
 #conversation-list label span {{
-  white-space: pre-line; line-height: 1.35; overflow-wrap: anywhere;
+  white-space: pre-line; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere;
 }}
 
 .viz-root {{

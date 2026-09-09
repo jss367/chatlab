@@ -87,6 +87,58 @@ def lay_out(root: str, model_id: str, files: dict[str, bytes]) -> Path:
     return folder
 
 
+class ModelActionTests(unittest.TestCase):
+    def test_downloaded_selection_offers_local_loading(self):
+        with mock.patch.object(models_page, "cache_status", return_value=CacheStatus(cached_bytes=100)) as status:
+            detail, download_load, download, load = models_page.refresh_model_actions(
+                "org/old-id", "org/downloaded"
+            )
+        status.assert_called_once_with("org/downloaded")
+        self.assertIn("Downloaded", detail)
+        self.assertFalse(download_load["visible"])
+        self.assertFalse(download["visible"])
+        self.assertTrue(load["visible"])
+        self.assertEqual(load["variant"], "primary")
+
+    def test_missing_and_partial_models_keep_download_actions(self):
+        for cached, expected in (
+            (CacheStatus(), "Not downloaded"),
+            (CacheStatus(cached_bytes=100, missing_files=(MODEL_WEIGHTS,)), "Download incomplete"),
+        ):
+            with self.subTest(cached=cached), mock.patch.object(models_page, "cache_status", return_value=cached):
+                detail, download_load, download, load = models_page.refresh_model_actions("org/model", None)
+            self.assertIn(expected, detail)
+            self.assertTrue(download_load["visible"])
+            self.assertTrue(download["visible"])
+            self.assertFalse(load["visible"])
+
+    def test_unsupported_download_does_not_offer_to_fetch_the_same_files(self):
+        with mock.patch.object(models_page, "cache_status", return_value=CacheStatus(cached_bytes=100, unsupported=True)):
+            detail, *buttons = models_page.refresh_model_actions("org/model", None)
+        self.assertIn("Unsupported", detail)
+        self.assertTrue(all(not button["visible"] for button in buttons))
+
+    def test_loaded_model_can_be_reloaded_with_new_precision(self):
+        with mock.patch.object(models_page, "cache_status", return_value=CacheStatus(cached_bytes=100)), mock.patch.object(runtime.MANAGER, "model_id", "org/model"):
+            detail, _, _, load = models_page.refresh_model_actions("org/model", None)
+        self.assertIn("Loaded now", detail)
+        self.assertTrue(load["visible"])
+
+    def test_cache_read_failure_preserves_local_load_for_error_reporting(self):
+        with mock.patch.object(models_page, "cache_status", side_effect=OSError("offline disk")):
+            detail, _, _, load = models_page.refresh_model_actions("org/model", None)
+        self.assertIn("Could not check", detail)
+        self.assertTrue(load["visible"])
+
+    def test_invalid_model_id_explains_format_and_hides_actions(self):
+        for model_id in ("foo", "org/", "../escape"):
+            with self.subTest(model_id=model_id):
+                detail, *buttons = models_page.refresh_model_actions(model_id, None)
+                self.assertIn("organization/model-name", detail)
+                self.assertNotIn("Could not check", detail)
+                self.assertTrue(all(not button["visible"] for button in buttons))
+
+
 class FormatCountTests(unittest.TestCase):
     def test_counts_read_like_the_hub_pages(self):
         for count, text in [
@@ -757,6 +809,16 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertIn("No models", summary)
         self.assertIn("Model search", summary)
 
+    def test_refresh_does_not_replace_an_uncached_typed_id_with_the_loaded_model(self):
+        self.manager.model_id = OLMO
+        radio, _, _ = app.refresh_my_models(None, "Name", model_id="org/not-downloaded")
+        self.assertIsNone(radio["value"])
+        self.assertEqual(app.chosen_model("org/not-downloaded", radio["value"]), "org/not-downloaded")
+
+    def test_refresh_keeps_a_picked_row_ahead_of_a_stale_textbox(self):
+        radio, _, _ = app.refresh_my_models("org/partial", "Name", model_id=OLMO)
+        self.assertEqual(radio["value"], "org/partial")
+
     def test_choosing_a_model_fills_the_id_box_and_describes_it(self):
         box, detail = app.select_my_model(OLMO)
 
@@ -897,7 +959,7 @@ class ModelFitTests(unittest.TestCase):
         self.addCleanup(lambda: setattr(models_page, "imported_torch", original))
 
         _radio, _detail, _summary, results, _search, known = app.refresh_after_device(
-            False, None, "Name", "full", None, held
+            False, None, "Name", "full", None, None, held
         )
 
         self.assertTrue(known)
@@ -1265,6 +1327,8 @@ class ModelSearchPaneTests(unittest.TestCase):
 
         self.assertIn("Already cached", detail)
         self.assertIn("15.0 GB cached", detail)
+        self.assertIn("Load cached", detail)
+        self.assertNotIn("Download and load", detail)
 
     def test_a_cached_result_of_another_kind_is_not_called_partly_cached(self):
         models_page.cache_status = lambda model_id: CacheStatus(
@@ -1690,6 +1754,29 @@ class PageLayoutTests(unittest.TestCase):
         # default only navigates.
         self.assertEqual(len(self.listeners("refresh_my_models")), 10)
 
+    def test_model_actions_follow_selections_and_cache_refreshes(self):
+        listeners = self.listeners("refresh_model_actions")
+        radio = self.labelled("Downloaded models")
+        model_id = self.labelled("Hugging Face model ID")
+        for control in (radio, model_id):
+            self.assertTrue(any(fn.targets == [(control._id, "change")] for fn in listeners))
+        for fn in listeners:
+            self.assertEqual(fn.inputs, [model_id, radio])
+            self.assertEqual(fn.outputs[0], self.by_id("model-availability"))
+            self.assertEqual(
+                [button.value for button in fn.outputs[1:]],
+                ["Download and load", "Download only", "Load cached"],
+            )
+        refresh_ids = {fn._id for fn in self.listeners("refresh_my_models")}
+        chained = [
+            dependency for dependency in self.demo.config["dependencies"]
+            if dependency["id"] in {fn._id for fn in listeners}
+            and dependency["trigger_after"] in refresh_ids
+        ]
+        # All six mutations, manual refresh, and startup refresh the controls
+        # even when the radio's selected value stays the same.
+        self.assertEqual(len(chained), 8)
+
     def test_every_load_reads_the_my_models_selection(self):
         # The ID box lags a row selection by a server round trip, so a button
         # clicked in that window would act on the box's previous contents -
@@ -1698,6 +1785,50 @@ class PageLayoutTests(unittest.TestCase):
         for name in ("load_cached_model", "download_model", "download_and_load_model"):
             (fn,) = self.listeners(name)
             self.assertIn(radio, fn.inputs, name)
+
+    def test_download_then_load_keeps_the_typed_model_when_another_model_is_loaded(self):
+        manager = ModelManager()
+        manager.model_id = OLMO
+        entries = [cached(OLMO)]
+        typed_id = "org/new-model"
+        (download,) = self.listeners("download_model")
+        (load,) = self.listeners("load_cached_model")
+        dependency = next(
+            item for item in self.demo.config["dependencies"]
+            if item["trigger_after"] == download._id
+        )
+        refresh = self.demo.fns[dependency["id"]]
+        self.assertEqual(refresh.fn, models_page.refresh_my_models)
+        self.assertEqual(refresh.inputs[-1], self.labelled("Hugging Face model ID"))
+
+        def fetch(model_id, token):
+            entries.append(cached(model_id))
+            yield "download progress"
+            return Path("/cache/new-model")
+
+        def read_weights(*args):
+            yield "load progress"
+            return "CPU"
+
+        with (
+            mock.patch.object(runtime, "MANAGER", manager),
+            mock.patch.object(models_page, "list_cached_models", side_effect=lambda: list(entries)),
+            mock.patch.object(models_page, "cache_status", side_effect=lambda model_id: next((entry.status for entry in entries if entry.model_id == model_id), CacheStatus())),
+            mock.patch.object(models_page, "stream_download", side_effect=fetch),
+            mock.patch.object(manager, "find_cached", return_value=Path("/cache/new-model")),
+            mock.patch.object(models_page, "stream_load", side_effect=read_weights) as stream_load,
+        ):
+            selected = models_page.clear_my_model_selection()[0]["value"]
+            cards = list(download.fn(typed_id, "", selected))
+            self.assertIn("Download complete", cards[-1])
+            self.assertEqual(manager.model_id, OLMO)
+            radio, _, _ = refresh.fn(selected, "Name", model_id=typed_id)
+            detail, _, _, load_button = models_page.refresh_model_actions(typed_id, radio["value"])
+            self.assertEqual(radio["value"], typed_id)
+            self.assertIn("Ready to load", detail)
+            self.assertTrue(load_button["visible"])
+            list(load.fn(typed_id, radio["value"]))
+            self.assertEqual(stream_load.call_args.args[0], typed_id)
 
     def test_a_picked_row_outranks_the_id_box(self):
         # A click's inputs are snapshotted in the browser, and a row reaches

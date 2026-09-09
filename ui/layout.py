@@ -29,7 +29,6 @@ from ui.common import (
     NO_TOKEN_SELECTED,
     PAGES,
     RESPONSE_STRIP_LABEL,
-    hint,
     show_page,
     status_card,
 )
@@ -81,6 +80,7 @@ from ui.models_page import (
     loaded_model_badge,
     redownload_my_model,
     refresh_after_device,
+    refresh_model_actions,
     refresh_model_badge,
     refresh_my_models,
     refresh_search_results,
@@ -118,6 +118,7 @@ from ui.settings_page import (
 )
 from ui.styles import (
     CSS,
+    THEME,
     SHORTCUT_JS,
     message_box_settings,
     set_message_box_keys,
@@ -153,7 +154,7 @@ def build_app() -> gr.Blocks:
     # The shell wants every pixel: the two side panes are a fixed width, so the
     # width the cap was holding back goes to the chat and the panel beside it.
     with gr.Blocks(
-        title="ChatLab", css=CSS, theme=gr.themes.Soft(), fill_width=True
+        title="ChatLab", css=CSS, theme=THEME, fill_width=True
     ) as demo:
         conversation_state = gr.State([])
         metrics_state = gr.State(empty_metrics())
@@ -193,7 +194,7 @@ def build_app() -> gr.Blocks:
             with gr.Column(
                 scale=0, min_width=CONVERSATION_PANE_WIDTH, elem_id="conversation-pane"
             ) as conversation_pane:
-                gr.Markdown("## Conversations")
+                gr.Markdown("## Conversations", elem_id="conversations-heading")
                 conversation_list = gr.Radio(
                     choices=branch_choices(new_forks(), []),
                     value=MAIN_BRANCH,
@@ -206,71 +207,65 @@ def build_app() -> gr.Blocks:
                     new_button = gr.Button("➕ New", size="sm", min_width=60)
                     fork_button = gr.Button("🌿 Fork", size="sm", min_width=60)
                     delete_fork_button = gr.Button("🗑️ Delete", size="sm", min_width=60)
-                gr.Markdown(
-                    hint(
-                        "What the entries say",
-                        "Each entry names the model that replied and the size of "
-                        "the conversation in tokens: the prompt behind its latest "
-                        "reply plus the reply itself. <strong>New</strong> starts "
-                        "an empty chat. <strong>Fork</strong> copies the "
-                        "conversation on screen; click a message first to fork at "
-                        "that point.",
-                    ),
-                    elem_classes=["scale-caption"],
-                )
 
             # The three pages share the rest of the width; one is visible at a
             # time, chosen by the nav.
             with gr.Column(scale=1, elem_id="chat-page") as chat_page:
-                gr.Markdown(
-                    "# ChatLab\nChat with an open model and see exactly how likely every generated token was.",
-                    elem_id="hero",
-                )
+                # Keep the header in the chat column so the token panel can
+                # start at the top of the page beside it.
+                with gr.Row(equal_height=True, elem_id="chat-columns"):
+                    with gr.Column(scale=3, min_width=320, elem_id="chat-workspace"):
+                        gr.Markdown(
+                            "# ChatLab",
+                            elem_id="hero",
+                        )
 
-                # The badge sits above the tabs, so both Chat and Score text
-                # say which model would answer. Beside it, while none is
-                # loaded, are links to set up the default or choose another
-                # model on the Models page.
-                with gr.Row(elem_id="model-bar"):
-                    model_badge_view = gr.HTML(
-                        loaded_model_badge(), elem_id="model-badge"
-                    )
-                    default_model_button = gr.Button(
-                        "Set up the default model",
-                        variant="primary",
-                        size="sm",
-                        visible=not runtime.MANAGER.loaded,
-                        elem_id="default-model",
-                    )
-                    load_model_button = gr.Button(
-                        "Choose another",
-                        size="sm",
-                        visible=not runtime.MANAGER.loaded,
-                        elem_id="load-model",
-                    )
+                        # The badge sits above the tabs, so both Chat and Score text
+                        # say which model would answer. Beside it, while none is
+                        # loaded, are links to set up the default or choose another
+                        # model on the Models page.
+                        with gr.Row(elem_id="model-bar"):
+                            model_badge_view = gr.HTML(
+                                loaded_model_badge(), elem_id="model-badge"
+                            )
+                            default_model_button = gr.Button(
+                                "Set up the default model",
+                                variant="primary",
+                                size="sm",
+                                visible=not runtime.MANAGER.loaded,
+                                elem_id="default-model",
+                            )
+                            load_model_button = gr.Button(
+                                "Choose another",
+                                size="sm",
+                                visible=not runtime.MANAGER.loaded,
+                                elem_id="load-model",
+                            )
 
-                # Nothing to see: the timer is what makes the badge tell every
-                # open tab about a load or unload, not just the one that asked
-                # for it. See BADGE_REFRESH_SECONDS.
-                badge_timer = gr.Timer(BADGE_REFRESH_SECONDS)
+                        # Nothing to see: the timer is what makes the badge tell every
+                        # open tab about a load or unload, not just the one that asked
+                        # for it. See BADGE_REFRESH_SECONDS.
+                        badge_timer = gr.Timer(BADGE_REFRESH_SECONDS)
 
-                with gr.Row(equal_height=True):
-                    with gr.Column(scale=3):
-                        with gr.Tabs():
-                            with gr.Tab("Chat"):
+                        with gr.Tabs(elem_id="conversation-tabs"):
+                            with gr.Tab("Chat", elem_id="chat-tab"):
                                 chatbot = gr.Chatbot(
                                     type="messages",
                                     label="Conversation",
                                     height=560,
+                                    show_label=False,
+                                    elem_id="conversation",
                                     editable="all",
                                     placeholder="Load a model, then start a conversation.",
                                 )
                                 prompt = gr.Textbox(
                                     label="Message",
+                                    show_label=False,
+                                    elem_id="message-input",
                                     **message_box_settings(saved.enter_sends),
                                 )
                                 with gr.Row():
-                                    send_button = gr.Button("Send", variant="primary")
+                                    send_button = gr.Button("Send", variant="primary", min_width=70)
                                     # Escape presses this; see SHORTCUT_JS,
                                     # which finds it by this id.
                                     stop_button = gr.Button(
@@ -284,12 +279,12 @@ def build_app() -> gr.Blocks:
                                     # wrap, the last of them takes a line of
                                     # its own and reads as the widest, most
                                     # important button under the box.
-                                    retry_button = gr.Button("🔁 Retry", min_width=110)
-                                    undo_button = gr.Button("↩️ Undo last", min_width=110)
+                                    retry_button = gr.Button("🔁 Retry", min_width=80)
+                                    undo_button = gr.Button("↩️ Undo last", min_width=90)
                                     # Named for what it takes: this empties
                                     # the conversation on screen and deletes
                                     # every other one with it.
-                                    clear_button = gr.Button("🗑️ Clear all", min_width=110)
+                                    clear_button = gr.Button("🗑️ Clear all", min_width=90)
                                 with gr.Column(
                                     visible=False,
                                     elem_id="clear-confirm",
@@ -304,114 +299,92 @@ def build_app() -> gr.Blocks:
                                             "Cancel", size="sm"
                                         )
 
-                                # The knobs reached for between one retry and
-                                # the next, on the page where the retrying
-                                # happens. The accordion's label carries their
-                                # values, so it does not have to be opened to
-                                # be read.
-                                # The knobs reached for between one retry and
-                                # the next, on the page where the retrying
-                                # happens. The accordion's label carries their
-                                # values, so it does not have to be opened to
-                                # be read - and it starts from the saved
-                                # settings, so a reopened app reads back what
-                                # it was left set to rather than the defaults.
-                                with gr.Accordion(
-                                    sampling_label(
-                                        saved.temperature,
-                                        saved.top_p,
-                                        saved.top_k,
-                                        saved.max_new_tokens,
-                                    ),
-                                    open=False,
-                                ) as sampling_accordion:
-                                    with gr.Row():
-                                        temperature = gr.Slider(
-                                            0,
-                                            2,
-                                            value=saved.temperature,
-                                            step=0.05,
-                                            label="Temperature",
-                                        )
-                                        top_p = gr.Slider(
-                                            0.05,
-                                            1,
-                                            value=saved.top_p,
-                                            step=0.01,
-                                            label="Top-p",
-                                        )
-                                    with gr.Row():
-                                        top_k = gr.Slider(
-                                            0,
-                                            200,
-                                            value=saved.top_k,
-                                            step=1,
-                                            label="Top-k (0 disables)",
-                                        )
-                                        # The ceiling is the context limit: a
-                                        # response cannot be longer than a
-                                        # prompt is allowed to be.
-                                        max_new_tokens = gr.Slider(
-                                            1,
-                                            saved.prefill_token_limit,
-                                            value=saved.max_new_tokens,
-                                            step=1,
-                                            label="Maximum new tokens",
-                                        )
-                                    with gr.Row():
-                                        seed = gr.Number(
-                                            value=saved.seed,
-                                            precision=0,
-                                            minimum=0,
-                                            label="Random seed",
-                                            info="Updated after each response so you can reproduce it.",
-                                        )
-                                        randomize_seed = gr.Checkbox(
-                                            value=saved.randomize_seed,
-                                            label="🎲 New seed each response",
-                                            info="Turn off to lock the seed and reproduce a response exactly.",
-                                        )
-                                with gr.Row():
-                                    save_button = gr.Button("💾 Save conversation")
-                                    load_upload = gr.UploadButton(
-                                        "📂 Load conversation",
-                                        file_types=[".json"],
-                                        type="filepath",
-                                    )
-                                saved_file = gr.File(
-                                    label="Saved conversation",
-                                    visible=False,
-                                    interactive=False,
-                                )
-                                generation_status = gr.Markdown("Ready.")
-                                with gr.Accordion("Export full metric trace", open=False):
-                                    with gr.Row():
-                                        gr.DownloadButton(
-                                            "Download JSON",
-                                            value=lambda trace: write_trace_export(
-                                                trace, "json"
-                                            ),
-                                            inputs=trace_state,
-                                            size="sm",
-                                        )
-                                        gr.DownloadButton(
-                                            "Download CSV",
-                                            value=lambda trace: write_trace_export(trace, "csv"),
-                                            inputs=trace_state,
-                                            size="sm",
-                                        )
-                                    gr.Markdown(
-                                        hint(
-                                            "What the export holds",
-                                            "Every token metric and all recorded "
-                                            "alternatives for the latest completed "
-                                            "response. JSON keeps the nested "
-                                            "alternatives; CSV gives one row per "
-                                            "token and spreads them into numbered "
-                                            "columns.",
+                                generation_status = gr.Markdown("Ready.", elem_id="generation-status")
+                                with gr.Accordion("Conversation tools", open=False, elem_id="conversation-tools"):
+                                    # Sampling and file controls are available on demand.
+                                    with gr.Accordion(
+                                        sampling_label(
+                                            saved.temperature,
+                                            saved.top_p,
+                                            saved.top_k,
+                                            saved.max_new_tokens,
                                         ),
-                                        elem_classes=["footer-note"],
+                                        open=False,
+                                    ) as sampling_accordion:
+                                        with gr.Row():
+                                            temperature = gr.Slider(
+                                                0,
+                                                2,
+                                                value=saved.temperature,
+                                                step=0.05,
+                                                label="Temperature",
+                                            )
+                                            top_p = gr.Slider(
+                                                0.05,
+                                                1,
+                                                value=saved.top_p,
+                                                step=0.01,
+                                                label="Top-p",
+                                            )
+                                        with gr.Row():
+                                            top_k = gr.Slider(
+                                                0,
+                                                200,
+                                                value=saved.top_k,
+                                                step=1,
+                                                label="Top-k (0 disables)",
+                                            )
+                                            # The ceiling is the context limit: a
+                                            # response cannot be longer than a
+                                            # prompt is allowed to be.
+                                            max_new_tokens = gr.Slider(
+                                                1,
+                                                saved.prefill_token_limit,
+                                                value=saved.max_new_tokens,
+                                                step=1,
+                                                label="Maximum new tokens",
+                                            )
+                                        with gr.Row():
+                                            seed = gr.Number(
+                                                value=saved.seed,
+                                                precision=0,
+                                                minimum=0,
+                                                label="Random seed",
+                                                info="Updated after each response so you can reproduce it.",
+                                            )
+                                            randomize_seed = gr.Checkbox(
+                                                value=saved.randomize_seed,
+                                                label="🎲 New seed each response",
+                                                info="Turn off to lock the seed and reproduce a response exactly.",
+                                            )
+                                    with gr.Row():
+                                        save_button = gr.Button("💾 Save conversation")
+                                        load_upload = gr.UploadButton(
+                                            "📂 Load conversation",
+                                            file_types=[".json"],
+                                            type="filepath",
+                                        )
+                                    saved_file = gr.File(
+                                        label="Saved conversation",
+                                        visible=False,
+                                        interactive=False,
                                     )
+                                    with gr.Accordion("Export full metric trace", open=False):
+                                        with gr.Row():
+                                            gr.DownloadButton(
+                                                "Download JSON",
+                                                value=lambda trace: write_trace_export(
+                                                    trace, "json"
+                                                ),
+                                                inputs=trace_state,
+                                                size="sm",
+                                            )
+                                            gr.DownloadButton(
+                                                "Download CSV",
+                                                value=lambda trace: write_trace_export(trace, "csv"),
+                                                inputs=trace_state,
+                                                size="sm",
+                                            )
 
                             with gr.Tab("Score text"):
                                 gr.Markdown(
@@ -449,8 +422,8 @@ def build_app() -> gr.Blocks:
                                 score_button = gr.Button("Score text", variant="primary")
                                 score_status = gr.Markdown("Nothing scored yet.")
 
-                    with gr.Column(scale=2):
-                        gr.Markdown("## Under the hood")
+                    with gr.Column(scale=2, min_width=300, elem_id="inspector-pane"):
+                        gr.Markdown("## Under the hood", elem_id="inspector-heading")
                         color_scale = gr.Dropdown(
                             choices=list(COLOR_SCALES),
                             value=saved.color_scale,
@@ -458,6 +431,7 @@ def build_app() -> gr.Blocks:
                         )
                         scale_caption = gr.Markdown(
                             COLOR_SCALES[saved.color_scale].caption,
+                            visible=False,
                             elem_classes=["scale-caption"],
                         )
                         token_strip = gr.HighlightedText(
@@ -470,48 +444,31 @@ def build_app() -> gr.Blocks:
                         token_detail = gr.Markdown(NO_TOKEN_SELECTED)
                         alternatives = gr.Dataframe(
                             headers=["Token ID", "Token", "Raw probability"],
+                            column_widths=["22%", "30%", "48%"],
+                            wrap=True,
+                            elem_id="token-alternatives",
                             datatype=["number", "str", "number"],
                             interactive=False,
                             label="Most likely alternatives — click one to branch into it",
                         )
-                        with gr.Row():
-                            branch_button = gr.Button("🌱 Branch from token", size="sm")
-                        gr.Markdown(
-                            hint(
-                                "What branching does",
-                                "Branching keeps the response up to the selected "
-                                "token, puts the alternative in its place, and "
-                                "lets the model continue from there.",
-                            ),
-                            elem_classes=["scale-caption"],
-                        )
-                        with gr.Row():
-                            branch_text = gr.Textbox(
-                                label="Or type your own replacement",
-                                placeholder=(
-                                    "Text to put where the selected token was. Include a "
-                                    "leading space if the word needs one."
-                                ),
-                                lines=1,
-                                scale=3,
-                            )
-                            branch_text_button = gr.Button(
-                                "✏️ Branch with text", size="sm", scale=0, min_width=160
-                            )
-                        gr.Markdown(
-                            hint(
-                                "What typed text does",
-                                "The typed text replaces the selected token "
-                                "exactly as written, whether or not the model "
-                                "would ever have chosen it, and the model "
-                                "continues from there. Include a leading space "
-                                "if the word needs one; text this tokenizer "
-                                "cannot reproduce exactly at that position is "
-                                "refused rather than approximated.",
-                            ),
-                            elem_classes=["scale-caption"],
-                        )
-                        with gr.Accordion("Layers and attention", open=False):
+                        with gr.Accordion("Branch response", open=False, elem_classes=["inspector-section"]):
+                            with gr.Row():
+                                branch_button = gr.Button("🌱 Branch from token", size="sm")
+                            with gr.Row():
+                                branch_text = gr.Textbox(
+                                    label="Or type your own replacement",
+                                    placeholder=(
+                                        "Text to put where the selected token was. Include a "
+                                        "leading space if the word needs one."
+                                    ),
+                                    lines=1,
+                                    scale=3,
+                                    min_width=160,
+                                )
+                                branch_text_button = gr.Button(
+                                    "✏️ Branch with text", size="sm", scale=0, min_width=160
+                                )
+                        with gr.Accordion("Layers and attention", open=False, elem_classes=["inspector-section"]):
                             with gr.Row():
                                 inspect_button = gr.Button(
                                     "🔬 Inspect layers", size="sm", scale=0, min_width=160
@@ -529,9 +486,10 @@ def build_app() -> gr.Blocks:
                                 info="0 averages every layer. Release the slider to repaint.",
                             )
                             attention_panel = gr.HTML(charts.EMPTY_ATTENTION)
-                        summary_panel = gr.HTML(charts.summary_tiles({}))
-                        surprise_panel = gr.HTML(charts.EMPTY_CHART)
-                        with gr.Accordion("Prompt and context tokens", open=False):
+                        with gr.Accordion("Response statistics", open=False, elem_classes=["inspector-section"]):
+                            summary_panel = gr.HTML(charts.summary_tiles({}))
+                            surprise_panel = gr.HTML(charts.EMPTY_CHART)
+                        with gr.Accordion("Prompt and context tokens", open=False, elem_classes=["inspector-section"]):
                             prompt_note = gr.Markdown("", elem_classes=["scale-caption"])
                             prompt_strip = gr.HighlightedText(
                                 label="Prompt tokens — click one",
@@ -540,18 +498,6 @@ def build_app() -> gr.Blocks:
                                 combine_adjacent=False,
                                 elem_id="prompt-strip",
                             )
-
-                gr.Markdown(
-                    hint(
-                        "How to read these numbers",
-                        "Rank and raw probability come from the unmodified model "
-                        "distribution. Sampling probability includes temperature, "
-                        "top-k, and top-p. Quantized models may produce slightly "
-                        "different ranks. Hover any measurement's name in the "
-                        "detail panel for what it means.",
-                    ),
-                    elem_classes=["footer-note"],
-                )
 
             with gr.Column(
                 scale=1, visible=False, elem_id="models-page"
@@ -590,6 +536,9 @@ def build_app() -> gr.Blocks:
                                 "the Metal kernels from the Hub. Other devices load full "
                                 "weights whatever is chosen. Applies to the next load."
                             ),
+                        )
+                        model_availability = gr.Markdown(
+                            "Checking downloaded files…", elem_id="model-availability"
                         )
                         with gr.Row():
                             download_load_button = gr.Button(
@@ -830,8 +779,30 @@ def build_app() -> gr.Blocks:
 
         # Every handler that can change what is on disk or in memory rescans
         # the cache afterwards, so My Models never shows a stale list.
-        models_inputs = [my_models, sort_models, weight_precision]
+        # The typed ID stays last: the model-actions listeners assert it is
+        # the input the refresh is given, and a new argument goes before it
+        # rather than displacing it.
+        models_inputs = [my_models, sort_models, weight_precision, model_id]
         models_outputs = [my_models, my_model_detail, my_models_summary]
+        action_inputs = [model_id, my_models]
+        action_outputs = [
+            model_availability, download_load_button, download_button, cached_button
+        ]
+
+        # Include programmatic selections (search, default, and rescans).
+        # The selected row takes precedence, just as it does for a load.
+        for control in action_inputs:
+            control.change(
+                refresh_model_actions, action_inputs, action_outputs,
+                show_progress="hidden", trigger_mode="always_last",
+                concurrency_id="model-actions",
+            )
+
+        def refresh_actions(event):
+            return event.then(
+                refresh_model_actions, action_inputs, action_outputs,
+                show_progress="hidden", concurrency_id="model-actions",
+            )
 
         # Refresh model-dependent displays after explicit model actions.
         # The timer also catches changes from other tabs, but this updates
@@ -840,6 +811,7 @@ def build_app() -> gr.Blocks:
             """Rescan the cache after ``event``, and re-read what the model feeds."""
 
             event = event.then(refresh_my_models, models_inputs, models_outputs)
+            event = refresh_actions(event)
             if not reloads:
                 return event
             return (
@@ -881,9 +853,12 @@ def build_app() -> gr.Blocks:
         # A manual refresh and a new sort order reorder a list; neither
         # changes what is on disk or in memory, which is all the badge and the
         # count ask about.
-        refresh_models_button.click(refresh_my_models, models_inputs, models_outputs)
+        refresh_actions(
+            refresh_models_button.click(refresh_my_models, models_inputs, models_outputs)
+        )
         sort_models.input(refresh_my_models, models_inputs, models_outputs)
-        demo.load(refresh_my_models, models_inputs, models_outputs)
+        # Before the reader chooses an ID, startup can highlight the loaded model.
+        refresh_actions(demo.load(refresh_my_models, [my_models, sort_models], models_outputs))
         # The badge's timer corrects the fit verdicts once torch has finished
         # importing: the page is painted before that, so the first verdicts
         # are given without knowing the device. It repaints once and then
