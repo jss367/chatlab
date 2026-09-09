@@ -22,6 +22,7 @@ from uuid import uuid4
 import gradio as gr
 from gradio.utils import get_upload_folder
 
+import api
 import charts
 import library
 import settings
@@ -127,9 +128,11 @@ from ui.conversations import (
     new_conversation,
     panel_reset,
     refresh_conversation_list,
+    remember_branch_sampling,
     remember_forks,
     remember_message,
     restore_conversations,
+    sampling_updates,
     save_conversation,
     selected_turn,
     switch_fork,
@@ -217,8 +220,10 @@ from ui.models_page import (
     model_snapshot,
     my_models_summary,
     redownload_my_model,
+    refresh_after_device,
     refresh_model_badge,
     refresh_my_models,
+    refresh_search_results,
     removal_refusal,
     remove_my_model,
     search_models,
@@ -263,7 +268,10 @@ from ui.scoring import (
     score_token_count,
 )
 from ui.settings_page import (
+    HARDWARE_UNREAD,
     PERSISTED_SETTING_NAMES,
+    hardware_card,
+    refresh_hardware,
     remember_committed_seed,
     remember_prefill_limit,
     remember_settings,
@@ -288,7 +296,14 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     conductor_port = os.environ.get("CONDUCTOR_PORT")
-    build_app().queue(default_concurrency_limit=1).launch(
+    demo = build_app().queue(default_concurrency_limit=1)
+    # Gradio builds its FastAPI application inside launch(), so the API is
+    # added once the server is up rather than before it. prevent_thread_lock
+    # is what makes that possible: the thread is held afterwards instead.
+    demo.launch(
         inbrowser=conductor_port is None,
         server_port=int(conductor_port) if conductor_port else None,
+        prevent_thread_lock=True,
     )
+    api.attach(demo.app)
+    demo.block_thread()

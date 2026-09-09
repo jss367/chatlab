@@ -248,6 +248,45 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
     )
 
 
+# The sampling a conversation keeps of its own. These four shape the reply
+# and are what a reader moves between one fork and the next: one branch at
+# temperature 0 beside one at 1.2 is the comparison the app is for. The seed
+# and the randomize switch are deliberately not among them - a finished reply
+# writes the seed it used into that box, so a seed kept per conversation
+# would record the app's dice rather than anybody's choice.
+CONVERSATION_SAMPLING = ("temperature", "top_p", "top_k", "max_new_tokens")
+
+
+def sampling_defaults(chosen: Settings | None = None) -> dict[str, Any]:
+    """The sampling a conversation starts from: the saved settings."""
+
+    saved = chosen if chosen is not None else current()
+    return {name: getattr(saved, name) for name in CONVERSATION_SAMPLING}
+
+
+def sampling_values(
+    held: Mapping[str, Any] | None, chosen: Settings | None = None
+) -> dict[str, Any]:
+    """The sampling to answer a conversation with, sanitized as a setting is.
+
+    ``held`` is what the conversation carries, which may be nothing, part of
+    the set, or - the file having been edited by hand - values out of range.
+    Whatever is missing or unusable falls back to the saved setting, through
+    the same :func:`sanitize` every setting goes through, so a conversation's
+    response length still follows a context limit the reader has lowered
+    since.
+    """
+
+    saved = chosen if chosen is not None else current()
+    given = {
+        name: value
+        for name, value in (held or {}).items()
+        if name in CONVERSATION_SAMPLING
+    }
+    checked = sanitize(saved.to_mapping() | given)
+    return {name: getattr(checked, name) for name in CONVERSATION_SAMPLING}
+
+
 def settings_path() -> Path:
     """Where the settings file is read from and written to."""
 

@@ -14,10 +14,16 @@ import gradio as gr
 import settings
 from model_runtime import (
     DEFAULT_MODEL_SORT,
+    FITS,
     MODEL_WEIGHTS,
+    QUANTIZED_BITS,
+    TIGHT,
+    UNFIT,
     CachedModel,
     CacheStatus,
+    DeviceProfile,
     DownloadSnapshot,
+    Fit,
     HubModel,
     LoadProgress,
     LoadSnapshot,
@@ -26,10 +32,16 @@ from model_runtime import (
     ModelLoaded,
     cache_root,
     cache_status,
+    device_profile,
+    estimate_parameter_bytes,
+    imported_torch,
+    estimate_snapshot_bytes,
     format_bytes,
     format_count,
     list_cached_models,
+    model_fit,
     search_hub_models,
+    snapshot_folder,
     sort_cached_models,
 )
 from ui import runtime
@@ -729,10 +741,137 @@ UNSUPPORTED_REASON = (
 )
 
 
-def cached_model_label(entry: CachedModel) -> str:
-    """``org/name · 15 GB``, flagged when it is loaded or short of files."""
+# The one word each verdict gets in a list. A model whose size or whose
+# machine could not be measured gets none: the detail beside the list says
+# what is not known, and a list is the wrong place to explain it.
+FIT_WORDS = {FITS: "fits", TIGHT: "tight", UNFIT: "won't fit"}
+
+# What the estimate assumes when the device has not been read yet. Both
+# accelerators load half precision; a load onto the CPU converts to float32
+# and takes twice as much, so a verdict given before the device is known can
+# be too generous by half. It is corrected as soon as the device is read -
+# see ``refresh_after_device``.
+ASSUMED_DTYPE = "float16"
+
+
+def fit_word(fit: Fit | None) -> str:
+    """The list's own one-word verdict, or nothing where there is none."""
+
+    return FIT_WORDS.get(fit.state, "") if fit is not None else ""
+
+
+def weight_bits(precision: str | None, profile: DeviceProfile) -> int | None:
+    """The bit width a load would pack linear weights into, or ``None`` for full.
+
+    A quantized choice is honoured on Apple Metal alone, so anywhere else the
+    estimate is of full weights however the radio is set - which is what the
+    load itself does. A device not read yet counts as somewhere else: of the
+    two ways to be wrong for the few seconds before it is read, saying a
+    model is tight when 4-bit would have fitted costs a reader nothing, while
+    saying it fits when the load will refuse it is the disagreement these
+    verdicts exist to prevent.
+    """
+
+    if not profile.quantizes:
+        return None
+    return QUANTIZED_BITS.get(precision or "full")
+
+
+def cached_fit(
+    entry: CachedModel, precision: str | None, profile: DeviceProfile
+) -> Fit | None:
+    """Whether ``entry`` would load now, or ``None`` where there is nothing to judge.
+
+    A model short of files has no size to measure until the rest arrives, an
+    unsupported one will not load whatever the memory says, and the model
+    already in memory has answered the question by being there - judging it
+    against what is left free would call the loaded model tight.
+
+    Being there only answers for the weights it was read as, though. **Load
+    cached** on the model in memory is how a new precision is applied, so a
+    reader who has moved that radio is asking about a load that has not
+    happened, and the model that fits at four bits may not fit whole.
+    """
+
+    if entry.status.missing_files or entry.status.unsupported:
+        return None
+    reloading = weight_bits(precision, profile) != weight_bits(
+        runtime.MANAGER.precision, profile
+    )
+    if runtime.MANAGER.model_id == entry.model_id and not reloading:
+        return None
+    snapshot = snapshot_folder(entry.path) if entry.path is not None else None
+    if snapshot is None:
+        return None
+    estimated = estimate_snapshot_bytes(
+        snapshot, profile.dtype or ASSUMED_DTYPE, weight_bits(precision, profile)
+    )
+    return model_fit(estimated, profile)
+
+
+def replacement_profile() -> DeviceProfile:
+    """The machine as a model about to be loaded would find it.
+
+    Every model a verdict is given for is one that would replace whatever is
+    in memory, and a load unloads first and only then checks whether the next
+    model fits. So the weights on the device now are counted as available;
+    without that, a 15 GB model already loaded would have every alternative
+    marked tight and the button would then load them anyway.
+    """
+
+    return device_profile().reclaimed(runtime.MANAGER.loaded_bytes)
+
+
+def cached_fits(
+    models: list[CachedModel], precision: str | None
+) -> dict[str, Fit]:
+    """The fit verdict for each of ``models``, by model ID, read against one profile."""
+
+    profile = replacement_profile()
+    fits = {}
+    for entry in models:
+        fit = cached_fit(entry, precision, profile)
+        if fit is not None:
+            fits[entry.model_id] = fit
+    return fits
+
+
+def hub_fit(result: HubModel, precision: str | None, profile: DeviceProfile) -> Fit:
+    """Whether ``result`` would load now, judged from the hub's parameter count.
+
+    The count is all a search result carries, so the estimate assumes a
+    half-precision checkpoint and, for a quantized load, that the embeddings
+    are packed with everything else. Both are close enough to tell a model
+    that fits from one that cannot; the detail says where the figure came
+    from.
+    """
+
+    if not result.parameters:
+        return model_fit(None, profile)
+    estimated = estimate_parameter_bytes(
+        result.parameters,
+        profile.dtype or ASSUMED_DTYPE,
+        weight_bits(precision, profile),
+    )
+    return model_fit(estimated, profile)
+
+
+def hub_fits(results: list[HubModel], precision: str | None) -> dict[str, Fit]:
+    """The fit verdict for each search result, by model ID, against one profile."""
+
+    profile = replacement_profile()
+    return {
+        result.model_id: hub_fit(result, precision, profile) for result in results
+    }
+
+
+def cached_model_label(entry: CachedModel, fit: Fit | None = None) -> str:
+    """``org/name · 15 GB · fits``, flagged when it is loaded or short of files."""
 
     label = f"{entry.model_id} · {format_bytes(entry.size_bytes)}"
+    verdict = fit_word(fit)
+    if verdict:
+        label += f" · {verdict}"
     if entry.status.missing_files:
         label += " · incomplete"
     elif entry.status.unsupported:
@@ -742,7 +881,7 @@ def cached_model_label(entry: CachedModel) -> str:
     return label
 
 
-def describe_cached_model(entry: CachedModel) -> str:
+def describe_cached_model(entry: CachedModel, fit: Fit | None = None) -> str:
     if runtime.MANAGER.model_id == entry.model_id:
         verdict = f"**Loaded now** on {runtime.MANAGER.device_name}."
     elif entry.status.missing_files:
@@ -755,6 +894,8 @@ def describe_cached_model(entry: CachedModel) -> str:
     else:
         verdict = "**Downloaded · Ready to load.** Use **Load cached** to bring it into memory."
     facts = [("On disk", describe_on_disk(entry.status))]
+    if fit is not None and fit.known:
+        facts.append(("Memory", fit.note))
     if entry.files:
         facts.append(("Files", f"{entry.files} in the current snapshot"))
     if entry.architecture:
@@ -786,26 +927,36 @@ def my_models_summary(models: list[CachedModel]) -> str:
 def refresh_my_models(
     selected: str | None,
     order: str | None = DEFAULT_MODEL_SORT,
+    precision: str | None = None,
     model_id: str | None = None,
 ):
-    """Keep the selected row or typed ID; default to the loaded model at startup."""
+    """Rescan the cache; keep the selected row or typed ID, or the loaded model.
+
+    ``precision`` is the **Weight precision** choice, which decides what each
+    model would take in memory and so whether it fits. The list is repainted
+    when that choice changes, which is what makes the radio the first thing
+    to try when a model will not load.
+    """
 
     models = sort_cached_models(list_cached_models(), order)
+    fits = cached_fits(models, precision)
     ids = [entry.model_id for entry in models]
     if selected not in ids:
         fallback = model_id.strip() if model_id is not None else runtime.MANAGER.model_id
         selected = fallback if fallback in ids else None
-    choices = [(cached_model_label(entry), entry.model_id) for entry in models]
+    choices = [
+        (cached_model_label(entry, fits.get(entry.model_id)), entry.model_id)
+        for entry in models
+    ]
     if selected is None:
         detail = NO_CACHED_MODEL_SELECTED if models else ""
     else:
-        detail = describe_cached_model(
-            next(entry for entry in models if entry.model_id == selected)
-        )
+        entry = next(entry for entry in models if entry.model_id == selected)
+        detail = describe_cached_model(entry, fits.get(selected))
     return gr.update(choices=choices, value=selected), detail, my_models_summary(models)
 
 
-def select_my_model(selected: str | None):
+def select_my_model(selected: str | None, precision: str | None = None):
     """Put the chosen cached model in the ID box and describe it."""
 
     if not selected:
@@ -815,7 +966,12 @@ def select_my_model(selected: str | None):
     )
     if entry is None:
         return gr.skip(), f"`{selected}` is no longer in the cache. Press **Refresh**."
-    return gr.update(value=selected), describe_cached_model(entry)
+    return (
+        gr.update(value=selected),
+        describe_cached_model(
+            entry, cached_fit(entry, precision, replacement_profile())
+        ),
+    )
 
 
 def clear_my_model_selection():
@@ -996,21 +1152,26 @@ def hide_remove_confirm():
     return gr.update(visible=False), None
 
 
-def hub_model_label(result: HubModel) -> str:
+def hub_model_label(result: HubModel, fit: Fit | None = None) -> str:
     parts = [result.model_id]
     if result.parameters:
         parts.append(f"{format_count(result.parameters)} params")
+    verdict = fit_word(fit)
+    if verdict:
+        parts.append(verdict)
     if result.downloads is not None:
         parts.append(f"{format_count(result.downloads)} downloads")
     return " · ".join(parts)
 
 
-def describe_hub_model(result: HubModel) -> str:
+def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
     name = html.escape(result.model_id)
     lines = [f"[{name} on Hugging Face](https://huggingface.co/{name})"]
     facts = []
     if result.parameters:
         facts.append(("Parameters", format_count(result.parameters)))
+    if fit is not None and fit.known:
+        facts.append(("Memory", f"{fit.note} Estimated from the parameter count."))
     counts = []
     if result.downloads is not None:
         counts.append(f"{format_count(result.downloads)} downloads in the last month")
@@ -1054,7 +1215,38 @@ def describe_hub_model(result: HubModel) -> str:
     return "\n".join(lines)
 
 
-def search_models(query: str, hf_token: str):
+def refresh_after_device(
+    known: bool,
+    selected: str | None,
+    order: str | None = DEFAULT_MODEL_SORT,
+    precision: str | None = None,
+    model_id: str | None = None,
+    result: str | None = None,
+    results: dict | None = None,
+):
+    """Repaint both model lists once the device is known, and only then.
+
+    The page is painted before torch has finished importing, so the first
+    verdicts are given without knowing the device: they assume half
+    precision and no quantization, which is the safe way to be wrong but is
+    wrong on a Mac with 4-bit chosen. A search run in those first seconds
+    carries the same provisional verdicts, so it is repainted here too,
+    from the results already in hand rather than by searching again. This
+    runs on the badge's timer, does nothing until the device can be read,
+    and repaints once - after which ``known`` keeps it quiet for the rest of
+    the session.
+    """
+
+    if known or imported_torch() is None:
+        return (gr.skip(),) * 6
+    return (
+        *refresh_my_models(selected, order, precision, model_id),
+        *refresh_search_results(result, results or {}, precision),
+        True,
+    )
+
+
+def search_models(query: str, hf_token: str, precision: str | None = None):
     """Search the hub and list the results; nothing is selected yet."""
 
     cleared = gr.update(choices=[], value=None)
@@ -1075,7 +1267,11 @@ def search_models(query: str, hf_token: str):
             f"No language models matched `{html.escape(cleaned)}`.",
             {},
         )
-    choices = [(hub_model_label(result), result.model_id) for result in results]
+    fits = hub_fits(results, precision)
+    choices = [
+        (hub_model_label(result, fits.get(result.model_id)), result.model_id)
+        for result in results
+    ]
     count = f"{len(results)} result{'s' if len(results) != 1 else ''}"
     return (
         gr.update(choices=choices, value=None),
@@ -1084,10 +1280,40 @@ def search_models(query: str, hf_token: str):
     )
 
 
-def select_search_result(selected: str | None, results: dict):
+def select_search_result(
+    selected: str | None, results: dict, precision: str | None = None
+):
     """Put the chosen search result in the ID box and describe it."""
 
     result = results.get(selected) if selected else None
     if result is None:
         return gr.skip(), NO_RESULT_SELECTED
-    return gr.update(value=result.model_id), describe_hub_model(result)
+    return (
+        gr.update(value=result.model_id),
+        describe_hub_model(result, hub_fit(result, precision, replacement_profile())),
+    )
+
+
+def refresh_search_results(
+    selected: str | None, results: dict, precision: str | None = None
+):
+    """Repaint the search list for a new weight precision, without searching again.
+
+    The results are held in a state, so a changed precision only needs the
+    verdicts recomputed. An empty list is left alone rather than replaced
+    with an empty one, which would clear the hint under it.
+    """
+
+    if not results:
+        return gr.skip(), gr.skip()
+    fits = hub_fits(list(results.values()), precision)
+    choices = [
+        (hub_model_label(result, fits.get(model_id)), model_id)
+        for model_id, result in results.items()
+    ]
+    detail = (
+        describe_hub_model(results[selected], fits.get(selected))
+        if selected in results
+        else gr.skip()
+    )
+    return gr.update(choices=choices, value=selected), detail

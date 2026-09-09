@@ -45,6 +45,31 @@ def tearDownModule():
 
 
 
+def roomy(
+    test, total_gb=48, available_gb=40, backend="mps", dtype="float16", held_gb=0
+):
+    """Judge fit against a fixed machine, not the one running the tests.
+
+    Availability moves from one second to the next and the tests must not,
+    so every fit verdict under test is read from a profile like this one.
+    ``held_gb`` is what a loaded model is holding on the device, which a load
+    gives back before it checks whether the next model fits.
+    """
+
+    profile = model_runtime.DeviceProfile(
+        backend=backend,
+        dtype=dtype,
+        total=total_gb * 1024**3,
+        available=available_gb * 1024**3,
+        pool="this machine",
+        held=held_gb * 1024**3,
+    )
+    original = models_page.device_profile
+    models_page.device_profile = lambda torch=None: profile
+    test.addCleanup(lambda: setattr(models_page, "device_profile", original))
+    return profile
+
+
 def lay_out(root: str, model_id: str, files: dict[str, bytes]) -> Path:
     """A model folder the way ``huggingface_hub`` keeps one: blobs plus symlinks."""
 
@@ -786,12 +811,12 @@ class MyModelsPaneTests(unittest.TestCase):
 
     def test_refresh_does_not_replace_an_uncached_typed_id_with_the_loaded_model(self):
         self.manager.model_id = OLMO
-        radio, _, _ = app.refresh_my_models(None, "Name", "org/not-downloaded")
+        radio, _, _ = app.refresh_my_models(None, "Name", model_id="org/not-downloaded")
         self.assertIsNone(radio["value"])
         self.assertEqual(app.chosen_model("org/not-downloaded", radio["value"]), "org/not-downloaded")
 
     def test_refresh_keeps_a_picked_row_ahead_of_a_stale_textbox(self):
-        radio, _, _ = app.refresh_my_models("org/partial", "Name", OLMO)
+        radio, _, _ = app.refresh_my_models("org/partial", "Name", model_id=OLMO)
         self.assertEqual(radio["value"], "org/partial")
 
     def test_choosing_a_model_fills_the_id_box_and_describes_it(self):
@@ -816,6 +841,214 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertEqual(
             app.select_my_model(None), (gr.skip(), app.NO_CACHED_MODEL_SELECTED)
         )
+
+
+class ModelFitTests(unittest.TestCase):
+    """Whether a model would load, said before the button is pressed."""
+
+    GB = 1024**3
+    CONFIG = json.dumps({"architectures": ["Olmo3ForCausalLM"], "dtype": "float16"})
+
+    def cache(self, sizes: dict[str, int]) -> Path:
+        """A cache holding one model per entry, each weighing what it says.
+
+        Sparse files: the fit check reads sizes, never contents, and the
+        alternative is writing tens of gigabytes to a temporary directory.
+        """
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        for model_id, size in sizes.items():
+            folder = lay_out(
+                root,
+                model_id,
+                {"config.json": self.CONFIG.encode(), "model.safetensors": b""},
+            )
+            weights = folder / "blobs" / "blob1"
+            with weights.open("r+b") as handle:
+                handle.truncate(size)
+        return root
+
+    def setUp(self):
+        self.manager = ModelManager()
+        self.profile = roomy(self)
+        root = self.cache({OLMO: 15 * self.GB, "org/huge": 200 * self.GB})
+        originals = (runtime.MANAGER, models_page.list_cached_models, models_page.cache_root)
+        runtime.MANAGER = self.manager
+        models_page.list_cached_models = lambda: list_cached_models(root)
+        models_page.cache_root = lambda: root
+        self.addCleanup(
+            lambda: setattr(runtime, "MANAGER", originals[0])
+            or setattr(models_page, "list_cached_models", originals[1])
+            or setattr(models_page, "cache_root", originals[2])
+        )
+
+    def labels(self, precision=None):
+        radio, _, _ = app.refresh_my_models(None, "Name", precision)
+        return dict((value, label) for label, value in radio["choices"])
+
+    def test_each_model_is_listed_with_the_verdict_a_load_would_get(self):
+        labels = self.labels()
+
+        self.assertIn("· fits", labels[OLMO])
+        self.assertIn("· won't fit", labels["org/huge"])
+
+    def test_a_quantized_precision_shrinks_what_has_to_fit(self):
+        # 15 GB of half-precision weights against a machine with 18 GB free:
+        # too big whole once the 4 GB reserve is counted, comfortable at four
+        # bits. This is what makes the weight precision radio the first thing
+        # to try.
+        roomy(self, total_gb=24, available_gb=18)
+
+        self.assertIn("· tight", self.labels("full")[OLMO])
+        self.assertIn("· fits", self.labels("4-bit")[OLMO])
+
+    def test_a_quantized_precision_is_ignored_where_it_would_not_apply(self):
+        # 8-bit and 4-bit weights need Apple Metal; a load elsewhere reads
+        # the checkpoint whole whatever the radio says, so the verdict does
+        # too rather than promising room the load will not find.
+        roomy(self, total_gb=24, available_gb=18, backend="cpu", dtype="float16")
+
+        self.assertIn("· tight", self.labels("4-bit")[OLMO])
+
+    def test_a_device_not_read_yet_is_judged_at_full_weights(self):
+        # Of the two ways to be wrong for the few seconds before the device
+        # is read, saying a model is tight when 4-bit would have fitted costs
+        # a reader nothing; saying it fits when the load will refuse it is
+        # the disagreement these verdicts exist to prevent. The list is
+        # repainted once the device is known - see the next test.
+        roomy(self, total_gb=24, available_gb=18, backend=None, dtype=None)
+
+        self.assertIn("· tight", self.labels("4-bit")[OLMO])
+
+    def test_the_verdicts_are_repainted_once_the_device_is_read(self):
+        # The page is painted before the background import finishes, so the
+        # first verdicts are given without knowing the device. The badge's
+        # timer corrects them once, and then leaves the list alone.
+        roomy(self, total_gb=24, available_gb=18, backend=None, dtype=None)
+        original = models_page.imported_torch
+        models_page.imported_torch = lambda: None
+        self.addCleanup(lambda: setattr(models_page, "imported_torch", original))
+
+        # Nothing to correct yet: torch is still importing.
+        self.assertEqual(
+            app.refresh_after_device(False, None, "Name", "4-bit"), (gr.skip(),) * 6
+        )
+
+        models_page.imported_torch = lambda: object()
+        radio, _detail, _summary, _results, _search_detail, known = (
+            app.refresh_after_device(False, None, "Name", "4-bit")
+        )
+
+        self.assertTrue(known)
+        self.assertIn("· tight", dict((v, k) for k, v in radio["choices"])[OLMO])
+        # And once it has run, it never runs again.
+        self.assertEqual(
+            app.refresh_after_device(True, None, "Name", "4-bit"), (gr.skip(),) * 6
+        )
+
+    def test_a_search_run_before_the_device_was_read_is_repainted_too(self):
+        held = {
+            "org/small": model_runtime.HubModel(
+                model_id="org/small", parameters=1_000_000_000
+            )
+        }
+        roomy(self, total_gb=24, available_gb=18, backend=None, dtype=None)
+        original = models_page.imported_torch
+        models_page.imported_torch = lambda: object()
+        self.addCleanup(lambda: setattr(models_page, "imported_torch", original))
+
+        _radio, _detail, _summary, results, _search, known = app.refresh_after_device(
+            False, None, "Name", "full", None, None, held
+        )
+
+        self.assertTrue(known)
+        self.assertIn("fits", results["choices"][0][0])
+
+    def test_the_selected_model_says_what_the_verdict_rests_on(self):
+        _box, detail = app.select_my_model(OLMO, "full")
+
+        self.assertIn("Memory", detail)
+        self.assertIn("15.0 GB of weights", detail)
+        self.assertIn("40.0 GB", detail)
+
+    def test_a_replacement_is_judged_after_the_loaded_model_is_given_back(self):
+        # A load unloads first and only then checks whether the next model
+        # fits, so the weights on the device now are not in the way of the
+        # model that would replace them. Without giving them back, a full
+        # machine marks every alternative tight and the button loads them
+        # anyway.
+        roomy(self, total_gb=24, available_gb=2)
+        self.assertIn("· tight", self.labels()[OLMO])
+
+        roomy(self, total_gb=24, available_gb=2, held_gb=18)
+        self.assertIn("· fits", self.labels()[OLMO])
+
+    def test_a_model_on_the_cpu_is_given_back_by_the_loads_own_estimate(self):
+        # Host memory keeps no allocator figure, and a CPU model's weights
+        # are anonymous memory, which the availability estimate deliberately
+        # does not count. The load's own estimate stands in, or every
+        # alternative would stay tight on a machine that would load them.
+        # The dtype is left at half precision so the estimate under test is
+        # the reclaim, not the CPU's own float32 conversion.
+        roomy(self, total_gb=24, available_gb=2, backend="cpu", dtype="float16")
+        self.manager.model_id = "org/other"
+
+        self.assertIn("· tight", self.labels()[OLMO])
+
+        self.manager.loaded_bytes = 18 * self.GB
+
+        self.assertIn("· fits", self.labels()[OLMO])
+
+    def test_the_model_in_memory_is_not_judged_again(self):
+        # It fits: it is there. Judging it against what is left free would
+        # call the loaded model tight.
+        self.manager.model_id = OLMO
+        self.manager.device_name = "Apple Metal (MPS)"
+        roomy(self, total_gb=24, available_gb=2)
+
+        label = self.labels()[OLMO]
+        self.assertIn("· loaded", label)
+        self.assertNotIn("tight", label)
+
+    def test_the_verdicts_are_the_words_the_stylesheet_looks_for(self):
+        # The CSS tints options by their label text, the only hook Gradio's
+        # Radio gives a stylesheet, so the words and the selectors have to
+        # stay spelled the same.
+        for verdict in ("· won't fit", "· tight"):
+            self.assertIn(f'[data-testid*="{verdict}"]', app.CSS)
+
+    def test_a_reload_at_another_precision_is_judged_again(self):
+        # Load cached on the model in memory is how a new precision is
+        # applied, so a reader who has moved that radio is asking about a
+        # load that has not happened - and a model that fits at four bits
+        # may not fit whole.
+        self.manager.model_id = OLMO
+        self.manager.device_name = "Apple Metal (MPS), 4-bit weights"
+        self.manager.precision = "4-bit"
+        roomy(self, total_gb=24, available_gb=18)
+
+        # The precision it is loaded at: nothing to ask.
+        self.assertNotIn("tight", self.labels("4-bit")[OLMO])
+        # Whole weights would not fit beside the 4 GB reserve.
+        self.assertIn("· tight", self.labels("full")[OLMO])
+
+    def test_a_reload_where_precision_cannot_apply_is_not_judged_again(self):
+        # Off Metal the radio changes nothing about the load, so moving it
+        # does not turn the loaded model into a question.
+        self.manager.model_id = OLMO
+        self.manager.precision = "full"
+        roomy(self, total_gb=24, available_gb=2, backend="cpu", dtype="float16")
+
+        self.assertNotIn("tight", self.labels("4-bit")[OLMO])
+
+    def test_an_incomplete_model_has_no_size_to_judge(self):
+        models_page.list_cached_models = lambda: [PARTIAL]
+
+        label = self.labels()["org/partial"]
+        self.assertIn("· incomplete", label)
+        for verdict in ("fits", "tight"):
+            self.assertNotIn(verdict, label)
 
 
 class ManageMyModelsTests(unittest.TestCase):
@@ -1025,6 +1258,7 @@ class ModelSearchPaneTests(unittest.TestCase):
     def setUp(self):
         self.results = [INSTRUCT, GATED]
         self.queries = []
+        roomy(self)
         original_search, original_status = models_page.search_hub_models, models_page.cache_status
         models_page.search_hub_models = self.search
         models_page.cache_status = lambda model_id: CacheStatus()
@@ -1047,9 +1281,11 @@ class ModelSearchPaneTests(unittest.TestCase):
             radio["choices"],
             [
                 (
-                    "allenai/Olmo-3-7B-Instruct · 7.3B params · 281K downloads",
+                    "allenai/Olmo-3-7B-Instruct · 7.3B params · fits · 281K downloads",
                     "allenai/Olmo-3-7B-Instruct",
                 ),
+                # A result whose parameter count the hub did not give has no
+                # size to judge, so it is listed without a verdict.
                 ("meta-llama/Llama-3.1-8B", "meta-llama/Llama-3.1-8B"),
             ],
         )
@@ -1537,9 +1773,10 @@ class PageLayoutTests(unittest.TestCase):
 
     def test_every_model_change_rescans_the_cache(self):
         # Download, download-and-load, load cached, unload, redownload,
-        # confirmed removal, the refresh button, a new sort order, and the
-        # page load each rescan. Selecting the default only navigates.
-        self.assertEqual(len(self.listeners("refresh_my_models")), 9)
+        # confirmed removal, the refresh button, a new sort order, a new
+        # weight precision, and the page load each rescan. Selecting the
+        # default only navigates.
+        self.assertEqual(len(self.listeners("refresh_my_models")), 10)
 
     def test_model_actions_follow_selections_and_cache_refreshes(self):
         listeners = self.listeners("refresh_model_actions")
@@ -1609,7 +1846,7 @@ class PageLayoutTests(unittest.TestCase):
             cards = list(download.fn(typed_id, "", selected))
             self.assertIn("Download complete", cards[-1])
             self.assertEqual(manager.model_id, OLMO)
-            radio, _, _ = refresh.fn(selected, "Name", typed_id)
+            radio, _, _ = refresh.fn(selected, "Name", model_id=typed_id)
             detail, _, _, load_button = models_page.refresh_model_actions(typed_id, radio["value"])
             self.assertEqual(radio["value"], typed_id)
             self.assertIn("Ready to load", detail)
@@ -1844,10 +2081,14 @@ class PageLayoutTests(unittest.TestCase):
         self.assertEqual([by_id[fn.targets[0][0]] for fn in moved], sliders)
         for fn in listeners:
             self.assertEqual(fn.inputs, sliders)
-        # The other three are the paths that move a slider without anyone
-        # touching it: the settings file read back on load, and the context
-        # limit committed, which can pull the response length down with it.
-        self.assertEqual(len(listeners) - len(moved), 3)
+        # The others are the paths that move a slider without anyone touching
+        # it: the settings file read back on load, the context limit
+        # committed, which can pull the response length down with it, and the
+        # six that change which conversation is on screen - forking, starting
+        # one, switching, deleting, clearing, and the page load that brings
+        # the saved conversations back - each of which brings that
+        # conversation's own sampling onto the sliders.
+        self.assertEqual(len(listeners) - len(moved), 9)
 
     def test_everything_that_writes_the_summary_shares_one_queue(self):
         # always_last coalesces each slider's own requests; across four
@@ -1908,8 +2149,10 @@ class PageLayoutTests(unittest.TestCase):
         # different model has its own limit, so every handler that changes
         # what is loaded recomputes the count rather than leaving the old
         # model's answer under the box.
+        # Four of the rescans change neither: the refresh button, a new sort
+        # order, a new weight precision, and the page load.
         self.assertEqual(
-            len(listeners) - len(typed), len(self.listeners("refresh_my_models")) - 3
+            len(listeners) - len(typed), len(self.listeners("refresh_my_models")) - 4
         )
 
     def test_choosing_a_model_writes_the_id_box(self):
@@ -1918,6 +2161,80 @@ class PageLayoutTests(unittest.TestCase):
             with self.subTest(handler=name):
                 (listener,) = self.listeners(name)
                 self.assertIs(listener.outputs[0], box)
+
+
+class HardwarePanelTests(unittest.TestCase):
+    """What the Settings page says about the machine."""
+
+    GB = 1024**3
+
+    def setUp(self):
+        self.manager = ModelManager()
+        original = runtime.MANAGER
+        runtime.MANAGER = self.manager
+        self.addCleanup(lambda: setattr(runtime, "MANAGER", original))
+
+    def card(self, **profile):
+        return app.hardware_card(model_runtime.DeviceProfile(**profile))
+
+    def test_a_device_not_read_yet_shows_the_memory_and_says_to_wait(self):
+        card = self.card(total=48 * self.GB, available=40 * self.GB)
+
+        self.assertIn("not read yet", card)
+        self.assertIn("48.0 GB in total", card)
+        self.assertIn("40.0 GB", card)
+        self.assertIn(app.HARDWARE_UNREAD, card)
+
+    def test_a_metal_machine_reports_the_cap_and_where_it_comes_from(self):
+        card = self.card(
+            backend="mps",
+            dtype="float16",
+            total=24 * self.GB,
+            available=20 * self.GB,
+            ceiling=24 * self.GB,
+            recommended=36 * self.GB,
+            fraction=24 / 36,
+        )
+
+        self.assertIn("Apple Metal (MPS)", card)
+        self.assertIn("loaded as float16", card)
+        self.assertIn("8-bit and 4-bit", card)
+        self.assertIn("24.0 GB, 0.67 of the 36.0 GB Metal recommends", card)
+        self.assertIn("mps_memory_fraction", card)
+        # The reserve the fit check keeps back is part of the same story.
+        self.assertIn("4.0 GB kept beside the weights", card)
+
+    def test_a_machine_without_metal_says_a_quantized_choice_is_ignored(self):
+        card = self.card(
+            backend="cpu", dtype="float32", total=16 * self.GB, available=8 * self.GB
+        )
+
+        self.assertIn("CPU", card)
+        self.assertIn("loaded as float32", card)
+        self.assertIn("needs Apple Metal", card)
+        self.assertNotIn("Metal cap", card)
+
+    def test_the_panel_names_the_model_in_memory(self):
+        self.manager.model_id = OLMO
+        self.manager.device_name = "Apple Metal (MPS), 4-bit weights"
+        self.manager.precision = "4-bit"
+
+        card = self.card(backend="mps", dtype="float16", total=48 * self.GB)
+
+        self.assertIn(OLMO, card)
+        self.assertIn("4-bit weights", card)
+
+    def test_an_empty_runtime_points_at_the_models_page(self):
+        card = self.card(backend="mps", dtype="float16", total=48 * self.GB)
+
+        self.assertIn("none", card)
+        self.assertIn("Models page", card)
+
+    def test_a_machine_that_reports_no_memory_says_unknown_rather_than_zero(self):
+        card = self.card(backend="cpu", dtype="float32")
+
+        self.assertIn("unknown in total", card)
+        self.assertNotIn("0.0 GB in total", card)
 
 
 class SavedSettingsTests(unittest.TestCase):
@@ -2071,7 +2388,13 @@ class SavedSettingsTests(unittest.TestCase):
                 events.setdefault(self.demo.blocks[block_id], set()).add(event)
 
         self.assertEqual(events[self.labelled("Random seed")], {"blur", "submit"})
-        self.assertEqual(events[self.labelled("Temperature")], {"change"})
+        # The four sampling controls are saved on input rather than change:
+        # switching conversations sets them, and a save from that would put
+        # the sampling of the conversation being looked at into the file
+        # every unpinned conversation answers with.
+        for label in ("Temperature", "Top-p", "Top-k (0 disables)", "Maximum new tokens"):
+            self.assertEqual(events[self.labelled(label)], {"input"}, label)
+        self.assertEqual(events[self.labelled("Measure prompt tokens")], {"change"})
         # And only the seed box's own events are allowed to write it down.
         for fn in self.listeners("remember_committed_seed"):
             self.assertEqual(
@@ -2193,7 +2516,7 @@ class SavedSettingsTests(unittest.TestCase):
     def test_lowering_the_context_limit_pulls_the_response_length_under_it(self):
         self.build_with(prefill_token_limit=8192, max_new_tokens=4096)
 
-        limit, length = app.remember_prefill_limit(1024, 4096)
+        limit, length, _forks = app.remember_prefill_limit(1024, 4096)
 
         self.assertEqual(limit["value"], 1024)
         self.assertEqual(length["maximum"], 1024)
@@ -2255,7 +2578,7 @@ class SavedSettingsTests(unittest.TestCase):
     def test_a_context_limit_outside_its_range_is_pulled_back_into_it(self):
         self.build_with()
 
-        limit, _length = app.remember_prefill_limit(2, 512)
+        limit, _length, _forks = app.remember_prefill_limit(2, 512)
 
         self.assertEqual(limit["value"], settings.PREFILL_TOKEN_LIMIT_RANGE[0])
 

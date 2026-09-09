@@ -8,7 +8,16 @@ from pathlib import Path
 from unittest import mock
 
 import library
-from conversation import MAIN_BRANCH, drop_branch, make_turn, new_forks, put_branch
+from conversation import (
+    MAIN_BRANCH,
+    branch_stamp,
+    copy_forks,
+    drop_branch,
+    make_turn,
+    new_forks,
+    put_branch,
+    put_branch_sampling,
+)
 
 EARLIER = "2026-09-01T10:00:00.000000+00:00"
 LATER = "2026-09-01T11:00:00.000000+00:00"
@@ -171,6 +180,203 @@ class RoundTripTests(unittest.TestCase):
         self.assertEqual([turn["role"] for turn in turns], ["user"])
 
 
+class SamplingFileTests(unittest.TestCase):
+    """A conversation's own sampling, through the file and through a merge."""
+
+    SAMPLING = {"temperature": 0.0, "top_p": 1.0, "top_k": 0, "max_new_tokens": 256}
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "conversations.json"
+
+    def test_a_branchs_sampling_comes_back_with_it(self):
+        forks = new_forks()
+        put_branch(forks, "Fork 1", [make_turn("user", "hi")])
+        put_branch_sampling(forks, "Fork 1", self.SAMPLING)
+
+        library.write(forks, self.path)
+        restored = library.read(self.path)
+
+        self.assertEqual(restored["sampling"], {"Fork 1": self.SAMPLING})
+
+    def test_a_branch_without_any_writes_nothing_and_reads_back_empty(self):
+        forks = new_forks()
+        put_branch(forks, MAIN_BRANCH, [make_turn("user", "hi")])
+
+        library.write(forks, self.path)
+
+        saved = json.loads(self.path.read_text())
+        self.assertNotIn("sampling", saved["branches"][0])
+        self.assertEqual(library.read(self.path)["sampling"], {})
+
+    def test_a_file_written_before_conversations_carried_sampling_still_reads(self):
+        # The key is simply absent, which is what every file written by an
+        # earlier version looks like.
+        library.write(stamped(MAIN_BRANCH, Main="hi"), self.path)
+        self.assertEqual(library.read(self.path)["sampling"], {})
+
+    def test_a_value_of_the_wrong_type_is_left_out_rather_than_refused(self):
+        # The whole pane must still come back: the conversations file is
+        # never a good enough reason to lose every conversation in it.
+        library.write(stamped(MAIN_BRANCH, Main="hi"), self.path)
+        saved = json.loads(self.path.read_text())
+        saved["branches"][0]["sampling"] = {
+            "temperature": "hot",
+            "top_k": True,
+            "max_new_tokens": 256,
+        }
+        self.path.write_text(json.dumps(saved))
+
+        restored = library.read(self.path)
+
+        self.assertEqual(restored["sampling"], {MAIN_BRANCH: {"max_new_tokens": 256}})
+        self.assertEqual(first_messages(restored), {MAIN_BRANCH: "hi"})
+
+    def test_a_key_this_version_knows_nothing_about_survives_a_save(self):
+        # Two machines can share the file without running the same version,
+        # and the newer one's per-branch sampling must come back whole.
+        library.write(stamped(MAIN_BRANCH, Main="hi"), self.path)
+        saved = json.loads(self.path.read_text())
+        saved["branches"][0]["sampling"] = {
+            "temperature": 0.0,
+            "repetition_penalty": 1.15,
+        }
+        self.path.write_text(json.dumps(saved))
+
+        library.write(library.read(self.path), self.path)
+
+        written = json.loads(self.path.read_text())["branches"][0]["sampling"]
+        self.assertEqual(written["repetition_penalty"], 1.15)
+        self.assertEqual(written["temperature"], 0.0)
+
+    def test_it_survives_a_slider_moved_here_too(self):
+        # Not just a read and a save: a temperature moved on this version
+        # leaves the newer version's own key where it was.
+        library.write(stamped(MAIN_BRANCH, Main="hi"), self.path)
+        saved = json.loads(self.path.read_text())
+        saved["branches"][0]["sampling"] = {
+            "temperature": 1.9,
+            "repetition_penalty": 1.15,
+        }
+        self.path.write_text(json.dumps(saved))
+
+        restored = library.read(self.path)
+        self.assertTrue(put_branch_sampling(restored, MAIN_BRANCH, self.SAMPLING))
+        library.write(restored, self.path)
+
+        written = json.loads(self.path.read_text())["branches"][0]["sampling"]
+        self.assertEqual(written["repetition_penalty"], 1.15)
+        self.assertEqual(written["temperature"], 0.0)
+
+    def test_sampling_taken_away_does_not_come_back(self):
+        # Clear leaves the main conversation empty and unpinned. Its sampling
+        # is merged on its own time, so without a stamp of its own the file's
+        # older copy looks like the newer of the two and pins it again.
+        pinned = stamped(MAIN_BRANCH, Main="hi")
+        put_branch_sampling(pinned, MAIN_BRANCH, self.SAMPLING)
+        library.write(pinned, self.path)
+
+        cleared = new_forks()
+        stamp = branch_stamp()
+        cleared["updated"] = {MAIN_BRANCH: stamp}
+        cleared["sampling_updated"] = {MAIN_BRANCH: stamp}
+        library.write(cleared, self.path)
+
+        restored = library.read(self.path)
+
+        self.assertEqual(restored["sampling"], {})
+        # And the removal outlives the merge, so a page still holding the old
+        # entry cannot put it back on the next save.
+        self.assertIn(MAIN_BRANCH, restored["sampling_updated"])
+        library.write(pinned, self.path)
+        self.assertEqual(library.read(self.path)["sampling"], {})
+
+    def test_sampling_that_is_not_an_object_is_not_a_file_this_app_wrote(self):
+        library.write(stamped(MAIN_BRANCH, Main="hi"), self.path)
+        saved = json.loads(self.path.read_text())
+        saved["branches"][0]["sampling"] = [0.8]
+        self.path.write_text(json.dumps(saved))
+
+        # read() reports it in the log and restores nothing, as it does for
+        # any file it cannot make sense of.
+        self.assertIsNone(library.read(self.path))
+        with self.assertRaises(ValueError):
+            library.parse(json.dumps(saved))
+
+    def test_a_whole_number_temperature_survives_as_a_number(self):
+        # A slider at 1 publishes an int, and JSON keeps it one.
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.SAMPLING | {"temperature": 1})
+
+        library.write(forks, self.path)
+
+        self.assertEqual(
+            library.read(self.path)["sampling"][MAIN_BRANCH]["temperature"], 1.0
+        )
+
+    def test_a_slider_moved_on_a_stale_page_keeps_the_newer_transcript(self):
+        # The two are merged apart. This page is a reply behind the file and
+        # has only moved a slider: it must not win the transcript, and the
+        # newer transcript must not undo the slider.
+        mine = stamped(MAIN_BRANCH, Main="mine")
+        put_branch_sampling(mine, MAIN_BRANCH, self.SAMPLING)
+        mine["updated"][MAIN_BRANCH] = EARLIER
+        theirs = stamped(MAIN_BRANCH, Main="theirs")
+        theirs["updated"][MAIN_BRANCH] = LATER
+
+        merged = library.merge(mine, theirs)
+
+        self.assertEqual(first_messages(merged), {MAIN_BRANCH: "theirs"})
+        self.assertEqual(merged["sampling"], {MAIN_BRANCH: self.SAMPLING})
+
+    def test_a_reply_saved_moments_ago_survives_a_sampling_only_edit(self):
+        # The whole of it, through the file: the other page saved a reply,
+        # this page changes only the temperature, and the reply stays.
+        theirs = stamped(MAIN_BRANCH, Main="hi")
+        theirs["branches"][MAIN_BRANCH].append(reply("an answer"))
+        theirs["updated"][MAIN_BRANCH] = LATER
+        library.write(theirs, self.path)
+
+        stale = stamped(MAIN_BRANCH, Main="hi")
+        stale["updated"][MAIN_BRANCH] = EARLIER
+        put_branch_sampling(stale, MAIN_BRANCH, self.SAMPLING)
+        library.write(stale, self.path)
+
+        restored = library.read(self.path)
+
+        self.assertEqual(
+            [turn["content"] for turn in restored["branches"][MAIN_BRANCH]],
+            ["hi", "an answer"],
+        )
+        self.assertEqual(restored["sampling"], {MAIN_BRANCH: self.SAMPLING})
+
+    def test_the_sampling_moved_more_recently_wins(self):
+        mine = stamped(MAIN_BRANCH, Main="mine")
+        put_branch_sampling(mine, MAIN_BRANCH, self.SAMPLING)
+        theirs = stamped(MAIN_BRANCH, Main="theirs")
+        put_branch_sampling(theirs, MAIN_BRANCH, self.SAMPLING | {"temperature": 1.9})
+        theirs["sampling_updated"][MAIN_BRANCH] = EARLIER
+
+        merged = library.merge(mine, theirs)
+
+        self.assertEqual(merged["sampling"][MAIN_BRANCH]["temperature"], 0.0)
+        # And the other way round, to show the stamp is what decides.
+        mine["sampling_updated"][MAIN_BRANCH] = EARLIER
+        theirs["sampling_updated"][MAIN_BRANCH] = LATER
+        self.assertEqual(
+            library.merge(mine, theirs)["sampling"][MAIN_BRANCH]["temperature"], 1.9
+        )
+
+    def test_a_branch_only_the_file_has_keeps_its_sampling(self):
+        theirs = stamped("Fork 1", **{"Fork 1": "theirs"})
+        put_branch_sampling(theirs, "Fork 1", self.SAMPLING)
+
+        merged = library.merge(stamped(MAIN_BRANCH, Main="mine"), theirs)
+
+        self.assertEqual(merged["sampling"], {"Fork 1": self.SAMPLING})
+
+
 class AsSeenTests(unittest.TestCase):
     def test_the_active_branch_is_read_from_the_conversation(self):
         forks = {
@@ -305,7 +511,7 @@ class MergeTests(unittest.TestCase):
 
     def test_a_first_save_needs_no_file(self):
         mine = stamped(MAIN_BRANCH, Main="hi")
-        self.assertEqual(library.merge(mine, None), mine)
+        self.assertEqual(library.merge(mine, None), copy_forks(mine))
         library.write(mine, self.path)
         self.assertEqual(first_messages(library.read(self.path)), {MAIN_BRANCH: "hi"})
 

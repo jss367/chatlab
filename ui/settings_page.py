@@ -1,10 +1,123 @@
-"""The Settings page: the sampling summary and the settings saved between sessions."""
+"""The Settings page: the hardware panel, the sampling summary, and the saved settings."""
 
 from __future__ import annotations
 
 import gradio as gr
 
+import library
 import settings
+from conversation import MAIN_BRANCH, branch_sampling
+from model_runtime import (
+    MEMORY_HEADROOM_BYTES,
+    QUANTIZED_BITS,
+    DeviceProfile,
+    allocated_bytes,
+    device_label,
+    device_profile,
+    format_memory,
+    imported_torch,
+    memory_note,
+    reserved_bytes,
+)
+from ui import runtime
+from ui.conversations import remember_branch_sampling
+
+
+# The hardware panel. Every figure here is one the app already acts on: the
+# memory a load is judged against, the ceiling Metal is held to, and what the
+# process is holding right now. They were only in the log before, which meant
+# reading a log file to find out why a load was refused.
+HARDWARE_UNREAD = (
+    "Reading the device… press **↻ Refresh** in a moment. ChatLab imports "
+    "PyTorch in the background at startup, and the device cannot be named "
+    "until that has finished."
+)
+
+
+def hardware_card(profile: DeviceProfile | None = None) -> str:
+    """What the machine is, and what it and this process are holding now.
+
+    Read on demand rather than on a timer: the figures come from ``vm_stat``
+    and the device allocator, and neither is worth a subprocess every couple
+    of seconds for a page nobody may be looking at.
+    """
+
+    profile = profile if profile is not None else device_profile()
+    facts = [
+        (
+            "Memory",
+            f"{memory_note(profile.total)} in total · {memory_note(profile.available)} "
+            "estimated available within ChatLab's limits",
+        )
+    ]
+    if profile.backend is None:
+        return f"**Device:** not read yet\n\n{_rows(facts)}\n\n{HARDWARE_UNREAD}"
+    facts.append(
+        (
+            "Full weights",
+            f"loaded as {profile.dtype}"
+            + (
+                f", and {' and '.join(QUANTIZED_BITS)} weights are quantized on the way in"
+                if profile.quantizes
+                else " — a quantized weight precision needs Apple Metal and is "
+                "ignored here"
+            ),
+        )
+    )
+    if profile.backend == "mps":
+        facts.append(("Metal cap", _metal_cap(profile)))
+    facts.append(("Safety reserve", f"{format_memory(MEMORY_HEADROOM_BYTES)} kept beside the weights"))
+    facts.append(("This process holds", _held(profile.backend)))
+    facts.append(("Model in memory", _loaded_model()))
+    return f"**Device:** {device_label(profile.backend)}\n\n{_rows(facts)}"
+
+
+def _rows(facts: list[tuple[str, str]]) -> str:
+    return "\n".join(f"- **{name}:** {value}" for name, value in facts)
+
+
+def _metal_cap(profile: DeviceProfile) -> str:
+    """The ceiling Metal allocations fail at, and where the number comes from."""
+
+    if profile.ceiling is None:
+        return (
+            "PyTorch's own, because Metal did not say what it recommends. "
+            "Set `mps_memory_fraction` in the settings file to hold it down."
+        )
+    return (
+        f"{format_memory(profile.ceiling)}, {profile.fraction:.2f} of the "
+        f"{memory_note(profile.recommended)} Metal recommends. A conversation "
+        "that outgrows it ends with an out-of-memory message rather than a "
+        "frozen Mac; `mps_memory_fraction` in the settings file moves it."
+    )
+
+
+def _held(backend: str) -> str:
+    """What the device allocator has out on this process's behalf."""
+
+    torch = imported_torch()
+    live = allocated_bytes(backend, torch) if torch is not None else None
+    taken = reserved_bytes(torch) if torch is not None else None
+    if live is None and taken is None:
+        return "not counted on this device — host memory keeps no such figure"
+    return (
+        f"{memory_note(live)} of live tensors · {memory_note(taken)} taken "
+        "from the driver, cached blocks included"
+    )
+
+
+def _loaded_model() -> str:
+    manager = runtime.MANAGER
+    if not manager.model_id:
+        return "none — load one on the Models page"
+    precision = manager.precision or "full"
+    return f"`{manager.model_id}`, {precision} weights, on {manager.device_name}"
+
+
+def refresh_hardware():
+    """Re-read the machine for the panel."""
+
+    return hardware_card()
 
 
 def sampling_label(temperature, top_p, top_k, max_new_tokens) -> str:
@@ -87,10 +200,20 @@ def restore_settings():
 
     saved = settings.load()
     values = saved.to_mapping() | {"model_id": settings.model_id_at_startup(saved)}
+    # The conversation that comes back with the page answers with its own
+    # sampling, so the controls have to come up holding that rather than the
+    # settings file's, which is only what a conversation without any starts
+    # from. Read from the file, not from the restored state, so this does not
+    # depend on which of the two page-load handlers Gradio runs first.
+    restored = library.read()
+    if restored is not None:
+        values |= settings.sampling_values(
+            branch_sampling(restored, restored.get("active", MAIN_BRANCH)), saved
+        )
     updates = [
         # The response-length ceiling is the context limit, so it comes back
         # with the length itself.
-        gr.update(value=saved.max_new_tokens, maximum=saved.prefill_token_limit)
+        gr.update(value=values["max_new_tokens"], maximum=saved.prefill_token_limit)
         if name == "max_new_tokens"
         else gr.update(value=values[name])
         for name in PERSISTED_SETTING_NAMES
@@ -98,17 +221,28 @@ def restore_settings():
     return (*updates, gr.update(value=saved.prefill_token_limit))
 
 
-def remember_prefill_limit(limit, max_new_tokens):
+def remember_prefill_limit(limit, max_new_tokens, forks=None, *sampling):
     """Save the context limit, and pull the response length under it.
 
     The response-length control tops out at the context limit, so lowering
     the limit lowers the ceiling and, if it was above the new one, the length
     itself. The limit is echoed back because it is clamped to a range the
     number box cannot express on its own.
+
+    A length that was actually pulled down is written into the conversation
+    on screen as well, since it is the reader's own doing and the
+    conversation would otherwise put the longer length back the next time it
+    was switched to. Only then: a limit merely tabbed through, or raised,
+    changes nothing, and writing on that would pin a conversation that had
+    been following the settings file.
     """
 
     saved = settings.update(prefill_token_limit=limit, max_new_tokens=max_new_tokens)
+    clamped = saved.max_new_tokens != max_new_tokens
     return (
         gr.update(value=saved.prefill_token_limit),
         gr.update(maximum=saved.prefill_token_limit, value=saved.max_new_tokens),
+        remember_branch_sampling(forks, *sampling[:-1], saved.max_new_tokens)
+        if clamped and sampling
+        else gr.skip(),
     )

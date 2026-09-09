@@ -1353,15 +1353,24 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE, forks: dict | None = None)
     emptied, the rest deleted - so the saved file lets go of them rather than
     handing them back on the next save. A branch another page added since
     this one loaded was not in the question Clear asked, and is left to it.
+
+    The sampling those branches carried is stamped as changed too. It is
+    merged on its own time (see ``library.merge``), so without a stamp of
+    its own the file's older copy would look like the newer of the two and
+    the emptied main conversation would come back pinned to the sampling of
+    the one that was cleared.
     """
 
     strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
         scale_name
     )
-    known = copy_forks(forks)["branches"]
+    known = copy_forks(forks)
     forks = new_forks()
     stamp = branch_stamp()
-    forks["updated"] = {name: stamp for name in (MAIN_BRANCH, *known)}
+    forks["updated"] = {name: stamp for name in (MAIN_BRANCH, *known["branches"])}
+    forks["sampling_updated"] = {
+        name: stamp for name in (MAIN_BRANCH, *known["sampling"])
+    }
     return (
         [],
         [],
