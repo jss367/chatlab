@@ -6,6 +6,7 @@ import shutil
 import stat
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import gradio as gr
@@ -676,6 +677,18 @@ class RunPromptsTests(unittest.TestCase):
         self.assertIn("Ran 1 of 3 prompts", final[STATUS])
         self.assertIn(app.BATCH_MODEL_CHANGED, final[STATUS])
         self.assertIn("Prompt 2 onwards did not run", final[STATUS])
+
+    def test_a_model_that_goes_out_at_the_start_refuses_the_run(self):
+        # An unload can land between the check in run_prompts() and the stamp
+        # the run pins itself to. The runtime reads a missing stamp as "any
+        # model will do", so a load arriving before the first prompt would
+        # leave every prompt unguarded and the table mixing two models.
+        manager = runtime.MANAGER
+        with mock.patch.object(type(manager), "load_id", property(lambda self: None)):
+            frames = self.run_batch("say hello")
+
+        self.assertEqual(frames[-1][STATUS], app.BATCH_NO_MODEL)
+        self.assertEqual(frames[-1][RESULTS], gr.skip())
 
     def test_an_unloaded_model_is_reported_before_anything_runs(self):
         runtime.MANAGER = self.original.__class__()

@@ -254,6 +254,23 @@ def _run_batch(
 ):
     """The body of run_prompts(), run with the generation slot held."""
 
+    # The load the run was started against. Holding the generation slot keeps
+    # other replies off the model, but not a load: one started from another
+    # browser tab waits on the model lock and can take it in the gap between
+    # two prompts. Every prompt is asked for under this load, so the runtime
+    # refuses rather than finishing the batch on other weights and reporting
+    # the whole table as one experiment.
+    expected_load_id = runtime.MANAGER.load_id
+    if expected_load_id is None:
+        # Nothing is loaded, which means an unload landed between the check
+        # in run_prompts() and this line. There is no stamp to run under, and
+        # the runtime reads a missing one as "any model will do", so a load
+        # arriving before the first prompt would leave the whole batch
+        # unguarded. The run is refused instead; it can be started again once
+        # a model is in memory.
+        yield (BATCH_NO_MODEL,) + (gr.skip(),) * 5
+        return
+
     directory = batch_directory()
     table = BatchTable(directory)
     traces: list[dict] = []
@@ -263,13 +280,6 @@ def _run_batch(
     failures = 0
     started = time.monotonic()
     total = len(prompts)
-    # The load the run was started against. Holding the generation slot keeps
-    # other replies off the model, but not a load: one started from another
-    # browser tab waits on the model lock and can take it in the gap between
-    # two prompts. Every prompt is asked for under this load, so the runtime
-    # refuses rather than finishing the batch on other weights and reporting
-    # the whole table as one experiment.
-    expected_load_id = runtime.MANAGER.load_id
     changed_at: int | None = None
 
     # The table is always published inside an update envelope. A raw value
