@@ -390,6 +390,10 @@ CONDITIONED_PIPELINES = (
     "audio",
     "music",
     "adapter",
+    # A prior stage takes the prompt and hands back conditioning embeddings
+    # for a second pipeline to draw from. It has a tokenizer and a text
+    # encoder like any text-to-image pipeline and returns no picture at all.
+    "prior",
 )
 
 # The components a pipeline needs to read a prompt at all. One without them
@@ -567,6 +571,15 @@ def pipeline_missing_files(snapshot: Path) -> tuple[str, ...]:
     ``from_pretrained`` takes one variant for the lot, so a component with a
     complete plain index beside an incomplete half-precision one is short of
     shards for a half-precision load. See :func:`_component_index`.
+
+    What is *not* checked is which files a weightless component needs. A
+    CLIP tokenizer wants ``vocab.json`` and ``merges.txt``, a fast one
+    ``tokenizer.json``, a T5 one ``spiece.model``, and knowing which from
+    outside means knowing the class - the same reason :func:`missing_files`
+    checks only the config and the weights of a text checkpoint, and for the
+    same trade: a wrong "incomplete" verdict on a good cache is worse than
+    the loader's own error on a bad one. An empty folder is the exception,
+    because none is none whatever the class.
     """
 
     missing: list[str] = []
@@ -576,6 +589,13 @@ def pipeline_missing_files(snapshot: Path) -> tuple[str, ...]:
     for name in pipeline_components(snapshot):
         folder = snapshot / name
         if not folder.is_dir():
+            missing.append(f"{name}/")
+            continue
+        if not any(folder.iterdir()):
+            # The folder was made and nothing was fetched into it, which is
+            # the same gap as its not being there at all. How many files a
+            # tokenizer or a scheduler needs cannot be told from outside -
+            # see the note in pipeline_missing_files - but none is none.
             missing.append(f"{name}/")
             continue
         if not (folder / COMPONENT_CONFIG).is_file():

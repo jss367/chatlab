@@ -446,6 +446,54 @@ class PipelineLayoutTests(unittest.TestCase):
                 self.assertFalse(status.complete)
                 self.assertEqual(status.missing_files, ())
 
+    def test_a_prior_stage_is_not_an_image_model(self):
+        """It takes the prompt and hands back conditioning embeddings for a
+        second pipeline to draw from: a tokenizer and a text encoder like
+        any text-to-image pipeline, and no picture at all."""
+
+        for class_name in (
+            "KandinskyPriorPipeline",
+            "StableCascadePriorPipeline",
+            "KandinskyV22PriorPipeline",
+        ):
+            files = self.whole()
+            files["model_index.json"] = json.dumps(
+                {**INDEX, "_class_name": class_name}
+            ).encode()
+            with self.subTest(pipeline=class_name), tempfile.TemporaryDirectory() as root:
+                self.snapshot(root, files)
+
+                self.assertTrue(cache_status(MODEL, Path(root)).unsupported)
+
+    def test_an_empty_component_folder_is_the_same_gap_as_a_missing_one(self):
+        """How many files a tokenizer needs cannot be told from outside, but
+        none is none whatever the class."""
+
+        files = {
+            name: content
+            for name, content in self.whole().items()
+            if not name.startswith("tokenizer/")
+        }
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, files)
+            (snapshot / "tokenizer").mkdir()
+            status = cache_status(MODEL, Path(root))
+
+            self.assertEqual(status.missing_files, ("tokenizer/",))
+            self.assertFalse(status.complete)
+
+    def test_a_tokenizer_with_files_is_left_to_the_loader_to_judge(self):
+        # Which files it needs depends on its class, and a wrong
+        # "incomplete" verdict on a good cache is worse than the loader's
+        # own error on a bad one - the same trade missing_files makes for a
+        # text checkpoint.
+        files = self.whole()
+        del files["tokenizer/vocab.json"]
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, files)
+
+            self.assertEqual(cache_status(MODEL, Path(root)).missing_files, ())
+
     def test_a_pipeline_that_cannot_read_a_prompt_at_all_is_refused(self):
         # No tokenizer and no text encoder: conditioned on something else,
         # whatever its class is called.
