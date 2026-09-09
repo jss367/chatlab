@@ -353,6 +353,21 @@ class ProcessSettingsTests(unittest.TestCase):
 
         self.assertEqual(self.path.stat().st_mtime_ns, before)
 
+    def test_required_save_failure_does_not_publish_but_normal_updates_still_do(self):
+        settings.update(temperature=.2)
+        with mock.patch('settings.write', return_value=None):
+            with self.assertRaises(OSError):
+                settings.update(require_saved=True, temperature=.4)
+            self.assertEqual(settings.current().temperature, .2)
+            settings.update(temperature=.5)
+            self.assertEqual(settings.current().temperature, .5)
+        self.assertEqual(self.saved()['temperature'], .2)
+
+    def test_required_save_writes_an_unchanged_preference(self):
+        self.assertFalse(self.path.exists())
+        settings.update(require_saved=True, enabled_extensions=[])
+        self.assertEqual(self.saved()['enabled_extensions'], [])
+
     def test_a_value_from_a_control_is_sanitized_on_the_way_in(self):
         settings.update(top_k=1000, color_scale="Ultraviolet")
 

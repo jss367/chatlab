@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import html
+
 import gradio as gr
 
 import charts
@@ -23,6 +26,9 @@ from token_metrics import (
 )
 from trace_export import write_trace_export
 from ui import runtime
+from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
+from extensions.registry import load_enabled
+from ui.extensions_page import build_extension_settings, data_directory, extension_css, restore_extensions
 from ui.common import (
     CHAT_PAGE,
     CONVERSATION_PANE_WIDTH,
@@ -116,6 +122,14 @@ from ui.panel import (
     recolor,
     remember_selection,
 )
+from ui.prompts import (
+    BATCH_HEADERS,
+    PROMPT_COUNT_HINT,
+    count_prompts,
+    load_prompt_file,
+    run_prompts,
+    stop_batch,
+)
 from ui.scoring import (
     SAMPLING_LABEL_QUEUE,
     SCORE_BUDGET_QUEUE,
@@ -167,12 +181,14 @@ def build_app() -> gr.Blocks:
     # the hardware panel on the Settings page - are the fuller reading for it
     # by the time a reader looks.
     warm_device()
+    extensions, extension_errors = load_enabled(saved.enabled_extensions)
+    page_choices = [PAGES[0], *(ext.spec.page_label for ext in extensions), *PAGES[1:]]
     # Gradio otherwise caps the page at one of a handful of widths and centers
     # it, which leaves a band of empty room down each side on a wide screen.
     # The shell wants every pixel: the two side panes are a fixed width, so the
     # width the cap was holding back goes to the chat and the panel beside it.
     with gr.Blocks(
-        title="ChatLab", css=CSS, theme=THEME, fill_width=True
+        title="ChatLab", css=CSS + extension_css(extensions), theme=THEME, fill_width=True
     ) as demo:
         conversation_state = gr.State([])
         metrics_state = gr.State(empty_metrics())
@@ -191,6 +207,14 @@ def build_app() -> gr.Blocks:
         context_ids_state = gr.State((*empty_metrics(), None))
         inspect_target = gr.State(None)
         insight_state = gr.State(None)
+        # The prompts the last file gave, as it gave them. A prompt with a
+        # blank line inside it reads as two once it is in the box, so a run
+        # prefers this list while the box still holds what loading it wrote;
+        # see ui.prompts.resolve_prompts().
+        loaded_prompts_state = gr.State([])
+        # Where the running batch writes its exports, so Stop can publish
+        # what is there; see ui.prompts.stop_batch().
+        batch_directory_state = gr.State(None)
         # Which load the scored token count on screen was counted against, so
         # a model swapped out from another tab can be told from this one.
         score_budget_load = gr.State(None)
@@ -201,7 +225,7 @@ def build_app() -> gr.Blocks:
             # the bottom.
             with gr.Column(scale=0, min_width=NAV_PANE_WIDTH, elem_id="nav-pane"):
                 nav = gr.Radio(
-                    choices=list(PAGES),
+                    choices=page_choices,
                     value=CHAT_PAGE,
                     show_label=False,
                     container=False,
@@ -440,6 +464,86 @@ def build_app() -> gr.Blocks:
                                 score_button = gr.Button("Score text", variant="primary")
                                 score_status = gr.Markdown("Nothing scored yet.")
 
+                            with gr.Tab("Prompts", elem_id="prompts-tab"):
+                                gr.Markdown(
+                                    "Run a list of prompts, each in a conversation of its "
+                                    "own, and keep every token's measurements. The system "
+                                    "prompt and prefill come from Settings, the sampling "
+                                    "controls from the Chat tab, so a batch is measured "
+                                    "exactly as a reply typed by hand would be."
+                                )
+                                prompts_box = gr.Textbox(
+                                    label="Prompts",
+                                    placeholder=(
+                                        "One prompt per block, with a blank line between "
+                                        "them, so a prompt can run to several lines."
+                                    ),
+                                    lines=8,
+                                    elem_id="prompts-box",
+                                )
+                                prompt_count = gr.Markdown(
+                                    PROMPT_COUNT_HINT,
+                                    elem_id="prompt-count",
+                                    elem_classes=["token-budget"],
+                                )
+                                with gr.Row():
+                                    run_prompts_button = gr.Button(
+                                        "Run prompts", variant="primary", min_width=110
+                                    )
+                                    # Escape presses this while a batch runs;
+                                    # see SHORTCUT_JS, which finds whichever
+                                    # stop button is on screen by these ids.
+                                    stop_prompts_button = gr.Button(
+                                        "Stop",
+                                        variant="stop",
+                                        visible=False,
+                                        elem_id="stop-batch-button",
+                                        min_width=70,
+                                    )
+                                    prompts_upload = gr.UploadButton(
+                                        "📂 Load prompts",
+                                        # "text" is any text file, which is
+                                        # what the parser's fallback reads: a
+                                        # prompt set arrives as often in a
+                                        # .md or a file with no extension at
+                                        # all as in a .txt, and a filter
+                                        # narrower than the parser would put
+                                        # those out of reach of a tab that
+                                        # says it takes them. The two JSON
+                                        # forms are named because a browser
+                                        # does not always call them text.
+                                        file_types=["text", ".json", ".jsonl"],
+                                        type="filepath",
+                                        min_width=130,
+                                    )
+                                batch_status = gr.Markdown(
+                                    "Nothing run yet.", elem_id="batch-status"
+                                )
+                                batch_results = gr.Dataframe(
+                                    headers=BATCH_HEADERS,
+                                    datatype=[
+                                        "number",
+                                        "str",
+                                        "str",
+                                        "number",
+                                        "number",
+                                        "number",
+                                        "number",
+                                    ],
+                                    column_widths=["5%", "27%", "32%", "9%", "9%", "9%", "9%"],
+                                    wrap=True,
+                                    interactive=False,
+                                    elem_id="batch-results",
+                                    label="Results — one row per prompt",
+                                )
+                                batch_files = gr.File(
+                                    label="One trace per prompt, and a table of every token",
+                                    file_count="multiple",
+                                    visible=False,
+                                    interactive=False,
+                                    elem_id="batch-files",
+                                )
+
                     with gr.Column(scale=2, min_width=300, elem_id="inspector-pane"):
                         gr.Markdown("## Under the hood", elem_id="inspector-heading")
                         color_scale = gr.Dropdown(
@@ -516,6 +620,24 @@ def build_app() -> gr.Blocks:
                                 combine_adjacent=False,
                                 elem_id="prompt-strip",
                             )
+
+            extension_pages = []
+            extension_model_buttons = []
+            navigation = NavigationService(extension_model_buttons.append)
+            for extension in extensions:
+                with gr.Column(scale=1, visible=False, elem_classes=["extension-page"]) as extension_page:
+                    context = ExtensionContext(
+                        models=ModelService(lambda: runtime.MANAGER), tokens=TokenInspector(),
+                        data_dir=data_directory(extension.spec.id), navigation=navigation,
+                    )
+                    try:
+                        extension.build_page(context)
+                    except Exception as exc:
+                        logging.getLogger(__name__).exception("Extension page failed: %s", extension.spec.id)
+                        message = f"{extension.spec.title}: {exc}"
+                        extension_errors.append(message)
+                        gr.Markdown("This extension could not open. " + html.escape(message))
+                extension_pages.append((extension.spec.page_label, extension_page))
 
             with gr.Column(
                 scale=1, visible=False, elem_id="images-page"
@@ -825,6 +947,7 @@ def build_app() -> gr.Blocks:
                     "box, because they are moved between one reply and the next.",
                     elem_id="settings-hero",
                 )
+                extensions_control, extensions_note, active_extensions = build_extension_settings([ext.spec.id for ext in extensions], extension_errors)
                 with gr.Row():
                     with gr.Column():
                         gr.Markdown("## System prompt, reasoning, and prefill")
@@ -926,6 +1049,21 @@ def build_app() -> gr.Blocks:
         nav.change(refresh_hardware, None, hardware_view)
         demo.load(refresh_hardware, None, hardware_view)
         refresh_hardware_button.click(refresh_hardware, None, hardware_view)
+        demo.load(restore_extensions, active_extensions, [extensions_control, extensions_note])
+        for label, extension_page in extension_pages:
+            def show_extension(page, expected=label):
+                return gr.update(visible=page == expected)
+            nav.change(show_extension, nav, extension_page)
+        def open_models_from_extension():
+            return (*go_to_models(), *(gr.update(visible=False) for _ in extension_pages))
+        for button in extension_model_buttons:
+            button.click(
+                open_models_from_extension, None,
+                # Every page container go_to_models() publishes an update
+                # for, in the order show_page() returns them.
+                [nav, conversation_pane, chat_page, images_page, models_page,
+                 settings_page, *(page for _, page in extension_pages)],
+            )
         # The scored token count follows the boxes as they are typed into.
         # always_last coalesces a burst of keystrokes into the one count that
         # matters, and the progress bar is hidden because a spinner on every
@@ -1698,6 +1836,55 @@ def build_app() -> gr.Blocks:
                 alternatives,
                 context_ids_state,
             ],
+        )
+        # A batch reads its prompts from the box and everything else from the
+        # controls the Chat tab and Settings already own, so there is nothing
+        # to set up before running one.
+        batch_outputs = [
+            batch_status,
+            batch_results,
+            run_prompts_button,
+            stop_prompts_button,
+            batch_files,
+            batch_directory_state,
+        ]
+        batch_run = run_prompts_button.click(
+            run_prompts,
+            [
+                prompts_box,
+                loaded_prompts_state,
+                system_prompt,
+                assistant_prefill,
+                temperature,
+                top_p,
+                top_k,
+                max_new_tokens,
+                seed,
+                randomize_seed,
+            ],
+            batch_outputs,
+        )
+        # Cancelling closes the run at its last yield, which is what returns
+        # the model lock; stop_batch() only puts the buttons back. The rows
+        # and files already published stay on screen, and they describe the
+        # prompts that finished.
+        # Stop reads the run's directory rather than the frame the cancelled
+        # generator published last: the prompt it was in the middle of is
+        # written on the way out, after that frame is gone. See stop_batch().
+        stop_prompts_button.click(
+            stop_batch, batch_directory_state, batch_outputs, cancels=[batch_run]
+        )
+        prompts_box.change(
+            count_prompts,
+            [prompts_box, loaded_prompts_state],
+            prompt_count,
+            trigger_mode="always_last",
+            show_progress="hidden",
+        )
+        prompts_upload.upload(
+            load_prompt_file,
+            [prompts_upload, prompts_box, loaded_prompts_state],
+            [prompts_box, batch_status, loaded_prompts_state],
         )
         color_scale.change(
             recolor,

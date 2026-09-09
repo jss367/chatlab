@@ -480,7 +480,13 @@ SHORTCUT_JS = """
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') { return; }
     if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) { return; }
-    const stop = document.querySelector('#stop-button');
+    // Whichever stop button is in the page: the chat's while a reply is
+    // streaming, the Prompts tab's while a batch runs, the Images page's
+    // while a picture is being drawn. Never more than one, because they
+    // contend for the same generation slot and the losers refuse.
+    const stop = document.querySelector(
+      '#stop-button, #stop-batch-button, #stop-drawing'
+    );
     if (!stop) { return; }
     event.preventDefault();
     stop.click();

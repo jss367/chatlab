@@ -23,6 +23,7 @@ drove.
 - Four color scales: raw rank, surprise, entropy, and sampling shift
 - Prompt tokens scored in the same pass that warms the cache
 - A **Score text** tab for measuring text the model did not write
+- A **Prompts** tab that runs a list of prompts, each in a conversation of its own, and writes one trace per prompt plus a table of every token
 - Perplexity, mean surprise, and a surprise trace for each response
 - Full metric-trace export as JSON or CSV
 - An OpenAI-compatible HTTP API on the same port, so the measurements can be scripted
@@ -33,7 +34,7 @@ drove.
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
 - Every conversation kept between sessions in one JSON file, so a reload or a restart brings the pane back as it was
-- Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response that is still being written from anywhere on the Chat page
+- Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response, or a run of prompts, from anywhere on the Chat page
 - Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
 - Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
@@ -396,6 +397,18 @@ Every prompt token is measured against the distribution the model held one step 
 
 The **Score text** tab measures text the model did not generate. Paste it, optionally give it context first, and one forward pass reports the same numbers for every token — useful for comparing two prompts, checking how memorized a passage is, or evaluating a response that came from somewhere else. Scoring is capped at 4,096 tokens per run, or at the model's shorter positional limit. A line under the box counts what is in it against that cap as it is typed, using the same encoding the check itself uses, so a passage too large to score says so before the press rather than after it.
 
+## Running a list of prompts
+
+The **Prompts** tab runs an experiment rather than a conversation. Write the prompts into the box with a blank line between them, so a prompt can run to several lines, or press **Load prompts** for a file: `.jsonl` is one prompt per line (a plain string, or an object with a `prompt`, `text`, or `content` field), `.json` is a list of them, and any text file is read on the same blank-line rule. A loaded file is added to what is already in the box, and the box is what runs, so the set can be edited first.
+
+A loaded prompt with a blank line inside it is the one thing the box cannot show whole, since that is how the box separates one prompt from the next. The run uses the file's own prompts while the box still holds what loading them wrote, so a dataset entry of several paragraphs is answered as the one prompt it is; the status line says so when a file contains one. Editing the box hands the reading back to it, blank lines and all.
+
+Each prompt is answered in a conversation of its own. Nothing carries over from the prompt before it: the model sees the system prompt from **Settings**, the prompt, and nothing else. Sampling comes from the controls under the message box, so a batch is measured exactly as a reply typed by hand would be. With **New seed each response** off, every prompt runs on the seed in the box and the run reproduces; with it on, each prompt gets its own seed, and the row and the trace both record which.
+
+The results table gives one row per prompt — an excerpt of the prompt and the answer, the token count, perplexity, mean surprise, and the seed. Below it are the files: `prompt-001.json` and its siblings, each a full trace in the same schema **Download JSON** writes for a single response, and `prompts.csv`, one row per generated token across the whole run with a `prompt_index` column naming the prompt each row came from and a `stopped` column saying whether that answer was cut short. Both are written as the run goes, so **Stop** — or Escape — leaves every prompt that produced tokens downloadable, the one it was in the middle of included; that one's trace says `stopped` in its sampling, since the model may have had more to say.
+
+A prompt that fails does not end the run. Its row says what went wrong, the rest of the set still runs, and the status line counts the failures at the end. A model swapped in from another tab does end it: the run is pinned to the model it started on, so the rest of the prompts are refused rather than answered by other weights and reported in the same table.
+
 ## The local API
 
 Everything ChatLab does to the model in memory is addressable from a script.
@@ -506,3 +519,8 @@ The image tests need no pipeline weights. `tests/fake_pipeline.py` is a
 denoising loop small enough to run on a laptop's CPU whose cross-attention
 module is diffusers' own `Attention`, so the recording processor is exercised
 against the class it will meet rather than a mock of it.
+The application deliberately leaves `trust_remote_code` disabled. Models that require executing custom repository code will not load unless their architecture is supported directly by Transformers.
+
+## Optional extensions
+
+Specialized tools can be enabled under **Settings → Extensions** and take effect after restarting ChatLab. **Maze experiments** adds an interactive navigation workbench with interruptions, token inspection and saved-run replay. It is bundled and disabled by default. See [the extension guide](EXTENSIONS.md) and [the Maze workbench guide](MAZE_WORKBENCH.md).

@@ -43,6 +43,8 @@ hiddenimports += collect_submodules("transformers.quantizers", on_error="warn on
 hiddenimports += collect_submodules("diffusers.pipelines", on_error="warn once")
 hiddenimports += collect_submodules("diffusers.schedulers", on_error="warn once")
 hiddenimports += collect_submodules("diffusers.models", on_error="warn once")
+# Optional first-party pages are imported only when enabled at runtime.
+hiddenimports += collect_submodules("extensions")
 hiddenimports += [
     "transformers.integrations.metal_quantization",
     "transformers.integrations.hub_kernels",
