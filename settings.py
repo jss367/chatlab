@@ -199,6 +199,7 @@ class Settings:
     image_size: int = 512
     image_seed: int = 42
     image_randomize_seed: bool = True
+    image_record_attention: bool = True
 
     def to_mapping(self) -> dict[str, Any]:
         """The object as the JSON file spells it."""
@@ -312,6 +313,10 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
         image_randomize_seed=_flag(
             values.get("image_randomize_seed", DEFAULTS.image_randomize_seed),
             DEFAULTS.image_randomize_seed,
+        ),
+        image_record_attention=_flag(
+            values.get("image_record_attention", DEFAULTS.image_record_attention),
+            DEFAULTS.image_record_attention,
         ),
     )
 

@@ -478,7 +478,9 @@ class ImageSettingsTests(unittest.TestCase):
         self.addCleanup(settings_sandbox.stop)
 
     def test_the_drawing_controls_are_saved_as_they_change(self):
-        images_page.remember_image_settings("blurry, watermark", 40, 9.0, 768, 5, False)
+        images_page.remember_image_settings(
+            "blurry, watermark", 40, 9.0, 768, 5, False, False
+        )
         saved = settings.load()
 
         self.assertEqual(saved.image_negative_prompt, "blurry, watermark")
@@ -487,24 +489,36 @@ class ImageSettingsTests(unittest.TestCase):
         self.assertEqual(saved.image_size, 768)
         self.assertEqual(saved.image_seed, 5)
         self.assertFalse(saved.image_randomize_seed)
+        self.assertFalse(saved.image_record_attention)
+
+    def test_the_attention_toggle_survives_a_restart(self):
+        # It is the one control that costs real time, so someone who turns
+        # it off has the strongest claim to have it stay off.
+        images_page.remember_image_settings("", 30, 7.5, 512, 1, False, False)
+
+        self.assertFalse(settings.load().image_record_attention)
+
+        images_page.remember_image_settings("", 30, 7.5, 512, 1, False, True)
+
+        self.assertTrue(settings.load().image_record_attention)
 
     def test_a_seed_a_finished_picture_left_in_the_box_is_not_saved(self):
         # The app writes that number itself; saving it would overwrite the
         # seed the reader chose. The Chat page's seed follows the same rule.
-        images_page.remember_image_settings("", 30, 7.5, 512, 11, False)
-        images_page.remember_image_settings("", 30, 7.5, 512, 999_999, True)
+        images_page.remember_image_settings("", 30, 7.5, 512, 11, False, True)
+        images_page.remember_image_settings("", 30, 7.5, 512, 999_999, True, True)
 
         self.assertEqual(settings.load().image_seed, 11)
 
     def test_committing_the_seed_box_saves_what_it_holds(self):
-        images_page.remember_committed_image_seed("", 30, 7.5, 512, 4321, True)
+        images_page.remember_committed_image_seed("", 30, 7.5, 512, 4321, True, True)
 
         self.assertEqual(settings.load().image_seed, 4321)
 
     def test_the_prompt_itself_is_never_saved(self):
         # It is the question being asked, not a setting, and the file is
         # meant to be shared between machines.
-        images_page.remember_image_settings("blurry", 30, 7.5, 512, 1, False)
+        images_page.remember_image_settings("blurry", 30, 7.5, 512, 1, False, True)
 
         self.assertNotIn("image_prompt", settings.load().to_mapping())
 

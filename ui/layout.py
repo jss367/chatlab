@@ -610,7 +610,7 @@ def build_app() -> gr.Blocks:
                                     label="Randomize seed",
                                 )
                             image_record_attention = gr.Checkbox(
-                                value=True,
+                                value=saved.image_record_attention,
                                 label="Record cross-attention",
                                 info=(
                                     "The one reading that costs time: the "
@@ -1009,6 +1009,7 @@ def build_app() -> gr.Blocks:
             image_size,
             image_seed,
             image_randomize,
+            image_record_attention,
         ]
         for control in (
             image_negative,
@@ -1016,6 +1017,7 @@ def build_app() -> gr.Blocks:
             image_guidance,
             image_size,
             image_randomize,
+            image_record_attention,
         ):
             control.change(remember_image_settings, image_settings_inputs, None)
         # The seed box is written to by a finished picture, so only the

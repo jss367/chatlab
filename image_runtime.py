@@ -414,6 +414,11 @@ class AttentionReader:
         self.steps: list[Any] = []
         self.recorded = 0
         self.skipped = 0
+        # How many of the prompt's tokens the pipeline's encoder really keyed
+        # on, which can be fewer than the tokenizer produced: a pipeline may
+        # encode with a shorter limit than its tokenizer's default, and the
+        # tokens past that were never seen. None until a module is read.
+        self.keyed: int | None = None
         # Counted apart from the rest, because "every layer was too big to
         # record" is a different thing to tell a reader than "this
         # architecture spells attention in a way this cannot read".
@@ -497,6 +502,7 @@ class AttentionReader:
         if side * side != queries:
             raise ValueError(f"{queries} queries is not a square grid")
         kept = min(keys, self.tokens)
+        self.keyed = kept if self.keyed is None else min(self.keyed, kept)
         columns = [averaged[:, position] for position in range(kept)]
         columns.append(
             averaged[:, kept:].sum(dim=1)
@@ -524,13 +530,26 @@ class AttentionReader:
         self._modules = 0
 
     def collected(self):
-        """Every step's maps as one array, or ``None`` when nothing was read."""
+        """Every step's maps as one array, or ``None`` when nothing was read.
+
+        Trimmed to the tokens the pipeline actually keyed on, with the
+        padding row moved up to sit right after the last of them. Otherwise
+        a prompt the encoder truncated would leave rows of zeros standing in
+        for words the model never saw, with the padding row stranded past
+        them where nothing reads it. See :attr:`keyed`.
+        """
 
         import numpy
 
         if not self.steps or not self.recorded:
             return None
-        return numpy.stack(self.steps)
+        maps = numpy.stack(self.steps)
+        if self.keyed is None or self.keyed >= self.tokens:
+            return maps
+        # The real rows, then the padding row from the end of the array.
+        return numpy.concatenate(
+            (maps[:, : self.keyed], maps[:, self.tokens : self.tokens + 1]), axis=1
+        )
 
 
 class RecordingProcessor:
@@ -719,6 +738,10 @@ def run(
     # Read after the run, not before it: whether a layer was too big to
     # record is only known once one has been offered.
     note = _attention_note(request, tokens, module, originals, reader)
+    if maps is not None and reader is not None and reader.keyed is not None:
+        # Only the tokens the encoder keyed on; the rest were truncated
+        # before the model saw them and have no map to click through to.
+        tokens = tokens[: reader.keyed]
     return ImageRun(
         request=request,
         readings=readings,

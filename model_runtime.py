@@ -477,9 +477,16 @@ def pipeline_missing_files(snapshot: Path) -> tuple[str, ...]:
     download cut off after the first shard leaves a folder that has *some*
     weights, which would read as whole and send **Load cached** into
     diffusers to fail on the shards that never arrived.
+
+    A snapshot whose variant-only components share no single variant is
+    reported the same way. Its files are all there, but ``from_pretrained``
+    takes one variant for the whole pipeline, so there is no load to make of
+    it; see :func:`pipeline_variant_missing`.
     """
 
     missing: list[str] = []
+    if pipeline_variant_missing(snapshot):
+        return (MODEL_WEIGHTS,)
     for name in pipeline_components(snapshot):
         folder = snapshot / name
         if not folder.is_dir():
@@ -612,37 +619,64 @@ def safetensors_dtype(path: Path) -> str | None:
     return None
 
 
-def pipeline_dtype(snapshot: Path) -> str | None:
-    """The dtype a pipeline's weights are stored as, or ``None``.
+# What a component whose stored dtype cannot be read is taken to be.
+# Pipelines ship as half precision, and assuming it errs towards refusing a
+# load rather than towards a float32 load that doubles past the estimate and
+# exhausts the machine.
+ASSUMED_PIPELINE_DTYPE = "float16"
 
-    Taken from the largest weight-bearing component, which is the one whose
-    size the estimate turns on: a pipeline's components need not agree, and
-    the text encoder disagreeing about its own few hundred megabytes does not
-    change what the unet costs. ``None`` when no component ships safetensors,
-    which is where the caller has to decide what to assume.
 
-    This is deliberately not what :func:`_read_config` reports for a
-    pipeline. That answers "what does this repo say it is", and a pipeline
-    says nothing one dtype could stand for; this answers "how big will it be
-    once loaded", which is one number and worth the file read.
+def component_dtype(folder: Path) -> str | None:
+    """The dtype one component's weights are stored as, or ``None``.
+
+    Read from the largest safetensors file it will load, because that is the
+    one whose size the component's estimate turns on. A component that ships
+    only ``.bin`` weights answers ``None``: a pickle has no cheap header to
+    read.
     """
 
-    best: tuple[int, str] | None = None
-    for name in pipeline_components(snapshot):
-        files = [
-            entry
-            for entry in _component_weights(snapshot / name)
-            if entry.suffix == ".safetensors"
-        ]
-        if not files:
+    files = [
+        entry
+        for entry in _component_weights(folder)
+        if entry.suffix == ".safetensors"
+    ]
+    if not files:
+        return None
+    try:
+        largest = max(files, key=lambda entry: entry.stat().st_size)
+    except OSError:
+        return None
+    return safetensors_dtype(largest)
+
+
+def pipeline_loaded_bytes(snapshot: Path, load_dtype: str) -> int | None:
+    """Memory a pipeline's weights take once loaded as ``load_dtype``, or ``None``.
+
+    Summed component by component, each converted from its own stored dtype,
+    because a pipeline's components need not share one and a single dtype
+    applied to the whole byte count mis-scales the ones that differ: a
+    float32 text encoder beside a half-precision unet would have the unet's
+    growth on a CPU float32 load go unestimated, and the inverse on a
+    half-precision load.
+
+    A component whose dtype cannot be read is assumed to be half precision,
+    which errs towards refusing a load rather than towards one that doubles
+    past the estimate; see :meth:`ModelManager._check_memory`.
+    """
+
+    components = pipeline_components(snapshot)
+    if not components:
+        return None
+    total = 0
+    for name in components:
+        folder = snapshot / name
+        stored = _loaded_variant_bytes(_component_weights(folder))
+        if not stored:
             continue
-        stored = safetensors_dtype(max(files, key=lambda entry: entry.stat().st_size))
-        if stored is None:
-            continue
-        size = _loaded_variant_bytes(_component_weights(snapshot / name))
-        if best is None or size > best[0]:
-            best = (size, stored)
-    return None if best is None else best[1]
+        total += estimate_loaded_bytes(
+            stored, component_dtype(folder) or ASSUMED_PIPELINE_DTYPE, load_dtype
+        )
+    return total
 
 
 def _component_variants(folder: Path) -> set[str]:
@@ -660,31 +694,49 @@ def pipeline_variant(snapshot: Path) -> str | None:
     """The variant a load has to ask diffusers for, or ``None`` for the plain set.
 
     ``from_pretrained`` looks for unsuffixed weights unless it is told a
-    variant, so a repo that ships only ``...fp16.safetensors`` cannot be
-    loaded without one. :func:`pipeline_missing_files` already calls such a
-    snapshot complete and :func:`_loaded_variant_bytes` already sizes it by
-    the set it has, so without this the two halves disagree: a model
-    advertised as ready to load would fail on weights diffusers never looked
-    for.
+    variant, and it takes one variant for the whole pipeline, falling back to
+    the unsuffixed files for any component that lacks it. So the variant has
+    to be one that *every* component without a plain set ships: naming a
+    variant only some of them have leaves the rest with nothing for diffusers
+    to fall back to.
 
     ``None`` when every weight-bearing component has a plain set, which is
-    the common case and what diffusers wants asked of it. Otherwise the
-    variant of the largest component that has no plain set. Components need
-    not agree, and diffusers falls back to the plain files for any component
-    that lacks the variant, so naming the one the biggest component needs is
-    what gets a mixed repo loaded.
+    the common case and what diffusers wants asked of it, and also when no
+    single variant covers the ones that do not — :func:`pipeline_missing_files`
+    reports that snapshot's weights as missing rather than letting a load
+    start that cannot finish.
     """
 
-    needed: tuple[int, str] | None = None
+    shared: set[str] | None = None
     for name in pipeline_components(snapshot):
-        folder = snapshot / name
-        variants = _component_variants(folder)
+        variants = _component_variants(snapshot / name)
         if not variants or "" in variants:
             continue
-        size = _loaded_variant_bytes(_component_weights(folder))
-        if needed is None or size > needed[0]:
-            needed = (size, sorted(variants)[0])
-    return None if needed is None else needed[1]
+        shared = variants if shared is None else shared & variants
+    if not shared:
+        return None
+    return sorted(shared)[0]
+
+
+def pipeline_variant_missing(snapshot: Path) -> bool:
+    """Whether the components disagree about variants past any hope of loading.
+
+    True when some component has no plain weight set and no one variant is
+    shipped by all such components, so whatever :func:`pipeline_variant`
+    named would leave another component unloadable. The snapshot is whole in
+    the sense that files are there; it is the combination that cannot be
+    asked for.
+    """
+
+    lacking = [
+        _component_variants(snapshot / name)
+        for name in pipeline_components(snapshot)
+        if _component_variants(snapshot / name)
+        and "" not in _component_variants(snapshot / name)
+    ]
+    if not lacking:
+        return False
+    return not set.intersection(*lacking)
 
 
 def weight_bytes_for(snapshot: Path, kind: str) -> int | None:
@@ -3660,32 +3712,37 @@ class ModelManager:
         allocator is refused here rather than part way through reading it.
 
         ``kind`` picks which weights are measured: one checkpoint at the root
-        for a text model, the sum over the component folders for an image
-        pipeline. Either way the stored dtype is what says how far the files
-        grow or shrink on the way in, and a pipeline's has to be read out of
-        its own weights (see :func:`pipeline_dtype`) because its components
-        keep no dtype in their configs. An unreadable one is assumed to be
-        half precision, which is what pipelines ship as and errs towards
-        refusing a load rather than towards a float32 CPU load that doubles
-        past the estimate and exhausts the machine.
+        for a text model, and for an image pipeline the sum over its
+        component folders, each converted from its own stored dtype. The
+        stored dtype is what says how far the files grow or shrink on the way
+        in, and a pipeline's has to be read out of the weights themselves
+        (see :func:`pipeline_loaded_bytes`) because its components keep no
+        dtype in their configs and need not agree about it either.
         """
 
-        weight_bytes = weight_bytes_for(local_path, kind)
-        if weight_bytes is None:
-            return None, None
         if kind == IMAGE_KIND:
-            checkpoint_dtype = pipeline_dtype(local_path) or "float16"
+            # Summed per component, each from its own dtype; a pipeline is
+            # never quantized here, so ``bits`` has already been cleared.
+            estimated = pipeline_loaded_bytes(local_path, load_dtype)
         else:
+            weight_bytes = weight_bytes_for(local_path, kind)
+            if weight_bytes is None:
+                return None, None
             _architecture, checkpoint_dtype = _read_config(local_path)
-        if bits is None:
-            estimated = estimate_loaded_bytes(weight_bytes, checkpoint_dtype, load_dtype)
-        else:
-            # What the quantizer will leave on the device, not what the file
-            # holds: the check is against the loaded size, and a 4-bit load
-            # of a checkpoint the machine could not hold whole is the point.
-            estimated = estimate_quantized_bytes(
-                weight_bytes, checkpoint_dtype, bits, _embedding_params(local_path)
-            )
+            if bits is None:
+                estimated = estimate_loaded_bytes(
+                    weight_bytes, checkpoint_dtype, load_dtype
+                )
+            else:
+                # What the quantizer will leave on the device, not what the
+                # file holds: the check is against the loaded size, and a
+                # 4-bit load of a checkpoint the machine could not hold whole
+                # is the point.
+                estimated = estimate_quantized_bytes(
+                    weight_bytes, checkpoint_dtype, bits, _embedding_params(local_path)
+                )
+        if estimated is None:
+            return None, None
         if backend == "cuda" and kind == IMAGE_KIND:
             # Staged in host memory and then moved onto the card whole, so
             # both pools have to hold it and the tighter one decides.

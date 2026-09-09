@@ -499,12 +499,17 @@ def select_token(run, token, step):
     return attention_overlay(run, token, int(step))
 
 
-def remember_image_settings(negative_prompt, steps, guidance, size, seed, randomize):
+def remember_image_settings(
+    negative_prompt, steps, guidance, size, seed, randomize, record_attention
+):
     """Save the Images page's own controls, as the Chat page saves its sampling.
 
     The prompt itself is not saved. It is the question being asked, not a
     setting, and a file meant to be shared between machines is the wrong
-    place for the last thing someone typed.
+    place for the last thing someone typed. Everything else in the accordion
+    is saved, the attention toggle included: it is the one control that
+    costs real time, so someone who turns it off has the strongest claim to
+    have it stay off.
     """
 
     settings.update(
@@ -514,10 +519,13 @@ def remember_image_settings(negative_prompt, steps, guidance, size, seed, random
         image_size=size,
         image_seed=settings.seed_to_save(seed, randomize, field="image_seed"),
         image_randomize_seed=randomize,
+        image_record_attention=record_attention,
     )
 
 
-def remember_committed_image_seed(negative_prompt, steps, guidance, size, seed, randomize):
+def remember_committed_image_seed(
+    negative_prompt, steps, guidance, size, seed, randomize, record_attention
+):
     """Save the Images page's controls, the seed box included, once it is edited.
 
     The seed box is written to by the app itself - a finished picture leaves
@@ -532,5 +540,6 @@ def remember_committed_image_seed(negative_prompt, steps, guidance, size, seed, 
         image_size=size,
         image_seed=seed,
         image_randomize_seed=randomize,
+        image_record_attention=record_attention,
     )
 

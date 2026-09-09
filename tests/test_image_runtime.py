@@ -240,9 +240,30 @@ class PipelineLayoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             self.assertIsNone(pipeline_variant(self.snapshot(root, self.whole())))
 
-    def test_the_variant_named_is_the_one_the_largest_component_needs(self):
-        # Components need not agree, and diffusers falls back to the plain
-        # files for any that lacks the variant.
+    def test_the_variant_named_is_one_every_bare_component_ships(self):
+        """from_pretrained takes one variant for the whole pipeline and can
+        only fall back to unsuffixed files, so naming a variant that some
+        components lack would leave those with nothing to fall back to."""
+
+        files = self.whole()
+        for component in ("unet", "vae"):
+            for variant in ("fp16", "bf16"):
+                files[f"{component}/diffusion_pytorch_model.{variant}.safetensors"] = (
+                    b"w" * 100
+                )
+            del files[f"{component}/diffusion_pytorch_model.safetensors"]
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, files)
+
+            # Both ship both, so either would load; the choice is stable.
+            self.assertEqual(pipeline_variant(snapshot), "bf16")
+            self.assertFalse(model_runtime.pipeline_variant_missing(snapshot))
+            self.assertEqual(cache_status(MODEL, Path(root)).missing_files, ())
+
+    def test_components_sharing_no_variant_are_reported_incomplete(self):
+        # An fp16 unet beside a bf16 vae, neither with a plain set: the files
+        # are all there and there is still no load to make of them, so saying
+        # so beats naming one variant and failing on the other component.
         files = self.whole()
         files["unet/diffusion_pytorch_model.fp16.safetensors"] = files.pop(
             "unet/diffusion_pytorch_model.safetensors"
@@ -252,9 +273,23 @@ class PipelineLayoutTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as root:
             snapshot = self.snapshot(root, files)
+            status = cache_status(MODEL, Path(root))
 
-            # The unet is the larger of the two.
-            self.assertEqual(pipeline_variant(snapshot), "fp16")
+            self.assertTrue(model_runtime.pipeline_variant_missing(snapshot))
+            self.assertIsNone(pipeline_variant(snapshot))
+            self.assertEqual(status.missing_files, (MODEL_WEIGHTS,))
+            self.assertFalse(status.complete)
+
+    def test_a_component_with_a_plain_set_beside_a_variant_needs_no_variant(self):
+        # A repo that ships both loads from the plain set, so a component
+        # that only has the variant does not force one on everybody.
+        files = self.whole()
+        files["unet/diffusion_pytorch_model.fp16.safetensors"] = b"w" * 100
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.snapshot(root, files)
+
+            self.assertIsNone(pipeline_variant(snapshot))
+            self.assertFalse(model_runtime.pipeline_variant_missing(snapshot))
 
     def test_a_pipeline_shipping_only_a_variant_is_sized_by_that(self):
         files = self.whole()
@@ -343,18 +378,39 @@ class PipelineDtypeTests(unittest.TestCase):
 
             self.assertEqual(model_runtime.safetensors_dtype(weights), "float16")
 
-    def test_the_largest_component_decides_the_pipeline_dtype(self):
-        """A pipeline's components need not agree, and the text encoder
-        disagreeing about its own few hundred megabytes does not change what
-        the unet costs."""
+    def test_each_component_is_measured_in_its_own_dtype(self):
+        """A pipeline's components need not agree, and one dtype applied to
+        the whole byte count mis-scales the ones that differ."""
 
         with tempfile.TemporaryDirectory() as root:
             snapshot = self.pipeline(
                 Path(root),
-                {"unet": ("float16", 200), "text_encoder": ("float32", 10)},
+                {"unet": ("float16", 200), "text_encoder": ("float32", 100)},
+            )
+            unet = model_runtime._loaded_variant_bytes(
+                model_runtime._component_weights(snapshot / "unet")
+            )
+            encoder = model_runtime._loaded_variant_bytes(
+                model_runtime._component_weights(snapshot / "text_encoder")
             )
 
-            self.assertEqual(model_runtime.pipeline_dtype(snapshot), "float16")
+            self.assertEqual(
+                model_runtime.component_dtype(snapshot / "unet"), "float16"
+            )
+            self.assertEqual(
+                model_runtime.component_dtype(snapshot / "text_encoder"), "float32"
+            )
+            # A float32 load doubles the fp16 unet and leaves the fp32
+            # encoder alone; a single dtype over the sum would scale both.
+            self.assertEqual(
+                model_runtime.pipeline_loaded_bytes(snapshot, "float32"),
+                unet * 2 + encoder,
+            )
+            # And a float16 load halves the encoder, leaving the unet alone.
+            self.assertEqual(
+                model_runtime.pipeline_loaded_bytes(snapshot, "float16"),
+                unet + encoder // 2,
+            )
 
     def test_a_file_that_is_not_safetensors_reports_no_dtype(self):
         with tempfile.TemporaryDirectory() as root:
@@ -394,25 +450,22 @@ class PipelineDtypeTests(unittest.TestCase):
         self.assertAlmostEqual(as_float32 / stored, 2.0, places=1)
         self.assertAlmostEqual(as_float16 / stored, 1.0, places=1)
 
-    def test_an_unreadable_dtype_is_assumed_to_be_half_precision(self):
-        # Pipelines ship as half precision, and erring that way refuses a
-        # load rather than letting a float32 CPU load double past the
-        # estimate and exhaust the machine.
+    def test_a_component_shipping_only_pickles_is_assumed_half_precision(self):
+        # A pickle has no cheap header to read. Pipelines ship as half
+        # precision, and erring that way refuses a load rather than letting a
+        # float32 CPU load double past the estimate and exhaust the machine.
         with tempfile.TemporaryDirectory() as root:
             snapshot = self.pipeline(Path(root), {"unet": ("float16", 200)})
-            stored = model_runtime.pipeline_weight_bytes(snapshot)
+            weights = snapshot / "unet" / "diffusion_pytorch_model.safetensors"
+            stored = weights.stat().st_size
+            weights.rename(snapshot / "unet" / "diffusion_pytorch_model.bin")
 
-            with (
-                mock.patch.object(model_runtime, "pipeline_dtype", return_value=None),
-                mock.patch.object(
-                    model_runtime, "system_memory", return_value=(64 * 1024**3, 32 * 1024**3)
-                ),
-            ):
-                estimated, _ = ModelManager._check_memory(
-                    "org/pipe", snapshot, "float32", "cpu", kind=IMAGE_KIND
-                )
-
-        self.assertAlmostEqual(estimated / stored, 2.0, places=1)
+            self.assertIsNone(model_runtime.component_dtype(snapshot / "unet"))
+            self.assertEqual(model_runtime.ASSUMED_PIPELINE_DTYPE, "float16")
+            # Assumed fp16, so a float32 load is estimated at twice the file.
+            self.assertEqual(
+                model_runtime.pipeline_loaded_bytes(snapshot, "float32"), stored * 2
+            )
 
     def test_a_pipeline_on_cuda_has_to_fit_the_card_and_the_machine(self):
         """It is staged in host memory and then moved onto the card whole,
@@ -754,6 +807,50 @@ class RunTests(unittest.TestCase):
         self.assertIsNotNone(image_runtime.token_map(run, len(run.tokens)))
         self.assertIsNone(image_runtime.token_map(run, len(run.tokens) + 1))
         self.assertIsNone(image_runtime.token_map(run, -1))
+
+    def test_tokens_the_encoder_never_saw_are_dropped_from_the_strip(self):
+        """A pipeline can encode with a shorter limit than its tokenizer's,
+        and the tokens past it were never keyed on. Keeping them left rows of
+        zeros standing in for words the model never read, with the padding
+        row stranded past them where nothing looks."""
+
+        pipeline = FakePipeline()
+        # Six words plus the two special tokens, but the encoder keys on
+        # four of them.
+        prompt = "a red bicycle on a beach"
+        pipeline.unet.ask_the_prompt = lambda hidden: pipeline.unet._processors[
+            "blocks.0.attn2.processor"
+        ](
+            pipeline.unet.attn2,
+            torch.randn(hidden.shape[0], 64, 16),
+            torch.randn(hidden.shape[0], 4, 16),
+        )
+
+        run = self.run_pipeline(pipeline, prompt=prompt, steps=2)
+
+        self.assertEqual(len(run.tokens), 4)
+        self.assertEqual(
+            [token["text"] for token in run.tokens],
+            ["<|startoftext|>", "a", "red", "bicycle"],
+        )
+        # Four token rows and the padding row, which is the last one.
+        self.assertEqual(run.attention.shape[1], 5)
+        self.assertEqual(len(image_runtime.token_shares(run)), 4)
+        self.assertIsNotNone(image_runtime.padding_share(run))
+        self.assertAlmostEqual(
+            sum(image_runtime.token_shares(run)) + image_runtime.padding_share(run),
+            1.0,
+            places=4,
+        )
+        # No row of zeros standing in for a word the model never read.
+        for share in image_runtime.token_shares(run):
+            self.assertGreater(share, 0.0)
+
+    def test_a_prompt_within_the_key_count_keeps_every_token(self):
+        run = self.run_pipeline(prompt="a red bicycle", steps=2)
+
+        self.assertEqual(len(run.tokens), 5)
+        self.assertEqual(run.attention.shape[1], 6)
 
     def test_turning_attention_off_keeps_the_rest_and_says_why(self):
         run = self.run_pipeline(record_attention=False)
