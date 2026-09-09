@@ -783,13 +783,18 @@ def my_models_summary(models: list[CachedModel]) -> str:
     return f"{count} · {total} on disk in {root}"
 
 
-def refresh_my_models(selected: str | None, order: str | None = DEFAULT_MODEL_SORT):
-    """Rescan the cache; keep the selection, or fall back to the loaded model."""
+def refresh_my_models(
+    selected: str | None,
+    order: str | None = DEFAULT_MODEL_SORT,
+    model_id: str | None = None,
+):
+    """Keep the selected row or typed ID; default to the loaded model at startup."""
 
     models = sort_cached_models(list_cached_models(), order)
     ids = [entry.model_id for entry in models]
     if selected not in ids:
-        selected = runtime.MANAGER.model_id if runtime.MANAGER.model_id in ids else None
+        fallback = model_id.strip() if model_id is not None else runtime.MANAGER.model_id
+        selected = fallback if fallback in ids else None
     choices = [(cached_model_label(entry), entry.model_id) for entry in models]
     if selected is None:
         detail = NO_CACHED_MODEL_SELECTED if models else ""

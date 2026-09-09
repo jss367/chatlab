@@ -794,7 +794,7 @@ def build_app() -> gr.Blocks:
 
         # Every handler that can change what is on disk or in memory rescans
         # the cache afterwards, so My Models never shows a stale list.
-        models_inputs = [my_models, sort_models]
+        models_inputs = [my_models, sort_models, model_id]
         models_outputs = [my_models, my_model_detail, my_models_summary]
         action_inputs = [model_id, my_models]
         action_outputs = [
@@ -862,7 +862,8 @@ def build_app() -> gr.Blocks:
             refresh_models_button.click(refresh_my_models, models_inputs, models_outputs)
         )
         sort_models.input(refresh_my_models, models_inputs, models_outputs)
-        refresh_actions(demo.load(refresh_my_models, models_inputs, models_outputs))
+        # Before the reader chooses an ID, startup can highlight the loaded model.
+        refresh_actions(demo.load(refresh_my_models, [my_models, sort_models], models_outputs))
         # Escape stops a running generation, from anywhere on the page.
         demo.load(None, None, None, js=SHORTCUT_JS)
 

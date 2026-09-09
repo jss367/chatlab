@@ -784,6 +784,16 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertIn("No models", summary)
         self.assertIn("Model search", summary)
 
+    def test_refresh_does_not_replace_an_uncached_typed_id_with_the_loaded_model(self):
+        self.manager.model_id = OLMO
+        radio, _, _ = app.refresh_my_models(None, "Name", "org/not-downloaded")
+        self.assertIsNone(radio["value"])
+        self.assertEqual(app.chosen_model("org/not-downloaded", radio["value"]), "org/not-downloaded")
+
+    def test_refresh_keeps_a_picked_row_ahead_of_a_stale_textbox(self):
+        radio, _, _ = app.refresh_my_models("org/partial", "Name", OLMO)
+        self.assertEqual(radio["value"], "org/partial")
+
     def test_choosing_a_model_fills_the_id_box_and_describes_it(self):
         box, detail = app.select_my_model(OLMO)
 
@@ -1562,6 +1572,50 @@ class PageLayoutTests(unittest.TestCase):
         for name in ("load_cached_model", "download_model", "download_and_load_model"):
             (fn,) = self.listeners(name)
             self.assertIn(radio, fn.inputs, name)
+
+    def test_download_then_load_keeps_the_typed_model_when_another_model_is_loaded(self):
+        manager = ModelManager()
+        manager.model_id = OLMO
+        entries = [cached(OLMO)]
+        typed_id = "org/new-model"
+        (download,) = self.listeners("download_model")
+        (load,) = self.listeners("load_cached_model")
+        dependency = next(
+            item for item in self.demo.config["dependencies"]
+            if item["trigger_after"] == download._id
+        )
+        refresh = self.demo.fns[dependency["id"]]
+        self.assertEqual(refresh.fn, models_page.refresh_my_models)
+        self.assertEqual(refresh.inputs[-1], self.labelled("Hugging Face model ID"))
+
+        def fetch(model_id, token):
+            entries.append(cached(model_id))
+            yield "download progress"
+            return Path("/cache/new-model")
+
+        def read_weights(*args):
+            yield "load progress"
+            return "CPU"
+
+        with (
+            mock.patch.object(runtime, "MANAGER", manager),
+            mock.patch.object(models_page, "list_cached_models", side_effect=lambda: list(entries)),
+            mock.patch.object(models_page, "cache_status", side_effect=lambda model_id: next((entry.status for entry in entries if entry.model_id == model_id), CacheStatus())),
+            mock.patch.object(models_page, "stream_download", side_effect=fetch),
+            mock.patch.object(manager, "find_cached", return_value=Path("/cache/new-model")),
+            mock.patch.object(models_page, "stream_load", side_effect=read_weights) as stream_load,
+        ):
+            selected = models_page.clear_my_model_selection()[0]["value"]
+            cards = list(download.fn(typed_id, "", selected))
+            self.assertIn("Download complete", cards[-1])
+            self.assertEqual(manager.model_id, OLMO)
+            radio, _, _ = refresh.fn(selected, "Name", typed_id)
+            detail, _, _, load_button = models_page.refresh_model_actions(typed_id, radio["value"])
+            self.assertEqual(radio["value"], typed_id)
+            self.assertIn("Ready to load", detail)
+            self.assertTrue(load_button["visible"])
+            list(load.fn(typed_id, radio["value"]))
+            self.assertEqual(stream_load.call_args.args[0], typed_id)
 
     def test_a_picked_row_outranks_the_id_box(self):
         # A click's inputs are snapshotted in the browser, and a row reaches
