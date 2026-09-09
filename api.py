@@ -114,23 +114,36 @@ class Frames:
         )
         self._worker.start()
 
+    def _put(self, item) -> bool:
+        """Hand ``item`` to the reader; ``False`` if nobody took it in time.
+
+        Every write waits, the last one and a failure included. A reader that
+        has gone leaves the buffer full, and an unbounded write would then
+        park this thread for good with the generation slot still held - after
+        which every reply, in the interface as much as here, would be refused
+        as busy until the app was restarted.
+        """
+
+        try:
+            self._frames.put(item, timeout=ABANDONED_AFTER_SECONDS)
+            return True
+        except queue.Full:
+            logger.info("Abandoned a streaming response nobody was reading")
+            return False
+
     def _run(self) -> None:
         try:
             for update in self._stream:
                 held = replace(update, metrics=list(update.metrics))
-                try:
-                    self._frames.put(held, timeout=ABANDONED_AFTER_SECONDS)
-                except queue.Full:
-                    # Nobody is reading. Closing the generator from the
-                    # thread that owns it raises GeneratorExit inside it, so
-                    # its own cleanup runs: the cache goes back and the model
-                    # lock is let go.
-                    logger.info("Abandoned a streaming response nobody was reading")
+                if not self._put(held):
+                    # Closing the generator from the thread that owns it
+                    # raises GeneratorExit inside it, so its own cleanup
+                    # runs: the cache goes back and the model lock is let go.
                     self._stream.close()
                     return
-            self._frames.put(_DONE)
+            self._put(_DONE)
         except BaseException as error:  # noqa: BLE001 - handed to the reader
-            self._frames.put(error)
+            self._put(error)
         finally:
             runtime.MANAGER.release_generation()
 

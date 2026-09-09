@@ -830,6 +830,10 @@ class StreamingTests(ApiTestCase):
 class FramesTests(ApiTestCase):
     """The frames of one generation, produced on a thread of their own."""
 
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, api, "ABANDONED_AFTER_SECONDS", api.ABANDONED_AFTER_SECONDS)
+
     def test_every_frame_is_produced_on_one_thread(self):
         # torch.inference_mode is thread-local and Starlette advances a
         # streaming iterator through its thread pool without promising the
@@ -901,15 +905,52 @@ class FramesTests(ApiTestCase):
                 closed.set()
                 raise
 
-        original = api.ABANDONED_AFTER_SECONDS
         api.ABANDONED_AFTER_SECONDS = 0.05
-        self.addCleanup(setattr, api, "ABANDONED_AFTER_SECONDS", original)
 
         self.manager.reserve_generation()
         produced = api.Frames(generate([]))
         produced.first()  # and then nothing reads the rest
 
         self.assertTrue(closed.wait(timeout=5))
+        for _ in range(200):
+            if not self.manager.busy:
+                break
+            time.sleep(0.01)
+        self.assertFalse(self.manager.busy)
+
+    def test_a_generation_that_ends_with_nobody_reading_gives_the_model_back(self):
+        # The reader left with the buffer full and the generation then
+        # finished: the write that says so has to give up like any other, or
+        # this thread parks for good holding the generation slot and every
+        # later reply - here and in the interface - is refused as busy.
+        api.ABANDONED_AFTER_SECONDS = 0.05
+
+        def generate(messages, **kwargs):
+            for index in range(api.FRAME_BUFFER + 1):
+                yield update("x" * (index + 1))
+
+        self.manager.reserve_generation()
+        produced = api.Frames(generate([]))
+        produced.first()  # and then nothing reads the rest
+
+        for _ in range(200):
+            if not self.manager.busy:
+                break
+            time.sleep(0.01)
+        self.assertFalse(self.manager.busy)
+
+    def test_a_failure_with_nobody_reading_gives_the_model_back_too(self):
+        api.ABANDONED_AFTER_SECONDS = 0.05
+
+        def generate(messages, **kwargs):
+            for index in range(api.FRAME_BUFFER + 1):
+                yield update("x" * (index + 1))
+            raise RuntimeError("the gpu fell over")
+
+        self.manager.reserve_generation()
+        produced = api.Frames(generate([]))
+        produced.first()
+
         for _ in range(200):
             if not self.manager.busy:
                 break
