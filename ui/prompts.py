@@ -120,6 +120,19 @@ def load_prompt_file(file_path, text: str, loaded):
     return prompts_to_text(combined), status, combined
 
 
+def same_lines(text: str) -> str:
+    """``text`` with every line ending written the way a browser returns it.
+
+    A textarea hands back line feeds whatever went in, so a prompt loaded
+    from a file written on Windows comes back from the box without its
+    carriage returns. Comparing the two as they are would call an untouched
+    box edited; this is only for that comparison, and the prompts a run
+    uses keep the line endings their file gave them.
+    """
+
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def resolve_prompts(text: str, loaded) -> list[str]:
     """The prompts a run should use: the loaded ones, or the box's own.
 
@@ -131,9 +144,9 @@ def resolve_prompts(text: str, loaded) -> list[str]:
     prompts as they always have.
     """
 
-    written = (text or "").strip()
+    written = same_lines(text).strip()
     prompts = list(loaded or [])
-    if prompts and prompts_to_text(prompts) == written:
+    if prompts and same_lines(prompts_to_text(prompts)) == written:
         return prompts
     return parse_prompts(text)
 

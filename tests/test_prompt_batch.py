@@ -72,6 +72,14 @@ class ParsePromptsTests(unittest.TestCase):
 
         self.assertEqual(prompts, ["a passage\nand its question", "another"])
 
+    def test_a_blank_line_written_on_windows_separates_too(self):
+        # A .txt file written on Windows would otherwise be read as one long
+        # prompt and run once, which looks like a model problem rather than
+        # a file one.
+        prompts = parse_prompts("first\r\n\r\nsecond")
+
+        self.assertEqual(prompts, ["first", "second"])
+
     def test_whitespace_only_lines_separate_and_are_dropped(self):
         prompts = parse_prompts("  first \n \t \n\n\nsecond\n")
 
@@ -268,6 +276,15 @@ class ResolvePromptsTests(unittest.TestCase):
 
         self.assertEqual(app.resolve_prompts(text, loaded), loaded)
         self.assertEqual(len(app.parse_prompts(text)), 3)
+
+    def test_a_windows_prompt_survives_the_box(self):
+        # A textarea hands back line feeds whatever went in, so a prompt
+        # loaded from a file written on Windows comes back without its
+        # carriage returns. Read as an edit, it would split in two.
+        loaded = ["first paragraph\r\n\r\nsecond paragraph"]
+        shown = app.prompts_to_text(loaded).replace("\r\n", "\n")
+
+        self.assertEqual(app.resolve_prompts(shown, loaded), loaded)
 
     def test_an_edited_box_is_read_as_it_is_written(self):
         loaded = ["first", "second"]

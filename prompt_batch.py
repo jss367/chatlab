@@ -39,9 +39,14 @@ def parse_prompts(text: str) -> list[str]:
     A prompt worth measuring is often several lines - a passage, then the
     question about it - so one prompt per line would make most of them
     unwritable. A blank line is the separator a reader can see in the box.
+
+    A blank line written on Windows carries a carriage return, and a file
+    holding those would otherwise be read as one long prompt: the split
+    takes them either way. What is inside a prompt is left as the file
+    wrote it, since that is what the model is being asked.
     """
 
-    blocks = re.split(r"\n[ \t]*\n", text or "")
+    blocks = re.split(r"\r?\n[ \t]*\r?\n", text or "")
     return [block.strip() for block in blocks if block.strip()]
 
 

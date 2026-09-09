@@ -291,6 +291,7 @@ from ui.prompts import (
     load_prompt_file,
     resolve_prompts,
     run_prompts,
+    same_lines,
     stop_batch,
 )
 from ui.scoring import (
