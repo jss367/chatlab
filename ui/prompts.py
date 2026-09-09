@@ -17,6 +17,7 @@ import gradio as gr
 from gradio.utils import get_upload_folder
 
 from conversation import make_turn, model_messages
+from model_runtime import ModelChanged
 from prompt_batch import (
     parse_prompt_file,
     parse_prompts,
@@ -50,6 +51,7 @@ BATCH_NO_MODEL = "Download and load a model first."
 BATCH_NO_PROMPTS = "Add some prompts first. A blank line separates one from the next."
 BATCH_BUSY = "Wait for the response to finish before running a batch."
 PROMPT_COUNT_HINT = "Prompts are separated by a blank line."
+BATCH_MODEL_CHANGED = "The model was replaced while the batch was running"
 
 # How much of a prompt and its answer the results table shows. The whole of
 # both is in the trace beside it; this column is for telling the rows apart.
@@ -207,12 +209,21 @@ def _run_batch(
 
     directory = batch_directory()
     traces: list[dict] = []
+    trace_indexes: list[int] = []
     rows: list[list] = []
     trace_paths: list[str] = []
     paths: list[str] = []
     failures = 0
     started = time.monotonic()
     total = len(prompts)
+    # The load the run was started against. Holding the generation slot keeps
+    # other replies off the model, but not a load: one started from another
+    # browser tab waits on the model lock and can take it in the gap between
+    # two prompts. Every prompt is asked for under this load, so the runtime
+    # refuses rather than finishing the batch on other weights and reporting
+    # the whole table as one experiment.
+    expected_load_id = runtime.MANAGER.load_id
+    changed_at: int | None = None
 
     # The table is always published inside an update envelope. A raw value
     # followed by gr.skip() has Gradio's streaming diff delete the data from
@@ -252,6 +263,7 @@ def _run_batch(
                 # pass over every prompt and reach no file.
                 analyze_prompt=False,
                 answer_prefill=assistant_prefill if applied_prefill else "",
+                load_id=expected_load_id,
             )
             # closing() releases the model lock the moment Stop cancels this
             # event and Gradio closes the outer generator.
@@ -270,6 +282,16 @@ def _run_batch(
                         gr.skip(),
                         gr.skip(),
                     )
+        except ModelChanged:
+            # This one is not a result about the prompt, so it gets no row.
+            # The prompts after it would answer under weights the finished
+            # rows were not measured on, and a table mixing the two is worse
+            # than a short one, so the run stops here and says why.
+            logger.warning(
+                "Prompt %s of %s did not run: the model changed", index, total
+            )
+            changed_at = index
+            break
         except Exception as error:
             # One bad prompt does not end the run: a passage too long for the
             # context window is a result about that prompt, and the twenty
@@ -312,11 +334,17 @@ def _run_batch(
                     metrics=metrics,
                 )
             )
-            trace_paths.append(write_batch_trace(traces[-1], directory, len(traces)))
+            # Numbered by where the prompt sits in the box, not by how many
+            # traces came before it. A prompt that failed produces no trace,
+            # and numbering by the count would hand its name and its row
+            # number to the next prompt that worked, filing one prompt's
+            # measurements under another's.
+            trace_indexes.append(index)
+            trace_paths.append(write_batch_trace(traces[-1], directory, index))
             # The files are published as the run grows, so stopping half way
             # through still leaves every finished prompt downloadable. The
             # table is rewritten each time for the same reason.
-            paths = [*trace_paths, write_batch_csv(traces, directory)]
+            paths = [*trace_paths, write_batch_csv(traces, directory, trace_indexes)]
         yield (
             batch_progress(index, total, len(metrics), started),
             gr.update(value=list(rows)),
@@ -327,13 +355,21 @@ def _run_batch(
 
     elapsed = max(time.monotonic() - started, 1e-6)
     tokens = sum(trace["token_count"] for trace in traces)
-    done = total - failures
+    # Counted from the rows rather than from ``total``, because a run that
+    # stopped at a model change never reached the prompts after it.
+    done = len(rows) - failures
     status = (
         f"Ran {done} of {total} prompt{'' if total == 1 else 's'} · "
         f"{tokens:,} tokens · {elapsed:.1f}s"
     )
     if traces:
         status = f"{status} · {len(traces)} trace files and one table ready."
+    if changed_at is not None:
+        status = f"{status}\n\n" + failure_status(
+            BATCH_MODEL_CHANGED,
+            f"Prompt {changed_at} onwards did not run. What is listed above "
+            "was measured on the model the batch started with.",
+        )
     if failures:
         # Appended rather than substituted: what did run is still the answer
         # to what was asked, and the failure is the caveat on it.

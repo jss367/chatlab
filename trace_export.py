@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -76,13 +77,22 @@ def _token_rows(trace: dict):
         yield row
 
 
-def _rows_to_csv(traces: list[dict], *, numbered: bool = False) -> str:
+def _rows_to_csv(traces: list[dict], *, indexes: Sequence[int] | None = None) -> str:
     """Write every trace's tokens into one table.
 
     The candidate columns are as wide as the widest token in any of the
     traces, so several responses can share a header even though one of them
     ran with a smaller top-k than another.
+
+    ``indexes`` gives each trace the prompt number it belongs to, written into
+    a prompt_index column. The numbers are the caller's because a batch can
+    drop a trace it failed to produce, and the ones that follow must keep the
+    positions they were asked in. ``None`` leaves the column out, which is what
+    a single trace exported on its own wants.
     """
+
+    if indexes is not None and len(indexes) != len(traces):
+        raise ValueError("Each trace needs exactly one prompt index.")
 
     candidate_count = max(
         (
@@ -98,7 +108,7 @@ def _rows_to_csv(traces: list[dict], *, numbered: bool = False) -> str:
         for field in CANDIDATE_FIELDS
     ]
     columns = (
-        (["prompt_index"] if numbered else [])
+        (["prompt_index"] if indexes is not None else [])
         + METADATA_COLUMNS
         + SAMPLING_COLUMNS
         + TOKEN_COLUMNS
@@ -108,9 +118,10 @@ def _rows_to_csv(traces: list[dict], *, numbered: bool = False) -> str:
     output = io.StringIO(newline="")
     writer = csv.DictWriter(output, fieldnames=columns, lineterminator="\n")
     writer.writeheader()
-    for index, trace in enumerate(traces, start=1):
+    numbers = list(indexes) if indexes is not None else [None] * len(traces)
+    for number, trace in zip(numbers, traces):
         for row in _token_rows(trace):
-            writer.writerow((row | {"prompt_index": index}) if numbered else row)
+            writer.writerow(row if number is None else row | {"prompt_index": number})
 
     return output.getvalue()
 
@@ -126,15 +137,22 @@ def trace_to_csv(trace: dict) -> str:
     return _rows_to_csv([trace])
 
 
-def traces_to_csv(traces: list[dict]) -> str:
+def traces_to_csv(traces: list[dict], indexes: Sequence[int] | None = None) -> str:
     """Flatten a whole batch into one table, numbered by the prompt it came from.
 
     A batch is read as a group - the same question asked twenty ways, one row
     per token of every answer - so the prompt each row belongs to has to be a
     column rather than a file name.
+
+    ``indexes`` says which prompt each trace answered. Without it the traces
+    are numbered in the order they are given, which is only the same thing
+    when every prompt produced a trace.
     """
 
-    return _rows_to_csv(list(traces), numbered=True)
+    traces = list(traces)
+    if indexes is None:
+        indexes = range(1, len(traces) + 1)
+    return _rows_to_csv(traces, indexes=list(indexes))
 
 
 def write_private_text(path: Path, text: str, *, newline: str | None = None) -> None:

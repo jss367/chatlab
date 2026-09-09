@@ -269,6 +269,7 @@ from ui.panel import (
 from ui.prompts import (
     BATCH_BUSY,
     BATCH_HEADERS,
+    BATCH_MODEL_CHANGED,
     BATCH_NO_MODEL,
     BATCH_NO_PROMPTS,
     BATCH_OUTPUT_NAMES,

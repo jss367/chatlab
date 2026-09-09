@@ -201,6 +201,24 @@ class BatchExportTests(unittest.TestCase):
         self.assertEqual([row["seed"] for row in rows], ["1", "2"])
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
+    def test_the_table_numbers_rows_by_the_prompt_the_caller_names(self):
+        # The traces a batch collects are only the prompts that worked, so the
+        # run says which prompt each one answered rather than letting the list
+        # position speak for it.
+        traces = [sample_trace(seed=1), sample_trace(seed=2)]
+
+        path = Path(write_batch_csv(traces, self.directory, [2, 5]))
+        rows = list(csv.DictReader(io.StringIO(path.read_text(encoding="utf-8"))))
+
+        self.assertEqual([row["prompt_index"] for row in rows], ["2", "5"])
+
+    def test_a_trace_without_a_number_is_refused(self):
+        # Numbering by count is the bug this parameter exists to prevent, so a
+        # caller that passes the wrong number of indexes is told, not guessed
+        # at.
+        with self.assertRaises(ValueError):
+            traces_to_csv([sample_trace(), sample_trace()], [1])
+
     def test_prompts_with_different_candidate_counts_share_one_header(self):
         # Top-k can be changed between runs, and a shorter candidate list must
         # not truncate the columns of the longer one it is written beside.
@@ -355,6 +373,56 @@ class RunPromptsTests(unittest.TestCase):
         self.assertIn("Failed: out of memory", rows[0][RESPONSE])
         self.assertEqual(rows[1][TOKENS], 3)
         self.assertIn("1 of 2 prompts failed", final[STATUS])
+
+    def test_a_failed_prompt_does_not_hand_its_number_to_the_next_one(self):
+        # A trace numbered by how many succeeded would file the second
+        # prompt's measurements as the first prompt's, which is the one
+        # reading of the run that is worse than losing it.
+        manager = runtime.MANAGER
+        original = manager.generate
+        calls = {"count": 0}
+
+        def fail_the_first(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("out of memory")
+            return original(*args, **kwargs)
+
+        manager.generate = fail_the_first
+        final = self.run_batch("first\n\nsecond")[-1]
+        paths = [Path(path) for path in final[FILES]["value"]]
+        table = [path for path in paths if path.name == "prompts.csv"][0]
+        rows = list(csv.DictReader(io.StringIO(table.read_text(encoding="utf-8"))))
+
+        self.assertEqual([path.name for path in paths[:-1]], ["prompt-002.json"])
+        self.assertEqual({row["prompt_index"] for row in rows}, {"2"})
+
+    def test_a_batch_stops_rather_than_finish_on_weights_it_did_not_start_on(self):
+        # A load started from another browser tab waits on the model lock and
+        # can take it between two prompts. Finishing the batch there would put
+        # two models' measurements in one table under one heading.
+        manager = runtime.MANAGER
+        original = manager.generate
+        calls = {"count": 0}
+
+        def reload_before_the_second(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] > 1:
+                # What another tab's load leaves behind: the same manager,
+                # holding a different load of the weights.
+                manager.load_count += 1
+            return original(*args, **kwargs)
+
+        manager.generate = reload_before_the_second
+        final = self.run_batch("first\n\nsecond\n\nthird")[-1]
+        rows = final[RESULTS]["value"]
+        names = [Path(path).name for path in final[FILES]["value"]]
+
+        self.assertEqual([row[INDEX] for row in rows], [1])
+        self.assertEqual(names, ["prompt-001.json", "prompts.csv"])
+        self.assertIn("Ran 1 of 3 prompts", final[STATUS])
+        self.assertIn(app.BATCH_MODEL_CHANGED, final[STATUS])
+        self.assertIn("Prompt 2 onwards did not run", final[STATUS])
 
     def test_an_unloaded_model_is_reported_before_anything_runs(self):
         runtime.MANAGER = self.original.__class__()

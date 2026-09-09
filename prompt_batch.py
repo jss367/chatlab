@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 from trace_export import trace_to_json, traces_to_csv, write_private_text
@@ -108,21 +109,31 @@ def parse_prompt_file(path) -> list[str]:
 
 
 def write_batch_trace(trace: dict, directory: Path, index: int) -> str:
-    """Write one prompt's trace, named for its place in the run."""
+    """Write one prompt's trace, named for its place in the run.
+
+    ``index`` is the prompt's position in the box, not its position among the
+    traces: a prompt that failed leaves a gap in the numbering rather than
+    letting the next one take its name.
+    """
 
     path = Path(directory) / f"prompt-{index:03d}.json"
     write_private_text(path, trace_to_json(trace))
     return str(path)
 
 
-def write_batch_csv(traces: list[dict], directory: Path) -> str:
+def write_batch_csv(
+    traces: list[dict], directory: Path, indexes: Sequence[int] | None = None
+) -> str:
     """Rewrite the table covering every prompt run so far.
 
     Rewritten after each prompt rather than once at the end, because a run
     that is stopped half way through is still a run: the table on disk always
     describes the prompts that have finished.
+
+    ``indexes`` names the prompt each trace answered, so the numbers in the
+    table match the trace file names even when a prompt in between failed.
     """
 
     path = Path(directory) / BATCH_CSV_NAME
-    write_private_text(path, traces_to_csv(traces), newline="")
+    write_private_text(path, traces_to_csv(traces, indexes), newline="")
     return str(path)
