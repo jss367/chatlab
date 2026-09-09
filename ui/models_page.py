@@ -773,27 +773,6 @@ def replacement_profile() -> DeviceProfile:
     return device_profile().reclaimed(runtime.MANAGER.loaded_bytes)
 
 
-def refresh_after_device(
-    known: bool,
-    selected: str | None,
-    order: str | None = DEFAULT_MODEL_SORT,
-    precision: str | None = None,
-):
-    """Repaint My Models once the device is known, and only then.
-
-    The page is painted before torch has finished importing, so the first
-    verdicts are given without knowing the device: they assume half
-    precision and no quantization, which is the safe way to be wrong but is
-    wrong on a Mac with 4-bit chosen. This runs on the badge's timer, does
-    nothing until the device can be read, and repaints once - after which
-    ``known`` keeps it quiet for the rest of the session.
-    """
-
-    if known or imported_torch() is None:
-        return (gr.skip(),) * 4
-    return (*refresh_my_models(selected, order, precision), True)
-
-
 def cached_fits(
     models: list[CachedModel], precision: str | None
 ) -> dict[str, Fit]:
@@ -1181,6 +1160,36 @@ def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
     else:
         lines.append("Its ID is in the model ID box: use **Download and load** to fetch it.")
     return "\n".join(lines)
+
+
+def refresh_after_device(
+    known: bool,
+    selected: str | None,
+    order: str | None = DEFAULT_MODEL_SORT,
+    precision: str | None = None,
+    result: str | None = None,
+    results: dict | None = None,
+):
+    """Repaint both model lists once the device is known, and only then.
+
+    The page is painted before torch has finished importing, so the first
+    verdicts are given without knowing the device: they assume half
+    precision and no quantization, which is the safe way to be wrong but is
+    wrong on a Mac with 4-bit chosen. A search run in those first seconds
+    carries the same provisional verdicts, so it is repainted here too,
+    from the results already in hand rather than by searching again. This
+    runs on the badge's timer, does nothing until the device can be read,
+    and repaints once - after which ``known`` keeps it quiet for the rest of
+    the session.
+    """
+
+    if known or imported_torch() is None:
+        return (gr.skip(),) * 6
+    return (
+        *refresh_my_models(selected, order, precision),
+        *refresh_search_results(result, results or {}, precision),
+        True,
+    )
 
 
 def search_models(query: str, hf_token: str, precision: str | None = None):

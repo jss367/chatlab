@@ -257,6 +257,24 @@ class RefusalTests(ApiTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("max_new_tokens", response.json()["error"]["message"])
 
+    def test_a_sampling_value_that_is_not_finite_is_refused(self):
+        # JSON has NaN and Infinity. A NaN would slip past the range check,
+        # every comparison against it being false, and the request would
+        # quietly answer at the saved setting instead.
+        for raw in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(value=raw):
+                response = self.client.post(
+                    "/v1/chat/completions",
+                    content=(
+                        '{"messages":[{"role":"user","content":"hi"}],'
+                        f'"temperature":{raw}}}'
+                    ),
+                    headers={"content-type": "application/json"},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("finite", response.json()["error"]["message"])
+                self.assertEqual(self.manager.calls, [])
+
     def test_a_field_of_the_wrong_type_says_so(self):
         for body, expected in [
             ({"temperature": "hot"}, "temperature must be a number."),

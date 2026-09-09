@@ -870,20 +870,38 @@ class ModelFitTests(unittest.TestCase):
 
         # Nothing to correct yet: torch is still importing.
         self.assertEqual(
-            app.refresh_after_device(False, None, "Name", "4-bit"), (gr.skip(),) * 4
+            app.refresh_after_device(False, None, "Name", "4-bit"), (gr.skip(),) * 6
         )
 
         models_page.imported_torch = lambda: object()
-        radio, _detail, _summary, known = app.refresh_after_device(
-            False, None, "Name", "4-bit"
+        radio, _detail, _summary, _results, _search_detail, known = (
+            app.refresh_after_device(False, None, "Name", "4-bit")
         )
 
         self.assertTrue(known)
         self.assertIn("· tight", dict((v, k) for k, v in radio["choices"])[OLMO])
         # And once it has run, it never runs again.
         self.assertEqual(
-            app.refresh_after_device(True, None, "Name", "4-bit"), (gr.skip(),) * 4
+            app.refresh_after_device(True, None, "Name", "4-bit"), (gr.skip(),) * 6
         )
+
+    def test_a_search_run_before_the_device_was_read_is_repainted_too(self):
+        held = {
+            "org/small": model_runtime.HubModel(
+                model_id="org/small", parameters=1_000_000_000
+            )
+        }
+        roomy(self, total_gb=24, available_gb=18, backend=None, dtype=None)
+        original = models_page.imported_torch
+        models_page.imported_torch = lambda: object()
+        self.addCleanup(lambda: setattr(models_page, "imported_torch", original))
+
+        _radio, _detail, _summary, results, _search, known = app.refresh_after_device(
+            False, None, "Name", "full", None, held
+        )
+
+        self.assertTrue(known)
+        self.assertIn("fits", results["choices"][0][0])
 
     def test_the_selected_model_says_what_the_verdict_rests_on(self):
         _box, detail = app.select_my_model(OLMO, "full")

@@ -264,11 +264,14 @@ def fork_conversation(
     name = library.claim_name(forks, FORK_PREFIX)
     put_branch(forks, name, forked)
     # A fork is the same conversation taken somewhere else, so it answers the
-    # way its parent does until it is changed. A new chat is not a copy of
-    # anything and starts from the saved settings instead.
-    inherited = branch_sampling(forks, forks["active"])
-    if inherited:
-        put_branch_sampling(forks, name, inherited)
+    # way its parent does until it is changed - and both sides are pinned to
+    # that, the parent included. Forking is where a comparison is set up, and
+    # a side carrying no sampling of its own follows the settings file, which
+    # the first slider moved on the other side would rewrite: both would then
+    # answer alike, which is the one thing the fork was for.
+    inherited = settings.sampling_values(branch_sampling(forks, forks["active"]))
+    put_branch_sampling(forks, forks["active"], inherited)
+    put_branch_sampling(forks, name, inherited)
     forks["active"] = name
     messages, _ = display_messages(forked)
 
@@ -383,6 +386,10 @@ def new_conversation(
     # this one loaded is not given a twin the merge would take for it.
     name = library.claim_name(forks, CHAT_PREFIX)
     put_branch(forks, name, [])
+    # Started from the settings file, and pinned to what it said at the time:
+    # a conversation that went on following the file would be moved by a
+    # slider touched on any other conversation.
+    put_branch_sampling(forks, name, settings.sampling_values(None))
     forks["active"] = name
     return (
         gr.skip(),

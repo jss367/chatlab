@@ -890,8 +890,8 @@ def build_app() -> gr.Blocks:
         # does nothing for the rest of the session.
         badge_timer.tick(
             refresh_after_device,
-            [device_read, *models_inputs],
-            [*models_outputs, device_read],
+            [device_read, *models_inputs, search_results, search_results_state],
+            [*models_outputs, search_results, search_detail, device_read],
             show_progress="hidden",
         )
         # Escape stops a running generation, from anywhere on the page.

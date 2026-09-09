@@ -3212,6 +3212,26 @@ class ConversationSamplingTests(unittest.TestCase):
         self.assertEqual(self.held(forked, "Fork 1"), self.OWN)
         self.assertEqual(self.values(app.sampling_updates(forked)), self.OWN)
 
+    def test_forking_pins_both_sides_of_the_comparison(self):
+        # Forking is where a comparison is set up. A side carrying no
+        # sampling of its own follows the settings file, and the first slider
+        # moved on the other side rewrites that file - so both would answer
+        # alike, which is the one thing the fork was for.
+        result = app.fork_conversation([make_turn("user", "one")], new_forks(), None)
+        forked = result[FORK_STATE]
+
+        defaults = settings.sampling_defaults()
+        self.assertEqual(self.held(forked, MAIN_BRANCH), defaults)
+        self.assertEqual(self.held(forked, "Fork 1"), defaults)
+
+        # Moving a slider on the fork now leaves the conversation it came
+        # from where it was, whatever the settings file goes on to say.
+        moved = app.remember_branch_sampling(forked, *self.OWN.values())
+        with settings.override(**self.OWN):
+            self.assertEqual(self.held(moved, "Fork 1"), self.OWN)
+            moved["active"] = MAIN_BRANCH
+            self.assertEqual(self.values(app.sampling_updates(moved)), defaults)
+
     def test_a_new_conversation_starts_from_the_saved_settings(self):
         forks = new_forks()
         put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
@@ -3219,7 +3239,12 @@ class ConversationSamplingTests(unittest.TestCase):
         result = app.new_conversation([make_turn("user", "one")], forks)
         started = result[FORK_STATE]
 
-        self.assertEqual(self.held(started, started["active"]), {})
+        # Pinned to what the file said when it was started, rather than left
+        # following the file: a conversation that followed it would be moved
+        # by a slider touched on any other conversation.
+        self.assertEqual(
+            self.held(started, started["active"]), settings.sampling_defaults()
+        )
         self.assertEqual(
             self.values(app.sampling_updates(started)), settings.sampling_defaults()
         )

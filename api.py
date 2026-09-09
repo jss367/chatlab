@@ -163,6 +163,11 @@ def sampling_from(body: dict) -> dict:
             continue
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ApiError(400, f"{name} must be a number.")
+        if not math.isfinite(value):
+            # JSON has NaN and Infinity, and a NaN would slip past the check
+            # below: every comparison against it is false, so the request
+            # would quietly answer at the saved setting instead.
+            raise ApiError(400, f"{name} must be a finite number.")
         given[setting] = value
     checked = settings.sanitize(saved.to_mapping() | given)
     for setting, value in given.items():
