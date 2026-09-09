@@ -11,6 +11,7 @@ import numpy
 import torch
 
 import image_runtime
+import model_runtime
 import settings_sandbox
 from fake_pipeline import FakePipeline, FakeTokenizer
 from image_runtime import ImageRequest
@@ -144,6 +145,64 @@ class PipelineLayoutTests(unittest.TestCase):
                 ["tokenizer_config.json", "vocab.json"],
             )
 
+    def test_a_component_missing_shards_is_incomplete_rather_than_ready(self):
+        """A download cut off after the first shard leaves a folder with
+        *some* weights. Reading that as whole sends Load cached into
+        diffusers to fail on the shards that never arrived."""
+
+        files = self.whole()
+        del files["unet/diffusion_pytorch_model.safetensors"]
+        files["unet/diffusion_pytorch_model.safetensors.index.json"] = json.dumps(
+            {
+                "weight_map": {
+                    "a": "diffusion_pytorch_model-00001-of-00002.safetensors",
+                    "b": "diffusion_pytorch_model-00002-of-00002.safetensors",
+                }
+            }
+        ).encode()
+        files["unet/diffusion_pytorch_model-00001-of-00002.safetensors"] = b"u" * 500
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, files)
+            status = cache_status(MODEL, Path(root))
+
+            self.assertEqual(
+                status.missing_files,
+                ("unet/diffusion_pytorch_model-00002-of-00002.safetensors",),
+            )
+            self.assertFalse(status.complete)
+
+    def test_a_component_with_every_shard_is_ready(self):
+        files = self.whole()
+        del files["unet/diffusion_pytorch_model.safetensors"]
+        files["unet/diffusion_pytorch_model.safetensors.index.json"] = json.dumps(
+            {
+                "weight_map": {
+                    "a": "diffusion_pytorch_model-00001-of-00002.safetensors",
+                    "b": "diffusion_pytorch_model-00002-of-00002.safetensors",
+                }
+            }
+        ).encode()
+        files["unet/diffusion_pytorch_model-00001-of-00002.safetensors"] = b"u" * 500
+        files["unet/diffusion_pytorch_model-00002-of-00002.safetensors"] = b"u" * 500
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, files)
+            status = cache_status(MODEL, Path(root))
+
+            self.assertEqual(status.missing_files, ())
+            self.assertTrue(status.complete)
+
+    def test_an_index_that_cannot_be_read_counts_as_missing_weights(self):
+        files = self.whole()
+        del files["unet/diffusion_pytorch_model.safetensors"]
+        files["unet/diffusion_pytorch_model.safetensors.index.json"] = b"not json"
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, files)
+
+            self.assertEqual(
+                cache_status(MODEL, Path(root)).missing_files,
+                (f"unet/{MODEL_WEIGHTS}",),
+            )
+
     def test_a_pipeline_is_sized_by_the_one_weight_set_it_will_load(self):
         """A repo often ships a half-precision set beside the full one, and
         ``from_pretrained`` reads one of them. Counting both would double
@@ -215,6 +274,146 @@ class PipelineLayoutTests(unittest.TestCase):
             self.assertEqual(pipeline_components(snapshot), ())
             self.assertIsNone(pipeline_weight_bytes(snapshot))
             self.assertIsNone(pipeline_class(snapshot))
+
+
+class PipelineDtypeTests(unittest.TestCase):
+    """How big a pipeline's weights get once loaded, read from the files."""
+
+    def pipeline(self, root: Path, components: dict[str, tuple[str, int]]) -> Path:
+        """A snapshot whose components hold safetensors of the given dtype and size."""
+
+        import torch
+        from safetensors.torch import save_file
+
+        index = {"_class_name": "StableDiffusionPipeline"}
+        for name, (dtype, side) in components.items():
+            (root / name).mkdir(parents=True, exist_ok=True)
+            (root / name / "config.json").write_text("{}")
+            index[name] = ["diffusers", "UNet2DConditionModel"]
+            save_file(
+                {"w": torch.zeros(side, side, dtype=getattr(torch, dtype))},
+                root / name / "diffusion_pytorch_model.safetensors",
+            )
+        (root / "model_index.json").write_text(json.dumps(index))
+        return root
+
+    def test_one_file_reports_the_dtype_out_of_its_own_header(self):
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.pipeline(Path(root), {"unet": ("float16", 32)})
+            weights = snapshot / "unet" / "diffusion_pytorch_model.safetensors"
+
+            self.assertEqual(model_runtime.safetensors_dtype(weights), "float16")
+
+    def test_the_largest_component_decides_the_pipeline_dtype(self):
+        """A pipeline's components need not agree, and the text encoder
+        disagreeing about its own few hundred megabytes does not change what
+        the unet costs."""
+
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.pipeline(
+                Path(root),
+                {"unet": ("float16", 200), "text_encoder": ("float32", 10)},
+            )
+
+            self.assertEqual(model_runtime.pipeline_dtype(snapshot), "float16")
+
+    def test_a_file_that_is_not_safetensors_reports_no_dtype(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "weights.safetensors"
+            path.write_bytes(b"nowhere near a header")
+
+            self.assertIsNone(model_runtime.safetensors_dtype(path))
+
+    def test_a_header_claiming_an_absurd_length_is_refused(self):
+        # A truncated or hostile file, not something to allocate for.
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "weights.safetensors"
+            path.write_bytes((2**60).to_bytes(8, "little") + b"{}")
+
+            self.assertIsNone(model_runtime.safetensors_dtype(path))
+
+    def test_a_half_precision_pipeline_is_doubled_for_a_float32_load(self):
+        """The bug this closes: on the CPU the loader asks for float32, so an
+        fp16-only pipeline occupies twice its on-disk size. Measured as
+        though it matched, it passed the safety reserve and then exhausted
+        the machine."""
+
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.pipeline(Path(root), {"unet": ("float16", 200)})
+            stored = model_runtime.pipeline_weight_bytes(snapshot)
+
+            with mock.patch.object(
+                model_runtime, "system_memory", return_value=(64 * 1024**3, 32 * 1024**3)
+            ):
+                as_float32, _ = ModelManager._check_memory(
+                    "org/pipe", snapshot, "float32", "cpu", kind=IMAGE_KIND
+                )
+                as_float16, _ = ModelManager._check_memory(
+                    "org/pipe", snapshot, "float16", "cpu", kind=IMAGE_KIND
+                )
+
+        self.assertAlmostEqual(as_float32 / stored, 2.0, places=1)
+        self.assertAlmostEqual(as_float16 / stored, 1.0, places=1)
+
+    def test_an_unreadable_dtype_is_assumed_to_be_half_precision(self):
+        # Pipelines ship as half precision, and erring that way refuses a
+        # load rather than letting a float32 CPU load double past the
+        # estimate and exhaust the machine.
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.pipeline(Path(root), {"unet": ("float16", 200)})
+            stored = model_runtime.pipeline_weight_bytes(snapshot)
+
+            with (
+                mock.patch.object(model_runtime, "pipeline_dtype", return_value=None),
+                mock.patch.object(
+                    model_runtime, "system_memory", return_value=(64 * 1024**3, 32 * 1024**3)
+                ),
+            ):
+                estimated, _ = ModelManager._check_memory(
+                    "org/pipe", snapshot, "float32", "cpu", kind=IMAGE_KIND
+                )
+
+        self.assertAlmostEqual(estimated / stored, 2.0, places=1)
+
+    def test_a_pipeline_on_cuda_is_checked_against_the_card_alone(self):
+        """It is moved onto the card whole, with nothing offloaded, so the
+        combined pool would pass a pipeline that fits host memory and then
+        fail inside .to("cuda")."""
+
+        import torch
+        from safetensors.torch import save_file
+
+        card = (8 * 1024**3, 6 * 1024**3)
+        host = (64 * 1024**3, 48 * 1024**3)
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.pipeline(Path(root), {"unet": ("float16", 64)})
+            # A checkpoint at the root as well, so the text leg has weights
+            # to measure and reaches the pool decision at all.
+            save_file(
+                {"w": torch.zeros(64, 64, dtype=torch.float16)},
+                snapshot / "model.safetensors",
+            )
+            (snapshot / "config.json").write_text('{"model_type": "olmo3"}')
+            with (
+                mock.patch.object(model_runtime, "cuda_memory", return_value=card),
+                mock.patch.object(model_runtime, "system_memory", return_value=host),
+                mock.patch.object(model_runtime, "check_memory_for_load") as checked,
+            ):
+                ModelManager._check_memory(
+                    "org/pipe", snapshot, "float16", "cuda", kind=IMAGE_KIND
+                )
+                image_pool = checked.call_args.kwargs["pool"]
+                image_total = checked.call_args.args[2]
+
+                ModelManager._check_memory(
+                    "org/model", snapshot, "float16", "cuda", kind=TEXT_KIND
+                )
+                text_total = checked.call_args.args[2]
+
+        self.assertEqual(image_pool, "the GPU")
+        self.assertEqual(image_total, card[0])
+        # A text model does still get the offload pool it really uses.
+        self.assertGreater(text_total, card[0])
 
 
 class PreviewTests(unittest.TestCase):
@@ -652,6 +851,20 @@ class GuidanceSummaryTests(unittest.TestCase):
         self.assertEqual(summary["peak_guidance_step"], 2)
         self.assertAlmostEqual(summary["mean_guidance_share"], 0.4)
 
+    def test_the_peak_pull_keeps_its_own_step_when_a_reading_is_missing(self):
+        """A step whose guidance the hook could not read drops out of the
+        pulls and not out of the readings, so an index into one is not an
+        index into the other and the peak would be named at the wrong step."""
+
+        readings = self.readings([None, 0.1, 0.9, 0.2], [None, 0.5, 0.4, 0.1])
+        summary = image_runtime.guidance_summary(readings)
+
+        # The 0.9 belongs to step 3, not to step 2 as a bare index would say.
+        self.assertAlmostEqual(summary["peak_guidance_share"], 0.9)
+        self.assertEqual(summary["peak_guidance_step"], 3)
+        # And the mean is over the pulls that exist, not over every step.
+        self.assertAlmostEqual(summary["mean_guidance_share"], (0.1 + 0.9 + 0.2) / 3)
+
     def test_an_unguided_run_is_summarized_without_a_pull(self):
         summary = image_runtime.guidance_summary(
             self.readings([None, None], [None, 0.3])
@@ -663,6 +876,34 @@ class GuidanceSummaryTests(unittest.TestCase):
 
     def test_no_readings_at_all_is_an_empty_summary(self):
         self.assertEqual(image_runtime.guidance_summary([]), {"step_count": 0})
+
+
+class TorchSeedTests(unittest.TestCase):
+    """The seed has to be one torch's generator will take.
+
+    Named apart from the Images page's own SeedTests, which cover how the
+    box and the randomize checkbox pick one; this covers the ceiling torch
+    imposes on whatever they picked.
+    """
+
+    def test_a_seed_past_torch_maximum_is_pulled_into_range(self):
+        # NumPy takes any non-negative integer however large, so the Chat
+        # page's seed only floors. torch raises above its own maximum, which
+        # would fail the draw outright rather than reproduce a different one.
+        self.assertEqual(image_runtime.usable_seed(2**70), image_runtime.MAX_SEED)
+        self.assertEqual(image_runtime.usable_seed(-1), 0)
+        self.assertEqual(image_runtime.usable_seed(42), 42)
+        self.assertEqual(image_runtime.usable_seed(None), 0)
+        self.assertEqual(image_runtime.usable_seed(float("inf")), 0)
+
+    def test_an_out_of_range_seed_still_draws(self):
+        run = image_runtime.run(
+            FakePipeline(),
+            ImageRequest(prompt="x", steps=2, seed=2**70, width=32, height=32),
+        )
+
+        self.assertEqual(run.steps_done, 2)
+        self.assertIsNotNone(run.image)
 
 
 class ManagerImageRunTests(unittest.TestCase):

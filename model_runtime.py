@@ -417,6 +417,50 @@ def _component_weights(folder: Path) -> list[Path]:
     ]
 
 
+def _component_index(folder: Path) -> Path | None:
+    """The shard index a component will load from, or ``None`` if it has none.
+
+    A big component ships its weights as shards with an index listing them,
+    the same as a text checkpoint. Which index matters is the one for the set
+    ``from_pretrained`` will read, so the preference is the same as
+    :func:`_loaded_variant_bytes`': the plain safetensors set, then the plain
+    PyTorch one, then whatever else is there.
+    """
+
+    if not folder.is_dir():
+        return None
+    indexes = {
+        _weight_variant(entry.name.removesuffix(".index.json")): entry
+        for entry in sorted(folder.iterdir())
+        if entry.is_file() and entry.name.endswith(".index.json")
+    }
+    for preferred in (("", "safetensors"), ("", "bin")):
+        if preferred in indexes:
+            return indexes[preferred]
+    return next(iter(indexes.values()), None)
+
+
+def _missing_shards(index: Path) -> tuple[str, ...]:
+    """The shards ``index`` names that are not beside it, or the index itself.
+
+    An index this cannot read counts as the weights being missing rather than
+    as nothing missing: the file is another repo's, so a ``weight_map`` that
+    is not an object of file names says the component cannot be loaded, which
+    is the thing worth reporting.
+    """
+
+    try:
+        weight_map = json.loads(index.read_text())["weight_map"]
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError("weight_map must be a non-empty object")
+        shards = {shard for shard in weight_map.values()}
+        if not all(isinstance(shard, str) and shard for shard in shards):
+            raise TypeError("weight_map values must be file names")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return (MODEL_WEIGHTS,)
+    return tuple(sorted(shard for shard in shards if not (index.parent / shard).is_file()))
+
+
 def pipeline_missing_files(snapshot: Path) -> tuple[str, ...]:
     """The files a pipeline snapshot needs before ``from_pretrained`` can load it.
 
@@ -427,6 +471,12 @@ def pipeline_missing_files(snapshot: Path) -> tuple[str, ...]:
     for those the folder's presence is the whole check. Which variant of the
     weights is there is not checked: a repo that ships only the half
     precision set loads from it.
+
+    A component whose weights come as shards is checked shard by shard
+    against its own index, exactly as a text checkpoint is. Without that, a
+    download cut off after the first shard leaves a folder that has *some*
+    weights, which would read as whole and send **Load cached** into
+    diffusers to fail on the shards that never arrived.
     """
 
     missing: list[str] = []
@@ -435,7 +485,12 @@ def pipeline_missing_files(snapshot: Path) -> tuple[str, ...]:
         if not folder.is_dir():
             missing.append(f"{name}/")
             continue
-        if (folder / COMPONENT_CONFIG).is_file() and not _component_weights(folder):
+        if not (folder / COMPONENT_CONFIG).is_file():
+            continue
+        index = _component_index(folder)
+        if index is not None:
+            missing.extend(f"{name}/{shard}" for shard in _missing_shards(index))
+        elif not _component_weights(folder):
             missing.append(f"{name}/{MODEL_WEIGHTS}")
     return tuple(missing)
 
@@ -500,6 +555,94 @@ def pipeline_weight_bytes(snapshot: Path) -> int | None:
         _loaded_variant_bytes(_component_weights(snapshot / name))
         for name in components
     )
+
+
+# How safetensors spells the dtypes in its header, in the names
+# :data:`DTYPE_BYTES` uses. The header is a length-prefixed JSON object at the
+# front of the file, so reading one costs a seek rather than a load.
+SAFETENSORS_DTYPES = {
+    "F64": "float64",
+    "F32": "float32",
+    "F16": "float16",
+    "BF16": "bfloat16",
+    "F8_E4M3": "float8_e4m3fn",
+    "F8_E5M2": "float8_e5m2",
+    "I8": "int8",
+    "U8": "uint8",
+}
+
+# The header length prefix: eight bytes, little-endian, unsigned.
+_HEADER_PREFIX = 8
+# Refuse to read a header claiming to be larger than any real one. A header
+# is a few hundred kilobytes for the largest checkpoints; a wild length is a
+# truncated or hostile file, not something to allocate for.
+MAX_SAFETENSORS_HEADER = 64 * 1024**2
+
+
+def safetensors_dtype(path: Path) -> str | None:
+    """The dtype the tensors in one safetensors file are stored as, or ``None``.
+
+    Read from the file's own header rather than from a config, because the
+    configs that matter do not say: a diffusers component keeps its
+    architecture in ``config.json`` and its dtype nowhere, so the unet that
+    dominates a pipeline's size would otherwise be unmeasurable. The first
+    tensor's dtype stands for the file, which is what a checkpoint saved in
+    one precision holds.
+    """
+
+    try:
+        with path.open("rb") as handle:
+            prefix = handle.read(_HEADER_PREFIX)
+            if len(prefix) < _HEADER_PREFIX:
+                return None
+            length = int.from_bytes(prefix, "little")
+            if not 0 < length <= MAX_SAFETENSORS_HEADER:
+                return None
+            header = json.loads(handle.read(length))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(header, dict):
+        return None
+    for name, entry in header.items():
+        if name == "__metadata__" or not isinstance(entry, dict):
+            continue
+        stored = SAFETENSORS_DTYPES.get(entry.get("dtype"))
+        if stored is not None:
+            return stored
+    return None
+
+
+def pipeline_dtype(snapshot: Path) -> str | None:
+    """The dtype a pipeline's weights are stored as, or ``None``.
+
+    Taken from the largest weight-bearing component, which is the one whose
+    size the estimate turns on: a pipeline's components need not agree, and
+    the text encoder disagreeing about its own few hundred megabytes does not
+    change what the unet costs. ``None`` when no component ships safetensors,
+    which is where the caller has to decide what to assume.
+
+    This is deliberately not what :func:`_read_config` reports for a
+    pipeline. That answers "what does this repo say it is", and a pipeline
+    says nothing one dtype could stand for; this answers "how big will it be
+    once loaded", which is one number and worth the file read.
+    """
+
+    best: tuple[int, str] | None = None
+    for name in pipeline_components(snapshot):
+        files = [
+            entry
+            for entry in _component_weights(snapshot / name)
+            if entry.suffix == ".safetensors"
+        ]
+        if not files:
+            continue
+        stored = safetensors_dtype(max(files, key=lambda entry: entry.stat().st_size))
+        if stored is None:
+            continue
+        size = _loaded_variant_bytes(_component_weights(snapshot / name))
+        if best is None or size > best[0]:
+            best = (size, stored)
+    return None if best is None else best[1]
 
 
 def weight_bytes_for(snapshot: Path, kind: str) -> int | None:
@@ -3299,12 +3442,16 @@ class ModelManager:
         estimate it judged that against so the caller can record it. Both
         are ``None`` when the snapshot could not be measured.
 
-        On CUDA the weights fill the graphics cards and ``device_map="auto"``
-        places the rest on the CPU, so the cards plus the machine's memory is
-        what must fit; on Metal the GPU shares the machine's memory, and on
-        the CPU it is the machine's memory outright. A snapshot whose weights
-        cannot be measured is let through: the loader will give its own, more
-        specific error.
+        On CUDA a text model's weights fill the graphics cards and
+        ``device_map="auto"`` places the rest on the CPU, so the cards plus
+        the machine's memory is what must fit; on Metal the GPU shares the
+        machine's memory, and on the CPU it is the machine's memory outright.
+        An image pipeline is the exception: it is moved onto the card whole,
+        with nothing offloaded, so on CUDA it is checked against the card
+        alone. Judging it against the combined pool would pass a pipeline
+        that fits host memory and then fail inside ``.to("cuda")``. A
+        snapshot whose weights cannot be measured is let through: the loader
+        will give its own, more specific error.
 
         ``ceiling`` is what the device's own allocator will hand out, which on
         Metal is less than the machine holds. Whichever of the two is smaller
@@ -3313,16 +3460,22 @@ class ModelManager:
 
         ``kind`` picks which weights are measured: one checkpoint at the root
         for a text model, the sum over the component folders for an image
-        pipeline. A pipeline's index names no dtype and its components need
-        not share one, so an image load is measured as though the files were
-        already in the dtype it loads as, which is what a repo shipping
-        half-precision weights for a half-precision load really does.
+        pipeline. Either way the stored dtype is what says how far the files
+        grow or shrink on the way in, and a pipeline's has to be read out of
+        its own weights (see :func:`pipeline_dtype`) because its components
+        keep no dtype in their configs. An unreadable one is assumed to be
+        half precision, which is what pipelines ship as and errs towards
+        refusing a load rather than towards a float32 CPU load that doubles
+        past the estimate and exhausts the machine.
         """
 
         weight_bytes = weight_bytes_for(local_path, kind)
         if weight_bytes is None:
             return None, None
-        _architecture, checkpoint_dtype = _read_config(local_path)
+        if kind == IMAGE_KIND:
+            checkpoint_dtype = pipeline_dtype(local_path) or "float16"
+        else:
+            _architecture, checkpoint_dtype = _read_config(local_path)
         if bits is None:
             estimated = estimate_loaded_bytes(weight_bytes, checkpoint_dtype, load_dtype)
         else:
@@ -3332,7 +3485,11 @@ class ModelManager:
             estimated = estimate_quantized_bytes(
                 weight_bytes, checkpoint_dtype, bits, _embedding_params(local_path)
             )
-        if backend == "cuda":
+        if backend == "cuda" and kind == IMAGE_KIND:
+            # The whole pipeline goes onto the card; nothing is offloaded.
+            total, available = cuda_memory()
+            pool = "the GPU"
+        elif backend == "cuda":
             total, available = offload_pool(cuda_memory(), system_memory())
             pool = "the GPU plus this machine"
         else:

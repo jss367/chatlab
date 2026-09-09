@@ -22,6 +22,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Mapping
 
+import image_runtime
 from token_metrics import COLOR_SCALES, DEFAULT_COLOR_SCALE
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,11 @@ TOP_K_RANGE = (0, 200)
 # uses when it picks a seed itself (app.SEED_LIMIT) would reproduce a
 # different one.
 SEED_FLOOR = 0
+
+# The image seed does have a ceiling, because torch's generator does: it
+# raises above image_runtime.MAX_SEED rather than taking whatever it is
+# given, so a saved 2**70 would fail every draw instead of reproducing one.
+IMAGE_SEED_RANGE = (SEED_FLOOR, image_runtime.MAX_SEED)
 
 
 def _number(value: Any) -> float | None:
@@ -298,8 +304,10 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
         image_size=_nearest_size(
             values.get("image_size", DEFAULTS.image_size), DEFAULTS.image_size
         ),
-        image_seed=_floored_int(
-            values.get("image_seed", DEFAULTS.image_seed), SEED_FLOOR, DEFAULTS.image_seed
+        image_seed=_clamped_int(
+            values.get("image_seed", DEFAULTS.image_seed),
+            IMAGE_SEED_RANGE,
+            DEFAULTS.image_seed,
         ),
         image_randomize_seed=_flag(
             values.get("image_randomize_seed", DEFAULTS.image_randomize_seed),

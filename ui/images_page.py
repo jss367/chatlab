@@ -87,18 +87,17 @@ def stop_drawing():
 def resolve_seed(seed, randomize: bool) -> int:
     """Pick the seed for one picture, inside the range torch will accept.
 
-    The same clamp the chat page applies to its own seed, for the same
-    reasons: the number box constrains the value but the API, a browser that
-    ignores the constraint, and a float the box rounded can all still arrive.
+    The number box constrains the value at both ends, but the API, a browser
+    that ignores the constraint, a float the box rounded and a hand-edited
+    settings file can all still arrive. The ceiling is torch's, which raises
+    above :data:`image_runtime.MAX_SEED` where NumPy would have taken any
+    non-negative integer; that is why this clamps where the Chat page's own
+    seed only floors.
     """
 
     if randomize:
         return random.randrange(SEED_LIMIT)
-    try:
-        value = int(seed)
-    except (OverflowError, TypeError, ValueError):
-        return 0
-    return max(value, 0)
+    return image_runtime.usable_seed(seed)
 
 
 # ------------------------------------------------------------ what is drawn

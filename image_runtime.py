@@ -106,6 +106,24 @@ HEAT_COLOR = (42, 120, 214)
 PADDING_ROW = "padding"
 
 
+# The largest seed ``torch.Generator.manual_seed`` accepts. NumPy takes any
+# non-negative integer however large, so the Chat page's seed has a floor and
+# no ceiling; torch raises above this, which would fail a draw outright. The
+# clamp lives at the one place a seed reaches torch, so a value out of range
+# is bounded whether it came from the box, the settings file, or the API.
+MAX_SEED = 0xFFFF_FFFF_FFFF_FFFF
+
+
+def usable_seed(seed) -> int:
+    """``seed`` as an integer inside the range torch's generator accepts."""
+
+    try:
+        value = int(seed)
+    except (OverflowError, TypeError, ValueError):
+        return 0
+    return min(max(value, 0), MAX_SEED)
+
+
 class Cancelled(RuntimeError):
     """The run was stopped between steps, at the reader's request."""
 
@@ -671,7 +689,7 @@ def run(
     )
     if originals is None:
         reader = None
-    generator = torch.Generator(device="cpu").manual_seed(int(request.seed))
+    generator = torch.Generator(device="cpu").manual_seed(usable_seed(request.seed))
     stopped = False
     image = None
     try:
@@ -816,8 +834,12 @@ def token_map(run: ImageRun, token: int, step: int = 0):
 def guidance_summary(readings: Sequence[StepReading]) -> dict:
     """Headline numbers for the guidance trace, for the run's summary tiles."""
 
-    shares = [
-        reading.guidance_share
+    # Paired with their steps for the same reason the movements are: a step
+    # whose guidance the hook could not read drops out of this list and not
+    # out of ``readings``, so an index into one is not an index into the
+    # other and the peak would be reported at the wrong step.
+    pulls = [
+        (reading.step, reading.guidance_share)
         for reading in readings
         if reading.guidance_share is not None
     ]
@@ -829,11 +851,11 @@ def guidance_summary(readings: Sequence[StepReading]) -> dict:
         if reading.latent_change is not None
     ]
     summary: dict[str, Any] = {"step_count": len(readings)}
-    if shares:
-        peak = max(range(len(shares)), key=shares.__getitem__)
-        summary["mean_guidance_share"] = sum(shares) / len(shares)
-        summary["peak_guidance_share"] = shares[peak]
-        summary["peak_guidance_step"] = readings[peak].step
+    if pulls:
+        peak_step, peak_share = max(pulls, key=lambda pair: pair[1])
+        summary["mean_guidance_share"] = sum(share for _s, share in pulls) / len(pulls)
+        summary["peak_guidance_share"] = peak_share
+        summary["peak_guidance_step"] = peak_step
     if moves:
         changes = [change for _step, change in moves]
         summary["final_latent_change"] = changes[-1]

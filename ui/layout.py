@@ -598,7 +598,12 @@ def build_app() -> gr.Blocks:
                                     value=saved.image_seed,
                                     label="Seed",
                                     precision=0,
-                                    minimum=settings.SEED_FLOOR,
+                                    # Bounded at both ends, unlike the Chat
+                                    # page's: torch's generator raises above
+                                    # its own maximum where NumPy would take
+                                    # any non-negative integer.
+                                    minimum=settings.IMAGE_SEED_RANGE[0],
+                                    maximum=settings.IMAGE_SEED_RANGE[1],
                                 )
                                 image_randomize = gr.Checkbox(
                                     value=saved.image_randomize_seed,
