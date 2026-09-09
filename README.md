@@ -6,6 +6,7 @@ A local chat interface that shows what happened under the hood for every token, 
 
 - Hugging Face model download and cache controls
 - A Models page listing the models already downloaded, with a search of the Hugging Face Hub for more
+- Every model in both lists marked *fits*, *tight* or *won't fit* against the memory this machine has free, at the weight precision chosen
 - A badge above the chat naming the model in memory and the device it runs on, or saying that none is loaded
 - A chat interface that collapses OLMo reasoning blocks into an expandable section
 - Live token-by-token generation with a **Stop** button
@@ -18,8 +19,10 @@ A local chat interface that shows what happened under the hood for every token, 
 - A **Prompts** tab that runs a list of prompts, each in a conversation of its own, and writes one trace per prompt plus a table of every token
 - Perplexity, mean surprise, and a surprise trace for each response
 - Full metric-trace export as JSON or CSV
+- An OpenAI-compatible HTTP API on the same port, so the measurements can be scripted
 - A system prompt, plus temperature, top-p, top-k, seed, and response-length controls
 - Every setting saved to one JSON file you can edit by hand or share between machines
+- Temperature, top-p, top-k and response length kept per conversation, so two forks can be compared at different settings
 - Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
@@ -29,6 +32,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
 - An attention view showing which earlier tokens the model looked at when predicting it
+- A hardware panel naming the device, the memory ChatLab judges a load against, the Metal cap, and what the process is holding
 - Apple Metal, NVIDIA CUDA, and CPU loading
 - 8-bit and 4-bit weights on Apple Metal, so a 7B model fits a 16 GB Mac
 
@@ -141,14 +145,18 @@ A badge above the tabs names the model that would answer. Until one is loaded, *
 ### Models
 
 - **Model** holds the model ID and token boxes, the **Weight precision** choice, and the download, load, and unload buttons, with the status card under them. **Full (16-bit)** loads the checkpoint as it is. **8-bit** and **4-bit** quantize the linear layers on the way in, on Apple Metal only: the weights take about a half or a quarter of the memory, generation runs on fused Metal kernels fetched from the Hub the first time, and the embeddings and output head are left in half precision so the logit lens still reads through the real head. Accuracy drops a little, most at 4 bits; the token measurements describe the quantized model, which is the one answering. Another device loads full weights whatever is chosen, and says so in the log. The choice is saved and applies to the next load. The card follows a download file by file and byte by byte, and then the load in the same shape: how many of the weights have been read, how much of the model is on the device, the speed, and how long is left. Reading 15 GB of cached weights into memory takes half a minute or so, and the card says so rather than sitting still.
-- **My Models** lists every model in the Hugging Face cache with its size on disk. **Sort by** orders the list newest download first, by name, or by size in either direction. A model short of files is marked *incomplete* and tinted amber, one that is whole but not a Transformers language model (a diffusers pipeline, a CTranslate2 or ONNX export) *unsupported*, and the one in memory *loaded*. Selecting one shows its file count, architecture and weight type from its `config.json`, revision, when it was last downloaded, and its folder, and puts its ID in the model box ready for **Load cached**. **Redownload** fetches whatever the selected model still lacks, resuming partial files rather than starting over; on a complete model it checks the Hub for updated files. **Remove** deletes the selected model's folder from the cache after a confirmation; a model that is loaded or still downloading has to be unloaded or finished first. The list rescans after every download, load, unload, and removal, and **Refresh** rescans it by hand.
-- **Model search** searches the Hub for text-generation models with Transformers support, most downloaded first. Each result shows its parameter count and recent downloads; selecting one adds its license, likes, last update, whether it is gated, and whether any of it is already on disk, and puts its ID in the model box ready for **Download and load**.
+- **My Models** lists every model in the Hugging Face cache with its size on disk, and says whether it would load: *fits* is a model there is room for now, *tight* one that fits the machine but not what is free at the moment, and *won't fit* one that is larger than the machine can hold whatever is free. The verdict is the same check that refuses a load, made before the button is pressed and against the **Weight precision** chosen, so switching to 4-bit repaints both lists and shows what that buys. For the first few seconds after the app starts, before it has finished reading the device, the verdicts are given as though the weights were loaded whole: too generous a verdict would send a reader to a button that then refuses them, and the lists are repainted as soon as the device is known. A model whose files are incomplete has no size to judge yet, and the model already in memory is not judged again - unless the weight precision has been moved since it was loaded, since **Load cached** on it is how a new precision is applied and a model that fits at four bits may not fit whole. Every verdict is for a model that would replace whatever is loaded, and a load frees the old weights before it checks whether the new ones fit, so what the device is holding now is counted as available. Two figures answer that, and the larger is the one used: what the device's own allocator reports, and what the last load estimated its weights would take. Neither is enough alone - host memory keeps no allocator figure at all, and a model spread over the graphics cards and the machine is only counted on the cards by one while the other covers the whole of it. **Sort by** orders the list newest download first, by name, or by size in either direction. A model short of files is marked *incomplete* and tinted amber, one that is whole but not a Transformers language model (a diffusers pipeline, a CTranslate2 or ONNX export) *unsupported*, and the one in memory *loaded*. Selecting one shows its file count, architecture and weight type from its `config.json`, revision, when it was last downloaded, and its folder, and puts its ID in the model box ready for **Load cached**. **Redownload** fetches whatever the selected model still lacks, resuming partial files rather than starting over; on a complete model it checks the Hub for updated files. **Remove** deletes the selected model's folder from the cache after a confirmation; a model that is loaded or still downloading has to be unloaded or finished first. The list rescans after every download, load, unload, and removal, and **Refresh** rescans it by hand.
+- **Model search** searches the Hub for language models with Transformers support, most downloaded first. Multimodal models are listed where Transformers loads them through the same auto class as a plain language model, Gemma 4 among them; those needing their own auto class, and conversions to another runtime such as the MLX and GGUF builds, are left out because they would download in full and then fail to load. Each result shows its parameter count, whether it would fit here, and recent downloads; selecting one adds its license, likes, last update, whether it is gated, and whether any of it is already on disk, and puts its ID in the model box ready for **Download and load**. A model that is not on disk has only the hub's parameter count to go on, so its size is estimated from that: the detail says so, and a result the hub gives no count for is listed without a verdict rather than with a guess.
 
 ### Settings
 
-The system prompt, assistant prefill, and reasoning options; the analysis and input controls described below; and the context limit under **Memory**. Settings apply to the next reply on any conversation.
+The system prompt, assistant prefill, and reasoning options; the analysis and input controls described below; the context limit under **Memory**; and a **Hardware** panel. Settings apply to the next reply on any conversation.
 
-The sampling controls are **not** here. Temperature, top-p, top-k, the response length and the seed are what gets moved between one retry and the next, so they sit under the message box on the Chat page, in a **Sampling** section that wears its own values: the summary reads without opening it. They are saved between sessions like everything else.
+**Hardware** is what the memory guard reads when it decides whether a model fits: the device a load would use and the precision it would read weights as, the machine's memory and how much of it ChatLab estimates is available within its own limits, the safety reserve it keeps beside the weights, the Metal cap and the share of Metal's recommendation it comes to, what the device allocator is holding for this process, and the model in memory. It is read when the page opens, when the Settings page is opened, after every load and unload, and whenever **↻ Refresh** is pressed - not on a timer, since reading it costs a subprocess. The same figures go to the log with every load and every reply, which is what makes a memory failure readable after the fact; the panel is how to look before one.
+
+The sampling controls are **not** here. Temperature, top-p, top-k, the response length and the seed are what gets moved between one retry and the next, so they sit under the message box on the Chat page, in a **Sampling** section that wears its own values: the summary reads without opening it.
+
+Four of them belong to the conversation rather than to the app: temperature, top-p, top-k and the response length are kept per conversation, so one fork can sit at temperature 0 while another beside it sits at 1.2, and switching between them brings each one's sliders back. A fork answers the way the conversation it was forked from does, and forking pins both sides to that: a conversation carrying no sampling of its own follows the settings file, and the first slider moved on either side would rewrite the file and move the other with it, which is the one thing the fork was for. A new conversation starts from the settings file and is pinned to what it said at the time; the file is also where a control moved on any conversation is written, so a new conversation begins from the values last used. The seed and **New seed each response** are not per conversation: a finished reply leaves the seed it used in that box, so a seed kept per conversation would record the app's dice rather than a choice.
 
 Every setting is saved as you change it, and read back the next time the app
 starts. They live in one file:
@@ -231,9 +239,12 @@ Click a message before pressing Fork to fork at that point. Forking at a reply k
 
 Each conversation has its own transcript, but the token panel describes only the response on screen: switching conversations clears it until the next response. **💾 Save conversation** writes the conversation on screen.
 
-Every conversation in the pane is kept between sessions. The whole pane -
-the active conversation and every other branch - is written to one file as it
-changes, a streaming reply included, and read back when the page loads, so a
+Every conversation in the pane is kept between sessions, its own sampling
+included, and the two are kept apart when two windows disagree: a window
+that moves a slider does not thereby claim a transcript it may be a reply
+behind on, and a newer transcript does not undo a slider moved in the other
+window. The whole pane - the active conversation and every other branch -
+is written to one file as it changes, a streaming reply included, and read back when the page loads, so a
 browser reload, a restart or a crash brings it back where it was. A reply
 that was still streaming when the page went away is kept as far as it got.
 Two windows on the same file - two tabs, or a reload beside the tab it
@@ -311,7 +322,84 @@ Each prompt is answered in a conversation of its own. Nothing carries over from 
 
 The results table gives one row per prompt — an excerpt of the prompt and the answer, the token count, perplexity, mean surprise, and the seed. Below it are the files: `prompt-001.json` and its siblings, each a full trace in the same schema **Download JSON** writes for a single response, and `prompts.csv`, one row per generated token across the whole run with a `prompt_index` column naming the prompt each row came from. Both are written as the run goes, so **Stop** — or Escape — leaves every prompt that finished on screen and downloadable.
 
-A prompt that fails does not end the run. Its row says what went wrong, the rest of the set still runs, and the status line counts the failures at the end.
+A prompt that fails does not end the run. Its row says what went wrong, the rest of the set still runs, and the status line counts the failures at the end. A model swapped in from another tab does end it: the run is pinned to the model it started on, so the rest of the prompts are refused rather than answered by other weights and reported in the same table.
+
+## The local API
+
+Everything ChatLab does to the model in memory is addressable from a script.
+The API is served on the same port as the interface, so if the app is at
+`http://127.0.0.1:7860` then its API is at `http://127.0.0.1:7860/v1`, and any
+OpenAI client can be pointed at it:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:7860/v1", api_key="not-needed")
+answer = client.chat.completions.create(
+    model="allenai/Olmo-3-7B-Think",
+    messages=[{"role": "user", "content": "Name three cities."}],
+    logprobs=True,
+    top_logprobs=5,
+)
+```
+
+`GET /v1/chatlab/status` is the call to make first: it names the model in
+memory, says whether a response is already running, and reports the memory
+figures the hardware panel shows. `GET /v1/models` lists every complete model
+in the cache and marks the loaded one.
+
+`POST /v1/chat/completions` answers a conversation. It takes `messages`,
+`temperature`, `top_p`, `top_k`, `max_tokens`, `seed`, `stream`, `logprobs`
+and `top_logprobs`, and anything left out takes the value the app is set to,
+so a script and the interface answer alike unless the script says otherwise. A
+value outside what ChatLab allows is refused with the nearest it would take
+rather than clamped in silence. Reasoning arrives as `reasoning_content`
+beside the answer's `content`, in the response and in the stream, so nothing
+has to strip `<think>` markers. A trailing assistant message is the assistant
+prefill: the reply must begin with that text, and its tokens are measured as
+replayed rather than sampled.
+
+With `logprobs`, every token carries its own `logprob`, its bytes, and the
+alternatives `top_logprobs` asked for, and beside them, under `chatlab`, the same
+measurements the token panel shows: raw rank, raw and sampling probability,
+surprise, entropy, the top-1 margin, the probability mass above it, and the
+sampling shift. `chatlab` names the seed, the device and the weight precision that answered
+- in the closing event of a stream as much as in a whole response, since by
+the time a stream ends another load may have replaced them.
+`chatlab.summary` comes with every response whether or not
+the tokens do - perplexity, mean surprise, the share the model ranked first -
+and `prompt_logprobs: true` adds the prompt's own tokens under
+`chatlab.prompt_tokens`, in the response or in the stream's closing event. The token that ended the response is measured and
+counted like any other, even though it is not part of the text. A token
+holding part of a character - a byte-level tokenizer splits one over several
+- reports `bytes` as null rather than the bytes of the replacement character
+it decodes to on its own; the text itself is assembled from the tokens
+together and is unaffected.
+
+`POST /v1/chatlab/score` is the **Score text** tab: give it `text` and
+optionally `context`, and it measures every token in one forward pass. It
+names the device and the weight precision that measured them, as a
+completion does. It is
+the endpoint for running a corpus past a model rather than a passage at a
+time.
+
+The API answers for the model already loaded and never loads one: a load takes
+minutes, replaces what is in memory, and can be refused for want of it, so it
+stays on the Models page where it can be watched. A request naming another
+model is refused by name, and a request that passes that check is bound to
+the load it was checked against: a load that lands before the first token is
+refused rather than answered by weights the request did not name. Only one generation runs at a time, as in the
+interface, and a second request is told the model is busy rather than queued
+behind an answer thousands of tokens long. Each generation runs on one thread
+of its own and its frames cross to the response through a queue, so a
+streaming answer is never resumed on a different worker; a client that stops
+reading is noticed within a minute, and the model is handed back rather than
+held by a response nobody is listening to; a client that comes back after
+that is told the response was given up on rather than handed the tokens
+that did arrive as though they were the whole answer. There is no
+authentication, and
+there is none on the interface either: both are served on the loopback address
+and anything that can reach one can already do everything the other can.
 
 ## Releasing a new version
 

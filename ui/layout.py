@@ -14,6 +14,7 @@ from conversation import (
 from model_runtime import (
     DEFAULT_MODEL_SORT,
     MODEL_SORT_ORDERS,
+    warm_device,
 )
 from token_metrics import (
     COLOR_SCALES,
@@ -37,9 +38,11 @@ from ui.conversations import (
     load_conversation,
     new_conversation,
     refresh_conversation_list,
+    remember_branch_sampling,
     remember_forks,
     remember_message,
     restore_conversations,
+    sampling_updates,
     save_conversation,
     switch_fork,
 )
@@ -76,9 +79,11 @@ from ui.models_page import (
     load_cached_model,
     loaded_model_badge,
     redownload_my_model,
+    refresh_after_device,
     refresh_model_actions,
     refresh_model_badge,
     refresh_my_models,
+    refresh_search_results,
     remove_my_model,
     search_models,
     select_default_model,
@@ -110,6 +115,8 @@ from ui.scoring import (
     score_token_count,
 )
 from ui.settings_page import (
+    hardware_card,
+    refresh_hardware,
     remember_committed_seed,
     remember_prefill_limit,
     remember_settings,
@@ -145,6 +152,11 @@ def build_app() -> gr.Blocks:
     # neighbour's would be a puzzle to explain.
     saved = settings.load()
     settings.ensure_file()
+    # Read the device beside the interface. Nothing here waits for it, and
+    # the pages that describe a load - the fit verdicts in both model lists,
+    # the hardware panel on the Settings page - are the fuller reading for it
+    # by the time a reader looks.
+    warm_device()
     # Gradio otherwise caps the page at one of a handful of widths and centers
     # it, which leaves a band of empty room down each side on a wide screen.
     # The shell wants every pixel: the two side panes are a fixed width, so the
@@ -674,6 +686,9 @@ def build_app() -> gr.Blocks:
                                 cancel_remove_button = gr.Button("Cancel", size="sm")
                         # The model the open confirmation is about; None when closed.
                         pending_removal = gr.State(None)
+                        # Whether the fit verdicts on screen were given with
+                        # the device known; see refresh_after_device.
+                        device_read = gr.State(False)
 
             with gr.Column(
                 scale=1, visible=False, elem_id="settings-page"
@@ -760,9 +775,34 @@ def build_app() -> gr.Blocks:
                             elem_classes=["scale-caption"],
                         )
 
+                        # What the memory guard is reading when it refuses a
+                        # load. These figures were in the log alone, which
+                        # made a refusal something to look up afterwards
+                        # rather than something to check first.
+                        gr.Markdown("## Hardware")
+                        hardware_view = gr.Markdown(
+                            hardware_card(),
+                            elem_id="hardware",
+                            elem_classes=["model-detail"],
+                        )
+                        refresh_hardware_button = gr.Button(
+                            "↻ Refresh", size="sm", scale=0, min_width=120
+                        )
+                        gr.Markdown(
+                            "Estimates, not guarantees: they are what ChatLab "
+                            "judges a load against, and each load and reply is "
+                            "recorded in the log with the same figures.",
+                            elem_classes=["scale-caption"],
+                        )
+
         nav.change(
             show_page, nav, [conversation_pane, chat_page, models_page, settings_page]
         )
+        # On the way to the page rather than on a timer: nothing here changes
+        # while it is not being looked at, and reading it costs a subprocess.
+        nav.change(refresh_hardware, None, hardware_view)
+        demo.load(refresh_hardware, None, hardware_view)
+        refresh_hardware_button.click(refresh_hardware, None, hardware_view)
         # The scored token count follows the boxes as they are typed into.
         # always_last coalesces a burst of keystrokes into the one count that
         # matters, and the progress bar is hidden because a spinner on every
@@ -817,7 +857,10 @@ def build_app() -> gr.Blocks:
 
         # Every handler that can change what is on disk or in memory rescans
         # the cache afterwards, so My Models never shows a stale list.
-        models_inputs = [my_models, sort_models, model_id]
+        # The typed ID stays last: the model-actions listeners assert it is
+        # the input the refresh is given, and a new argument goes before it
+        # rather than displacing it.
+        models_inputs = [my_models, sort_models, weight_precision, model_id]
         models_outputs = [my_models, my_model_detail, my_models_summary]
         action_inputs = [model_id, my_models]
         action_outputs = [
@@ -849,12 +892,19 @@ def build_app() -> gr.Blocks:
             event = refresh_actions(event)
             if not reloads:
                 return event
-            return event.then(refresh_model_badge, None, badge_outputs).then(
-                score_token_count,
-                score_budget_inputs,
-                score_budget_outputs,
-                show_progress="hidden",
-                concurrency_id=SCORE_BUDGET_QUEUE,
+            return (
+                event.then(refresh_model_badge, None, badge_outputs)
+                .then(
+                    score_token_count,
+                    score_budget_inputs,
+                    score_budget_outputs,
+                    show_progress="hidden",
+                    concurrency_id=SCORE_BUDGET_QUEUE,
+                )
+                # A load or an unload is the largest change the machine's
+                # memory sees, so the hardware panel is re-read after it
+                # rather than left showing what was true before.
+                .then(refresh_hardware, None, hardware_view)
             )
 
         # Download-only changes the cache without changing the loaded model.
@@ -887,6 +937,16 @@ def build_app() -> gr.Blocks:
         sort_models.input(refresh_my_models, models_inputs, models_outputs)
         # Before the reader chooses an ID, startup can highlight the loaded model.
         refresh_actions(demo.load(refresh_my_models, [my_models, sort_models], models_outputs))
+        # The badge's timer corrects the fit verdicts once torch has finished
+        # importing: the page is painted before that, so the first verdicts
+        # are given without knowing the device. It repaints once and then
+        # does nothing for the rest of the session.
+        badge_timer.tick(
+            refresh_after_device,
+            [device_read, *models_inputs, search_results, search_results_state],
+            [*models_outputs, search_results, search_detail, device_read],
+            show_progress="hidden",
+        )
         # Escape stops a running generation, from anywhere on the page.
         demo.load(None, None, None, js=SHORTCUT_JS)
 
@@ -913,7 +973,11 @@ def build_app() -> gr.Blocks:
         )
         # .input rather than .change: the refresh above also sets the radio,
         # and a .change listener would rewrite the model ID box on each rescan.
-        my_models.input(select_my_model, my_models, [model_id, my_model_detail])
+        my_models.input(
+            select_my_model,
+            [my_models, weight_precision],
+            [model_id, my_model_detail],
+        )
         # .input again, for the same reason: only the reader's own typing
         # withdraws the selection, never a refresh writing the box.
         model_id.input(clear_my_model_selection, None, [my_models, my_model_detail])
@@ -942,15 +1006,26 @@ def build_app() -> gr.Blocks:
         cancel_remove_button.click(hide_remove_confirm, None, confirm_outputs)
 
         search_outputs = [search_results, search_detail, search_results_state]
-        search_button.click(search_models, [search_query, hf_token], search_outputs)
-        search_query.submit(search_models, [search_query, hf_token], search_outputs)
+        search_inputs = [search_query, hf_token, weight_precision]
+        search_button.click(search_models, search_inputs, search_outputs)
+        search_query.submit(search_models, search_inputs, search_outputs)
         # Picking a search result names a model too, so it withdraws the My
         # Models selection the same way typing an ID does.
         search_results.input(
             select_search_result,
-            [search_results, search_results_state],
+            [search_results, search_results_state, weight_precision],
             [model_id, search_detail],
         ).then(clear_my_model_selection, None, [my_models, my_model_detail])
+        # Whether a model fits depends on how its weights would be held, so
+        # both lists are repainted when that choice changes. Neither touches
+        # the cache or the model in memory, so neither is a rescan.
+        weight_precision.change(
+            refresh_my_models, models_inputs, models_outputs
+        ).then(
+            refresh_search_results,
+            [search_results, search_results_state, weight_precision],
+            [search_results, search_detail],
+        )
         enter_sends.change(set_message_box_keys, enter_sends, prompt)
 
         # The sampling accordion wears its own values.
@@ -971,6 +1046,44 @@ def build_app() -> gr.Blocks:
                 sampling_accordion,
                 trigger_mode="always_last",
                 show_progress="hidden",
+                concurrency_id=SAMPLING_LABEL_QUEUE,
+            )
+            # These four belong to the conversation on screen, so a move of
+            # one is written into it as well as into the settings file - the
+            # file being what the next new conversation starts from.
+            #
+            # .input rather than .change: switching conversations sets these
+            # controls too, and a write from that would stamp a conversation
+            # nobody had touched. input is the reader's own move, keyboard
+            # included. always_last for the same reason as above: a drag is
+            # one write.
+            control.input(
+                remember_branch_sampling,
+                [forks_state, *sampling_controls],
+                forks_state,
+                trigger_mode="always_last",
+                show_progress="hidden",
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
+
+        def brings_its_sampling(event):
+            """Put the newly active conversation's sampling onto the controls.
+
+            Every path that changes which conversation is on screen ends
+            here, so the sliders describe the conversation in front of the
+            reader rather than the one they just left. The label follows the
+            controls, as it does when they are moved by hand.
+            """
+
+            return event.then(
+                sampling_updates,
+                forks_state,
+                sampling_controls,
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            ).then(
+                update_sampling_label,
+                sampling_controls,
+                sampling_accordion,
                 concurrency_id=SAMPLING_LABEL_QUEUE,
             )
 
@@ -995,10 +1108,6 @@ def build_app() -> gr.Blocks:
             system_prompt,
             keep_reasoning,
             assistant_prefill,
-            temperature,
-            top_p,
-            top_k,
-            max_new_tokens,
             randomize_seed,
             analyze_prompt,
             color_scale,
@@ -1007,6 +1116,30 @@ def build_app() -> gr.Blocks:
             weight_precision,
         ):
             control.change(remember_settings, persisted_inputs, None)
+        # The four that belong to a conversation are saved on input, like the
+        # write into the conversation itself. Switching conversations sets
+        # them, and a save from that would put the sampling of the
+        # conversation merely being looked at into the settings file - which
+        # is what an unpinned conversation answers with, so looking at a
+        # branch pinned to temperature 0 would quietly move every unpinned
+        # one to 0 as well.
+        # On the conversation queue, so the file is written before a switch
+        # that follows reads it: a conversation carrying no sampling of its
+        # own answers with what that file says, and a slider moved and then a
+        # switch in quick succession must not read the older value.
+        #
+        # always_last for the same reason the branch write has it, and more
+        # so now that this shares a queue: with Gradio's default, a slider
+        # still moving while this is pending drops the newer values and the
+        # file keeps one from part way through the drag.
+        for control in sampling_controls:
+            control.input(
+                remember_settings,
+                persisted_inputs,
+                None,
+                trigger_mode="always_last",
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
         # The seed box is the one control the app writes to itself: a finished
         # response leaves the seed that produced it there, and saving that
         # would overwrite the seed the reader chose. Blur and submit are the
@@ -1020,17 +1153,25 @@ def build_app() -> gr.Blocks:
         # typing.
         # Lowering it can pull the response length down with it, which the
         # sampling summary names, so the label follows that too.
+        # A lowered limit can pull the response length down with it, which
+        # the sampling summary names and the conversation on screen has to
+        # be told about - that clamp is the reader's own doing, and the
+        # conversation would otherwise put the longer length back the next
+        # time it was switched to. The handler writes the conversation only
+        # when it actually clamped, so a limit tabbed through or raised does
+        # not pin a conversation that was following the settings file.
         for event in (prefill_token_limit.blur, prefill_token_limit.submit):
             event(
                 remember_prefill_limit,
-                [prefill_token_limit, max_new_tokens],
-                [prefill_token_limit, max_new_tokens],
+                [prefill_token_limit, max_new_tokens, forks_state, *sampling_controls],
+                [prefill_token_limit, max_new_tokens, forks_state],
+                concurrency_id=CONVERSATION_PANE_QUEUE,
             ).then(
-            update_sampling_label,
-            sampling_controls,
-            sampling_accordion,
-            concurrency_id=SAMPLING_LABEL_QUEUE,
-        )
+                update_sampling_label,
+                sampling_controls,
+                sampling_accordion,
+                concurrency_id=SAMPLING_LABEL_QUEUE,
+            )
         # A page load is where the file is read back, so reloading the browser
         # shows what was saved rather than what the app started with. The
         # sampling summary is rebuilt from whatever came back, since the label
@@ -1163,7 +1304,7 @@ def build_app() -> gr.Blocks:
         for control in (new_button, fork_button, delete_fork_button):
             control.click(hide_clear_confirm, None, clear_confirm)
         conversation_list.input(hide_clear_confirm, None, clear_confirm)
-        confirm_clear_button.click(
+        brings_its_sampling(confirm_clear_button.click(
             clear_chat,
             inputs=[color_scale, forks_state],
             concurrency_id=CONVERSATION_PANE_QUEUE,
@@ -1188,7 +1329,7 @@ def build_app() -> gr.Blocks:
                 clear_confirm,
             ],
             cancels=running,
-        )
+        ))
 
         # Forking, switching, starting afresh and deleting all replace the
         # conversation, so they cancel a running generation for the same
@@ -1214,36 +1355,51 @@ def build_app() -> gr.Blocks:
             trace_state,
         ]
         chatbot.select(remember_message, conversation_state, selected_message)
-        fork_button.click(
-            fork_conversation,
-            [conversation_state, forks_state, selected_message, color_scale],
-            fork_outputs,
-            cancels=running,
-            concurrency_id=CONVERSATION_PANE_QUEUE,
+
+        brings_its_sampling(
+            fork_button.click(
+                fork_conversation,
+                [
+                    conversation_state,
+                    forks_state,
+                    selected_message,
+                    color_scale,
+                    *sampling_controls,
+                ],
+                fork_outputs,
+                cancels=running,
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
         )
-        new_button.click(
-            new_conversation,
-            [conversation_state, forks_state, color_scale],
-            fork_outputs,
-            cancels=running,
-            concurrency_id=CONVERSATION_PANE_QUEUE,
+        brings_its_sampling(
+            new_button.click(
+                new_conversation,
+                [conversation_state, forks_state, color_scale, *sampling_controls],
+                fork_outputs,
+                cancels=running,
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
         )
         # .input rather than .change: the list is also redrawn by the handlers
         # above and the listener below, and a .change listener would switch a
         # second time on each.
-        conversation_list.input(
-            switch_fork,
-            [conversation_list, conversation_state, forks_state, color_scale],
-            fork_outputs,
-            cancels=running,
-            concurrency_id=CONVERSATION_PANE_QUEUE,
+        brings_its_sampling(
+            conversation_list.input(
+                switch_fork,
+                [conversation_list, conversation_state, forks_state, color_scale],
+                fork_outputs,
+                cancels=running,
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
         )
-        delete_fork_button.click(
-            delete_fork,
-            [conversation_state, forks_state, color_scale],
-            fork_outputs,
-            cancels=running,
-            concurrency_id=CONVERSATION_PANE_QUEUE,
+        brings_its_sampling(
+            delete_fork_button.click(
+                delete_fork,
+                [conversation_state, forks_state, color_scale],
+                fork_outputs,
+                cancels=running,
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
         )
         # Every other path that changes the conversation - a streaming reply
         # above all - lands here, and the list's model tag and token count
@@ -1268,12 +1424,14 @@ def build_app() -> gr.Blocks:
         # this cancels a generation still running - the one a reload
         # interrupted, whose frames would otherwise land on the restored
         # transcript.
-        demo.load(
-            restore_conversations,
-            None,
-            [chatbot, conversation_state, forks_state, conversation_list],
-            cancels=running,
-            concurrency_id=CONVERSATION_PANE_QUEUE,
+        brings_its_sampling(
+            demo.load(
+                restore_conversations,
+                None,
+                [chatbot, conversation_state, forks_state, conversation_list],
+                cancels=running,
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
         )
 
         save_button.click(
