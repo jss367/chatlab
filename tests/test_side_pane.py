@@ -1925,6 +1925,80 @@ class PageLayoutTests(unittest.TestCase):
                 self.assertIs(listener.outputs[0], box)
 
 
+class HardwarePanelTests(unittest.TestCase):
+    """What the Settings page says about the machine."""
+
+    GB = 1024**3
+
+    def setUp(self):
+        self.manager = ModelManager()
+        original = runtime.MANAGER
+        runtime.MANAGER = self.manager
+        self.addCleanup(lambda: setattr(runtime, "MANAGER", original))
+
+    def card(self, **profile):
+        return app.hardware_card(model_runtime.DeviceProfile(**profile))
+
+    def test_a_device_not_read_yet_shows_the_memory_and_says_to_wait(self):
+        card = self.card(total=48 * self.GB, available=40 * self.GB)
+
+        self.assertIn("not read yet", card)
+        self.assertIn("48.0 GB in total", card)
+        self.assertIn("40.0 GB", card)
+        self.assertIn(app.HARDWARE_UNREAD, card)
+
+    def test_a_metal_machine_reports_the_cap_and_where_it_comes_from(self):
+        card = self.card(
+            backend="mps",
+            dtype="float16",
+            total=24 * self.GB,
+            available=20 * self.GB,
+            ceiling=24 * self.GB,
+            recommended=36 * self.GB,
+            fraction=24 / 36,
+        )
+
+        self.assertIn("Apple Metal (MPS)", card)
+        self.assertIn("loaded as float16", card)
+        self.assertIn("8-bit and 4-bit", card)
+        self.assertIn("24.0 GB, 0.67 of the 36.0 GB Metal recommends", card)
+        self.assertIn("mps_memory_fraction", card)
+        # The reserve the fit check keeps back is part of the same story.
+        self.assertIn("4.0 GB kept beside the weights", card)
+
+    def test_a_machine_without_metal_says_a_quantized_choice_is_ignored(self):
+        card = self.card(
+            backend="cpu", dtype="float32", total=16 * self.GB, available=8 * self.GB
+        )
+
+        self.assertIn("CPU", card)
+        self.assertIn("loaded as float32", card)
+        self.assertIn("needs Apple Metal", card)
+        self.assertNotIn("Metal cap", card)
+
+    def test_the_panel_names_the_model_in_memory(self):
+        self.manager.model_id = OLMO
+        self.manager.device_name = "Apple Metal (MPS), 4-bit weights"
+        self.manager.precision = "4-bit"
+
+        card = self.card(backend="mps", dtype="float16", total=48 * self.GB)
+
+        self.assertIn(OLMO, card)
+        self.assertIn("4-bit weights", card)
+
+    def test_an_empty_runtime_points_at_the_models_page(self):
+        card = self.card(backend="mps", dtype="float16", total=48 * self.GB)
+
+        self.assertIn("none", card)
+        self.assertIn("Models page", card)
+
+    def test_a_machine_that_reports_no_memory_says_unknown_rather_than_zero(self):
+        card = self.card(backend="cpu", dtype="float32")
+
+        self.assertIn("unknown in total", card)
+        self.assertNotIn("0.0 GB in total", card)
+
+
 class SavedSettingsTests(unittest.TestCase):
     """The settings file the interface opens with and writes back to."""
 

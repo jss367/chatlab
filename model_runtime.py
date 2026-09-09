@@ -970,6 +970,11 @@ class DeviceProfile:
     available: int | None = None
     ceiling: int | None = None
     pool: str = "this machine"
+    recommended: int | None = None
+    """Metal's recommended working set, which the ceiling is a share of."""
+
+    fraction: float | None = None
+    """The share of that recommendation the allocator is held to."""
 
     @property
     def quantizes(self) -> bool:
@@ -1011,15 +1016,17 @@ def device_profile(torch=None) -> DeviceProfile:
         total, available = system_memory()
         return DeviceProfile(total=total, available=available)
     backend = detect_backend(torch)
-    ceiling = mps_ceiling(torch) if backend == "mps" else None
-    total, available, pool = memory_pool(backend, ceiling)
+    budget = mps_budget(torch) if backend == "mps" else MetalBudget()
+    total, available, pool = memory_pool(backend, budget.ceiling)
     return DeviceProfile(
         backend=backend,
         dtype=dtype_name(load_dtype(backend, torch)),
         total=total,
         available=available,
-        ceiling=ceiling,
+        ceiling=budget.ceiling,
         pool=pool,
+        recommended=budget.recommended,
+        fraction=budget.fraction,
     )
 
 
@@ -1090,13 +1097,24 @@ def default_mps_memory_fraction(
     return min(1.0, (total * DEFAULT_MPS_MEMORY_SHARE) / recommended)
 
 
-def mps_ceiling(torch=None) -> int | None:
-    """The most Metal's allocator will hand out under the cap, or ``None``.
+class MetalBudget(NamedTuple):
+    """Metal's own recommendation, the share of it allowed, and the product.
+
+    Any of the three is ``None`` where Metal will not say what it recommends,
+    or where the cap is being left alone - see :func:`mps_memory_fraction`.
+    """
+
+    recommended: int | None = None
+    fraction: float | None = None
+    ceiling: int | None = None
+
+
+def mps_budget(torch=None) -> MetalBudget:
+    """What Metal recommends and what ChatLab will let the allocator take.
 
     What :meth:`ModelManager._cap_mps_memory` sets, computed without setting
-    it, so a load can be judged against the same ceiling it will meet.
-    ``None`` where Metal will not say what it recommends, or where the cap is
-    left alone.
+    it, so a load can be judged against the same ceiling it will meet and the
+    Settings page can say what that ceiling is.
     """
 
     if torch is None:
@@ -1104,8 +1122,14 @@ def mps_ceiling(torch=None) -> int | None:
     recommended = _recommended_mps_memory(torch)
     fraction = mps_memory_fraction(recommended, system_memory()[0])
     if fraction is None or not recommended:
-        return None
-    return int(recommended * fraction)
+        return MetalBudget(recommended, fraction)
+    return MetalBudget(recommended, fraction, int(recommended * fraction))
+
+
+def mps_ceiling(torch=None) -> int | None:
+    """The most Metal's allocator will hand out under the cap, or ``None``."""
+
+    return mps_budget(torch).ceiling
 
 
 def _recommended_mps_memory(torch) -> int | None:

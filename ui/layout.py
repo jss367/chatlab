@@ -104,6 +104,8 @@ from ui.scoring import (
     score_token_count,
 )
 from ui.settings_page import (
+    hardware_card,
+    refresh_hardware,
     remember_committed_seed,
     remember_prefill_limit,
     remember_settings,
@@ -740,9 +742,34 @@ def build_app() -> gr.Blocks:
                             elem_classes=["scale-caption"],
                         )
 
+                        # What the memory guard is reading when it refuses a
+                        # load. These figures were in the log alone, which
+                        # made a refusal something to look up afterwards
+                        # rather than something to check first.
+                        gr.Markdown("## Hardware")
+                        hardware_view = gr.Markdown(
+                            hardware_card(),
+                            elem_id="hardware",
+                            elem_classes=["model-detail"],
+                        )
+                        refresh_hardware_button = gr.Button(
+                            "↻ Refresh", size="sm", scale=0, min_width=120
+                        )
+                        gr.Markdown(
+                            "Estimates, not guarantees: they are what ChatLab "
+                            "judges a load against, and each load and reply is "
+                            "recorded in the log with the same figures.",
+                            elem_classes=["scale-caption"],
+                        )
+
         nav.change(
             show_page, nav, [conversation_pane, chat_page, models_page, settings_page]
         )
+        # On the way to the page rather than on a timer: nothing here changes
+        # while it is not being looked at, and reading it costs a subprocess.
+        nav.change(refresh_hardware, None, hardware_view)
+        demo.load(refresh_hardware, None, hardware_view)
+        refresh_hardware_button.click(refresh_hardware, None, hardware_view)
         # The scored token count follows the boxes as they are typed into.
         # always_last coalesces a burst of keystrokes into the one count that
         # matters, and the progress bar is hidden because a spinner on every
@@ -809,12 +836,19 @@ def build_app() -> gr.Blocks:
             event = event.then(refresh_my_models, models_inputs, models_outputs)
             if not reloads:
                 return event
-            return event.then(refresh_model_badge, None, badge_outputs).then(
-                score_token_count,
-                score_budget_inputs,
-                score_budget_outputs,
-                show_progress="hidden",
-                concurrency_id=SCORE_BUDGET_QUEUE,
+            return (
+                event.then(refresh_model_badge, None, badge_outputs)
+                .then(
+                    score_token_count,
+                    score_budget_inputs,
+                    score_budget_outputs,
+                    show_progress="hidden",
+                    concurrency_id=SCORE_BUDGET_QUEUE,
+                )
+                # A load or an unload is the largest change the machine's
+                # memory sees, so the hardware panel is re-read after it
+                # rather than left showing what was true before.
+                .then(refresh_hardware, None, hardware_view)
             )
 
         # Download-only changes the cache without changing the loaded model.

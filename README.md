@@ -29,6 +29,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
 - An attention view showing which earlier tokens the model looked at when predicting it
+- A hardware panel naming the device, the memory ChatLab judges a load against, the Metal cap, and what the process is holding
 - Apple Metal, NVIDIA CUDA, and CPU loading
 - 8-bit and 4-bit weights on Apple Metal, so a 7B model fits a 16 GB Mac
 
@@ -146,7 +147,9 @@ A badge above the tabs names the model that would answer. Until one is loaded, *
 
 ### Settings
 
-The system prompt, assistant prefill, and reasoning options; the analysis and input controls described below; and the context limit under **Memory**. Settings apply to the next reply on any conversation.
+The system prompt, assistant prefill, and reasoning options; the analysis and input controls described below; the context limit under **Memory**; and a **Hardware** panel. Settings apply to the next reply on any conversation.
+
+**Hardware** is what the memory guard reads when it decides whether a model fits: the device a load would use and the precision it would read weights as, the machine's memory and how much of it ChatLab estimates is available within its own limits, the safety reserve it keeps beside the weights, the Metal cap and the share of Metal's recommendation it comes to, what the device allocator is holding for this process, and the model in memory. It is read when the page opens, when the Settings page is opened, after every load and unload, and whenever **↻ Refresh** is pressed - not on a timer, since reading it costs a subprocess. The same figures go to the log with every load and every reply, which is what makes a memory failure readable after the fact; the panel is how to look before one.
 
 The sampling controls are **not** here. Temperature, top-p, top-k, the response length and the seed are what gets moved between one retry and the next, so they sit under the message box on the Chat page, in a **Sampling** section that wears its own values: the summary reads without opening it. They are saved between sessions like everything else.
 

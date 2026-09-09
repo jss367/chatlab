@@ -264,7 +264,10 @@ from ui.scoring import (
     score_token_count,
 )
 from ui.settings_page import (
+    HARDWARE_UNREAD,
     PERSISTED_SETTING_NAMES,
+    hardware_card,
+    refresh_hardware,
     remember_committed_seed,
     remember_prefill_limit,
     remember_settings,
