@@ -167,6 +167,31 @@ class ModelListTests(ApiTestCase):
         self.assertTrue(listed["chatlab"]["loaded"])
         self.assertEqual(listed["chatlab"]["size_bytes"], 1000)
 
+    def test_the_list_reads_what_is_loaded_once(self):
+        # A load landing part way through the list would otherwise mark two
+        # models loaded, and a client could not tell which will answer.
+        entries = [
+            CachedModel(model_id=name, status=CacheStatus(cached_bytes=10))
+            for name in ("fake/model", "org/other")
+        ]
+        original = api.list_cached_models
+        api.list_cached_models = lambda: entries
+        self.addCleanup(setattr, api, "list_cached_models", original)
+        reads = []
+
+        def loaded_model():
+            reads.append(True)
+            return model_runtime.LoadedModel("fake/model", "CPU", "full", "fake/model#1")
+
+        self.manager.loaded_model = loaded_model
+
+        body = self.client.get("/v1/models").json()
+
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(
+            [entry["chatlab"]["loaded"] for entry in body["data"]], [True, False]
+        )
+
     def test_the_status_says_what_would_answer_and_whether_it_can(self):
         body = self.client.get("/v1/chatlab/status").json()
 

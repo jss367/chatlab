@@ -3166,6 +3166,10 @@ class ConversationSamplingTests(unittest.TestCase):
         self.assertEqual(len(saving), len(settings.CONVERSATION_SAMPLING))
         for fn in saving:
             self.assertEqual(fn.concurrency_id, app.CONVERSATION_PANE_QUEUE)
+            # A slider still moving while this is pending would otherwise
+            # have its newer values dropped, leaving the file holding one
+            # from part way through the drag.
+            self.assertEqual(fn.trigger_mode, "always_last")
 
     def test_a_value_the_settings_would_refuse_falls_back_to_the_setting(self):
         forks = new_forks()

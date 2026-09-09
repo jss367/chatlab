@@ -1049,11 +1049,17 @@ def build_app() -> gr.Blocks:
         # that follows reads it: a conversation carrying no sampling of its
         # own answers with what that file says, and a slider moved and then a
         # switch in quick succession must not read the older value.
+        #
+        # always_last for the same reason the branch write has it, and more
+        # so now that this shares a queue: with Gradio's default, a slider
+        # still moving while this is pending drops the newer values and the
+        # file keeps one from part way through the drag.
         for control in sampling_controls:
             control.input(
                 remember_settings,
                 persisted_inputs,
                 None,
+                trigger_mode="always_last",
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
         # The seed box is the one control the app writes to itself: a finished

@@ -502,6 +502,10 @@ def build_router() -> APIRouter:
     def models() -> JSONResponse:
         """Every model on disk ChatLab could answer with, the loaded one marked."""
 
+        # One reading of what is in memory for the whole list: a load landing
+        # part way through it would otherwise mark two models loaded, and a
+        # client could not tell which one will answer.
+        in_memory = runtime.MANAGER.loaded_model()
         data = []
         for entry in list_cached_models():
             if not entry.status.complete:
@@ -514,7 +518,7 @@ def build_router() -> APIRouter:
                     "created": int(entry.updated or 0),
                     "owned_by": organization or "chatlab",
                     "chatlab": {
-                        "loaded": entry.model_id == runtime.MANAGER.model_id,
+                        "loaded": entry.model_id == in_memory.model_id,
                         "size_bytes": entry.size_bytes,
                         "architecture": entry.architecture,
                     },
