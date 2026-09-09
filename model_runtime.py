@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -976,12 +976,34 @@ class DeviceProfile:
     fraction: float | None = None
     """The share of that recommendation the allocator is held to."""
 
+    held: int | None = None
+    """Live tensors on the device: the loaded model, and any cache beside it.
+
+    ``None`` where the device keeps no such figure, which is host memory.
+    """
+
     @property
     def quantizes(self) -> bool:
         """Whether a quantized weight precision would be honoured here."""
 
         return self.backend == "mps"
 
+    def reclaimed(self) -> DeviceProfile:
+        """The same reading with the loaded model's memory given back.
+
+        A load unloads whatever is in memory before it checks whether the
+        next model fits, so the weights on the device now are not in the way
+        of the model that would replace them. Anything that judges a
+        replacement has to say the same, or the list and the button disagree.
+        Left alone where the device keeps no figure to give back.
+        """
+
+        if not self.held:
+            return self
+        return replace(
+            self,
+            available=None if self.available is None else self.available + self.held,
+        )
 
 DEVICE_LABELS = {"mps": "Apple Metal (MPS)", "cpu": "CPU"}
 
@@ -1027,6 +1049,7 @@ def device_profile(torch=None) -> DeviceProfile:
         pool=pool,
         recommended=budget.recommended,
         fraction=budget.fraction,
+        held=allocated_bytes(backend, torch),
     )
 
 

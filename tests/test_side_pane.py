@@ -45,11 +45,15 @@ def tearDownModule():
 
 
 
-def roomy(test, total_gb=48, available_gb=40, backend="mps", dtype="float16"):
+def roomy(
+    test, total_gb=48, available_gb=40, backend="mps", dtype="float16", held_gb=0
+):
     """Judge fit against a fixed machine, not the one running the tests.
 
     Availability moves from one second to the next and the tests must not,
     so every fit verdict under test is read from a profile like this one.
+    ``held_gb`` is what a loaded model is holding on the device, which a load
+    gives back before it checks whether the next model fits.
     """
 
     profile = model_runtime.DeviceProfile(
@@ -58,6 +62,7 @@ def roomy(test, total_gb=48, available_gb=40, backend="mps", dtype="float16"):
         total=total_gb * 1024**3,
         available=available_gb * 1024**3,
         pool="this machine",
+        held=held_gb * 1024**3,
     )
     original = models_page.device_profile
     models_page.device_profile = lambda torch=None: profile
@@ -858,6 +863,18 @@ class ModelFitTests(unittest.TestCase):
         self.assertIn("Memory", detail)
         self.assertIn("15.0 GB of weights", detail)
         self.assertIn("40.0 GB", detail)
+
+    def test_a_replacement_is_judged_after_the_loaded_model_is_given_back(self):
+        # A load unloads first and only then checks whether the next model
+        # fits, so the weights on the device now are not in the way of the
+        # model that would replace them. Without giving them back, a full
+        # machine marks every alternative tight and the button loads them
+        # anyway.
+        roomy(self, total_gb=24, available_gb=2)
+        self.assertIn("· tight", self.labels()[OLMO])
+
+        roomy(self, total_gb=24, available_gb=2, held_gb=18)
+        self.assertIn("· fits", self.labels()[OLMO])
 
     def test_the_model_in_memory_is_not_judged_again(self):
         # It fits: it is there. Judging it against what is left free would

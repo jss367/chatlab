@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from dataclasses import replace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -41,6 +42,7 @@ class Recorder:
 
     def __init__(self, updates=None, raises=None):
         self.model_id = "fake/model"
+        self.load_id = "fake/model#1"
         self.device_name = "CPU"
         self.precision = "full"
         self.busy = False
@@ -368,6 +370,38 @@ class RequestPlumbingTests(ApiTestCase):
         self.assertEqual(call["answer_prefill"], "Well, actually")
         self.assertEqual([turn["role"] for turn in call["messages"]], ["user"])
 
+    def test_the_generation_is_bound_to_the_load_that_was_checked(self):
+        # A load from the Models page can take the model lock between the
+        # check and the first token. The runtime compares this under the lock
+        # and refuses, rather than answering from the new weights while the
+        # response names the old ones.
+        self.post(messages=[{"role": "user", "content": "hi"}])
+
+        self.assertEqual(self.manager.calls[0]["load_id"], "fake/model#1")
+
+    def test_a_load_that_landed_in_between_is_refused(self):
+        self.use(
+            Recorder(raises=model_runtime.ModelChanged("the model has changed"))
+        )
+
+        response = self.post(messages=[{"role": "user", "content": "hi"}])
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["type"], "model_not_loaded")
+        self.assertFalse(runtime.MANAGER.busy)
+
+    def test_the_model_reported_is_the_one_that_answered(self):
+        # Read under the model lock by the runtime, not from the manager
+        # afterwards.
+        self.manager.updates = [update("Hello")]
+        self.manager.updates[0] = replace(
+            self.manager.updates[0], model_id="fake/other"
+        )
+
+        body = self.post(messages=[{"role": "user", "content": "hi"}]).json()
+
+        self.assertEqual(body["model"], "fake/other")
+
     def test_the_prompt_is_measured_only_when_it_is_asked_for(self):
         self.post(messages=[{"role": "user", "content": "hi"}])
         self.assertFalse(self.manager.calls[0]["analyze_prompt"])
@@ -627,6 +661,25 @@ class StreamingTests(ApiTestCase):
         whole_reasoning, whole_answer, _closed = split_reasoning(final)
         self.assertEqual(assembled, whole_answer)
         self.assertEqual(reasoning, whole_reasoning)
+
+    def test_a_stream_that_paid_for_prompt_measurements_receives_them(self):
+        # The prompt is measured during the same pass that warms the cache,
+        # so a streaming caller that asked for it has already paid.
+        self.manager.updates[0].prompt_metrics.append(metric(1, "hi"))
+
+        frames = self.frames(prompt_logprobs=True, logprobs=True)
+
+        self.assertEqual(
+            [entry["token"] for entry in frames[-1]["chatlab"]["prompt_tokens"]],
+            ["hi"],
+        )
+
+    def test_a_stream_that_did_not_ask_gets_no_prompt_measurements(self):
+        self.manager.updates[0].prompt_metrics.append(metric(1, "hi"))
+
+        frames = self.frames()
+
+        self.assertNotIn("prompt_tokens", frames[-1]["chatlab"])
 
     def test_the_slot_is_given_back_when_the_stream_ends(self):
         self.frames()

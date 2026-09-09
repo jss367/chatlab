@@ -2932,6 +2932,43 @@ class DeviceProfileTests(unittest.TestCase):
             model_runtime.system_memory = saved
         self.assertEqual(applied, [24 / 36])
 
+    def test_the_loaded_models_memory_is_given_back_for_a_replacement(self):
+        from model_runtime import DeviceProfile
+
+        profile = DeviceProfile(
+            backend="mps",
+            available=2 * self.GB,
+            total=24 * self.GB,
+            held=15 * self.GB,
+        )
+
+        self.assertEqual(profile.reclaimed().available, 17 * self.GB)
+        # The total is the machine's own either way.
+        self.assertEqual(profile.reclaimed().total, 24 * self.GB)
+        # Nothing to give back, or no figure for it: unchanged.
+        self.assertEqual(
+            DeviceProfile(available=2 * self.GB).reclaimed().available, 2 * self.GB
+        )
+        self.assertIsNone(DeviceProfile(held=self.GB).reclaimed().available)
+
+    def test_the_profile_reads_what_the_device_is_holding(self):
+        import model_runtime
+
+        torch = types.SimpleNamespace(
+            float32="torch.float32",
+            cuda=types.SimpleNamespace(is_available=lambda: False),
+            backends=types.SimpleNamespace(
+                mps=types.SimpleNamespace(is_available=lambda: False)
+            ),
+        )
+        saved = model_runtime.system_memory
+        model_runtime.system_memory = lambda: (16 * self.GB, 8 * self.GB)
+        try:
+            # Host memory keeps no such figure, so there is nothing to give back.
+            self.assertIsNone(model_runtime.device_profile(torch).held)
+        finally:
+            model_runtime.system_memory = saved
+
     def test_the_device_names_itself_the_way_a_loaded_model_does(self):
         from model_runtime import device_label
 

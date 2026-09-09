@@ -755,12 +755,25 @@ def cached_fit(
     return model_fit(estimated, profile)
 
 
+def replacement_profile() -> DeviceProfile:
+    """The machine as a model about to be loaded would find it.
+
+    Every model a verdict is given for is one that would replace whatever is
+    in memory, and a load unloads first and only then checks whether the next
+    model fits. So the weights on the device now are counted as available;
+    without that, a 15 GB model already loaded would have every alternative
+    marked tight and the button would then load them anyway.
+    """
+
+    return device_profile().reclaimed()
+
+
 def cached_fits(
     models: list[CachedModel], precision: str | None
 ) -> dict[str, Fit]:
     """The fit verdict for each of ``models``, by model ID, read against one profile."""
 
-    profile = device_profile()
+    profile = replacement_profile()
     fits = {}
     for entry in models:
         fit = cached_fit(entry, precision, profile)
@@ -792,7 +805,7 @@ def hub_fit(result: HubModel, precision: str | None, profile: DeviceProfile) -> 
 def hub_fits(results: list[HubModel], precision: str | None) -> dict[str, Fit]:
     """The fit verdict for each search result, by model ID, against one profile."""
 
-    profile = device_profile()
+    profile = replacement_profile()
     return {
         result.model_id: hub_fit(result, precision, profile) for result in results
     }
@@ -899,7 +912,9 @@ def select_my_model(selected: str | None, precision: str | None = None):
         return gr.skip(), f"`{selected}` is no longer in the cache. Press **Refresh**."
     return (
         gr.update(value=selected),
-        describe_cached_model(entry, cached_fit(entry, precision, device_profile())),
+        describe_cached_model(
+            entry, cached_fit(entry, precision, replacement_profile())
+        ),
     )
 
 
@@ -1186,7 +1201,7 @@ def select_search_result(
         return gr.skip(), NO_RESULT_SELECTED
     return (
         gr.update(value=result.model_id),
-        describe_hub_model(result, hub_fit(result, precision, device_profile())),
+        describe_hub_model(result, hub_fit(result, precision, replacement_profile())),
     )
 
 

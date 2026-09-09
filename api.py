@@ -352,6 +352,7 @@ def build_router() -> APIRouter:
 
         try:
             model_id = loaded_model(body.get("model"))
+            load_id = runtime.MANAGER.load_id
             turns, prefill = conversation_from(body)
             sampling = sampling_from(body)
             measured, wants = token_detail(body)
@@ -371,6 +372,11 @@ def build_router() -> APIRouter:
             )
         request_id = f"chatcmpl-{uuid4().hex}"
         created = int(time.time())
+        # The load the request was checked against. A load from the Models
+        # page can take the model lock between that check and the first
+        # token, and without this the answer would come from the new weights
+        # while the response named the old ones; the runtime compares it
+        # under the lock and refuses instead.
         stream = runtime.MANAGER.generate(
             turns,
             temperature=sampling["temperature"],
@@ -380,6 +386,7 @@ def build_router() -> APIRouter:
             seed=sampling["seed"],
             analyze_prompt=prompt_logprobs,
             answer_prefill=prefill,
+            load_id=load_id,
         )
         # The first frame is drawn here rather than inside the response,
         # because everything a request can be refused for - a prompt past the
@@ -399,11 +406,21 @@ def build_router() -> APIRouter:
         except Exception as error:
             runtime.MANAGER.release_generation()
             return error_response(refusal(error))
+        # The weights that answered, read under the model lock rather than
+        # from the manager afterwards.
+        model_id = first.model_id or model_id
         frames = chain([first], stream)
         if streaming:
             return StreamingResponse(
                 stream_completion(
-                    frames, request_id, created, model_id, sampling, measured, wants
+                    frames,
+                    request_id,
+                    created,
+                    model_id,
+                    sampling,
+                    measured,
+                    wants,
+                    prompt_logprobs,
                 ),
                 media_type="text/event-stream",
             )
@@ -622,6 +639,7 @@ def stream_completion(
     sampling: dict,
     measured: bool,
     wants: int,
+    prompt_logprobs: bool = False,
 ) -> Iterator[str]:
     """The same answer as it arrives, one event per batch of tokens.
 
@@ -692,6 +710,12 @@ def stream_completion(
                 "summary": summarize(metrics),
             },
         }
+        if prompt_logprobs and last is not None:
+            # The prompt was measured during the same pass that warmed the
+            # cache, so a streaming caller has already paid for it.
+            payload["chatlab"]["prompt_tokens"] = [
+                token_entry(metric, wants) for metric in last.prompt_metrics
+            ]
         yield f"data: {json.dumps(payload)}\n\n"
         yield "data: [DONE]\n\n"
     except Exception as error:
