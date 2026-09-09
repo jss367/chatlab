@@ -943,6 +943,7 @@ class FramesTests(ApiTestCase):
 
     def test_a_failure_with_nobody_reading_gives_the_model_back_too(self):
         api.ABANDONED_AFTER_SECONDS = 0.05
+        api.FRAME_WAIT_SECONDS = 0.05
 
         def generate(messages, **kwargs):
             for index in range(api.FRAME_BUFFER + 1):
@@ -958,6 +959,13 @@ class FramesTests(ApiTestCase):
                 break
             time.sleep(0.01)
         self.assertFalse(self.manager.busy)
+
+        # The failure itself could not cross a full buffer, so a reader that
+        # comes back is told the response was given up on rather than handed
+        # a clean end to a truncated answer.
+        with self.assertRaises(api.ApiError) as caught:
+            list(produced.rest())
+        self.assertEqual(caught.exception.kind, "abandoned")
 
     def test_a_reader_that_comes_back_to_an_abandoned_generation_is_told(self):
         # Abandonment leaves a full buffer and no last item in it. A reader

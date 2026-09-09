@@ -160,7 +160,13 @@ class Frames:
                     return
             self._put(_DONE)
         except BaseException as error:  # noqa: BLE001 - handed to the reader
-            self._put(error)
+            if not self._put(error):
+                # The buffer was full of frames nobody was reading, so the
+                # failure could not be handed over. A reader that comes back
+                # is told the response was given up on, which is the true
+                # part of what happened and keeps it from reading a
+                # truncated answer as a whole one.
+                self._abandoned = True
         finally:
             runtime.MANAGER.release_generation()
             self._finished.set()
