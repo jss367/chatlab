@@ -58,6 +58,7 @@ class Episode:
             setattr(result, key, threading.Lock() if key == "lock" else copy.deepcopy(value, memo))
         if result.phase == "ready" and not result.turns:
             result.run_id = uuid4().hex
+            result.created_at = time.time()
         return result
 
     def __post_init__(self):

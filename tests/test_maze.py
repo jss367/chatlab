@@ -80,12 +80,20 @@ class MazeTests(unittest.TestCase):
 
     def test_browser_sessions_have_independent_episode_state(self):
         original = Episode(MAZE, CONFIG)
-        duplicate = copy.deepcopy(original)
+        original.created_at = 100.
+        with mock.patch('extensions.maze_experiments.runner.time.time', return_value=200.):
+            duplicate = copy.deepcopy(original)
         duplicate.request_stop()
         self.assertEqual(original.phase, "ready")
         self.assertNotEqual(original.run_id, duplicate.run_id)
         self.assertIsNot(original.lock, duplicate.lock)
         self.assertIsNot(original.messages, duplicate.messages)
+        self.assertEqual(original.created_at, 100.)
+        self.assertEqual(duplicate.created_at, 200.)
+        original.phase = 'paused'
+        resumed = copy.deepcopy(original)
+        self.assertEqual(resumed.created_at, original.created_at)
+        self.assertEqual(resumed.run_id, original.run_id)
 
     def test_seed_and_distance(self):
         a, b = generate(), generate()
