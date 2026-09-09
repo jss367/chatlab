@@ -9,6 +9,7 @@ import gradio as gr
 import numpy as np
 
 import app
+from ui import models_page, panel, runtime
 import settings
 from model_runtime import (
     MODEL_WEIGHTS,
@@ -107,13 +108,13 @@ class ScoreStatusTests(unittest.TestCase):
     """What the Score text status line promises about the numbers above it."""
 
     def status(self, seam_verified: bool = True, chat_template_missing: bool = False) -> str:
-        original = app.MANAGER
-        app.MANAGER = StubManager(seam_verified, chat_template_missing)
+        original = runtime.MANAGER
+        runtime.MANAGER = StubManager(seam_verified, chat_template_missing)
         try:
             frames = list(app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE))
             return frames[-1][7]
         finally:
-            app.MANAGER = original
+            runtime.MANAGER = original
 
     def test_a_verified_seam_is_reported_without_a_caveat(self):
         status = self.status(True)
@@ -164,9 +165,9 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
 
     def setUp(self):
         self.manager = StubManager()
-        original = app.MANAGER
-        app.MANAGER = self.manager
-        self.addCleanup(setattr, app, "MANAGER", original)
+        original = runtime.MANAGER
+        runtime.MANAGER = self.manager
+        self.addCleanup(setattr, runtime, "MANAGER", original)
 
     def score(self):
         return list(app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE))[-1]
@@ -183,14 +184,14 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
     def test_a_refusal_touches_nothing_but_the_status(self):
         # The strips still describe the response that is streaming, and the
         # stamp on them still has to match the clicks it is collecting.
-        before = app._metrics_generation
+        before = panel._metrics_generation
         self.assertTrue(self.manager.reserve_generation())
         try:
             result = self.score()
         finally:
             self.manager.release_generation()
 
-        self.assertEqual(app._metrics_generation, before, "no stamp was minted")
+        self.assertEqual(panel._metrics_generation, before, "no stamp was minted")
         for index, value in enumerate(result):
             if index != 7:
                 self.assertEqual(value, gr.skip(), f"output {index}")
@@ -305,11 +306,11 @@ class DownloadCardTests(unittest.TestCase):
     """What the model panel says while a download runs, and after."""
 
     def setUp(self):
-        self.original = app.MANAGER
-        self.original_poll = app.DOWNLOAD_POLL_SECONDS
-        app.DOWNLOAD_POLL_SECONDS = 0.01
-        self.addCleanup(setattr, app, "MANAGER", self.original)
-        self.addCleanup(setattr, app, "DOWNLOAD_POLL_SECONDS", self.original_poll)
+        self.original = runtime.MANAGER
+        self.original_poll = models_page.DOWNLOAD_POLL_SECONDS
+        models_page.DOWNLOAD_POLL_SECONDS = 0.01
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
+        self.addCleanup(setattr, models_page, "DOWNLOAD_POLL_SECONDS", self.original_poll)
 
     def test_bytes_are_shown_in_decimal_units(self):
         self.assertEqual(app.format_bytes(512), "512 B")
@@ -397,9 +398,9 @@ class DownloadCardTests(unittest.TestCase):
                     files.update(1)
                 return Path("/cache/snap")
 
-        app.MANAGER = Manager()
+        runtime.MANAGER = Manager()
 
-        cards = app.download_model("org/model", "")
+        cards = models_page.download_model("org/model", "")
         first = next(cards)
         waiting = next(cards)
         file_list_arrives.set()
@@ -420,16 +421,16 @@ class DownloadCardTests(unittest.TestCase):
             def fetch(self, model_id, token, progress):
                 raise OSError("no network")
 
-        app.MANAGER = Manager()
+        runtime.MANAGER = Manager()
 
-        frames = list(app.download_model("org/model", ""))
+        frames = list(models_page.download_model("org/model", ""))
 
         self.assertIn("Download failed", frames[-1])
         self.assertIn("no network", frames[-1])
-        self.assertEqual(app.MANAGER.active_downloads, {})
+        self.assertEqual(runtime.MANAGER.active_downloads, {})
 
     def test_a_worker_that_cannot_start_releases_its_reservation(self):
-        app.MANAGER = ModelManager()
+        runtime.MANAGER = ModelManager()
 
         with mock.patch.object(
             threading.Thread, "start", side_effect=RuntimeError("no threads")
@@ -437,7 +438,7 @@ class DownloadCardTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "no threads"):
                 list(app.stream_download("org/model", ""))
 
-        self.assertEqual(app.MANAGER.active_downloads, {})
+        self.assertEqual(runtime.MANAGER.active_downloads, {})
 
     def test_a_second_request_follows_the_download_already_running(self):
         progress = DownloadProgress()
@@ -451,14 +452,14 @@ class DownloadCardTests(unittest.TestCase):
                 calls.append(model_id)
                 return Path("/cache/snap")
 
-        app.MANAGER = Manager()
-        app.MANAGER.active_downloads["org/model"] = progress
+        runtime.MANAGER = Manager()
+        runtime.MANAGER.active_downloads["org/model"] = progress
         frames = []
-        for frame in app.download_model("org/model", ""):
+        for frame in models_page.download_model("org/model", ""):
             frames.append(frame)
             if len(frames) == 2:
                 # The other handler's download finishes.
-                app.MANAGER.active_downloads.clear()
+                runtime.MANAGER.active_downloads.clear()
 
         self.assertIn("25%", frames[1])
         self.assertEqual(calls, ["org/model"], "one quick pass over the cached files")
@@ -481,8 +482,8 @@ class DownloadCardTests(unittest.TestCase):
             def load(self, model_id, local_path, progress=None, precision="full"):
                 return "cpu"
 
-        app.MANAGER = Manager()
-        first = app.download_model("org/model", "")
+        runtime.MANAGER = Manager()
+        first = models_page.download_model("org/model", "")
         second = app.download_and_load_model("org/model", "")
 
         self.assertIn("Downloading model", next(first))
@@ -503,13 +504,13 @@ class DownloadCardTests(unittest.TestCase):
             def fetch(self, model_id, token, progress):
                 raise AssertionError("should not be reached")
 
-        app.MANAGER = Manager()
+        runtime.MANAGER = Manager()
 
-        frames = list(app.download_model("not a model id", ""))
+        frames = list(models_page.download_model("not a model id", ""))
 
         self.assertIn("Download failed", frames[-1])
         self.assertIn("organization/model-name", frames[-1])
-        self.assertEqual(app.MANAGER.active_downloads, {})
+        self.assertEqual(runtime.MANAGER.active_downloads, {})
 
     def test_load_cached_while_downloading_points_at_the_running_download(self):
         progress = DownloadProgress()
@@ -519,7 +520,7 @@ class DownloadCardTests(unittest.TestCase):
         class Manager:
             active_downloads = {"org/model": progress}
 
-        app.MANAGER = Manager()
+        runtime.MANAGER = Manager()
 
         frames = list(app.load_cached_model("org/model"))
 
@@ -542,10 +543,9 @@ class DownloadCardTests(unittest.TestCase):
                     "/cache/snapshots/abc",
                 )
 
-        app.MANAGER = Manager()
+        runtime.MANAGER = Manager()
 
-        with mock.patch.object(
-            app, "cache_status", return_value=CacheStatus(cached_bytes=1)
+        with mock.patch.object(models_page, "cache_status", return_value=CacheStatus(cached_bytes=1)
         ):
             frames = list(app.load_cached_model("org/model"))
 
@@ -594,12 +594,12 @@ class LoadCardTests(unittest.TestCase):
             return self._work(progress)
 
     def setUp(self):
-        self.addCleanup(setattr, app, "MANAGER", app.MANAGER)
-        self.addCleanup(setattr, app, "cache_status", app.cache_status)
-        self.addCleanup(setattr, app, "LOAD_POLL_SECONDS", app.LOAD_POLL_SECONDS)
-        app.MANAGER = self.Manager(lambda progress: "CPU")
-        app.cache_status = lambda model_id: CacheStatus(cached_bytes=14_600_000_000)
-        app.LOAD_POLL_SECONDS = 0.01
+        self.addCleanup(setattr, runtime, "MANAGER", runtime.MANAGER)
+        self.addCleanup(setattr, models_page, "cache_status", models_page.cache_status)
+        self.addCleanup(setattr, models_page, "LOAD_POLL_SECONDS", models_page.LOAD_POLL_SECONDS)
+        runtime.MANAGER = self.Manager(lambda progress: "CPU")
+        models_page.cache_status = lambda model_id: CacheStatus(cached_bytes=14_600_000_000)
+        models_page.LOAD_POLL_SECONDS = 0.01
 
     def test_the_first_frame_says_the_weights_are_being_read_not_fetched(self):
         # The old card named the size and the folder and then sat there, which
@@ -697,7 +697,7 @@ class LoadCardTests(unittest.TestCase):
                 held[0] = byte_count
             return "Apple Metal (MPS)"
 
-        app.MANAGER = self.Manager(work)
+        runtime.MANAGER = self.Manager(work)
 
         frames = list(app.load_cached_model(self.MODEL))
 
@@ -716,7 +716,7 @@ class LoadCardTests(unittest.TestCase):
         def work(progress):
             raise RuntimeError("Metal ran out of memory")
 
-        app.MANAGER = self.Manager(work)
+        runtime.MANAGER = self.Manager(work)
 
         frames = list(app.load_cached_model(self.MODEL))
 
@@ -738,15 +738,15 @@ class LoadCardTests(unittest.TestCase):
                 order.append(("loaded", self.loading_id))
                 return "CPU"
 
-        app.MANAGER = Manager(lambda progress: "CPU")
+        runtime.MANAGER = Manager(lambda progress: "CPU")
 
         list(app.load_cached_model(self.MODEL))
 
         self.assertEqual(order, [("claimed", self.MODEL), ("loaded", self.MODEL)])
-        self.assertIsNone(app.MANAGER.loading_id, "given back when the load ends")
+        self.assertIsNone(runtime.MANAGER.loading_id, "given back when the load ends")
 
     def test_a_worker_that_cannot_start_gives_the_claim_back(self):
-        app.MANAGER = ModelManager()
+        runtime.MANAGER = ModelManager()
 
         with mock.patch.object(
             threading.Thread, "start", side_effect=RuntimeError("no threads")
@@ -754,10 +754,10 @@ class LoadCardTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "no threads"):
                 list(app.stream_load(self.MODEL, Path("/cache/snap")))
 
-        self.assertIsNone(app.MANAGER.loading_id)
+        self.assertIsNone(runtime.MANAGER.loading_id)
 
     def test_a_load_that_ends_before_the_first_frame_still_reports_ready(self):
-        app.MANAGER = self.Manager(lambda progress: "CPU")
+        runtime.MANAGER = self.Manager(lambda progress: "CPU")
 
         frames = list(app.load_cached_model(self.MODEL))
 
@@ -775,17 +775,17 @@ class DownloadStatusTests(unittest.TestCase):
 
     def run_handler(self, handler, statuses: list[CacheStatus], *args) -> list[str]:
         remaining = list(statuses)
-        original_manager, original_status = app.MANAGER, app.cache_status
-        app.MANAGER = DownloadManager()
-        app.cache_status = lambda model_id: remaining.pop(0)
+        original_manager, original_status = runtime.MANAGER, models_page.cache_status
+        runtime.MANAGER = DownloadManager()
+        models_page.cache_status = lambda model_id: remaining.pop(0)
         try:
             return list(handler(self.MODEL, *args))
         finally:
-            app.MANAGER, app.cache_status = original_manager, original_status
+            runtime.MANAGER, models_page.cache_status = original_manager, original_status
 
     def test_a_first_download_is_announced_as_a_full_one(self):
         cards = self.run_handler(
-            app.download_model,
+            models_page.download_model,
             [CacheStatus(), CacheStatus(cached_bytes=15_000_000_000)],
             "",
         )
@@ -796,7 +796,7 @@ class DownloadStatusTests(unittest.TestCase):
 
     def test_a_cut_off_download_is_announced_as_resumed(self):
         cards = self.run_handler(
-            app.download_model,
+            models_page.download_model,
             [
                 CacheStatus(
                     cached_bytes=10,
@@ -818,14 +818,14 @@ class DownloadStatusTests(unittest.TestCase):
         """A leftover from another revision changes nothing about ``main``."""
 
         cached = CacheStatus(cached_bytes=15_000_000_000, partial_files=1, partial_bytes=5)
-        cards = self.run_handler(app.download_model, [cached, cached], "")
+        cards = self.run_handler(models_page.download_model, [cached, cached], "")
 
         self.assertIn("already in the Hugging Face cache", cards[0])
         self.assertNotIn("Resuming", cards[0])
 
     def test_a_complete_cache_reports_that_nothing_was_fetched(self):
         cached = CacheStatus(cached_bytes=15_000_000_000)
-        cards = self.run_handler(app.download_model, [cached, cached], "")
+        cards = self.run_handler(models_page.download_model, [cached, cached], "")
 
         self.assertIn("already in the Hugging Face cache", cards[0])
         self.assertIn("nothing new was fetched", cards[-1])
@@ -899,7 +899,7 @@ class DownloadStatusTests(unittest.TestCase):
         shards = tuple(f"model-0000{i}-of-00006.safetensors" for i in range(2, 7))
         before = CacheStatus(cached_bytes=3_000_000_000, missing_files=shards)
         cards = self.run_handler(
-            app.download_model, [before, CacheStatus(cached_bytes=15_000_000_000)], ""
+            models_page.download_model, [before, CacheStatus(cached_bytes=15_000_000_000)], ""
         )
 
         self.assertIn("Resuming download", cards[0])
@@ -923,12 +923,12 @@ class DownloadStatusTests(unittest.TestCase):
         self.assertIn("Not cached", cards[-1])
 
     def test_an_invalid_id_fails_before_anything_is_measured(self):
-        original = app.MANAGER
-        app.MANAGER = DownloadManager()
+        original = runtime.MANAGER
+        runtime.MANAGER = DownloadManager()
         try:
-            cards = list(app.download_model("not-a-model-id", ""))
+            cards = list(models_page.download_model("not-a-model-id", ""))
         finally:
-            app.MANAGER = original
+            runtime.MANAGER = original
 
         self.assertEqual(len(cards), 1)
         self.assertIn("Download failed", cards[0])
@@ -1046,26 +1046,26 @@ class ScoreBudgetTests(unittest.TestCase):
             return self.answer
 
     def budget(self, manager, context="", text="some text", template=False) -> str:
-        original = app.MANAGER
-        app.MANAGER = manager
+        original = runtime.MANAGER
+        runtime.MANAGER = manager
         try:
             shown, _load_id = app.score_token_count(context, text, template)
             return shown
         finally:
-            app.MANAGER = original
+            runtime.MANAGER = original
 
     def test_the_count_travels_with_the_load_it_was_counted_against(self):
         # A tokenizer belongs to the weights in memory, so a number counted
         # under one load says nothing about the next.
-        original = app.MANAGER
-        app.MANAGER = self.Counting((12, 4096), load_id="stub/model#7")
+        original = runtime.MANAGER
+        runtime.MANAGER = self.Counting((12, 4096), load_id="stub/model#7")
         try:
             self.assertEqual(
                 app.score_token_count("", "some text", False),
                 ("12 of 4,096 tokens.", "stub/model#7"),
             )
         finally:
-            app.MANAGER = original
+            runtime.MANAGER = original
 
     def test_an_empty_box_is_not_counted_at_all(self):
         counting = self.Counting((0, 4096))
@@ -1118,14 +1118,14 @@ class ScoreBudgetRecoveryTests(unittest.TestCase):
             return self.answer
 
     def recover(self, manager, shown, counted_load="stub/model#1"):
-        original = app.MANAGER
-        app.MANAGER = manager
+        original = runtime.MANAGER
+        runtime.MANAGER = manager
         try:
             return app.recover_score_budget(
                 shown, counted_load, "", "some text", False
             )
         finally:
-            app.MANAGER = original
+            runtime.MANAGER = original
 
     def test_a_count_that_is_stuck_is_recomputed(self):
         counting = self.Counting((12, 4096))
@@ -1284,10 +1284,10 @@ class DefaultModelSelectionTests(unittest.TestCase):
         manager.model_id, manager.device_name = "org/new-choice", "CPU"
         manager.model = manager.tokenizer = object()
         with (
-            mock.patch.object(app, "MANAGER", manager),
+            mock.patch.object(runtime, "MANAGER", manager),
             mock.patch.object(manager, "load") as load,
             mock.patch.object(manager, "download") as download,
-            mock.patch.object(app, "cache_status") as cache,
+            mock.patch.object(models_page, "cache_status") as cache,
         ):
             for _ in range(2):
                 result = app.select_default_model()
@@ -1324,14 +1324,13 @@ class DefaultModelSelectionTests(unittest.TestCase):
             return "CPU"
 
         with (
-            mock.patch.object(
-                app, "cache_status", return_value=CacheStatus(cached_bytes=1)
+            mock.patch.object(models_page, "cache_status", return_value=CacheStatus(cached_bytes=1)
             ),
             mock.patch.object(
-                app.MANAGER, "find_cached", return_value=Path("/unused/cache")
+                runtime.MANAGER, "find_cached", return_value=Path("/unused/cache")
             ),
-            mock.patch.object(app, "stream_load", side_effect=load),
-            mock.patch.object(app, "stream_download") as download,
+            mock.patch.object(models_page, "stream_load", side_effect=load),
+            mock.patch.object(models_page, "stream_download") as download,
         ):
             cards = list(app.load_cached_model(settings.DEFAULT_MODEL_ID))
             download.assert_not_called()
@@ -1371,9 +1370,9 @@ class DefaultModelSelectionTests(unittest.TestCase):
             return "CPU"
 
         with (
-            mock.patch.object(app, "cache_status", return_value=CacheStatus()),
-            mock.patch.object(app, "stream_download", side_effect=download),
-            mock.patch.object(app, "stream_load", side_effect=load),
+            mock.patch.object(models_page, "cache_status", return_value=CacheStatus()),
+            mock.patch.object(models_page, "stream_download", side_effect=download),
+            mock.patch.object(models_page, "stream_load", side_effect=load),
         ):
             cards = list(app.download_and_load_model(settings.DEFAULT_MODEL_ID, ""))
         self.assertEqual(

@@ -13,3 +13,5 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E731"]
+# app.py gathers the ui package under one roof for the launcher and the tests.
+"app.py" = ["F401"]

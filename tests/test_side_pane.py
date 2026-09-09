@@ -14,6 +14,7 @@ from unittest import mock
 import gradio as gr
 
 import app
+from ui import models_page, runtime
 import model_runtime
 import settings
 from model_runtime import (
@@ -641,14 +642,14 @@ class MyModelsPaneTests(unittest.TestCase):
     def setUp(self):
         self.entries = [cached(OLMO), PARTIAL]
         self.manager = ModelManager()
-        originals = (app.MANAGER, app.list_cached_models, app.cache_root)
-        app.MANAGER = self.manager
-        app.list_cached_models = lambda: list(self.entries)
-        app.cache_root = lambda: Path("/cache")
+        originals = (runtime.MANAGER, models_page.list_cached_models, models_page.cache_root)
+        runtime.MANAGER = self.manager
+        models_page.list_cached_models = lambda: list(self.entries)
+        models_page.cache_root = lambda: Path("/cache")
         self.addCleanup(
-            lambda: setattr(app, "MANAGER", originals[0])
-            or setattr(app, "list_cached_models", originals[1])
-            or setattr(app, "cache_root", originals[2])
+            lambda: setattr(runtime, "MANAGER", originals[0])
+            or setattr(models_page, "list_cached_models", originals[1])
+            or setattr(models_page, "cache_root", originals[2])
         )
 
     def test_every_cached_model_is_listed_with_its_size(self):
@@ -763,22 +764,22 @@ class ManageMyModelsTests(unittest.TestCase):
         self.manager = ModelManager()
         self.removed = []
         originals = (
-            app.MANAGER,
-            app.list_cached_models,
+            runtime.MANAGER,
+            models_page.list_cached_models,
             model_runtime.remove_cached_model,
-            app.download_model,
+            models_page.download_model,
         )
-        app.MANAGER = self.manager
-        app.list_cached_models = lambda: list(self.entries)
+        runtime.MANAGER = self.manager
+        models_page.list_cached_models = lambda: list(self.entries)
         # The manager deletes through the module-level function, so that is
         # what stands in: the manager's own checks stay real.
         model_runtime.remove_cached_model = self.remove
-        app.download_model = self.download
+        models_page.download_model = self.download
         self.addCleanup(
-            lambda: setattr(app, "MANAGER", originals[0])
-            or setattr(app, "list_cached_models", originals[1])
+            lambda: setattr(runtime, "MANAGER", originals[0])
+            or setattr(models_page, "list_cached_models", originals[1])
             or setattr(model_runtime, "remove_cached_model", originals[2])
-            or setattr(app, "download_model", originals[3])
+            or setattr(models_page, "download_model", originals[3])
         )
 
     def remove(self, model_id, cache_dir=None):
@@ -962,12 +963,12 @@ class ModelSearchPaneTests(unittest.TestCase):
     def setUp(self):
         self.results = [INSTRUCT, GATED]
         self.queries = []
-        original_search, original_status = app.search_hub_models, app.cache_status
-        app.search_hub_models = self.search
-        app.cache_status = lambda model_id: CacheStatus()
+        original_search, original_status = models_page.search_hub_models, models_page.cache_status
+        models_page.search_hub_models = self.search
+        models_page.cache_status = lambda model_id: CacheStatus()
         self.addCleanup(
-            lambda: setattr(app, "search_hub_models", original_search)
-            or setattr(app, "cache_status", original_status)
+            lambda: setattr(models_page, "search_hub_models", original_search)
+            or setattr(models_page, "cache_status", original_status)
         )
 
     def search(self, query, hf_token):
@@ -1045,7 +1046,7 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertIn("token", detail)
 
     def test_a_result_already_on_disk_says_so(self):
-        app.cache_status = lambda model_id: CacheStatus(cached_bytes=15_000_000_000)
+        models_page.cache_status = lambda model_id: CacheStatus(cached_bytes=15_000_000_000)
         _, _, state = app.search_models("olmo", "")
 
         _, detail = app.select_search_result(INSTRUCT.model_id, state)
@@ -1054,7 +1055,7 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertIn("15.0 GB cached", detail)
 
     def test_a_cached_result_of_another_kind_is_not_called_partly_cached(self):
-        app.cache_status = lambda model_id: CacheStatus(
+        models_page.cache_status = lambda model_id: CacheStatus(
             cached_bytes=5_500_000_000, unsupported=True
         )
         _, _, state = app.search_models("olmo", "")
@@ -1067,7 +1068,7 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertNotIn("Download and load", detail)
 
     def test_a_partly_downloaded_result_says_so(self):
-        app.cache_status = lambda model_id: CacheStatus(
+        models_page.cache_status = lambda model_id: CacheStatus(
             cached_bytes=100, missing_files=(MODEL_WEIGHTS,)
         )
         _, _, state = app.search_models("olmo", "")
@@ -1080,7 +1081,7 @@ class ModelSearchPaneTests(unittest.TestCase):
         def refuse(model_id):
             raise PermissionError(13, "Permission denied")
 
-        app.cache_status = refuse
+        models_page.cache_status = refuse
         _, _, state = app.search_models("olmo", "")
 
         box, detail = app.select_search_result(INSTRUCT.model_id, state)
@@ -1104,9 +1105,9 @@ class ModelBadgeTests(unittest.TestCase):
 
     def setUp(self):
         self.manager = ModelManager()
-        original = app.MANAGER
-        app.MANAGER = self.manager
-        self.addCleanup(lambda: setattr(app, "MANAGER", original))
+        original = runtime.MANAGER
+        runtime.MANAGER = self.manager
+        self.addCleanup(lambda: setattr(runtime, "MANAGER", original))
 
     def load(self):
         self.manager.model = object()
