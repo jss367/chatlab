@@ -482,6 +482,12 @@ def pipeline_missing_files(snapshot: Path) -> tuple[str, ...]:
     reported the same way. Its files are all there, but ``from_pretrained``
     takes one variant for the whole pipeline, so there is no load to make of
     it; see :func:`pipeline_variant_missing`.
+
+    A folder holding weights but no ``config.json`` is missing that config
+    rather than exempt from the check: diffusers cannot construct a unet or
+    a VAE without one, so a download cut off before it arrived is
+    incomplete rather than whole. Absence of both is still the tokenizer and
+    the scheduler, and still no gap.
     """
 
     missing: list[str] = []
@@ -493,6 +499,8 @@ def pipeline_missing_files(snapshot: Path) -> tuple[str, ...]:
             missing.append(f"{name}/")
             continue
         if not (folder / COMPONENT_CONFIG).is_file():
+            if _component_weights(folder) or _component_index(folder) is not None:
+                missing.append(f"{name}/{COMPONENT_CONFIG}")
             continue
         index = _component_index(folder)
         if index is not None:
@@ -1097,6 +1105,25 @@ def cuda_memory(torch=None) -> tuple[int | None, int | None]:
     return total, free
 
 
+def cuda_device_memory(torch=None) -> tuple[int | None, int | None]:
+    """Total and free memory on the one CUDA device a load would land on.
+
+    ``.to("cuda")`` places a model on the current device rather than
+    spreading it, so for a load that does that the sum across every visible
+    card is the wrong figure: a pipeline whose weights fit the aggregate but
+    not card 0 would pass and then fail while it was being moved. This is
+    the reading :func:`cuda_memory` takes, for that one device.
+    """
+
+    if torch is None:
+        import torch
+    try:
+        free, total = torch.cuda.mem_get_info(torch.cuda.current_device())
+    except (RuntimeError, AttributeError, ValueError, TypeError, IndexError):
+        return None, None
+    return int(total), int(free)
+
+
 def allocated_bytes(backend: str, torch=None) -> int | None:
     """Bytes of live tensors on ``backend``'s device, or ``None`` where unknown.
 
@@ -1245,12 +1272,16 @@ def memory_pool(
     the card *and* the machine, each on its own rather than added together:
     the combined pool would pass one that fits host memory and then fail
     inside ``.to("cuda")``, and the card alone would pass one that exhausts
-    the machine while ``from_pretrained`` is still staging it.
+    the machine while ``from_pretrained`` is still staging it. And it is the
+    one card the pipeline lands on rather than every visible one, because
+    ``.to("cuda")`` does not spread a model the way ``device_map="auto"``
+    does: the sum would pass a pipeline that fits the aggregate and fails on
+    card 0. See :func:`cuda_device_memory`.
     """
 
     if backend == "cuda" and kind == IMAGE_KIND:
-        total, available = _smaller_known(cuda_memory(), system_memory())
-        pool = "both the GPU and this machine"
+        total, available = _smaller_known(cuda_device_memory(), system_memory())
+        pool = "both this GPU and this machine"
     elif backend == "cuda":
         total, available = offload_pool(cuda_memory(), system_memory())
         pool = "the GPU plus this machine"

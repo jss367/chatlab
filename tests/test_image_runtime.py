@@ -194,6 +194,44 @@ class PipelineLayoutTests(unittest.TestCase):
             self.assertEqual(status.missing_files, ())
             self.assertTrue(status.complete)
 
+    def test_a_component_with_weights_but_no_config_is_missing_the_config(self):
+        """diffusers cannot construct a unet or a VAE without its config, so
+        a download cut off before it arrived is incomplete, not whole."""
+
+        files = self.whole()
+        del files["unet/config.json"]
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, files)
+            status = cache_status(MODEL, Path(root))
+
+            self.assertEqual(status.missing_files, ("unet/config.json",))
+            self.assertFalse(status.complete)
+
+    def test_a_sharded_component_with_no_config_is_missing_it_too(self):
+        files = self.whole()
+        del files["unet/config.json"]
+        del files["unet/diffusion_pytorch_model.safetensors"]
+        files["unet/diffusion_pytorch_model.safetensors.index.json"] = json.dumps(
+            {"weight_map": {"a": "diffusion_pytorch_model-00001-of-00001.safetensors"}}
+        ).encode()
+        files["unet/diffusion_pytorch_model-00001-of-00001.safetensors"] = b"u" * 900
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, files)
+
+            self.assertEqual(
+                cache_status(MODEL, Path(root)).missing_files, ("unet/config.json",)
+            )
+
+    def test_a_folder_with_neither_a_config_nor_weights_is_still_no_gap(self):
+        # The tokenizer and the scheduler keep a config of their own name and
+        # no weights at all; absence of both is what they look like.
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, self.whole())
+            status = cache_status(MODEL, Path(root))
+
+            self.assertEqual(status.missing_files, ())
+            self.assertTrue(status.complete)
+
     def test_an_index_that_cannot_be_read_counts_as_missing_weights(self):
         files = self.whole()
         del files["unet/diffusion_pytorch_model.safetensors"]
@@ -472,12 +510,16 @@ class PipelineDtypeTests(unittest.TestCase):
         with nothing offloaded. The combined pool would pass one that fits
         host memory and then fail inside .to("cuda"); the card alone would
         pass one that exhausts the machine while from_pretrained stages it.
-        So both pools have to hold it and the tighter one decides."""
+        So both pools have to hold it and the tighter one decides - and the
+        card is the one it lands on, not every visible one summed."""
 
         import torch
         from safetensors.torch import save_file
 
-        card = (8 * 1024**3, 6 * 1024**3)
+        # Two cards: the sum an offloading text load may use, and the one
+        # card a pipeline is moved onto.
+        one_card = (8 * 1024**3, 6 * 1024**3)
+        all_cards = (16 * 1024**3, 12 * 1024**3)
         host = (64 * 1024**3, 48 * 1024**3)
         with tempfile.TemporaryDirectory() as root:
             snapshot = self.pipeline(Path(root), {"unet": ("float16", 64)})
@@ -489,7 +531,10 @@ class PipelineDtypeTests(unittest.TestCase):
             )
             (snapshot / "config.json").write_text('{"model_type": "olmo3"}')
             with (
-                mock.patch.object(model_runtime, "cuda_memory", return_value=card),
+                mock.patch.object(model_runtime, "cuda_memory", return_value=all_cards),
+                mock.patch.object(
+                    model_runtime, "cuda_device_memory", return_value=one_card
+                ),
                 mock.patch.object(model_runtime, "system_memory", return_value=host),
                 mock.patch.object(model_runtime, "check_memory_for_load") as checked,
             ):
@@ -504,12 +549,15 @@ class PipelineDtypeTests(unittest.TestCase):
                 )
                 text_total = checked.call_args.args[2]
 
-        self.assertEqual(image_pool, "both the GPU and this machine")
-        # The tighter of the two, which here is the card - not their sum.
-        self.assertEqual(image_total, min(card[0], host[0]))
-        self.assertLess(image_total, card[0] + host[0])
-        # A text model does still get the offload pool it really uses.
-        self.assertEqual(text_total, card[0] + host[0])
+        self.assertEqual(image_pool, "both this GPU and this machine")
+        # The tighter of the two, which here is the one card it lands on -
+        # not their sum, and not every visible card summed.
+        self.assertEqual(image_total, min(one_card[0], host[0]))
+        self.assertLess(image_total, one_card[0] + host[0])
+        self.assertLess(image_total, all_cards[0])
+        # A text model does still get the offload pool it really uses, over
+        # every card, because device_map="auto" really does spread it.
+        self.assertEqual(text_total, all_cards[0] + host[0])
 
 
 class KindAwareFitTests(unittest.TestCase):
@@ -557,38 +605,41 @@ class KindAwareFitTests(unittest.TestCase):
 
         self.assertEqual(asked_for_4bit, whole)
 
+    ONE_CARD = (8 * 1024**3, 6 * 1024**3)
+    ALL_CARDS = (16 * 1024**3, 12 * 1024**3)
+    HOST = (64 * 1024**3, 48 * 1024**3)
+
+    def memory(self):
+        return (
+            mock.patch.object(model_runtime, "cuda_memory", return_value=self.ALL_CARDS),
+            mock.patch.object(
+                model_runtime, "cuda_device_memory", return_value=self.ONE_CARD
+            ),
+            mock.patch.object(model_runtime, "system_memory", return_value=self.HOST),
+        )
+
     def profile(self, backend):
-        card = (8 * 1024**3, 6 * 1024**3)
-        host = (64 * 1024**3, 48 * 1024**3)
-        with (
-            mock.patch.object(model_runtime, "cuda_memory", return_value=card),
-            mock.patch.object(model_runtime, "system_memory", return_value=host),
-        ):
+        cards, card, host = self.memory()
+        with cards, card, host:
             total, available, pool = model_runtime.memory_pool(backend)
-            return (
-                model_runtime.DeviceProfile(
-                    backend=backend, total=total, available=available, pool=pool
-                ),
-                card,
-                host,
-            )
+        return model_runtime.DeviceProfile(
+            backend=backend, total=total, available=available, pool=pool
+        )
 
     def test_a_pipeline_on_cuda_reads_the_tighter_of_the_two_pools(self):
-        profile, card, host = self.profile("cuda")
+        profile = self.profile("cuda")
 
-        with (
-            mock.patch.object(model_runtime, "cuda_memory", return_value=card),
-            mock.patch.object(model_runtime, "system_memory", return_value=host),
-        ):
+        cards, card, host = self.memory()
+        with cards, card, host:
             for_images = profile.for_kind(IMAGE_KIND)
 
-        self.assertEqual(profile.total, card[0] + host[0])
-        self.assertEqual(for_images.total, min(card[0], host[0]))
-        self.assertEqual(for_images.pool, "both the GPU and this machine")
+        self.assertEqual(profile.total, self.ALL_CARDS[0] + self.HOST[0])
+        self.assertEqual(for_images.total, min(self.ONE_CARD[0], self.HOST[0]))
+        self.assertEqual(for_images.pool, "both this GPU and this machine")
 
     def test_a_text_model_and_every_other_backend_read_unchanged(self):
-        cuda, _card, _host = self.profile("cuda")
-        metal, _c, _h = self.profile("mps")
+        cuda = self.profile("cuda")
+        metal = self.profile("mps")
 
         self.assertIs(cuda.for_kind(TEXT_KIND), cuda)
         # Only CUDA stages in host memory before moving across, so Metal and
@@ -747,6 +798,47 @@ class AttentionReaderTests(unittest.TestCase):
 
         numpy.testing.assert_allclose(grid[:2], numpy.zeros((2, 2, 2)), atol=1e-6)
         numpy.testing.assert_allclose(grid[2], numpy.ones((2, 2)), atol=1e-6)
+
+    def test_the_modules_own_qk_norms_are_applied(self):
+        """A module with norm_q or norm_k normalizes its projections before
+        it computes attention, and the processor this wraps does that. Maps
+        computed without them look valid and describe different
+        probabilities from the ones that drew the picture."""
+
+        from diffusers.models.attention_processor import Attention
+
+        reader = self.reader(tokens=3, size=4)
+        attn = Attention(
+            query_dim=8, cross_attention_dim=8, heads=2, dim_head=4, qk_norm="rms_norm"
+        )
+        self.assertIsNotNone(attn.norm_q)
+
+        hidden = torch.randn(1, 16, 8)
+        encoder = torch.randn(1, 5, 8)
+        with_norms = reader._probabilities(attn, hidden, encoder, torch)
+
+        # The same module with its norms taken away gives different
+        # probabilities, which is what makes skipping them a wrong answer
+        # rather than a rounding difference.
+        attn.norm_q = None
+        attn.norm_k = None
+        without = reader._probabilities(attn, hidden, encoder, torch)
+
+        self.assertFalse(torch.allclose(with_norms, without, atol=1e-4))
+
+    def test_a_norm_that_cannot_be_applied_reports_no_map(self):
+        # Reported unsupported rather than guessed at: a map that describes
+        # different probabilities is worse than no map, because the page says
+        # the token drove those pixels.
+        from diffusers.models.attention_processor import Attention
+
+        reader = self.reader(tokens=3, size=4)
+        attn = Attention(query_dim=8, cross_attention_dim=8, heads=2, dim_head=4)
+        attn.norm_q = lambda tensor: (_ for _ in ()).throw(RuntimeError("wrong shape"))
+
+        self.assertIsNone(
+            reader._probabilities(attn, torch.randn(1, 16, 8), torch.randn(1, 5, 8), torch)
+        )
 
     def test_a_query_grid_that_is_not_square_is_refused(self):
         reader = self.reader()

@@ -476,6 +476,9 @@ class AttentionReader:
             encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
         query = to_batch(attn.to_q(hidden_states))
         key = to_batch(attn.to_k(encoder_hidden_states))
+        query, key = self._normalized(attn, query, key)
+        if query is None:
+            return None
         probabilities = scores(query, key)
         heads = int(attn.heads)
         batch = probabilities.shape[0] // heads
@@ -486,6 +489,35 @@ class AttentionReader:
         # unguided batch of one is its own conditional half.
         shaped = probabilities.reshape(batch, heads, *probabilities.shape[1:])
         return shaped[-1].to("cpu", torch.float32)
+
+    @staticmethod
+    def _normalized(attn, query, key):
+        """The projections with the module's own Q/K norms applied, or ``(None, None)``.
+
+        A module configured with ``norm_q`` or ``norm_k`` normalizes its
+        projections before it computes attention, and the processor this
+        wraps does exactly that. Skipping the norms here would produce maps
+        that look valid and describe different probabilities from the ones
+        that drew the picture, which is worse than no map: the page says a
+        token drove those pixels.
+
+        Applied after ``head_to_batch_dim``, whose last axis is the head
+        dimension these norms are sized for. A norm that turns out to be
+        over something else raises rather than broadcasting quietly, and
+        such a module is reported unsupported instead of guessed at.
+        """
+
+        try:
+            norm_q = getattr(attn, "norm_q", None)
+            norm_k = getattr(attn, "norm_k", None)
+            if norm_q is not None:
+                query = norm_q(query)
+            if norm_k is not None:
+                key = norm_k(key)
+        except (RuntimeError, ValueError, TypeError):
+            logger.debug("Could not apply a module's Q/K norms", exc_info=True)
+            return None, None
+        return query, key
 
     def _grid(self, probabilities, torch):
         """One module's map, head-averaged and resampled onto the common grid.
