@@ -96,10 +96,23 @@ class Episode:
     def request_pause(self):
         self.pause_requested = True
 
-    def request_stop(self):
-        self.stop_requested = True
-        if not self.busy and self.phase not in TERMINAL:
+    def request_stop(self, save_dir=None):
+        with self.lock:
+            if self.replay_only or self.phase in TERMINAL:
+                return
+            self.stop_requested = True
+            if self.busy:
+                return  # The active stream owns cleanup and persistence.
             self.phase, self.detail = "stopped", "Stopped by you. This is not scored as model abandonment."
+            if save_dir:
+                try:
+                    self.save(save_dir)
+                except OSError as exc:
+                    self.warn_autosave(str(exc))
+
+    def warn_autosave(self, error):
+        self.detail += (f" Autosave failed: {error}. Latest changes remain in memory. "
+                        "Use Export run JSON to download them, and check the run directory or free disk space.")
 
     def request_interruption(self):
         if self.interrupted:
@@ -193,10 +206,10 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             raise ValueError("Start a new episode to run again. This episode is finished or is a saved replay.")
         manager = models.open_session()
         episode.busy = True
-    episode.pause_requested = episode.stop_requested = False
-    episode.phase = "running"
-    episode.model_id = episode.model_id or manager.model_id
-    episode.load_id = episode.load_id or manager.load_id
+        episode.pause_requested = episode.stop_requested = False
+        episode.phase = "running"
+        episode.model_id = episode.model_id or manager.model_id
+        episode.load_id = episode.load_id or manager.load_id
     turn = None
     autosave_error = None
 
@@ -282,12 +295,12 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             count = max(0, len(turn["metrics"]) - turn["forced_prefix_tokens"])
             episode.sampled_tokens += count
             turn.update(sampled_tokens=count, tokens_cumulative=episode.sampled_tokens, finish_reason=episode.phase)
-        episode.busy = False
-        manager.close()
-        autosave()
-        if autosave_error is not None:
-            episode.detail += (f" Autosave failed: {autosave_error}. Latest changes remain in memory. "
-                               "Use Export run JSON to download them, and check the run directory or free disk space.")
+        with episode.lock:
+            episode.busy = False
+            manager.close()
+            autosave()
+            if autosave_error is not None:
+                episode.warn_autosave(autosave_error)
     yield episode
 
 

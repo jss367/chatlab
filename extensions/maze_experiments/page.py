@@ -223,7 +223,7 @@ def _build_page(context):
             if kind == "pause":
                 ep.request_pause()
             elif kind == "stop":
-                ep.request_stop()
+                ep.request_stop(runs_dir(context))
             else:
                 ep.request_interruption()
         except ValueError as exc:

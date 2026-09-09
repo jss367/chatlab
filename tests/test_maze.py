@@ -1,6 +1,7 @@
 import copy
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -302,6 +303,67 @@ class MazeTests(unittest.TestCase):
         self.assertEqual(ep.sampled_tokens, 0)
         self.assertEqual(ep.turns[0]['finish_reason'], 'user_stopped')
         self.assertFalse(manager.busy)
+
+    def test_stop_at_startup_lock_handoff_is_not_cleared(self):
+        ep = Episode(MAZE, CONFIG)
+        manager = Manager([])
+        class StopOnFirstUnlock:
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.released = False
+            def __enter__(self):
+                self.lock.acquire()
+            def __exit__(self, *exc):
+                self.lock.release()
+                if not self.released:
+                    self.released = True
+                    ep.request_stop()
+        ep.lock = StopOnFirstUnlock()
+        list(stream_episode(ep, manager))
+        self.assertEqual(ep.phase, 'stopped')
+        self.assertEqual(manager.calls, [])
+        self.assertEqual(ep.turns, [])
+        self.assertFalse(manager.busy)
+
+    def test_idle_stops_persist_ready_and_paused_runs(self):
+        for paused in (False, True):
+            with self.subTest(paused=paused), tempfile.TemporaryDirectory() as directory:
+                ep = Episode(MAZE, CONFIG)
+                if paused:
+                    manager = Manager([('\n' + call_text(MAZE.maze_id, 'east'), [8, 0])])
+                    list(stream_episode(ep, manager, single_step=True, save_dir=Path(directory)))
+                before = (ep.sampled_tokens, ep.tool_attempts, ep.resumed, ep.latency)
+                ep.request_stop(Path(directory))
+                saved = json.loads((Path(directory) / f'{ep.run_id}.json').read_text())
+                self.assertEqual(saved['phase'], 'stopped')
+                self.assertEqual((ep.sampled_tokens, ep.tool_attempts, ep.resumed, ep.latency), before)
+
+    def test_idle_stop_does_not_rewrite_replays_or_finished_runs(self):
+        ep = Episode(MAZE, CONFIG)
+        ep.phase = 'paused'
+        with tempfile.TemporaryDirectory() as directory:
+            path = ep.save(Path(directory))
+            original = path.read_bytes()
+            replay = from_payload(json.loads(original))
+            replay.request_stop(Path(directory))
+            self.assertEqual(replay.phase, 'paused')
+            self.assertFalse(replay.stop_requested)
+            self.assertEqual(path.read_bytes(), original)
+        ep.phase = 'arrived'
+        with mock.patch.object(ep, 'save') as save:
+            ep.request_stop(Path('/unused'))
+        save.assert_not_called()
+        self.assertEqual(ep.phase, 'arrived')
+
+    def test_idle_stop_storage_failure_retains_stopped_state_and_export_guidance(self):
+        ep = Episode(MAZE, CONFIG)
+        with mock.patch.object(ep, 'save', side_effect=PermissionError('Archive not writable')) as save:
+            ep.request_stop(Path('/unused'))
+            ep.request_stop(Path('/unused'))
+        save.assert_called_once()
+        self.assertEqual(ep.phase, 'stopped')
+        self.assertIn('Autosave failed:', ep.detail)
+        self.assertIn('Export run JSON', ep.detail)
 
     def test_export_uses_a_private_temporary_file(self):
         ep = Episode(MAZE, CONFIG)
