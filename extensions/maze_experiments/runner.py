@@ -230,6 +230,10 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             if episode.stop_requested:
                 episode.phase, episode.detail = "stopped", "Stopped by you before the next response."
                 break
+            if episode.pause_requested:
+                episode.phase = "paused"
+                episode.detail += " Paused before the next response."
+                break
             if manager.load_id != episode.load_id:
                 raise ValueError("The model changed during this episode. Start a new episode with the selected model.")
             forced = interrupted_prefix(episode, manager)

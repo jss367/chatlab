@@ -291,6 +291,35 @@ class MazeTests(unittest.TestCase):
         self.assertEqual(len(ep.turns), 1)
         self.assertEqual(ep.sampled_tokens, 2)
 
+    def test_pause_during_response_gap_does_not_start_another_response(self):
+        for also_stop in (False, True):
+            with self.subTest(also_stop=also_stop):
+                ep = Episode(MAZE, CONFIG)
+                manager = Manager([('\n' + call_text(MAZE.maze_id, 'east'), [8, 0])])
+                def request_during_gap(_):
+                    ep.request_pause()
+                    if also_stop:
+                        ep.request_stop()
+                with mock.patch('extensions.maze_experiments.runner.time.sleep', side_effect=request_during_gap):
+                    list(stream_episode(ep, manager))
+                self.assertEqual(ep.phase, 'stopped' if also_stop else 'paused')
+                self.assertEqual(len(manager.calls), 1)
+                self.assertEqual(len(ep.turns), 1)
+                self.assertEqual(ep.sampled_tokens, 2)
+                self.assertFalse(manager.busy)
+
+    def test_pause_during_active_response_still_completes_its_move(self):
+        ep = Episode(MAZE, CONFIG)
+        manager = Manager([('\n' + call_text(MAZE.maze_id, 'east'), [8, 0])])
+        stream = stream_episode(ep, manager)
+        next(stream)
+        ep.request_pause()
+        list(stream)
+        self.assertEqual(ep.phase, 'paused')
+        self.assertEqual(ep.position, (0, 1))
+        self.assertEqual(ep.turns[0]['finish_reason'], 'stop')
+        self.assertEqual(ep.sampled_tokens, 2)
+
     def test_stop_on_opening_frame_never_invokes_generation(self):
         ep = Episode(MAZE, CONFIG)
         manager = Manager([])
