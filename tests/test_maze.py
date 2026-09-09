@@ -260,6 +260,29 @@ class MazeTests(unittest.TestCase):
             path.unlink()
             path.parent.rmdir()
 
+    def test_exporting_old_replay_does_not_overwrite_newer_completed_archive(self):
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        move = call_text(MAZE.maze_id, 'east')
+        manager = Manager([(move, [8, 0]), (move, [8, 0])])
+        with tempfile.TemporaryDirectory() as directory:
+            list(stream_episode(ep, manager, single_step=True, save_dir=Path(directory)))
+            old_snapshot = copy.deepcopy(ep.payload())
+            self.assertEqual(old_snapshot['phase'], 'paused')
+            list(stream_episode(ep, manager, save_dir=Path(directory)))
+            self.assertEqual(ep.phase, 'arrived')
+            archive = Path(directory) / f'{ep.run_id}.json'
+            completed = archive.read_bytes()
+            path = Path(export_run(from_payload(old_snapshot), Path(directory)))
+            try:
+                self.assertEqual(archive.read_bytes(), completed)
+                downloaded = json.loads(path.read_text())
+                self.assertEqual(downloaded['phase'], 'paused')
+                self.assertEqual(downloaded['run_id'], ep.run_id)
+                self.assertNotEqual(path, archive)
+            finally:
+                path.unlink()
+                path.parent.rmdir()
+
     def test_resuming_with_another_model_preserves_original_provenance(self):
         ep = Episode(MAZE, CONFIG | {"interruption_text": ""})
         manager = Manager([(call_text(MAZE.maze_id, "east"), [8, 0])])

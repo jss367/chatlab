@@ -39,10 +39,11 @@ def runs_dir(context):
 def export_run(ep, directory):
     if ep.busy:
         raise gr.Error("Pause or stop the episode before exporting. Completed responses are also autosaved.")
-    try:
-        ep.save(directory)
-    except OSError:
-        gr.Warning("The run archive could not be written. Providing a temporary download instead.")
+    if not ep.replay_only:
+        try:
+            ep.save(directory)
+        except OSError:
+            gr.Warning("The run archive could not be written. Providing a temporary download instead.")
     return str(ep.export())
 
 
