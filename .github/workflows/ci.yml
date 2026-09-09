@@ -1,0 +1,32 @@
+name: Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        # The CPU build of torch: the tests never touch a GPU, and the
+        # default wheel carries a few gigabytes of CUDA libraries with it.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements.txt ruff
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: python -m unittest discover -s tests

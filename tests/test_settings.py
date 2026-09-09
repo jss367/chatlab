@@ -93,6 +93,15 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(saved.keep_reasoning, settings.DEFAULTS.keep_reasoning)
         self.assertEqual(saved.color_scale, settings.DEFAULTS.color_scale)
 
+    def test_a_weight_precision_this_version_does_not_offer_falls_back(self):
+        self.write_file({"weight_precision": "3-bit"})
+        saved, _unknown = settings.read(self.path)
+        self.assertEqual(saved.weight_precision, "full")
+
+        self.write_file({"weight_precision": "4-bit"})
+        saved, _unknown = settings.read(self.path)
+        self.assertEqual(saved.weight_precision, "4-bit")
+
     def test_a_flag_where_a_number_belongs_falls_back_to_its_default(self):
         # True is an int in Python, so without a check it would arrive as 1
         # and be pulled up to the floor of the range, leaving an app that

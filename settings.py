@@ -55,6 +55,10 @@ PREFILL_TOKEN_LIMIT_RANGE = (256, 131072)
 # default is 1.7, well past physical memory. A null in the file means the
 # model runtime's default of 1.0; see model_runtime.mps_memory_fraction.
 MPS_MEMORY_FRACTION_RANGE = (0.1, 2.0)
+# How the weights are held in memory. "full" is the checkpoint's own
+# half-precision; the other two quantize the linear layers on the way in,
+# which Apple Metal alone supports (see model_runtime.QUANTIZED_BITS).
+WEIGHT_PRECISIONS = ("full", "8-bit", "4-bit")
 
 TEMPERATURE_RANGE = (0.0, 2.0)
 TOP_P_RANGE = (0.05, 1.0)
@@ -152,6 +156,7 @@ class Settings:
     color_scale: str = DEFAULT_COLOR_SCALE
     prefill_token_limit: int = DEFAULT_PREFILL_TOKEN_LIMIT
     mps_memory_fraction: float | None = None
+    weight_precision: str = "full"
 
     def to_mapping(self) -> dict[str, Any]:
         """The object as the JSON file spells it."""
@@ -179,6 +184,9 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
     )
     fraction = values.get("mps_memory_fraction", DEFAULTS.mps_memory_fraction)
     scale = _text(values.get("color_scale", DEFAULTS.color_scale), DEFAULTS.color_scale)
+    precision = _text(
+        values.get("weight_precision", DEFAULTS.weight_precision), DEFAULTS.weight_precision
+    )
     return Settings(
         model_id=_text(values.get("model_id", DEFAULTS.model_id), DEFAULTS.model_id)
         or DEFAULTS.model_id,
@@ -226,6 +234,9 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
             DEFAULTS.analyze_prompt,
         ),
         color_scale=scale if scale in COLOR_SCALES else DEFAULTS.color_scale,
+        weight_precision=(
+            precision if precision in WEIGHT_PRECISIONS else DEFAULTS.weight_precision
+        ),
         prefill_token_limit=prefill,
         mps_memory_fraction=(
             None

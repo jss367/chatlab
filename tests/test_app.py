@@ -478,7 +478,7 @@ class DownloadCardTests(unittest.TestCase):
                 finish.wait(5)
                 return Path("/cache/snap")
 
-            def load(self, model_id, local_path, progress=None):
+            def load(self, model_id, local_path, progress=None, precision="full"):
                 return "cpu"
 
         app.MANAGER = Manager()
@@ -567,7 +567,7 @@ class DownloadManager(FakeDownloads):
         self.downloads += 1
         return Path("/cache/models--allenai--Olmo-3-7B-Think/snapshots/abc")
 
-    def load(self, model_id, path, progress=None):
+    def load(self, model_id, path, progress=None, precision="full"):
         return "mps"
 
 
@@ -590,7 +590,7 @@ class LoadCardTests(unittest.TestCase):
         def find_cached(self, model_id):
             return Path("/cache/models--allenai--Olmo-3-7B-Think/snapshots/abc")
 
-        def load(self, model_id, path, progress=None):
+        def load(self, model_id, path, progress=None, precision="full"):
             return self._work(progress)
 
     def setUp(self):
@@ -734,7 +734,7 @@ class LoadCardTests(unittest.TestCase):
                 order.append(("claimed", model_id))
                 return super().reserve_load(model_id)
 
-            def load(self, model_id, path, progress=None):
+            def load(self, model_id, path, progress=None, precision="full"):
                 order.append(("loaded", self.loading_id))
                 return "CPU"
 
@@ -1365,7 +1365,7 @@ class DefaultModelSelectionTests(unittest.TestCase):
             yield "download progress"
             return Path("/unused/cache")
 
-        def load(model_id, path):
+        def load(model_id, path, precision="full"):
             actions.append(("load", model_id))
             yield "load progress"
             return "CPU"

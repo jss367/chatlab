@@ -1,13 +1,16 @@
 import json
 import re
 import shutil
+import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import settings
 import settings_sandbox
+import tiny_tokenizer
 from model_runtime import (
     MIN_MODEL_POSITION_LIMIT,
     MODEL_WEIGHTS,
@@ -848,24 +851,13 @@ class ContextSplitTests(unittest.TestCase):
         self.assertFalse(split.seam_verified)
 
 
-def _gpt2_or_none():
-    """The cached GPT-2 tokenizer, or ``None`` where it is not on this machine.
-
-    The vocabulary is the point: a real one where the literal
-    ``<|endoftext|>`` a reader might paste and the id a post-processor would
-    append are the same token, which is the case the fake tokenizers can only
-    assert into being.
-    """
-
-    try:
-        from transformers import AutoTokenizer
-
-        return AutoTokenizer.from_pretrained("gpt2", local_files_only=True)
-    except Exception:  # noqa: BLE001 - no tokenizer on this machine is fine
-        return None
-
-
-GPT2 = _gpt2_or_none()
+# A real byte-level vocabulary is the point of the tests below: one where the
+# literal ``<|endoftext|>`` a reader might paste and the id a post-processor
+# would append are the same token, which is the case the fake tokenizers can
+# only assert into being. It is trained on the spot rather than read out of
+# the Hugging Face cache, so the tests do not depend on what one machine has
+# downloaded.
+REAL = tiny_tokenizer.build()
 
 
 class WrappedWithoutOffsets:
@@ -900,13 +892,12 @@ class WrappedWithoutOffsets:
         return self._inner.decode(list(ids), **kwargs)
 
 
-@unittest.skipIf(GPT2 is None, "the GPT-2 tokenizer is not cached on this machine")
 class RealVocabularyTests(unittest.TestCase):
     """The all-special case with a real vocabulary behind it."""
 
     def tokenizer(self):
-        closer = [int(GPT2.eos_token_id)]
-        return WrappedWithoutOffsets(GPT2, closer, list(closer))
+        closer = [int(REAL.eos_token_id)]
+        return WrappedWithoutOffsets(REAL, closer, list(closer))
 
     def test_a_passage_of_nothing_but_specials_scores_the_pasted_one(self):
         # The reader pasted <|endoftext|> and nothing else, so the ids are
@@ -914,7 +905,7 @@ class RealVocabularyTests(unittest.TestCase):
         # the same number. The scored token is theirs, and the closer the
         # post-processor wrote is not scored.
         tokenizer = self.tokenizer()
-        eos = int(GPT2.eos_token_id)
+        eos = int(REAL.eos_token_id)
         self.assertEqual(
             tokenizer("<|endoftext|>").input_ids, [eos, eos, eos]
         )
@@ -928,7 +919,7 @@ class RealVocabularyTests(unittest.TestCase):
 
     def test_an_ordinary_appended_closer_still_comes_off(self):
         tokenizer = self.tokenizer()
-        eos = int(GPT2.eos_token_id)
+        eos = int(REAL.eos_token_id)
         context_ids, text_ids, *_ = split_context_and_text(
             tokenizer, "the cat sat on the ", "mat"
         )
@@ -938,7 +929,7 @@ class RealVocabularyTests(unittest.TestCase):
         # The token that straddles the seam carries the context's trailing
         # space with it, and is scored as part of the text, as it is
         # everywhere else.
-        self.assertEqual(GPT2.decode(text_ids), " mat")
+        self.assertEqual(REAL.decode(text_ids), " mat")
 
 
 class ScoringEncodeTests(unittest.TestCase):
@@ -1784,7 +1775,7 @@ class LoadProgressTests(unittest.TestCase):
         progress = LoadProgress()
         seen = []
 
-        def fake_load(model_id, local_path, torch, load_progress=None):
+        def fake_load(model_id, local_path, torch, load_progress=None, precision="full"):
             seen.append(load_progress)
             return "CPU"
 
@@ -1792,6 +1783,136 @@ class LoadProgressTests(unittest.TestCase):
             manager.load("org/model", Path("/snap"), progress)
 
         self.assertEqual(seen, [progress])
+
+
+class QuantizedLoadTests(unittest.TestCase):
+    """What the loader asks transformers for, per device and precision."""
+
+    def load_with(self, precision, mps: bool):
+        from model_runtime import ModelManager
+
+        manager = ModelManager()
+        calls = []
+
+        def from_pretrained(path, **kwargs):
+            calls.append(kwargs)
+            model = mock.MagicMock()
+            model.to.return_value = model
+            return model
+
+        fake_torch = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(is_available=lambda: False),
+            backends=types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: mps)),
+            float16="torch.float16",
+            float32="torch.float32",
+        )
+        transformers = types.SimpleNamespace(
+            AutoModelForCausalLM=types.SimpleNamespace(from_pretrained=from_pretrained),
+            AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda *a, **k: object()),
+            MetalConfig=lambda **kwargs: ("metal", kwargs),
+        )
+        with (
+            mock.patch.dict(sys.modules, {"transformers": transformers}),
+            mock.patch.object(manager, "_cap_mps_memory", return_value=None),
+            mock.patch.object(manager, "_check_memory", return_value=(None, None)) as check,
+            mock.patch.object(manager, "_release_device_cache"),
+            mock.patch("model_runtime.allocated_bytes", return_value=None),
+        ):
+            device = manager._load_locked("org/model", Path("/snap"), fake_torch, precision=precision)
+        return manager, device, calls, check
+
+    def test_a_quantized_load_on_metal_goes_through_the_metal_quantizer(self):
+        manager, device, calls, check = self.load_with("4-bit", mps=True)
+
+        self.assertEqual(device, "Apple Metal (MPS), 4-bit weights")
+        self.assertEqual(manager.precision, "4-bit")
+        (kwargs,) = calls
+        self.assertEqual(kwargs["device_map"], "mps")
+        self.assertEqual(kwargs["quantization_config"], ("metal", {"bits": 4, "group_size": 64}))
+        self.assertEqual(check.call_args.kwargs["bits"], 4)
+
+    def test_full_weights_on_metal_are_loaded_as_before(self):
+        manager, device, calls, check = self.load_with("full", mps=True)
+
+        self.assertEqual(device, "Apple Metal (MPS)")
+        self.assertEqual(manager.precision, "full")
+        (kwargs,) = calls
+        self.assertNotIn("quantization_config", kwargs)
+        self.assertNotIn("device_map", kwargs)
+        self.assertIsNone(check.call_args.kwargs["bits"])
+
+    def test_a_quantized_choice_off_metal_loads_full_weights_and_says_so(self):
+        with self.assertLogs("model_runtime", level="INFO") as logs:
+            manager, device, calls, check = self.load_with("8-bit", mps=False)
+
+        self.assertEqual(device, "CPU")
+        self.assertEqual(manager.precision, "full")
+        (kwargs,) = calls
+        self.assertNotIn("quantization_config", kwargs)
+        self.assertIsNone(check.call_args.kwargs["bits"])
+        self.assertTrue(any("need Apple Metal" in line for line in logs.output))
+
+    def test_a_transformers_without_the_quantizer_is_explained(self):
+        from model_runtime import ModelManager
+
+        manager = ModelManager()
+        fake_torch = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(is_available=lambda: False),
+            backends=types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True)),
+            float16="torch.float16",
+            float32="torch.float32",
+        )
+        # A 4.57-era transformers: no MetalConfig to import.
+        transformers = types.SimpleNamespace(
+            __version__="4.57.1",
+            AutoModelForCausalLM=types.SimpleNamespace(
+                from_pretrained=lambda *a, **k: self.fail("must not reach the loader")
+            ),
+            AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda *a, **k: object()),
+        )
+        with (
+            mock.patch.dict(sys.modules, {"transformers": transformers}),
+            mock.patch.object(manager, "_cap_mps_memory", return_value=None),
+            mock.patch.object(manager, "_check_memory", return_value=(None, None)),
+            mock.patch.object(manager, "_release_device_cache"),
+            mock.patch("model_runtime.allocated_bytes", return_value=None),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                manager._load_locked("org/model", Path("/snap"), fake_torch, precision="8-bit")
+        self.assertIn("transformers 5.3 or newer", str(caught.exception))
+        self.assertIn("4.57.1", str(caught.exception))
+        self.assertFalse(manager.loaded)
+
+    def test_a_missing_kernels_package_is_explained(self):
+        from model_runtime import ModelManager
+
+        manager = ModelManager()
+
+        def from_pretrained(path, **kwargs):
+            raise ImportError("Metal quantization requires kernels: `pip install kernels`")
+
+        fake_torch = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(is_available=lambda: False),
+            backends=types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True)),
+            float16="torch.float16",
+            float32="torch.float32",
+        )
+        transformers = types.SimpleNamespace(
+            AutoModelForCausalLM=types.SimpleNamespace(from_pretrained=from_pretrained),
+            AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda *a, **k: object()),
+            MetalConfig=lambda **kwargs: kwargs,
+        )
+        with (
+            mock.patch.dict(sys.modules, {"transformers": transformers}),
+            mock.patch.object(manager, "_cap_mps_memory", return_value=None),
+            mock.patch.object(manager, "_check_memory", return_value=(None, None)),
+            mock.patch.object(manager, "_release_device_cache"),
+            mock.patch("model_runtime.allocated_bytes", return_value=None),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                manager._load_locked("org/model", Path("/snap"), fake_torch, precision="4-bit")
+        self.assertIn("pip install kernels", str(caught.exception))
+        self.assertFalse(manager.loaded)
 
 
 class AllocatedBytesTests(unittest.TestCase):
@@ -1899,6 +2020,59 @@ class MemoryGuardTests(unittest.TestCase):
         # Unknown on either side: assume the file's own size.
         self.assertEqual(estimate_loaded_bytes(1000, None, "float16"), 1000)
         self.assertEqual(estimate_loaded_bytes(1000, "int4", "float16"), 1000)
+
+    def test_the_quantized_estimate_leaves_the_embeddings_whole(self):
+        from model_runtime import estimate_quantized_bytes
+
+        # 1000 half-precision parameters, 200 of them in the embeddings.
+        # 4-bit: 200 x 2 bytes + 800 x (0.5 + 4/64) bytes.
+        self.assertEqual(estimate_quantized_bytes(2000, "bfloat16", 4, 200), 400 + 450)
+        # 8-bit: 200 x 2 + 800 x (1 + 4/64).
+        self.assertEqual(estimate_quantized_bytes(2000, "bfloat16", 8, 200), 400 + 850)
+        # A float32 checkpoint is halved on the way in first.
+        self.assertEqual(estimate_quantized_bytes(4000, "float32", 4, 200), 400 + 450)
+        # Unknown embeddings: everything is quantized.
+        self.assertEqual(estimate_quantized_bytes(2000, "bfloat16", 4, None), 562)
+        # Embeddings larger than the model itself cannot be: capped.
+        self.assertEqual(estimate_quantized_bytes(2000, "bfloat16", 4, 5000), 2000)
+
+    def test_the_embedding_size_is_read_from_the_config(self):
+        from model_runtime import _embedding_params
+
+        snapshot = self._snapshot({})
+        (snapshot / "config.json").write_text(
+            json.dumps({"vocab_size": 100, "hidden_size": 8, "tie_word_embeddings": False})
+        )
+        self.assertEqual(_embedding_params(snapshot), 1600)
+        (snapshot / "config.json").write_text(
+            json.dumps({"vocab_size": 100, "hidden_size": 8, "tie_word_embeddings": True})
+        )
+        self.assertEqual(_embedding_params(snapshot), 800)
+        (snapshot / "config.json").write_text(json.dumps({"vocab_size": "many"}))
+        self.assertIsNone(_embedding_params(snapshot))
+        self.assertIsNone(_embedding_params(None))
+
+    def test_the_width_is_read_under_the_names_other_architectures_use(self):
+        from model_runtime import _embedding_params, _embedding_params_from
+
+        # GPT-2 spells it n_embd, MPT d_model. Transformers resolves both
+        # through its config classes when the file names the architecture.
+        self.assertEqual(
+            _embedding_params_from({"vocab_size": 100, "n_embd": 8, "tie_word_embeddings": True}), 800
+        )
+        self.assertEqual(_embedding_params_from({"vocab_size": 100, "d_model": 8}), 1600)
+        self.assertIsNone(_embedding_params_from({"vocab_size": 100}))
+
+        snapshot = self._snapshot({})
+        (snapshot / "config.json").write_text(
+            json.dumps({"model_type": "gpt2", "vocab_size": 100, "n_embd": 8})
+        )
+        # GPT-2 ties its embeddings by default, which the config class knows
+        # and the raw file does not say.
+        self.assertEqual(_embedding_params(snapshot), 800)
+        # A file with no architecture at all still reads under the aliases.
+        (snapshot / "config.json").write_text(json.dumps({"vocab_size": 100, "d_model": 8}))
+        self.assertEqual(_embedding_params(snapshot), 1600)
 
     def test_a_model_larger_than_the_machine_is_refused(self):
         from model_runtime import InsufficientMemoryError, check_memory_for_load

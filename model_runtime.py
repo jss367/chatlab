@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -72,6 +72,18 @@ MIN_MODEL_POSITION_LIMIT = 16
 MEMORY_HEADROOM_BYTES = 4 * 1024**3
 
 # Bytes per parameter for the dtypes a checkpoint or a load can use.
+# The bit width each quantized precision packs a linear weight into, and the
+# group of weights that share one scale and one bias. Transformers' Metal
+# quantizer does the packing on the way in and runs the fused
+# dequantize-and-multiply kernels from the Hub, so this is Apple Metal only:
+# on another device the weights are loaded whole and the choice noted.
+QUANTIZED_BITS = {"8-bit": 8, "4-bit": 4}
+QUANTIZATION_GROUP_SIZE = 64
+# The first Transformers release that ships MetalConfig. Older releases still
+# run everything else, so requirements.txt keeps its lower floor and a
+# quantized load on one of them is refused by name.
+METAL_QUANTIZATION_TRANSFORMERS = "5.3"
+
 DTYPE_BYTES = {
     "float64": 8,
     "float32": 4,
@@ -502,6 +514,30 @@ def estimate_loaded_bytes(
     return int(weight_bytes * loaded / stored)
 
 
+def estimate_quantized_bytes(
+    weight_bytes: int,
+    checkpoint_dtype: str | None,
+    bits: int,
+    embedding_params: int | None,
+    group_size: int = QUANTIZATION_GROUP_SIZE,
+) -> int:
+    """Memory the weights take once the linear layers are quantized to ``bits``.
+
+    Each packed weight costs ``bits`` and each group of ``group_size`` of them
+    a half-precision scale and bias. The embeddings and the output head are
+    left as they are, so a model whose vocabulary is a large share of its
+    parameters saves less than the bit width alone would suggest.
+    ``embedding_params`` is how many parameters those matrices hold, or
+    ``None`` to treat every parameter as quantized.
+    """
+
+    half = estimate_loaded_bytes(weight_bytes, checkpoint_dtype, "float16")
+    params = half / 2
+    embedding = min(float(embedding_params or 0), params)
+    per_param = bits / 8 + 2 * 2 / group_size
+    return int(embedding * 2 + (params - embedding) * per_param)
+
+
 def system_memory() -> tuple[int | None, int | None]:
     """Total and currently available physical memory in bytes, where known.
 
@@ -847,6 +883,63 @@ def _read_config(snapshot: Path | None) -> tuple[str | None, str | None]:
         architecture if isinstance(architecture, str) else None,
         dtype if isinstance(dtype, str) else None,
     )
+
+
+# Where a config spells its hidden width when not as ``hidden_size``: GPT-2
+# and its descendants, MPT and Falcon, Bloom. Transformers' own config classes
+# resolve these, and are asked first; the list is the fallback for a config
+# they cannot load.
+HIDDEN_SIZE_ALIASES = ("hidden_size", "n_embd", "d_model", "hidden_dim", "model_dim")
+
+
+def _embedding_params_from(config: Mapping[str, Any]) -> int | None:
+    """Parameters in the embedding and output matrices, from a config's fields, or ``None``."""
+
+    vocab = config.get("vocab_size")
+    hidden = next(
+        (config[name] for name in HIDDEN_SIZE_ALIASES if isinstance(config.get(name), int)),
+        None,
+    )
+    if not isinstance(vocab, int) or hidden is None or vocab <= 0 or hidden <= 0:
+        return None
+    tied = config.get("tie_word_embeddings", False) is True
+    return vocab * hidden * (1 if tied else 2)
+
+
+def _embedding_params(snapshot: Path | None) -> int | None:
+    """Parameters in the embedding and output matrices, or ``None`` when the config will not say.
+
+    The quantizer leaves these matrices in half precision, so the estimate a
+    quantized load is checked against needs their size. Transformers' config
+    class for the architecture is asked first, since it knows the field the
+    width is stored under; the raw file, read under the common aliases, is
+    the fallback for an architecture it cannot load.
+    """
+
+    if snapshot is None:
+        return None
+    try:
+        from transformers import AutoConfig
+
+        loaded = AutoConfig.from_pretrained(snapshot, local_files_only=True)
+        params = _embedding_params_from(
+            {
+                "vocab_size": getattr(loaded, "vocab_size", None),
+                "hidden_size": getattr(loaded, "hidden_size", None),
+                "tie_word_embeddings": getattr(loaded, "tie_word_embeddings", False),
+            }
+        )
+        if params is not None:
+            return params
+    except Exception:  # noqa: BLE001 - any failure here falls through to the file
+        pass
+    try:
+        config = json.loads((snapshot / "config.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    return _embedding_params_from(config)
 
 
 def _newest_write(folder: Path, snapshot: Path | None) -> float | None:
@@ -2207,6 +2300,33 @@ class LoadProgress:
         return LoadSnapshot(bytes_done, total, steps_done, steps_total)
 
 
+def _cache_can_crop(cache, held: int) -> bool:
+    """Whether ``cache``, holding ``held`` tokens, can be cut back and still be right.
+
+    A full-attention layer keeps every key and value, so cutting the tail off
+    leaves exactly the prefix. A sliding-window layer keeps only its last
+    ``sliding_window`` entries: once the sequence has reached the window,
+    earlier entries are gone, and no cut can bring them back for a position
+    that would have attended to them. Transformers refuses the crop outright
+    in that case. Such a cache is rebuilt from the start instead. A cache
+    that cannot say which layers slide, or how wide the window is, is not
+    trusted either.
+    """
+
+    if not hasattr(cache, "crop"):
+        return False
+    sliding = getattr(cache, "is_sliding", None) or []
+    layers = getattr(cache, "layers", None) or []
+    for index, is_sliding in enumerate(sliding):
+        if not is_sliding:
+            continue
+        layer = layers[index] if index < len(layers) else None
+        window = getattr(layer, "sliding_window", None)
+        if not isinstance(window, int) or held >= window:
+            return False
+    return True
+
+
 class ModelManager:
     """Own the single in-memory model used by the local application."""
 
@@ -2216,6 +2336,7 @@ class ModelManager:
         self.model_id: str | None = None
         self.local_path: Path | None = None
         self.device_name: str | None = None
+        self.precision: str | None = None
         # Counts successful loads, so state produced under one set of weights
         # can be told from state produced under the next even when both came
         # from the same repository ID (a re-download at a newer revision).
@@ -2273,6 +2394,9 @@ class ModelManager:
         # generation at a time.
         self._run_note: tuple[str | None, int] | None = None
         self._run_device_bytes: int | None = None
+        # The key-value cache the last inspection left behind, with the load
+        # it belongs to and the tokens it covers. See _inspect_cache_for().
+        self._inspect_cache: tuple[str, list[int], Any] | None = None
 
     @property
     def loaded(self) -> bool:
@@ -2483,12 +2607,18 @@ class ModelManager:
         )
 
     def load(
-        self, model_id: str, local_path: Path, progress: LoadProgress | None = None
+        self,
+        model_id: str,
+        local_path: Path,
+        progress: LoadProgress | None = None,
+        precision: str = "full",
     ) -> str:
         """Read ``model_id`` into memory from ``local_path``, and say where it landed.
 
         Blocks until the last weight is in; ``progress`` is how a caller on
-        another thread watches it happen.
+        another thread watches it happen. ``precision`` is one of
+        :data:`settings.WEIGHT_PRECISIONS`; a quantized choice is honoured
+        on Apple Metal and noted, then ignored, elsewhere.
         """
 
         import torch
@@ -2500,7 +2630,9 @@ class ModelManager:
         checked_id, claim = self.reserve_load(model_id)
         try:
             with self._lock, self._reading_weights(checked_id):
-                return self._load_locked(checked_id, local_path, torch, progress)
+                return self._load_locked(
+                    checked_id, local_path, torch, progress, precision=precision
+                )
         finally:
             self.release_load(claim)
 
@@ -2510,6 +2642,7 @@ class ModelManager:
         local_path: Path,
         torch,
         progress: LoadProgress | None = None,
+        precision: str = "full",
     ) -> str:
         """Bring ``model_id`` in from ``local_path`` while the caller holds ``_lock``."""
 
@@ -2517,6 +2650,7 @@ class ModelManager:
 
         progress = progress or LoadProgress()
         self._unload_locked(torch)
+        bits = QUANTIZED_BITS.get(precision)
         if torch.cuda.is_available():
             backend = "cuda"
             dtype = (
@@ -2528,6 +2662,15 @@ class ModelManager:
         else:
             backend = "cpu"
             dtype = torch.float32
+        if bits is not None and backend != "mps":
+            logger.info(
+                "Loading %s with full weights: %s weights need Apple Metal, not %s",
+                model_id,
+                precision,
+                backend,
+            )
+            bits = None
+        precision = precision if bits is not None else "full"
         # The cap goes on before the check rather than before the load, so
         # the check can refuse a model that fits the machine but not the
         # allocator's half of it. Otherwise a 25 GB checkpoint on an idle
@@ -2539,6 +2682,7 @@ class ModelManager:
             str(dtype).replace("torch.", ""),
             backend,
             ceiling=ceiling,
+            bits=bits,
         )
         # Bytes are counted only where the device keeps a total to count
         # them against; elsewhere the loader's own steps are all there is.
@@ -2557,6 +2701,45 @@ class ModelManager:
                         low_cpu_mem_usage=True,
                     )
                     device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
+                elif backend == "mps" and bits is not None:
+                    # The quantizer packs each weight as it lands, and wants
+                    # to land it on the device it will run on: a CPU stop on
+                    # the way is refused, so this is the one Metal load that
+                    # goes through device_map. The output head and the
+                    # embeddings are left in half precision, which is what
+                    # keeps the logit lens reading through the real head.
+                    try:
+                        from transformers import MetalConfig
+                    except ImportError as error:
+                        # requirements.txt admits 4.57, which predates the
+                        # quantizer; the rest of the app runs there, so the
+                        # floor stays and the choice is refused with the
+                        # version it needs rather than a bare ImportError.
+                        import transformers
+
+                        raise RuntimeError(
+                            f"{precision} weights need transformers "
+                            f"{METAL_QUANTIZATION_TRANSFORMERS} or newer; this "
+                            f"is {transformers.__version__}. Run `pip install "
+                            f"-U transformers` and load again."
+                        ) from error
+
+                    try:
+                        model = AutoModelForCausalLM.from_pretrained(
+                            local_path,
+                            local_files_only=True,
+                            dtype=dtype,
+                            device_map="mps",
+                            quantization_config=MetalConfig(
+                                bits=bits, group_size=QUANTIZATION_GROUP_SIZE
+                            ),
+                        )
+                    except ImportError as error:
+                        raise RuntimeError(
+                            f"{precision} weights need the kernels package: "
+                            f"run `pip install kernels` and load again. ({error})"
+                        ) from error
+                    device_name = f"Apple Metal (MPS), {precision} weights"
                 elif backend == "mps":
                     # Into host memory and across afterwards, rather than
                     # materialized on the device with device_map="mps". The
@@ -2584,10 +2767,11 @@ class ModelManager:
             # Before the cache goes back, so the figure is what the device was
             # holding when the load gave up rather than what survived cleanup.
             logger.warning(
-                "Load of %s as %s on %s failed: %s estimated, %s held on the "
-                "device, %s estimated available beforehand, device ceiling %s (%s)",
+                "Load of %s as %s (%s weights) on %s failed: %s estimated, %s held "
+                "on the device, %s estimated available beforehand, device ceiling %s (%s)",
                 model_id,
                 str(dtype).replace("torch.", ""),
+                precision,
                 backend,
                 memory_note(estimated),
                 memory_note(reserved_bytes(torch)),
@@ -2610,15 +2794,17 @@ class ModelManager:
         self.model_id = model_id
         self.local_path = local_path
         self.device_name = device_name
+        self.precision = precision
         self.load_count += 1
         # The one record of what a load cost. Without it a later memory
         # failure cannot be told from a leak, a second copy of the weights, or
         # a machine that was already full when the load began.
         logger.info(
-            "Loaded %s as %s on %s: %s estimated, %s held on the device, "
-            "%s estimated available beforehand, device ceiling %s",
+            "Loaded %s as %s (%s weights) on %s: %s estimated, %s held on the "
+            "device, %s estimated available beforehand, device ceiling %s",
             model_id,
             str(dtype).replace("torch.", ""),
+            precision,
             device_name,
             memory_note(estimated),
             memory_note(reserved_bytes(torch)),
@@ -2683,13 +2869,74 @@ class ModelManager:
     def _unload_locked(self, torch) -> None:
         """Clear the loaded model while the caller holds ``_lock``."""
 
+        self._inspect_cache = None
         self.model = None
         self.tokenizer = None
         self.model_id = None
         self.local_path = None
         self.device_name = None
+        self.precision = None
         gc.collect()
         self._release_device_cache(torch)
+
+    def _drop_inspect_cache(self) -> None:
+        """Forget the cache the last inspection kept, and give its memory back."""
+
+        if self._inspect_cache is None:
+            return
+        self._inspect_cache = None
+        self._release_device_cache()
+
+    def _inspect_cache_for(self, needed: list[int]):
+        """A key-value cache holding exactly ``needed``, reusing the last one where it can.
+
+        Clicking through the tokens of one response asks about the same
+        sequence again and again, and the cache the previous click built
+        covers most of the next one. The kept cache is used as it stands when
+        the tokens match, extended when the new click is further along, and
+        cut back with ``crop()`` when it is earlier. A different sequence, a
+        cache from another load, or one that cannot be cropped is thrown away
+        and rebuilt from nothing. Called under the model lock.
+        """
+
+        kept = self._inspect_cache
+        self._inspect_cache = None
+        if kept is not None:
+            load_id, ids, cache = kept
+            shared = min(len(ids), len(needed))
+            if (
+                load_id != self.load_id
+                or cache is None
+                or ids[:shared] != needed[:shared]
+                or (len(ids) > len(needed) and not _cache_can_crop(cache, len(ids)))
+            ):
+                kept = None
+
+        if kept is None:
+            self._release_device_cache()
+            ids, cache = [], None
+        else:
+            _, ids, cache = kept
+            if len(ids) > len(needed):
+                # A negative count removes that many tokens from the end. A
+                # positive one is the older "length to keep" form, which
+                # Transformers 5.x warns about and 5.18 drops.
+                cache.crop(-(len(ids) - len(needed)))
+                ids = ids[: len(needed)]
+
+        if len(ids) == len(needed):
+            return cache
+        # Collect nothing: only the cache is wanted.
+        _, cache, _ = self._prefill(
+            needed[len(ids) :],
+            segments=[""] * (len(needed) - len(ids)),
+            positions=list(range(len(ids), len(needed))),
+            score_from=len(needed),
+            collect_from=len(needed),
+            past_key_values=cache,
+            cached=len(ids),
+        )
+        return cache
 
     @staticmethod
     def _release_device_cache(torch=None) -> None:
@@ -2709,6 +2956,7 @@ class ModelManager:
         load_dtype: str,
         backend: str,
         ceiling: int | None = None,
+        bits: int | None = None,
     ) -> tuple[int | None, int | None]:
         """Refuse a load that cannot fit, before any weight is read.
 
@@ -2734,7 +2982,15 @@ class ModelManager:
         if weight_bytes is None:
             return None, None
         _architecture, checkpoint_dtype = _read_config(local_path)
-        estimated = estimate_loaded_bytes(weight_bytes, checkpoint_dtype, load_dtype)
+        if bits is None:
+            estimated = estimate_loaded_bytes(weight_bytes, checkpoint_dtype, load_dtype)
+        else:
+            # What the quantizer will leave on the device, not what the file
+            # holds: the check is against the loaded size, and a 4-bit load
+            # of a checkpoint the machine could not hold whole is the point.
+            estimated = estimate_quantized_bytes(
+                weight_bytes, checkpoint_dtype, bits, _embedding_params(local_path)
+            )
         if backend == "cuda":
             total, available = offload_pool(cuda_memory(), system_memory())
             pool = "the GPU plus this machine"
@@ -3231,6 +3487,8 @@ class ModelManager:
         score_from: int,
         collect_from: int = 0,
         sample: Callable[[np.ndarray], np.ndarray] | None = None,
+        past_key_values=None,
+        cached: int = 0,
     ):
         """Run the model over ``token_ids`` a chunk at a time.
 
@@ -3239,6 +3497,11 @@ class ModelManager:
         token except the first is measured against the distribution the model
         held one step earlier, so the same pass that warms the cache also
         explains the prompt.
+
+        ``past_key_values`` is a cache already holding ``cached`` tokens that
+        precede ``token_ids``; the pass continues from it rather than from an
+        empty one. The metrics and positions still describe ``token_ids``
+        alone.
 
         Tokens before ``collect_from`` get no metric at all, which is how a
         prompt the reader chose not to measure stays out of the results while
@@ -3257,7 +3520,6 @@ class ModelManager:
         model = self.model
         device = next(model.parameters()).device
         metrics: list[dict] = []
-        past_key_values = None
         carry: np.ndarray | None = None
         total = len(token_ids)
 
@@ -3268,7 +3530,9 @@ class ModelManager:
             )
             outputs = model(
                 input_ids=chunk,
-                attention_mask=torch.ones((1, end), dtype=torch.long, device=device),
+                attention_mask=torch.ones(
+                    (1, cached + end), dtype=torch.long, device=device
+                ),
                 past_key_values=past_key_values,
                 use_cache=True,
             )
@@ -3486,6 +3750,9 @@ class ModelManager:
                 assert self.tokenizer is not None
                 model = self.model
                 tokenizer = self.tokenizer
+                # A response is where memory runs short, so what the last
+                # inspection kept is given back before the prompt is fed.
+                self._drop_inspect_cache()
                 # Read here, under the lock, alongside the weights: this is the
                 # only place the two are guaranteed to agree, which is what makes
                 # the stamp on each update worth trusting.
@@ -3835,6 +4102,7 @@ class ModelManager:
 
             assert self.tokenizer is not None
             tokenizer = self.tokenizer
+            self._drop_inspect_cache()
             # Whitespace is worth measuring: how expected a paragraph break or
             # an indent was is a real question for a token explorer, and the
             # tokenizer turns those characters into ordinary tokens. Only a
@@ -4015,16 +4283,9 @@ class ModelManager:
             device = next(model.parameters()).device
             token_id = ids[index]
 
-            past_key_values = None
-            if index > 1:
-                # Collect nothing: only the cache is wanted.
-                _, past_key_values, _ = self._prefill(
-                    ids[: index - 1],
-                    segments=[""] * (index - 1),
-                    positions=list(range(index - 1)),
-                    score_from=index,
-                    collect_from=index,
-                )
+            # Everything before the predicting token, from the last click's
+            # cache where the sequence allows it.
+            past_key_values = self._inspect_cache_for(ids[: index - 1])
 
             with self._eager_attention():
                 outputs = model(
@@ -4096,6 +4357,12 @@ class ModelManager:
                 }
                 for position in range(index)
             ]
+            # The step above appended the predicting token, so the cache now
+            # covers the sequence through it. Kept for the next click; a
+            # response or a scoring pass takes it back (see _drop_inspect_cache).
+            produced = getattr(outputs, "past_key_values", None)
+            if produced is not None and self.load_id is not None:
+                self._inspect_cache = (self.load_id, ids[:index], produced)
             del outputs, past_key_values
             return TokenInsight(
                 index=index,

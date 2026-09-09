@@ -18,15 +18,19 @@ import gradio as gr
 from gradio.utils import get_upload_folder
 
 import charts
+import library
 import settings
 from conversation import (
     CHAT_PREFIX,
+    FORK_PREFIX,
     MAIN_BRANCH,
     THINK_CLOSE,
     branch_choices,
+    branch_stamp,
     copy_forks,
     copy_turns,
     display_messages,
+    drop_branch,
     forget_measurements,
     fork_at,
     from_json,
@@ -35,8 +39,7 @@ from conversation import (
     make_turn,
     model_messages,
     new_forks,
-    next_branch_name,
-    next_fork_name,
+    put_branch,
     split_reasoning,
     to_json,
     user_index_at_or_before,
@@ -472,11 +475,12 @@ def load_detail(
     return f"{name}\n\n`{progress_bar(shown)}` {percent}%\n\n{figures}"
 
 
-def stream_load(model_id: str, path: Path):
+def stream_load(model_id: str, path: Path, precision: str = "full"):
     """Yield a status card every half second until ``model_id`` is in memory.
 
     Returns the device it landed on, so a caller writes
     ``device = yield from stream_load(...)``. A failed load raises here.
+    ``precision`` is the weight precision chosen on the Models page.
 
     The load runs on its own thread, as a download does: ``from_pretrained``
     blocks until the last weight, and a handler that blocked with it could
@@ -488,7 +492,7 @@ def stream_load(model_id: str, path: Path):
 
     def work() -> None:
         try:
-            outcome["device"] = MANAGER.load(model_id, path, progress)
+            outcome["device"] = MANAGER.load(model_id, path, progress, precision=precision)
         except BaseException as error:
             outcome["error"] = error
         finally:
@@ -653,7 +657,9 @@ def download_model(model_id: str, hf_token: str, selected: str | None = None):
     )
 
 
-def download_and_load_model(model_id: str, hf_token: str, selected: str | None = None):
+def download_and_load_model(
+    model_id: str, hf_token: str, selected: str | None = None, precision: str = "full"
+):
     """Download and load the model explicitly selected on the Models page."""
 
     model_id = chosen_model(model_id, selected)
@@ -674,7 +680,7 @@ def download_and_load_model(model_id: str, hf_token: str, selected: str | None =
             f"{fetched} Moving `{model_id.strip()}` onto the best available device…",
             "working",
         )
-        device = yield from stream_load(model_id, path)
+        device = yield from stream_load(model_id, path, precision)
     except Exception as error:
         yield failure_card("Model setup failed", html.escape(str(error)))
         return
@@ -705,7 +711,9 @@ def incomplete_snapshot_detail(model_id: str, error: Exception) -> str:
     )
 
 
-def load_cached_model(model_id: str, selected: str | None = None):
+def load_cached_model(
+    model_id: str, selected: str | None = None, precision: str = "full"
+):
     """Load the selected model from local files, preserving any load error."""
 
     cleaned = chosen_model(model_id, selected)
@@ -759,7 +767,7 @@ def load_cached_model(model_id: str, selected: str | None = None):
     try:
         path = MANAGER.find_cached(cleaned)
         started = time.monotonic()
-        device = yield from stream_load(cleaned, path)
+        device = yield from stream_load(cleaned, path, precision)
     except IncompleteSnapshotError as error:
         yield failure_card(
             "Download unfinished", incomplete_snapshot_detail(cleaned, error)
@@ -2887,7 +2895,7 @@ def hide_clear_confirm():
     return gr.update(visible=False)
 
 
-def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
+def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE, forks: dict | None = None):
     """Empty everything the conversation owns.
 
     Clear cancels a running generation (see ``cancels`` on its listener), and a
@@ -2896,12 +2904,20 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
 
     Reached from the confirmation panel alone, which this closes on its way
     out; the Clear button itself only opens that panel.
+
+    Every branch this page knew of is marked as changed now - the main one
+    emptied, the rest deleted - so the saved file lets go of them rather than
+    handing them back on the next save. A branch another page added since
+    this one loaded was not in the question Clear asked, and is left to it.
     """
 
     strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
         scale_name
     )
+    known = copy_forks(forks)["branches"]
     forks = new_forks()
+    stamp = branch_stamp()
+    forks["updated"] = {name: stamp for name in (MAIN_BRANCH, *known)}
     return (
         [],
         [],
@@ -2939,7 +2955,7 @@ def conversation_list_update(forks: dict, turns: list[dict] | None):
 
 
 def refresh_conversation_list(turns: list[dict] | None, forks: dict | None):
-    """Redraw the list from state, for the paths that do not publish it.
+    """Redraw the list from state, and write the conversation on screen into the forks.
 
     Sending, retrying, editing, undoing and loading all write the conversation
     state without knowing about the list, and a streaming reply rewrites it on
@@ -2947,9 +2963,54 @@ def refresh_conversation_list(turns: list[dict] | None, forks: dict | None):
     thread the list through every one of those handlers, this listens to the
     state itself: Gradio fires a State's change event only when the stored
     value's hash differs, so it runs exactly when the labels could have changed.
+
+    The same moment is when the active branch has changed, so the forks are
+    handed back with the conversation on screen written into it and stamped
+    as changed now (see ``library.as_seen``). The stamp has to live in the
+    forks state, not just in the file: it is what decides, when this page
+    later puts the branch away or saves again, whether its copy or one another
+    page has saved since is the newer - so it must record when the branch
+    changed here, not when this page next happened to save it. Saving itself
+    is left to ``remember_forks`` below, which the forks' change fires, so
+    each frame is written once.
     """
 
-    return conversation_list_update(copy_forks(forks), turns)
+    seen = library.as_seen(forks, turns)
+    return conversation_list_update(seen, turns), seen
+
+
+def remember_forks(turns: list[dict] | None, forks: dict | None) -> None:
+    """Save the pane whenever the forks change. This is the one place the file is written.
+
+    The forks change on every path that matters: the listener above hands
+    them back whenever the conversation changes, and forking, starting a new
+    chat, switching, deleting and clearing write them directly - including
+    the changes that leave the conversation state's hash where it was, a
+    switch between two empty branches, say, which the listener above never
+    sees. The conversation on screen is written in once more on the way, in
+    case the forks are a frame behind it. The file is small - text and a few
+    counts per turn, no measurements - so rewriting it once per streaming
+    frame costs nothing the frame itself does not already cost.
+    """
+
+    library.write(library.as_seen(forks, turns))
+
+
+def restore_conversations():
+    """Bring the saved conversations back when the page loads.
+
+    A reload rebuilds the page from empty state, and this is what puts the
+    conversations pane and the active branch back the way they were. The
+    token panel is not restored: the measurements described one response as
+    one model produced it, and the page has no model loaded yet.
+    """
+
+    forks = library.read()
+    if forks is None:
+        return (gr.skip(),) * 4
+    turns = copy_turns(forks["branches"][forks["active"]])
+    messages, _ = display_messages(turns)
+    return messages, turns, forks, conversation_list_update(forks, turns)
 
 
 # --------------------------------------------------------------------- forks
@@ -3054,11 +3115,11 @@ def fork_conversation(
     forks = copy_forks(forks)
     turns = copy_turns(turns)
     finalize_partial(turns)
-    forks["branches"][forks["active"]] = copy_turns(turns)
+    put_branch(forks, forks["active"], turns)
     found = selected_turn(turns, selected)
     forked, box_text = fork_at(turns, found)
-    name = next_fork_name(forks)
-    forks["branches"][name] = copy_turns(forked)
+    name = library.claim_name(forks, FORK_PREFIX)
+    put_branch(forks, name, forked)
     forks["active"] = name
     messages, _ = display_messages(forked)
 
@@ -3101,7 +3162,7 @@ def switch_fork(
 
     turns = copy_turns(turns)
     finalize_partial(turns)
-    forks["branches"][forks["active"]] = turns
+    put_branch(forks, forks["active"], turns)
     forks["active"] = name
     target = copy_turns(forks["branches"][name])
     messages, _ = display_messages(target)
@@ -3134,7 +3195,7 @@ def delete_fork(
             "The main conversation cannot be deleted. Clear all empties every conversation.",
         )
 
-    del forks["branches"][name]
+    drop_branch(forks, name)
     forks["active"] = MAIN_BRANCH
     target = copy_turns(forks["branches"].setdefault(MAIN_BRANCH, []))
     messages, _ = display_messages(target)
@@ -3168,9 +3229,11 @@ def new_conversation(
     forks = copy_forks(forks)
     turns = copy_turns(turns)
     finalize_partial(turns)
-    forks["branches"][forks["active"]] = turns
-    name = next_branch_name(forks, CHAT_PREFIX)
-    forks["branches"][name] = []
+    put_branch(forks, forks["active"], turns)
+    # The names in the file count too, so a chat another page started since
+    # this one loaded is not given a twin the merge would take for it.
+    name = library.claim_name(forks, CHAT_PREFIX)
+    put_branch(forks, name, [])
     forks["active"] = name
     return (
         gr.skip(),
@@ -3937,6 +4000,18 @@ SCORE_BUDGET_QUEUE = "score-budget"
 # rewritten by the next change, so it would stay that way.
 SAMPLING_LABEL_QUEUE = "sampling-label"
 
+# One queue for everything that rewrites the forks or the conversation in one
+# step: the branch buttons, the list, Clear all, Undo, Stop, the loaders, and
+# the two listeners on the states. Gradio
+# runs events that share a concurrency id one at a time, in the order they
+# were queued, and reads a State input when the event runs rather than when
+# it was queued. So a redraw queued by a streaming frame can no longer run
+# after a click on New with the forks as they were before the click, and
+# hand that older pane back over the new one. The generation handlers stay
+# out of it: they hold their own slot for the whole reply, and the redraw
+# has to run between their frames.
+CONVERSATION_PANE_QUEUE = "conversation-pane"
+
 
 def score_token_count(context: str, text: str, use_chat_template: bool):
     """The count for the box, and the load it was counted against.
@@ -4031,6 +4106,7 @@ PERSISTED_SETTING_NAMES = (
     "color_scale",
     "enter_sends",
     "model_id",
+    "weight_precision",
 )
 
 
@@ -4537,6 +4613,22 @@ def build_app() -> gr.Blocks:
                             type="password",
                             placeholder="Only needed for gated or private models",
                         )
+                        weight_precision = gr.Radio(
+                            choices=[
+                                ("Full (16-bit)", "full"),
+                                ("8-bit", "8-bit"),
+                                ("4-bit", "4-bit"),
+                            ],
+                            value=saved.weight_precision,
+                            label="Weight precision",
+                            info=(
+                                "On Apple Metal, 8-bit and 4-bit weights take about a "
+                                "half and a quarter of the memory of full weights, at a "
+                                "small cost in accuracy; the first quantized load fetches "
+                                "the Metal kernels from the Hub. Other devices load full "
+                                "weights whatever is chosen. Applies to the next load."
+                            ),
+                        )
                         with gr.Row():
                             download_load_button = gr.Button(
                                 "Download and load", variant="primary", size="sm"
@@ -4776,12 +4868,16 @@ def build_app() -> gr.Blocks:
         )
         rescan(
             download_load_button.click(
-                download_and_load_model, [model_id, hf_token, my_models], model_status
+                download_and_load_model,
+                [model_id, hf_token, my_models, weight_precision],
+                model_status,
             )
         )
         rescan(
             cached_button.click(
-                load_cached_model, [model_id, my_models], model_status
+                load_cached_model,
+                [model_id, my_models, weight_precision],
+                model_status,
             )
         )
         rescan(unload_button.click(unload_model, outputs=model_status))
@@ -4894,7 +4990,7 @@ def build_app() -> gr.Blocks:
         chat_inputs = [prompt, conversation_state, *settings_inputs]
 
         # Everything saved between sessions, in PERSISTED_SETTING_NAMES order.
-        persisted_inputs = [*settings_inputs, enter_sends, model_id]
+        persisted_inputs = [*settings_inputs, enter_sends, model_id, weight_precision]
         for control in (
             system_prompt,
             keep_reasoning,
@@ -4908,6 +5004,7 @@ def build_app() -> gr.Blocks:
             color_scale,
             enter_sends,
             model_id,
+            weight_precision,
         ):
             control.change(remember_settings, persisted_inputs, None)
         # The seed box is the one control the app writes to itself: a finished
@@ -5010,6 +5107,7 @@ def build_app() -> gr.Blocks:
         stop_button.click(
             stop_generation,
             inputs=[conversation_state, metrics_state, context_ids_state],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
             outputs=[
                 chatbot,
                 conversation_state,
@@ -5038,12 +5136,14 @@ def build_app() -> gr.Blocks:
             [conversation_state, color_scale],
             undo_outputs,
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         chatbot.undo(
             undo_message,
             [conversation_state, color_scale],
             undo_outputs,
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         # Clear asks before it takes anything, so the button that opens the
         # question does nothing else - it neither clears nor cancels. The
@@ -5065,7 +5165,8 @@ def build_app() -> gr.Blocks:
         conversation_list.input(hide_clear_confirm, None, clear_confirm)
         confirm_clear_button.click(
             clear_chat,
-            inputs=color_scale,
+            inputs=[color_scale, forks_state],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
             outputs=[
                 chatbot,
                 conversation_state,
@@ -5118,12 +5219,14 @@ def build_app() -> gr.Blocks:
             [conversation_state, forks_state, selected_message, color_scale],
             fork_outputs,
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         new_button.click(
             new_conversation,
             [conversation_state, forks_state, color_scale],
             fork_outputs,
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         # .input rather than .change: the list is also redrawn by the handlers
         # above and the listener below, and a .change listener would switch a
@@ -5133,12 +5236,14 @@ def build_app() -> gr.Blocks:
             [conversation_list, conversation_state, forks_state, color_scale],
             fork_outputs,
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         delete_fork_button.click(
             delete_fork,
             [conversation_state, forks_state, color_scale],
             fork_outputs,
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         # Every other path that changes the conversation - a streaming reply
         # above all - lands here, and the list's model tag and token count
@@ -5146,7 +5251,29 @@ def build_app() -> gr.Blocks:
         conversation_state.change(
             refresh_conversation_list,
             [conversation_state, forks_state],
-            conversation_list,
+            [conversation_list, forks_state],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+        )
+        # And the forks' change, which the listener above fires in turn, is
+        # where the file is written - once per change, whichever path made it.
+        forks_state.change(
+            remember_forks,
+            [conversation_state, forks_state],
+            None,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+        )
+        # The saved conversations come back first, so the listeners above
+        # have something to describe. A page with nothing saved is left as
+        # it was built. Like every other path that replaces the conversation,
+        # this cancels a generation still running - the one a reload
+        # interrupted, whose frames would otherwise land on the restored
+        # transcript.
+        demo.load(
+            restore_conversations,
+            None,
+            [chatbot, conversation_state, forks_state, conversation_list],
+            cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
 
         save_button.click(
@@ -5176,6 +5303,7 @@ def build_app() -> gr.Blocks:
                 trace_state,
             ],
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
 
         score_button.click(

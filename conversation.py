@@ -25,6 +25,8 @@ guessing.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
+from datetime import datetime, timezone
 
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
@@ -241,7 +243,16 @@ def model_messages(
 
 
 def new_forks() -> dict:
-    return {"active": MAIN_BRANCH, "branches": {MAIN_BRANCH: []}}
+    """The pane with nothing in it: the empty main conversation, never yet saved.
+
+    ``updated`` holds, per branch name, when this page last changed that
+    branch, as :func:`branch_stamp` writes it. A name in it with no branch
+    under ``branches`` is one this page deleted, and when. Both are what lets
+    two pages writing the same file keep each other's work - see
+    ``library.merge``.
+    """
+
+    return {"active": MAIN_BRANCH, "branches": {MAIN_BRANCH: []}, "updated": {}}
 
 
 def copy_forks(forks: dict | None) -> dict:
@@ -252,20 +263,59 @@ def copy_forks(forks: dict | None) -> dict:
             name: copy_turns(turns) for name, turns in forks.get("branches", {}).items()
         }
         or {MAIN_BRANCH: []},
+        "updated": dict(forks.get("updated") or {}),
     }
 
 
-def next_branch_name(forks: dict, prefix: str) -> str:
-    """The first ``<prefix> N`` not already taken, so deleting one never renames another."""
+def branch_stamp() -> str:
+    """Now, as the ``updated`` entries spell it.
 
+    UTC, always with microseconds, so that two stamps compare as strings the
+    way they compare as times.
+    """
+
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def put_branch(forks: dict, name: str, turns: list[dict] | None) -> None:
+    """Store ``turns`` as branch ``name``, and stamp it if that changes what is saved.
+
+    A branch put back exactly as it was - the conversation on screen written
+    into the pane on the way to another branch, say - keeps the stamp it had,
+    so a copy of it that another page has changed since still wins.
+    """
+
+    turns = copy_turns(turns)
+    before = forks["branches"].get(name)
+    if before is None or turn_entries(before) != turn_entries(turns):
+        forks["updated"][name] = branch_stamp()
+    forks["branches"][name] = turns
+
+
+def drop_branch(forks: dict, name: str) -> None:
+    """Remove branch ``name`` and record when, so no other page's copy brings it back."""
+
+    del forks["branches"][name]
+    forks["updated"][name] = branch_stamp()
+
+
+def next_branch_name(forks: dict, prefix: str, taken: Iterable[str] = ()) -> str:
+    """The first ``<prefix> N`` not already taken, so deleting one never renames another.
+
+    ``taken`` is further names to step over - those the saved file has spoken
+    for, as ``library.taken_names`` lists them - so a branch another page
+    started since this one loaded is not given a twin.
+    """
+
+    used = set(forks["branches"]) | set(taken)
     number = 1
-    while f"{prefix} {number}" in forks["branches"]:
+    while f"{prefix} {number}" in used:
         number += 1
     return f"{prefix} {number}"
 
 
-def next_fork_name(forks: dict) -> str:
-    return next_branch_name(forks, FORK_PREFIX)
+def next_fork_name(forks: dict, taken: Iterable[str] = ()) -> str:
+    return next_branch_name(forks, FORK_PREFIX, taken)
 
 
 def fork_at(
@@ -431,7 +481,9 @@ def branch_choices(forks: dict | None, turns: list[dict] | None) -> list[tuple[s
 # --------------------------------------------------------------- save / load
 
 
-def to_json(turns: list[dict] | None, *, system_prompt: str = "") -> str:
+def turn_entries(turns: list[dict] | None) -> list[dict]:
+    """The turns as a file spells them: text, reasoning and the counts behind a reply."""
+
     entries = []
     for turn in turns or []:
         entry = {
@@ -445,24 +497,12 @@ def to_json(turns: list[dict] | None, *, system_prompt: str = "") -> str:
             if isinstance(value, kind) and not isinstance(value, bool):
                 entry[key] = value
         entries.append(entry)
-    payload = {
-        "format": SAVE_FORMAT,
-        "system_prompt": system_prompt or "",
-        "turns": entries,
-    }
-    return json.dumps(payload, indent=2, ensure_ascii=False)
+    return entries
 
 
-def from_json(payload: str) -> tuple[list[dict], str]:
-    try:
-        data = json.loads(payload)
-    except json.JSONDecodeError as error:
-        raise ValueError(f"That file is not valid JSON: {error}") from error
+def turns_from_entries(raw_turns) -> list[dict]:
+    """Turns read back from :func:`turn_entries`, or ``ValueError`` for anything else."""
 
-    if not isinstance(data, dict) or data.get("format") != SAVE_FORMAT:
-        raise ValueError(f"Expected a {SAVE_FORMAT} file saved by this app.")
-
-    raw_turns = data.get("turns")
     if not isinstance(raw_turns, list):
         raise ValueError("The saved file has no list of turns.")
 
@@ -488,6 +528,28 @@ def from_json(payload: str) -> tuple[list[dict], str]:
                 raise ValueError(f"Turn {key} cannot be negative.")
             turn[key] = value
         turns.append(turn)
+    return turns
+
+
+def to_json(turns: list[dict] | None, *, system_prompt: str = "") -> str:
+    payload = {
+        "format": SAVE_FORMAT,
+        "system_prompt": system_prompt or "",
+        "turns": turn_entries(turns),
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def from_json(payload: str) -> tuple[list[dict], str]:
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"That file is not valid JSON: {error}") from error
+
+    if not isinstance(data, dict) or data.get("format") != SAVE_FORMAT:
+        raise ValueError(f"Expected a {SAVE_FORMAT} file saved by this app.")
+
+    turns = turns_from_entries(data.get("turns"))
 
     system_prompt = data.get("system_prompt", "")
     if not isinstance(system_prompt, str):

@@ -8,6 +8,7 @@ import torch
 import model_runtime
 import settings
 import settings_sandbox
+import tiny_tokenizer
 from conversation import split_reasoning
 from model_runtime import IncrementalDecoder, ModelChanged, ModelManager
 
@@ -256,14 +257,9 @@ class IncrementalDecoderTests(unittest.TestCase):
         self.assert_matches_full_decode(list(range(200)), tokenizer=tokenizer)
 
     def test_a_real_byte_level_tokenizer_round_trips(self):
-        """The same invariant against GPT-2 BPE, when it is in the local cache."""
+        """The same invariant against a real byte-level BPE vocabulary."""
 
-        try:
-            from transformers import AutoTokenizer
-
-            tokenizer = AutoTokenizer.from_pretrained("gpt2", local_files_only=True)
-        except (ImportError, OSError, ValueError) as error:  # pragma: no cover
-            self.skipTest(f"gpt2 is not cached locally: {error}")
+        tokenizer = tiny_tokenizer.build()
 
         text = "\U0001f3b2\U0001f9e0\U0001f501\u21a9\ufe0f\U0001f4be\U0001f4c2" * 8
         token_ids = tokenizer.encode(text)
@@ -302,6 +298,14 @@ class GenerateStreamingTests(unittest.TestCase):
         for update in manager.generate([{"role": "user", "content": "hi"}], **options):
             updates.append((update.text, len(update.metrics)))
         return updates
+
+    def test_a_response_gives_back_what_the_last_inspection_kept(self):
+        manager = loaded_manager([0, 1, EOS_ID])
+        manager._inspect_cache = (manager.load_id, [0, 1], object())
+
+        self.collect(manager)
+
+        self.assertIsNone(manager._inspect_cache)
 
     def test_a_forced_prefix_from_an_earlier_load_is_refused_before_any_token(self):
         manager = loaded_manager([0, 1, 2, EOS_ID])

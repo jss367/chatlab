@@ -361,7 +361,7 @@ class LoadingIdTests(unittest.TestCase):
         manager = ModelManager()
         seen = []
 
-        def fake_load(model_id, local_path, torch, progress=None):
+        def fake_load(model_id, local_path, torch, progress=None, precision="full"):
             seen.append((manager.loading_id, manager._lock.locked()))
             return "CPU"
 
@@ -374,13 +374,12 @@ class LoadingIdTests(unittest.TestCase):
     def test_a_load_waiting_for_the_lock_is_already_named(self):
         # A generation holds the lock for as long as its reply takes; the
         # load queued behind it must count as under way from the click.
-        import threading
 
         manager = ModelManager()
         manager._lock.acquire()
         entered = threading.Event()
 
-        def fake_load(model_id, local_path, torch, progress=None):
+        def fake_load(model_id, local_path, torch, progress=None, precision="full"):
             entered.set()
             return "CPU"
 
@@ -404,7 +403,7 @@ class LoadingIdTests(unittest.TestCase):
     def test_a_failed_load_clears_the_loading_id(self):
         manager = ModelManager()
 
-        def fail(model_id, local_path, torch, progress=None):
+        def fail(model_id, local_path, torch, progress=None, precision="full"):
             raise RuntimeError("gpu fell over")
 
         with mock.patch.object(manager, "_load_locked", fail):
@@ -471,7 +470,6 @@ class LoadingIdTests(unittest.TestCase):
         # must leave the other's name in place: otherwise the chat badge
         # goes back to "No model loaded" halfway through a load, and offers
         # the reader a button to start one more.
-        import threading
 
         manager = ModelManager()
         second = "org/second"
@@ -480,7 +478,7 @@ class LoadingIdTests(unittest.TestCase):
         let_first_finish = threading.Event()
         let_second_finish = threading.Event()
 
-        def fake_load(model_id, local_path, torch, progress=None):
+        def fake_load(model_id, local_path, torch, progress=None, precision="full"):
             if model_id == OLMO:
                 in_first.set()
                 let_first_finish.wait(5)
@@ -535,13 +533,12 @@ class LoadingIdTests(unittest.TestCase):
         # be the order the lock is handed out in: a thread can be set aside
         # between the two steps. The badge has to name the load that is
         # really reading weights, not the one that claimed last.
-        import threading
 
         manager = ModelManager()
         reading = threading.Event()
         let_it_finish = threading.Event()
 
-        def fake_load(model_id, local_path, torch, progress=None):
+        def fake_load(model_id, local_path, torch, progress=None, precision="full"):
             reading.set()
             let_it_finish.wait(5)
             return "CPU"
@@ -1978,7 +1975,7 @@ class SavedSettingsTests(unittest.TestCase):
 
     def test_saving_a_setting_writes_the_file(self):
         self.build_with()
-        values = dict(zip(app.PERSISTED_SETTING_NAMES, [None] * 13))
+        values = dict(zip(app.PERSISTED_SETTING_NAMES, [None] * len(app.PERSISTED_SETTING_NAMES)))
         values.update(settings.current().to_mapping())
         values["temperature"] = 0.1
         app.remember_settings(
@@ -2096,6 +2093,7 @@ class SavedSettingsTests(unittest.TestCase):
                         "Color tokens by",
                         "Enter sends the message",
                         "Hugging Face model ID",
+                        "Weight precision",
                     ]
                 ),
                 self.labelled("Context limit (tokens)"),
