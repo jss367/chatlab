@@ -2874,7 +2874,11 @@ class HubSearchTests(unittest.TestCase):
 
         self.assertEqual([result.model_id for result in found], ["google/gemma-4-E4B-it"])
 
-    def test_an_architecture_answers_for_a_config_with_no_model_type(self):
+    def test_a_config_without_a_model_type_is_left_out(self):
+        # AutoConfig resolves by model_type, not by the architectures a config
+        # lists beside it, so a mapped class name there is not a promise the
+        # load path can keep: it would place the repository nowhere and fail
+        # after the whole snapshot had come down.
         self.found = [
             hub_result(
                 "org/no-model-type",
@@ -2884,9 +2888,7 @@ class HubSearchTests(unittest.TestCase):
             hub_result("org/no-config-at-all", "text-generation", config=None),
         ]
 
-        found = search_hub_models("org")
-
-        self.assertEqual([result.model_id for result in found], ["org/no-model-type"])
+        self.assertEqual(search_hub_models("org"), [])
 
     def test_the_hub_is_not_asked_to_do_the_filtering(self):
         # The tags are checked here, so asking the hub for one pipeline tag
@@ -2957,19 +2959,27 @@ class HubSearchTests(unittest.TestCase):
     def test_a_repository_shipping_both_formats_is_kept(self):
         # The GGUF files sit beside a Transformers checkpoint that loads, so
         # the repository is not a dead end. judge_snapshot agrees: a snapshot
-        # is only unsupported where it holds no Transformers checkpoint.
+        # is only unsupported where it holds no Transformers checkpoint. Both
+        # of the formats in WEIGHT_FORMATS count, safetensors and the older
+        # pytorch_model.bin alike.
         self.found = [
             hub_result(
                 "org/model-with-a-gguf-folder",
                 "text-generation",
                 tags=["transformers", "safetensors", "gguf"],
-            )
+            ),
+            hub_result(
+                "org/model-from-before-safetensors",
+                "text-generation",
+                tags=["transformers", "pytorch", "gguf"],
+            ),
         ]
 
         found = search_hub_models("model")
 
         self.assertEqual(
-            [result.model_id for result in found], ["org/model-with-a-gguf-folder"]
+            [result.model_id for result in found],
+            ["org/model-with-a-gguf-folder", "org/model-from-before-safetensors"],
         )
 
     def test_matches_below_the_rejected_ones_still_fill_the_list(self):

@@ -1168,9 +1168,10 @@ SEARCH_FOREIGN_TAGS = frozenset({"mlx"})
 # both a Transformers checkpoint and a GGUF conversion of it loads here, and
 # judge_snapshot reaches that same verdict from the files on disk. Offering a
 # GGUF-only repository would download the whole snapshot for a load that
-# cannot happen.
+# cannot happen. The native tags are the two in WEIGHT_FORMATS - a repository
+# whose checkpoint predates safetensors is still one from_pretrained reads.
 SEARCH_FOREIGN_FORMAT_TAGS = frozenset({"gguf", "onnx", "tflite", "coreml", "keras"})
-SEARCH_NATIVE_TAG = "safetensors"
+SEARCH_NATIVE_TAGS = frozenset({"safetensors", "pytorch"})
 
 # How many of the hub's answers to read while filling the list. The checks
 # above are made here rather than by the hub, so the results are read a page
@@ -1186,7 +1187,7 @@ def foreign_to_transformers(tags: Iterable[str]) -> bool:
     tags = set(tags)
     if not SEARCH_FOREIGN_TAGS.isdisjoint(tags):
         return True
-    if SEARCH_NATIVE_TAG in tags:
+    if not SEARCH_NATIVE_TAGS.isdisjoint(tags):
         return False
     return not SEARCH_FOREIGN_FORMAT_TAGS.isdisjoint(tags)
 
@@ -1206,25 +1207,25 @@ def causal_lm_model_types() -> Mapping[str, str]:
 
 
 def loads_as_a_causal_lm(config: Mapping | None, model_types: Mapping[str, str]) -> bool:
-    """Whether ``AutoModelForCausalLM`` has a class for the architecture ``config`` names.
+    """Whether ``AutoModelForCausalLM`` has a class for the ``model_type`` in ``config``.
 
     A pipeline tag says what a model does, not which auto class loads it.
     LLaVA, BLIP-2, PaliGemma, Idefics and the Qwen-VL models all sit under
     "image-text-to-text" beside Gemma 4, but only Gemma 4 is in this map:
     the rest need their own auto class, and would download in full and then
-    fail in :meth:`ModelManager._load_locked`. ``model_type`` is the field
-    ``from_pretrained`` looks itself up by, so this is the same verdict it
-    will reach once the files are on disk, reached before the download. A
-    repository whose config the hub does not carry is left out for the reason
-    an untagged one is: nothing about it says it would load.
+    fail in :meth:`ModelManager._load_locked`.
+
+    ``model_type`` is the one field asked about, because it is the one
+    ``AutoConfig`` resolves by. The ``architectures`` a config also lists name
+    the classes it was saved from, and reading a mapped name there as a yes
+    would pass a repository ``AutoConfig`` cannot place at all. A config
+    without a ``model_type``, or one the hub does not carry, is left out for
+    the reason an untagged repository is: nothing about it says it would load.
     """
 
     if not config:
         return False
-    if config.get("model_type") in model_types:
-        return True
-    classes = set(model_types.values())
-    return any(name in classes for name in config.get("architectures") or ())
+    return config.get("model_type") in model_types
 
 
 @dataclass(frozen=True)
@@ -1253,7 +1254,7 @@ def search_hub_models(
     pipeline tag is in :data:`SEARCH_PIPELINE_TAGS` - a model that writes
     text, whatever else it can read - less the conversions to another runtime
     that :func:`foreign_to_transformers` recognises, and less those whose
-    architecture :func:`loads_as_a_causal_lm` does not accept. A repository
+    ``model_type`` :func:`loads_as_a_causal_lm` does not accept. A repository
     the hub has no tag or config for is left out rather than guessed at; its
     ID can still be typed into the model ID box. Sorted by recent downloads.
 
