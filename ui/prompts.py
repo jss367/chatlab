@@ -286,7 +286,13 @@ def _run_batch(
 
     directory = batch_directory()
     table = BatchTable(directory)
-    traces: list[dict] = []
+    # Counted rather than collected. What a batch measures is the largest
+    # thing it produces, and a run that held every token of every prompt
+    # until it ended would take that memory from the model it is running on.
+    # The traces are on disk as they are made; what the status line needs of
+    # them is two numbers.
+    kept_traces = 0
+    kept_tokens = 0
     rows: list[list] = []
     trace_paths: list[str] = []
     paths: list[str] = []
@@ -337,7 +343,7 @@ def _run_batch(
             already inside GeneratorExit and a yield there is an error.
             """
 
-            nonlocal kept
+            nonlocal kept, kept_traces, kept_tokens
             if kept or not metrics:
                 return
             kept = True
@@ -362,25 +368,25 @@ def _run_batch(
                 # did not say so would be read as a finished response and put
                 # a truncated answer in an experiment beside whole ones.
                 sampling["stopped"] = True
-            traces.append(
-                build_trace(
-                    model_id=model_id,
-                    messages=request,
-                    response=text,
-                    sampling=sampling,
-                    metrics=metrics,
-                )
+            trace = build_trace(
+                model_id=model_id,
+                messages=request,
+                response=text,
+                sampling=sampling,
+                metrics=metrics,
             )
+            kept_traces += 1
+            kept_tokens += trace["token_count"]
             # Numbered by where the prompt sits in the box, not by how many
             # traces came before it. A prompt that failed produces no trace,
             # and numbering by the count would hand its name and its row
             # number to the next prompt that worked, filing one prompt's
             # measurements under another's.
-            trace_paths.append(write_batch_trace(traces[-1], directory, index))
+            trace_paths.append(write_batch_trace(trace, directory, index))
             # The files are written as the run goes, so stopping half way
             # through still leaves every prompt that produced tokens on disk.
             # The table takes this prompt's rows for the same reason.
-            paths[:] = [*trace_paths, table.add(traces[-1], index)]
+            paths[:] = [*trace_paths, table.add(trace, index)]
 
         try:
             stream = runtime.MANAGER.generate(
@@ -494,7 +500,7 @@ def _run_batch(
             gr.skip(),
         )
     elapsed = max(time.monotonic() - started, 1e-6)
-    tokens = sum(trace["token_count"] for trace in traces)
+    tokens = kept_tokens
     # Counted from the rows rather than from ``total``, because a run that
     # stopped at a model change never reached the prompts after it.
     done = len(rows) - failures
@@ -502,8 +508,8 @@ def _run_batch(
         f"Ran {done} of {total} prompt{'' if total == 1 else 's'} · "
         f"{tokens:,} tokens · {elapsed:.1f}s"
     )
-    if traces:
-        status = f"{status} · {len(traces)} trace files and one table ready."
+    if kept_traces:
+        status = f"{status} · {kept_traces} trace files and one table ready."
     if changed_at is not None:
         status = f"{status}\n\n" + failure_status(
             BATCH_MODEL_CHANGED,

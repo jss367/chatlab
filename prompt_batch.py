@@ -119,6 +119,18 @@ def parse_prompt_file(path) -> list[str]:
     return parse_prompts(raw)
 
 
+def batch_trace_path(directory: Path, index: int) -> Path:
+    """Where the trace for the prompt at ``index`` is written."""
+
+    return Path(directory) / f"prompt-{index:03d}.json"
+
+
+def read_batch_trace(directory: Path, index: int) -> dict:
+    """Read back a trace this run wrote."""
+
+    return json.loads(batch_trace_path(directory, index).read_text(encoding="utf-8"))
+
+
 def write_batch_trace(trace: dict, directory: Path, index: int) -> str:
     """Write one prompt's trace, named for its place in the run.
 
@@ -127,7 +139,7 @@ def write_batch_trace(trace: dict, directory: Path, index: int) -> str:
     letting the next one take its name.
     """
 
-    path = Path(directory) / f"prompt-{index:03d}.json"
+    path = batch_trace_path(directory, index)
     write_private_text(path, trace_to_json(trace))
     return str(path)
 
@@ -162,27 +174,39 @@ class BatchTable:
     The exception is the candidate columns. Their number is the header's, and
     a prompt whose tokens carry more alternatives than the header holds cannot
     be appended without the rows disagreeing with it, so that prompt widens
-    the table and the file is written again. Top-k is usually one setting for
-    a whole run, so this is rare, and after it the appending resumes.
+    the table and the file is written again. Every token a run measures
+    carries the same number of alternatives, so this is close to unreachable
+    in practice, and the rewrite reads the traces back from the run's own
+    files rather than keeping them. What a batch measures is the largest
+    thing it produces - thousands of tokens a prompt, each with its
+    alternatives - and holding all of it until the run ends would take
+    hundreds of megabytes from the machine the model is running on.
+
+    The prompt numbers are kept, since they are what the rows are written
+    under and cost nothing.
     """
 
     def __init__(self, directory: Path):
-        self.path = Path(directory) / BATCH_CSV_NAME
-        self.traces: list[dict] = []
+        self.directory = Path(directory)
+        self.path = self.directory / BATCH_CSV_NAME
         self.indexes: list[int] = []
         self.width = 0
 
     def add(self, trace: dict, index: int) -> str:
-        """Put one prompt's tokens in the table, and return where it is."""
+        """Put one prompt's tokens in the table, and return where it is.
 
-        self.traces.append(trace)
+        The prompt's own trace file must already be written: a rewrite reads
+        every prompt back from those files, this one included.
+        """
+
         self.indexes.append(int(index))
         width = candidate_width([trace])
-        if width > self.width or len(self.traces) == 1:
+        if width > self.width or len(self.indexes) == 1:
             self.width = max(width, self.width)
+            traces = [read_batch_trace(self.directory, number) for number in self.indexes]
             write_private_text(
                 self.path,
-                traces_to_csv(self.traces, self.indexes, width=self.width),
+                traces_to_csv(traces, self.indexes, width=self.width),
                 newline="",
             )
         else:
