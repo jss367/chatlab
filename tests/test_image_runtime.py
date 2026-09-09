@@ -1,8 +1,10 @@
 """Recognizing, sizing and running a diffusers pipeline."""
 
 import json
+import sys
 import tempfile
 import threading
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1003,13 +1005,18 @@ class ManagerImageRunTests(unittest.TestCase):
 
 
 class PipelineLoaderTests(unittest.TestCase):
-    """What the loader asks diffusers for, and what it refuses to ask."""
+    """What the loader asks diffusers for, and what it refuses to ask.
 
-    def test_a_quantized_precision_is_noted_and_not_applied_to_a_pipeline(self):
-        """The Metal quantizer is Transformers' own, and a pipeline is
-        several models of which only some are Transformers ones."""
+    Driven through ``_load_locked`` with a stand-in torch, the way the
+    quantized text-load tests are: patching the real ``torch.backends.mps``
+    to claim a Metal machine leaves ``_release_device_cache`` calling
+    ``torch.mps.empty_cache()`` on a runner that has no MPS backend, which
+    raises. A namespace that says what the branch under test needs, and
+    nothing else, does not depend on the host at all.
+    """
 
-        import model_runtime
+    def load_pipeline(self, precision: str = "full", mps: bool = True):
+        """Read a pipeline through the loader; return the manager and the kwargs."""
 
         manager = ModelManager()
         calls = []
@@ -1018,34 +1025,55 @@ class PipelineLoaderTests(unittest.TestCase):
             calls.append(kwargs)
             return FakePipeline()
 
-        pipeline_module = type("DiffusionPipeline", (), {"from_pretrained": from_pretrained})
-        fake_diffusers = type("diffusers", (), {"DiffusionPipeline": pipeline_module})
-
-        with (
-            mock.patch.dict("sys.modules", {"diffusers": fake_diffusers}),
-            mock.patch.object(model_runtime, "weight_bytes_for", return_value=10),
-            # A machine with room, so the check under test is the precision
-            # rather than whoever's laptop is running the suite.
-            mock.patch.object(
-                model_runtime, "system_memory", return_value=(64 * 1024**3, 32 * 1024**3)
+        fake_torch = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(is_available=lambda: False),
+            backends=types.SimpleNamespace(
+                mps=types.SimpleNamespace(is_available=lambda: mps)
             ),
-            mock.patch.object(torch.cuda, "is_available", return_value=False),
-            mock.patch.object(torch.backends.mps, "is_available", return_value=True),
-            mock.patch.object(ModelManager, "_cap_mps_memory", return_value=None),
+            float16="torch.float16",
+            float32="torch.float32",
+        )
+        fake_diffusers = types.SimpleNamespace(
+            DiffusionPipeline=types.SimpleNamespace(from_pretrained=from_pretrained)
+        )
+        with (
+            mock.patch.dict(sys.modules, {"diffusers": fake_diffusers}),
+            mock.patch.object(manager, "_cap_mps_memory", return_value=None),
+            mock.patch.object(manager, "_check_memory", return_value=(None, None)) as check,
+            mock.patch.object(manager, "_release_device_cache"),
+            mock.patch("model_runtime.allocated_bytes", return_value=None),
         ):
-            manager.load(
-                "org/pipe", Path("/snap"), precision="4-bit", kind=IMAGE_KIND
+            device = manager._load_locked(
+                "org/pipe", Path("/snap"), fake_torch, precision=precision, kind=IMAGE_KIND
             )
+        return manager, device, calls, check
+
+    def test_a_quantized_precision_is_noted_and_not_applied_to_a_pipeline(self):
+        """The Metal quantizer is Transformers' own, and a pipeline is
+        several models of which only some are Transformers ones."""
+
+        manager, device, calls, check = self.load_pipeline(precision="4-bit")
 
         self.assertEqual(manager.kind, IMAGE_KIND)
         self.assertEqual(manager.precision, "full")
         self.assertNotIn("quantization_config", calls[0])
-        self.assertEqual(calls[0]["torch_dtype"], torch.float16)
+        self.assertEqual(calls[0]["torch_dtype"], "torch.float16")
         self.assertTrue(calls[0]["local_files_only"])
         self.assertTrue(manager.image_loaded)
         self.assertFalse(manager.loaded)
         self.assertEqual(manager.pipeline.device, "mps")
-        self.assertEqual(manager.device_name, "Apple Metal (MPS)")
+        self.assertEqual(device, "Apple Metal (MPS)")
+        # And the check was told which kind it was sizing.
+        self.assertEqual(check.call_args.kwargs["kind"], IMAGE_KIND)
+        self.assertIsNone(check.call_args.kwargs["bits"])
+
+    def test_a_pipeline_on_the_cpu_is_read_as_float32_and_stays_there(self):
+        manager, device, calls, _check = self.load_pipeline(mps=False)
+
+        self.assertEqual(calls[0]["torch_dtype"], "torch.float32")
+        self.assertEqual(device, "CPU")
+        # Nothing to move onto, so .to() is never called.
+        self.assertEqual(manager.pipeline.device, "cpu")
 
 
 class TokenizerTests(unittest.TestCase):
