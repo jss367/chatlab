@@ -1066,6 +1066,21 @@ def allocated_bytes(backend: str, torch=None) -> int | None:
     return None
 
 
+def _smaller_known(left: tuple[int | None, int | None], right: tuple[int | None, int | None]):
+    """The tighter of two memory pools, field by field.
+
+    For a load that has to fit in both of two pools independently rather
+    than in their sum: whichever is smaller is the one that will refuse it.
+    A pool whose size could not be read does not constrain anything, so the
+    other one stands.
+    """
+
+    return tuple(
+        one if other is None else other if one is None else min(one, other)
+        for one, other in zip(left, right)
+    )
+
+
 def _sum_known(*figures: int | None) -> int | None:
     known = [figure for figure in figures if figure is not None]
     return sum(known) if known else None
@@ -3629,12 +3644,15 @@ class ModelManager:
         ``device_map="auto"`` places the rest on the CPU, so the cards plus
         the machine's memory is what must fit; on Metal the GPU shares the
         machine's memory, and on the CPU it is the machine's memory outright.
-        An image pipeline is the exception: it is moved onto the card whole,
-        with nothing offloaded, so on CUDA it is checked against the card
-        alone. Judging it against the combined pool would pass a pipeline
-        that fits host memory and then fail inside ``.to("cuda")``. A
-        snapshot whose weights cannot be measured is let through: the loader
-        will give its own, more specific error.
+        An image pipeline is the exception: it is read into host memory and
+        moved onto the card whole, with nothing offloaded, so on CUDA it has
+        to fit the card *and* the machine, each on its own rather than added
+        together. The combined pool would pass a pipeline that fits host
+        memory and then fail inside ``.to("cuda")``; the card alone would
+        pass one that fits the card and exhausts the machine while
+        ``from_pretrained`` is still staging it. A snapshot whose weights
+        cannot be measured is let through: the loader will give its own, more
+        specific error.
 
         ``ceiling`` is what the device's own allocator will hand out, which on
         Metal is less than the machine holds. Whichever of the two is smaller
@@ -3669,9 +3687,10 @@ class ModelManager:
                 weight_bytes, checkpoint_dtype, bits, _embedding_params(local_path)
             )
         if backend == "cuda" and kind == IMAGE_KIND:
-            # The whole pipeline goes onto the card; nothing is offloaded.
-            total, available = cuda_memory()
-            pool = "the GPU"
+            # Staged in host memory and then moved onto the card whole, so
+            # both pools have to hold it and the tighter one decides.
+            total, available = _smaller_known(cuda_memory(), system_memory())
+            pool = "both the GPU and this machine"
         elif backend == "cuda":
             total, available = offload_pool(cuda_memory(), system_memory())
             pool = "the GPU plus this machine"

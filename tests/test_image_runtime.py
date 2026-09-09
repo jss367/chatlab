@@ -414,10 +414,12 @@ class PipelineDtypeTests(unittest.TestCase):
 
         self.assertAlmostEqual(estimated / stored, 2.0, places=1)
 
-    def test_a_pipeline_on_cuda_is_checked_against_the_card_alone(self):
-        """It is moved onto the card whole, with nothing offloaded, so the
-        combined pool would pass a pipeline that fits host memory and then
-        fail inside .to("cuda")."""
+    def test_a_pipeline_on_cuda_has_to_fit_the_card_and_the_machine(self):
+        """It is staged in host memory and then moved onto the card whole,
+        with nothing offloaded. The combined pool would pass one that fits
+        host memory and then fail inside .to("cuda"); the card alone would
+        pass one that exhausts the machine while from_pretrained stages it.
+        So both pools have to hold it and the tighter one decides."""
 
         import torch
         from safetensors.torch import save_file
@@ -449,10 +451,12 @@ class PipelineDtypeTests(unittest.TestCase):
                 )
                 text_total = checked.call_args.args[2]
 
-        self.assertEqual(image_pool, "the GPU")
-        self.assertEqual(image_total, card[0])
+        self.assertEqual(image_pool, "both the GPU and this machine")
+        # The tighter of the two, which here is the card - not their sum.
+        self.assertEqual(image_total, min(card[0], host[0]))
+        self.assertLess(image_total, card[0] + host[0])
         # A text model does still get the offload pool it really uses.
-        self.assertGreater(text_total, card[0])
+        self.assertEqual(text_total, card[0] + host[0])
 
 
 class PreviewTests(unittest.TestCase):
@@ -1026,6 +1030,27 @@ class ManagerImageRunTests(unittest.TestCase):
         self.assertIsNone(manager.kind)
         self.assertFalse(manager.in_memory)
         self.assertIsNone(manager.load_id)
+
+    def test_a_stop_keeps_the_step_it_was_pressed_during(self):
+        """Stop promises to end the run after the step it is on. The
+        pipeline calls the step-end callback after a step has run, so
+        raising before the reading was taken threw that step's frame and
+        maps away and reported the run one step shorter than it got."""
+
+        manager = self.loaded()
+        # The watcher runs after the callback, so the cancellation is seen
+        # at the end of the *next* step - the one it was pressed during.
+        manager.pipeline = FakePipeline(
+            watcher=lambda step: manager.stop_image_run() if step == 0 else None
+        )
+
+        run = manager.generate_image(self.request(steps=6))
+
+        self.assertTrue(run.stopped)
+        self.assertEqual(run.steps_done, 2)
+        self.assertEqual([reading.step for reading in run.readings], [1, 2])
+        # And the maps were flushed for both, not just the first.
+        self.assertEqual(len(run.attention), 2)
 
     def test_a_run_can_be_stopped_through_the_manager(self):
         manager = self.loaded()

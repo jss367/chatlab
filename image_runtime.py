@@ -667,9 +667,16 @@ def run(
     previous: dict[str, Any] = {}
 
     def on_step_end(pipe, step, timestep, callback_kwargs):
+        """Record the step that just finished, then stop if asked to.
+
+        The pipeline calls this *after* a step has run, so the reading is
+        taken before the cancellation is honoured: Stop promises to end the
+        run after the step it is on, and raising first would throw that
+        step's frame and maps away and report the run one step shorter than
+        it really got.
+        """
+
         del pipe
-        if cancel is not None and cancel.is_set():
-            raise Cancelled("The image run was stopped.")
         latents = callback_kwargs.get("latents")
         if latents is not None:
             readings.append(
@@ -679,6 +686,8 @@ def run(
                 on_step(readings[-1])
         if reader is not None:
             reader.flush()
+        if cancel is not None and cancel.is_set():
+            raise Cancelled("The image run was stopped.")
         return {}
 
     handle = module.register_forward_hook(guidance) if module is not None else None

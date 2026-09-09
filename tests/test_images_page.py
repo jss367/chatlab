@@ -239,10 +239,13 @@ class DrawTests(ImagePageTestCase):
         run = last[ROW["run"]]
 
         self.assertTrue(run.stopped)
-        self.assertEqual(run.steps_done, 1)
-        self.assertIn("Stopped after", last[ROW["status"]])
+        # Two, not one: the watcher fires after the first step's callback,
+        # so the step Stop was pressed during finishes and is kept, which is
+        # what the button promises.
+        self.assertEqual(run.steps_done, 2)
+        self.assertIn("Stopped after 2 steps", last[ROW["status"]])
         self.assertIsNone(last[ROW["image"]])
-        self.assertIn("Step 1 of 1", last[ROW["trajectory"]])
+        self.assertIn("Step 2 of 2", last[ROW["trajectory"]])
 
     def test_a_stop_left_over_from_before_does_not_kill_the_next_picture(self):
         # There is no run to stop, so the press has nothing to set and
