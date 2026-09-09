@@ -429,18 +429,18 @@ def download_model(model_id: str, hf_token: str, selected: str | None = None):
     started = time.monotonic()
     try:
         before = cache_status(model_id)
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         yield failure_card("Download failed", html.escape(str(error)))
         return
     yield status_card(*describe_cache(model_id, before), "working")
     try:
         path = yield from stream_download(model_id, hf_token)
+        elapsed = time.monotonic() - started
+        fetched = describe_fetched(before, cache_status(model_id), elapsed)
     except Exception as error:
         yield failure_card("Download failed", html.escape(str(error)))
         return
 
-    elapsed = time.monotonic() - started
-    fetched = describe_fetched(before, cache_status(model_id), elapsed)
     yield status_card(
         "Download complete",
         f"{fetched} `{model_id.strip()}` is cached in `{path}`. "
@@ -458,7 +458,7 @@ def download_and_load_model(
     started = time.monotonic()
     try:
         before = cache_status(model_id)
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         yield failure_card("Model setup failed", html.escape(str(error)))
         return
     yield status_card(*describe_cache(model_id, before), "working")
@@ -529,7 +529,7 @@ def load_cached_model(
     yield status_card("Finding cached model", f"Looking for {name} locally…", "working")
     try:
         status = cache_status(cleaned)
-    except ValueError as error:
+    except (OSError, ValueError) as error:
         yield failure_card("Could not load cached model", html.escape(str(error)))
         return
     if status.missing_files:
