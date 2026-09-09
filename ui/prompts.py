@@ -397,8 +397,11 @@ def _run_batch(
                 # more to say.
                 held = None
                 for update in stream:
-                    if held is not None:
-                        yield held
+                    # Copied before the frame below is published, not after.
+                    # The for statement has already fetched this update, so a
+                    # Stop landing on that yield would otherwise have keep()
+                    # write the update before it and drop a batch the model
+                    # really produced.
                     text = update.text
                     metrics = list(update.metrics)
                     model_id = update.model_id or model_id
@@ -406,6 +409,8 @@ def _run_batch(
                     forced_prefix_tokens = update.forced_prefix_tokens
                     if update.literal_prefill_text:
                         literal_prefill = update.literal_prefill_text
+                    if held is not None:
+                        yield held
                     held = (
                         batch_progress(index, total, len(metrics), started),
                         gr.skip(),

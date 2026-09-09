@@ -540,6 +540,26 @@ class RunPromptsTests(unittest.TestCase):
         self.assertEqual(written, ["prompt-002.json"])
         self.assertIn("Failed", frames[-1][RESULTS]["value"][0][RESPONSE])
 
+    def test_a_stopped_prompt_keeps_every_batch_the_model_produced(self):
+        # The for statement fetches an update before the loop body runs, so
+        # a Stop landing on the progress frame would write the update before
+        # it unless each one is copied first. A response long enough to
+        # arrive in two batches is what makes the difference visible.
+        original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([0, 1, 2, 3], PIECES, EOS_ID)
+        self.addCleanup(setattr, runtime, "MANAGER", original)
+
+        run = app.run_prompts("say hello", [], "", "", 0.0, 1.0, 0, 12, 42, False)
+        opening = next(run)
+        directory = Path(opening[DIRECTORY])
+        next(run)
+        run.close()
+
+        traces = sorted(directory.glob("prompt-*.json"))
+        self.assertTrue(traces)
+        trace = json.loads(traces[0].read_text(encoding="utf-8"))
+        self.assertEqual(trace["token_count"], 12)
+
     def test_a_stopped_prompt_says_it_was_stopped(self):
         # The tokens are exact but may not be the whole answer, and a trace
         # read as a finished response would put a truncated answer in an
