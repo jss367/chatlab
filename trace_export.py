@@ -77,24 +77,15 @@ def _token_rows(trace: dict):
         yield row
 
 
-def _rows_to_csv(traces: list[dict], *, indexes: Sequence[int] | None = None) -> str:
-    """Write every trace's tokens into one table.
+def candidate_width(traces: Sequence[dict]) -> int:
+    """How many alternatives the widest token in ``traces`` recorded.
 
-    The candidate columns are as wide as the widest token in any of the
-    traces, so several responses can share a header even though one of them
-    ran with a smaller top-k than another.
-
-    ``indexes`` gives each trace the prompt number it belongs to, written into
-    a prompt_index column. The numbers are the caller's because a batch can
-    drop a trace it failed to produce, and the ones that follow must keep the
-    positions they were asked in. ``None`` leaves the column out, which is what
-    a single trace exported on its own wants.
+    This is what decides the header, so a caller adding to a table it has
+    already written asks for it before deciding whether the table can be
+    appended to or has to be written again.
     """
 
-    if indexes is not None and len(indexes) != len(traces):
-        raise ValueError("Each trace needs exactly one prompt index.")
-
-    candidate_count = max(
+    return max(
         (
             len(token.get("top_candidates") or [])
             for trace in traces
@@ -102,6 +93,36 @@ def _rows_to_csv(traces: list[dict], *, indexes: Sequence[int] | None = None) ->
         ),
         default=0,
     )
+
+
+def _rows_to_csv(
+    traces: list[dict],
+    *,
+    indexes: Sequence[int] | None = None,
+    width: int | None = None,
+    header: bool = True,
+) -> str:
+    """Write every trace's tokens into one table.
+
+    The candidate columns are as wide as the widest token in any of the
+    traces, so several responses can share a header even though one of them
+    ran with a smaller top-k than another. ``width`` fixes that number
+    instead, which is how rows are written to join a table already on disk.
+
+    ``indexes`` gives each trace the prompt number it belongs to, written into
+    a prompt_index column. The numbers are the caller's because a batch can
+    drop a trace it failed to produce, and the ones that follow must keep the
+    positions they were asked in. ``None`` leaves the column out, which is what
+    a single trace exported on its own wants.
+
+    ``header`` writes the column names first. Rows appended to an existing
+    table leave it out, and are the caller's to keep under the same width.
+    """
+
+    if indexes is not None and len(indexes) != len(traces):
+        raise ValueError("Each trace needs exactly one prompt index.")
+
+    candidate_count = candidate_width(traces) if width is None else width
     candidate_columns = [
         f"candidate_{index}_{field}"
         for index in range(1, candidate_count + 1)
@@ -116,8 +137,15 @@ def _rows_to_csv(traces: list[dict], *, indexes: Sequence[int] | None = None) ->
     )
 
     output = io.StringIO(newline="")
-    writer = csv.DictWriter(output, fieldnames=columns, lineterminator="\n")
-    writer.writeheader()
+    # A token can carry more alternatives than the fixed width holds, and the
+    # columns for them do not exist in the table being joined. Dropping them
+    # keeps the row on the shape its header promises; the caller widens the
+    # table instead when it wants them, which is what BatchTable does.
+    writer = csv.DictWriter(
+        output, fieldnames=columns, lineterminator="\n", extrasaction="ignore"
+    )
+    if header:
+        writer.writeheader()
     numbers = list(indexes) if indexes is not None else [None] * len(traces)
     for number, trace in zip(numbers, traces):
         for row in _token_rows(trace):
@@ -137,7 +165,13 @@ def trace_to_csv(trace: dict) -> str:
     return _rows_to_csv([trace])
 
 
-def traces_to_csv(traces: list[dict], indexes: Sequence[int] | None = None) -> str:
+def traces_to_csv(
+    traces: list[dict],
+    indexes: Sequence[int] | None = None,
+    *,
+    width: int | None = None,
+    header: bool = True,
+) -> str:
     """Flatten a whole batch into one table, numbered by the prompt it came from.
 
     A batch is read as a group - the same question asked twenty ways, one row
@@ -147,12 +181,36 @@ def traces_to_csv(traces: list[dict], indexes: Sequence[int] | None = None) -> s
     ``indexes`` says which prompt each trace answered. Without it the traces
     are numbered in the order they are given, which is only the same thing
     when every prompt produced a trace.
+
+    ``width`` and ``header`` are for writing rows that join a table already on
+    disk: the columns are the ones that table has, and the names are not
+    repeated part way down it.
     """
 
     traces = list(traces)
     if indexes is None:
         indexes = range(1, len(traces) + 1)
-    return _rows_to_csv(traces, indexes=list(indexes))
+    return _rows_to_csv(traces, indexes=list(indexes), width=width, header=header)
+
+
+def append_private_text(path: Path, text: str, *, newline: str | None = None) -> None:
+    """Add ``text`` to the end of ``path``, keeping it owner-only.
+
+    The mode is given to ``os.open()`` for the case where the file is not
+    there yet, and settled on the descriptor either way, so a file created by
+    an append is as private as one written whole; see write_private_text() for
+    why the mode cannot wait until afterwards.
+    """
+
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        handle = os.fdopen(descriptor, "a", encoding="utf-8", newline=newline)
+    except Exception:
+        os.close(descriptor)
+        raise
+    with handle:
+        handle.write(text)
 
 
 def write_private_text(path: Path, text: str, *, newline: str | None = None) -> None:

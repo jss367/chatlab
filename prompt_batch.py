@@ -13,7 +13,13 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
-from trace_export import trace_to_json, traces_to_csv, write_private_text
+from trace_export import (
+    append_private_text,
+    candidate_width,
+    trace_to_json,
+    traces_to_csv,
+    write_private_text,
+)
 
 
 # The keys a JSON prompt may carry, in the order they are looked for. A file
@@ -124,16 +130,60 @@ def write_batch_trace(trace: dict, directory: Path, index: int) -> str:
 def write_batch_csv(
     traces: list[dict], directory: Path, indexes: Sequence[int] | None = None
 ) -> str:
-    """Rewrite the table covering every prompt run so far.
-
-    Rewritten after each prompt rather than once at the end, because a run
-    that is stopped half way through is still a run: the table on disk always
-    describes the prompts that have finished.
+    """Write the table covering every prompt given, from scratch.
 
     ``indexes`` names the prompt each trace answered, so the numbers in the
     table match the trace file names even when a prompt in between failed.
+
+    A run adds to its table one prompt at a time; see :class:`BatchTable`.
     """
 
     path = Path(directory) / BATCH_CSV_NAME
     write_private_text(path, traces_to_csv(traces, indexes), newline="")
     return str(path)
+
+
+class BatchTable:
+    """The table for one run, extended as each prompt finishes.
+
+    The table is on disk from the first prompt onwards rather than written at
+    the end, because a run that is stopped half way through is still a run and
+    what it measured should be downloadable. Each prompt adds its own rows
+    instead of the whole table being written again: rewriting would serialize
+    every token of every earlier prompt once per prompt, which on a
+    hundred-prompt batch is the first prompt written a hundred times, and all
+    of it between two generations while the model sits idle.
+
+    The exception is the candidate columns. Their number is the header's, and
+    a prompt whose tokens carry more alternatives than the header holds cannot
+    be appended without the rows disagreeing with it, so that prompt widens
+    the table and the file is written again. Top-k is usually one setting for
+    a whole run, so this is rare, and after it the appending resumes.
+    """
+
+    def __init__(self, directory: Path):
+        self.path = Path(directory) / BATCH_CSV_NAME
+        self.traces: list[dict] = []
+        self.indexes: list[int] = []
+        self.width = 0
+
+    def add(self, trace: dict, index: int) -> str:
+        """Put one prompt's tokens in the table, and return where it is."""
+
+        self.traces.append(trace)
+        self.indexes.append(int(index))
+        width = candidate_width([trace])
+        if width > self.width or len(self.traces) == 1:
+            self.width = max(width, self.width)
+            write_private_text(
+                self.path,
+                traces_to_csv(self.traces, self.indexes, width=self.width),
+                newline="",
+            )
+        else:
+            append_private_text(
+                self.path,
+                traces_to_csv([trace], [index], width=self.width, header=False),
+                newline="",
+            )
+        return str(self.path)

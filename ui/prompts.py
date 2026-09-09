@@ -19,10 +19,10 @@ from gradio.utils import get_upload_folder
 from conversation import make_turn, model_messages
 from model_runtime import ModelChanged
 from prompt_batch import (
+    BatchTable,
     parse_prompt_file,
     parse_prompts,
     prompts_to_text,
-    write_batch_csv,
     write_batch_trace,
 )
 from token_metrics import summarize
@@ -208,8 +208,8 @@ def _run_batch(
     """The body of run_prompts(), run with the generation slot held."""
 
     directory = batch_directory()
+    table = BatchTable(directory)
     traces: list[dict] = []
-    trace_indexes: list[int] = []
     rows: list[list] = []
     trace_paths: list[str] = []
     paths: list[str] = []
@@ -339,12 +339,11 @@ def _run_batch(
             # and numbering by the count would hand its name and its row
             # number to the next prompt that worked, filing one prompt's
             # measurements under another's.
-            trace_indexes.append(index)
             trace_paths.append(write_batch_trace(traces[-1], directory, index))
             # The files are published as the run grows, so stopping half way
             # through still leaves every finished prompt downloadable. The
-            # table is rewritten each time for the same reason.
-            paths = [*trace_paths, write_batch_csv(traces, directory, trace_indexes)]
+            # table takes this prompt's rows for the same reason.
+            paths = [*trace_paths, table.add(traces[-1], index)]
         yield (
             batch_progress(index, total, len(metrics), started),
             gr.update(value=list(rows)),

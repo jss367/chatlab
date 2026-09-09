@@ -468,7 +468,17 @@ def build_app() -> gr.Blocks:
                                     )
                                     prompts_upload = gr.UploadButton(
                                         "📂 Load prompts",
-                                        file_types=[".txt", ".jsonl", ".json"],
+                                        # "text" is any text file, which is
+                                        # what the parser's fallback reads: a
+                                        # prompt set arrives as often in a
+                                        # .md or a file with no extension at
+                                        # all as in a .txt, and a filter
+                                        # narrower than the parser would put
+                                        # those out of reach of a tab that
+                                        # says it takes them. The two JSON
+                                        # forms are named because a browser
+                                        # does not always call them text.
+                                        file_types=["text", ".json", ".jsonl"],
                                         type="filepath",
                                         min_width=130,
                                     )

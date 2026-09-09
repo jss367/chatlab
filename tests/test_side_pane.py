@@ -2007,6 +2007,20 @@ class PageLayoutTests(unittest.TestCase):
                 ],
             )
 
+    def test_the_prompt_upload_takes_every_file_the_parser_reads(self):
+        # The parser reads anything that is not JSON as blank-line separated
+        # text, and the README says so, so a filter that only offered .txt
+        # would hide the .md and extensionless prompt sets it handles.
+        upload = next(
+            block
+            for block in self.demo.blocks.values()
+            if getattr(block, "label", None) == "\U0001f4c2 Load prompts"
+        )
+
+        self.assertIn("text", upload.file_types)
+        self.assertIn(".json", upload.file_types)
+        self.assertIn(".jsonl", upload.file_types)
+
     def test_escape_is_wired_to_the_stop_button_by_its_id(self):
         # The shortcut presses the button rather than reaching past it, so
         # whatever Stop does, Escape does. It needs the id to find it.

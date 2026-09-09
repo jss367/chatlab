@@ -13,6 +13,7 @@ import gradio as gr
 import app
 import settings_sandbox
 from prompt_batch import (
+    BatchTable,
     parse_prompt_file,
     parse_prompts,
     prompts_to_text,
@@ -239,6 +240,86 @@ class BatchExportTests(unittest.TestCase):
 
         self.assertEqual(first, after)
         self.assertEqual([row["seed"] for row in rows], ["1", "2"])
+
+
+
+class BatchCsvTests(unittest.TestCase):
+    """The CSV a run adds to as each prompt finishes."""
+
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp(prefix="chatlab-test-"))
+        self.addCleanup(shutil.rmtree, self.directory)
+        self.addCleanup(os.umask, os.umask(0))
+
+    def rows(self, path):
+        return list(csv.DictReader(io.StringIO(Path(path).read_text(encoding="utf-8"))))
+
+    def test_each_prompt_adds_its_rows_to_the_one_table(self):
+        table = BatchTable(self.directory)
+
+        table.add(sample_trace(seed=1), 1)
+        path = table.add(sample_trace(seed=2), 3)
+        rows = self.rows(path)
+
+        self.assertEqual([row["prompt_index"] for row in rows], ["1", "3"])
+        self.assertEqual([row["seed"] for row in rows], ["1", "2"])
+
+    def test_the_column_names_are_written_once(self):
+        # An appended prompt that repeated the header would put a row of
+        # column names half way down the table, which every reader would
+        # then have to know to skip.
+        table = BatchTable(self.directory)
+        table.add(sample_trace(seed=1), 1)
+        path = table.add(sample_trace(seed=2), 2)
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(sum(line.startswith("prompt_index") for line in lines), 1)
+
+    def test_a_prompt_is_not_written_again_by_the_next_one(self):
+        # The point of appending: a hundred-prompt run used to serialize the
+        # first prompt a hundred times, between generations, holding the model.
+        table = BatchTable(self.directory)
+        table.add(sample_trace(seed=1), 1)
+        first = Path(table.path).read_text(encoding="utf-8")
+
+        table.add(sample_trace(seed=2), 2)
+        after = Path(table.path).read_text(encoding="utf-8")
+
+        self.assertTrue(after.startswith(first))
+
+    def test_a_wider_candidate_list_rewrites_the_table(self):
+        # The header names the candidate columns, so a prompt carrying more
+        # alternatives than it holds cannot simply be appended: the whole
+        # table is written again under the wider header, and the rows already
+        # in it keep their values.
+        table = BatchTable(self.directory)
+        table.add(sample_trace(seed=1, candidates=1), 1)
+        path = table.add(sample_trace(seed=2, candidates=3), 2)
+        rows = self.rows(path)
+
+        self.assertEqual([row["prompt_index"] for row in rows], ["1", "2"])
+        self.assertEqual(rows[0]["candidate_3_text"], "")
+        self.assertEqual(rows[1]["candidate_3_text"], "x")
+
+    def test_a_narrower_prompt_after_a_wide_one_keeps_the_columns(self):
+        table = BatchTable(self.directory)
+        table.add(sample_trace(seed=1, candidates=3), 1)
+        path = table.add(sample_trace(seed=2, candidates=1), 2)
+        rows = self.rows(path)
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]["candidate_1_text"], "x")
+        self.assertEqual(rows[1]["candidate_3_text"], "")
+
+    def test_the_table_is_owner_only_from_the_first_prompt(self):
+        table = BatchTable(self.directory)
+        path = Path(table.add(sample_trace(), 1))
+
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+        table.add(sample_trace(), 2)
+
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
 
 class RunPromptsTests(unittest.TestCase):
