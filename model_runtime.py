@@ -1170,7 +1170,13 @@ SEARCH_FOREIGN_TAGS = frozenset({"mlx"})
 # GGUF-only repository would download the whole snapshot for a load that
 # cannot happen. The native tags are the two in WEIGHT_FORMATS - a repository
 # whose checkpoint predates safetensors is still one from_pretrained reads.
-SEARCH_FOREIGN_FORMAT_TAGS = frozenset({"gguf", "onnx", "tflite", "coreml", "keras"})
+SEARCH_FOREIGN_FORMAT_TAGS = frozenset(
+    # One per suffix in FOREIGN_SUFFIXES, under the names the hub files them
+    # by: a TensorFlow or Flax checkpoint is tagged for its framework rather
+    # than for the .h5 or .msgpack it is written in, and _load_locked passes
+    # neither from_tf nor from_flax.
+    {"gguf", "onnx", "tflite", "coreml", "keras", "tf", "jax", "flax"}
+)
 SEARCH_NATIVE_TAGS = frozenset({"safetensors", "pytorch"})
 
 # How many of the hub's answers to read while filling the list. The checks

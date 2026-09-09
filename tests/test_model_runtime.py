@@ -2982,6 +2982,27 @@ class HubSearchTests(unittest.TestCase):
             ["org/model-with-a-gguf-folder", "org/model-from-before-safetensors"],
         )
 
+    def test_a_repository_in_another_framework_is_left_out(self):
+        # The hub files a TensorFlow or Flax checkpoint under its framework,
+        # not under the .h5 or .msgpack it is written in, and _load_locked
+        # passes neither from_tf nor from_flax. judge_snapshot already calls
+        # both suffixes foreign once they are on disk.
+        self.found = [
+            hub_result(
+                "org/tensorflow-only", "text-generation", tags=["transformers", "tf"]
+            ),
+            hub_result("org/flax-only", "text-generation", tags=["transformers", "jax"]),
+            hub_result(
+                "allenai/Olmo-3-7B-Think",
+                "text-generation",
+                tags=["transformers", "safetensors"],
+            ),
+        ]
+
+        found = search_hub_models("model")
+
+        self.assertEqual([result.model_id for result in found], ["allenai/Olmo-3-7B-Think"])
+
     def test_matches_below_the_rejected_ones_still_fill_the_list(self):
         # The hub sorts by downloads and the checks here run afterwards, so a
         # query whose most-downloaded matches are all embedding models must
