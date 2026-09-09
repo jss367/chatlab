@@ -129,7 +129,11 @@ def _rows_to_csv(
         for field in CANDIDATE_FIELDS
     ]
     columns = (
-        (["prompt_index"] if indexes is not None else [])
+        # A batch's rows carry the prompt they answered and whether that
+        # answer was cut short, because the table is read on its own: a
+        # reader who never opens the traces would otherwise take a stopped
+        # answer for a whole one.
+        (["prompt_index", "stopped"] if indexes is not None else [])
         + METADATA_COLUMNS
         + SAMPLING_COLUMNS
         + TOKEN_COLUMNS
@@ -148,8 +152,13 @@ def _rows_to_csv(
         writer.writeheader()
     numbers = list(indexes) if indexes is not None else [None] * len(traces)
     for number, trace in zip(numbers, traces):
+        stopped = bool((trace.get("sampling") or {}).get("stopped"))
         for row in _token_rows(trace):
-            writer.writerow(row if number is None else row | {"prompt_index": number})
+            writer.writerow(
+                row
+                if number is None
+                else row | {"prompt_index": number, "stopped": stopped}
+            )
 
     return output.getvalue()
 

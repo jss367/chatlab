@@ -303,6 +303,7 @@ def _run_batch(
         forced_prefix_tokens = 0
         applied_prefill = bool(assistant_prefill)
         kept = False
+        failed = False
 
         def keep(*, stopped: bool = False) -> None:
             """Write what this prompt produced, and add it to the table.
@@ -415,6 +416,7 @@ def _run_batch(
                 "Prompt %s of %s did not run: the model changed", index, total
             )
             changed_at = index
+            failed = True
             break
         except Exception as error:
             # One bad prompt does not end the run: a passage too long for the
@@ -423,6 +425,7 @@ def _run_batch(
             # why, the log keeps the traceback, and the count is reported once
             # at the end rather than as a toast per prompt.
             logger.exception("Prompt %s of %s failed", index, total)
+            failed = True
             failures += 1
             rows.append(failed_row(index, prompt, error, used_seed))
             yield (
@@ -441,7 +444,14 @@ def _run_batch(
             # which is the one thing the files written as the run goes are
             # there to prevent. stop_batch() publishes what is in the
             # directory, so a prompt kept here is still reachable.
-            keep(stopped=True)
+            #
+            # A prompt that raised is not kept, whatever it had written by
+            # then: a failed response is not a response to export, which is
+            # what ui.generation does for a single reply, and exporting one
+            # here would put a half-answer in the table under a row that
+            # says it failed.
+            if not failed:
+                keep(stopped=True)
 
         _reasoning, answer, _closed = split_response_text(
             text, literal_prefill=literal_prefill, reasoning_prefilled=prefilled

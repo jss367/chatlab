@@ -220,6 +220,17 @@ class BatchExportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             traces_to_csv([sample_trace(), sample_trace()], [1])
 
+    def test_the_table_says_which_answers_were_cut_short(self):
+        # The table is read on its own, so a reader who never opens the
+        # traces would otherwise take a stopped answer for a whole one.
+        whole = sample_trace(seed=1)
+        stopped = sample_trace(seed=2)
+        stopped["sampling"]["stopped"] = True
+
+        rows = list(csv.DictReader(io.StringIO(traces_to_csv([whole, stopped]))))
+
+        self.assertEqual([row["stopped"] for row in rows], ["False", "True"])
+
     def test_prompts_with_different_candidate_counts_share_one_header(self):
         # Top-k can be changed between runs, and a shorter candidate list must
         # not truncate the columns of the longer one it is written beside.
@@ -504,6 +515,29 @@ class RunPromptsTests(unittest.TestCase):
         traces = sorted(directory.glob("prompt-*.json"))
         self.assertTrue(traces)
         self.assertTrue((directory / "prompts.csv").exists())
+
+    def test_a_failed_prompt_is_not_exported_as_a_stopped_one(self):
+        # A failed response is not a response to export, which is what the
+        # chat does for a single reply. Exporting the tokens it managed
+        # would put a half answer in the table under a row saying it failed.
+        manager = runtime.MANAGER
+        original = manager.generate
+
+        def fail_after_a_token(*args, **kwargs):
+            yield from ()
+            raise RuntimeError("out of memory")
+
+        def failing(*args, **kwargs):
+            manager.generate = original
+            return fail_after_a_token()
+
+        manager.generate = failing
+        frames = self.run_batch("first\n\nsecond")
+        directory = Path(frames[0][DIRECTORY])
+
+        written = sorted(path.name for path in directory.glob("prompt-*.json"))
+        self.assertEqual(written, ["prompt-002.json"])
+        self.assertIn("Failed", frames[-1][RESULTS]["value"][0][RESPONSE])
 
     def test_a_stopped_prompt_says_it_was_stopped(self):
         # The tokens are exact but may not be the whole answer, and a trace
