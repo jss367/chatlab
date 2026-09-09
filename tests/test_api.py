@@ -10,6 +10,7 @@ import api
 import model_runtime
 import settings
 import settings_sandbox
+from conversation import split_reasoning
 from model_runtime import CachedModel, CacheStatus, GenerationUpdate, ScoredText
 from ui import runtime
 
@@ -570,6 +571,63 @@ class StreamingTests(ApiTestCase):
 
         self.assertFalse(any("logprobs" in frame["choices"][0] for frame in frames))
 
+    def test_a_marker_split_across_frames_never_leaks_into_the_answer(self):
+        # A frame can end on the "<" of "</think>". A delta already sent
+        # cannot be taken back, so the half marker is withheld until the rest
+        # of it arrives.
+        self.manager.updates = [
+            update("<think>Hello", metrics=[metric(1, "Hello")]),
+            update("<think>Hello<", metrics=[metric(1, "Hello"), metric(2, "<")]),
+            update(
+                "<think>Hello</think> wor",
+                metrics=[metric(1, "Hello"), metric(2, "<"), metric(3, " wor")],
+            ),
+            update(
+                "<think>Hello</think> world",
+                metrics=[
+                    metric(1, "Hello"),
+                    metric(2, "<"),
+                    metric(3, " wor"),
+                    metric(4, "ld"),
+                ],
+            ),
+        ]
+
+        frames = self.frames()
+
+        answer = "".join(
+            frame["choices"][0]["delta"].get("content", "") for frame in frames
+        )
+        reasoning = "".join(
+            frame["choices"][0]["delta"].get("reasoning_content", "")
+            for frame in frames
+        )
+        self.assertEqual(answer, "world")
+        self.assertEqual(reasoning, "Hello")
+
+    def test_the_assembled_stream_is_the_answer_the_whole_response_gives(self):
+        # Whatever the last frame withheld is released in the closing frame,
+        # so a client that concatenates the deltas has what a client that
+        # asked for the whole response would have read.
+        final = "<think>Reasoning</think> The answer <think>again</think> ends"
+        self.manager.updates = [
+            update(final[:length], metrics=[metric(1, final[:length])])
+            for length in (8, 20, 30, len(final) - 1, len(final))
+        ]
+
+        frames = self.frames()
+
+        assembled = "".join(
+            frame["choices"][0]["delta"].get("content", "") for frame in frames
+        )
+        reasoning = "".join(
+            frame["choices"][0]["delta"].get("reasoning_content", "")
+            for frame in frames
+        )
+        whole_reasoning, whole_answer, _closed = split_reasoning(final)
+        self.assertEqual(assembled, whole_answer)
+        self.assertEqual(reasoning, whole_reasoning)
+
     def test_the_slot_is_given_back_when_the_stream_ends(self):
         self.frames()
         self.assertFalse(self.manager.busy)
@@ -628,6 +686,43 @@ class ScoreTests(ApiTestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("text must be a string", response.json()["error"]["message"])
+
+    def test_scoring_takes_the_generation_slot_while_it_runs(self):
+        # Scoring and generating take the same model lock. Without the slot,
+        # a score would wait out a whole response instead of saying the model
+        # was busy, and would hold the lock a later response was refused for.
+        held = []
+
+        def score(text, **kwargs):
+            held.append(runtime.MANAGER.busy)
+            return ScoredText(context_metrics=[], metrics=[metric(1, "hi")])
+
+        self.manager.score_text = score
+
+        response = self.client.post("/v1/chatlab/score", json={"text": "hi"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(held, [True])
+        self.assertFalse(self.manager.busy)
+
+    def test_scoring_during_a_response_is_told_the_model_is_busy(self):
+        self.manager.busy = True
+        self.manager.score_text = lambda text, **kwargs: self.fail("scored anyway")
+
+        response = self.client.post("/v1/chatlab/score", json={"text": "hi"})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["type"], "model_busy")
+
+    def test_the_slot_is_given_back_after_a_refused_score(self):
+        def refuse(text, **kwargs):
+            raise ValueError("nothing to score")
+
+        self.manager.score_text = refuse
+
+        self.client.post("/v1/chatlab/score", json={"text": "x"})
+
+        self.assertFalse(self.manager.busy)
 
     def test_scoring_needs_a_model_too(self):
         self.manager.model_id = None

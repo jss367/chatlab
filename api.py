@@ -441,6 +441,19 @@ def build_router() -> APIRouter:
             _measured, wants = token_detail(body)
         except ApiError as error:
             return error_response(error)
+        # Scoring and generating take the same model lock, so a score that
+        # did not reserve the slot would wait out a whole response rather
+        # than say the model was busy - and would hold the lock a later
+        # response was refused for.
+        if not runtime.MANAGER.reserve_generation():
+            return error_response(
+                ApiError(
+                    409,
+                    "ChatLab is generating a response already. Only one run at "
+                    "a time; try again when it has finished.",
+                    "model_busy",
+                )
+            )
         try:
             scored = runtime.MANAGER.score_text(
                 text, context=context, use_chat_template=use_template
@@ -449,6 +462,8 @@ def build_router() -> APIRouter:
             return error_response(ApiError(400, str(error)))
         except Exception as error:
             return error_response(refusal(error))
+        finally:
+            runtime.MANAGER.release_generation()
         return JSONResponse(
             {
                 "object": "chatlab.score",
@@ -483,11 +498,21 @@ def refusal(error: Exception) -> ApiError:
     return ApiError(500, str(error) or error.__class__.__name__, "server_error")
 
 
-def answer_and_reasoning(update) -> tuple[str, str]:
-    """The visible answer and the reasoning block, split as the chat splits them."""
+def answer_and_reasoning(update, streaming: bool = False) -> tuple[str, str]:
+    """The visible answer and the reasoning block, split as the chat splits them.
+
+    ``streaming`` withholds a reasoning marker that has only half arrived, as
+    the chat does. A frame can end on the ``<`` of ``<think>``, and a delta
+    already sent cannot be taken back: without this the client would append
+    that fragment as answer text and the assembled stream would differ from
+    the response the same generation returns whole. The last frame is split
+    without it, so the withheld characters are released at the end.
+    """
 
     reasoning, answer, _closed = split_reasoning(
-        update.text, reasoning_prefilled=update.reasoning_prefilled
+        update.text,
+        streaming=streaming,
+        reasoning_prefilled=update.reasoning_prefilled,
     )
     return answer, reasoning
 
@@ -567,6 +592,28 @@ def _chunk(request_id: str, created: int, model_id: str, choice: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+def _delta(
+    sent_answer: str, sent_reasoning: str, answer: str, reasoning: str
+) -> dict[str, Any]:
+    """What one frame adds to what the client already has.
+
+    The runtime hands back the whole text each frame, and a client wants only
+    what is new. A block that no longer starts with what was sent - the split
+    having moved a word from one side to the other - is sent again whole,
+    since a diff cannot express a retraction.
+    """
+
+    delta: dict[str, Any] = {}
+    for key, sent, current in (
+        ("reasoning_content", sent_reasoning, reasoning),
+        ("content", sent_answer, answer),
+    ):
+        if current == sent:
+            continue
+        delta[key] = current[len(sent) :] if current.startswith(sent) else current
+    return delta
+
+
 def stream_completion(
     stream: Iterator,
     request_id: str,
@@ -596,18 +643,8 @@ def stream_completion(
         )
         for update in stream:
             last = update
-            answer, reasoning = answer_and_reasoning(update)
-            delta: dict[str, Any] = {}
-            if reasoning.startswith(sent_reasoning) and reasoning != sent_reasoning:
-                delta["reasoning_content"] = reasoning[len(sent_reasoning) :]
-            elif reasoning != sent_reasoning:
-                # The split moved a word from one side to the other, which a
-                # diff cannot express; send the whole block again.
-                delta["reasoning_content"] = reasoning
-            if answer.startswith(sent_answer) and answer != sent_answer:
-                delta["content"] = answer[len(sent_answer) :]
-            elif answer != sent_answer:
-                delta["content"] = answer
+            answer, reasoning = answer_and_reasoning(update, streaming=True)
+            delta = _delta(sent_answer, sent_reasoning, answer, reasoning)
             sent_answer, sent_reasoning = answer, reasoning
             metrics = list(update.metrics)
             choice: dict[str, Any] = {"index": 0, "delta": delta, "finish_reason": None}
@@ -620,9 +657,17 @@ def stream_completion(
             if delta or "logprobs" in choice:
                 yield _chunk(request_id, created, model_id, choice)
         metrics = list(last.metrics) if last is not None else []
+        # Split once more without the trimming, so a marker the last frame
+        # withheld - and any text the model wrote after it - is released here
+        # rather than dropped from the stream.
+        if last is not None:
+            answer, reasoning = answer_and_reasoning(last)
+            closing = _delta(sent_answer, sent_reasoning, answer, reasoning)
+        else:
+            closing = {}
         final = {
             "index": 0,
-            "delta": {},
+            "delta": closing,
             "finish_reason": finish_reason(
                 len(metrics),
                 last.forced_prefix_tokens if last is not None else 0,

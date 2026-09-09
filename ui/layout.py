@@ -981,11 +981,16 @@ def build_app() -> gr.Blocks:
                 show_progress="hidden",
                 concurrency_id=SAMPLING_LABEL_QUEUE,
             )
-            # These four belong to the conversation on screen, so a change to
+            # These four belong to the conversation on screen, so a move of
             # one is written into it as well as into the settings file - the
             # file being what the next new conversation starts from.
-            # always_last for the same reason as above: a drag is one write.
-            control.change(
+            #
+            # .input rather than .change: switching conversations sets these
+            # controls too, and a write from that would stamp a conversation
+            # nobody had touched. input is the reader's own move, keyboard
+            # included. always_last for the same reason as above: a drag is
+            # one write.
+            control.input(
                 remember_branch_sampling,
                 [forks_state, *sampling_controls],
                 forks_state,

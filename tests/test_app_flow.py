@@ -3148,16 +3148,33 @@ class ConversationSamplingTests(unittest.TestCase):
 
         self.assertEqual(self.held(forks), self.OWN)
 
-    def test_a_control_that_reports_the_saved_value_writes_nothing(self):
-        # Every path that changes conversation puts the values on the
-        # controls, and each of those changes reports back. A conversation
-        # that has never been given sampling keeps following the file rather
-        # than gaining an entry that says the same thing.
+    def test_a_deliberate_move_is_stored_even_at_the_saved_value(self):
+        # The same move also writes the settings file, on its own queue, so
+        # comparing against that file here would be a race: were it to land
+        # first, the conversation would be left following the file rather
+        # than pinned to the value just chosen.
         defaults = settings.sampling_defaults()
 
-        result = app.remember_branch_sampling(new_forks(), *defaults.values())
+        forks = app.remember_branch_sampling(new_forks(), *defaults.values())
 
-        self.assertEqual(result, gr.skip())
+        self.assertEqual(self.held(forks), defaults)
+
+    def test_only_the_readers_own_move_writes_the_conversation(self):
+        # Every path that changes conversation sets these controls too. A
+        # write from that would stamp a conversation nobody had touched, and
+        # would claim it from another page that really had changed it, so the
+        # write hangs off input rather than change.
+        demo = app.build_app()
+        listeners = [
+            fn
+            for fn in demo.fns.values()
+            if getattr(fn.fn, "__name__", None) == "remember_branch_sampling"
+        ]
+
+        self.assertEqual(len(listeners), len(settings.CONVERSATION_SAMPLING))
+        self.assertEqual(
+            {event for fn in listeners for _block, event in fn.targets}, {"input"}
+        )
 
     def test_a_control_reporting_what_the_conversation_already_holds_writes_nothing(self):
         forks = new_forks()

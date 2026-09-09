@@ -133,26 +133,28 @@ def sampling_updates(forks: dict | None):
 def remember_branch_sampling(forks: dict | None, *values):
     """Write the sampling controls into the conversation on screen.
 
-    The values are also saved to the settings file by ``remember_settings``,
-    which is what a conversation with none of its own starts from - so a
-    control moved here changes this conversation and the next new one, and no
-    other. ``gr.skip`` when nothing changed, because the forks' change is
-    what writes the conversations file and a slider that reports the value it
-    already had should not cost a write.
+    Wired to each control's ``input`` rather than its ``change``, so this is
+    the reader moving a slider and never the app setting one: switching
+    conversations writes the values of the conversation switched to onto the
+    controls, and a write from that would stamp a branch nobody had touched -
+    and, where two pages have the same conversation open, would claim it from
+    the page that really did change it.
+
+    Because it only ever runs for a deliberate move, the value is stored
+    whatever it is, including one that happens to equal the saved setting.
+    Comparing against the settings file here would be a race: the same move
+    also fires ``remember_settings``, on its own queue, and if that ran first
+    the file would already hold the new value and this conversation would be
+    left following the file rather than pinned to what was chosen.
+    ``gr.skip`` when the values are the ones already stored, because the
+    forks' change is what writes the conversations file.
     """
 
     held = settings.sampling_values(
         dict(zip(settings.CONVERSATION_SAMPLING, values, strict=True))
     )
     forks = copy_forks(forks)
-    active = forks["active"]
-    if not branch_sampling(forks, active) and held == settings.sampling_defaults():
-        # A conversation that has never been given sampling of its own and is
-        # sitting at the saved values keeps following them, rather than
-        # gaining an entry that says the same thing. Otherwise merely
-        # visiting every conversation would write one into each.
-        return gr.skip()
-    if not put_branch_sampling(forks, active, held):
+    if not put_branch_sampling(forks, forks["active"], held):
         return gr.skip()
     return forks
 
