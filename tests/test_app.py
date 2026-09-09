@@ -310,7 +310,7 @@ class DownloadCardTests(unittest.TestCase):
         self.original_poll = models_page.DOWNLOAD_POLL_SECONDS
         models_page.DOWNLOAD_POLL_SECONDS = 0.01
         self.addCleanup(setattr, runtime, "MANAGER", self.original)
-        self.addCleanup(setattr, app, "DOWNLOAD_POLL_SECONDS", self.original_poll)
+        self.addCleanup(setattr, models_page, "DOWNLOAD_POLL_SECONDS", self.original_poll)
 
     def test_bytes_are_shown_in_decimal_units(self):
         self.assertEqual(app.format_bytes(512), "512 B")
@@ -595,8 +595,8 @@ class LoadCardTests(unittest.TestCase):
 
     def setUp(self):
         self.addCleanup(setattr, runtime, "MANAGER", runtime.MANAGER)
-        self.addCleanup(setattr, app, "cache_status", models_page.cache_status)
-        self.addCleanup(setattr, app, "LOAD_POLL_SECONDS", models_page.LOAD_POLL_SECONDS)
+        self.addCleanup(setattr, models_page, "cache_status", models_page.cache_status)
+        self.addCleanup(setattr, models_page, "LOAD_POLL_SECONDS", models_page.LOAD_POLL_SECONDS)
         runtime.MANAGER = self.Manager(lambda progress: "CPU")
         models_page.cache_status = lambda model_id: CacheStatus(cached_bytes=14_600_000_000)
         models_page.LOAD_POLL_SECONDS = 0.01
