@@ -988,7 +988,7 @@ class DeviceProfile:
 
         return self.backend == "mps"
 
-    def reclaimed(self, fallback: int | None = None) -> DeviceProfile:
+    def reclaimed(self, estimated: int | None = None) -> DeviceProfile:
         """The same reading with the loaded model's memory given back.
 
         A load unloads whatever is in memory before it checks whether the
@@ -996,15 +996,17 @@ class DeviceProfile:
         of the model that would replace them. Anything that judges a
         replacement has to say the same, or the list and the button disagree.
 
-        ``fallback`` is what to give back where the device keeps no figure of
-        its own, which is host memory: the load's own estimate of the weights
-        it read, as :attr:`ModelManager.loaded_bytes` records it. A model on
-        the CPU is anonymous memory, which this platform's estimate of what
-        is available deliberately does not count, so without this a CPU load
-        would leave every alternative marked tight.
+        ``estimated`` is the load's own estimate of the weights it read, as
+        :attr:`ModelManager.loaded_bytes` records it, and the larger of the
+        two figures is what a load gives back. Neither is enough alone: host
+        memory keeps no allocator figure at all, and a CUDA model spread over
+        the cards and the machine by ``device_map="auto"`` is only counted on
+        the cards by one while the other covers the whole of it. On Metal the
+        allocator figure can be the larger, a response's key-value cache
+        being live tensors too, and that is freed with the model.
         """
 
-        given = self.held or fallback
+        given = max(self.held or 0, estimated or 0)
         if not given:
             return self
         return replace(
@@ -1023,7 +1025,7 @@ def device_label(backend: str | None, torch=None) -> str:
     if backend != "cuda":
         return DEVICE_LABELS.get(backend, backend)
     if torch is None:
-        torch = sys.modules.get("torch")
+        torch = imported_torch()
     try:
         return f"CUDA ({torch.cuda.get_device_name(0)})"
     except (AttributeError, RuntimeError, ValueError, TypeError):
@@ -1040,7 +1042,7 @@ def device_profile(torch=None) -> DeviceProfile:
     """
 
     if torch is None:
-        torch = sys.modules.get("torch")
+        torch = imported_torch()
     if torch is None:
         total, available = system_memory()
         return DeviceProfile(total=total, available=available)
@@ -1060,12 +1062,34 @@ def device_profile(torch=None) -> DeviceProfile:
     )
 
 
+# Set once torch has finished importing. Python puts a module in
+# ``sys.modules`` before its body has run, so the module being there says
+# nothing about whether its attributes exist yet: a reader that went by
+# presence alone could find ``torch`` without ``torch.backends``, and either
+# raise or quietly report the wrong device. Nothing reads torch through
+# :func:`imported_torch` until this is set.
+_torch_ready = threading.Event()
+
+
+def imported_torch():
+    """torch, if it is imported and finished importing; otherwise ``None``.
+
+    For everything that describes the machine before a model is loaded. None
+    of it is worth paying a multi-second import for, and none of it may read
+    a module that is still being built.
+    """
+
+    return sys.modules.get("torch") if _torch_ready.is_set() else None
+
+
 def warm_device() -> None:
     """Import torch beside the interface so the first fit verdict is the full one.
 
     Started when the app is built. The import holds no lock the interface
     wants and the module is imported once however many threads ask for it, so
-    a load that arrives while this is still running simply waits for it.
+    a load that arrives while this is still running simply waits for it. The
+    interface never waits: until this finishes, the device is reported as not
+    read yet.
     """
 
     def read() -> None:
@@ -1074,6 +1098,8 @@ def warm_device() -> None:
         except Exception as error:  # pragma: no cover - torch is a hard dependency
             logger.warning("Could not import torch to read the device: %s", error)
             return
+        # Only now is every attribute there to be read.
+        _torch_ready.set()
         logger.info("Device: %s", device_label(detect_backend()))
 
     threading.Thread(target=read, name="chatlab-device", daemon=True).start()

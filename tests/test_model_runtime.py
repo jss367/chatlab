@@ -3,6 +3,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -2872,7 +2873,7 @@ class DeviceProfileTests(unittest.TestCase):
         saved = model_runtime.system_memory
         model_runtime.system_memory = lambda: (48 * self.GB, 40 * self.GB)
         try:
-            with mock.patch.dict(sys.modules, {"torch": None}):
+            with mock.patch.object(model_runtime, "_torch_ready", threading.Event()):
                 profile = model_runtime.device_profile()
         finally:
             model_runtime.system_memory = saved
@@ -2951,6 +2952,19 @@ class DeviceProfileTests(unittest.TestCase):
         )
         self.assertIsNone(DeviceProfile(held=self.GB).reclaimed().available)
 
+    def test_whichever_figure_is_larger_is_what_a_load_gives_back(self):
+        # Neither is enough alone: a CUDA model spread over the cards and the
+        # machine is only counted on the cards by the allocator, while the
+        # load's estimate covers the whole of it; on Metal the allocator can
+        # be the larger, a response's key-value cache being live tensors too.
+        from model_runtime import DeviceProfile
+
+        profile = DeviceProfile(available=self.GB, held=4 * self.GB)
+
+        self.assertEqual(profile.reclaimed(10 * self.GB).available, 11 * self.GB)
+        self.assertEqual(profile.reclaimed(2 * self.GB).available, 5 * self.GB)
+        self.assertEqual(profile.reclaimed(None).available, 5 * self.GB)
+
     def test_the_profile_reads_what_the_device_is_holding(self):
         import model_runtime
 
@@ -2968,6 +2982,32 @@ class DeviceProfileTests(unittest.TestCase):
             self.assertIsNone(model_runtime.device_profile(torch).held)
         finally:
             model_runtime.system_memory = saved
+
+    def test_a_torch_that_is_still_importing_is_not_read(self):
+        # Python puts a module in sys.modules before its body has run, so a
+        # reader that went by presence alone could find torch without
+        # torch.backends and either raise - at startup, where the hardware
+        # panel is built - or quietly report the wrong device.
+        import model_runtime
+
+        half_built = types.ModuleType("torch")  # no cuda, no backends, no dtypes
+
+        with mock.patch.dict(sys.modules, {"torch": half_built}):
+            with mock.patch.object(model_runtime, "_torch_ready", threading.Event()):
+                self.assertIsNone(model_runtime.imported_torch())
+                self.assertIsNone(model_runtime.device_profile().backend)
+            ready = threading.Event()
+            ready.set()
+            with mock.patch.object(model_runtime, "_torch_ready", ready):
+                self.assertIs(model_runtime.imported_torch(), half_built)
+
+    def test_the_import_thread_is_what_says_torch_may_be_read(self):
+        import model_runtime
+
+        with mock.patch.object(model_runtime, "_torch_ready", threading.Event()) as flag:
+            model_runtime.warm_device()
+            self.assertTrue(flag.wait(timeout=60))
+        self.assertIsNotNone(model_runtime.imported_torch())
 
     def test_the_device_names_itself_the_way_a_loaded_model_does(self):
         from model_runtime import device_label

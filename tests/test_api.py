@@ -545,6 +545,23 @@ class CompletionShapeTests(ApiTestCase):
         self.assertEqual(body["chatlab"]["device"], "CPU")
         self.assertEqual(body["chatlab"]["precision"], "full")
 
+    def test_the_device_reported_is_the_one_that_answered(self):
+        # Read with the load the request is bound to, not after the
+        # generation: by then the model lock is free and a queued load can
+        # have replaced the device and the precision both.
+        class Swaps(Recorder):
+            def generate(self, messages, **kwargs):
+                self.device_name = "Apple Metal (MPS), 4-bit weights"
+                self.precision = "4-bit"
+                return super().generate(messages, **kwargs)
+
+        self.use(Swaps(self.manager.updates))
+
+        body = self.answer()
+
+        self.assertEqual(body["chatlab"]["device"], "CPU")
+        self.assertEqual(body["chatlab"]["precision"], "full")
+
     def test_the_prompt_measurements_come_when_they_are_asked_for(self):
         self.manager.updates = [
             update("Hello", prompt_ids=(1, 2)),

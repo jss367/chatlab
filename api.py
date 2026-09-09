@@ -373,6 +373,13 @@ def build_router() -> APIRouter:
 
         try:
             model_id, load_id = loaded_model(body.get("model"))
+            # Read with the load, not after the generation: by then the model
+            # lock is free and a queued load can have replaced both. A load
+            # that lands in between makes the runtime refuse this request
+            # against its load ID, so these can only describe the weights
+            # that answered.
+            device = runtime.MANAGER.device_name
+            precision = runtime.MANAGER.precision
             turns, prefill = conversation_from(body)
             sampling = sampling_from(body)
             measured, wants = token_detail(body)
@@ -455,6 +462,8 @@ def build_router() -> APIRouter:
                     measured,
                     wants,
                     prompt_logprobs,
+                    device=device,
+                    precision=precision,
                 )
             )
         except ApiError as error:
@@ -566,6 +575,8 @@ def whole_completion(
     measured: bool,
     wants: int,
     prompt_logprobs: bool,
+    device: str | None = None,
+    precision: str | None = None,
 ) -> dict:
     """Run the generation to its end and answer with the whole of it."""
 
@@ -604,8 +615,8 @@ def whole_completion(
         },
         "chatlab": {
             "seed": sampling["seed"],
-            "device": runtime.MANAGER.device_name,
-            "precision": runtime.MANAGER.precision,
+            "device": device,
+            "precision": precision,
             "replayed_tokens": last.forced_prefix_tokens,
             "summary": summarize(metrics),
         },

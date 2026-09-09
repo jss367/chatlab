@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import sys
-
 import gradio as gr
 
 import library
@@ -17,6 +15,7 @@ from model_runtime import (
     device_label,
     device_profile,
     format_memory,
+    imported_torch,
     memory_note,
     reserved_bytes,
 )
@@ -95,7 +94,7 @@ def _metal_cap(profile: DeviceProfile) -> str:
 def _held(backend: str) -> str:
     """What the device allocator has out on this process's behalf."""
 
-    torch = sys.modules.get("torch")
+    torch = imported_torch()
     live = allocated_bytes(backend, torch) if torch is not None else None
     taken = reserved_bytes(torch) if torch is not None else None
     if live is None and taken is None:
