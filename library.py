@@ -21,6 +21,11 @@ a lock, so two handlers saving at once cannot each merge into the same old
 copy and the second replace the first's work; two processes on one file are
 not protected against each other.
 
+A branch can also carry its own sampling - the temperature, top-p, top-k and
+response length it answers with - which is written beside its turns and
+follows the same stamp, so the side that touched a branch last decides both.
+A branch with none answers with the saved settings.
+
 Where it lives::
 
     ~/.local/share/chatlab/conversations.json
@@ -43,6 +48,7 @@ from uuid import uuid4
 
 from conversation import (
     MAIN_BRANCH,
+    SAMPLING_FIELDS,
     copy_forks,
     next_branch_name,
     put_branch,
@@ -95,12 +101,35 @@ def as_seen(forks: dict | None, turns: list[dict] | None) -> dict:
     return forks
 
 
+def sampling_entry(values: dict | None) -> dict:
+    """A branch's sampling as a file spells it: the known keys, rightly typed.
+
+    A value of the wrong type is dropped rather than written, so a file this
+    version reads back is one it can also parse. The types are the file's
+    business alone; what the values may be is the settings module's.
+    """
+
+    entry = {}
+    for key, kind in SAMPLING_FIELDS.items():
+        value = (values or {}).get(key)
+        if isinstance(value, bool):
+            continue
+        if kind is float and isinstance(value, int):
+            value = float(value)
+        if isinstance(value, kind):
+            entry[key] = value
+    return entry
+
+
 def dump(forks: dict | None) -> str:
     forks = copy_forks(forks)
     updated = forks["updated"]
     branches = []
     for name, turns in forks["branches"].items():
         entry = {"name": name, "turns": turn_entries(turns)}
+        sampling = sampling_entry(forks["sampling"].get(name))
+        if sampling:
+            entry["sampling"] = sampling
         if name in updated:
             entry["updated"] = updated[name]
         branches.append(entry)
@@ -131,6 +160,7 @@ def parse(payload: str) -> dict:
         raise ValueError("The conversations file has no list of branches.")
 
     branches: dict[str, list[dict]] = {}
+    sampling: dict[str, dict] = {}
     updated: dict[str, str] = {}
     for entry in raw_branches:
         if not isinstance(entry, dict):
@@ -145,6 +175,16 @@ def parse(payload: str) -> dict:
             if not isinstance(stamp, str):
                 raise ValueError(f"The branch {name!r} has an updated time that is not a string.")
             updated[name] = stamp
+        held = entry.get("sampling")
+        if held is not None:
+            if not isinstance(held, dict):
+                raise ValueError(f"The branch {name!r} has sampling that is not an object.")
+            # Whatever is unusable is left out here and falls back to the
+            # saved setting when the conversation is answered, the same way
+            # a hand-edited settings file does.
+            kept = sampling_entry(held)
+            if kept:
+                sampling[name] = kept
         turns = turns_from_entries(entry.get("turns"))
         # A response that was still streaming when the file was written is
         # kept as far as it got, and closed, so its reasoning block does not
@@ -171,7 +211,12 @@ def parse(payload: str) -> dict:
     active = data.get("active")
     if active not in branches:
         active = next(iter(branches))
-    return {"active": active, "branches": branches, "updated": updated}
+    return {
+        "active": active,
+        "branches": branches,
+        "sampling": sampling,
+        "updated": updated,
+    }
 
 
 def merge(mine: dict | None, theirs: dict | None) -> dict:
@@ -198,6 +243,7 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
         names += [name for name in held if name not in names]
 
     branches: dict[str, list[dict]] = {}
+    sampling: dict[str, dict] = {}
     updated: dict[str, str] = {}
     for name in names:
         ours = mine["updated"].get(name, "")
@@ -210,6 +256,12 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
             winner = mine if name in mine["branches"] else theirs
         if name in winner["branches"]:
             branches[name] = winner["branches"][name]
+            # The sampling goes the way the branch does: one stamp covers
+            # both, so the side that touched the branch last decides what it
+            # answers with as well as what was said in it.
+            held = winner["sampling"].get(name)
+            if held:
+                sampling[name] = held
         stamp = winner["updated"].get(name)
         if stamp:
             updated[name] = stamp
@@ -217,7 +269,12 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
     if not branches:
         branches[MAIN_BRANCH] = []
     active = mine["active"] if mine["active"] in branches else next(iter(branches))
-    return {"active": active, "branches": branches, "updated": updated}
+    return {
+        "active": active,
+        "branches": branches,
+        "sampling": sampling,
+        "updated": updated,
+    }
 
 
 def read(path: Path | None = None) -> dict | None:

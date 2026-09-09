@@ -6,7 +6,9 @@ import sys
 
 import gradio as gr
 
+import library
 import settings
+from conversation import MAIN_BRANCH, branch_sampling
 from model_runtime import (
     MEMORY_HEADROOM_BYTES,
     QUANTIZED_BITS,
@@ -198,10 +200,20 @@ def restore_settings():
 
     saved = settings.load()
     values = saved.to_mapping() | {"model_id": settings.model_id_at_startup(saved)}
+    # The conversation that comes back with the page answers with its own
+    # sampling, so the controls have to come up holding that rather than the
+    # settings file's, which is only what a conversation without any starts
+    # from. Read from the file, not from the restored state, so this does not
+    # depend on which of the two page-load handlers Gradio runs first.
+    restored = library.read()
+    if restored is not None:
+        values |= settings.sampling_values(
+            branch_sampling(restored, restored.get("active", MAIN_BRANCH)), saved
+        )
     updates = [
         # The response-length ceiling is the context limit, so it comes back
         # with the length itself.
-        gr.update(value=saved.max_new_tokens, maximum=saved.prefill_token_limit)
+        gr.update(value=values["max_new_tokens"], maximum=saved.prefill_token_limit)
         if name == "max_new_tokens"
         else gr.update(value=values[name])
         for name in PERSISTED_SETTING_NAMES

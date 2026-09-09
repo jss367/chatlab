@@ -8,6 +8,7 @@ from conversation import (
     TITLE_LIMIT,
     branch_choices,
     branch_label,
+    branch_sampling,
     branch_stamp,
     branch_title,
     copy_forks,
@@ -25,6 +26,7 @@ from conversation import (
     next_branch_name,
     next_fork_name,
     put_branch,
+    put_branch_sampling,
     short_model_name,
     split_reasoning,
     to_json,
@@ -340,6 +342,67 @@ class ForkTests(unittest.TestCase):
         forked, box = fork_at(turns, (9, "content"))
         self.assertEqual(forked, turns)
         self.assertIsNone(box)
+
+
+class BranchSamplingTests(unittest.TestCase):
+    """The sampling a conversation carries of its own."""
+
+    SAMPLING = {"temperature": 0.0, "top_p": 1.0, "top_k": 0, "max_new_tokens": 256}
+
+    def test_a_branch_carries_none_until_it_is_given_some(self):
+        forks = new_forks()
+        self.assertEqual(forks["sampling"], {})
+        self.assertEqual(branch_sampling(forks, MAIN_BRANCH), {})
+        self.assertEqual(branch_sampling(None, MAIN_BRANCH), {})
+
+    def test_giving_a_branch_sampling_stamps_it_like_a_message_would(self):
+        forks = new_forks()
+        put_branch(forks, MAIN_BRANCH, [make_turn("user", "one")])
+        first = forks["updated"][MAIN_BRANCH]
+
+        self.assertTrue(put_branch_sampling(forks, MAIN_BRANCH, self.SAMPLING))
+
+        self.assertEqual(branch_sampling(forks, MAIN_BRANCH), self.SAMPLING)
+        self.assertGreater(forks["updated"][MAIN_BRANCH], first)
+
+    def test_the_same_sampling_again_changes_nothing(self):
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.SAMPLING)
+        stamp = forks["updated"][MAIN_BRANCH]
+
+        self.assertFalse(put_branch_sampling(forks, MAIN_BRANCH, self.SAMPLING))
+        self.assertEqual(forks["updated"][MAIN_BRANCH], stamp)
+
+    def test_only_the_sampling_keys_are_kept(self):
+        forks = new_forks()
+        put_branch_sampling(
+            forks, MAIN_BRANCH, self.SAMPLING | {"seed": 7, "system_prompt": "no"}
+        )
+        self.assertEqual(branch_sampling(forks, MAIN_BRANCH), self.SAMPLING)
+
+    def test_reading_it_hands_back_a_copy(self):
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.SAMPLING)
+        held = branch_sampling(forks, MAIN_BRANCH)
+        held["temperature"] = 1.9
+        self.assertEqual(forks["sampling"][MAIN_BRANCH]["temperature"], 0.0)
+
+    def test_copying_the_forks_copies_it(self):
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.SAMPLING)
+        copied = copy_forks(forks)
+        copied["sampling"][MAIN_BRANCH]["temperature"] = 1.9
+        self.assertEqual(forks["sampling"][MAIN_BRANCH]["temperature"], 0.0)
+
+    def test_a_deleted_branch_takes_its_sampling_with_it(self):
+        forks = new_forks()
+        put_branch(forks, "Fork 1", [])
+        put_branch_sampling(forks, "Fork 1", self.SAMPLING)
+
+        drop_branch(forks, "Fork 1")
+
+        self.assertEqual(forks["sampling"], {})
+        self.assertEqual(branch_sampling(forks, "Fork 1"), {})
 
 
 def measured(content, model="allenai/Olmo-3-7B-Think", prompt=100, generated=20):

@@ -1847,10 +1847,14 @@ class PageLayoutTests(unittest.TestCase):
         self.assertEqual([by_id[fn.targets[0][0]] for fn in moved], sliders)
         for fn in listeners:
             self.assertEqual(fn.inputs, sliders)
-        # The other three are the paths that move a slider without anyone
-        # touching it: the settings file read back on load, and the context
-        # limit committed, which can pull the response length down with it.
-        self.assertEqual(len(listeners) - len(moved), 3)
+        # The others are the paths that move a slider without anyone touching
+        # it: the settings file read back on load, the context limit
+        # committed, which can pull the response length down with it, and the
+        # six that change which conversation is on screen - forking, starting
+        # one, switching, deleting, clearing, and the page load that brings
+        # the saved conversations back - each of which brings that
+        # conversation's own sampling onto the sliders.
+        self.assertEqual(len(listeners) - len(moved), 9)
 
     def test_everything_that_writes_the_summary_shares_one_queue(self):
         # always_last coalesces each slider's own requests; across four

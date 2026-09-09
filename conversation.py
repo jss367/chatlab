@@ -42,6 +42,18 @@ TITLE_LIMIT = 40
 # The per-turn provenance fields, and the type each must have in a saved file.
 TURN_ORIGIN_FIELDS = {"model": str, "prompt_tokens": int, "generated_tokens": int}
 
+# The sampling a conversation can carry of its own, and the type each must
+# have in a saved file. The settings module owns what the values may be; this
+# is only what a file is allowed to hold. Anything else there is ignored, so
+# a file written by a newer version keeps its extra keys through a save by an
+# older one.
+SAMPLING_FIELDS = {
+    "temperature": float,
+    "top_p": float,
+    "top_k": int,
+    "max_new_tokens": int,
+}
+
 _PARTIAL_TAGS = tuple(
     sorted(
         {THINK_OPEN[:size] for size in range(1, len(THINK_OPEN))}
@@ -234,7 +246,8 @@ def model_messages(
 # The forks live beside the conversation as a plain dictionary so they fit in a
 # ``gr.State``:
 #
-#     {"active": name, "branches": {name: [turns...], ...}}
+#     {"active": name, "branches": {name: [turns...], ...},
+#      "sampling": {name: {...}, ...}, "updated": {name: stamp, ...}}
 #
 # Only the *inactive* branches are current in ``branches``: the active one is
 # whatever the conversation state holds, and its entry is refreshed whenever
@@ -250,9 +263,19 @@ def new_forks() -> dict:
     under ``branches`` is one this page deleted, and when. Both are what lets
     two pages writing the same file keep each other's work - see
     ``library.merge``.
+
+    ``sampling`` holds, per branch name, the sampling that branch answers
+    with - see :func:`put_branch_sampling`. A branch with no entry answers
+    with the saved settings, which is what every branch did before
+    conversations carried their own.
     """
 
-    return {"active": MAIN_BRANCH, "branches": {MAIN_BRANCH: []}, "updated": {}}
+    return {
+        "active": MAIN_BRANCH,
+        "branches": {MAIN_BRANCH: []},
+        "sampling": {},
+        "updated": {},
+    }
 
 
 def copy_forks(forks: dict | None) -> dict:
@@ -263,6 +286,10 @@ def copy_forks(forks: dict | None) -> dict:
             name: copy_turns(turns) for name, turns in forks.get("branches", {}).items()
         }
         or {MAIN_BRANCH: []},
+        "sampling": {
+            name: dict(values)
+            for name, values in (forks.get("sampling") or {}).items()
+        },
         "updated": dict(forks.get("updated") or {}),
     }
 
@@ -296,7 +323,33 @@ def drop_branch(forks: dict, name: str) -> None:
     """Remove branch ``name`` and record when, so no other page's copy brings it back."""
 
     del forks["branches"][name]
+    forks.setdefault("sampling", {}).pop(name, None)
     forks["updated"][name] = branch_stamp()
+
+
+def branch_sampling(forks: dict | None, name: str) -> dict:
+    """What branch ``name`` carries of its own sampling; empty where it carries none."""
+
+    held = (forks or {}).get("sampling") or {}
+    return dict(held.get(name) or {})
+
+
+def put_branch_sampling(forks: dict, name: str, values: dict) -> bool:
+    """Store ``values`` as branch ``name``'s sampling; say whether that changed anything.
+
+    Stamped like a change to the turns, and for the same reason: the stamp is
+    what decides, when two pages have both touched a branch, which copy wins,
+    and a conversation moved to temperature 0 on one page must not be pulled
+    back by another page that merely still holds it.
+    """
+
+    sampling = forks.setdefault("sampling", {})
+    kept = {key: value for key, value in values.items() if key in SAMPLING_FIELDS}
+    if sampling.get(name) == kept:
+        return False
+    sampling[name] = kept
+    forks["updated"][name] = branch_stamp()
+    return True
 
 
 def next_branch_name(forks: dict, prefix: str, taken: Iterable[str] = ()) -> str:

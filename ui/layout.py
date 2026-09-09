@@ -39,9 +39,11 @@ from ui.conversations import (
     load_conversation,
     new_conversation,
     refresh_conversation_list,
+    remember_branch_sampling,
     remember_forks,
     remember_message,
     restore_conversations,
+    sampling_updates,
     save_conversation,
     switch_fork,
 )
@@ -979,6 +981,39 @@ def build_app() -> gr.Blocks:
                 show_progress="hidden",
                 concurrency_id=SAMPLING_LABEL_QUEUE,
             )
+            # These four belong to the conversation on screen, so a change to
+            # one is written into it as well as into the settings file - the
+            # file being what the next new conversation starts from.
+            # always_last for the same reason as above: a drag is one write.
+            control.change(
+                remember_branch_sampling,
+                [forks_state, *sampling_controls],
+                forks_state,
+                trigger_mode="always_last",
+                show_progress="hidden",
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
+
+        def brings_its_sampling(event):
+            """Put the newly active conversation's sampling onto the controls.
+
+            Every path that changes which conversation is on screen ends
+            here, so the sliders describe the conversation in front of the
+            reader rather than the one they just left. The label follows the
+            controls, as it does when they are moved by hand.
+            """
+
+            return event.then(
+                sampling_updates,
+                forks_state,
+                sampling_controls,
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            ).then(
+                update_sampling_label,
+                sampling_controls,
+                sampling_accordion,
+                concurrency_id=SAMPLING_LABEL_QUEUE,
+            )
 
         settings_inputs = [
             system_prompt,
@@ -1169,7 +1204,7 @@ def build_app() -> gr.Blocks:
         for control in (new_button, fork_button, delete_fork_button):
             control.click(hide_clear_confirm, None, clear_confirm)
         conversation_list.input(hide_clear_confirm, None, clear_confirm)
-        confirm_clear_button.click(
+        brings_its_sampling(confirm_clear_button.click(
             clear_chat,
             inputs=[color_scale, forks_state],
             concurrency_id=CONVERSATION_PANE_QUEUE,
@@ -1194,7 +1229,7 @@ def build_app() -> gr.Blocks:
                 clear_confirm,
             ],
             cancels=running,
-        )
+        ))
 
         # Forking, switching, starting afresh and deleting all replace the
         # conversation, so they cancel a running generation for the same
@@ -1220,36 +1255,45 @@ def build_app() -> gr.Blocks:
             trace_state,
         ]
         chatbot.select(remember_message, conversation_state, selected_message)
-        fork_button.click(
-            fork_conversation,
-            [conversation_state, forks_state, selected_message, color_scale],
-            fork_outputs,
-            cancels=running,
-            concurrency_id=CONVERSATION_PANE_QUEUE,
+
+        brings_its_sampling(
+            fork_button.click(
+                fork_conversation,
+                [conversation_state, forks_state, selected_message, color_scale],
+                fork_outputs,
+                cancels=running,
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
         )
-        new_button.click(
-            new_conversation,
-            [conversation_state, forks_state, color_scale],
-            fork_outputs,
-            cancels=running,
-            concurrency_id=CONVERSATION_PANE_QUEUE,
+        brings_its_sampling(
+            new_button.click(
+                new_conversation,
+                [conversation_state, forks_state, color_scale],
+                fork_outputs,
+                cancels=running,
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
         )
         # .input rather than .change: the list is also redrawn by the handlers
         # above and the listener below, and a .change listener would switch a
         # second time on each.
-        conversation_list.input(
-            switch_fork,
-            [conversation_list, conversation_state, forks_state, color_scale],
-            fork_outputs,
-            cancels=running,
-            concurrency_id=CONVERSATION_PANE_QUEUE,
+        brings_its_sampling(
+            conversation_list.input(
+                switch_fork,
+                [conversation_list, conversation_state, forks_state, color_scale],
+                fork_outputs,
+                cancels=running,
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
         )
-        delete_fork_button.click(
-            delete_fork,
-            [conversation_state, forks_state, color_scale],
-            fork_outputs,
-            cancels=running,
-            concurrency_id=CONVERSATION_PANE_QUEUE,
+        brings_its_sampling(
+            delete_fork_button.click(
+                delete_fork,
+                [conversation_state, forks_state, color_scale],
+                fork_outputs,
+                cancels=running,
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
         )
         # Every other path that changes the conversation - a streaming reply
         # above all - lands here, and the list's model tag and token count
@@ -1274,12 +1318,14 @@ def build_app() -> gr.Blocks:
         # this cancels a generation still running - the one a reload
         # interrupted, whose frames would otherwise land on the restored
         # transcript.
-        demo.load(
-            restore_conversations,
-            None,
-            [chatbot, conversation_state, forks_state, conversation_list],
-            cancels=running,
-            concurrency_id=CONVERSATION_PANE_QUEUE,
+        brings_its_sampling(
+            demo.load(
+                restore_conversations,
+                None,
+                [chatbot, conversation_state, forks_state, conversation_list],
+                cancels=running,
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
         )
 
         save_button.click(

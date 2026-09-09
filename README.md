@@ -20,6 +20,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Full metric-trace export as JSON or CSV
 - A system prompt, plus temperature, top-p, top-k, seed, and response-length controls
 - Every setting saved to one JSON file you can edit by hand or share between machines
+- Temperature, top-p, top-k and response length kept per conversation, so two forks can be compared at different settings
 - Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
@@ -151,7 +152,9 @@ The system prompt, assistant prefill, and reasoning options; the analysis and in
 
 **Hardware** is what the memory guard reads when it decides whether a model fits: the device a load would use and the precision it would read weights as, the machine's memory and how much of it ChatLab estimates is available within its own limits, the safety reserve it keeps beside the weights, the Metal cap and the share of Metal's recommendation it comes to, what the device allocator is holding for this process, and the model in memory. It is read when the page opens, when the Settings page is opened, after every load and unload, and whenever **↻ Refresh** is pressed - not on a timer, since reading it costs a subprocess. The same figures go to the log with every load and every reply, which is what makes a memory failure readable after the fact; the panel is how to look before one.
 
-The sampling controls are **not** here. Temperature, top-p, top-k, the response length and the seed are what gets moved between one retry and the next, so they sit under the message box on the Chat page, in a **Sampling** section that wears its own values: the summary reads without opening it. They are saved between sessions like everything else.
+The sampling controls are **not** here. Temperature, top-p, top-k, the response length and the seed are what gets moved between one retry and the next, so they sit under the message box on the Chat page, in a **Sampling** section that wears its own values: the summary reads without opening it.
+
+Four of them belong to the conversation rather than to the app: temperature, top-p, top-k and the response length are kept per conversation, so one fork can sit at temperature 0 while another beside it sits at 1.2, and switching between them brings each one's sliders back. A fork answers the way the conversation it was forked from does; a new conversation starts from the saved settings, which are also what a control moved on any conversation writes down, so a new one begins from the values last used. The seed and **New seed each response** are not per conversation: a finished reply leaves the seed it used in that box, so a seed kept per conversation would record the app's dice rather than a choice.
 
 Every setting is saved as you change it, and read back the next time the app
 starts. They live in one file:
@@ -234,9 +237,9 @@ Click a message before pressing Fork to fork at that point. Forking at a reply k
 
 Each conversation has its own transcript, but the token panel describes only the response on screen: switching conversations clears it until the next response. **💾 Save conversation** writes the conversation on screen.
 
-Every conversation in the pane is kept between sessions. The whole pane -
-the active conversation and every other branch - is written to one file as it
-changes, a streaming reply included, and read back when the page loads, so a
+Every conversation in the pane is kept between sessions, its own sampling
+included. The whole pane - the active conversation and every other branch -
+is written to one file as it changes, a streaming reply included, and read back when the page loads, so a
 browser reload, a restart or a crash brings it back where it was. A reply
 that was still streaming when the page went away is kept as far as it got.
 Two windows on the same file - two tabs, or a reload beside the tab it

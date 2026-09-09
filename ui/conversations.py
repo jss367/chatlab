@@ -11,11 +11,13 @@ from gradio.utils import get_upload_folder
 
 import charts
 import library
+import settings
 from conversation import (
     CHAT_PREFIX,
     FORK_PREFIX,
     MAIN_BRANCH,
     branch_choices,
+    branch_sampling,
     copy_forks,
     copy_turns,
     display_messages,
@@ -24,6 +26,7 @@ from conversation import (
     from_json,
     locate,
     put_branch,
+    put_branch_sampling,
     to_json,
 )
 from token_metrics import (
@@ -105,6 +108,53 @@ def restore_conversations():
     turns = copy_turns(forks["branches"][forks["active"]])
     messages, _ = display_messages(turns)
     return messages, turns, forks, conversation_list_update(forks, turns)
+
+
+def sampling_updates(forks: dict | None):
+    """Put the active conversation's sampling into the controls.
+
+    Chained onto every path that changes which conversation is on screen, so
+    switching to a fork brings back the temperature it was answered at rather
+    than leaving the last one's on the sliders. A conversation that carries
+    none - a new chat, or one from a file written before conversations carried
+    sampling - comes up with the saved settings, which is what every
+    conversation used to answer with.
+    """
+
+    forks = forks or {}
+    values = settings.sampling_values(
+        branch_sampling(forks, forks.get("active", MAIN_BRANCH))
+    )
+    return tuple(
+        gr.update(value=values[name]) for name in settings.CONVERSATION_SAMPLING
+    )
+
+
+def remember_branch_sampling(forks: dict | None, *values):
+    """Write the sampling controls into the conversation on screen.
+
+    The values are also saved to the settings file by ``remember_settings``,
+    which is what a conversation with none of its own starts from - so a
+    control moved here changes this conversation and the next new one, and no
+    other. ``gr.skip`` when nothing changed, because the forks' change is
+    what writes the conversations file and a slider that reports the value it
+    already had should not cost a write.
+    """
+
+    held = settings.sampling_values(
+        dict(zip(settings.CONVERSATION_SAMPLING, values, strict=True))
+    )
+    forks = copy_forks(forks)
+    active = forks["active"]
+    if not branch_sampling(forks, active) and held == settings.sampling_defaults():
+        # A conversation that has never been given sampling of its own and is
+        # sitting at the saved values keeps following them, rather than
+        # gaining an entry that says the same thing. Otherwise merely
+        # visiting every conversation would write one into each.
+        return gr.skip()
+    if not put_branch_sampling(forks, active, held):
+        return gr.skip()
+    return forks
 
 
 def remember_message(turns: list[dict] | None, event: gr.SelectData):
@@ -211,6 +261,12 @@ def fork_conversation(
     forked, box_text = fork_at(turns, found)
     name = library.claim_name(forks, FORK_PREFIX)
     put_branch(forks, name, forked)
+    # A fork is the same conversation taken somewhere else, so it answers the
+    # way its parent does until it is changed. A new chat is not a copy of
+    # anything and starts from the saved settings instead.
+    inherited = branch_sampling(forks, forks["active"])
+    if inherited:
+        put_branch_sampling(forks, name, inherited)
     forks["active"] = name
     messages, _ = display_messages(forked)
 
