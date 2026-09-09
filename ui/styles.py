@@ -108,6 +108,14 @@ CSS = f"""
 }}
 .model-list label[data-testid*="· incomplete"] span {{ color: #b45309; }}
 .dark .model-list label[data-testid*="· incomplete"] span {{ color: #fbbf24; }}
+/* The fit verdicts are read off the same label. A model that cannot fit is
+   greyed rather than reddened: it is not an error, and the reader may be
+   looking at it to find that out. */
+.model-list label[data-testid*="· won't fit"]:not(.selected) span {{
+  color: var(--body-text-color-subdued);
+}}
+.model-list label[data-testid*="· tight"] span {{ color: #b45309; }}
+.dark .model-list label[data-testid*="· tight"] span {{ color: #fbbf24; }}
 .model-sort label span {{ font-size: 0.8rem; }}
 .remove-confirm {{
   border: 1px solid #d97706; border-radius: 8px; padding: 0.4rem 0.6rem;

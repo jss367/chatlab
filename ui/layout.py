@@ -14,6 +14,7 @@ from conversation import (
 from model_runtime import (
     DEFAULT_MODEL_SORT,
     MODEL_SORT_ORDERS,
+    warm_device,
 )
 from token_metrics import (
     COLOR_SCALES,
@@ -79,6 +80,7 @@ from ui.models_page import (
     redownload_my_model,
     refresh_model_badge,
     refresh_my_models,
+    refresh_search_results,
     remove_my_model,
     search_models,
     select_default_model,
@@ -136,6 +138,11 @@ def build_app() -> gr.Blocks:
     # neighbour's would be a puzzle to explain.
     saved = settings.load()
     settings.ensure_file()
+    # Read the device beside the interface. Nothing here waits for it, and
+    # the pages that describe a load - the fit verdicts in both model lists,
+    # the hardware panel on the Settings page - are the fuller reading for it
+    # by the time a reader looks.
+    warm_device()
     # Gradio otherwise caps the page at one of a handful of widths and centers
     # it, which leaves a band of empty room down each side on a wide screen.
     # The shell wants every pixel: the two side panes are a fixed width, so the
@@ -790,7 +797,7 @@ def build_app() -> gr.Blocks:
 
         # Every handler that can change what is on disk or in memory rescans
         # the cache afterwards, so My Models never shows a stale list.
-        models_inputs = [my_models, sort_models]
+        models_inputs = [my_models, sort_models, weight_precision]
         models_outputs = [my_models, my_model_detail, my_models_summary]
 
         # Refresh model-dependent displays after explicit model actions.
@@ -863,7 +870,11 @@ def build_app() -> gr.Blocks:
         )
         # .input rather than .change: the refresh above also sets the radio,
         # and a .change listener would rewrite the model ID box on each rescan.
-        my_models.input(select_my_model, my_models, [model_id, my_model_detail])
+        my_models.input(
+            select_my_model,
+            [my_models, weight_precision],
+            [model_id, my_model_detail],
+        )
         # .input again, for the same reason: only the reader's own typing
         # withdraws the selection, never a refresh writing the box.
         model_id.input(clear_my_model_selection, None, [my_models, my_model_detail])
@@ -892,15 +903,26 @@ def build_app() -> gr.Blocks:
         cancel_remove_button.click(hide_remove_confirm, None, confirm_outputs)
 
         search_outputs = [search_results, search_detail, search_results_state]
-        search_button.click(search_models, [search_query, hf_token], search_outputs)
-        search_query.submit(search_models, [search_query, hf_token], search_outputs)
+        search_inputs = [search_query, hf_token, weight_precision]
+        search_button.click(search_models, search_inputs, search_outputs)
+        search_query.submit(search_models, search_inputs, search_outputs)
         # Picking a search result names a model too, so it withdraws the My
         # Models selection the same way typing an ID does.
         search_results.input(
             select_search_result,
-            [search_results, search_results_state],
+            [search_results, search_results_state, weight_precision],
             [model_id, search_detail],
         ).then(clear_my_model_selection, None, [my_models, my_model_detail])
+        # Whether a model fits depends on how its weights would be held, so
+        # both lists are repainted when that choice changes. Neither touches
+        # the cache or the model in memory, so neither is a rescan.
+        weight_precision.change(
+            refresh_my_models, models_inputs, models_outputs
+        ).then(
+            refresh_search_results,
+            [search_results, search_results_state, weight_precision],
+            [search_results, search_detail],
+        )
         enter_sends.change(set_message_box_keys, enter_sends, prompt)
 
         # The sampling accordion wears its own values.

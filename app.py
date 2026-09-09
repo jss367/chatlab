@@ -219,6 +219,7 @@ from ui.models_page import (
     redownload_my_model,
     refresh_model_badge,
     refresh_my_models,
+    refresh_search_results,
     removal_refusal,
     remove_my_model,
     search_models,
