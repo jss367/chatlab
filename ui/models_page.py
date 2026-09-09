@@ -389,7 +389,14 @@ def refresh_model_actions(model_id: str, selected: str | None):
     cleaned = chosen_model(model_id, selected)
     try:
         cached = cache_status(cleaned) if cleaned else CacheStatus()
-    except (OSError, ValueError):
+    except ValueError as error:
+        return (
+            html.escape(str(error)),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False, variant="secondary"),
+        )
+    except OSError:
         # Keep local loading available if the cache cannot be inspected;
         # its handler can explain the actual error when clicked.
         return (

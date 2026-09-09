@@ -105,6 +105,14 @@ class ModelActionTests(unittest.TestCase):
         self.assertIn("Could not check", detail)
         self.assertTrue(load["visible"])
 
+    def test_invalid_model_id_explains_format_and_hides_actions(self):
+        for model_id in ("foo", "org/", "../escape"):
+            with self.subTest(model_id=model_id):
+                detail, *buttons = models_page.refresh_model_actions(model_id, None)
+                self.assertIn("organization/model-name", detail)
+                self.assertNotIn("Could not check", detail)
+                self.assertTrue(all(not button["visible"] for button in buttons))
+
 
 class FormatCountTests(unittest.TestCase):
     def test_counts_read_like_the_hub_pages(self):
