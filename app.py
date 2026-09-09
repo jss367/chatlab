@@ -3567,6 +3567,9 @@ NAV_TILE_CSS = "\n".join(
 )
 
 CSS = f"""
+/* Keep the navigation close to the window edge; Gradio's default page
+   padding otherwise adds a wide empty gutter beside the narrow pane. */
+.gradio-container .app {{ padding-left: 8px !important; }}
 #hero, #models-hero, #settings-hero {{ padding: 0.5rem 0 0.2rem; }}
 #hero h1, #models-hero h1, #settings-hero h1 {{ font-size: 2.1rem; margin-bottom: 0.25rem; }}
 #model-status {{ min-height: 128px; }}
