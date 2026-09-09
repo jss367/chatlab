@@ -22,9 +22,11 @@ copy and the second replace the first's work; two processes on one file are
 not protected against each other.
 
 A branch can also carry its own sampling - the temperature, top-p, top-k and
-response length it answers with - which is written beside its turns and
-follows the same stamp, so the side that touched a branch last decides both.
-A branch with none answers with the saved settings.
+response length it answers with - written beside its turns and stamped
+separately, so a page that moves a slider does not thereby claim a
+transcript it may be a reply behind on, and a newer transcript does not undo
+a slider moved on another page. A branch with no sampling of its own answers
+with the saved settings.
 
 Where it lives::
 
@@ -130,6 +132,9 @@ def dump(forks: dict | None) -> str:
         sampling = sampling_entry(forks["sampling"].get(name))
         if sampling:
             entry["sampling"] = sampling
+            stamp = forks["sampling_updated"].get(name)
+            if stamp:
+                entry["sampling_updated"] = stamp
         if name in updated:
             entry["updated"] = updated[name]
         branches.append(entry)
@@ -161,6 +166,7 @@ def parse(payload: str) -> dict:
 
     branches: dict[str, list[dict]] = {}
     sampling: dict[str, dict] = {}
+    sampling_updated: dict[str, str] = {}
     updated: dict[str, str] = {}
     for entry in raw_branches:
         if not isinstance(entry, dict):
@@ -185,6 +191,13 @@ def parse(payload: str) -> dict:
             kept = sampling_entry(held)
             if kept:
                 sampling[name] = kept
+                stamp = entry.get("sampling_updated")
+                if stamp is not None:
+                    if not isinstance(stamp, str):
+                        raise ValueError(
+                            f"The branch {name!r} has a sampling time that is not a string."
+                        )
+                    sampling_updated[name] = stamp
         turns = turns_from_entries(entry.get("turns"))
         # A response that was still streaming when the file was written is
         # kept as far as it got, and closed, so its reasoning block does not
@@ -215,6 +228,7 @@ def parse(payload: str) -> dict:
         "active": active,
         "branches": branches,
         "sampling": sampling,
+        "sampling_updated": sampling_updated,
         "updated": updated,
     }
 
@@ -244,24 +258,35 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
 
     branches: dict[str, list[dict]] = {}
     sampling: dict[str, dict] = {}
+    sampling_updated: dict[str, str] = {}
     updated: dict[str, str] = {}
-    for name in names:
-        ours = mine["updated"].get(name, "")
-        its = theirs["updated"].get(name, "")
+
+    def newer(name: str, times: str) -> dict:
+        """Whichever side touched ``name`` more recently by the ``times`` stamps."""
+
+        ours = mine[times].get(name, "")
+        its = theirs[times].get(name, "")
         if ours > its:
-            winner = mine
-        elif its > ours:
-            winner = theirs
-        else:
-            winner = mine if name in mine["branches"] else theirs
+            return mine
+        if its > ours:
+            return theirs
+        return mine if name in mine["branches"] else theirs
+
+    for name in names:
+        winner = newer(name, "updated")
         if name in winner["branches"]:
             branches[name] = winner["branches"][name]
-            # The sampling goes the way the branch does: one stamp covers
-            # both, so the side that touched the branch last decides what it
-            # answers with as well as what was said in it.
-            held = winner["sampling"].get(name)
+            # The sampling is merged on its own stamp rather than the
+            # branch's. A page that moves a slider may be a reply behind the
+            # page that made it: it must not win the transcript, and the
+            # newer transcript must not undo its slider.
+            side = newer(name, "sampling_updated")
+            held = side["sampling"].get(name)
             if held:
                 sampling[name] = held
+                stamp = side["sampling_updated"].get(name)
+                if stamp:
+                    sampling_updated[name] = stamp
         stamp = winner["updated"].get(name)
         if stamp:
             updated[name] = stamp
@@ -273,6 +298,7 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
         "active": active,
         "branches": branches,
         "sampling": sampling,
+        "sampling_updated": sampling_updated,
         "updated": updated,
     }
 

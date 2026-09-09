@@ -34,6 +34,7 @@ from model_runtime import (
     cache_status,
     device_profile,
     estimate_parameter_bytes,
+    imported_torch,
     estimate_snapshot_bytes,
     format_bytes,
     format_count,
@@ -705,8 +706,10 @@ UNSUPPORTED_REASON = (
 FIT_WORDS = {FITS: "fits", TIGHT: "tight", UNFIT: "won't fit"}
 
 # What the estimate assumes when the device has not been read yet. Both
-# accelerators load half precision, so this is only wrong for a load onto the
-# CPU, and by then torch has been imported and the real answer is available.
+# accelerators load half precision; a load onto the CPU converts to float32
+# and takes twice as much, so a verdict given before the device is known can
+# be too generous by half. It is corrected as soon as the device is read -
+# see ``refresh_after_device``.
 ASSUMED_DTYPE = "float16"
 
 
@@ -719,14 +722,16 @@ def fit_word(fit: Fit | None) -> str:
 def weight_bits(precision: str | None, profile: DeviceProfile) -> int | None:
     """The bit width a load would pack linear weights into, or ``None`` for full.
 
-    A quantized choice is honoured on Apple Metal alone, so on a device known
-    to be something else the estimate is of full weights however the radio is
-    set - which is what the load itself does. A device not read yet is taken
-    at the reader's word, because the alternative is telling a Mac reader who
-    has chosen 4-bit that a model will not fit at 16.
+    A quantized choice is honoured on Apple Metal alone, so anywhere else the
+    estimate is of full weights however the radio is set - which is what the
+    load itself does. A device not read yet counts as somewhere else: of the
+    two ways to be wrong for the few seconds before it is read, saying a
+    model is tight when 4-bit would have fitted costs a reader nothing, while
+    saying it fits when the load will refuse it is the disagreement these
+    verdicts exist to prevent.
     """
 
-    if profile.backend is not None and not profile.quantizes:
+    if not profile.quantizes:
         return None
     return QUANTIZED_BITS.get(precision or "full")
 
@@ -766,6 +771,27 @@ def replacement_profile() -> DeviceProfile:
     """
 
     return device_profile().reclaimed(runtime.MANAGER.loaded_bytes)
+
+
+def refresh_after_device(
+    known: bool,
+    selected: str | None,
+    order: str | None = DEFAULT_MODEL_SORT,
+    precision: str | None = None,
+):
+    """Repaint My Models once the device is known, and only then.
+
+    The page is painted before torch has finished importing, so the first
+    verdicts are given without knowing the device: they assume half
+    precision and no quantization, which is the safe way to be wrong but is
+    wrong on a Mac with 4-bit chosen. This runs on the badge's timer, does
+    nothing until the device can be read, and repaints once - after which
+    ``known`` keeps it quiet for the rest of the session.
+    """
+
+    if known or imported_torch() is None:
+        return (gr.skip(),) * 4
+    return (*refresh_my_models(selected, order, precision), True)
 
 
 def cached_fits(

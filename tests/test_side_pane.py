@@ -849,13 +849,41 @@ class ModelFitTests(unittest.TestCase):
 
         self.assertIn("· tight", self.labels("4-bit")[OLMO])
 
-    def test_a_device_not_read_yet_takes_the_reader_at_their_word(self):
-        # Before torch is imported the device is unknown. Telling a Mac
-        # reader who has chosen 4-bit that a model will not fit at 16 would
-        # be the worse of the two guesses.
+    def test_a_device_not_read_yet_is_judged_at_full_weights(self):
+        # Of the two ways to be wrong for the few seconds before the device
+        # is read, saying a model is tight when 4-bit would have fitted costs
+        # a reader nothing; saying it fits when the load will refuse it is
+        # the disagreement these verdicts exist to prevent. The list is
+        # repainted once the device is known - see the next test.
         roomy(self, total_gb=24, available_gb=18, backend=None, dtype=None)
 
-        self.assertIn("· fits", self.labels("4-bit")[OLMO])
+        self.assertIn("· tight", self.labels("4-bit")[OLMO])
+
+    def test_the_verdicts_are_repainted_once_the_device_is_read(self):
+        # The page is painted before the background import finishes, so the
+        # first verdicts are given without knowing the device. The badge's
+        # timer corrects them once, and then leaves the list alone.
+        roomy(self, total_gb=24, available_gb=18, backend=None, dtype=None)
+        original = models_page.imported_torch
+        models_page.imported_torch = lambda: None
+        self.addCleanup(lambda: setattr(models_page, "imported_torch", original))
+
+        # Nothing to correct yet: torch is still importing.
+        self.assertEqual(
+            app.refresh_after_device(False, None, "Name", "4-bit"), (gr.skip(),) * 4
+        )
+
+        models_page.imported_torch = lambda: object()
+        radio, _detail, _summary, known = app.refresh_after_device(
+            False, None, "Name", "4-bit"
+        )
+
+        self.assertTrue(known)
+        self.assertIn("· tight", dict((v, k) for k, v in radio["choices"])[OLMO])
+        # And once it has run, it never runs again.
+        self.assertEqual(
+            app.refresh_after_device(True, None, "Name", "4-bit"), (gr.skip(),) * 4
+        )
 
     def test_the_selected_model_says_what_the_verdict_rests_on(self):
         _box, detail = app.select_my_model(OLMO, "full")

@@ -80,6 +80,7 @@ from ui.models_page import (
     load_cached_model,
     loaded_model_badge,
     redownload_my_model,
+    refresh_after_device,
     refresh_model_badge,
     refresh_my_models,
     refresh_search_results,
@@ -658,6 +659,9 @@ def build_app() -> gr.Blocks:
                                 cancel_remove_button = gr.Button("Cancel", size="sm")
                         # The model the open confirmation is about; None when closed.
                         pending_removal = gr.State(None)
+                        # Whether the fit verdicts on screen were given with
+                        # the device known; see refresh_after_device.
+                        device_read = gr.State(False)
 
             with gr.Column(
                 scale=1, visible=False, elem_id="settings-page"
@@ -880,6 +884,16 @@ def build_app() -> gr.Blocks:
         refresh_models_button.click(refresh_my_models, models_inputs, models_outputs)
         sort_models.input(refresh_my_models, models_inputs, models_outputs)
         demo.load(refresh_my_models, models_inputs, models_outputs)
+        # The badge's timer corrects the fit verdicts once torch has finished
+        # importing: the page is painted before that, so the first verdicts
+        # are given without knowing the device. It repaints once and then
+        # does nothing for the rest of the session.
+        badge_timer.tick(
+            refresh_after_device,
+            [device_read, *models_inputs],
+            [*models_outputs, device_read],
+            show_progress="hidden",
+        )
         # Escape stops a running generation, from anywhere on the page.
         demo.load(None, None, None, js=SHORTCUT_JS)
 

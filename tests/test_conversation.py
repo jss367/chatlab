@@ -355,23 +355,28 @@ class BranchSamplingTests(unittest.TestCase):
         self.assertEqual(branch_sampling(forks, MAIN_BRANCH), {})
         self.assertEqual(branch_sampling(None, MAIN_BRANCH), {})
 
-    def test_giving_a_branch_sampling_stamps_it_like_a_message_would(self):
+    def test_giving_a_branch_sampling_stamps_it_under_its_own_time(self):
+        # Not the turns' stamp: two pages can have one conversation open, and
+        # a page that moves a slider may be a reply behind the other. Sharing
+        # one stamp would have it win the whole branch and take the newer
+        # reply off the file with it.
         forks = new_forks()
         put_branch(forks, MAIN_BRANCH, [make_turn("user", "one")])
-        first = forks["updated"][MAIN_BRANCH]
+        turns_stamp = forks["updated"][MAIN_BRANCH]
 
         self.assertTrue(put_branch_sampling(forks, MAIN_BRANCH, self.SAMPLING))
 
         self.assertEqual(branch_sampling(forks, MAIN_BRANCH), self.SAMPLING)
-        self.assertGreater(forks["updated"][MAIN_BRANCH], first)
+        self.assertIn(MAIN_BRANCH, forks["sampling_updated"])
+        self.assertEqual(forks["updated"][MAIN_BRANCH], turns_stamp)
 
     def test_the_same_sampling_again_changes_nothing(self):
         forks = new_forks()
         put_branch_sampling(forks, MAIN_BRANCH, self.SAMPLING)
-        stamp = forks["updated"][MAIN_BRANCH]
+        stamp = forks["sampling_updated"][MAIN_BRANCH]
 
         self.assertFalse(put_branch_sampling(forks, MAIN_BRANCH, self.SAMPLING))
-        self.assertEqual(forks["updated"][MAIN_BRANCH], stamp)
+        self.assertEqual(forks["sampling_updated"][MAIN_BRANCH], stamp)
 
     def test_only_the_sampling_keys_are_kept(self):
         forks = new_forks()
@@ -402,6 +407,7 @@ class BranchSamplingTests(unittest.TestCase):
         drop_branch(forks, "Fork 1")
 
         self.assertEqual(forks["sampling"], {})
+        self.assertEqual(forks["sampling_updated"], {})
         self.assertEqual(branch_sampling(forks, "Fork 1"), {})
 
 

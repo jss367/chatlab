@@ -480,7 +480,12 @@ def build_router() -> APIRouter:
             text = body.get("text")
             if not isinstance(text, str):
                 raise ApiError(400, "text must be a string.")
-            context = body.get("context") or ""
+            context = body.get("context")
+            if context is None:
+                context = ""
+            # Checked after the default rather than through it: `or ""` would
+            # turn a 0 or a [] into an empty context and measure the text
+            # against nothing at all, rather than saying what was wrong.
             if not isinstance(context, str):
                 raise ApiError(400, "context must be a string.")
             use_template = _flag(body, "use_chat_template")

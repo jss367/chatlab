@@ -267,13 +267,17 @@ def new_forks() -> dict:
     ``sampling`` holds, per branch name, the sampling that branch answers
     with - see :func:`put_branch_sampling`. A branch with no entry answers
     with the saved settings, which is what every branch did before
-    conversations carried their own.
+    conversations carried their own. ``sampling_updated`` stamps those the
+    way ``updated`` stamps the turns, and separately: a page that changes
+    only the temperature must not thereby claim a transcript it may be a
+    reply behind on.
     """
 
     return {
         "active": MAIN_BRANCH,
         "branches": {MAIN_BRANCH: []},
         "sampling": {},
+        "sampling_updated": {},
         "updated": {},
     }
 
@@ -290,6 +294,7 @@ def copy_forks(forks: dict | None) -> dict:
             name: dict(values)
             for name, values in (forks.get("sampling") or {}).items()
         },
+        "sampling_updated": dict(forks.get("sampling_updated") or {}),
         "updated": dict(forks.get("updated") or {}),
     }
 
@@ -324,6 +329,7 @@ def drop_branch(forks: dict, name: str) -> None:
 
     del forks["branches"][name]
     forks.setdefault("sampling", {}).pop(name, None)
+    forks.setdefault("sampling_updated", {}).pop(name, None)
     forks["updated"][name] = branch_stamp()
 
 
@@ -341,6 +347,11 @@ def put_branch_sampling(forks: dict, name: str, values: dict) -> bool:
     what decides, when two pages have both touched a branch, which copy wins,
     and a conversation moved to temperature 0 on one page must not be pulled
     back by another page that merely still holds it.
+
+    Under its own stamp, though, not the turns'. Two pages can have one
+    conversation open, and a page that moves a slider may be a reply behind
+    the other: sharing one stamp would have that page win the whole branch
+    and take the newer reply off the file with it.
     """
 
     sampling = forks.setdefault("sampling", {})
@@ -348,7 +359,7 @@ def put_branch_sampling(forks: dict, name: str, values: dict) -> bool:
     if sampling.get(name) == kept:
         return False
     sampling[name] = kept
-    forks["updated"][name] = branch_stamp()
+    forks.setdefault("sampling_updated", {})[name] = branch_stamp()
     return True
 
 

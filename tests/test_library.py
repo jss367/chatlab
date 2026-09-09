@@ -255,13 +255,12 @@ class SamplingFileTests(unittest.TestCase):
             library.read(self.path)["sampling"][MAIN_BRANCH]["temperature"], 1.0
         )
 
-    def test_the_sampling_goes_the_way_the_branch_does(self):
-        # One stamp covers a branch's turns and its sampling, so the side
-        # that touched it last decides both.
+    def test_a_slider_moved_on_a_stale_page_keeps_the_newer_transcript(self):
+        # The two are merged apart. This page is a reply behind the file and
+        # has only moved a slider: it must not win the transcript, and the
+        # newer transcript must not undo the slider.
         mine = stamped(MAIN_BRANCH, Main="mine")
         put_branch_sampling(mine, MAIN_BRANCH, self.SAMPLING)
-        # put_branch_sampling stamps as it writes, so this page's own stamp
-        # is pushed back to before the file's for the sake of the test.
         mine["updated"][MAIN_BRANCH] = EARLIER
         theirs = stamped(MAIN_BRANCH, Main="theirs")
         theirs["updated"][MAIN_BRANCH] = LATER
@@ -269,19 +268,45 @@ class SamplingFileTests(unittest.TestCase):
         merged = library.merge(mine, theirs)
 
         self.assertEqual(first_messages(merged), {MAIN_BRANCH: "theirs"})
-        self.assertEqual(merged["sampling"], {})
+        self.assertEqual(merged["sampling"], {MAIN_BRANCH: self.SAMPLING})
 
-    def test_the_newer_sides_sampling_wins(self):
+    def test_a_reply_saved_moments_ago_survives_a_sampling_only_edit(self):
+        # The whole of it, through the file: the other page saved a reply,
+        # this page changes only the temperature, and the reply stays.
+        theirs = stamped(MAIN_BRANCH, Main="hi")
+        theirs["branches"][MAIN_BRANCH].append(reply("an answer"))
+        theirs["updated"][MAIN_BRANCH] = LATER
+        library.write(theirs, self.path)
+
+        stale = stamped(MAIN_BRANCH, Main="hi")
+        stale["updated"][MAIN_BRANCH] = EARLIER
+        put_branch_sampling(stale, MAIN_BRANCH, self.SAMPLING)
+        library.write(stale, self.path)
+
+        restored = library.read(self.path)
+
+        self.assertEqual(
+            [turn["content"] for turn in restored["branches"][MAIN_BRANCH]],
+            ["hi", "an answer"],
+        )
+        self.assertEqual(restored["sampling"], {MAIN_BRANCH: self.SAMPLING})
+
+    def test_the_sampling_moved_more_recently_wins(self):
         mine = stamped(MAIN_BRANCH, Main="mine")
         put_branch_sampling(mine, MAIN_BRANCH, self.SAMPLING)
-        mine["updated"][MAIN_BRANCH] = LATER
         theirs = stamped(MAIN_BRANCH, Main="theirs")
         put_branch_sampling(theirs, MAIN_BRANCH, self.SAMPLING | {"temperature": 1.9})
-        theirs["updated"][MAIN_BRANCH] = EARLIER
+        theirs["sampling_updated"][MAIN_BRANCH] = EARLIER
 
         merged = library.merge(mine, theirs)
 
         self.assertEqual(merged["sampling"][MAIN_BRANCH]["temperature"], 0.0)
+        # And the other way round, to show the stamp is what decides.
+        mine["sampling_updated"][MAIN_BRANCH] = EARLIER
+        theirs["sampling_updated"][MAIN_BRANCH] = LATER
+        self.assertEqual(
+            library.merge(mine, theirs)["sampling"][MAIN_BRANCH]["temperature"], 1.9
+        )
 
     def test_a_branch_only_the_file_has_keeps_its_sampling(self):
         theirs = stamped("Fork 1", **{"Fork 1": "theirs"})

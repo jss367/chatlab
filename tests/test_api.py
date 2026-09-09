@@ -791,6 +791,37 @@ class ScoreTests(ApiTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("9,000 tokens", response.json()["error"]["message"])
 
+    def test_a_context_that_is_not_text_is_refused_rather_than_dropped(self):
+        # A falsey non-string would otherwise become an empty context and the
+        # text would be measured against nothing at all, which is a different
+        # question than the one asked.
+        self.manager.score_text = lambda text, **kwargs: self.fail("scored anyway")
+
+        for context in (0, False, [], {}):
+            with self.subTest(context=context):
+                response = self.client.post(
+                    "/v1/chatlab/score", json={"text": "hi", "context": context}
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(
+                    "context must be a string", response.json()["error"]["message"]
+                )
+
+    def test_an_absent_context_is_no_context(self):
+        seen = {}
+
+        def score(text, **kwargs):
+            seen.update(kwargs)
+            return ScoredText(context_metrics=[], metrics=[metric(1, "hi")])
+
+        self.manager.score_text = score
+
+        for body in ({"text": "hi"}, {"text": "hi", "context": None}):
+            with self.subTest(body=body):
+                response = self.client.post("/v1/chatlab/score", json=body)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(seen["context"], "")
+
     def test_the_text_is_required(self):
         response = self.client.post("/v1/chatlab/score", json={})
 

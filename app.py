@@ -220,6 +220,7 @@ from ui.models_page import (
     model_snapshot,
     my_models_summary,
     redownload_my_model,
+    refresh_after_device,
     refresh_model_badge,
     refresh_my_models,
     refresh_search_results,
