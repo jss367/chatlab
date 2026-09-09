@@ -114,8 +114,8 @@ def interrupted_prefix(episode, manager):
     if not episode.interrupt_next and episode.moves < episode.config["interrupt_after"]:
         return []
     text = episode.config["interruption_text"]
-    if any(mark in text for mark in ("<tool_call", "</tool_call", "<|im_", "<|endoftext|>")):
-        raise ValueError("Interruption text cannot supply executable tool syntax or conversation boundary tokens.")
+    if any(mark in text for mark in ("<tool_call", "</tool_call", "<|im_", "<|endoftext|>", "<think>", "</think>")):
+        raise ValueError("Interruption text cannot supply tool syntax, conversation boundary tokens or reasoning delimiters.")
     # forced_ids inserts into the actual next response, including inside an
     # already-open reasoning block. Unlike answer_prefill it adds no </think>.
     ids = manager.encode(text)

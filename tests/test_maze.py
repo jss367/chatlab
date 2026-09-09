@@ -108,6 +108,21 @@ class MazeTests(unittest.TestCase):
             text = '<tool_call>\n' + json.dumps({"name": "move", "arguments": {"maze_id": MAZE.maze_id, "direction": value}}) + '\n</tool_call>'
             self.assertEqual(parse_call(text)[1], "invalid_arguments")
 
+    def test_supplied_reasoning_markers_are_rejected_before_generation(self):
+        for marker in ('<think>', '</think>'):
+            for prefilled in (False, True):
+                with self.subTest(marker=marker, reasoning_prefilled=prefilled):
+                    ep = Episode(MAZE, CONFIG | {'interruption_text': marker, 'prefix_tokens': 0})
+                    manager = Manager([])
+                    manager.reasoning_prefilled = prefilled
+                    list(stream_episode(ep, manager))
+                    self.assertEqual(ep.phase, 'error')
+                    self.assertIn('reasoning delimiters', ep.detail)
+                    self.assertEqual(manager.calls, [])
+                    self.assertFalse(manager.busy)
+                    self.assertFalse(ep.interrupted)
+                    self.assertIsNone(ep.resumed)
+
     def test_return_then_arrival_excludes_supplied_tokens(self):
         ep = Episode(MAZE, CONFIG)
         move = '\n' + call_text(MAZE.maze_id, "east")
