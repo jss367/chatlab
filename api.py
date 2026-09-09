@@ -40,10 +40,9 @@ from model_runtime import (
     InsufficientMemoryError,
     ModelChanged,
     OutOfMemoryError,
-    cache_status,
-    list_cached_models,
     device_label,
     device_profile,
+    list_cached_models,
 )
 from token_metrics import summarize
 from ui import runtime
