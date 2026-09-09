@@ -490,6 +490,20 @@ class RunPromptsTests(unittest.TestCase):
         self.assertTrue(any("Prompt 1 of 2" in status for status in statuses))
         self.assertTrue(any("Prompt 2 of 2" in status for status in statuses))
 
+    def test_a_finished_prompt_is_recorded_before_anything_can_cancel_it(self):
+        # Stop closes the generator at whichever yield it is parked on. A
+        # progress line published after the last update would sit between a
+        # prompt finishing and its row and trace being written, and a Stop
+        # landing there took a fully generated answer with it. The frame
+        # after the opening one now already carries the finished prompt.
+        run = app.run_prompts("say hello", [], "", "", *SAMPLING)
+        self.addCleanup(run.close)
+        next(run)
+        frame = next(run)
+
+        self.assertEqual(len(frame[RESULTS]["value"]), 1)
+        self.assertEqual(len(frame[FILES]["value"]), 2)
+
     def test_the_files_grow_as_the_run_does(self):
         # A run stopped half way through keeps what it produced, which is only
         # true if each finished prompt is published as it lands.
@@ -623,6 +637,14 @@ class BatchTableTests(unittest.TestCase):
 
     def test_a_short_prompt_is_shown_whole(self):
         self.assertEqual(app.excerpt("say hello"), "say hello")
+
+    def test_a_loaded_paragraph_prompt_is_counted_once(self):
+        # The count is the only number on screen before the press, so it has
+        # to be the number the run will take, not the number of blocks the
+        # box happens to show.
+        loaded = ["one\n\ntwo"]
+
+        self.assertEqual(app.count_prompts(app.prompts_to_text(loaded), loaded), "1 prompt.")
 
     def test_the_count_follows_the_box(self):
         self.assertEqual(app.count_prompts(""), app.PROMPT_COUNT_HINT)

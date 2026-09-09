@@ -1529,7 +1529,7 @@ def build_app() -> gr.Blocks:
         stop_prompts_button.click(stop_batch, None, batch_outputs, cancels=[batch_run])
         prompts_box.change(
             count_prompts,
-            prompts_box,
+            [prompts_box, loaded_prompts_state],
             prompt_count,
             trigger_mode="always_last",
             show_progress="hidden",

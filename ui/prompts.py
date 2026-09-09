@@ -58,10 +58,16 @@ BATCH_MODEL_CHANGED = "The model was replaced while the batch was running"
 EXCERPT_LENGTH = 80
 
 
-def count_prompts(text: str) -> str:
-    """How many prompts the box holds, as it is written."""
+def count_prompts(text: str, loaded=()) -> str:
+    """How many prompts a run would take from the box.
 
-    count = len(parse_prompts(text))
+    Counted through resolve_prompts() rather than the box alone, so a loaded
+    prompt with a blank line inside it is counted once, the way it will run.
+    A count that disagreed with the run would be worse than none: it is the
+    only number on screen before the press.
+    """
+
+    count = len(resolve_prompts(text, loaded))
     if not count:
         return PROMPT_COUNT_HINT
     return f"{count} prompt{'' if count == 1 else 's'}."
@@ -309,7 +315,20 @@ def _run_batch(
             # closing() releases the model lock the moment Stop cancels this
             # event and Gradio closes the outer generator.
             with contextlib.closing(stream):
+                # The progress line for one update is published at the top of
+                # the next pass, so nothing is yielded after the update that
+                # turns out to be the last. Yielding there would put a
+                # cancellation point between a prompt finishing and its row
+                # and trace being written: Stop landing in that window used to
+                # throw GeneratorExit into the yield and take a fully
+                # generated answer with it, which is exactly the case the
+                # published-as-it-goes files exist to protect. The frame lost
+                # this way is a progress line the finishing frame replaces in
+                # the same breath.
+                held = None
                 for update in stream:
+                    if held is not None:
+                        yield held
                     text = update.text
                     metrics = list(update.metrics)
                     model_id = update.model_id or model_id
@@ -317,7 +336,7 @@ def _run_batch(
                     forced_prefix_tokens = update.forced_prefix_tokens
                     if update.literal_prefill_text:
                         literal_prefill = update.literal_prefill_text
-                    yield (
+                    held = (
                         batch_progress(index, total, len(metrics), started),
                         gr.skip(),
                         gr.skip(),
