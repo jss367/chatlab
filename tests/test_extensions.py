@@ -267,8 +267,9 @@ class ExtensionSettingsTests(unittest.TestCase):
 
     def test_disabled_app_build_never_imports_maze(self):
         with tempfile.TemporaryDirectory() as temp:
+            # Background imports may add modules while the predicate runs.
             result = subprocess.run([sys.executable, '-c',
-                "import app,sys; demo=app.build_app(); assert not any(n.startswith('extensions.maze_experiments') for n in sys.modules); demo.close()"],
+                "import app,sys; demo=app.build_app(); assert not any(n.startswith('extensions.maze_experiments') for n in tuple(sys.modules)); demo.close()"],
                 env=os.environ | {settings.SETTINGS_PATH_ENV: str(Path(temp)/'settings.json'), 'GRADIO_ANALYTICS_ENABLED':'False'},
                 capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
