@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from extensions.maze_experiments.maze import Maze, apply_call, call_text, generate, parse_call
-from extensions.maze_experiments.runner import Episode, from_payload, stream_episode
+from extensions.maze_experiments.runner import Episode, TERMINAL, from_payload, stream_episode
 from model_runtime import ModelManager
 from extension_api import ModelService
 from extension_api import TokenInspector
@@ -132,6 +132,23 @@ class MazeTests(unittest.TestCase):
                     self.assertFalse(manager.busy)
                     self.assertFalse(ep.interrupted)
                     self.assertIsNone(ep.resumed)
+
+    def test_interruption_rejects_finished_runs_and_replays_without_changing_provenance(self):
+        for phase, replay in [(phase, False) for phase in TERMINAL] + [('ready', True), ('paused', True), ('running', True)]:
+            with self.subTest(phase=phase, replay=replay):
+                ep = Episode(MAZE, CONFIG)
+                ep.phase, ep.replay_only = phase, replay
+                before = copy.deepcopy(ep.payload())
+                with self.assertRaisesRegex(ValueError, 'Start a new episode'):
+                    ep.request_interruption()
+                self.assertEqual(ep.payload(), before)
+                self.assertFalse(ep.interrupt_next)
+        for phase in ('ready', 'paused', 'running'):
+            ep = Episode(MAZE, CONFIG)
+            ep.phase = phase
+            ep.request_interruption()
+            self.assertTrue(ep.interrupt_next)
+            self.assertTrue(ep.manual_intervention)
 
     def test_return_then_arrival_excludes_supplied_tokens(self):
         ep = Episode(MAZE, CONFIG)

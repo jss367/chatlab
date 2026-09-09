@@ -115,6 +115,8 @@ class Episode:
                         "Use Export run JSON to download them, and check the run directory or free disk space.")
 
     def request_interruption(self):
+        if self.phase in TERMINAL or self.replay_only:
+            raise ValueError("Start a new episode to request an interruption. This episode is finished or is a saved replay.")
         if self.interrupted:
             raise ValueError("This episode already contains its interruption. Start another run to compare settings.")
         if not self.config.get("interruption_text", "").strip():
