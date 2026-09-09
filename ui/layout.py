@@ -117,6 +117,19 @@ from ui.styles import (
 )
 
 
+# One queue for everything that rewrites the forks or the conversation in one
+# step: the branch buttons, the list, Clear all, Undo, Stop, the loaders, and
+# the two listeners on the states. Gradio
+# runs events that share a concurrency id one at a time, in the order they
+# were queued, and reads a State input when the event runs rather than when
+# it was queued. So a redraw queued by a streaming frame can no longer run
+# after a click on New with the forks as they were before the click, and
+# hand that older pane back over the new one. The generation handlers stay
+# out of it: they hold their own slot for the whole reply, and the redraw
+# has to run between their frames.
+CONVERSATION_PANE_QUEUE = "conversation-pane"
+
+
 def build_app() -> gr.Blocks:
     # Read once, here, rather than per control: a build is one snapshot of
     # the file, and a control whose value came from a later read than its
@@ -1044,6 +1057,7 @@ def build_app() -> gr.Blocks:
         stop_button.click(
             stop_generation,
             inputs=[conversation_state, metrics_state, context_ids_state],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
             outputs=[
                 chatbot,
                 conversation_state,
@@ -1072,12 +1086,14 @@ def build_app() -> gr.Blocks:
             [conversation_state, color_scale],
             undo_outputs,
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         chatbot.undo(
             undo_message,
             [conversation_state, color_scale],
             undo_outputs,
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         # Clear asks before it takes anything, so the button that opens the
         # question does nothing else - it neither clears nor cancels. The
@@ -1099,7 +1115,8 @@ def build_app() -> gr.Blocks:
         conversation_list.input(hide_clear_confirm, None, clear_confirm)
         confirm_clear_button.click(
             clear_chat,
-            inputs=color_scale,
+            inputs=[color_scale, forks_state],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
             outputs=[
                 chatbot,
                 conversation_state,
@@ -1152,12 +1169,14 @@ def build_app() -> gr.Blocks:
             [conversation_state, forks_state, selected_message, color_scale],
             fork_outputs,
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         new_button.click(
             new_conversation,
             [conversation_state, forks_state, color_scale],
             fork_outputs,
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         # .input rather than .change: the list is also redrawn by the handlers
         # above and the listener below, and a .change listener would switch a
@@ -1167,12 +1186,14 @@ def build_app() -> gr.Blocks:
             [conversation_list, conversation_state, forks_state, color_scale],
             fork_outputs,
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         delete_fork_button.click(
             delete_fork,
             [conversation_state, forks_state, color_scale],
             fork_outputs,
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         # Every other path that changes the conversation - a streaming reply
         # above all - lands here, and the list's model tag and token count
@@ -1180,9 +1201,17 @@ def build_app() -> gr.Blocks:
         conversation_state.change(
             refresh_conversation_list,
             [conversation_state, forks_state],
-            conversation_list,
+            [conversation_list, forks_state],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
-        forks_state.change(remember_forks, [conversation_state, forks_state], None)
+        # And the forks' change, which the listener above fires in turn, is
+        # where the file is written - once per change, whichever path made it.
+        forks_state.change(
+            remember_forks,
+            [conversation_state, forks_state],
+            None,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+        )
         # The saved conversations come back first, so the listeners above
         # have something to describe. A page with nothing saved is left as
         # it was built. Like every other path that replaces the conversation,
@@ -1194,6 +1223,7 @@ def build_app() -> gr.Blocks:
             None,
             [chatbot, conversation_state, forks_state, conversation_list],
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
 
         save_button.click(
@@ -1223,6 +1253,7 @@ def build_app() -> gr.Blocks:
                 trace_state,
             ],
             cancels=running,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
 
         score_button.click(

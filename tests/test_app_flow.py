@@ -1,3 +1,5 @@
+import asyncio
+import copy
 import inspect
 import os
 import stat
@@ -286,7 +288,7 @@ class ChatFlowTests(unittest.TestCase):
         frames = self.last(app.chat("hi", [], *SETTINGS))
         self.assertEqual(strip_of(frames[0][STRIP]), [])
         self.assertEqual(frames[0][DETAIL], app.NO_TOKEN_SELECTED)
-        self.assertEqual(frames[0][ALTS], [])
+        self.assertEqual(strip_of(frames[0][ALTS]), [])
         # Later frames only append to the strip, so a token picked mid-stream
         # stays valid and its details are left alone.
         for frame in frames[1:]:
@@ -297,7 +299,46 @@ class ChatFlowTests(unittest.TestCase):
         turns = [make_turn("user", "one"), make_turn("assistant", "stale")]
         frames = self.last(app.retry_last("", turns, *SETTINGS))
         self.assertEqual(frames[0][DETAIL], app.NO_TOKEN_SELECTED)
-        self.assertEqual(frames[0][ALTS], [])
+        self.assertEqual(strip_of(frames[0][ALTS]), [])
+
+    def test_streaming_skip_does_not_delete_the_rendered_table_data(self):
+        # The browser retains the table value by reference. Gradio's client
+        # applies the next stream patch in place, even for a skipped output.
+        # Exercise real postprocessing and diffs: a bare [] reset used to
+        # turn into delete(data), delete(headers), then crash the table render.
+        demo = app.build_app()
+        listener = next(fn for fn in demo.fns.values() if fn.fn is app.chat)
+        frames = self.last(app.chat("hi", [], *SETTINGS))
+
+        async def wire_frames():
+            state = gr.blocks.SessionState(demo)
+            return [
+                await demo.postprocess_data(listener, frame, state)
+                for frame in frames[:2]
+            ]
+
+        first, second = asyncio.run(wire_frames())
+        demo.handle_streaming_diffs(listener, first, "table-regression", 1, final=False)
+        patch = demo.handle_streaming_diffs(
+            listener, second, "table-regression", 1, final=False
+        )[ALTS]
+        client_value = copy.deepcopy(first[ALTS])
+        rendered_table = client_value.get("value", client_value)
+        expected = copy.deepcopy(rendered_table)
+        self.assertEqual(rendered_table["data"], [])
+
+        # These two frames only add/delete dictionary properties. Match the
+        # client's in-place edits, including the alias held by the renderer.
+        for action, path, value in patch:
+            target = client_value
+            for key in path[:-1]:
+                target = target[key]
+            if action == "delete":
+                del target[path[-1]]
+            else:
+                self.assertEqual(action, "add")
+                target[path[-1]] = value
+        self.assertEqual(rendered_table, expected)
 
     def test_a_refused_send_keeps_the_token_diagnostics(self):
         # gr.skip() leaves the previous response's panel on screen.
@@ -2602,6 +2643,11 @@ class ForkTests(unittest.TestCase):
         self.original = runtime.MANAGER
         runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
         self.addCleanup(setattr, runtime, "MANAGER", self.original)
+        # New branches are named around what the saved file holds, so start
+        # each test with nothing saved.
+        self.path = library.library_path()
+        if self.path.exists():
+            self.path.unlink()
 
     def turns(self):
         return [
@@ -2610,6 +2656,19 @@ class ForkTests(unittest.TestCase):
             make_turn("user", "two"),
             make_turn("assistant", "second"),
         ]
+
+    def test_a_new_branch_is_not_named_after_one_another_page_saved(self):
+        # The other page started Chat 1 and Fork 1 after this one loaded, and
+        # this page's forks know nothing of them.
+        other = new_forks()
+        other["branches"]["Chat 1"] = [make_turn("user", "theirs")]
+        other["branches"]["Fork 1"] = []
+        library.write(other, self.path)
+
+        fresh = app.new_conversation(self.turns(), new_forks())
+        self.assertEqual(fresh[FORK_STATE]["active"], "Chat 2")
+        forked = app.fork_conversation(self.turns(), new_forks(), None)
+        self.assertEqual(forked[FORK_STATE]["active"], "Fork 2")
 
     def test_forking_copies_the_conversation_into_a_new_fork(self):
         result = app.fork_conversation(self.turns(), new_forks(), None)
@@ -2730,10 +2789,21 @@ class ForkTests(unittest.TestCase):
     def test_clear_resets_the_forks(self):
         result = app.clear_chat()
         self.assertEqual(len(result), CLEAR_OUTPUTS)
-        self.assertEqual(result[-3], new_forks())
+        self.assertEqual(result[-3]["active"], MAIN_BRANCH)
+        self.assertEqual(result[-3]["branches"], {MAIN_BRANCH: []})
         self.assertEqual(names_of(result[-2]), [MAIN_BRANCH])
         # And closes the confirmation that asked for it.
         self.assertEqual(result[-1], gr.update(visible=False))
+
+    def test_clear_marks_every_branch_it_knew_as_gone(self):
+        forked = app.fork_conversation(self.turns(), new_forks(), None)
+        result = app.clear_chat(app.DEFAULT_COLOR_SCALE, forked[FORK_STATE])
+        forks = result[-3]
+        # The main conversation is emptied now and Fork 1 deleted now, so a
+        # save merges as a change to each rather than as a stale copy.
+        self.assertEqual(forks["branches"], {MAIN_BRANCH: []})
+        self.assertEqual(set(forks["updated"]), {MAIN_BRANCH, "Fork 1"})
+        self.assertGreater(forks["updated"]["Fork 1"], forked[FORK_STATE]["updated"]["Fork 1"])
 
     def test_a_forked_conversation_can_be_continued(self):
         forked = app.fork_conversation(self.turns(), new_forks(), None)
@@ -2848,7 +2918,7 @@ class ConversationListTests(unittest.TestCase):
 
     def test_the_refreshed_list_names_the_model_and_the_size(self):
         last = list(app.chat("hi", [], *SETTINGS))[-1]
-        update = app.refresh_conversation_list(last[TURNS], new_forks())
+        update, _forks = app.refresh_conversation_list(last[TURNS], new_forks())
         reply = last[TURNS][-1]
         total = reply["prompt_tokens"] + reply["generated_tokens"]
         self.assertEqual(names_of(update), [MAIN_BRANCH])
@@ -2860,12 +2930,17 @@ class ConversationListTests(unittest.TestCase):
         forks["branches"][MAIN_BRANCH] = [make_turn("user", "stale")]
         forks["branches"]["Fork 1"] = [make_turn("user", "other")]
         forks["active"] = "Fork 1"
-        update = app.refresh_conversation_list([make_turn("user", "live")], forks)
+        update, seen = app.refresh_conversation_list([make_turn("user", "live")], forks)
         self.assertEqual(
             labels_of(update),
             ["Main · stale\nNo replies yet", "Fork 1 · live\nNo replies yet"],
         )
         self.assertEqual(update["value"], "Fork 1")
+        # The forks come back with the live turns written in and stamped, so
+        # the state carries when the branch changed; the input is untouched.
+        self.assertEqual(seen["branches"]["Fork 1"][0]["content"], "live")
+        self.assertEqual(list(seen["updated"]), ["Fork 1"])
+        self.assertEqual(forks["branches"]["Fork 1"][0]["content"], "other")
 
     def test_a_loaded_conversation_keeps_its_tags(self):
         last = list(app.chat("hi", [], *SETTINGS))[-1]
@@ -2919,8 +2994,9 @@ class ConversationListWiringTests(unittest.TestCase):
     def test_a_change_to_the_conversation_state_redraws_the_list(self):
         refresh = self.named("refresh_conversation_list")
         state, _metrics, _context = self.named("stop_generation").inputs
+        forks = self.named("remember_forks").inputs[1]
         self.assertEqual(refresh.targets, [(state._id, "change")])
-        self.assertEqual(refresh.outputs, [self.conversation_list()])
+        self.assertEqual(refresh.outputs, [self.conversation_list(), forks])
 
     def test_picking_an_entry_switches_to_it(self):
         switch = self.named("switch_fork")
@@ -2942,6 +3018,29 @@ class ConversationListWiringTests(unittest.TestCase):
         self.assertEqual(restore.targets, [(self.demo._id, "load")])
         self.assertEqual(restore.inputs, [])
         self.assertEqual(restore.outputs[1:], [state, forks, self.conversation_list()])
+
+    def test_everything_that_rewrites_the_conversation_in_one_step_runs_on_one_queue(self):
+        # A redraw queued by a streaming frame must not run after a click on
+        # New with the pane as it was before the click, and Undo must not
+        # publish branch A's shortened transcript into branch B after a
+        # switch. Sharing one concurrency id makes Gradio run them in order,
+        # reading the states as they are when each runs. The rule is derived
+        # rather than listed: every listener that writes the conversation
+        # state and is not a streaming handler is on the queue, and every
+        # streaming handler is off it, since the redraw has to run between
+        # its frames.
+        state, _metrics, _context = self.named("stop_generation").inputs
+        forks = self.named("remember_forks").inputs[1]
+        writers = [fn for fn in self.demo.fns.values() if state in fn.outputs or forks in fn.outputs]
+        self.assertTrue(writers)
+        for fn in writers:
+            name = getattr(fn.fn, "__name__", str(fn))
+            with self.subTest(handler=name):
+                if inspect.isgeneratorfunction(fn.fn):
+                    self.assertNotEqual(fn.concurrency_id, app.CONVERSATION_PANE_QUEUE)
+                else:
+                    self.assertEqual(fn.concurrency_id, app.CONVERSATION_PANE_QUEUE)
+        self.assertEqual(self.named("remember_forks").concurrency_id, app.CONVERSATION_PANE_QUEUE)
 
     def test_a_change_to_the_forks_saves_them(self):
         remember = self.named("remember_forks")
@@ -2994,18 +3093,44 @@ class ConversationLibraryTests(unittest.TestCase):
         if self.path.exists():
             self.path.unlink()
 
-    def test_a_redraw_writes_the_pane_as_seen(self):
+    def test_a_redraw_hands_the_pane_as_seen_to_the_forks_which_are_then_saved(self):
         forks = new_forks()
         forks["branches"]["Chat 2"] = [make_turn("user", "other")]
         forks["active"] = "Chat 2"
         on_screen = [make_turn("user", "other"), make_turn("assistant", "reply", "")]
 
-        app.refresh_conversation_list(on_screen, forks)
+        _update, seen = app.refresh_conversation_list(on_screen, forks)
+        # The redraw itself writes nothing; the forks' change does.
+        self.assertFalse(self.path.exists())
+        app.remember_forks(on_screen, seen)
 
         saved = library.read(self.path)
         self.assertEqual(saved["active"], "Chat 2")
         self.assertEqual(saved["branches"][MAIN_BRANCH], [])
         self.assertEqual([turn["content"] for turn in saved["branches"]["Chat 2"]], ["other", "reply"])
+        self.assertEqual(list(saved["updated"]), ["Chat 2"])
+
+    def test_a_branch_put_away_later_does_not_outrank_a_newer_copy_of_it(self):
+        # Two tabs on one file. Tab A edits Main and saves; tab B edits Main
+        # and saves after it; then A starts a new chat, which puts its copy of
+        # Main away, without having touched Main since. B's copy is the newer
+        # and must stay, so the stamp A puts Main away with has to be the
+        # time A changed it, not the time A put it away.
+        a_forks = new_forks()
+        a_turns = [make_turn("user", "A's edit")]
+        _update, a_forks = app.refresh_conversation_list(a_turns, a_forks)
+        app.remember_forks(a_turns, a_forks)
+
+        b_turns = [make_turn("user", "B's later edit")]
+        _update, b_forks = app.refresh_conversation_list(b_turns, new_forks())
+        app.remember_forks(b_turns, b_forks)
+
+        fresh = app.new_conversation(a_turns, a_forks)
+        app.remember_forks(fresh[FORK_TURNS], fresh[FORK_STATE])
+
+        saved = library.read(self.path)
+        self.assertEqual([turn["content"] for turn in saved["branches"][MAIN_BRANCH]], ["B's later edit"])
+        self.assertEqual(list(saved["branches"]), [MAIN_BRANCH, "Chat 1"])
 
     def test_a_change_of_forks_writes_them_too(self):
         forks = new_forks()

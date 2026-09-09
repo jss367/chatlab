@@ -13,6 +13,7 @@ import charts
 from conversation import (
     MAIN_BRANCH,
     THINK_CLOSE,
+    branch_stamp,
     copy_forks,
     copy_turns,
     display_messages,
@@ -512,7 +513,12 @@ def _stream_reply(
             used_seed,
             *send_stop_buttons(busy),
             NO_TOKEN_SELECTED if reset_details else gr.skip(),
-            [] if reset_details else gr.skip(),
+            # Gradio applies streaming diffs in place. A raw Dataframe value
+            # followed by gr.skip() deletes data/headers from the very object
+            # the table still renders, which can crash WebKit's next update.
+            # Keep the value inside an update envelope so only that envelope
+            # changes when later frames leave the selected token alone.
+            gr.update(value=[]) if reset_details else gr.skip(),
             prompt_strip,
             prompt_metrics,
             prompt_note,
@@ -1333,7 +1339,7 @@ def hide_clear_confirm():
     return gr.update(visible=False)
 
 
-def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
+def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE, forks: dict | None = None):
     """Empty everything the conversation owns.
 
     Clear cancels a running generation (see ``cancels`` on its listener), and a
@@ -1342,12 +1348,20 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE):
 
     Reached from the confirmation panel alone, which this closes on its way
     out; the Clear button itself only opens that panel.
+
+    Every branch this page knew of is marked as changed now - the main one
+    emptied, the rest deleted - so the saved file lets go of them rather than
+    handing them back on the next save. A branch another page added since
+    this one loaded was not in the question Clear asked, and is left to it.
     """
 
     strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
         scale_name
     )
+    known = copy_forks(forks)["branches"]
     forks = new_forks()
+    stamp = branch_stamp()
+    forks["updated"] = {name: stamp for name in (MAIN_BRANCH, *known)}
     return (
         [],
         [],

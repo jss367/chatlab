@@ -27,12 +27,15 @@ import library
 import settings
 from conversation import (
     CHAT_PREFIX,
+    FORK_PREFIX,
     MAIN_BRANCH,
     THINK_CLOSE,
     branch_choices,
+    branch_stamp,
     copy_forks,
     copy_turns,
     display_messages,
+    drop_branch,
     forget_measurements,
     fork_at,
     from_json,
@@ -43,6 +46,7 @@ from conversation import (
     new_forks,
     next_branch_name,
     next_fork_name,
+    put_branch,
     split_reasoning,
     to_json,
     user_index_at_or_before,
@@ -172,6 +176,7 @@ from ui.inspection import (
     reset_inspection,
 )
 from ui.layout import (
+    CONVERSATION_PANE_QUEUE,
     build_app,
 )
 from ui.models_page import (

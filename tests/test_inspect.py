@@ -16,15 +16,31 @@ class FakeConfig:
 
 
 class FakeCache:
-    """A key-value cache that only remembers how many tokens it holds."""
+    """A key-value cache that only remembers how many tokens it holds.
 
-    def __init__(self):
+    ``crop`` follows ``DynamicCache.crop`` in Transformers 4.57 through 5.x:
+    a negative count removes that many tokens, and a positive one is the
+    older "length to keep" form, a no-op when the cache is already shorter.
+    """
+
+    def __init__(self, sliding_windows: list[int | None] = ()):
         self.length = 0
         self.crops: list[int] = []
+        # One entry per layer, as DynamicCache exposes them: None for a
+        # full-attention layer, the window for a sliding one.
+        self.is_sliding = [window is not None for window in sliding_windows]
+        self.layers = [
+            SimpleNamespace(sliding_window=window) if window is not None else SimpleNamespace()
+            for window in sliding_windows
+        ]
 
     def crop(self, tokens_to_remove: int) -> None:
         self.crops.append(tokens_to_remove)
-        self.length -= tokens_to_remove
+        if tokens_to_remove > 0:
+            if tokens_to_remove >= self.length:
+                return
+            tokens_to_remove = self.length - tokens_to_remove
+        self.length -= abs(tokens_to_remove)
 
 
 class FakeLensModel(torch.nn.Module):
@@ -67,6 +83,7 @@ class FakeLensModel(torch.nn.Module):
         # the tokens fed, the way a DynamicCache does, and records how many
         # tokens each call fed it.
         self.caching = False
+        self.sliding_windows: list[int | None] = []
         self.fed: list[int] = []
 
     def set_attn_implementation(self, name: str) -> None:
@@ -91,7 +108,11 @@ class FakeLensModel(torch.nn.Module):
         self.fed.append(length)
         cache = None
         if self.caching:
-            cache = past_key_values if past_key_values is not None else FakeCache()
+            cache = (
+                past_key_values
+                if past_key_values is not None
+                else FakeCache(self.sliding_windows)
+            )
             assert cache.length == first, (cache.length, first)
             cache.length += length
         targets = [
@@ -332,7 +353,10 @@ class InspectTests(unittest.TestCase):
         manager.inspect(ids, 4)
 
         self.assertEqual(manager.model.fed, [1])
-        self.assertEqual(manager._inspect_cache[2].crops, [1])
+        # The cache held the four tokens the first click read and wrote; the
+        # second needs the three before the predicting one, so one comes off.
+        self.assertEqual(manager._inspect_cache[2].crops, [-1])
+        self.assertEqual(manager._inspect_cache[2].length, 4)
 
     def test_an_earlier_click_crops_the_cache_instead_of_rebuilding_it(self):
         manager = lens_manager([1, 2, 3, 4, 5, 6, 7])
@@ -345,8 +369,54 @@ class InspectTests(unittest.TestCase):
         manager.inspect(ids, 2)
 
         self.assertEqual(manager.model.fed, [1])
-        self.assertEqual(cache.crops, [5])
+        # Six tokens held, one needed before the predicting token: five off,
+        # then the predicting token is read into the cache.
+        self.assertEqual(cache.crops, [-5])
         self.assertEqual(manager._inspect_cache[1], ids[:2])
+        self.assertEqual(cache.length, 2)
+
+    def test_an_earlier_click_rebuilds_a_sliding_cache_that_reached_its_window(self):
+        # A hybrid model: one full layer and one with a window of 4. After six
+        # tokens the sliding layer has let the first ones go, so cutting back
+        # to two would leave a hole; the cache is rebuilt instead.
+        manager = lens_manager([1, 2, 3, 4, 5, 6, 7])
+        manager.model.caching = True
+        manager.model.sliding_windows = [None, 4]
+        ids = [0, 1, 2, 3, 4, 5, 6]
+        manager.inspect(ids, 6)
+        first = manager._inspect_cache[2]
+        manager.model.fed.clear()
+
+        manager.inspect(ids, 3)
+
+        self.assertEqual(manager.model.fed, [2, 1])
+        self.assertEqual(first.crops, [])
+        self.assertIsNot(manager._inspect_cache[2], first)
+
+    def test_an_earlier_click_still_crops_a_sliding_cache_within_its_window(self):
+        manager = lens_manager([1, 2, 3, 4, 5, 6, 7])
+        manager.model.caching = True
+        manager.model.sliding_windows = [None, 64]
+        ids = [0, 1, 2, 3, 4, 5, 6]
+        manager.inspect(ids, 6)
+        cache = manager._inspect_cache[2]
+        manager.model.fed.clear()
+
+        manager.inspect(ids, 3)
+
+        self.assertEqual(manager.model.fed, [1])
+        self.assertEqual(cache.crops, [-4])
+
+    def test_a_sliding_layer_with_an_unknown_window_is_never_cropped(self):
+        from model_runtime import _cache_can_crop
+
+        unknown = FakeCache([None])
+        unknown.is_sliding = [True]
+        self.assertFalse(_cache_can_crop(unknown, 2))
+        self.assertTrue(_cache_can_crop(FakeCache([None, None]), 500))
+        self.assertTrue(_cache_can_crop(FakeCache([8]), 7))
+        self.assertFalse(_cache_can_crop(FakeCache([8]), 8))
+        self.assertFalse(_cache_can_crop(object(), 1))
 
     def test_a_different_sequence_rebuilds_the_cache(self):
         manager = lens_manager([1, 2, 3, 4, 5])

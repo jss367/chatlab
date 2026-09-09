@@ -79,6 +79,10 @@ MEMORY_HEADROOM_BYTES = 4 * 1024**3
 # on another device the weights are loaded whole and the choice noted.
 QUANTIZED_BITS = {"8-bit": 8, "4-bit": 4}
 QUANTIZATION_GROUP_SIZE = 64
+# The first Transformers release that ships MetalConfig. Older releases still
+# run everything else, so requirements.txt keeps its lower floor and a
+# quantized load on one of them is refused by name.
+METAL_QUANTIZATION_TRANSFORMERS = "5.3"
 
 DTYPE_BYTES = {
     "float64": 8,
@@ -570,38 +574,20 @@ def _run_quietly(command: list[str]) -> str:
 
 
 def _darwin_available_memory() -> int | None:
-    """Memory a load can take without pushing the machine into swap.
+    """Estimate available memory, allowing file-cache reclaim at normal pressure.
 
-    ``vm_stat``'s counters are not a partition, so the arithmetic here is
-    chosen to never claim a page twice and never claim one that needs swap.
-    Three of them are disjoint and count in full:
+    Free, speculative and purgeable pages form the conservative baseline.
+    Under normal macOS pressure, also credit the pageable file-backed total,
+    subtracting speculative pages already counted in that total. This is an
+    estimate: some file pages are active or dirty, so the load guard still
+    keeps its working reserve. Anonymous and compressed pages are not credit.
 
-    - ``Pages free``, which is nobody's.
-    - ``Pages speculative``, the read-ahead cache, its own queue.
-    - ``Pages purgeable``, which the kernel may throw away on demand. These
-      sit inside the active and inactive queues rather than beside them, but
-      purgeable memory is anonymous, so they do not overlap the file-page
-      credit below.
+    With elevated or unknown pressure, use only the baseline plus the floor
+    of file pages in the inactive queue: ``max(0, inactive - anonymous)``.
+    This avoids assuming active file pages can be reclaimed cheaply while
+    the machine is struggling. Swap occupancy alone is not current pressure.
 
-    The inactive queue is the hard one. It mixes file pages, which are
-    reclaimed without touching swap, with dirty anonymous pages, which are
-    reclaimed by writing them out - the storm this figure exists to prevent.
-    Counting it whole is what makes ``memory_pressure`` useless here: it
-    reported 87% of this machine free while 10.6 GB of its 12 GB of swap was
-    in use.
-
-    ``File-backed pages`` cannot bound the file part of that queue, because
-    it counts active file pages too and ``vm_stat`` does not say how many.
-    ``Anonymous pages`` can, from the other side: the queue cannot hold more
-    anonymous pages than the machine has, so at least
-    ``inactive - anonymous`` of it is file pages. That is a floor rather than
-    a ceiling, which is the right direction for a guard - it credits a
-    machine whose inactive queue is mostly cache, and credits nothing when
-    the queue could be all dirty anonymous pages.
-
-    ``None`` means the platform said nothing usable, which the caller treats
-    as "unmeasured" and lets the load through. A machine with genuinely no
-    reclaimable pages therefore has to answer 0, not ``None``.
+    ``None`` means unmeasured; a measured exhausted machine must return 0.
     """
 
     output = _run_quietly(["vm_stat"])
@@ -621,7 +607,16 @@ def _darwin_available_memory() -> int | None:
     total = sum(pages for pages in reclaimable if pages is not None)
 
     inactive, anonymous = count("Pages inactive"), count("Anonymous pages")
-    if inactive is not None and anonymous is not None:
+    files, speculative = count("File-backed pages"), count("Pages speculative")
+    pressure = _run_quietly(
+        ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"]
+    ).strip()
+    # This sysctl exports dispatch flags (normal=1, warning=2, critical=4),
+    # not XNU's internal enum (whose normal value is 0).
+    # https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_memorystatus_notify.c
+    if pressure == "1" and files is not None and speculative is not None:
+        total += max(0, files - speculative)
+    elif inactive is not None and anonymous is not None:
         total += max(0, inactive - anonymous)
     return total * int(size.group(1))
 
@@ -710,7 +705,7 @@ def _sum_known(*figures: int | None) -> int | None:
 def offload_pool(
     gpu: tuple[int | None, int | None], host: tuple[int | None, int | None]
 ) -> tuple[int | None, int | None]:
-    """Total and free memory a CUDA load can spread over: the cards plus the host.
+    """Total and estimated available memory across the CUDA cards and host.
 
     ``device_map="auto"`` fills the graphics cards first and places whatever
     is left on the CPU, so a model that outgrows the cards still loads when
@@ -741,15 +736,17 @@ def check_memory_for_load(
     if total is not None and needed > total:
         raise InsufficientMemoryError(
             f"{model_id} needs about {format_memory(estimated_bytes)} of memory plus "
-            f"{format_memory(headroom)} of working room, and {pool} has "
+            f"{format_memory(headroom)} of safety reserve, and {pool} has "
             f"{format_memory(total)} in total. Choose a smaller model."
         )
     if available is not None and needed > available:
         raise InsufficientMemoryError(
             f"{model_id} needs about {format_memory(estimated_bytes)} of memory plus "
-            f"{format_memory(headroom)} of working room, but only "
-            f"{format_memory(available)} is free right now. Close other "
-            "applications and try again."
+            f"{format_memory(headroom)} of safety reserve. ChatLab estimates "
+            f"{format_memory(available)} available within its memory safety limits "
+            "and stopped this load to reduce the risk of heavy paging. "
+            "Wait for memory pressure to fall, close memory-heavy applications, "
+            "or choose a smaller model."
         )
 
 
@@ -888,22 +885,61 @@ def _read_config(snapshot: Path | None) -> tuple[str | None, str | None]:
     )
 
 
+# Where a config spells its hidden width when not as ``hidden_size``: GPT-2
+# and its descendants, MPT and Falcon, Bloom. Transformers' own config classes
+# resolve these, and are asked first; the list is the fallback for a config
+# they cannot load.
+HIDDEN_SIZE_ALIASES = ("hidden_size", "n_embd", "d_model", "hidden_dim", "model_dim")
+
+
+def _embedding_params_from(config: Mapping[str, Any]) -> int | None:
+    """Parameters in the embedding and output matrices, from a config's fields, or ``None``."""
+
+    vocab = config.get("vocab_size")
+    hidden = next(
+        (config[name] for name in HIDDEN_SIZE_ALIASES if isinstance(config.get(name), int)),
+        None,
+    )
+    if not isinstance(vocab, int) or hidden is None or vocab <= 0 or hidden <= 0:
+        return None
+    tied = config.get("tie_word_embeddings", False) is True
+    return vocab * hidden * (1 if tied else 2)
+
+
 def _embedding_params(snapshot: Path | None) -> int | None:
-    """Parameters in the embedding and output matrices, from the config, or ``None``."""
+    """Parameters in the embedding and output matrices, or ``None`` when the config will not say.
+
+    The quantizer leaves these matrices in half precision, so the estimate a
+    quantized load is checked against needs their size. Transformers' config
+    class for the architecture is asked first, since it knows the field the
+    width is stored under; the raw file, read under the common aliases, is
+    the fallback for an architecture it cannot load.
+    """
 
     if snapshot is None:
         return None
+    try:
+        from transformers import AutoConfig
+
+        loaded = AutoConfig.from_pretrained(snapshot, local_files_only=True)
+        params = _embedding_params_from(
+            {
+                "vocab_size": getattr(loaded, "vocab_size", None),
+                "hidden_size": getattr(loaded, "hidden_size", None),
+                "tie_word_embeddings": getattr(loaded, "tie_word_embeddings", False),
+            }
+        )
+        if params is not None:
+            return params
+    except Exception:  # noqa: BLE001 - any failure here falls through to the file
+        pass
     try:
         config = json.loads((snapshot / "config.json").read_text())
     except (OSError, ValueError):
         return None
     if not isinstance(config, dict):
         return None
-    vocab, hidden = config.get("vocab_size"), config.get("hidden_size")
-    if not isinstance(vocab, int) or not isinstance(hidden, int) or vocab <= 0 or hidden <= 0:
-        return None
-    tied = config.get("tie_word_embeddings", False) is True
-    return vocab * hidden * (1 if tied else 2)
+    return _embedding_params_from(config)
 
 
 def _newest_write(folder: Path, snapshot: Path | None) -> float | None:
@@ -2264,6 +2300,33 @@ class LoadProgress:
         return LoadSnapshot(bytes_done, total, steps_done, steps_total)
 
 
+def _cache_can_crop(cache, held: int) -> bool:
+    """Whether ``cache``, holding ``held`` tokens, can be cut back and still be right.
+
+    A full-attention layer keeps every key and value, so cutting the tail off
+    leaves exactly the prefix. A sliding-window layer keeps only its last
+    ``sliding_window`` entries: once the sequence has reached the window,
+    earlier entries are gone, and no cut can bring them back for a position
+    that would have attended to them. Transformers refuses the crop outright
+    in that case. Such a cache is rebuilt from the start instead. A cache
+    that cannot say which layers slide, or how wide the window is, is not
+    trusted either.
+    """
+
+    if not hasattr(cache, "crop"):
+        return False
+    sliding = getattr(cache, "is_sliding", None) or []
+    layers = getattr(cache, "layers", None) or []
+    for index, is_sliding in enumerate(sliding):
+        if not is_sliding:
+            continue
+        layer = layers[index] if index < len(layers) else None
+        window = getattr(layer, "sliding_window", None)
+        if not isinstance(window, int) or held >= window:
+            return False
+    return True
+
+
 class ModelManager:
     """Own the single in-memory model used by the local application."""
 
@@ -2645,7 +2708,21 @@ class ModelManager:
                     # goes through device_map. The output head and the
                     # embeddings are left in half precision, which is what
                     # keeps the logit lens reading through the real head.
-                    from transformers import MetalConfig
+                    try:
+                        from transformers import MetalConfig
+                    except ImportError as error:
+                        # requirements.txt admits 4.57, which predates the
+                        # quantizer; the rest of the app runs there, so the
+                        # floor stays and the choice is refused with the
+                        # version it needs rather than a bare ImportError.
+                        import transformers
+
+                        raise RuntimeError(
+                            f"{precision} weights need transformers "
+                            f"{METAL_QUANTIZATION_TRANSFORMERS} or newer; this "
+                            f"is {transformers.__version__}. Run `pip install "
+                            f"-U transformers` and load again."
+                        ) from error
 
                     try:
                         model = AutoModelForCausalLM.from_pretrained(
@@ -2691,7 +2768,7 @@ class ModelManager:
             # holding when the load gave up rather than what survived cleanup.
             logger.warning(
                 "Load of %s as %s (%s weights) on %s failed: %s estimated, %s held "
-                "on the device, %s free beforehand, device ceiling %s (%s)",
+                "on the device, %s estimated available beforehand, device ceiling %s (%s)",
                 model_id,
                 str(dtype).replace("torch.", ""),
                 precision,
@@ -2724,7 +2801,7 @@ class ModelManager:
         # a machine that was already full when the load began.
         logger.info(
             "Loaded %s as %s (%s weights) on %s: %s estimated, %s held on the "
-            "device, %s free beforehand, device ceiling %s",
+            "device, %s estimated available beforehand, device ceiling %s",
             model_id,
             str(dtype).replace("torch.", ""),
             precision,
@@ -2831,7 +2908,7 @@ class ModelManager:
                 load_id != self.load_id
                 or cache is None
                 or ids[:shared] != needed[:shared]
-                or (len(ids) > len(needed) and not hasattr(cache, "crop"))
+                or (len(ids) > len(needed) and not _cache_can_crop(cache, len(ids)))
             ):
                 kept = None
 
@@ -2841,7 +2918,10 @@ class ModelManager:
         else:
             _, ids, cache = kept
             if len(ids) > len(needed):
-                cache.crop(len(ids) - len(needed))
+                # A negative count removes that many tokens from the end. A
+                # positive one is the older "length to keep" form, which
+                # Transformers 5.x warns about and 5.18 drops.
+                cache.crop(-(len(ids) - len(needed)))
                 ids = ids[: len(needed)]
 
         if len(ids) == len(needed):
@@ -2881,9 +2961,9 @@ class ModelManager:
         """Refuse a load that cannot fit, before any weight is read.
 
         Returns the memory the weights are expected to take, which is also
-        what a load counts its own progress towards, and the free memory it
-        judged that against so the caller can record it. Both are ``None``
-        when the snapshot could not be measured.
+        what a load counts its own progress towards, and the availability
+        estimate it judged that against so the caller can record it. Both
+        are ``None`` when the snapshot could not be measured.
 
         On CUDA the weights fill the graphics cards and ``device_map="auto"``
         places the rest on the CPU, so the cards plus the machine's memory is
@@ -2931,7 +3011,7 @@ class ModelManager:
             # explaining afterwards, and the caller turns it into a status
             # card that the log never sees.
             logger.warning(
-                "Refused %s as %s on %s: %s estimated, %s free of %s in %s",
+                "Refused %s as %s on %s: %s estimated, %s estimated available of %s in %s",
                 model_id,
                 load_dtype,
                 backend,

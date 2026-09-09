@@ -13,16 +13,17 @@ import charts
 import library
 from conversation import (
     CHAT_PREFIX,
+    FORK_PREFIX,
     MAIN_BRANCH,
     branch_choices,
     copy_forks,
     copy_turns,
     display_messages,
+    drop_branch,
     fork_at,
     from_json,
     locate,
-    next_branch_name,
-    next_fork_name,
+    put_branch,
     to_json,
 )
 from token_metrics import (
@@ -48,7 +49,7 @@ def conversation_list_update(forks: dict, turns: list[dict] | None):
 
 
 def refresh_conversation_list(turns: list[dict] | None, forks: dict | None):
-    """Redraw the list from state, and save what it shows.
+    """Redraw the list from state, and write the conversation on screen into the forks.
 
     Sending, retrying, editing, undoing and loading all write the conversation
     state without knowing about the list, and a streaming reply rewrites it on
@@ -57,25 +58,33 @@ def refresh_conversation_list(turns: list[dict] | None, forks: dict | None):
     state itself: Gradio fires a State's change event only when the stored
     value's hash differs, so it runs exactly when the labels could have changed.
 
-    The same moment is when the conversations are worth saving, so the file
-    on disk is rewritten here too. It is small - text and a few counts per
-    turn, no measurements - so a write per streaming frame costs nothing the
-    frame itself does not already cost.
+    The same moment is when the active branch has changed, so the forks are
+    handed back with the conversation on screen written into it and stamped
+    as changed now (see ``library.as_seen``). The stamp has to live in the
+    forks state, not just in the file: it is what decides, when this page
+    later puts the branch away or saves again, whether its copy or one another
+    page has saved since is the newer - so it must record when the branch
+    changed here, not when this page next happened to save it. Saving itself
+    is left to ``remember_forks`` below, which the forks' change fires, so
+    each frame is written once.
     """
 
-    forks = copy_forks(forks)
-    library.write(library.as_seen(forks, turns))
-    return conversation_list_update(forks, turns)
+    seen = library.as_seen(forks, turns)
+    return conversation_list_update(seen, turns), seen
 
 
 def remember_forks(turns: list[dict] | None, forks: dict | None) -> None:
-    """Save the pane when the set of branches changes.
+    """Save the pane whenever the forks change. This is the one place the file is written.
 
-    Forking, starting a new chat, switching, deleting and clearing all write
-    ``forks``, and most of them write the conversation too; but a switch
-    between two empty branches, or a new chat started from an empty one,
-    leaves the conversation state's hash where it was and the listener above
-    silent. This one listens to the forks themselves.
+    The forks change on every path that matters: the listener above hands
+    them back whenever the conversation changes, and forking, starting a new
+    chat, switching, deleting and clearing write them directly - including
+    the changes that leave the conversation state's hash where it was, a
+    switch between two empty branches, say, which the listener above never
+    sees. The conversation on screen is written in once more on the way, in
+    case the forks are a frame behind it. The file is small - text and a few
+    counts per turn, no measurements - so rewriting it once per streaming
+    frame costs nothing the frame itself does not already cost.
     """
 
     library.write(library.as_seen(forks, turns))
@@ -197,11 +206,11 @@ def fork_conversation(
     forks = copy_forks(forks)
     turns = copy_turns(turns)
     finalize_partial(turns)
-    forks["branches"][forks["active"]] = copy_turns(turns)
+    put_branch(forks, forks["active"], turns)
     found = selected_turn(turns, selected)
     forked, box_text = fork_at(turns, found)
-    name = next_fork_name(forks)
-    forks["branches"][name] = copy_turns(forked)
+    name = library.claim_name(forks, FORK_PREFIX)
+    put_branch(forks, name, forked)
     forks["active"] = name
     messages, _ = display_messages(forked)
 
@@ -244,7 +253,7 @@ def switch_fork(
 
     turns = copy_turns(turns)
     finalize_partial(turns)
-    forks["branches"][forks["active"]] = turns
+    put_branch(forks, forks["active"], turns)
     forks["active"] = name
     target = copy_turns(forks["branches"][name])
     messages, _ = display_messages(target)
@@ -277,7 +286,7 @@ def delete_fork(
             "The main conversation cannot be deleted. Clear all empties every conversation.",
         )
 
-    del forks["branches"][name]
+    drop_branch(forks, name)
     forks["active"] = MAIN_BRANCH
     target = copy_turns(forks["branches"].setdefault(MAIN_BRANCH, []))
     messages, _ = display_messages(target)
@@ -311,9 +320,11 @@ def new_conversation(
     forks = copy_forks(forks)
     turns = copy_turns(turns)
     finalize_partial(turns)
-    forks["branches"][forks["active"]] = turns
-    name = next_branch_name(forks, CHAT_PREFIX)
-    forks["branches"][name] = []
+    put_branch(forks, forks["active"], turns)
+    # The names in the file count too, so a chat another page started since
+    # this one loaded is not given a twin the merge would take for it.
+    name = library.claim_name(forks, CHAT_PREFIX)
+    put_branch(forks, name, [])
     forks["active"] = name
     return (
         gr.skip(),

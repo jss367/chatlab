@@ -14,6 +14,7 @@ from urllib.request import urlopen
 
 import updater
 from app import build_app
+from desktop_smoke import smoke_test_metal
 from version import __version__
 
 
@@ -71,8 +72,9 @@ def start_local_server():
 
 
 def smoke_test() -> int:
-    """Verify a packaged executable can start and serve the application."""
+    """Verify packaged Metal support and the application's local server."""
 
+    smoke_test_metal()
     demo, local_url = start_local_server()
     try:
         with urlopen(local_url, timeout=15) as response:
@@ -313,7 +315,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--smoke-test",
         action="store_true",
-        help="start the local server, verify it responds, and exit",
+        help="check Metal support (including a tiny model on MPS), verify the server, and exit",
     )
     parser.add_argument("--version", action="version", version=f"ChatLab {__version__}")
     return parser.parse_args(argv)

@@ -9,4 +9,7 @@ huggingface-hub>=1.1
 kernels>=0.16
 numpy>=1.26
 torch>=2.5
+# 5.3 is the first release with the Metal quantizer behind the 8-bit and
+# 4-bit weight precisions; everything else runs on 4.57, so that stays the
+# floor and an older install is told which version it needs.
 transformers>=4.57,<6

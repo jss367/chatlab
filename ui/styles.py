@@ -14,6 +14,9 @@ from ui.inspection import (
 
 
 CSS = f"""
+/* Keep the navigation close to the window edge; Gradio's default page
+   padding otherwise adds a wide empty gutter beside the narrow pane. */
+.gradio-container .app {{ padding-left: 8px !important; }}
 #hero, #models-hero, #settings-hero {{ padding: 0.5rem 0 0.2rem; }}
 #hero h1, #models-hero h1, #settings-hero h1 {{ font-size: 2.1rem; margin-bottom: 0.25rem; }}
 #model-status {{ min-height: 128px; }}
@@ -303,12 +306,12 @@ def message_box_settings(enter_sends: bool) -> dict:
         return {
             "lines": 1,
             "max_lines": MESSAGE_BOX_MAX_LINES,
-            "placeholder": "Ask OLMo something… Enter sends, Shift+Enter starts a new line.",
+            "placeholder": "Ask anything… Enter sends, Shift+Enter starts a new line.",
         }
     return {
         "lines": 3,
         "max_lines": MESSAGE_BOX_MAX_LINES,
-        "placeholder": "Ask OLMo something… Shift+Enter sends, Enter starts a new line.",
+        "placeholder": "Ask anything… Shift+Enter sends, Enter starts a new line.",
     }
 
 
