@@ -42,7 +42,7 @@ The host passes `extension_api.ExtensionContext`:
 - `models`: the model service; obtain exclusive access with `open_session()`.
 - `tokens`: the shared `TokenInspector`, with `color_map`, `strip(metrics)` and `describe(metric)`.
 - `data_dir`: an extension-specific directory. Create it only when writing data.
-- `navigation`: the host's Gradio navigation component; a callback can output `"Models"` to open model loading.
+- `navigation`: the host navigation service; call `context.navigation.open_models(button)` during page construction to make a Gradio button open model loading. The host updates the sidebar selection and all page visibility together.
 - `api_version`: the version supplied by this host.
 
 ### Generating

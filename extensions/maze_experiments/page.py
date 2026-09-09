@@ -113,7 +113,6 @@ def views(ep, reveal, index=None, animate=False):
 
 
 def _build_page(context):
-    nav = context.navigation
     default_config = dict(supplied_moves=3, interrupt_after=3, interruption_text=next(iter(PASSAGES.values())),
                           prefix_tokens=8, temperature=.7, sampling_seed=20260914, per_turn_tokens=1024,
                           token_budget=8192, attempt_budget=32)
@@ -261,7 +260,7 @@ def _build_page(context):
     strip.select(select_token, metrics_state, [detail, alternatives], queue=False, show_progress="hidden")
     save.click(export, episode, download, show_progress="hidden")
     upload.upload(load, [upload, episode, reveal], [episode, *outputs], show_progress="hidden")
-    models.click(lambda: "Models", None, nav)
+    context.navigation.open_models(models)
 
 
 def build_page(context):

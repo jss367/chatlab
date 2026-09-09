@@ -25,7 +25,7 @@ from token_metrics import (
 )
 from trace_export import write_trace_export
 from ui import runtime
-from extension_api import ExtensionContext, ModelService, TokenInspector
+from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from extensions.registry import load_enabled
 from ui.extensions_page import build_extension_settings, data_directory, extension_css, restore_extensions
 from ui.common import (
@@ -508,11 +508,13 @@ def build_app() -> gr.Blocks:
                             )
 
             extension_pages = []
+            extension_model_buttons = []
+            navigation = NavigationService(extension_model_buttons.append)
             for extension in extensions:
                 with gr.Column(scale=1, visible=False, elem_classes=["extension-page"]) as extension_page:
                     context = ExtensionContext(
                         models=ModelService(lambda: runtime.MANAGER), tokens=TokenInspector(),
-                        data_dir=data_directory(extension.spec.id), navigation=nav,
+                        data_dir=data_directory(extension.spec.id), navigation=navigation,
                     )
                     try:
                         extension.build_page(context)
@@ -755,6 +757,14 @@ def build_app() -> gr.Blocks:
             def show_extension(page, expected=label):
                 return gr.update(visible=page == expected)
             nav.change(show_extension, nav, extension_page)
+        def open_models_from_extension():
+            return (*go_to_models(), *(gr.update(visible=False) for _ in extension_pages))
+        for button in extension_model_buttons:
+            button.click(
+                open_models_from_extension, None,
+                [nav, conversation_pane, chat_page, models_page, settings_page,
+                 *(page for _, page in extension_pages)],
+            )
         # The scored token count follows the boxes as they are typed into.
         # always_last coalesces a burst of keystrokes into the one count that
         # matters, and the progress bar is hidden because a spinner on every

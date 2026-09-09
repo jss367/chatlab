@@ -14,7 +14,7 @@ import gradio as gr
 import app
 import settings
 import settings_sandbox
-from extension_api import ModelService
+from extension_api import ModelService, NavigationService
 from extensions.registry import ExtensionSpec, LoadedExtension, load_enabled
 from ui.extensions_page import save_extensions
 
@@ -158,7 +158,7 @@ class RegistryTests(unittest.TestCase):
             nav = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'nav')
             self.assertIn(('Example', 'Example'), nav.choices)
             self.assertEqual(seen[0].api_version, 1)
-            self.assertEqual(seen[0].navigation, nav)
+            self.assertIsInstance(seen[0].navigation, NavigationService)
         finally:
             demo.close()
 
@@ -170,6 +170,29 @@ class RegistryTests(unittest.TestCase):
         try:
             ids = {getattr(b, 'elem_id', None) for b in demo.blocks.values()}
             self.assertTrue({'chat-page', 'settings-page', 'models-page'} <= ids)
+        finally:
+            demo.close()
+
+    def test_extension_model_button_updates_navigation_and_every_page(self):
+        buttons = []
+        def build(context):
+            button = gr.Button("Choose a model")
+            context.navigation.open_models(button)
+            buttons.append(button)
+        extensions = [LoadedExtension(
+            ExtensionSpec(name, name.title(), "", name.title(), name), build, "",
+        ) for name in ("first", "second")]
+        with mock.patch('ui.layout.load_enabled', return_value=(extensions, [])):
+            demo = app.build_app()
+        try:
+            for button in buttons:
+                listener = next(fn for fn in demo.fns.values() if fn.targets == [(button._id, 'click')])
+                updates = dict(zip(listener.outputs, listener.fn(), strict=True))
+                nav = next(b for b in updates if getattr(b, 'elem_id', None) == 'nav')
+                self.assertEqual(updates.pop(nav), 'Models')
+                self.assertEqual(len(updates), 6)  # Four core panes and both extensions.
+                for page, update in updates.items():
+                    self.assertEqual(update['visible'], getattr(page, 'elem_id', None) == 'models-page')
         finally:
             demo.close()
 

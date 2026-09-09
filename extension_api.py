@@ -13,7 +13,7 @@ from pathlib import Path
 from trace_export import write_private_text
 
 API_VERSION = 1
-__all__ = ["API_VERSION", "ExtensionContext", "ModelService", "GenerationSession", "TokenInspector", "write_private_text"]
+__all__ = ["API_VERSION", "ExtensionContext", "ModelService", "GenerationSession", "TokenInspector", "NavigationService", "write_private_text"]
 
 
 class ModelService:
@@ -133,10 +133,24 @@ class TokenInspector:
         return describe_token(metric)
 
 
+class NavigationService:
+    """Register navigation actions while building an extension's page.
+
+    The host wires both its navigation selection and page visibility after all
+    pages exist. Extensions never need references to the host's UI components.
+    """
+    def __init__(self, register_models_button):
+        self._register_models_button = register_models_button
+
+    def open_models(self, button):
+        """Make this button open model loading when clicked."""
+        self._register_models_button(button)
+
+
 @dataclass(frozen=True)
 class ExtensionContext:
     models: ModelService
     tokens: TokenInspector
     data_dir: Path
-    navigation: object  # The host's Gradio navigation component; emit "Models" to open it.
+    navigation: NavigationService
     api_version: int = API_VERSION
