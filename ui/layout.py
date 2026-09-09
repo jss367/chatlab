@@ -1041,10 +1041,6 @@ def build_app() -> gr.Blocks:
             system_prompt,
             keep_reasoning,
             assistant_prefill,
-            temperature,
-            top_p,
-            top_k,
-            max_new_tokens,
             randomize_seed,
             analyze_prompt,
             color_scale,
@@ -1053,6 +1049,15 @@ def build_app() -> gr.Blocks:
             weight_precision,
         ):
             control.change(remember_settings, persisted_inputs, None)
+        # The four that belong to a conversation are saved on input, like the
+        # write into the conversation itself. Switching conversations sets
+        # them, and a save from that would put the sampling of the
+        # conversation merely being looked at into the settings file - which
+        # is what an unpinned conversation answers with, so looking at a
+        # branch pinned to temperature 0 would quietly move every unpinned
+        # one to 0 as well.
+        for control in sampling_controls:
+            control.input(remember_settings, persisted_inputs, None)
         # The seed box is the one control the app writes to itself: a finished
         # response leaves the seed that produced it there, and saving that
         # would overwrite the seed the reader chose. Blur and submit are the

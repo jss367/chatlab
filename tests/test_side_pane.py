@@ -2187,7 +2187,13 @@ class SavedSettingsTests(unittest.TestCase):
                 events.setdefault(self.demo.blocks[block_id], set()).add(event)
 
         self.assertEqual(events[self.labelled("Random seed")], {"blur", "submit"})
-        self.assertEqual(events[self.labelled("Temperature")], {"change"})
+        # The four sampling controls are saved on input rather than change:
+        # switching conversations sets them, and a save from that would put
+        # the sampling of the conversation being looked at into the file
+        # every unpinned conversation answers with.
+        for label in ("Temperature", "Top-p", "Top-k (0 disables)", "Maximum new tokens"):
+            self.assertEqual(events[self.labelled(label)], {"input"}, label)
+        self.assertEqual(events[self.labelled("Measure prompt tokens")], {"change"})
         # And only the seed box's own events are allowed to write it down.
         for fn in self.listeners("remember_committed_seed"):
             self.assertEqual(
