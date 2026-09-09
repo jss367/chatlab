@@ -20,6 +20,10 @@ for package in (
     "gradio_client",
     "groovy",
     "huggingface_hub",
+    # Metal quantization imports the Hub kernel loader lazily. collect_all
+    # retains its distribution metadata as well as kernels_data's native code.
+    "kernels",
+    "kernels_data",
     "safehttpx",
     "safetensors",
     "tokenizers",
@@ -30,6 +34,11 @@ for package in (
     hiddenimports += package_imports
 
 hiddenimports += collect_submodules("transformers.models", on_error="warn once")
+hiddenimports += collect_submodules("transformers.quantizers", on_error="warn once")
+hiddenimports += [
+    "transformers.integrations.metal_quantization",
+    "transformers.integrations.hub_kernels",
+]
 
 a = Analysis(
     ["desktop_launcher.py"],
