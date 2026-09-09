@@ -197,6 +197,20 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
     episode.model_id = episode.model_id or manager.model_id
     episode.load_id = episode.load_id or manager.load_id
     turn = None
+    autosave_error = None
+
+    def autosave():
+        nonlocal autosave_error
+        if not save_dir or autosave_error is not None:
+            return
+        try:
+            episode.save(save_dir)
+        except OSError as exc:
+            # Storage is separate from the model outcome. Stop between turns,
+            # retain the in-memory run, and never retry this failure in cleanup.
+            autosave_error = str(exc)
+            episode.pause_requested = True
+
     try:
         while episode.phase == "running":
             if manager.load_id != episode.load_id:
@@ -240,8 +254,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             if episode.phase in TERMINAL and episode.interrupted and episode.resumed is None:
                 episode.resumed = False if episode.phase not in ("stopped", "error") else None
                 episode.first_move_progress = False if episode.resumed is False else None
-            if save_dir:
-                episode.save(save_dir)
+            autosave()
             yield episode
             if episode.phase in TERMINAL:
                 break
@@ -262,8 +275,10 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             turn.update(sampled_tokens=count, tokens_cumulative=episode.sampled_tokens, finish_reason=episode.phase)
         episode.busy = False
         manager.close()
-        if save_dir:
-            episode.save(save_dir)
+        autosave()
+        if autosave_error is not None:
+            episode.detail += (f" Autosave failed: {autosave_error}. Latest changes remain in memory. "
+                               "Use Export run JSON to download them, and check the run directory or free disk space.")
     yield episode
 
 

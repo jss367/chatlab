@@ -4,13 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from extensions.maze_experiments.maze import Maze, apply_call, call_text, generate, parse_call
 from extensions.maze_experiments.runner import Episode, from_payload, stream_episode
 from model_runtime import ModelManager
 from extension_api import ModelService
 from extension_api import TokenInspector
-from extensions.maze_experiments.page import views
+from extensions.maze_experiments.page import export_run, views
 import gradio as gr
 
 CONFIG = dict(supplied_moves=0, interrupt_after=0, interruption_text="Distracted", prefix_tokens=2,
@@ -188,6 +189,50 @@ class MazeTests(unittest.TestCase):
         self.assertFalse(manager.busy)
         ep.request_stop()
         self.assertEqual(ep.phase, "stopped")
+
+    def test_failed_autosave_pauses_or_preserves_outcome_and_yields_cleanup(self):
+        for supplied, reply, phase in ((0, call_text(MAZE.maze_id, 'east'), 'paused'),
+                                       (1, call_text(MAZE.maze_id, 'east'), 'arrived'),
+                                       (0, 'I am done.', 'abandoned')):
+            with self.subTest(phase=phase):
+                ep = Episode(MAZE, CONFIG | {'supplied_moves': supplied})
+                manager = Manager([('\n' + reply, [8, 0])])
+                with mock.patch.object(ep, 'save', side_effect=PermissionError('Archive not writable')) as save:
+                    frames = [(frame.phase, frame.busy, frame.detail) for frame in stream_episode(ep, manager, save_dir=Path('/unused'))]
+                save.assert_called_once()
+                self.assertEqual(frames[-1][:2], (phase, False))
+                self.assertIn('Autosave failed:', frames[-1][2])
+                self.assertFalse(manager.busy)
+                self.assertEqual(ep.sampled_tokens, 2)
+                self.assertEqual(len(manager.calls), 1)
+                self.assertEqual(ep.resumed, phase != 'abandoned')
+                self.assertEqual(ep.latency, 2 if phase != 'abandoned' else None)
+
+    def test_save_failure_during_final_cleanup_still_yields_a_final_frame(self):
+        ep = Episode(MAZE, CONFIG)
+        manager = Manager([('\n' + call_text(MAZE.maze_id, 'east'), [8, 0])])
+        with mock.patch.object(ep, 'save', side_effect=[None, OSError('Disk full')]) as save:
+            frames = [(frame.phase, frame.busy, frame.detail) for frame in stream_episode(ep, manager, single_step=True, save_dir=Path('/unused'))]
+        self.assertEqual(save.call_count, 2)
+        self.assertEqual(frames[-1][:2], ('paused', False))
+        self.assertIn('Disk full', frames[-1][2])
+        self.assertFalse(manager.busy)
+        self.assertEqual(ep.sampled_tokens, 2)
+
+    def test_export_download_survives_unwritable_archive(self):
+        ep = Episode(MAZE, CONFIG)
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / 'not-a-directory'
+            archive.write_text('blocked')
+            with mock.patch('extensions.maze_experiments.page.gr.Warning') as warning:
+                path = Path(export_run(ep, archive))
+            warning.assert_called_once()
+        try:
+            self.assertEqual(json.loads(path.read_text())['run_id'], ep.run_id)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        finally:
+            path.unlink()
+            path.parent.rmdir()
 
     def test_resuming_with_another_model_preserves_original_provenance(self):
         ep = Episode(MAZE, CONFIG | {"interruption_text": ""})

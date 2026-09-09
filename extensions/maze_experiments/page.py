@@ -36,6 +36,16 @@ def runs_dir(context):
     return Path(os.environ.get("CHATLAB_MAZE_RUNS_PATH", str(context.data_dir))).expanduser()
 
 
+def export_run(ep, directory):
+    if ep.busy:
+        raise gr.Error("Pause or stop the episode before exporting. Completed responses are also autosaved.")
+    try:
+        ep.save(directory)
+    except OSError:
+        gr.Warning("The run archive could not be written. Providing a temporary download instead.")
+    return str(ep.export())
+
+
 def board(ep, index=None, reveal=False, animate=False):
     maze = ep.maze
     events = [e for e in ep.events if e.get("turn", -1) <= index] if index is not None else ep.events
@@ -227,10 +237,7 @@ def _build_page(context):
         return views(ep, show, selections, session_id, int(i if i is not None else -1))
 
     def export(ep):
-        if ep.busy:
-            raise gr.Error("Pause or stop the episode before exporting. Completed responses are also autosaved.")
-        ep.save(runs_dir(context))
-        return str(ep.export())
+        return export_run(ep, runs_dir(context))
 
     def load(path, ep, show, session_id):
         if ep.busy:
