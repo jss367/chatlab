@@ -3578,7 +3578,7 @@ class ModelManager:
             return None
         return mps_ceiling(torch)
 
-    def _prompt_token_ids(self, messages: list[dict]) -> tuple[list[int], bool]:
+    def _prompt_token_ids(self, messages: list[dict], tools: list[dict] | None = None) -> tuple[list[int], bool]:
         """Token ids for a chat prompt, and whether it prefills ``<think>``.
 
         Reasoning templates such as OLMo Think end the generation prompt with
@@ -3591,15 +3591,18 @@ class ModelManager:
         tokenizer = self.tokenizer
         prefilled = False
 
+        if tools is not None and not tokenizer.chat_template:
+            raise ValueError("Tool use requires a model with a native chat/tool template.")
         if tokenizer.chat_template:
+            tool_args = {"tools": tools} if tools is not None else {}
             rendered = tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False
+                messages, add_generation_prompt=True, tokenize=False, **tool_args
             )
             prefilled = isinstance(rendered, str) and rendered.rstrip().endswith(
                 THINK_OPEN
             )
             encoded = tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=True
+                messages, add_generation_prompt=True, tokenize=True, **tool_args
             )
         else:
             transcript = "\n".join(
@@ -4128,6 +4131,7 @@ class ModelManager:
         max_new_tokens: int,
         seed: int,
         analyze_prompt: bool = True,
+        tools: list[dict] | None = None,
         forced_ids: Sequence[int] = (),
         answer_prefill: str = "",
         literal_prefill_tokens: int = 0,
@@ -4190,6 +4194,7 @@ class ModelManager:
                 max_new_tokens=max_new_tokens,
                 seed=seed,
                 analyze_prompt=analyze_prompt,
+                tools=tools,
                 forced_ids=forced_ids,
                 answer_prefill=answer_prefill,
                 literal_prefill_tokens=literal_prefill_tokens,
@@ -4259,6 +4264,7 @@ class ModelManager:
         max_new_tokens: int,
         seed: int,
         analyze_prompt: bool = True,
+        tools: list[dict] | None = None,
         forced_ids: Sequence[int] = (),
         answer_prefill: str = "",
         literal_prefill_tokens: int = 0,
@@ -4292,7 +4298,10 @@ class ModelManager:
                 assert producing_load_id is not None
                 device = next(model.parameters()).device
 
-                prompt_ids, reasoning_prefilled = self._prompt_token_ids(messages)
+                prompt_ids, reasoning_prefilled = (
+                    self._prompt_token_ids(messages, tools=tools) if tools is not None
+                    else self._prompt_token_ids(messages)
+                )
                 # Noted here rather than left to the first update, because a run
                 # that fails in the prefill below never publishes one and prefill
                 # is where a memory failure is most likely.

@@ -98,6 +98,8 @@ html, body {{ height: 100%; overflow: hidden; }}
   height: 100%; overflow-y: auto; overscroll-behavior-y: contain;
   padding: 24px 32px;
 }}
+/* Settings can grow with optional tools; scroll instead of shrinking sections. */
+#settings-page > * {{ flex: 0 0 auto; }}
 #conversations-heading h2, #inspector-heading h2 {{
   font-size: 15px; line-height: 24px; font-weight: 600; margin: 0;
 }}

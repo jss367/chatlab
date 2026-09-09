@@ -157,11 +157,14 @@ class Settings:
     prefill_token_limit: int = DEFAULT_PREFILL_TOKEN_LIMIT
     mps_memory_fraction: float | None = None
     weight_precision: str = "full"
+    enabled_extensions: tuple[str, ...] = ()
 
     def to_mapping(self) -> dict[str, Any]:
         """The object as the JSON file spells it."""
 
-        return {field.name: getattr(self, field.name) for field in fields(self)}
+        result = {field.name: getattr(self, field.name) for field in fields(self)}
+        result["enabled_extensions"] = list(self.enabled_extensions)
+        return result
 
 
 DEFAULTS = Settings()
@@ -187,7 +190,10 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
     precision = _text(
         values.get("weight_precision", DEFAULTS.weight_precision), DEFAULTS.weight_precision
     )
+    enabled = values.get("enabled_extensions", ())
+    enabled = tuple(dict.fromkeys(x for x in enabled if isinstance(x, str))) if isinstance(enabled, (list, tuple)) else ()
     return Settings(
+        enabled_extensions=enabled,
         model_id=_text(values.get("model_id", DEFAULTS.model_id), DEFAULTS.model_id)
         or DEFAULTS.model_id,
         system_prompt=_text(
