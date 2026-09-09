@@ -532,11 +532,14 @@ def build_router() -> APIRouter:
         """
 
         profile = device_profile()
+        # One reading of the four, so a status asked for while a load is
+        # landing cannot describe one model's weights with another's device.
+        in_memory = runtime.MANAGER.loaded_model()
         return JSONResponse(
             {
-                "model": runtime.MANAGER.model_id,
-                "device": runtime.MANAGER.device_name or device_label(profile.backend),
-                "precision": runtime.MANAGER.precision,
+                "model": in_memory.model_id,
+                "device": in_memory.device_name or device_label(profile.backend),
+                "precision": in_memory.precision,
                 "busy": runtime.MANAGER.busy,
                 "memory": {
                     "total_bytes": profile.total,

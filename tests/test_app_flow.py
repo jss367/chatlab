@@ -3134,25 +3134,38 @@ class ConversationSamplingTests(unittest.TestCase):
         forks["active"] = "Fork 1"
         self.assertEqual(self.values(app.sampling_updates(forks)), self.OWN)
 
-    def test_an_unpinned_conversation_keeps_what_the_controls_show(self):
-        # The settings write is a separate listener, so a slider moved and
-        # then a switch in quick succession would otherwise put the value
-        # just moved away from back on the controls - and that branch's next
-        # reply would use it.
+    def test_an_unpinned_conversation_answers_with_the_saved_settings(self):
+        # Not with the controls: on a switch they hold the conversation being
+        # left, so reading them would make an unpinned conversation answer
+        # with the sampling of whatever was looked at before it - switching
+        # from a temperature-0 fork to an unpinned Main would take Main to 0.
+        with settings.override(**self.OWN):
+            self.assertEqual(
+                self.values(app.sampling_updates(new_forks())), self.OWN
+            )
         with settings.override(**settings.sampling_defaults()):
-            shown = self.values(app.sampling_updates(new_forks(), *self.OWN.values()))
+            self.assertEqual(
+                self.values(app.sampling_updates(new_forks())),
+                settings.sampling_defaults(),
+            )
 
-        self.assertEqual(shown, self.OWN)
+    def test_the_settings_write_is_ordered_before_a_switch_reads_it(self):
+        # That file is what an unpinned conversation answers with, so a
+        # slider moved and then a switch in quick succession would otherwise
+        # read the value moved away from. Sharing the conversation queue is
+        # what orders the write ahead of the switch.
+        demo = app.build_app()
+        saving = [
+            fn
+            for fn in demo.fns.values()
+            if getattr(fn.fn, "__name__", None) == "remember_settings"
+            and fn.targets
+            and fn.targets[0][1] == "input"
+        ]
 
-    def test_a_pinned_conversation_still_wins_over_the_controls(self):
-        forks = new_forks()
-        put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
-
-        shown = self.values(
-            app.sampling_updates(forks, *settings.sampling_defaults().values())
-        )
-
-        self.assertEqual(shown, self.OWN)
+        self.assertEqual(len(saving), len(settings.CONVERSATION_SAMPLING))
+        for fn in saving:
+            self.assertEqual(fn.concurrency_id, app.CONVERSATION_PANE_QUEUE)
 
     def test_a_value_the_settings_would_refuse_falls_back_to_the_setting(self):
         forks = new_forks()
@@ -3330,6 +3343,24 @@ class ConversationSamplingTests(unittest.TestCase):
         forked = result[FORK_STATE]
         self.assertEqual(self.held(forked, MAIN_BRANCH), self.OWN)
         self.assertEqual(self.held(forked, "Fork 1"), self.OWN)
+
+    def test_a_fork_keeps_a_key_this_version_knows_nothing_about(self):
+        # A file written by a newer version can carry an extra sampling
+        # field. It goes to both sides, or that version would find the fork
+        # answering differently from the conversation it came from.
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
+        forks["sampling"][MAIN_BRANCH]["repetition_penalty"] = 1.15
+
+        result = app.fork_conversation([make_turn("user", "one")], forks, None)
+        forked = result[FORK_STATE]
+
+        for name in (MAIN_BRANCH, "Fork 1"):
+            with self.subTest(branch=name):
+                self.assertEqual(
+                    self.held(forked, name).get("repetition_penalty"), 1.15
+                )
+                self.assertEqual(self.held(forked, name)["temperature"], 0.0)
 
     def test_a_fork_of_a_pinned_conversation_keeps_its_sampling(self):
         # The parent's own entry wins over the controls: the controls are

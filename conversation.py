@@ -356,12 +356,13 @@ def put_branch_sampling(forks: dict, name: str, values: dict) -> bool:
 
     sampling = forks.setdefault("sampling", {})
     # Whatever the branch carries that this version knows nothing about
-    # stays: a file shared with a newer version keeps its own keys through a
-    # slider moved here. See ``library.sampling_entry``.
+    # stays, and so does anything of that kind in ``values`` - which is how
+    # a fork inherits a newer version's own keys from the conversation it
+    # came from. See ``library.sampling_entry``.
     held = sampling.get(name) or {}
     kept = {
         key: value for key, value in held.items() if key not in SAMPLING_FIELDS
-    } | {key: value for key, value in values.items() if key in SAMPLING_FIELDS}
+    } | dict(values)
     if held == kept:
         return False
     sampling[name] = kept

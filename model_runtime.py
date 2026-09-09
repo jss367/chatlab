@@ -2735,6 +2735,21 @@ def _cache_can_crop(cache, held: int) -> bool:
     return True
 
 
+class LoadedModel(NamedTuple):
+    """What is in memory, as one reading.
+
+    The four move together - a load replaces all of them - so anything that
+    reports them together has to read them together. Read field by field,
+    a caller can straddle a load and describe one model's weights with
+    another's device or precision.
+    """
+
+    model_id: str | None = None
+    device_name: str | None = None
+    precision: str | None = None
+    load_id: str | None = None
+
+
 class ModelManager:
     """Own the single in-memory model used by the local application."""
 
@@ -2753,6 +2768,10 @@ class ModelManager:
         # can be told from state produced under the next even when both came
         # from the same repository ID (a re-download at a newer revision).
         self.load_count = 0
+        # What is in memory, kept as one value beside the fields above so it
+        # can be read without straddling a load; see :meth:`loaded_model`.
+        self._loaded = LoadedModel()
+        self._loaded_lock = threading.Lock()
         # Loads claimed and not finished yet, by claim number. ``model_id``
         # is cleared for the whole of a load and set only once the weights
         # are in, so on its own it says nothing about the minutes in
@@ -2809,6 +2828,17 @@ class ModelManager:
         # The key-value cache the last inspection left behind, with the load
         # it belongs to and the tokens it covers. See _inspect_cache_for().
         self._inspect_cache: tuple[str, list[int], Any] | None = None
+
+    def loaded_model(self) -> LoadedModel:
+        """What is in memory: the model, its device, its precision, its load.
+
+        One reading of the four, so a caller reporting them together cannot
+        straddle a load and describe one model with another's device. Empty
+        fields where nothing is loaded.
+        """
+
+        with self._loaded_lock:
+            return self._loaded
 
     @property
     def loaded(self) -> bool:
@@ -3200,6 +3230,10 @@ class ModelManager:
         self.precision = precision
         self.loaded_bytes = estimated
         self.load_count += 1
+        with self._loaded_lock:
+            self._loaded = LoadedModel(
+                model_id, device_name, precision, f"{model_id}#{self.load_count}"
+            )
         # The one record of what a load cost. Without it a later memory
         # failure cannot be told from a leak, a second copy of the weights, or
         # a machine that was already full when the load began.
@@ -3281,6 +3315,8 @@ class ModelManager:
         self.device_name = None
         self.precision = None
         self.loaded_bytes = None
+        with self._loaded_lock:
+            self._loaded = LoadedModel()
         gc.collect()
         self._release_device_cache(torch)
 

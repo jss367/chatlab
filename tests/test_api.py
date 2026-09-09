@@ -57,6 +57,11 @@ class Recorder:
     def loaded(self) -> bool:
         return self.model_id is not None
 
+    def loaded_model(self):
+        return model_runtime.LoadedModel(
+            self.model_id, self.device_name, self.precision, self.load_id
+        )
+
     def reserve_generation(self):
         if self.busy:
             return False
@@ -170,6 +175,27 @@ class ModelListTests(ApiTestCase):
         self.assertEqual(body["precision"], "full")
         self.assertFalse(body["busy"])
         self.assertIn("pool", body["memory"])
+
+    def test_the_status_reads_the_four_as_one(self):
+        # Asked for while a load is landing, field-by-field reads can
+        # straddle it and describe one model's weights with another's
+        # device; the manager hands them over together.
+        torn = []
+
+        def loaded_model():
+            torn.append(True)
+            return model_runtime.LoadedModel(
+                "fake/model", "Apple Metal (MPS), 4-bit weights", "4-bit", "fake/model#2"
+            )
+
+        self.manager.loaded_model = loaded_model
+        self.manager.device_name = "CPU"  # what a separate read would have found
+
+        body = self.client.get("/v1/chatlab/status").json()
+
+        self.assertEqual(len(torn), 1)
+        self.assertEqual(body["device"], "Apple Metal (MPS), 4-bit weights")
+        self.assertEqual(body["precision"], "4-bit")
 
     def test_the_status_answers_with_no_model_loaded(self):
         self.manager.model_id = None

@@ -999,7 +999,7 @@ def build_app() -> gr.Blocks:
 
             return event.then(
                 sampling_updates,
-                [forks_state, *sampling_controls],
+                forks_state,
                 sampling_controls,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             ).then(
@@ -1045,8 +1045,17 @@ def build_app() -> gr.Blocks:
         # is what an unpinned conversation answers with, so looking at a
         # branch pinned to temperature 0 would quietly move every unpinned
         # one to 0 as well.
+        # On the conversation queue, so the file is written before a switch
+        # that follows reads it: a conversation carrying no sampling of its
+        # own answers with what that file says, and a slider moved and then a
+        # switch in quick succession must not read the older value.
         for control in sampling_controls:
-            control.input(remember_settings, persisted_inputs, None)
+            control.input(
+                remember_settings,
+                persisted_inputs,
+                None,
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
         # The seed box is the one control the app writes to itself: a finished
         # response leaves the seed that produced it there, and saving that
         # would overwrite the seed the reader chose. Blur and submit are the

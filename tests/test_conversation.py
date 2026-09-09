@@ -378,12 +378,30 @@ class BranchSamplingTests(unittest.TestCase):
         self.assertFalse(put_branch_sampling(forks, MAIN_BRANCH, self.SAMPLING))
         self.assertEqual(forks["sampling_updated"][MAIN_BRANCH], stamp)
 
-    def test_only_the_sampling_keys_are_kept(self):
+    def test_what_is_written_is_what_is_stored(self):
+        # The caller decides: the interface passes the four this version
+        # knows, and a fork passes those plus any key a newer version wrote
+        # on the conversation it came from. The file layer is what checks
+        # the types of the four - see library.sampling_entry.
         forks = new_forks()
         put_branch_sampling(
-            forks, MAIN_BRANCH, self.SAMPLING | {"seed": 7, "system_prompt": "no"}
+            forks, MAIN_BRANCH, self.SAMPLING | {"repetition_penalty": 1.15}
         )
-        self.assertEqual(branch_sampling(forks, MAIN_BRANCH), self.SAMPLING)
+        self.assertEqual(
+            branch_sampling(forks, MAIN_BRANCH),
+            self.SAMPLING | {"repetition_penalty": 1.15},
+        )
+
+    def test_a_key_a_newer_version_wrote_survives_a_slider_moved_here(self):
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, {"repetition_penalty": 1.15})
+
+        put_branch_sampling(forks, MAIN_BRANCH, self.SAMPLING)
+
+        self.assertEqual(
+            branch_sampling(forks, MAIN_BRANCH),
+            self.SAMPLING | {"repetition_penalty": 1.15},
+        )
 
     def test_reading_it_hands_back_a_copy(self):
         forks = new_forks()

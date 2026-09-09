@@ -16,6 +16,7 @@ from conversation import (
     CHAT_PREFIX,
     FORK_PREFIX,
     MAIN_BRANCH,
+    SAMPLING_FIELDS,
     branch_choices,
     branch_sampling,
     copy_forks,
@@ -127,25 +128,28 @@ def sampling_on_screen(values) -> dict:
     )
 
 
-def sampling_updates(forks: dict | None, *sampling):
+def sampling_updates(forks: dict | None):
     """Put the active conversation's sampling into the controls.
 
     Chained onto every path that changes which conversation is on screen, so
     switching to a fork brings back the temperature it was answered at rather
-    than leaving the last one's on the sliders.
+    than leaving the last one's on the sliders. A conversation that carries
+    none of its own - one from a file written before conversations carried
+    sampling - comes up with the saved settings, which is what it answers
+    with.
 
-    A conversation that carries none of its own - one from a file written
-    before conversations carried sampling - keeps whatever the controls are
-    showing, which is what it answers with. Reading the settings file for
-    that would be a race: its write is a separate listener, so a slider
-    moved and then a switch in quick succession would put the value just
-    moved away from back on the controls.
+    The saved settings, and not the controls: on a switch the controls hold
+    the conversation being left, so reading them would make an unpinned
+    conversation answer with the sampling of whatever was looked at before
+    it. The settings file is read instead, and the sampling controls' own
+    write to that file is ordered ahead of this on the conversation queue,
+    so a slider moved and then a switch in quick succession still reads the
+    value the reader chose.
     """
 
     forks = forks or {}
-    held = branch_sampling(forks, forks.get("active", MAIN_BRANCH))
-    values = (
-        settings.sampling_values(held) if held else sampling_on_screen(sampling)
+    values = settings.sampling_values(
+        branch_sampling(forks, forks.get("active", MAIN_BRANCH))
     )
     return tuple(
         gr.update(value=values[name]) for name in settings.CONVERSATION_SAMPLING
@@ -293,9 +297,15 @@ def fork_conversation(
     # the first slider moved on the other side would rewrite: both would then
     # answer alike, which is the one thing the fork was for.
     held = branch_sampling(forks, forks["active"])
-    inherited = (
-        settings.sampling_values(held) if held else sampling_on_screen(sampling)
-    )
+    if held:
+        # A key this version knows nothing about goes to both sides, or the
+        # newer version that wrote it would find the fork answering
+        # differently from the conversation it was forked from.
+        inherited = {
+            key: value for key, value in held.items() if key not in SAMPLING_FIELDS
+        } | settings.sampling_values(held)
+    else:
+        inherited = sampling_on_screen(sampling)
     put_branch_sampling(forks, forks["active"], inherited)
     put_branch_sampling(forks, name, inherited)
     forks["active"] = name
