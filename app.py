@@ -2053,7 +2053,12 @@ def _stream_reply(
             used_seed,
             *send_stop_buttons(busy),
             NO_TOKEN_SELECTED if reset_details else gr.skip(),
-            [] if reset_details else gr.skip(),
+            # Gradio applies streaming diffs in place. A raw Dataframe value
+            # followed by gr.skip() deletes data/headers from the very object
+            # the table still renders, which can crash WebKit's next update.
+            # Keep the value inside an update envelope so only that envelope
+            # changes when later frames leave the selected token alone.
+            gr.update(value=[]) if reset_details else gr.skip(),
             prompt_strip,
             prompt_metrics,
             prompt_note,
