@@ -426,7 +426,7 @@ def ensure_file(path: Path | None = None) -> Path | None:
     return write(current(), dict(_unknown), target)
 
 
-def update(**values: Any) -> Settings:
+def update(*, require_saved: bool = False, **values: Any) -> Settings:
     """Change some settings, save them, and return the whole set.
 
     Every value goes through :func:`sanitize`, so a caller may pass whatever
@@ -437,16 +437,25 @@ def update(**values: Any) -> Settings:
     changed in quick succession run their handlers on separate threads, and
     were the file written outside the lock the slower of the two could land
     last and leave the file holding the older of the two values.
+
+    With require_saved, publish the change only after a successful write and
+    raise OSError on failure. This also writes an unchanged value, so callers
+    can confirm persistence rather than only the process's current preference.
     """
 
     global _current
     with _lock:
         base = _current if _current is not None else DEFAULTS
         merged = sanitize(base.to_mapping() | values)
-        if merged == base:
+        if merged == base and not require_saved:
             return merged
-        _current = merged
-        write(merged, _unknown)
+        if require_saved:
+            if write(merged, _unknown) is None:
+                raise OSError("Could not save settings.")
+            _current = merged
+        else:
+            _current = merged
+            write(merged, _unknown)
     return merged
 
 

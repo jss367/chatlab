@@ -289,3 +289,16 @@ class ExtensionSettingsTests(unittest.TestCase):
             with self.assertRaisesRegex(gr.Error, 'Could not save'):
                 save_extensions(['maze_experiments'], [])
         self.assertEqual(json.loads(settings.settings_path().read_text())['enabled_extensions'], [])
+        self.assertEqual(settings.current().enabled_extensions, ())
+        settings.update(temperature=.3)
+        self.assertEqual(settings.load().enabled_extensions, ())
+        self.assertEqual(settings.current().temperature, .3)
+
+    def test_failed_disable_keeps_previously_saved_extensions(self):
+        save_extensions(['maze_experiments'], [])
+        with mock.patch('settings.write', return_value=None):
+            with self.assertRaisesRegex(gr.Error, 'Could not save'):
+                save_extensions([], ['maze_experiments'])
+        settings.update(top_k=20)
+        self.assertEqual(settings.load().enabled_extensions, ('maze_experiments',))
+        self.assertEqual(settings.current().top_k, 20)

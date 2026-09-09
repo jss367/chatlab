@@ -35,10 +35,10 @@ def save_extensions(selected, active_ids):
     if not isinstance(selected, list) or any(item not in known for item in selected):
         raise gr.Error("Select an extension from the available list.")
     unknown = [item for item in settings.current().enabled_extensions if item not in known]
-    chosen = settings.update(enabled_extensions=[*unknown, *selected])
-    persisted, _ = settings.read()
-    if persisted.enabled_extensions != chosen.enabled_extensions:
-        raise gr.Error("Could not save extension settings. Check that the settings file is writable.")
+    try:
+        settings.update(require_saved=True, enabled_extensions=[*unknown, *selected])
+    except OSError as exc:
+        raise gr.Error("Could not save extension settings. Check that the settings file is writable.") from exc
     return pending_note(selected, active_ids)
 
 
