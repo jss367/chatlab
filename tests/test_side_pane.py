@@ -2361,7 +2361,7 @@ class SavedSettingsTests(unittest.TestCase):
     def test_lowering_the_context_limit_pulls_the_response_length_under_it(self):
         self.build_with(prefill_token_limit=8192, max_new_tokens=4096)
 
-        limit, length = app.remember_prefill_limit(1024, 4096)
+        limit, length, _forks = app.remember_prefill_limit(1024, 4096)
 
         self.assertEqual(limit["value"], 1024)
         self.assertEqual(length["maximum"], 1024)
@@ -2423,7 +2423,7 @@ class SavedSettingsTests(unittest.TestCase):
     def test_a_context_limit_outside_its_range_is_pulled_back_into_it(self):
         self.build_with()
 
-        limit, _length = app.remember_prefill_limit(2, 512)
+        limit, _length, _forks = app.remember_prefill_limit(2, 512)
 
         self.assertEqual(limit["value"], settings.PREFILL_TOKEN_LIMIT_RANGE[0])
 

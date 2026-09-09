@@ -3176,12 +3176,7 @@ class ConversationSamplingTests(unittest.TestCase):
         self.assertEqual(
             {event for fn in sliders for _block, event in fn.targets}, {"input"}
         )
-        # The context limit committed can clamp the response length, and that
-        # clamp belongs to the conversation too. It is chained onto that
-        # commit rather than hung off a control, so it has no target of its
-        # own - Gradio records it as a "then" with no block: blur and submit,
-        # one each.
-        self.assertEqual(len(listeners) - len(sliders), 2)
+        self.assertEqual(len(listeners), len(sliders))
 
     def test_a_control_reporting_what_the_conversation_already_holds_writes_nothing(self):
         forks = new_forks()
@@ -3257,6 +3252,33 @@ class ConversationSamplingTests(unittest.TestCase):
         )
         # And the conversation it was started beside keeps its own.
         self.assertEqual(self.held(started), self.OWN)
+
+    def test_a_clamped_response_length_reaches_the_conversation(self):
+        # Committing a lower context limit pulls the length down with it, and
+        # the conversation has to be told: it would otherwise put the longer
+        # length back the next time it was switched to.
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN | {"max_new_tokens": 1024})
+
+        with settings.override(prefill_token_limit=8192, max_new_tokens=1024):
+            _limit, length, written = app.remember_prefill_limit(
+                256, 1024, forks, 0.0, 1.0, 0, 1024
+            )
+
+        # 256 is the floor the limit can be lowered to, and the length
+        # follows it down.
+        self.assertEqual(length["value"], 256)
+        self.assertEqual(self.held(written)["max_new_tokens"], 256)
+
+    def test_a_context_limit_that_clamps_nothing_leaves_the_conversation_alone(self):
+        # A limit tabbed through, or raised, changes nothing - and writing on
+        # that would pin a conversation that had been following the file.
+        with settings.override(prefill_token_limit=1024, max_new_tokens=256):
+            _limit, _length, written = app.remember_prefill_limit(
+                4096, 256, new_forks(), *self.OWN.values()
+            )
+
+        self.assertEqual(written, gr.skip())
 
     def test_switching_back_brings_the_sampling_back(self):
         forks = new_forks()

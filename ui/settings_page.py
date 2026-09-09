@@ -20,6 +20,7 @@ from model_runtime import (
     reserved_bytes,
 )
 from ui import runtime
+from ui.conversations import remember_branch_sampling
 
 
 # The hardware panel. Every figure here is one the app already acts on: the
@@ -220,17 +221,28 @@ def restore_settings():
     return (*updates, gr.update(value=saved.prefill_token_limit))
 
 
-def remember_prefill_limit(limit, max_new_tokens):
+def remember_prefill_limit(limit, max_new_tokens, forks=None, *sampling):
     """Save the context limit, and pull the response length under it.
 
     The response-length control tops out at the context limit, so lowering
     the limit lowers the ceiling and, if it was above the new one, the length
     itself. The limit is echoed back because it is clamped to a range the
     number box cannot express on its own.
+
+    A length that was actually pulled down is written into the conversation
+    on screen as well, since it is the reader's own doing and the
+    conversation would otherwise put the longer length back the next time it
+    was switched to. Only then: a limit merely tabbed through, or raised,
+    changes nothing, and writing on that would pin a conversation that had
+    been following the settings file.
     """
 
     saved = settings.update(prefill_token_limit=limit, max_new_tokens=max_new_tokens)
+    clamped = saved.max_new_tokens != max_new_tokens
     return (
         gr.update(value=saved.prefill_token_limit),
         gr.update(maximum=saved.prefill_token_limit, value=saved.max_new_tokens),
+        remember_branch_sampling(forks, *sampling[:-1], saved.max_new_tokens)
+        if clamped and sampling
+        else gr.skip(),
     )

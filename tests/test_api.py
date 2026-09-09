@@ -483,6 +483,24 @@ class CompletionShapeTests(ApiTestCase):
         self.assertEqual(message["content"], "world")
         self.assertEqual(message["reasoning_content"], "Hello")
 
+    def test_reasoning_markers_the_caller_supplied_stay_in_the_answer(self):
+        # A prefill is the caller's own text, not syntax: a reply told to
+        # begin "<think>quoted</think>" keeps that at the start of the answer
+        # rather than having it read as a reasoning block.
+        prefill = "<think>quoted</think>"
+        self.manager.updates = [
+            replace(
+                update(f"{prefill} and on", metrics=[metric(1, prefill)]),
+                literal_prefill_text=prefill,
+            )
+        ]
+
+        body = self.answer()
+
+        message = body["choices"][0]["message"]
+        self.assertEqual(message["content"], f"{prefill} and on")
+        self.assertNotIn("reasoning_content", message)
+
     def test_a_reply_with_no_reasoning_carries_no_reasoning_field(self):
         self.manager.updates = [update("Hello")]
 

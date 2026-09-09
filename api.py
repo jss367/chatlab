@@ -35,7 +35,6 @@ from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import settings
-from conversation import split_reasoning
 from model_runtime import (
     InsufficientMemoryError,
     ModelChanged,
@@ -46,7 +45,7 @@ from model_runtime import (
 )
 from token_metrics import summarize
 from ui import runtime
-from ui.generation import resolve_seed
+from ui.generation import resolve_seed, split_response_text
 
 logger = logging.getLogger(__name__)
 
@@ -567,6 +566,11 @@ UNSTABLE_CHARACTER = "\ufffd"
 def answer_and_reasoning(update, streaming: bool = False) -> tuple[str, str]:
     """The visible answer and the reasoning block, split as the chat splits them.
 
+    Literally as the chat splits them: reasoning markers inside a prefill the
+    caller supplied are the caller's own text, not syntax, so a reply told to
+    begin ``<think>quoted</think>`` keeps that at the start of the answer
+    rather than having it read as a reasoning block.
+
     ``streaming`` withholds whatever the next frame may yet change: a
     reasoning marker that has only half arrived, as the chat does, and the
     replacement character a byte-level tokenizer decodes half of a character
@@ -578,8 +582,10 @@ def answer_and_reasoning(update, streaming: bool = False) -> tuple[str, str]:
     end.
     """
 
-    reasoning, answer, _closed = split_reasoning(
+    reasoning, answer, _closed = split_response_text(
         update.text,
+        literal_prefill=update.literal_prefill_text,
+        literal_spans=update.literal_text_spans,
         streaming=streaming,
         reasoning_prefilled=update.reasoning_prefilled,
     )
