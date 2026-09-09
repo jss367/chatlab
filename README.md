@@ -15,6 +15,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Four color scales: raw rank, surprise, entropy, and sampling shift
 - Prompt tokens scored in the same pass that warms the cache
 - A **Score text** tab for measuring text the model did not write
+- A **Prompts** tab that runs a list of prompts, each in a conversation of its own, and writes one trace per prompt plus a table of every token
 - Perplexity, mean surprise, and a surprise trace for each response
 - Full metric-trace export as JSON or CSV
 - A system prompt, plus temperature, top-p, top-k, seed, and response-length controls
@@ -23,7 +24,7 @@ A local chat interface that shows what happened under the hood for every token, 
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
 - Every conversation kept between sessions in one JSON file, so a reload or a restart brings the pane back as it was
-- Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response that is still being written from anywhere on the Chat page
+- Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response, or a run of prompts, from anywhere on the Chat page
 - Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
 - Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
@@ -301,6 +302,16 @@ After a response finishes, open **Export full metric trace** under the conversat
 Every prompt token is measured against the distribution the model held one step earlier, during the same pass that fills the key-value cache, so it costs nothing extra to see how predictable your own prompt was. They appear under **Prompt and context tokens**; the first token has nothing before it, so it is left unscored. Turn the measurement off in **Sampling, analysis, and input controls** if you do not want it, and note that only the most recent 1,024 tokens of a very long prompt are scored.
 
 The **Score text** tab measures text the model did not generate. Paste it, optionally give it context first, and one forward pass reports the same numbers for every token — useful for comparing two prompts, checking how memorized a passage is, or evaluating a response that came from somewhere else. Scoring is capped at 4,096 tokens per run, or at the model's shorter positional limit. A line under the box counts what is in it against that cap as it is typed, using the same encoding the check itself uses, so a passage too large to score says so before the press rather than after it.
+
+## Running a list of prompts
+
+The **Prompts** tab runs an experiment rather than a conversation. Write the prompts into the box with a blank line between them, so a prompt can run to several lines, or press **Load prompts** for a file: `.jsonl` is one prompt per line (a plain string, or an object with a `prompt`, `text`, or `content` field), `.json` is a list of them, and anything else is read as text on the same blank-line rule. A loaded file is added to what is already in the box, and the box is what runs, so the set can be edited first.
+
+Each prompt is answered in a conversation of its own. Nothing carries over from the prompt before it: the model sees the system prompt from **Settings**, the prompt, and nothing else. Sampling comes from the controls under the message box, so a batch is measured exactly as a reply typed by hand would be. With **New seed each response** off, every prompt runs on the seed in the box and the run reproduces; with it on, each prompt gets its own seed, and the row and the trace both record which.
+
+The results table gives one row per prompt — an excerpt of the prompt and the answer, the token count, perplexity, mean surprise, and the seed. Below it are the files: `prompt-001.json` and its siblings, each a full trace in the same schema **Download JSON** writes for a single response, and `prompts.csv`, one row per generated token across the whole run with a `prompt_index` column naming the prompt each row came from. Both are written as the run goes, so **Stop** — or Escape — leaves every prompt that finished on screen and downloadable.
+
+A prompt that fails does not end the run. Its row says what went wrong, the rest of the set still runs, and the status line counts the failures at the end.
 
 ## Releasing a new version
 

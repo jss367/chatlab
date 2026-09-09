@@ -93,6 +93,14 @@ from ui.panel import (
     recolor,
     remember_selection,
 )
+from ui.prompts import (
+    BATCH_HEADERS,
+    PROMPT_COUNT_HINT,
+    count_prompts,
+    load_prompt_file,
+    run_prompts,
+    stop_batch,
+)
 from ui.scoring import (
     SAMPLING_LABEL_QUEUE,
     SCORE_BUDGET_QUEUE,
@@ -409,6 +417,76 @@ def build_app() -> gr.Blocks:
                                 )
                                 score_button = gr.Button("Score text", variant="primary")
                                 score_status = gr.Markdown("Nothing scored yet.")
+
+                            with gr.Tab("Prompts", elem_id="prompts-tab"):
+                                gr.Markdown(
+                                    "Run a list of prompts, each in a conversation of its "
+                                    "own, and keep every token's measurements. The system "
+                                    "prompt and prefill come from Settings, the sampling "
+                                    "controls from the Chat tab, so a batch is measured "
+                                    "exactly as a reply typed by hand would be."
+                                )
+                                prompts_box = gr.Textbox(
+                                    label="Prompts",
+                                    placeholder=(
+                                        "One prompt per block, with a blank line between "
+                                        "them, so a prompt can run to several lines."
+                                    ),
+                                    lines=8,
+                                    elem_id="prompts-box",
+                                )
+                                prompt_count = gr.Markdown(
+                                    PROMPT_COUNT_HINT,
+                                    elem_id="prompt-count",
+                                    elem_classes=["token-budget"],
+                                )
+                                with gr.Row():
+                                    run_prompts_button = gr.Button(
+                                        "Run prompts", variant="primary", min_width=110
+                                    )
+                                    # Escape presses this while a batch runs;
+                                    # see SHORTCUT_JS, which finds whichever
+                                    # stop button is on screen by these ids.
+                                    stop_prompts_button = gr.Button(
+                                        "Stop",
+                                        variant="stop",
+                                        visible=False,
+                                        elem_id="stop-batch-button",
+                                        min_width=70,
+                                    )
+                                    prompts_upload = gr.UploadButton(
+                                        "📂 Load prompts",
+                                        file_types=[".txt", ".jsonl", ".json"],
+                                        type="filepath",
+                                        min_width=130,
+                                    )
+                                batch_status = gr.Markdown(
+                                    "Nothing run yet.", elem_id="batch-status"
+                                )
+                                batch_results = gr.Dataframe(
+                                    headers=BATCH_HEADERS,
+                                    datatype=[
+                                        "number",
+                                        "str",
+                                        "str",
+                                        "number",
+                                        "number",
+                                        "number",
+                                        "number",
+                                    ],
+                                    column_widths=["5%", "27%", "32%", "9%", "9%", "9%", "9%"],
+                                    wrap=True,
+                                    interactive=False,
+                                    elem_id="batch-results",
+                                    label="Results — one row per prompt",
+                                )
+                                batch_files = gr.File(
+                                    label="One trace per prompt, and a table of every token",
+                                    file_count="multiple",
+                                    visible=False,
+                                    interactive=False,
+                                    elem_id="batch-files",
+                                )
 
                     with gr.Column(scale=2, min_width=300, elem_id="inspector-pane"):
                         gr.Markdown("## Under the hood", elem_id="inspector-heading")
@@ -1244,6 +1322,46 @@ def build_app() -> gr.Blocks:
                 alternatives,
                 context_ids_state,
             ],
+        )
+        # A batch reads its prompts from the box and everything else from the
+        # controls the Chat tab and Settings already own, so there is nothing
+        # to set up before running one.
+        batch_outputs = [
+            batch_status,
+            batch_results,
+            run_prompts_button,
+            stop_prompts_button,
+            batch_files,
+        ]
+        batch_run = run_prompts_button.click(
+            run_prompts,
+            [
+                prompts_box,
+                system_prompt,
+                assistant_prefill,
+                temperature,
+                top_p,
+                top_k,
+                max_new_tokens,
+                seed,
+                randomize_seed,
+            ],
+            batch_outputs,
+        )
+        # Cancelling closes the run at its last yield, which is what returns
+        # the model lock; stop_batch() only puts the buttons back. The rows
+        # and files already published stay on screen, and they describe the
+        # prompts that finished.
+        stop_prompts_button.click(stop_batch, None, batch_outputs, cancels=[batch_run])
+        prompts_box.change(
+            count_prompts,
+            prompts_box,
+            prompt_count,
+            trigger_mode="always_last",
+            show_progress="hidden",
+        )
+        prompts_upload.upload(
+            load_prompt_file, [prompts_upload, prompts_box], [prompts_box, batch_status]
         )
         color_scale.change(
             recolor,

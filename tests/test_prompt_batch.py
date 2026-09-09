@@ -1,0 +1,463 @@
+import csv
+import io
+import json
+import os
+import shutil
+import stat
+import tempfile
+import unittest
+from pathlib import Path
+
+import gradio as gr
+
+import app
+import settings_sandbox
+from prompt_batch import (
+    parse_prompt_file,
+    parse_prompts,
+    prompts_to_text,
+    write_batch_csv,
+    write_batch_trace,
+)
+from trace_export import build_trace, traces_to_csv
+from ui import runtime
+
+from test_streaming import EOS_ID, PIECES, loaded_manager
+
+
+def setUpModule():
+    settings_sandbox.start()
+
+
+def tearDownModule():
+    settings_sandbox.stop()
+
+
+# The batch handlers publish app.BATCH_OUTPUT_NAMES, in that order.
+STATUS, RESULTS, RUN, STOP, FILES = range(len(app.BATCH_OUTPUT_NAMES))
+
+# The results table's columns, by name.
+(
+    INDEX,
+    PROMPT,
+    RESPONSE,
+    TOKENS,
+    PERPLEXITY,
+    MEAN_SURPRISE,
+    SEED,
+) = range(len(app.BATCH_HEADERS))
+
+# The sampling half of run_prompts()' arguments: greedy, short, and with the
+# seed pinned so a row's numbers are the same on every run.
+SAMPLING = (0.0, 1.0, 0, 8, 42, False)
+
+
+def trace_of(update) -> dict:
+    """The trace written for one prompt, read back off disk."""
+
+    paths = [Path(path) for path in update["value"]]
+    return json.loads(paths[0].read_text(encoding="utf-8"))
+
+
+class ParsePromptsTests(unittest.TestCase):
+    def test_a_blank_line_separates_prompts(self):
+        prompts = parse_prompts("first prompt\n\nsecond prompt")
+
+        self.assertEqual(prompts, ["first prompt", "second prompt"])
+
+    def test_a_prompt_may_run_to_several_lines(self):
+        prompts = parse_prompts("a passage\nand its question\n\nanother")
+
+        self.assertEqual(prompts, ["a passage\nand its question", "another"])
+
+    def test_whitespace_only_lines_separate_and_are_dropped(self):
+        prompts = parse_prompts("  first \n \t \n\n\nsecond\n")
+
+        self.assertEqual(prompts, ["first", "second"])
+
+    def test_nothing_written_is_no_prompts(self):
+        self.assertEqual(parse_prompts("   \n\n  "), [])
+        self.assertEqual(parse_prompts(""), [])
+
+    def test_the_box_text_round_trips(self):
+        prompts = ["one", "two\nwith a second line"]
+
+        self.assertEqual(parse_prompts(prompts_to_text(prompts)), prompts)
+
+
+class ParsePromptFileTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp(prefix="chatlab-test-"))
+        self.addCleanup(shutil.rmtree, self.directory)
+
+    def write(self, name: str, text: str) -> Path:
+        path = self.directory / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_jsonl_takes_one_prompt_per_line(self):
+        path = self.write(
+            "prompts.jsonl",
+            '{"prompt": "first"}\n\n{"text": "second"}\n"third"\n',
+        )
+
+        self.assertEqual(parse_prompt_file(path), ["first", "second", "third"])
+
+    def test_a_jsonl_line_that_is_not_json_names_its_line(self):
+        path = self.write("prompts.jsonl", '{"prompt": "fine"}\nnot json\n')
+
+        with self.assertRaises(ValueError) as caught:
+            parse_prompt_file(path)
+
+        self.assertIn("Line 2", str(caught.exception))
+
+    def test_a_jsonl_object_without_a_prompt_says_which_keys_it_wanted(self):
+        path = self.write("prompts.jsonl", '{"question": "first"}\n')
+
+        with self.assertRaises(ValueError) as caught:
+            parse_prompt_file(path)
+
+        self.assertIn("Line 1", str(caught.exception))
+        self.assertIn("prompt", str(caught.exception))
+
+    def test_json_takes_a_list_or_an_object_holding_one(self):
+        listed = self.write("prompts.json", '["first", {"content": "second"}]')
+        wrapped = self.write("wrapped.json", '{"prompts": ["first", "second"]}')
+
+        self.assertEqual(parse_prompt_file(listed), ["first", "second"])
+        self.assertEqual(parse_prompt_file(wrapped), ["first", "second"])
+
+    def test_json_that_is_not_a_list_of_prompts_is_refused(self):
+        path = self.write("prompts.json", '{"model": "olmo"}')
+
+        with self.assertRaises(ValueError) as caught:
+            parse_prompt_file(path)
+
+        self.assertIn("list of prompts", str(caught.exception))
+
+    def test_any_other_extension_is_read_as_text(self):
+        path = self.write("prompts.txt", "first\n\nsecond over\ntwo lines\n")
+
+        self.assertEqual(parse_prompt_file(path), ["first", "second over\ntwo lines"])
+
+
+def sample_trace(*, seed: int = 1, candidates: int = 1, response: str = "hello"):
+    return build_trace(
+        model_id="example/model",
+        messages=[{"role": "user", "content": "Say hello"}],
+        response=response,
+        sampling={
+            "temperature": 0.8,
+            "top_p": 0.95,
+            "top_k": 50,
+            "max_new_tokens": 100,
+            "seed": seed,
+        },
+        metrics=[
+            {
+                "position": 1,
+                "token_id": 42,
+                "text": response,
+                "display_text": response,
+                "category": "Top 5",
+                "raw_rank": 2,
+                "raw_probability": 0.25,
+                "sampling_probability": 0.4,
+                "surprise_bits": 2.0,
+                "probability_mass_above": 0.5,
+                "top_candidates": [
+                    {"token_id": index, "text": "x", "probability": 0.5}
+                    for index in range(candidates)
+                ],
+            }
+        ],
+        generated_at="2026-08-31T12:00:00+00:00",
+    )
+
+
+class BatchExportTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp(prefix="chatlab-test-"))
+        self.addCleanup(shutil.rmtree, self.directory)
+        # A permissive umask is what makes the file mode visible: under it a
+        # plain write would leave the traces world-readable.
+        self.addCleanup(os.umask, os.umask(0))
+
+    def test_one_trace_per_prompt_is_named_for_its_place_in_the_run(self):
+        first = Path(write_batch_trace(sample_trace(), self.directory, 1))
+        tenth = Path(write_batch_trace(sample_trace(), self.directory, 10))
+
+        self.assertEqual(first.name, "prompt-001.json")
+        self.assertEqual(tenth.name, "prompt-010.json")
+        self.assertEqual(stat.S_IMODE(first.stat().st_mode), 0o600)
+
+    def test_the_table_numbers_every_row_with_the_prompt_it_came_from(self):
+        traces = [sample_trace(seed=1), sample_trace(seed=2)]
+
+        path = Path(write_batch_csv(traces, self.directory))
+        rows = list(csv.DictReader(io.StringIO(path.read_text(encoding="utf-8"))))
+
+        self.assertEqual([row["prompt_index"] for row in rows], ["1", "2"])
+        self.assertEqual([row["seed"] for row in rows], ["1", "2"])
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_prompts_with_different_candidate_counts_share_one_header(self):
+        # Top-k can be changed between runs, and a shorter candidate list must
+        # not truncate the columns of the longer one it is written beside.
+        table = traces_to_csv([sample_trace(candidates=1), sample_trace(candidates=3)])
+        reader = csv.DictReader(io.StringIO(table))
+        rows = list(reader)
+
+        self.assertIn("candidate_3_text", reader.fieldnames)
+        self.assertEqual(rows[0]["candidate_3_text"], "")
+        self.assertEqual(rows[1]["candidate_3_text"], "x")
+
+    def test_a_finished_prompt_survives_the_next_ones_rewrite(self):
+        # The table is rewritten after every prompt so a stopped run still has
+        # one. The rows already in it have to come back unchanged.
+        first = Path(write_batch_csv([sample_trace(seed=1)], self.directory))
+        after = Path(write_batch_csv([sample_trace(seed=1), sample_trace(seed=2)], self.directory))
+        rows = list(csv.DictReader(io.StringIO(after.read_text(encoding="utf-8"))))
+
+        self.assertEqual(first, after)
+        self.assertEqual([row["seed"] for row in rows], ["1", "2"])
+
+
+class RunPromptsTests(unittest.TestCase):
+    """What a batch publishes, and what it leaves on disk."""
+
+    def setUp(self):
+        # Keep the exports out of the shared upload folder this machine's
+        # other Gradio apps write into.
+        self.uploads = tempfile.TemporaryDirectory(prefix="chatlab-uploads-")
+        self.addCleanup(self.uploads.cleanup)
+        previous = os.environ.get("GRADIO_TEMP_DIR")
+        os.environ["GRADIO_TEMP_DIR"] = self.uploads.name
+        if previous is None:
+            self.addCleanup(os.environ.pop, "GRADIO_TEMP_DIR", None)
+        else:
+            self.addCleanup(os.environ.__setitem__, "GRADIO_TEMP_DIR", previous)
+
+        self.original = runtime.MANAGER
+        # "Hello world" and then the end of the response, on repeat, so every
+        # prompt in a batch is answered the same way.
+        runtime.MANAGER = loaded_manager([0, 1, EOS_ID], PIECES, EOS_ID)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
+
+    def run_batch(self, prompts_text, system_prompt="", prefill=""):
+        frames = list(
+            app.run_prompts(prompts_text, system_prompt, prefill, *SAMPLING)
+        )
+        self.assertTrue(frames)
+        for frame in frames:
+            self.assertEqual(len(frame), len(app.BATCH_OUTPUT_NAMES))
+        return frames
+
+    def test_every_prompt_gets_a_row_and_a_trace_file(self):
+        final = self.run_batch("first prompt\n\nsecond prompt")[-1]
+        rows = final[RESULTS]["value"]
+        names = [Path(path).name for path in final[FILES]["value"]]
+
+        self.assertEqual([row[INDEX] for row in rows], [1, 2])
+        self.assertEqual(names, ["prompt-001.json", "prompt-002.json", "prompts.csv"])
+        self.assertIn("Ran 2 of 2 prompts", final[STATUS])
+        self.assertTrue(final[FILES]["visible"])
+
+    def test_a_row_carries_the_answer_and_its_measurements(self):
+        final = self.run_batch("say hello")[-1]
+        row = final[RESULTS]["value"][0]
+
+        self.assertEqual(row[RESPONSE], "Hello world")
+        # Two words and the end-of-response token, which is measured too.
+        self.assertEqual(row[TOKENS], 3)
+        self.assertEqual(row[SEED], 42)
+        self.assertGreater(row[PERPLEXITY], 0)
+
+    def test_each_prompt_runs_in_a_conversation_of_its_own(self):
+        # The point of a batch: the second prompt must not see the first, or
+        # its measurements would describe a context no row mentions.
+        final = self.run_batch("first prompt\n\nsecond prompt")[-1]
+        traces = [
+            json.loads(Path(path).read_text(encoding="utf-8"))
+            for path in final[FILES]["value"][:2]
+        ]
+
+        for trace, prompt in zip(traces, ["first prompt", "second prompt"]):
+            self.assertEqual(trace["messages"], [{"role": "user", "content": prompt}])
+
+    def test_the_system_prompt_leads_every_conversation(self):
+        final = self.run_batch("first\n\nsecond", system_prompt="Be terse.")[-1]
+        trace = trace_of(final[FILES])
+
+        self.assertEqual(trace["messages"][0], {"role": "system", "content": "Be terse."})
+
+    def test_the_trace_records_the_sampling_the_row_was_measured_under(self):
+        final = self.run_batch("say hello")[-1]
+        trace = trace_of(final[FILES])
+
+        self.assertEqual(trace["sampling"]["seed"], 42)
+        self.assertEqual(trace["sampling"]["max_new_tokens"], 8)
+        self.assertEqual(trace["token_count"], 3)
+        self.assertNotIn("assistant_prefill", trace["sampling"])
+
+    def test_a_prefill_is_recorded_with_the_response_it_shaped(self):
+        # "Hello" is a token this tokenizer knows, so the prefill is replayed
+        # rather than refused, and the trace has to say the answer began with
+        # text the model did not choose.
+        final = self.run_batch("say hello", prefill="Hello")[-1]
+        trace = trace_of(final[FILES])
+
+        self.assertEqual(trace["sampling"]["assistant_prefill"], "Hello")
+
+    def test_the_buttons_swap_for_the_run_and_back_again(self):
+        frames = self.run_batch("say hello")
+
+        self.assertEqual(frames[0][RUN], gr.update(visible=False))
+        self.assertEqual(frames[0][STOP], gr.update(visible=True))
+        self.assertEqual(frames[-1][RUN], gr.update(visible=True))
+        self.assertEqual(frames[-1][STOP], gr.update(visible=False))
+
+    def test_progress_is_reported_prompt_by_prompt(self):
+        statuses = [frame[STATUS] for frame in self.run_batch("first\n\nsecond")]
+
+        self.assertTrue(any("Prompt 1 of 2" in status for status in statuses))
+        self.assertTrue(any("Prompt 2 of 2" in status for status in statuses))
+
+    def test_the_files_grow_as_the_run_does(self):
+        # A run stopped half way through keeps what it produced, which is only
+        # true if each finished prompt is published as it lands.
+        frames = self.run_batch("first\n\nsecond")
+        published = [
+            len(frame[FILES]["value"])
+            for frame in frames
+            if isinstance(frame[FILES], dict) and frame[FILES].get("value")
+        ]
+
+        # One trace and the table, then two traces and the table.
+        self.assertEqual(published[0], 2)
+        self.assertEqual(published[-1], 3)
+
+    def test_a_prompt_that_fails_does_not_end_the_run(self):
+        manager = runtime.MANAGER
+        original = manager.generate
+        calls = {"count": 0}
+
+        def fail_the_first(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("out of memory")
+            return original(*args, **kwargs)
+
+        manager.generate = fail_the_first
+        final = self.run_batch("first\n\nsecond")[-1]
+        rows = final[RESULTS]["value"]
+
+        self.assertIn("Failed: out of memory", rows[0][RESPONSE])
+        self.assertEqual(rows[1][TOKENS], 3)
+        self.assertIn("1 of 2 prompts failed", final[STATUS])
+
+    def test_an_unloaded_model_is_reported_before_anything_runs(self):
+        runtime.MANAGER = self.original.__class__()
+        frames = self.run_batch("say hello")
+
+        self.assertEqual(frames[-1][STATUS], app.BATCH_NO_MODEL)
+        self.assertEqual(frames[-1][RESULTS], gr.skip())
+
+    def test_an_empty_box_is_reported_rather_than_run(self):
+        frames = self.run_batch("   \n\n  ")
+
+        self.assertEqual(frames[-1][STATUS], app.BATCH_NO_PROMPTS)
+
+    def test_a_batch_refuses_while_a_reply_is_being_written(self):
+        self.assertTrue(runtime.MANAGER.reserve_generation())
+        self.addCleanup(runtime.MANAGER.release_generation)
+
+        frames = self.run_batch("say hello")
+
+        self.assertEqual(frames[-1][STATUS], app.BATCH_BUSY)
+
+    def test_the_generation_slot_comes_back_when_the_run_is_cancelled(self):
+        # Gradio closes the generator where it stood. A slot left reserved
+        # there would refuse every reply for the rest of the session.
+        run = app.run_prompts("first\n\nsecond", "", "", *SAMPLING)
+        next(run)
+        run.close()
+
+        self.assertTrue(runtime.MANAGER.reserve_generation())
+        runtime.MANAGER.release_generation()
+
+    def test_chat_refuses_while_a_batch_holds_the_model(self):
+        run = app.run_prompts("first\n\nsecond", "", "", *SAMPLING)
+        self.addCleanup(run.close)
+        next(run)
+
+        refusal = list(app.chat("hi", [], "", False, "", 0.0, 1.0, 0, 8, 42, False))[-1]
+
+        self.assertIn(app.BUSY_STATUS, refusal[5])
+
+
+class BatchTableTests(unittest.TestCase):
+    def test_an_excerpt_is_one_line_and_stops_at_the_limit(self):
+        excerpt = app.excerpt("a prompt\nwith a second line " + "x" * 200)
+
+        self.assertNotIn("\n", excerpt)
+        self.assertLessEqual(len(excerpt), app.EXCERPT_LENGTH)
+        self.assertTrue(excerpt.endswith("…"))
+
+    def test_a_short_prompt_is_shown_whole(self):
+        self.assertEqual(app.excerpt("say hello"), "say hello")
+
+    def test_the_count_follows_the_box(self):
+        self.assertEqual(app.count_prompts(""), app.PROMPT_COUNT_HINT)
+        self.assertEqual(app.count_prompts("one"), "1 prompt.")
+        self.assertEqual(app.count_prompts("one\n\ntwo"), "2 prompts.")
+
+
+class LoadPromptFileTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp(prefix="chatlab-test-"))
+        self.addCleanup(shutil.rmtree, self.directory)
+
+    def write(self, name: str, text: str) -> Path:
+        path = self.directory / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_a_file_is_added_to_what_is_already_in_the_box(self):
+        path = self.write("prompts.txt", "third\n\nfourth")
+
+        text, status = app.load_prompt_file(str(path), "first\n\nsecond")
+
+        self.assertEqual(parse_prompts(text), ["first", "second", "third", "fourth"])
+        self.assertIn("Loaded 2 prompts", status)
+
+    def test_an_unreadable_file_leaves_the_box_alone(self):
+        path = self.write("prompts.jsonl", "not json\n")
+
+        text, status = app.load_prompt_file(str(path), "first")
+
+        self.assertEqual(text, gr.skip())
+        self.assertIn("Could not read that file", status)
+
+    def test_a_file_with_no_prompts_says_so(self):
+        path = self.write("prompts.txt", "\n\n   \n")
+
+        text, status = app.load_prompt_file(str(path), "first")
+
+        self.assertEqual(text, gr.skip())
+        self.assertIn("No prompts", status)
+
+
+class StopBatchTests(unittest.TestCase):
+    def test_stopping_gives_the_buttons_back_and_keeps_the_rows(self):
+        status, results, run, stop, files = app.stop_batch()
+
+        self.assertIn("Stopped", status)
+        self.assertEqual(results, gr.skip())
+        self.assertEqual(files, gr.skip())
+        self.assertEqual(run, gr.update(visible=True))
+        self.assertEqual(stop, gr.update(visible=False))
+
+
+if __name__ == "__main__":
+    unittest.main()

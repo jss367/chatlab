@@ -56,6 +56,65 @@ def trace_to_json(trace: dict) -> str:
     return json.dumps(trace, ensure_ascii=False, indent=2) + "\n"
 
 
+METADATA_COLUMNS = ["schema_version", "generated_at", "model_id"]
+SAMPLING_COLUMNS = ["temperature", "top_p", "top_k", "max_new_tokens", "seed"]
+CANDIDATE_FIELDS = ("token_id", "text", "probability")
+
+
+def _token_rows(trace: dict):
+    """One row per generated token, with the trace's own columns on each."""
+
+    sampling = trace.get("sampling") or {}
+    metadata = {column: trace.get(column) for column in METADATA_COLUMNS}
+    generation_settings = {column: sampling.get(column) for column in SAMPLING_COLUMNS}
+    for token in trace.get("tokens") or []:
+        row = metadata | generation_settings
+        row.update({column: token.get(column) for column in TOKEN_COLUMNS})
+        for index, candidate in enumerate(token.get("top_candidates") or [], start=1):
+            for field in CANDIDATE_FIELDS:
+                row[f"candidate_{index}_{field}"] = candidate.get(field)
+        yield row
+
+
+def _rows_to_csv(traces: list[dict], *, numbered: bool = False) -> str:
+    """Write every trace's tokens into one table.
+
+    The candidate columns are as wide as the widest token in any of the
+    traces, so several responses can share a header even though one of them
+    ran with a smaller top-k than another.
+    """
+
+    candidate_count = max(
+        (
+            len(token.get("top_candidates") or [])
+            for trace in traces
+            for token in (trace.get("tokens") or [])
+        ),
+        default=0,
+    )
+    candidate_columns = [
+        f"candidate_{index}_{field}"
+        for index in range(1, candidate_count + 1)
+        for field in CANDIDATE_FIELDS
+    ]
+    columns = (
+        (["prompt_index"] if numbered else [])
+        + METADATA_COLUMNS
+        + SAMPLING_COLUMNS
+        + TOKEN_COLUMNS
+        + candidate_columns
+    )
+
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=columns, lineterminator="\n")
+    writer.writeheader()
+    for index, trace in enumerate(traces, start=1):
+        for row in _token_rows(trace):
+            writer.writerow((row | {"prompt_index": index}) if numbered else row)
+
+    return output.getvalue()
+
+
 def trace_to_csv(trace: dict) -> str:
     """Flatten a trace into one row per generated token.
 
@@ -64,41 +123,18 @@ def trace_to_csv(trace: dict) -> str:
     candidates use numbered columns, preserving the complete candidate list.
     """
 
-    tokens = trace.get("tokens") or []
-    sampling = trace.get("sampling") or {}
-    candidate_count = max(
-        (len(token.get("top_candidates") or []) for token in tokens), default=0
-    )
-    metadata_columns = ["schema_version", "generated_at", "model_id"]
-    sampling_columns = [
-        "temperature",
-        "top_p",
-        "top_k",
-        "max_new_tokens",
-        "seed",
-    ]
-    candidate_columns = [
-        f"candidate_{index}_{field}"
-        for index in range(1, candidate_count + 1)
-        for field in ("token_id", "text", "probability")
-    ]
-    columns = metadata_columns + sampling_columns + TOKEN_COLUMNS + candidate_columns
+    return _rows_to_csv([trace])
 
-    output = io.StringIO(newline="")
-    writer = csv.DictWriter(output, fieldnames=columns, lineterminator="\n")
-    writer.writeheader()
 
-    metadata = {column: trace.get(column) for column in metadata_columns}
-    generation_settings = {column: sampling.get(column) for column in sampling_columns}
-    for token in tokens:
-        row = metadata | generation_settings
-        row.update({column: token.get(column) for column in TOKEN_COLUMNS})
-        for index, candidate in enumerate(token.get("top_candidates") or [], start=1):
-            for field in ("token_id", "text", "probability"):
-                row[f"candidate_{index}_{field}"] = candidate.get(field)
-        writer.writerow(row)
+def traces_to_csv(traces: list[dict]) -> str:
+    """Flatten a whole batch into one table, numbered by the prompt it came from.
 
-    return output.getvalue()
+    A batch is read as a group - the same question asked twenty ways, one row
+    per token of every answer - so the prompt each row belongs to has to be a
+    column rather than a file name.
+    """
+
+    return _rows_to_csv(list(traces), numbered=True)
 
 
 def write_private_text(path: Path, text: str, *, newline: str | None = None) -> None:
