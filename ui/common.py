@@ -42,7 +42,7 @@ DOWNLOAD_BAR_WIDTH = 24
 # it shows with Chat only, and is wide enough for a model ID and a token
 # count while leaving the conversation most of the screen.
 #
-# Wide enough for the longest page name at the tile's small type. With three
+# Wide enough for the longest page name at the tile's small type. With four
 # pages there is nothing to be won by hiding those names: the pane would save
 # a handful of pixels and cost a reader the only signpost on the screen.
 NAV_PANE_WIDTH = 72
@@ -51,7 +51,12 @@ NAV_PANE_WIDTH = 72
 CONVERSATION_PANE_WIDTH = 248
 
 
-CHAT_PAGE, MODELS_PAGE, SETTINGS_PAGE = PAGES = ("Chat", "Models", "Settings")
+CHAT_PAGE, IMAGES_PAGE, MODELS_PAGE, SETTINGS_PAGE = PAGES = (
+    "Chat",
+    "Images",
+    "Models",
+    "Settings",
+)
 
 
 # Each nav tile shows an icon above the page's own name. The name is the
@@ -59,6 +64,7 @@ CHAT_PAGE, MODELS_PAGE, SETTINGS_PAGE = PAGES = ("Chat", "Models", "Settings")
 # the icon in front of it and keeps it out of that reading.
 NAV_ICONS = {
     CHAT_PAGE: "💬",
+    IMAGES_PAGE: "🖼️",
     MODELS_PAGE: "🧠",
     # The gear has a text form and an emoji form; the variation selector
     # asks for the emoji, so it matches the other two tiles.

@@ -450,3 +450,179 @@ def attention_strip(insight: dict, layer: int = 0) -> str:
         f'Solid outline: the token being explained.{html.escape(sink)}</div>'
         f'<ol class="attn-top">{listed}</ol></div>'
     )
+
+
+# ------------------------------------------------------- denoising a picture
+
+EMPTY_DENOISING_CHART = (
+    '<div class="viz-empty">The denoising trace appears once a picture has '
+    "been drawn.</div>"
+)
+
+# The second series' colour, for the movement line beside the guidance one.
+# Both are ratios on the same axis, so they share a scale honestly; what
+# tells them apart is the hue and the legend.
+_MOVEMENT_COLOR = "#d98016"
+
+_DENOISING_HEIGHT = 160.0
+
+
+def _step_series(readings: Sequence, name: str) -> list[tuple[int, float]]:
+    """``(step, value)`` for every step that has a reading of ``name``."""
+
+    return [
+        (int(reading.step), float(getattr(reading, name)))
+        for reading in readings
+        if getattr(reading, name, None) is not None
+    ]
+
+
+def denoising_chart(readings: Sequence) -> str:
+    """Guidance pull and latent movement per denoising step, on one axis.
+
+    ``readings`` are :class:`image_runtime.StepReading` objects. Both series
+    are dimensionless ratios of the same kind - a length divided by a length -
+    so one axis serves both, and a reader can see directly that the prompt
+    stops pulling around the same time the picture stops moving.
+    """
+
+    guidance = _step_series(readings, "guidance_share")
+    movement = _step_series(readings, "latent_change")
+    if len(guidance) + len(movement) < 2:
+        return EMPTY_DENOISING_CHART
+
+    steps = [int(reading.step) for reading in readings]
+    first, last = min(steps), max(steps)
+    ceiling = max(
+        0.05,
+        max((value for _step, value in guidance + movement), default=0.0),
+    )
+    plot_width = _VIEW_WIDTH - _PAD_LEFT - _PAD_RIGHT
+    plot_height = _DENOISING_HEIGHT - _PAD_TOP - _PAD_BOTTOM
+    span = max(1, last - first)
+
+    def x_at(step: int) -> float:
+        return _PAD_LEFT + plot_width * (step - first) / span
+
+    def y_at(value: float) -> float:
+        return _PAD_TOP + plot_height * (1 - value / ceiling)
+
+    def path(series: list[tuple[int, float]]) -> str:
+        return " ".join(
+            f"{'M' if index == 0 else 'L'}{x_at(step):.1f},{y_at(value):.1f}"
+            for index, (step, value) in enumerate(series)
+        )
+
+    gridlines = "".join(
+        f'<line class="viz-grid" x1="{_PAD_LEFT}" x2="{_VIEW_WIDTH - _PAD_RIGHT}" '
+        f'y1="{y_at(value):.1f}" y2="{y_at(value):.1f}" />'
+        f'<text class="viz-tick" x="{_PAD_LEFT - 6}" y="{y_at(value) + 3.5:.1f}" '
+        f'text-anchor="end">{value:.2f}</text>'
+        for value in (0.0, ceiling / 2, ceiling)
+    )
+    lines = ""
+    if guidance:
+        lines += f'<path class="viz-line" d="{path(guidance)}" />'
+    if movement:
+        lines += (
+            f'<path class="viz-line" d="{path(movement)}" '
+            f'style="stroke: {_MOVEMENT_COLOR}" />'
+        )
+
+    by_step = {int(reading.step): reading for reading in readings}
+    width = plot_width / span
+    hover = "".join(
+        f'<rect class="viz-hit" x="{x_at(step) - width / 2:.1f}" y="{_PAD_TOP}" '
+        f'width="{width:.1f}" height="{plot_height:.1f}">'
+        f"<title>{_step_title(by_step[step])}</title></rect>"
+        for step in sorted(by_step)
+    )
+    legend = (
+        '<span class="viz-key"><span class="viz-swatch viz-swatch-line"></span>'
+        "guidance pull</span>"
+        f'<span class="viz-key"><span class="viz-swatch" style="background: '
+        f'{_MOVEMENT_COLOR}"></span>latent movement</span>'
+    )
+    return (
+        '<figure class="viz-root" id="denoising-chart">'
+        '<figcaption class="viz-title">Per denoising step'
+        f'<span class="viz-sub">{legend}</span></figcaption>'
+        f'<svg viewBox="0 0 {_VIEW_WIDTH:g} {_DENOISING_HEIGHT:g}" role="img" '
+        'aria-label="Guidance pull and latent movement per denoising step">'
+        f"{gridlines}{lines}"
+        f'<line class="viz-axis" x1="{_PAD_LEFT}" x2="{_VIEW_WIDTH - _PAD_RIGHT}" '
+        f'y1="{y_at(0):.1f}" y2="{y_at(0):.1f}" />'
+        f'<text class="viz-tick" x="{_PAD_LEFT}" y="{_DENOISING_HEIGHT - 6:g}">'
+        f"step {first}</text>"
+        f'<text class="viz-tick" x="{_VIEW_WIDTH - _PAD_RIGHT}" '
+        f'y="{_DENOISING_HEIGHT - 6:g}" text-anchor="end">step {last}</text>'
+        f"{hover}</svg></figure>"
+    )
+
+
+def _step_title(reading) -> str:
+    parts = [f"step {reading.step}", f"timestep {reading.timestep:,.0f}"]
+    if reading.guidance_share is not None:
+        parts.append(f"guidance pull {reading.guidance_share:.3f}")
+    if reading.latent_change is not None:
+        parts.append(f"moved {reading.latent_change:.3f}")
+    return html.escape(" · ".join(parts))
+
+
+EMPTY_IMAGE_TILES = '<div class="viz-empty">No picture has been drawn yet.</div>'
+
+
+def image_summary_tiles(summary: dict, *, note: str = "") -> str:
+    """Headline numbers for a finished image run."""
+
+    if not summary.get("step_count"):
+        return EMPTY_IMAGE_TILES
+
+    tiles = [
+        _tile(
+            f"{summary['step_count']:,}",
+            "denoising steps",
+            "How many steps the scheduler really ran, which can differ from "
+            "the number asked for.",
+        )
+    ]
+    if "mean_guidance_share" in summary:
+        tiles.append(
+            _tile(
+                f"{summary['mean_guidance_share']:.3f}",
+                "mean guidance pull",
+                "How far the prompt moved each step's prediction, as a "
+                "fraction of what the model predicted without it. Peak "
+                f"{summary['peak_guidance_share']:.3f} at step "
+                f"{summary['peak_guidance_step']:,}.",
+            )
+        )
+        tiles.append(
+            _tile(
+                f"{summary['peak_guidance_step']:,}",
+                "strongest pull at step",
+                "The step where the prompt disagreed most with what the "
+                "model would have drawn from noise alone.",
+            )
+        )
+    if "settled_step" in summary:
+        tiles.append(
+            _tile(
+                f"{summary['settled_step']:,}",
+                "settled by step",
+                "From here on every step moved the latent less than a tenth "
+                "of the largest move: the composition was decided and the "
+                "rest is detail.",
+            )
+        )
+    if "final_latent_change" in summary:
+        tiles.append(
+            _tile(
+                f"{summary['final_latent_change']:.3f}",
+                "final step moved",
+                "How much the last step changed the latent, relative to its "
+                "own size.",
+            )
+        )
+    footer = f'<div class="viz-note">{html.escape(note)}</div>' if note else ""
+    return f'<div class="viz-root viz-tiles">{"".join(tiles)}</div>{footer}'

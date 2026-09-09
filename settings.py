@@ -22,6 +22,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Mapping
 
+import image_runtime
 from token_metrics import COLOR_SCALES, DEFAULT_COLOR_SCALE
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,21 @@ MPS_MEMORY_FRACTION_RANGE = (0.1, 2.0)
 # which Apple Metal alone supports (see model_runtime.QUANTIZED_BITS).
 WEIGHT_PRECISIONS = ("full", "8-bit", "4-bit")
 
+# How an image run is set up. The step count is where the denoising
+# trajectory's length comes from, so it is also how many readings the Images
+# page has to scrub through; a hundred and fifty is past the point any
+# scheduler still improves. Guidance is the classifier-free guidance scale,
+# and 1.0 or below turns guidance off altogether, which is worth being able
+# to ask for: it is the one setting where the prompt stops pulling and the
+# guidance trace goes flat by construction.
+IMAGE_STEPS_RANGE = (1, 150)
+IMAGE_GUIDANCE_RANGE = (0.0, 20.0)
+# The square sizes offered. Every one is a multiple of eight, which is what
+# the latent grid needs, and the list stops at the native size of the
+# largest pipeline this runs (SDXL at 1024). An off-list size in the file is
+# pulled to the nearest of these rather than refused.
+IMAGE_SIZES = (384, 512, 640, 768, 896, 1024)
+
 TEMPERATURE_RANGE = (0.0, 2.0)
 TOP_P_RANGE = (0.05, 1.0)
 TOP_K_RANGE = (0, 200)
@@ -70,6 +86,11 @@ TOP_K_RANGE = (0, 200)
 # uses when it picks a seed itself (app.SEED_LIMIT) would reproduce a
 # different one.
 SEED_FLOOR = 0
+
+# The image seed does have a ceiling, because torch's generator does: it
+# raises above image_runtime.MAX_SEED rather than taking whatever it is
+# given, so a saved 2**70 would fail every draw instead of reproducing one.
+IMAGE_SEED_RANGE = (SEED_FLOOR, image_runtime.MAX_SEED)
 
 
 def _number(value: Any) -> float | None:
@@ -132,6 +153,21 @@ def _flag(value: Any, default: bool) -> bool:
     return value if isinstance(value, bool) else default
 
 
+def _nearest_size(value: Any, default: int) -> int:
+    """The offered image size closest to ``value``, or ``default`` for a non-number.
+
+    The size is a choice from a list rather than a range, so a hand-written
+    500 becomes 512 instead of being refused: the latent grid needs a
+    multiple of eight, and a pipeline given anything else either crops or
+    fails deep inside itself.
+    """
+
+    number = _whole(value)
+    if number is None:
+        return default
+    return min(IMAGE_SIZES, key=lambda size: (abs(size - number), size))
+
+
 @dataclass(frozen=True)
 class Settings:
     """One reader's choices, with the defaults the interface starts from.
@@ -157,6 +193,13 @@ class Settings:
     prefill_token_limit: int = DEFAULT_PREFILL_TOKEN_LIMIT
     mps_memory_fraction: float | None = None
     weight_precision: str = "full"
+    image_negative_prompt: str = ""
+    image_steps: int = 30
+    image_guidance: float = 7.5
+    image_size: int = 512
+    image_seed: int = 42
+    image_randomize_seed: bool = True
+    image_record_attention: bool = True
     enabled_extensions: tuple[str, ...] = ()
 
     def to_mapping(self) -> dict[str, Any]:
@@ -250,6 +293,36 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
             else _clamped_float(
                 fraction, MPS_MEMORY_FRACTION_RANGE, DEFAULTS.mps_memory_fraction or 1.0
             )
+        ),
+        image_negative_prompt=_text(
+            values.get("image_negative_prompt", DEFAULTS.image_negative_prompt),
+            DEFAULTS.image_negative_prompt,
+        ),
+        image_steps=_clamped_int(
+            values.get("image_steps", DEFAULTS.image_steps),
+            IMAGE_STEPS_RANGE,
+            DEFAULTS.image_steps,
+        ),
+        image_guidance=_clamped_float(
+            values.get("image_guidance", DEFAULTS.image_guidance),
+            IMAGE_GUIDANCE_RANGE,
+            DEFAULTS.image_guidance,
+        ),
+        image_size=_nearest_size(
+            values.get("image_size", DEFAULTS.image_size), DEFAULTS.image_size
+        ),
+        image_seed=_clamped_int(
+            values.get("image_seed", DEFAULTS.image_seed),
+            IMAGE_SEED_RANGE,
+            DEFAULTS.image_seed,
+        ),
+        image_randomize_seed=_flag(
+            values.get("image_randomize_seed", DEFAULTS.image_randomize_seed),
+            DEFAULTS.image_randomize_seed,
+        ),
+        image_record_attention=_flag(
+            values.get("image_record_attention", DEFAULTS.image_record_attention),
+            DEFAULTS.image_record_attention,
         ),
     )
 
@@ -507,20 +580,30 @@ def model_id_to_save(shown: str, chosen: Settings | None = None) -> str:
     return saved.model_id
 
 
-def seed_to_save(shown: Any, randomizing: bool, chosen: Settings | None = None) -> Any:
-    """The seed to write down while the box on the Settings page shows ``shown``.
+def seed_to_save(
+    shown: Any,
+    randomizing: bool,
+    chosen: Settings | None = None,
+    *,
+    field: str = "seed",
+) -> Any:
+    """The seed to write down while the box on the page shows ``shown``.
 
-    The seed box is the one control the app writes to itself: a finished
-    response leaves the seed that produced it there. While randomization is
-    on, that number is the app's rather than the reader's, and every control
-    publishes it whenever anything changes, so without this a nudge of the
-    temperature would save a seed nobody chose over the one the reader did.
-    Committing the seed box itself is an explicit choice and is saved, and so
-    is turning randomization off, which is how a reader keeps the seed a
-    response has just used.
+    A seed box is the one control the app writes to itself: a finished
+    response, or a finished picture, leaves the seed that produced it there.
+    While randomization is on, that number is the app's rather than the
+    reader's, and every control publishes it whenever anything changes, so
+    without this a nudge of the temperature would save a seed nobody chose
+    over the one the reader did. Committing the seed box itself is an
+    explicit choice and is saved, and so is turning randomization off, which
+    is how a reader keeps the seed a response has just used.
+
+    ``field`` names which saved seed stands in for a randomized one: the
+    Chat and Images pages each have their own, and they are set and cleared
+    independently.
     """
 
     if not randomizing:
         return shown
     saved = chosen if chosen is not None else current()
-    return saved.seed
+    return getattr(saved, field)

@@ -1,6 +1,13 @@
 # ChatLab
 
-A local chat interface that shows what happened under the hood for every token, generated or not. Tokens are colored by whichever measurement you pick, and clicking one shows its probability, sampling probability, surprise, entropy, and the alternatives the model preferred.
+A local interface for models that shows what happened under the hood while they
+worked. For a language model that means every token, generated or not: tokens
+are colored by whichever measurement you pick, and clicking one shows its
+probability, sampling probability, surprise, entropy, and the alternatives the
+model preferred. For a diffusion model it means every denoising step: the
+trajectory to scrub through, how hard the prompt pulled against what the model
+would have drawn from noise alone, and which pixels each word of the prompt
+drove.
 
 ## What it includes
 
@@ -35,8 +42,9 @@ A local chat interface that shows what happened under the hood for every token, 
 - A hardware panel naming the device, the memory ChatLab judges a load against, the Metal cap, and what the process is holding
 - Apple Metal, NVIDIA CUDA, and CPU loading
 - 8-bit and 4-bit weights on Apple Metal, so a 7B model fits a 16 GB Mac
+- An **Images** page that draws with a diffusion model and reads the drawing back: one frame per denoising step, the guidance pull and the latent movement per step, and a cross-attention map per prompt token
 
-The default model is [`allenai/Olmo-3-7B-Think`](https://huggingface.co/allenai/Olmo-3-7B-Think). Its full weights require a download of roughly 15 GB. Other Hugging Face causal language models with built-in Transformers support can also work.
+The default model is [`allenai/Olmo-3-7B-Think`](https://huggingface.co/allenai/Olmo-3-7B-Think). Its full weights require a download of roughly 15 GB. Other Hugging Face causal language models with built-in Transformers support can also work, and so can diffusers text-to-image pipelines; see [Images](#images).
 
 ## Run it
 
@@ -138,15 +146,17 @@ the Settings page is the direct way to bound it.
 
 ## The pages
 
-A pane at the far left switches between three pages, each tile an icon above the page's name. **Chat** is the conversation, with the conversations pane beside it and the token panel to its right. **Models** is everything about which model is running. **Settings**, at the bottom of the pane, is how every reply is prompted and measured.
+A pane at the far left switches between four pages, each tile an icon above the page's name. **Chat** is the conversation, with the conversations pane beside it and the token panel to its right. **Images** is the same shape with a picture where the transcript goes. **Models** is everything about which model is running. **Settings**, at the bottom of the pane, is how every reply is prompted and measured.
+
+One model is in memory at a time whichever kind it is, because the two share the device and, on Apple silicon, the machine's memory. So loading an image model unloads a text one and the other way round, and each page's badge says whether what is in memory is a model it can use: a model of the other kind is named and greyed rather than reported as nothing loaded, which would send you off to load a second one on top of it.
 
 A badge above the tabs names the model that would answer. Until one is loaded, **Set up the default model** opens Models with the default selected, and **Choose another** opens Models to browse. Selecting the default does not start a download or replace a loaded model. On Models, choose **Load cached** to use local files without a network check, or **Download and load** to fetch and load the model. A full default-model download is about 15 GB; the setup guidance states this before you start. Progress and any load errors appear on the Models page.
 
 ### Models
 
 - **Model** holds the model ID and token boxes, the **Weight precision** choice, and the download, load, and unload buttons, with the status card under them. **Full (16-bit)** loads the checkpoint as it is. **8-bit** and **4-bit** quantize the linear layers on the way in, on Apple Metal only: the weights take about a half or a quarter of the memory, generation runs on fused Metal kernels fetched from the Hub the first time, and the embeddings and output head are left in half precision so the logit lens still reads through the real head. Accuracy drops a little, most at 4 bits; the token measurements describe the quantized model, which is the one answering. Another device loads full weights whatever is chosen, and says so in the log. The choice is saved and applies to the next load. The card follows a download file by file and byte by byte, and then the load in the same shape: how many of the weights have been read, how much of the model is on the device, the speed, and how long is left. Reading 15 GB of cached weights into memory takes half a minute or so, and the card says so rather than sitting still.
-- **My Models** lists every model in the Hugging Face cache with its size on disk, and says whether it would load: *fits* is a model there is room for now, *tight* one that fits the machine but not what is free at the moment, and *won't fit* one that is larger than the machine can hold whatever is free. The verdict is the same check that refuses a load, made before the button is pressed and against the **Weight precision** chosen, so switching to 4-bit repaints both lists and shows what that buys. For the first few seconds after the app starts, before it has finished reading the device, the verdicts are given as though the weights were loaded whole: too generous a verdict would send a reader to a button that then refuses them, and the lists are repainted as soon as the device is known. A model whose files are incomplete has no size to judge yet, and the model already in memory is not judged again - unless the weight precision has been moved since it was loaded, since **Load cached** on it is how a new precision is applied and a model that fits at four bits may not fit whole. Every verdict is for a model that would replace whatever is loaded, and a load frees the old weights before it checks whether the new ones fit, so what the device is holding now is counted as available. Two figures answer that, and the larger is the one used: what the device's own allocator reports, and what the last load estimated its weights would take. Neither is enough alone - host memory keeps no allocator figure at all, and a model spread over the graphics cards and the machine is only counted on the cards by one while the other covers the whole of it. **Sort by** orders the list newest download first, by name, or by size in either direction. A model short of files is marked *incomplete* and tinted amber, one that is whole but not a Transformers language model (a diffusers pipeline, a CTranslate2 or ONNX export) *unsupported*, and the one in memory *loaded*. Selecting one shows its file count, architecture and weight type from its `config.json`, revision, when it was last downloaded, and its folder, and puts its ID in the model box ready for **Load cached**. **Redownload** fetches whatever the selected model still lacks, resuming partial files rather than starting over; on a complete model it checks the Hub for updated files. **Remove** deletes the selected model's folder from the cache after a confirmation; a model that is loaded or still downloading has to be unloaded or finished first. The list rescans after every download, load, unload, and removal, and **Refresh** rescans it by hand.
-- **Model search** searches the Hub for language models with Transformers support, most downloaded first. Multimodal models are listed where Transformers loads them through the same auto class as a plain language model, Gemma 4 among them; those needing their own auto class, and conversions to another runtime such as the MLX and GGUF builds, are left out because they would download in full and then fail to load. Each result shows its parameter count, whether it would fit here, and recent downloads; selecting one adds its license, likes, last update, whether it is gated, and whether any of it is already on disk, and puts its ID in the model box ready for **Download and load**. A model that is not on disk has only the hub's parameter count to go on, so its size is estimated from that: the detail says so, and a result the hub gives no count for is listed without a verdict rather than with a guess.
+- **My Models** lists every model in the Hugging Face cache with its size on disk, and says whether it would load: *fits* is a model there is room for now, *tight* one that fits the machine but not what is free at the moment, and *won't fit* one that is larger than the machine can hold whatever is free. The verdict is the same check that refuses a load, made before the button is pressed and against the **Weight precision** chosen, so switching to 4-bit repaints both lists and shows what that buys. An image pipeline is judged as one: its size is summed over its component folders, each from its own stored dtype, and on an NVIDIA card it has to fit both the card and the machine, because it is read into host memory before it moves onto the card. For the first few seconds after the app starts, before it has finished reading the device, the verdicts are given as though the weights were loaded whole: too generous a verdict would send a reader to a button that then refuses them, and the lists are repainted as soon as the device is known. A model whose files are incomplete has no size to judge yet, and the model already in memory is not judged again - unless the weight precision has been moved since it was loaded, since **Load cached** on it is how a new precision is applied and a model that fits at four bits may not fit whole. Every verdict is for a model that would replace whatever is loaded, and a load frees the old weights before it checks whether the new ones fit, so what the device is holding now is counted as available. Two figures answer that, and the larger is the one used: what the device's own allocator reports, and what the last load estimated its weights would take. Neither is enough alone - host memory keeps no allocator figure at all, and a model spread over the graphics cards and the machine is only counted on the cards by one while the other covers the whole of it. **Sort by** orders the list newest download first, by name, or by size in either direction. A model short of files is marked *incomplete* and tinted amber, a diffusers pipeline *image*, one that is whole but neither kind ChatLab loads (a CTranslate2 or ONNX export, a folder of SAE weights) *unsupported*, and the one in memory *loaded*. Selecting one shows its file count, architecture and weight type from its `config.json`, revision, when it was last downloaded, and its folder, and puts its ID in the model box ready for **Load cached**. **Redownload** fetches whatever the selected model still lacks, resuming partial files rather than starting over; on a complete model it checks the Hub for updated files. **Remove** deletes the selected model's folder from the cache after a confirmation; a model that is loaded or still downloading has to be unloaded or finished first. The list rescans after every download, load, unload, and removal, and **Refresh** rescans it by hand.
+- **Model search** searches the Hub for one kind at a time, because the Hub files them under different libraries: **Text models** finds language models with Transformers support and **Image models** finds text-to-image diffusers pipelines, most downloaded first. An image model here means one a prompt alone drives: diffusers files video, audio, img2img, inpainting and upscaling pipelines under the same `model_index.json`, and those are left out because the Images page has only a prompt to give them. Among the text results, multimodal models are listed where Transformers loads them through the same auto class as a plain language model, Gemma 4 among them; those needing their own auto class, and conversions to another runtime such as the MLX and GGUF builds, are left out because they would download in full and then fail to load. The same runtime check applies to the image results, which is why a converted diffusion model is left out too. Each result shows its parameter count, whether it would fit here, and recent downloads; selecting one adds its license, likes, last update, whether it is gated, and whether any of it is already on disk, and puts its ID in the model box ready for **Download and load**. A model that is not on disk has only the hub's parameter count to go on, so its size is estimated from that: the detail says so, and a result the hub gives no count for is listed without a verdict rather than with a guess.
 
 ### Settings
 
@@ -185,7 +195,80 @@ holds three keys whose controls are not on this page: `model_id`, the model
 the Models page opens with, which `OLMO_MODEL_ID` still overrides for one run,
 `weight_precision`, the Models page's **Weight precision** choice (`full`,
 `8-bit` or `4-bit`), and `mps_memory_fraction`, the Apple Metal cap described
-under [Memory](#memory), which is read when a model is loaded.
+under [Memory](#memory), which is read when a model is loaded. The Images
+page's own controls are saved beside them under the `image_` keys.
+
+## Images
+
+The Images page draws a picture with a diffusion model and reads back what the
+model did while it drew. Load a diffusers text-to-image pipeline on the Models
+page — the model list marks one *image*, and **Model search** finds them under
+**Image models** — then type a prompt and press **Draw**. A pipeline that
+wants more than a prompt (img2img, inpainting, upscaling, video, audio) is
+marked *unsupported* rather than offered, because this page has only a prompt
+to give it, and one too old to report its denoising steps is refused before it
+draws rather than producing a run with no trajectory and a Stop button that
+does nothing. **Stop** ends the run
+after the step it is on and keeps the trajectory it had recorded; there is no
+finished picture, because the pipeline never reached its decode.
+
+**Drawing settings** holds the denoising step count, the guidance scale, the
+size, the seed, and **Record cross-attention**. The negative prompt sits with
+the prompt rather than in that accordion, because it changes the readings as
+well as the picture: it is what the unconditional half of every step is
+prompted with, and the guidance pull is measured against it.
+
+Weight precision does not apply here. The Metal quantizer is Transformers'
+own, and a pipeline is several models of which only some are Transformers
+ones, so an image load takes its weights whole and says so in the log rather
+than quantizing part of it and reporting a precision that held for the text
+encoder alone.
+
+Three readings sit beside the picture, and none of them needs the pipeline to
+be rewritten — whichever pipeline the repo ships is the one that runs, prompt
+encoding and scheduler and all.
+
+**Denoising trajectory** is one frame per step, with a slider to scrub
+through. The frames are a linear projection of the latent's four channels onto
+red, green and blue, not a full decode: running the VAE on every step would
+about double the wait, and layout and colour are what a frame is for. The
+finished picture beside it is the pipeline's own decode. The frames say so, so
+a disagreement over detail is not a puzzle.
+
+**Guidance and movement** charts two numbers per step on one axis, both of them
+a length divided by a length. The *guidance pull* is how far the prompt moved
+that step's prediction away from the unconditional one, as a fraction of the
+unconditional prediction's own size: 0.2 means the prompt pulled by a fifth of
+what the model would have drawn from noise alone. It is the closest thing a
+diffusion model has to surprise, and it is read straight out of the denoiser's
+own output, whose batch is the unconditional and conditional predictions side
+by side. With guidance at 1 or below there is no second prediction and nothing
+was pulling, so the series is absent rather than flat. The *latent movement* is
+how far each step moved the latent relative to where it already was; it falls
+as a picture settles, and the tiles name the step from which every step moved
+less than a tenth of the largest move — the step the composition was decided
+and the rest became detail.
+
+**Prompt attention** shades every prompt token by its share of the picture's
+cross-attention, against the strongest token in the prompt, and clicking one
+lays its map over the picture: brighter is more of that cell's attention.
+Averaged over heads and over every cross-attention layer that could be read.
+The pipeline's own attention kernel never builds the probability matrix, so
+recording it means computing the queries, keys and softmax a second time
+alongside — which is the one reading that costs real time, and why
+**Record cross-attention** can be turned off for the pipeline's own speed
+while the trajectory and the guidance trace still arrive.
+
+The line under the strip reports what the *padding* took, which is usually
+most of it. CLIP pads every prompt to a fixed length and Stable Diffusion
+passes no attention mask, so those positions past the end of your prompt are
+attended to like any other; without that line a token's share would be a share
+of something unnamed and every number on the page would look mysteriously
+small.
+
+The step slider moves the frame, the shading and the map together. Attention
+moves between steps as much as the picture does, so a strip left on the run's
+average beside a moved frame would be quietly wrong.
 
 ## Working with a conversation
 
@@ -430,6 +513,12 @@ Developer ID is the step that would let clients verify who built them.
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
+The application deliberately leaves `trust_remote_code` disabled. Models that require executing custom repository code will not load unless their architecture is supported directly by Transformers or, for an image model, by diffusers.
+
+The image tests need no pipeline weights. `tests/fake_pipeline.py` is a
+denoising loop small enough to run on a laptop's CPU whose cross-attention
+module is diffusers' own `Attention`, so the recording processor is exercised
+against the class it will meet rather than a mock of it.
 The application deliberately leaves `trust_remote_code` disabled. Models that require executing custom repository code will not load unless their architecture is supported directly by Transformers.
 
 ## Optional extensions

@@ -12,10 +12,12 @@ datas = []
 binaries = []
 hiddenimports = []
 
-# Gradio ships its browser client as package data. Transformers discovers model
-# implementations lazily, so include its built-in architectures for downloaded
-# Hugging Face models rather than limiting the desktop app to OLMo alone.
+# Gradio ships its browser client as package data. Transformers and diffusers
+# both discover model implementations lazily, so include their built-in
+# architectures for downloaded Hugging Face models rather than limiting the
+# desktop app to OLMo and one pipeline.
 for package in (
+    "diffusers",
     "gradio",
     "gradio_client",
     "groovy",
@@ -35,6 +37,12 @@ for package in (
 
 hiddenimports += collect_submodules("transformers.models", on_error="warn once")
 hiddenimports += collect_submodules("transformers.quantizers", on_error="warn once")
+# DiffusionPipeline builds itself from the class names in model_index.json, so
+# every pipeline and every component class a downloaded repo might name has to
+# be in the bundle; none of them is imported by any line of ChatLab's own.
+hiddenimports += collect_submodules("diffusers.pipelines", on_error="warn once")
+hiddenimports += collect_submodules("diffusers.schedulers", on_error="warn once")
+hiddenimports += collect_submodules("diffusers.models", on_error="warn once")
 # Optional first-party pages are imported only when enabled at runtime.
 hiddenimports += collect_submodules("extensions")
 hiddenimports += [

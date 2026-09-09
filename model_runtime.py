@@ -160,6 +160,25 @@ WEIGHT_FORMATS = (
     ("pytorch_model.bin", "pytorch_model.bin.index.json"),
 )
 
+# The two kinds of model ChatLab loads. A text model is one checkpoint at the
+# root of the snapshot and answers with tokens; an image model is a diffusers
+# pipeline, a folder per component, and answers with a picture. They share
+# the cache, the download, the memory ceiling and the one slot in memory, and
+# part company at the loader and at the page that drives them.
+TEXT_KIND = "text"
+IMAGE_KIND = "image"
+
+# A diffusers pipeline announces itself with this file, which also names
+# every component folder it is made of.
+PIPELINE_INDEX = "model_index.json"
+
+# Where a pipeline component keeps its weights. Only the folders that hold a
+# ``config.json`` are models at all: the tokenizer, the scheduler and the
+# feature extractor each keep a config of their own name and no weights, so
+# absence there is not a missing file.
+COMPONENT_CONFIG = "config.json"
+COMPONENT_WEIGHT_SUFFIXES = (".safetensors", ".bin")
+
 
 @dataclass(frozen=True)
 class CacheStatus:
@@ -168,13 +187,13 @@ class CacheStatus:
     ``missing_files`` names what the ``main`` snapshot still lacks before the
     model can load, and is the one verdict on that: a cache another tool
     filled with only the config and tokenizer, or a download stopped between
-    shards, has finished blobs but no model. ``unsupported`` says the snapshot
-    is whole but is not a Transformers language model at all (a diffusers
-    pipeline, a CTranslate2 or ONNX export, a folder of SAE weights): nothing
-    is missing, ChatLab just cannot load it. ``cached_bytes`` counts finished
-    files; ``partial_files`` and ``partial_bytes`` count the ``.incomplete``
-    blobs a cut-off download left behind, which ``snapshot_download`` resumes
-    rather than restarts. Those are a size estimate, not a verdict: the blob
+    shards, has finished blobs but no model. ``kind`` says which of the two
+    kinds of model it is (:data:`TEXT_KIND` or :data:`IMAGE_KIND`), and is
+    empty for a snapshot that is whole but neither (a CTranslate2 or ONNX
+    export, a folder of SAE weights): nothing is missing, ChatLab just cannot
+    load it. ``cached_bytes`` counts finished files; ``partial_files`` and
+    ``partial_bytes`` count the ``.incomplete`` blobs a cut-off download left
+    behind, which ``snapshot_download`` resumes rather than restarts. Those are a size estimate, not a verdict: the blob
     folder is shared by every revision of the repo, so a stray partial may
     belong to another revision or to a file the model never loads, and a
     partial the snapshot does need already shows up in ``missing_files``,
@@ -185,11 +204,17 @@ class CacheStatus:
     partial_files: int = 0
     partial_bytes: int = 0
     missing_files: tuple[str, ...] = ()
-    unsupported: bool = False
+    kind: str = TEXT_KIND
 
     @property
     def present(self) -> bool:
         return self.cached_bytes > 0 or self.partial_files > 0
+
+    @property
+    def unsupported(self) -> bool:
+        """Whole, but not a model of either kind ChatLab can load."""
+
+        return not self.kind
 
     @property
     def complete(self) -> bool:
@@ -270,17 +295,18 @@ TRAINER_ARTIFACTS = re.compile(
 def foreign_weights(snapshot: Path, *, transformers_config: bool) -> bool:
     """Whether the snapshot holds weights laid out for something other than Transformers.
 
-    A diffusers pipeline announces itself with ``model_index.json``. Otherwise
-    the evidence is a weight file where ``from_pretrained`` would never look:
+    The evidence is a weight file where ``from_pretrained`` would never look:
     at the root under a name that is not a checkpoint or a shard (CTranslate2's
     ``model.bin``, an ``model.onnx``), or in a subfolder. When the root
     ``config.json`` is a Transformers one, only a foreign format in a
     subfolder counts, since such repos often ship extras like
     ``original/consolidated.00.pth`` beside the checkpoint they are missing.
+
+    A diffusers pipeline is also weights in subfolders, and would answer
+    yes here; :func:`judge_snapshot` recognizes it by its
+    ``model_index.json`` before asking, because ChatLab loads that kind.
     """
 
-    if (snapshot / "model_index.json").is_file():
-        return True
     checkpoints = {name for pair in WEIGHT_FORMATS for name in pair}
     for entry in snapshot.rglob("*"):
         if not entry.is_file() or entry.suffix not in WEIGHT_SUFFIXES:
@@ -300,30 +326,574 @@ def foreign_weights(snapshot: Path, *, transformers_config: bool) -> bool:
     return False
 
 
-def judge_snapshot(snapshot: Path | None) -> tuple[tuple[str, ...], bool]:
-    """``(missing_files, unsupported)`` for what the snapshot holds.
+def judge_snapshot(snapshot: Path | None) -> tuple[tuple[str, ...], str]:
+    """``(missing_files, kind)`` for what the snapshot holds.
 
     ``missing_files`` are the files ``from_pretrained`` needs before it can
-    load: only the config and the weights are checked, since which tokenizer
-    files a repo ships varies too much to know from the outside, and a wrong
-    "incomplete" verdict on a good cache would be worse than a generic load
-    error. A snapshot with no Transformers checkpoint at its root but weights
-    laid out for another framework (diffusers, CTranslate2, ONNX, SAE
-    weights) is not a cut-off download and is ``unsupported`` instead, with
-    nothing reported missing. Absence alone is never that verdict: a snapshot
-    holding only a tokenizer, or only a config, is incomplete.
+    load: for a text model only the config and the weights are checked, since
+    which tokenizer files a repo ships varies too much to know from the
+    outside, and a wrong "incomplete" verdict on a good cache would be worse
+    than a generic load error. ``kind`` is :data:`TEXT_KIND` or
+    :data:`IMAGE_KIND`, and empty for a snapshot with no Transformers
+    checkpoint at its root but weights laid out for a framework ChatLab does
+    not run (CTranslate2, ONNX, a folder of SAE weights): that is not a
+    cut-off download, and nothing is reported missing for it. Absence alone
+    is never that verdict: a snapshot holding only a tokenizer, or only a
+    config, is incomplete.
+
+    The pipeline check comes first, because a diffusers repo keeps its
+    weights in subfolders and has no checkpoint at its root, which is
+    exactly the shape :func:`foreign_weights` reads as another framework.
     """
 
     if snapshot is None:
-        return ("config.json", MODEL_WEIGHTS), False
+        return ("config.json", MODEL_WEIGHTS), TEXT_KIND
+    if is_pipeline(snapshot):
+        if not pipeline_draws_from_text(snapshot):
+            # A diffusers pipeline all right, and not one the Images page
+            # can drive: it wants a picture, a video frame or a sound
+            # ChatLab has no way to give it. See pipeline_draws_from_text.
+            return (), ""
+        return pipeline_missing_files(snapshot), IMAGE_KIND
     has_checkpoint = any(
         (snapshot / name).is_file() for pair in WEIGHT_FORMATS for name in pair
     )
     if not has_checkpoint and foreign_weights(
         snapshot, transformers_config=is_transformers_config(snapshot / "config.json")
     ):
-        return (), True
-    return missing_files(snapshot), False
+        return (), ""
+    return missing_files(snapshot), TEXT_KIND
+
+
+def is_pipeline(snapshot: Path) -> bool:
+    """Whether the snapshot is a diffusers pipeline rather than one checkpoint."""
+
+    return (snapshot / PIPELINE_INDEX).is_file()
+
+
+# What a pipeline class name says it needs besides a prompt. diffusers files
+# video, audio, image-conditioned and upscaling pipelines under the same
+# ``model_index.json`` as a text-to-image one, and the Images page has only a
+# prompt to give: such a pipeline would load and then fail for want of an
+# image, a video frame or an audio clip it was never handed.
+CONDITIONED_PIPELINES = (
+    "img2img",
+    "image2image",
+    "inpaint",
+    "instructpix2pix",
+    "controlnet",
+    "upscale",
+    "superresolution",
+    "depth",
+    "variation",
+    "video",
+    "audio",
+    "music",
+    "adapter",
+    # A prior stage takes the prompt and hands back conditioning embeddings
+    # for a second pipeline to draw from. It has a tokenizer and a text
+    # encoder like any text-to-image pipeline and returns no picture at all.
+    "prior",
+    # Subject-driven generation: a reference image and a subject category
+    # beside the prompt.
+    "blip",
+)
+
+# The components a pipeline needs to read a prompt at all. One without them
+# is conditioned on something else - an image embedding, a video frame - and
+# is not something a prompt alone drives, whatever its class is called.
+TEXT_TO_IMAGE_COMPONENTS = ("tokenizer", "text_encoder")
+
+
+def pipeline_draws_from_text(snapshot: Path) -> bool:
+    """Whether this pipeline is one a prompt alone can drive.
+
+    Two questions, because neither answers on its own. The components say
+    whether it can read a prompt: a pipeline with no tokenizer and no text
+    encoder is conditioned on something else and could not use one. The
+    class name says whether it wants more than a prompt: an img2img or an
+    upscaling pipeline has both components and still needs a picture handed
+    to it.
+
+    A guess either way, and deliberately the conservative one: a pipeline
+    this turns down is reported unsupported rather than offered and then
+    failed at the first draw, and its ID can still be typed into the model
+    box for a load that says what really went wrong.
+
+    A guess is all it can be from here. Naming the class is the only signal
+    a cache scan has, since it reads folders without importing anything, and
+    a list of markers will always be one family behind. What the pipeline
+    really requires is read off its own ``__call__`` once it is built; see
+    :func:`image_runtime.refuse_unusable`, which is the exact check and the
+    one that catches a family nobody has thought of.
+    """
+
+    name = (pipeline_class(snapshot) or "").lower()
+    if any(marker in name for marker in CONDITIONED_PIPELINES):
+        return False
+    components = pipeline_components(snapshot)
+    return all(needed in components for needed in TEXT_TO_IMAGE_COMPONENTS)
+
+
+def pipeline_components(snapshot: Path) -> tuple[str, ...]:
+    """The component subfolders ``model_index.json`` names, in its own order.
+
+    A pipeline is a handful of models that run in sequence, one folder each,
+    and the index is the list. Its other entries are skipped: the keys that
+    begin with an underscore are the pipeline's own class and version, and a
+    component the repo ships without (a safety checker it left out) is
+    written as a pair of nulls rather than dropped.
+    """
+
+    try:
+        index = json.loads((snapshot / PIPELINE_INDEX).read_text())
+    except (OSError, ValueError):
+        return ()
+    if not isinstance(index, dict):
+        return ()
+    return tuple(
+        name
+        for name, value in index.items()
+        if not name.startswith("_")
+        and isinstance(value, list)
+        and len(value) == 2
+        and all(isinstance(part, str) and part for part in value)
+    )
+
+
+def pipeline_class(snapshot: Path) -> str | None:
+    """The pipeline class ``model_index.json`` names, for the model list."""
+
+    try:
+        index = json.loads((snapshot / PIPELINE_INDEX).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(index, dict):
+        return None
+    name = index.get("_class_name")
+    return name if isinstance(name, str) and name else None
+
+
+def _component_weights(folder: Path) -> list[Path]:
+    """The weight files one component folder holds, whatever their variant."""
+
+    if not folder.is_dir():
+        return []
+    return [
+        entry
+        for entry in folder.iterdir()
+        if entry.is_file() and entry.suffix in COMPONENT_WEIGHT_SUFFIXES
+    ]
+
+
+def _component_index(folder: Path, variant: str = "") -> Path | None:
+    """The shard index a component will load from, or ``None`` if it has none.
+
+    A big component ships its weights as shards with an index listing them,
+    the same as a text checkpoint. Which index matters is the one
+    ``from_pretrained`` will read, and that depends on the variant the whole
+    pipeline is being loaded as: a component holding both a complete plain
+    index and an incomplete half-precision one is complete for a plain load
+    and short of shards for a half-precision one, so checking the plain
+    index of an fp16 load would call the snapshot whole and then fail inside
+    diffusers.
+
+    So the pipeline's variant comes first, then the plain set - which is
+    what diffusers falls back to for a component that has no such variant.
+    An index for neither means the set being loaded is not sharded, and
+    ``None`` says there is nothing to check shard by shard: matching any
+    index at all would validate a half-precision one against a plain load
+    and report shards missing that the load never asks for.
+    """
+
+    if not folder.is_dir():
+        return None
+    indexes = {
+        _weight_variant(entry.name.removesuffix(".index.json")): entry
+        for entry in sorted(folder.iterdir())
+        if entry.is_file() and entry.name.endswith(".index.json")
+    }
+    preferences = [(variant, "safetensors"), (variant, "bin")] if variant else []
+    preferences += [("", "safetensors"), ("", "bin")]
+    for preferred in preferences:
+        if preferred in indexes:
+            return indexes[preferred]
+    return None
+
+
+def _shard_index_name(shard: Path) -> str:
+    """The index file a shard belongs to, by the name diffusers looks for."""
+
+    return f"{SHARD_NAME.sub(lambda match: f'.{match.group(1)}', shard.name)}.index.json"
+
+
+def _missing_shards(index: Path) -> tuple[str, ...]:
+    """The shards ``index`` names that are not beside it, or the index itself.
+
+    An index this cannot read counts as the weights being missing rather than
+    as nothing missing: the file is another repo's, so a ``weight_map`` that
+    is not an object of file names says the component cannot be loaded, which
+    is the thing worth reporting.
+    """
+
+    try:
+        weight_map = json.loads(index.read_text())["weight_map"]
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError("weight_map must be a non-empty object")
+        shards = {shard for shard in weight_map.values()}
+        if not all(isinstance(shard, str) and shard for shard in shards):
+            raise TypeError("weight_map values must be file names")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return (MODEL_WEIGHTS,)
+    return tuple(sorted(shard for shard in shards if not (index.parent / shard).is_file()))
+
+
+def pipeline_missing_files(snapshot: Path) -> tuple[str, ...]:
+    """The files a pipeline snapshot needs before ``from_pretrained`` can load it.
+
+    Each component the index names must have its folder, and each folder
+    that holds a ``config.json`` must have weights beside it. The folders
+    without one are the tokenizer, the scheduler and the feature extractor,
+    which keep a config under a name of their own and no weights at all, so
+    for those the folder's presence is the whole check. Which variant of the
+    weights is there is not checked: a repo that ships only the half
+    precision set loads from it.
+
+    A component whose weights come as shards is checked shard by shard
+    against its own index, exactly as a text checkpoint is. Without that, a
+    download cut off after the first shard leaves a folder that has *some*
+    weights, which would read as whole and send **Load cached** into
+    diffusers to fail on the shards that never arrived.
+
+    A snapshot whose variant-only components share no single variant is
+    reported the same way. Its files are all there, but ``from_pretrained``
+    takes one variant for the whole pipeline, so there is no load to make of
+    it; see :func:`pipeline_variant_missing`.
+
+    A folder holding weights but no ``config.json`` is missing that config
+    rather than exempt from the check: diffusers cannot construct a unet or
+    a VAE without one, so a download cut off before it arrived is
+    incomplete rather than whole. Absence of both is still the tokenizer and
+    the scheduler, and still no gap.
+
+    Every component is checked against the variant the whole pipeline will
+    be loaded as, not against whichever set it happens to prefer on its own:
+    ``from_pretrained`` takes one variant for the lot, so a component with a
+    complete plain index beside an incomplete half-precision one is short of
+    shards for a half-precision load. See :func:`_component_index`.
+
+    What is *not* checked is which files a weightless component needs. A
+    CLIP tokenizer wants ``vocab.json`` and ``merges.txt``, a fast one
+    ``tokenizer.json``, a T5 one ``spiece.model``, and knowing which from
+    outside means knowing the class - the same reason :func:`missing_files`
+    checks only the config and the weights of a text checkpoint, and for the
+    same trade: a wrong "incomplete" verdict on a good cache is worse than
+    the loader's own error on a bad one. An empty folder is the exception,
+    because none is none whatever the class.
+    """
+
+    missing: list[str] = []
+    if pipeline_variant_missing(snapshot):
+        return (MODEL_WEIGHTS,)
+    variant = pipeline_variant(snapshot) or ""
+    for name in pipeline_components(snapshot):
+        folder = snapshot / name
+        if not folder.is_dir():
+            missing.append(f"{name}/")
+            continue
+        if not any(folder.iterdir()):
+            # The folder was made and nothing was fetched into it, which is
+            # the same gap as its not being there at all. How many files a
+            # tokenizer or a scheduler needs cannot be told from outside -
+            # see the note in pipeline_missing_files - but none is none.
+            missing.append(f"{name}/")
+            continue
+        if not (folder / COMPONENT_CONFIG).is_file():
+            if (
+                _component_weights(folder)
+                or _component_index(folder, variant) is not None
+            ):
+                missing.append(f"{name}/{COMPONENT_CONFIG}")
+            continue
+        index = _component_index(folder, variant)
+        if index is not None:
+            missing.extend(f"{name}/{shard}" for shard in _missing_shards(index))
+            continue
+        # The set this load will read, not whatever else is in the folder:
+        # a complete file of another variant does not make up for the one
+        # being loaded, and an orphan shard of the one being loaded is not
+        # excused by a complete file of another.
+        wanted = [
+            entry
+            for entry in _component_weights(folder)
+            if _weight_variant(entry.name)[0] == variant
+        ] or _component_weights(folder)
+        if not wanted:
+            missing.append(f"{name}/{MODEL_WEIGHTS}")
+        elif all(SHARD_NAME.search(entry.name) for entry in wanted):
+            # Shards and no index. Diffusers finds a sharded checkpoint
+            # through its index and nothing else, so a download that left
+            # the shards but not the index has weights that cannot be
+            # discovered - which is a gap, not a whole unsharded set.
+            missing.append(f"{name}/{_shard_index_name(wanted[0])}")
+    return tuple(missing)
+
+
+# A weight file's variant, as diffusers spells it: the part between the name
+# and the suffix in ``diffusion_pytorch_model.fp16.safetensors``. A repo often
+# ships both a full-precision and a half-precision set of the same component,
+# and counting both would double the component's measured size.
+_VARIANT = re.compile(r"^(?P<stem>.+?)(?:\.(?P<variant>[^.]+))?\.(?P<suffix>[^.]+)$")
+
+
+def _weight_variant(name: str) -> tuple[str, str]:
+    """``(variant, suffix)`` for a weight file name; the variant is empty for the plain set.
+
+    A shard is ``...-00001-of-00002.safetensors``, whose middle part is not a
+    variant, so the shard numbering is stripped before the name is read.
+    """
+
+    stripped = SHARD_NAME.sub(lambda match: f".{match.group(1)}", name)
+    found = _VARIANT.match(stripped)
+    if found is None:
+        return "", ""
+    return found.group("variant") or "", found.group("suffix") or ""
+
+
+def _loaded_variant_bytes(files: list[Path]) -> int:
+    """The bytes of the one weight set a component will really load.
+
+    Grouped by variant and format, because ``from_pretrained`` reads one
+    group and ignores the rest. The plain safetensors set is preferred, then
+    the plain PyTorch one, the same order diffusers looks in; a repo that
+    ships only a variant (half precision alone, say) is measured by its
+    largest group, which is the upper bound on what a load can read.
+    """
+
+    groups: dict[tuple[str, str], int] = {}
+    for entry in files:
+        try:
+            size = entry.stat().st_size
+        except OSError:
+            continue
+        group = _weight_variant(entry.name)
+        groups[group] = groups.get(group, 0) + size
+    for preferred in (("", "safetensors"), ("", "bin")):
+        if preferred in groups:
+            return groups[preferred]
+    return max(groups.values(), default=0)
+
+
+def pipeline_weight_bytes(snapshot: Path) -> int | None:
+    """Bytes of the weights a pipeline load will read, or ``None``.
+
+    The sum over the component folders, each measured by the one weight set
+    it will really load; see :func:`_loaded_variant_bytes`. ``None`` when the
+    index cannot be read, which leaves the loader to give its own error.
+    """
+
+    components = pipeline_components(snapshot)
+    if not components:
+        return None
+    return sum(
+        _loaded_variant_bytes(_component_weights(snapshot / name))
+        for name in components
+    )
+
+
+# How safetensors spells the dtypes in its header, in the names
+# :data:`DTYPE_BYTES` uses. The header is a length-prefixed JSON object at the
+# front of the file, so reading one costs a seek rather than a load.
+SAFETENSORS_DTYPES = {
+    "F64": "float64",
+    "F32": "float32",
+    "F16": "float16",
+    "BF16": "bfloat16",
+    "F8_E4M3": "float8_e4m3fn",
+    "F8_E5M2": "float8_e5m2",
+    "I8": "int8",
+    "U8": "uint8",
+}
+
+# The header length prefix: eight bytes, little-endian, unsigned.
+_HEADER_PREFIX = 8
+# Refuse to read a header claiming to be larger than any real one. A header
+# is a few hundred kilobytes for the largest checkpoints; a wild length is a
+# truncated or hostile file, not something to allocate for.
+MAX_SAFETENSORS_HEADER = 64 * 1024**2
+
+
+def safetensors_dtype(path: Path) -> str | None:
+    """The dtype the tensors in one safetensors file are stored as, or ``None``.
+
+    Read from the file's own header rather than from a config, because the
+    configs that matter do not say: a diffusers component keeps its
+    architecture in ``config.json`` and its dtype nowhere, so the unet that
+    dominates a pipeline's size would otherwise be unmeasurable. The first
+    tensor's dtype stands for the file, which is what a checkpoint saved in
+    one precision holds.
+    """
+
+    try:
+        with path.open("rb") as handle:
+            prefix = handle.read(_HEADER_PREFIX)
+            if len(prefix) < _HEADER_PREFIX:
+                return None
+            length = int.from_bytes(prefix, "little")
+            if not 0 < length <= MAX_SAFETENSORS_HEADER:
+                return None
+            header = json.loads(handle.read(length))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(header, dict):
+        return None
+    for name, entry in header.items():
+        if name == "__metadata__" or not isinstance(entry, dict):
+            continue
+        stored = SAFETENSORS_DTYPES.get(entry.get("dtype"))
+        if stored is not None:
+            return stored
+    return None
+
+
+# What a component whose stored dtype cannot be read is taken to be.
+# Pipelines ship as half precision, and assuming it errs towards refusing a
+# load rather than towards a float32 load that doubles past the estimate and
+# exhausts the machine.
+ASSUMED_PIPELINE_DTYPE = "float16"
+
+
+def component_dtype(folder: Path) -> str | None:
+    """The dtype one component's weights are stored as, or ``None``.
+
+    Read from the largest safetensors file it will load, because that is the
+    one whose size the component's estimate turns on. A component that ships
+    only ``.bin`` weights answers ``None``: a pickle has no cheap header to
+    read.
+    """
+
+    files = [
+        entry
+        for entry in _component_weights(folder)
+        if entry.suffix == ".safetensors"
+    ]
+    if not files:
+        return None
+    try:
+        largest = max(files, key=lambda entry: entry.stat().st_size)
+    except OSError:
+        return None
+    return safetensors_dtype(largest)
+
+
+def pipeline_loaded_bytes(snapshot: Path, load_dtype: str) -> int | None:
+    """Memory a pipeline's weights take once loaded as ``load_dtype``, or ``None``.
+
+    Summed component by component, each converted from its own stored dtype,
+    because a pipeline's components need not share one and a single dtype
+    applied to the whole byte count mis-scales the ones that differ: a
+    float32 text encoder beside a half-precision unet would have the unet's
+    growth on a CPU float32 load go unestimated, and the inverse on a
+    half-precision load.
+
+    A component whose dtype cannot be read is assumed to be half precision,
+    which errs towards refusing a load rather than towards one that doubles
+    past the estimate; see :meth:`ModelManager._check_memory`.
+    """
+
+    components = pipeline_components(snapshot)
+    if not components:
+        return None
+    total = 0
+    for name in components:
+        folder = snapshot / name
+        stored = _loaded_variant_bytes(_component_weights(folder))
+        if not stored:
+            continue
+        total += estimate_loaded_bytes(
+            stored, component_dtype(folder) or ASSUMED_PIPELINE_DTYPE, load_dtype
+        )
+    return total
+
+
+def _component_variants(folder: Path) -> set[str]:
+    """The weight variants one component folder can actually be loaded from.
+
+    A variant counts only where its files are a set ``from_pretrained``
+    could read: one unsharded file, or shards with the index that lists
+    them. An orphan shard left by a cut-off download is not a plain set just
+    because it is named like one - counting it would say a plain load is
+    available, send :func:`pipeline_variant` looking for unsuffixed weights,
+    and leave a perfectly good half-precision file beside it unused.
+    """
+
+    grouped: dict[str, list[Path]] = {}
+    for entry in _component_weights(folder):
+        grouped.setdefault(_weight_variant(entry.name)[0], []).append(entry)
+    usable = set()
+    for variant, entries in grouped.items():
+        if any(not SHARD_NAME.search(entry.name) for entry in entries):
+            usable.add(variant)
+        elif _component_index(folder, variant) is not None:
+            usable.add(variant)
+    return usable
+
+
+def pipeline_variant(snapshot: Path) -> str | None:
+    """The variant a load has to ask diffusers for, or ``None`` for the plain set.
+
+    ``from_pretrained`` looks for unsuffixed weights unless it is told a
+    variant, and it takes one variant for the whole pipeline, falling back to
+    the unsuffixed files for any component that lacks it. So the variant has
+    to be one that *every* component without a plain set ships: naming a
+    variant only some of them have leaves the rest with nothing for diffusers
+    to fall back to.
+
+    ``None`` when every weight-bearing component has a plain set, which is
+    the common case and what diffusers wants asked of it, and also when no
+    single variant covers the ones that do not — :func:`pipeline_missing_files`
+    reports that snapshot's weights as missing rather than letting a load
+    start that cannot finish.
+    """
+
+    shared: set[str] | None = None
+    for name in pipeline_components(snapshot):
+        variants = _component_variants(snapshot / name)
+        if not variants or "" in variants:
+            continue
+        shared = variants if shared is None else shared & variants
+    if not shared:
+        return None
+    return sorted(shared)[0]
+
+
+def pipeline_variant_missing(snapshot: Path) -> bool:
+    """Whether the components disagree about variants past any hope of loading.
+
+    True when some component has no plain weight set and no one variant is
+    shipped by all such components, so whatever :func:`pipeline_variant`
+    named would leave another component unloadable. The snapshot is whole in
+    the sense that files are there; it is the combination that cannot be
+    asked for.
+    """
+
+    lacking = [
+        _component_variants(snapshot / name)
+        for name in pipeline_components(snapshot)
+        if _component_variants(snapshot / name)
+        and "" not in _component_variants(snapshot / name)
+    ]
+    if not lacking:
+        return False
+    return not set.intersection(*lacking)
+
+
+def weight_bytes_for(snapshot: Path, kind: str) -> int | None:
+    """Bytes of the weights a load of this kind will read, or ``None``."""
+
+    if kind == IMAGE_KIND:
+        return pipeline_weight_bytes(snapshot)
+    return snapshot_weight_bytes(snapshot)
 
 
 def missing_files(snapshot: Path) -> tuple[str, ...]:
@@ -383,8 +953,8 @@ def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
                 cached += entry.stat().st_size
     if cached == 0 and partial_files == 0:
         return CacheStatus()
-    missing, unsupported = judge_snapshot(snapshot)
-    return CacheStatus(cached, partial_files, partial_bytes, missing, unsupported)
+    missing, kind = judge_snapshot(snapshot)
+    return CacheStatus(cached, partial_files, partial_bytes, missing, kind)
 
 
 def folder_bytes(folder: Path) -> int:
@@ -676,18 +1246,46 @@ def cuda_memory(torch=None) -> tuple[int | None, int | None]:
     return total, free
 
 
-def allocated_bytes(backend: str, torch=None) -> int | None:
+def cuda_device_memory(torch=None) -> tuple[int | None, int | None]:
+    """Total and free memory on the one CUDA device a load would land on.
+
+    ``.to("cuda")`` places a model on the current device rather than
+    spreading it, so for a load that does that the sum across every visible
+    card is the wrong figure: a pipeline whose weights fit the aggregate but
+    not card 0 would pass and then fail while it was being moved. This is
+    the reading :func:`cuda_memory` takes, for that one device.
+    """
+
+    if torch is None:
+        import torch
+    try:
+        free, total = torch.cuda.mem_get_info(torch.cuda.current_device())
+    except (RuntimeError, AttributeError, ValueError, TypeError, IndexError):
+        return None, None
+    return int(total), int(free)
+
+
+def allocated_bytes(backend: str, torch=None, device_only: bool = False) -> int | None:
     """Bytes of live tensors on ``backend``'s device, or ``None`` where unknown.
 
     CUDA and Metal each keep a running total in their allocator, which is how
     far a load has got measured in bytes. Host memory keeps no such figure, so
     a load onto the CPU is followed by the loader's own step count instead.
+
+    ``device_only`` narrows the CUDA reading to the current card. The sum is
+    what a text model spread by ``device_map="auto"`` really holds, and the
+    wrong figure for anything asking what one card would get back: a model
+    across two cards would credit the whole of it to the one an image
+    pipeline is about to land on. Everywhere else there is one device and
+    the two readings agree.
     """
 
     if torch is None:
         import torch
     try:
         if backend == "cuda":
+            if device_only:
+                return int(torch.cuda.memory_allocated(torch.cuda.current_device()))
             devices = range(int(torch.cuda.device_count()))
             return sum(int(torch.cuda.memory_allocated(index)) for index in devices)
         if backend == "mps":
@@ -695,6 +1293,21 @@ def allocated_bytes(backend: str, torch=None) -> int | None:
     except (RuntimeError, AttributeError, ValueError, TypeError):
         return None
     return None
+
+
+def _smaller_known(left: tuple[int | None, int | None], right: tuple[int | None, int | None]):
+    """The tighter of two memory pools, field by field.
+
+    For a load that has to fit in both of two pools independently rather
+    than in their sum: whichever is smaller is the one that will refuse it.
+    A pool whose size could not be read does not constrain anything, so the
+    other one stands.
+    """
+
+    return tuple(
+        one if other is None else other if one is None else min(one, other)
+        for one, other in zip(left, right)
+    )
 
 
 def _sum_known(*figures: int | None) -> int | None:
@@ -791,18 +1404,35 @@ def dtype_name(dtype) -> str:
     return str(dtype).replace("torch.", "")
 
 
-def memory_pool(backend: str, ceiling: int | None = None) -> tuple[int | None, int | None, str]:
+def memory_pool(
+    backend: str, ceiling: int | None = None, kind: str = TEXT_KIND
+) -> tuple[int | None, int | None, str]:
     """Total and available memory a load on ``backend`` may use, and its name.
 
-    On CUDA the weights fill the graphics cards and ``device_map="auto"``
-    places the rest on the CPU, so the cards plus the machine's memory is the
-    pool; on Metal the GPU shares the machine's memory, and on the CPU it is
-    the machine's memory outright. ``ceiling`` is what the device's own
-    allocator will hand out, which on Metal is less than the machine holds:
-    whichever of the two is smaller is what the weights have to fit inside.
+    On CUDA a text model's weights fill the graphics cards and
+    ``device_map="auto"`` places the rest on the CPU, so the cards plus the
+    machine's memory is the pool; on Metal the GPU shares the machine's
+    memory, and on the CPU it is the machine's memory outright. ``ceiling``
+    is what the device's own allocator will hand out, which on Metal is less
+    than the machine holds: whichever of the two is smaller is what the
+    weights have to fit inside.
+
+    An image pipeline on CUDA is the exception. It is read into host memory
+    and moved onto the card whole, with nothing offloaded, so it has to fit
+    the card *and* the machine, each on its own rather than added together:
+    the combined pool would pass one that fits host memory and then fail
+    inside ``.to("cuda")``, and the card alone would pass one that exhausts
+    the machine while ``from_pretrained`` is still staging it. And it is the
+    one card the pipeline lands on rather than every visible one, because
+    ``.to("cuda")`` does not spread a model the way ``device_map="auto"``
+    does: the sum would pass a pipeline that fits the aggregate and fails on
+    card 0. See :func:`cuda_device_memory`.
     """
 
-    if backend == "cuda":
+    if backend == "cuda" and kind == IMAGE_KIND:
+        total, available = _smaller_known(cuda_device_memory(), system_memory())
+        pool = "both this GPU and this machine"
+    elif backend == "cuda":
         total, available = offload_pool(cuda_memory(), system_memory())
         pool = "the GPU plus this machine"
     else:
@@ -908,7 +1538,10 @@ def fit_for(
 
 
 def estimate_snapshot_bytes(
-    snapshot: Path, load_dtype_name: str, bits: int | None = None
+    snapshot: Path,
+    load_dtype_name: str,
+    bits: int | None = None,
+    kind: str = TEXT_KIND,
 ) -> int | None:
     """Memory the weights in ``snapshot`` would take once loaded, or ``None``.
 
@@ -916,8 +1549,17 @@ def estimate_snapshot_bytes(
     files, or an index that cannot be read. A load in that state is let
     through to the loader, which gives its own more specific error, and a
     reader is told the size is unknown rather than shown a guess.
+
+    An image pipeline is measured component by component, each from its own
+    stored dtype (see :func:`pipeline_loaded_bytes`), because there is no one
+    checkpoint at the root to read and no one dtype to read it as. ``bits``
+    does not apply to one: the Metal quantizer is Transformers' own and a
+    load has already cleared the choice, so it is ignored rather than
+    reported as though it had been honoured.
     """
 
+    if kind == IMAGE_KIND:
+        return pipeline_loaded_bytes(snapshot, load_dtype_name)
     weight_bytes = snapshot_weight_bytes(snapshot)
     if weight_bytes is None:
         return None
@@ -980,6 +1622,17 @@ class DeviceProfile:
     """Live tensors on the device: the loaded model, and any cache beside it.
 
     ``None`` where the device keeps no such figure, which is host memory.
+    Summed across the cards on CUDA, because that is what a text model
+    spread by ``device_map="auto"`` holds; see :attr:`held_here` for the one
+    card an image pipeline would land on.
+    """
+
+    held_here: int | None = None
+    """Live tensors on the one device a load would land on.
+
+    The same as :attr:`held` everywhere but a multi-card CUDA host, where
+    that one sums across the cards. What a tighter pool may count as coming
+    back; see :meth:`reclaimable`.
     """
 
     @property
@@ -987,6 +1640,52 @@ class DeviceProfile:
         """Whether a quantized weight precision would be honoured here."""
 
         return self.backend == "mps"
+
+    def for_kind(self, kind: str, reclaimed: int | None = None) -> DeviceProfile:
+        """The reading a load of this kind would get, with the unload counted in.
+
+        Only an image pipeline on CUDA reads differently, and only because it
+        is staged in host memory before it is moved onto the card, so it has
+        to fit both pools rather than their sum; see :func:`memory_pool`.
+        Everything else is :meth:`reclaimed` on the reading it already is.
+
+        The unload is counted into each pool *before* they are collapsed to
+        the tighter one, which is why this does both rather than leaving the
+        caller to call :meth:`reclaimed` afterwards. Unloading frees card
+        memory on the card, and collapsing first would credit it to whichever
+        pool happened to be smaller: with host memory the tighter side, 6 GB
+        free there would read as 14 after an 8 GB model left the card, and
+        the list would call a replacement a fit that the load then refuses.
+
+        Kept as a method so a caller judging a list of models takes the two
+        readings it needs once rather than per model - reading host memory
+        is a subprocess.
+        """
+
+        if kind != IMAGE_KIND or self.backend != "cuda":
+            return self.reclaimed(reclaimed)
+        card_total, card_free = cuda_device_memory()
+        host_total, host_free = system_memory()
+        # What the unload gives back, pool by pool. The card gets its own
+        # allocator figure; host memory gets nothing, because the share of a
+        # spread model that sat there cannot be read from here and guessing
+        # high is what turns a refusal into a promise.
+        if card_free is not None:
+            card_free += self.held_here or 0
+        total, available = _smaller_known(
+            (card_total, card_free), (host_total, host_free)
+        )
+        if self.ceiling is not None:
+            total = self.ceiling if total is None else min(total, self.ceiling)
+            available = (
+                self.ceiling if available is None else min(available, self.ceiling)
+            )
+        return replace(
+            self,
+            total=total,
+            available=available,
+            pool="both this GPU and this machine",
+        )
 
     def reclaimed(self, estimated: int | None = None) -> DeviceProfile:
         """The same reading with the loaded model's memory given back.
@@ -1006,13 +1705,24 @@ class DeviceProfile:
         being live tensors too, and that is freed with the model.
         """
 
-        given = max(self.held or 0, estimated or 0)
+        given = self.reclaimable(estimated)
         if not given:
             return self
         return replace(
             self,
             available=None if self.available is None else self.available + given,
         )
+
+    def reclaimable(self, estimated: int | None = None) -> int:
+        """How much of the loaded model's memory a summed pool gets back.
+
+        The larger of the two figures, for the reason :meth:`reclaimed`
+        gives. A pool that is the tighter of two does its own arithmetic
+        pool by pool before collapsing them, and does not come through here;
+        see :meth:`for_kind`.
+        """
+
+        return max(self.held or 0, estimated or 0)
 
 DEVICE_LABELS = {"mps": "Apple Metal (MPS)", "cpu": "CPU"}
 
@@ -1059,6 +1769,7 @@ def device_profile(torch=None) -> DeviceProfile:
         recommended=budget.recommended,
         fraction=budget.fraction,
         held=allocated_bytes(backend, torch),
+        held_here=allocated_bytes(backend, torch, device_only=True),
     )
 
 
@@ -1222,22 +1933,32 @@ def first_line(error: BaseException) -> str:
     return lines[0][:200] if lines else f"no message from {type(error).__name__}"
 
 
-def out_of_memory_message(error: BaseException) -> str:
+# What to try, per kind of run: the advice has to name something the reader
+# is actually looking at. A conversation and a response length mean nothing
+# to someone who was drawing a picture, and a step count and a size mean
+# nothing to someone mid-reply.
+OUT_OF_MEMORY_ADVICE = {
+    TEXT_KIND: "Shorten the conversation or the text, lower the response length",
+    IMAGE_KIND: "Draw a smaller picture, lower the step count",
+}
+
+
+def out_of_memory_message(error: BaseException, kind: str = TEXT_KIND) -> str:
     """One readable sentence for a backend's out-of-memory failure."""
 
+    advice = OUT_OF_MEMORY_ADVICE.get(kind, OUT_OF_MEMORY_ADVICE[TEXT_KIND])
     return (
-        "The model ran out of memory. Shorten the conversation or the text, "
-        "lower the response length, or load a smaller model. "
+        f"The model ran out of memory. {advice}, or load a smaller model. "
         f"({first_line(error)})"
     )
 
 
-def _reraise_out_of_memory(error: BaseException) -> None:
+def _reraise_out_of_memory(error: BaseException, kind: str = TEXT_KIND) -> None:
     """Re-raise a backend failure, as :class:`OutOfMemoryError` when that is what it was."""
 
     if isinstance(error, OutOfMemoryError) or not is_out_of_memory_error(error):
         raise error
-    raise OutOfMemoryError(out_of_memory_message(error)) from error
+    raise OutOfMemoryError(out_of_memory_message(error, kind)) from error
 
 
 def _guards_device_memory(method):
@@ -1264,6 +1985,12 @@ def _guards_device_memory(method):
 def _read_config(snapshot: Path | None) -> tuple[str | None, str | None]:
     if snapshot is None:
         return None, None
+    if is_pipeline(snapshot):
+        # A pipeline has no architecture of its own: each component folder
+        # keeps a config, and what names the model is the class the index
+        # says to build. Its dtype is the components' business too, and they
+        # need not agree, so none is reported.
+        return pipeline_class(snapshot), None
     # The config is another repo's file, so nothing about its shape is
     # trusted: a config that is not an object, or an ``architectures`` that is
     # not a list, reads as an unknown architecture rather than an error.
@@ -1648,24 +2375,49 @@ class HubModel:
     license: str | None = None
 
 
-def search_hub_models(
-    query: str, hf_token: str | None = None, limit: int = SEARCH_LIMIT
-) -> list[HubModel]:
-    """Search the hub for language models Transformers can load.
+# The library each kind of model has to be published under, which is the one
+# filter the hub itself applies. Everything else about whether a result is
+# loadable is decided here, result by result; see search_hub_models.
+HUB_LIBRARIES = {TEXT_KIND: "transformers", IMAGE_KIND: "diffusers"}
 
-    The filter is the one the application itself imposes: only models with
-    built-in Transformers support load here, so results laid out for another
-    framework would be dead ends. Of those, the ones kept are the ones whose
-    pipeline tag is in :data:`SEARCH_PIPELINE_TAGS` - a model that writes
-    text, whatever else it can read - less the conversions to another runtime
-    that :func:`foreign_to_transformers` recognises, and less those whose
+# The pipeline tags an image model is found under. A diffusers repository
+# that writes a picture from a prompt is tagged for exactly that, so unlike
+# the text tags there is no second spelling to catch.
+SEARCH_IMAGE_PIPELINE_TAGS = ("text-to-image",)
+
+
+def search_hub_models(
+    query: str,
+    hf_token: str | None = None,
+    limit: int = SEARCH_LIMIT,
+    kind: str = TEXT_KIND,
+) -> list[HubModel]:
+    """Search the hub for models of one kind that ChatLab can load.
+
+    ``kind`` is :data:`TEXT_KIND` or :data:`IMAGE_KIND`. The library the hub
+    is asked for comes from :data:`HUB_LIBRARIES`; everything else about
+    whether a result is loadable is decided here, because the hub cannot be
+    asked most of it.
+
+    For a text model the ones kept are the ones whose pipeline tag is in
+    :data:`SEARCH_PIPELINE_TAGS` - a model that writes text, whatever else it
+    can read - less the conversions to another runtime that
+    :func:`foreign_to_transformers` recognises, and less those whose
     ``model_type`` :func:`loads_as_a_causal_lm` does not accept. A repository
     the hub has no tag or config for is left out rather than guessed at; its
-    ID can still be typed into the model ID box. Sorted by recent downloads.
+    ID can still be typed into the model ID box.
 
-    The hub is read a page at a time until ``limit`` results are kept, so a
-    query whose most-downloaded matches are all rejected here still fills the
-    list from further down. :data:`SEARCH_SCAN_LIMIT` caps how far down.
+    For an image model the tag is :data:`SEARCH_IMAGE_PIPELINE_TAGS` and the
+    runtime check is the same one, which asks about the weight format rather
+    than about Transformers and so reads a conversion of a diffusion model
+    the same way. There is no causal-LM check to make: a pipeline has no
+    ``model_type`` in that map and is built from its ``model_index.json``, so
+    the library and the tag are what say it would load.
+
+    Sorted by recent downloads. The hub is read a page at a time until
+    ``limit`` results are kept, so a query whose most-downloaded matches are
+    all rejected here still fills the list from further down.
+    :data:`SEARCH_SCAN_LIMIT` caps how far down.
     """
 
     from huggingface_hub import HfApi
@@ -1673,12 +2425,13 @@ def search_hub_models(
     cleaned = query.strip()
     if not cleaned:
         return []
+    images = kind == IMAGE_KIND
     token = hf_token.strip() if hf_token and hf_token.strip() else None
     # No limit: the generator pages through the results, and the loop below
     # stops it once the list is full or SEARCH_SCAN_LIMIT have been read.
     found = HfApi().list_models(
         search=cleaned,
-        filter="transformers",
+        filter=HUB_LIBRARIES.get(kind, HUB_LIBRARIES[TEXT_KIND]),
         sort="downloads",
         expand=[
             "config",
@@ -1693,17 +2446,22 @@ def search_hub_models(
         ],
         token=token,
     )
-    model_types = causal_lm_model_types()
+    # Only a text search needs the auto map, and reading it reaches torch,
+    # so an image search does not pay for it.
+    model_types = {} if images else causal_lm_model_types()
+    wanted_tags = SEARCH_IMAGE_PIPELINE_TAGS if images else SEARCH_PIPELINE_TAGS
     results = []
     for scanned, info in enumerate(found, start=1):
         if scanned > SEARCH_SCAN_LIMIT:
             break
-        if getattr(info, "pipeline_tag", None) not in SEARCH_PIPELINE_TAGS:
+        if getattr(info, "pipeline_tag", None) not in wanted_tags:
             continue
         tags = getattr(info, "tags", None) or []
         if foreign_to_transformers(tags):
             continue
-        if not loads_as_a_causal_lm(getattr(info, "config", None), model_types):
+        if not images and not loads_as_a_causal_lm(
+            getattr(info, "config", None), model_types
+        ):
             continue
         safetensors = getattr(info, "safetensors", None)
         parameters = getattr(safetensors, "total", None) if safetensors else None
@@ -2859,12 +3617,161 @@ class LoadedModel(NamedTuple):
     load_id: str | None = None
 
 
+# What the two loaders hand back: the causal LM and its tokenizer for a text
+# model, the pipeline for an image one, and the device to report either way.
+# One shape for both, so the load's own bookkeeping does not have to know
+# which of them ran. Named apart from LoadedModel below, which is a different
+# thing entirely - what is in memory, as one reading for a caller to report.
+ReadWeights = tuple[Any, Any, Any, str]
+
+
+def _read_text_model(
+    local_path: Path, torch, backend: str, dtype, bits: int | None, precision: str
+) -> ReadWeights:
+    """Read one causal-LM checkpoint out of ``local_path`` onto ``backend``."""
+
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
+    if backend == "cuda":
+        model = AutoModelForCausalLM.from_pretrained(
+            local_path,
+            local_files_only=True,
+            dtype=dtype,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+        )
+        device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
+    elif backend == "mps" and bits is not None:
+        # The quantizer packs each weight as it lands, and wants to land it
+        # on the device it will run on: a CPU stop on the way is refused, so
+        # this is the one Metal load that goes through device_map. The output
+        # head and the embeddings are left in half precision, which is what
+        # keeps the logit lens reading through the real head.
+        try:
+            from transformers import MetalConfig
+        except ImportError as error:
+            # requirements.txt admits 4.57, which predates the quantizer; the
+            # rest of the app runs there, so the floor stays and the choice
+            # is refused with the version it needs rather than a bare
+            # ImportError.
+            import transformers
+
+            raise RuntimeError(
+                f"{precision} weights need transformers "
+                f"{METAL_QUANTIZATION_TRANSFORMERS} or newer; this "
+                f"is {transformers.__version__}. Run `pip install "
+                f"-U transformers` and load again."
+            ) from error
+
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                local_path,
+                local_files_only=True,
+                dtype=dtype,
+                device_map="mps",
+                quantization_config=MetalConfig(
+                    bits=bits, group_size=QUANTIZATION_GROUP_SIZE
+                ),
+            )
+        except ImportError as error:
+            raise RuntimeError(
+                f"{precision} weights need the kernels package: "
+                f"run `pip install kernels` and load again. ({error})"
+            ) from error
+        device_name = f"Apple Metal (MPS), {precision} weights"
+    elif backend == "mps":
+        # Into host memory and across afterwards, rather than materialized on
+        # the device with device_map="mps". The checkpoint is converted on the
+        # way in, and Metal does that conversion with one cast kernel per
+        # tensor: on torch 2.14, Olmo-3-7B loaded in 15 seconds this way (12
+        # to read and convert, 3 to copy across) and had not finished after
+        # seven minutes the other way.
+        model = AutoModelForCausalLM.from_pretrained(
+            local_path,
+            local_files_only=True,
+            dtype=dtype,
+            low_cpu_mem_usage=True,
+        ).to("mps")
+        device_name = "Apple Metal (MPS)"
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            local_path,
+            local_files_only=True,
+            dtype=dtype,
+            low_cpu_mem_usage=True,
+        )
+        device_name = "CPU"
+    return model, tokenizer, None, device_name
+
+
+# The first diffusers release whose DiffusionPipeline takes a local folder
+# with local_files_only and returns a pipeline with callback_on_step_end.
+# Older releases run everything else in the app, so requirements.txt keeps no
+# floor of its own for them and an image load says which version it needs.
+PIPELINE_DIFFUSERS = "0.31"
+
+
+def _read_pipeline(
+    local_path: Path, torch, backend: str, dtype, bits: int | None, precision: str
+) -> ReadWeights:
+    """Read a diffusers pipeline out of ``local_path`` onto ``backend``.
+
+    Built from ``model_index.json``, so whichever pipeline the repo ships is
+    the one that runs and its components come as it laid them out. Read into
+    host memory and moved across afterwards for the reason the text loader
+    gives: Metal converts a checkpoint's dtype far faster on the way in than
+    it materializes one already on the device.
+
+    A repo that ships only variant-named weights is asked for that variant,
+    because otherwise ``from_pretrained`` looks for the unsuffixed files it
+    does not have; see :func:`pipeline_variant`.
+
+    ``bits`` and ``precision`` are accepted and unused. A pipeline is several
+    models, only some of them Transformers ones, so the caller has already
+    cleared a quantized choice and noted that it did; the signature matches
+    the text loader's so the load itself need not tell them apart.
+    """
+
+    del bits, precision
+    try:
+        from diffusers import DiffusionPipeline
+    except ImportError as error:
+        raise RuntimeError(
+            "Image models need the diffusers package: run "
+            f"`pip install 'diffusers>={PIPELINE_DIFFUSERS}'` and load again. "
+            f"({error})"
+        ) from error
+
+    variant = pipeline_variant(local_path)
+    pipeline = DiffusionPipeline.from_pretrained(
+        local_path,
+        local_files_only=True,
+        torch_dtype=dtype,
+        **({"variant": variant} if variant else {}),
+    )
+    device = {"cuda": "cuda", "mps": "mps"}.get(backend)
+    if device is not None:
+        pipeline = pipeline.to(device)
+    device_name = {
+        "cuda": lambda: f"CUDA ({torch.cuda.get_device_name(0)})",
+        "mps": lambda: "Apple Metal (MPS)",
+    }.get(backend, lambda: "CPU")()
+    return None, None, pipeline, device_name
+
+
 class ModelManager:
     """Own the single in-memory model used by the local application."""
 
     def __init__(self) -> None:
         self.model = None
         self.tokenizer = None
+        # The diffusers pipeline, when the model in memory is an image model.
+        # It stands apart from ``model`` rather than sharing the slot because
+        # everything that generates text asks :attr:`loaded`, and a pipeline
+        # answering that question yes would be fed tokens.
+        self.pipeline = None
+        self.kind: str | None = None
         self.model_id: str | None = None
         self.local_path: Path | None = None
         self.device_name: str | None = None
@@ -2937,6 +3844,13 @@ class ModelManager:
         # The key-value cache the last inspection left behind, with the load
         # it belongs to and the tokens it covers. See _inspect_cache_for().
         self._inspect_cache: tuple[str, list[int], Any] | None = None
+        # How Stop reaches the image run that is drawing right now, and only
+        # that one. It belongs to the run holding the generation slot rather
+        # than to the page, because button visibility is per browser tab: a
+        # second tab can press Draw while the first is still drawing, and a
+        # token the page owned would be cleared by that second attempt even
+        # though it is refused, losing the first tab's cancellation.
+        self._image_cancel: threading.Event | None = None
 
     def loaded_model(self) -> LoadedModel:
         """What is in memory: the model, its device, its precision, its load.
@@ -2951,7 +3865,21 @@ class ModelManager:
 
     @property
     def loaded(self) -> bool:
+        """Whether a text model is in memory, ready to be fed tokens."""
+
         return self.model is not None and self.tokenizer is not None
+
+    @property
+    def image_loaded(self) -> bool:
+        """Whether an image pipeline is in memory, ready to be given a prompt."""
+
+        return self.pipeline is not None
+
+    @property
+    def in_memory(self) -> bool:
+        """Whether a model of either kind is in memory."""
+
+        return self.loaded or self.image_loaded
 
     @property
     def load_id(self) -> str | None:
@@ -2960,10 +3888,11 @@ class ModelManager:
         Two loads of the same repository ID can hold different snapshots, so
         anything that must be read back by the model that produced it is
         stamped with this rather than the ID alone. ``None`` when nothing is
-        loaded.
+        loaded, of either kind: an image run's readings are stamped with this
+        too, so a picture's maps can be told from the next load's.
         """
 
-        if not self.loaded:
+        if not self.in_memory:
             return None
         return f"{self.model_id}#{self.load_count}"
 
@@ -3163,13 +4092,23 @@ class ModelManager:
         local_path: Path,
         progress: LoadProgress | None = None,
         precision: str = "full",
+        kind: str = TEXT_KIND,
     ) -> str:
         """Read ``model_id`` into memory from ``local_path``, and say where it landed.
 
         Blocks until the last weight is in; ``progress`` is how a caller on
         another thread watches it happen. ``precision`` is one of
         :data:`settings.WEIGHT_PRECISIONS`; a quantized choice is honoured
-        on Apple Metal and noted, then ignored, elsewhere.
+        on Apple Metal and noted, then ignored, elsewhere. ``kind`` picks the
+        loader: :data:`TEXT_KIND` reads one causal-LM checkpoint,
+        :data:`IMAGE_KIND` reads a diffusers pipeline. It comes from the
+        snapshot on disk (:func:`judge_snapshot`), not from the reader, so a
+        repo of one kind is never read as the other.
+
+        One model is in memory at a time whichever kind it is: the two share
+        the device, and on Apple silicon the GPU draws from the same pool as
+        everything else, so holding a 7B model and an image pipeline at once
+        is how the machine ends up paging.
         """
 
         import torch
@@ -3182,7 +4121,12 @@ class ModelManager:
         try:
             with self._lock, self._reading_weights(checked_id):
                 return self._load_locked(
-                    checked_id, local_path, torch, progress, precision=precision
+                    checked_id,
+                    local_path,
+                    torch,
+                    progress,
+                    precision=precision,
+                    kind=kind,
                 )
         finally:
             self.release_load(claim)
@@ -3194,10 +4138,9 @@ class ModelManager:
         torch,
         progress: LoadProgress | None = None,
         precision: str = "full",
+        kind: str = TEXT_KIND,
     ) -> str:
         """Bring ``model_id`` in from ``local_path`` while the caller holds ``_lock``."""
-
-        from transformers import AutoModelForCausalLM, AutoTokenizer
 
         progress = progress or LoadProgress()
         self._unload_locked(torch)
@@ -3210,6 +4153,19 @@ class ModelManager:
                 model_id,
                 precision,
                 backend,
+            )
+            bits = None
+        if bits is not None and kind == IMAGE_KIND:
+            # The Metal quantizer is Transformers' own, and a pipeline is
+            # several models of which only some are Transformers ones. Rather
+            # than quantize a part of it and report a precision that only
+            # held for the text encoder, an image load takes its weights
+            # whole and says so.
+            logger.info(
+                "Loading %s with full weights: %s weights are for text models, "
+                "not diffusers pipelines",
+                model_id,
+                precision,
             )
             bits = None
         precision = precision if bits is not None else "full"
@@ -3225,86 +4181,18 @@ class ModelManager:
             backend,
             ceiling=ceiling,
             bits=bits,
+            kind=kind,
         )
         # Bytes are counted only where the device keeps a total to count
         # them against; elsewhere the loader's own steps are all there is.
         if allocated_bytes(backend, torch) is not None:
             progress.measure_bytes(estimated, lambda: allocated_bytes(backend, torch))
-        tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
-
         try:
             with progress.watch():
-                if backend == "cuda":
-                    model = AutoModelForCausalLM.from_pretrained(
-                        local_path,
-                        local_files_only=True,
-                        dtype=dtype,
-                        device_map="auto",
-                        low_cpu_mem_usage=True,
-                    )
-                    device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
-                elif backend == "mps" and bits is not None:
-                    # The quantizer packs each weight as it lands, and wants
-                    # to land it on the device it will run on: a CPU stop on
-                    # the way is refused, so this is the one Metal load that
-                    # goes through device_map. The output head and the
-                    # embeddings are left in half precision, which is what
-                    # keeps the logit lens reading through the real head.
-                    try:
-                        from transformers import MetalConfig
-                    except ImportError as error:
-                        # requirements.txt admits 4.57, which predates the
-                        # quantizer; the rest of the app runs there, so the
-                        # floor stays and the choice is refused with the
-                        # version it needs rather than a bare ImportError.
-                        import transformers
-
-                        raise RuntimeError(
-                            f"{precision} weights need transformers "
-                            f"{METAL_QUANTIZATION_TRANSFORMERS} or newer; this "
-                            f"is {transformers.__version__}. Run `pip install "
-                            f"-U transformers` and load again."
-                        ) from error
-
-                    try:
-                        model = AutoModelForCausalLM.from_pretrained(
-                            local_path,
-                            local_files_only=True,
-                            dtype=dtype,
-                            device_map="mps",
-                            quantization_config=MetalConfig(
-                                bits=bits, group_size=QUANTIZATION_GROUP_SIZE
-                            ),
-                        )
-                    except ImportError as error:
-                        raise RuntimeError(
-                            f"{precision} weights need the kernels package: "
-                            f"run `pip install kernels` and load again. ({error})"
-                        ) from error
-                    device_name = f"Apple Metal (MPS), {precision} weights"
-                elif backend == "mps":
-                    # Into host memory and across afterwards, rather than
-                    # materialized on the device with device_map="mps". The
-                    # checkpoint is converted on the way in, and Metal does
-                    # that conversion with one cast kernel per tensor: on
-                    # torch 2.14, Olmo-3-7B loaded in 15 seconds this way
-                    # (12 to read and convert, 3 to copy across) and had not
-                    # finished after seven minutes the other way.
-                    model = AutoModelForCausalLM.from_pretrained(
-                        local_path,
-                        local_files_only=True,
-                        dtype=dtype,
-                        low_cpu_mem_usage=True,
-                    ).to("mps")
-                    device_name = "Apple Metal (MPS)"
-                else:
-                    model = AutoModelForCausalLM.from_pretrained(
-                        local_path,
-                        local_files_only=True,
-                        dtype=dtype,
-                        low_cpu_mem_usage=True,
-                    )
-                    device_name = "CPU"
+                read = _read_pipeline if kind == IMAGE_KIND else _read_text_model
+                model, tokenizer, pipeline, device_name = read(
+                    local_path, torch, backend, dtype, bits, precision
+                )
         except (RuntimeError, MemoryError) as error:
             # Before the cache goes back, so the figure is what the device was
             # holding when the load gave up rather than what survived cleanup.
@@ -3330,9 +4218,12 @@ class ModelManager:
                 ) from error
             raise
 
-        model.eval()
+        if model is not None:
+            model.eval()
         self.model = model
         self.tokenizer = tokenizer
+        self.pipeline = pipeline
+        self.kind = kind
         self.model_id = model_id
         self.local_path = local_path
         self.device_name = device_name
@@ -3419,6 +4310,8 @@ class ModelManager:
         self._inspect_cache = None
         self.model = None
         self.tokenizer = None
+        self.pipeline = None
+        self.kind = None
         self.model_id = None
         self.local_path = None
         self.device_name = None
@@ -3507,6 +4400,7 @@ class ModelManager:
         backend: str,
         ceiling: int | None = None,
         bits: int | None = None,
+        kind: str = TEXT_KIND,
     ) -> tuple[int | None, int | None]:
         """Refuse a load that cannot fit, before any weight is read.
 
@@ -3515,10 +4409,17 @@ class ModelManager:
         estimate it judged that against so the caller can record it. Both
         are ``None`` when the snapshot could not be measured.
 
-        On CUDA the weights fill the graphics cards and ``device_map="auto"``
-        places the rest on the CPU, so the cards plus the machine's memory is
-        what must fit; on Metal the GPU shares the machine's memory, and on
-        the CPU it is the machine's memory outright. A snapshot whose weights
+        On CUDA a text model's weights fill the graphics cards and
+        ``device_map="auto"`` places the rest on the CPU, so the cards plus
+        the machine's memory is what must fit; on Metal the GPU shares the
+        machine's memory, and on the CPU it is the machine's memory outright.
+        An image pipeline is the exception: it is read into host memory and
+        moved onto the card whole, with nothing offloaded, so on CUDA it has
+        to fit the card *and* the machine, each on its own rather than added
+        together. The combined pool would pass a pipeline that fits host
+        memory and then fail inside ``.to("cuda")``; the card alone would
+        pass one that fits the card and exhausts the machine while
+        ``from_pretrained`` is still staging it. A snapshot whose weights
         cannot be measured is let through: the loader will give its own, more
         specific error.
 
@@ -3526,12 +4427,23 @@ class ModelManager:
         Metal is less than the machine holds. Whichever of the two is smaller
         is what the weights have to fit inside, so a model too big for the
         allocator is refused here rather than part way through reading it.
+
+        ``kind`` picks which weights are measured: one checkpoint at the root
+        for a text model, and for an image pipeline the sum over its
+        component folders, each converted from its own stored dtype. The
+        stored dtype is what says how far the files grow or shrink on the way
+        in, and a pipeline's has to be read out of the weights themselves
+        (see :func:`pipeline_loaded_bytes`) because its components keep no
+        dtype in their configs and need not agree about it either.
         """
 
-        estimated = estimate_snapshot_bytes(local_path, load_dtype, bits)
+        # Through main's two helpers rather than branching here: both now
+        # take the kind, so the fit panel that also calls them sizes a
+        # pipeline the same way a load does.
+        estimated = estimate_snapshot_bytes(local_path, load_dtype, bits, kind)
         if estimated is None:
             return None, None
-        total, available, pool = memory_pool(backend, ceiling)
+        total, available, pool = memory_pool(backend, ceiling, kind)
         try:
             check_memory_for_load(
                 validate_model_id(model_id), estimated, total, available, pool=pool
@@ -4556,6 +5468,139 @@ class ModelManager:
                 # be what got measured: its own allocation, or nothing at
                 # all if it unloaded first.
                 self._run_device_bytes = reserved_bytes()
+
+    def start_image_run(self) -> threading.Event:
+        """Claim the generation slot for an image run and publish its cancel token.
+
+        For a caller that has to hold both *before* it publishes anything,
+        which a streaming handler does: Gradio does not resume it until the
+        browser has been sent its first frame, so a run reserved after that
+        frame leaves a network round trip in which the page shows a Stop
+        button over nothing reserved, ``stop_image_run`` reports that nothing
+        is drawing, and a load arriving in between can replace the pipeline
+        the page checked. The Chat page reserves before its first frame for
+        the same reason; see :meth:`reserve_generation`.
+
+        The caller must release with :meth:`finish_image_run` in a
+        ``finally``. :meth:`generate_image` picks up a run started this way
+        rather than starting a second one.
+        """
+
+        if not self.reserve_generation():
+            raise ModelBusy("The model is busy. Wait for the current run to finish.")
+        cancel = threading.Event()
+        self._image_cancel = cancel
+        return cancel
+
+    def finish_image_run(self) -> None:
+        """Give back what :meth:`start_image_run` took. Pairs with it."""
+
+        self._image_cancel = None
+        self.release_generation()
+
+    def stop_image_run(self) -> bool:
+        """Ask the image run that is drawing to stop, and say whether one was.
+
+        The token belongs to the run holding the generation slot, so a Stop
+        pressed while nothing is drawing is a no-op rather than something a
+        later run inherits, and a second tab's refused Draw cannot clear the
+        first tab's cancellation.
+        """
+
+        cancel = self._image_cancel
+        if cancel is None:
+            return False
+        cancel.set()
+        return True
+
+    def generate_image(self, request, *, on_step=None, cancel=None):
+        """Draw ``request`` with the pipeline in memory, and report what happened.
+
+        Blocks until the picture is finished; ``on_step`` is called with each
+        step's readings from this thread, which is how a caller watching from
+        another one shows the trajectory arriving. ``request`` is an
+        :class:`image_runtime.ImageRequest` and the answer an
+        :class:`image_runtime.ImageRun`.
+
+        Holds the same two things a text generation holds: the generation
+        slot, so two runs cannot start at once, and the model lock, so a load
+        or an unload cannot pull the pipeline out from under one. Which means
+        a reply and a picture exclude each other, as they must - there is one
+        model in memory and one device under it.
+
+        The cancel token is made here rather than handed in, and published
+        only once the slot is held: see :meth:`stop_image_run`. So a caller
+        that loses the race for the slot never touches the running run's
+        token, and the token is gone again the moment the run ends.
+
+        A caller that had to reserve before it could publish anything has
+        already done both through :meth:`start_image_run` and hands its
+        token back as ``cancel``; this then runs on that reservation and
+        gives it up when the run ends. Handed in rather than guessed at: a
+        slot that is already taken is either that caller's own or another
+        run's, and the two must not be confused.
+
+        The run is stamped with the load that drew it, so a maps-and-steps
+        readout can be told apart from one the next load produced.
+        """
+
+        import image_runtime
+
+        if cancel is None:
+            cancel = self.start_image_run()
+        started = time.monotonic()
+        run = None
+        try:
+            with self._lock:
+                if self.pipeline is None:
+                    raise RuntimeError("No image model is loaded.")
+                run = image_runtime.run(
+                    self.pipeline,
+                    request,
+                    cancel=cancel,
+                    on_step=on_step,
+                    model_id=self.model_id,
+                    load_id=self.load_id,
+                )
+                return run
+        except (RuntimeError, MemoryError) as error:
+            # A picture is the largest single allocation the app makes, so
+            # running out of memory is the failure worth naming; everything
+            # else is the pipeline's own error, passed through.
+            _reraise_out_of_memory(error, IMAGE_KIND)
+            raise
+        finally:
+            # The run's own end, whoever reserved it: a streaming caller
+            # cannot release the slot itself, because the pipeline is on
+            # this thread and would still be drawing after that caller's
+            # generator was closed.
+            self.finish_image_run()
+            self._log_image_run(run, request, time.monotonic() - started)
+            # The largest thing a run allocates is the pipeline's own
+            # activations, and the previews and maps it leaves behind are the
+            # caller's now; give the allocator's blocks back rather than hold
+            # them until the next run.
+            self._release_device_cache()
+
+    def _log_image_run(self, run, request, seconds: float) -> None:
+        """Record what a picture cost, whatever its outcome. One line per run."""
+
+        try:
+            logger.info(
+                "Drew %s steps of %s at %sx%s for %s in %.1fs: guidance %s, "
+                "%s held on the device%s",
+                0 if run is None else run.steps_done,
+                request.steps,
+                request.width,
+                request.height,
+                self.model_id or "no model",
+                seconds,
+                request.guidance_scale,
+                memory_note(reserved_bytes()),
+                "" if run is not None and not run.stopped else ", stopped",
+            )
+        except Exception:  # noqa: BLE001 - a log line must not break a run
+            logger.debug("Could not record the image run", exc_info=True)
 
     def count_score_tokens(
         self,

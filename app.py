@@ -52,11 +52,14 @@ from conversation import (
     to_json,
     user_index_at_or_before,
 )
+import image_runtime
 from model_runtime import (
     DEFAULT_MODEL_SORT,
+    IMAGE_KIND,
     MODEL_SORT_ORDERS,
     MODEL_WEIGHTS,
     PROMPT_SCORE_LIMIT,
+    TEXT_KIND,
     CachedModel,
     CacheStatus,
     DownloadSnapshot,
@@ -79,6 +82,7 @@ from model_runtime import (
 from token_metrics import (
     COLOR_SCALES,
     DEFAULT_COLOR_SCALE,
+    PROMPT_ATTENTION_SCALE,
     UNSCORED_BEYOND_LIMIT,
     category_for,
     summarize,
@@ -106,6 +110,7 @@ from ui.common import (
     DEFAULT_MODEL_DOWNLOAD,
     DOWNLOAD_BAR_WIDTH,
     DOWNLOAD_POLL_SECONDS,
+    IMAGES_PAGE,
     IncompleteSnapshotError,
     LOAD_POLL_SECONDS,
     METRIC_GLOSSARY,
@@ -150,6 +155,28 @@ from ui.conversations import (
     save_conversation,
     selected_turn,
     switch_fork,
+)
+from ui.images_page import (
+    DRAW_POLL_SECONDS,
+    EMPTY_PROMPT,
+    IMAGE_OUTPUT_NAMES,
+    NO_ATTENTION,
+    NO_IMAGE_MODEL,
+    NO_TRAJECTORY,
+    NOTHING_TO_STOP,
+    PROMPT_STRIP_LABEL,
+    TEXT_MODEL_LOADED,
+    attention_note,
+    attention_overlay,
+    draw,
+    prompt_strip_value,
+    remember_committed_image_seed,
+    remember_image_settings,
+    remember_token,
+    select_step,
+    select_token,
+    stop_drawing,
+    trajectory_frame,
 )
 from ui.generation import (
     BUSY_STATUS,
@@ -205,7 +232,10 @@ from ui.models_page import (
     NO_RESULT_SELECTED,
     Pace,
     RateMeter,
+    KIND_NAMES,
     SEARCH_HINT,
+    SEARCH_HINTS,
+    SEARCH_KINDS,
     UNSUPPORTED_REASON,
     ask_remove_my_model,
     cached_model_label,
@@ -235,6 +265,7 @@ from ui.models_page import (
     my_models_summary,
     redownload_my_model,
     refresh_after_device,
+    refresh_image_badge,
     refresh_model_badge,
     refresh_my_models,
     refresh_search_results,
@@ -247,6 +278,7 @@ from ui.models_page import (
     stream_download,
     stream_load,
     unload_model,
+    where_to_use,
 )
 from ui.panel import (
     BRANCH_HINT,

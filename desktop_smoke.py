@@ -1,9 +1,67 @@
-"""Exercise the desktop bundle's lazily imported Metal dependencies."""
+"""Exercise the dependencies the desktop bundle only imports lazily.
+
+Nothing here is about whether the code is right. It is about whether
+PyInstaller put it in the bundle: the Metal quantizer and every diffusers
+pipeline class are reached by name at run time, so a missing hidden import in
+``ChatLab.spec`` shows up as a failure on a user's Mac and nowhere else.
+"""
 
 from __future__ import annotations
 
 import importlib
 from tempfile import TemporaryDirectory
+
+
+# The pipeline and component classes a downloaded image repo names in its
+# ``model_index.json``. ChatLab's own code imports none of them: they are
+# looked up by name from that file, which is exactly the kind of import a
+# bundle can be built without. These are the ones the common Stable Diffusion
+# and SDXL repos ask for.
+PIPELINE_CLASSES = (
+    ("diffusers", "DiffusionPipeline"),
+    ("diffusers", "StableDiffusionPipeline"),
+    ("diffusers", "StableDiffusionXLPipeline"),
+    ("diffusers", "UNet2DConditionModel"),
+    ("diffusers", "AutoencoderKL"),
+    ("diffusers", "PNDMScheduler"),
+    ("diffusers", "EulerDiscreteScheduler"),
+    ("diffusers", "DDIMScheduler"),
+    ("transformers", "CLIPTextModel"),
+    ("transformers", "CLIPTextModelWithProjection"),
+    ("transformers", "CLIPTokenizer"),
+)
+
+
+def smoke_test_pipelines() -> None:
+    """Check the bundle can build a diffusers pipeline by class name.
+
+    ``DiffusionPipeline.from_pretrained`` reads ``model_index.json`` and
+    resolves each component by looking its class up on the library the file
+    names, so a bundle missing any of them loads no image model at all. The
+    lookup is made the same way here, and the recording processor is built
+    against the attention class it will wrap.
+    """
+
+    diffusers = importlib.import_module("diffusers")
+    transformers = importlib.import_module("transformers")
+    libraries = {"diffusers": diffusers, "transformers": transformers}
+    missing = [
+        f"{library}.{name}"
+        for library, name in PIPELINE_CLASSES
+        if getattr(libraries[library], name, None) is None
+    ]
+    if missing:
+        raise RuntimeError(
+            "The desktop bundle is missing pipeline classes a downloaded image "
+            f"model would ask for: {', '.join(missing)}."
+        )
+    attention = importlib.import_module("diffusers.models.attention_processor")
+    if not callable(getattr(attention.Attention, "get_attention_scores", None)):
+        raise RuntimeError(
+            "The desktop bundle's diffusers cannot report attention "
+            "probabilities, so the Images page could map no prompt token."
+        )
+    print("ChatLab diffusers pipeline class checks passed")
 
 
 def smoke_test_metal() -> None:

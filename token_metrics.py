@@ -146,6 +146,29 @@ COLOR_SCALES: dict[str, ColorScale] = {
 DEFAULT_COLOR_SCALE = "Raw rank"
 
 
+# The Images page's prompt strip, which is not one of the scales above: it
+# paints prompt tokens by how much of the picture's cross-attention each one
+# took, and it is not offered as a choice because it is the only measurement
+# an image run has for a token. Its buckets are relative to the strongest
+# token in the prompt rather than absolute, because a share is divided among
+# however many tokens the prompt has and a fixed edge would paint every long
+# prompt uniformly pale.
+PROMPT_ATTENTION_SCALE = ColorScale(
+    name="Prompt attention",
+    field="share",
+    labels=(
+        "Barely (<20%)",
+        "Some (20–40%)",
+        "Half (40–60%)",
+        "Most (60–85%)",
+        "Strongest (85%+)",
+    ),
+    fills=SEQUENTIAL_FILLS,
+    edges=(0.2, 0.4, 0.6, 0.85),
+    caption="Each token's share of the picture's cross-attention, against the strongest token in the prompt. Darker drove more of the picture.",
+)
+
+
 def category_for(metric: dict, scale_name: str = DEFAULT_COLOR_SCALE) -> str:
     """Bucket one token under the requested color scale."""
 

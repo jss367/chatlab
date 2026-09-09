@@ -15,8 +15,11 @@ import settings
 from model_runtime import (
     DEFAULT_MODEL_SORT,
     FITS,
+    IMAGE_KIND,
     MODEL_WEIGHTS,
     QUANTIZED_BITS,
+    SEARCH_IMAGE_PIPELINE_TAGS,
+    TEXT_KIND,
     TIGHT,
     UNFIT,
     CachedModel,
@@ -238,12 +241,16 @@ def load_detail(
     return f"{name}\n\n`{progress_bar(shown)}` {percent}%\n\n{figures}"
 
 
-def stream_load(model_id: str, path: Path, precision: str = "full"):
+def stream_load(
+    model_id: str, path: Path, precision: str = "full", kind: str = TEXT_KIND
+):
     """Yield a status card every half second until ``model_id`` is in memory.
 
     Returns the device it landed on, so a caller writes
     ``device = yield from stream_load(...)``. A failed load raises here.
     ``precision`` is the weight precision chosen on the Models page.
+    ``kind`` is the snapshot's own verdict on what it holds, so a diffusers
+    pipeline is read by the pipeline loader and a checkpoint by the text one.
 
     The load runs on its own thread, as a download does: ``from_pretrained``
     blocks until the last weight, and a handler that blocked with it could
@@ -255,7 +262,9 @@ def stream_load(model_id: str, path: Path, precision: str = "full"):
 
     def work() -> None:
         try:
-            outcome["device"] = runtime.MANAGER.load(model_id, path, progress, precision=precision)
+            outcome["device"] = runtime.MANAGER.load(
+                model_id, path, progress, precision=precision, kind=kind
+            )
         except BaseException as error:
             outcome["error"] = error
         finally:
@@ -396,7 +405,14 @@ def chosen_model(model_id: str, selected: str | None) -> str:
 
 
 def refresh_model_actions(model_id: str, selected: str | None):
-    """Show the actions appropriate to the chosen model's local files."""
+    """Show the actions appropriate to the chosen model's local files.
+
+    A downloaded model is also named by kind, because this panel is where a
+    reader asks what they can do with the model in front of them and the two
+    kinds are driven from different pages. Without it, selecting an image
+    pipeline offers **Load cached** and says nothing about the answer
+    arriving on the Images page rather than in the chat.
+    """
 
     cleaned = chosen_model(model_id, selected)
     try:
@@ -418,9 +434,12 @@ def refresh_model_actions(model_id: str, selected: str | None):
             gr.update(visible=True, variant="secondary"),
         )
     if cached.complete:
-        detail = "**Downloaded** · Ready to load from disk."
+        detail = f"**Downloaded** · Ready to load from disk. {where_to_use(cached.kind)}"
         if runtime.MANAGER.model_id == cleaned:
-            detail = "**Downloaded · Loaded now** · Load cached again to apply a new precision."
+            detail = (
+                "**Downloaded · Loaded now** · Load cached again to apply a new "
+                f"precision. {where_to_use(cached.kind)}"
+            )
     elif cached.unsupported:
         detail = "**Downloaded · Unsupported** · ChatLab cannot load this model's format."
     elif cached.present:
@@ -484,7 +503,10 @@ def download_and_load_model(
             f"{fetched} Moving `{model_id.strip()}` onto the best available device…",
             "working",
         )
-        device = yield from stream_load(model_id, path, precision)
+        # Read after the download rather than before it: what the repo turns
+        # out to hold is only knowable once its files are here.
+        fetched_status = cache_status(model_id)
+        device = yield from stream_load(model_id, path, precision, fetched_status.kind)
     except Exception as error:
         yield failure_card("Model setup failed", html.escape(str(error)))
         return
@@ -492,7 +514,8 @@ def download_and_load_model(
     elapsed = time.monotonic() - started
     yield status_card(
         "Model ready",
-        f"`{model_id.strip()}` is loaded on **{device}** ({elapsed:.1f} seconds total).",
+        f"`{model_id.strip()}` is loaded on **{device}** ({elapsed:.1f} seconds "
+        f"total). {where_to_use(fetched_status.kind)}",
         "success",
     )
 
@@ -571,7 +594,7 @@ def load_cached_model(
     try:
         path = runtime.MANAGER.find_cached(cleaned)
         started = time.monotonic()
-        device = yield from stream_load(cleaned, path, precision)
+        device = yield from stream_load(cleaned, path, precision, status.kind)
     except IncompleteSnapshotError as error:
         yield failure_card(
             "Download unfinished", incomplete_snapshot_detail(cleaned, error)
@@ -583,13 +606,13 @@ def load_cached_model(
     yield status_card(
         "Model ready",
         f"{name} is loaded on **{device}** "
-        f"({time.monotonic() - started:.1f} seconds).",
+        f"({time.monotonic() - started:.1f} seconds). {where_to_use(status.kind)}",
         "success",
     )
 
 
 def unload_model():
-    if not runtime.MANAGER.loaded:
+    if not runtime.MANAGER.in_memory:
         return status_card("No model loaded", "There is nothing to unload.")
     runtime.MANAGER.unload()
     return status_card("Model unloaded", "Model memory has been released.", "success")
@@ -621,19 +644,33 @@ def model_badge(state: str, text: str) -> str:
     )
 
 
-def model_snapshot() -> tuple[str | None, str | None, str | None]:
-    """The load under way, the model in memory, and its device, read once.
+def model_snapshot() -> tuple[str | None, str | None, str | None, str]:
+    """The load under way, the model in memory, its device and its kind, read once.
 
     Reuse these values so the badge and setup links render from the same
     readings. This is display state, not an atomic snapshot or a reservation
     of the model for a later action.
+
+    The kind is read from what is really in memory rather than from what the
+    last load was asked for, so it can never disagree with the object a page
+    would go on to use.
     """
 
-    return runtime.MANAGER.loading_id, runtime.MANAGER.model_id, runtime.MANAGER.device_name
+    return (
+        runtime.MANAGER.loading_id,
+        runtime.MANAGER.model_id,
+        runtime.MANAGER.device_name,
+        IMAGE_KIND if runtime.MANAGER.image_loaded else TEXT_KIND,
+    )
 
 
-def loaded_model_badge(snapshot=None) -> str:
+def loaded_model_badge(snapshot=None, *, kind: str = TEXT_KIND) -> str:
     """Name the model in memory, the one being loaded, or neither.
+
+    ``kind`` is the kind of model the page asking can use. A model of the
+    other kind is named and set apart rather than hidden: the Chat page
+    saying "no model loaded" while an image pipeline filled the machine's
+    memory would send a reader to load a second one on top of it.
 
     A model in memory is named ahead of any load. A load counts itself as
     under way before it waits for the model lock, so asking for a second
@@ -653,27 +690,53 @@ def loaded_model_badge(snapshot=None) -> str:
     :func:`refresh_model_badge`.
     """
 
-    loading, model_id, device = (
+    loading, model_id, device, loaded_kind = (
         model_snapshot() if snapshot is None else snapshot
     )
     if model_id and device:
-        return model_badge("ready", f"{model_id} · loaded on {device}")
+        if loaded_kind == kind:
+            return model_badge("ready", f"{model_id} · loaded on {device}")
+        return model_badge(
+            "other",
+            f"{model_id} · {KIND_NAMES.get(loaded_kind, 'model')}, not used here",
+        )
     if loading:
         return model_badge("loading", f"Loading {loading}…")
     return model_badge("empty", NO_MODEL_BADGE)
 
 
-def refresh_model_badge():
-    """Refresh the badge and the setup links from the same reading.
+def _setup_links(snapshot, kind: str):
+    """Whether a page's own "choose a model" links belong on screen.
+
+    Hidden once that page has a model it can use, or while any load is
+    pending. A model of the other kind leaves them showing, because from
+    that page there is still a model to go and load.
 
     Setup links navigate without loading anything, so downloads do not need
-    to disable them. Hide them when a model is loaded or a load is pending.
+    to disable them.
     """
 
+    loading, model_id, device, loaded_kind = snapshot
+    ready = bool(model_id and device and loaded_kind == kind)
+    return gr.update(visible=not (ready or bool(loading)))
+
+
+def refresh_model_badge():
+    """Refresh the Chat page's badge and setup links from the same reading."""
+
     snapshot = model_snapshot()
-    loading, model_id, device = snapshot
-    links = gr.update(visible=not ((model_id and device) or loading))
-    return loaded_model_badge(snapshot), links, links
+    links = _setup_links(snapshot, TEXT_KIND)
+    return loaded_model_badge(snapshot, kind=TEXT_KIND), links, links
+
+
+def refresh_image_badge():
+    """Refresh the Images page's badge and its own setup link."""
+
+    snapshot = model_snapshot()
+    return (
+        loaded_model_badge(snapshot, kind=IMAGE_KIND),
+        _setup_links(snapshot, IMAGE_KIND),
+    )
 
 
 def go_to_models():
@@ -718,10 +781,23 @@ def select_default_model():
 NO_CACHED_MODEL_SELECTED = "Select a model to see its details and put it in the model ID box."
 
 
-SEARCH_HINT = (
-    "Search Hugging Face for language models Transformers can load. "
-    "Selecting a result puts its ID in the model ID box; **Download and load** fetches it."
-)
+# The search is scoped to one kind at a time, because the hub files them
+# under different libraries: a Transformers query and a diffusers one are
+# different searches, not one search with a wider net.
+SEARCH_KINDS = (("Text models", TEXT_KIND), ("Image models", IMAGE_KIND))
+
+SEARCH_HINTS = {
+    TEXT_KIND: (
+        "Searching Hugging Face for language models Transformers can load. "
+        "Selecting a result puts its ID in the model ID box; **Download and load** fetches it."
+    ),
+    IMAGE_KIND: (
+        "Searching Hugging Face for text-to-image diffusers pipelines. "
+        "Selecting a result puts its ID in the model ID box; **Download and load** fetches it."
+    ),
+}
+
+SEARCH_HINT = SEARCH_HINTS[TEXT_KIND]
 
 
 NO_RESULT_SELECTED = "Select a result to see its details."
@@ -734,11 +810,33 @@ def format_timestamp(stamp: float | None) -> str:
 
 
 UNSUPPORTED_REASON = (
-    "not a Transformers language model: its files are all here, but its weights "
-    "are laid out for another framework (a diffusers pipeline, a CTranslate2 or "
-    "ONNX export, say) and there is no `model.safetensors` or `pytorch_model.bin` "
-    "at the top of the repo, so ChatLab cannot load it."
+    "not a model ChatLab loads: its files are all here, but it is not one of "
+    "the two kinds. ChatLab loads a Transformers causal language model, which "
+    "has a `model.safetensors` or `pytorch_model.bin` at the top of the repo, "
+    "and a diffusers pipeline that draws from a prompt, which has a "
+    "`model_index.json`, a tokenizer and a text encoder. A CTranslate2 or "
+    "ONNX export is neither; so is a diffusers pipeline that wants a picture, "
+    "a video frame or a sound alongside the prompt, because the Images page "
+    "has only a prompt to give it."
 )
+
+
+# What each kind of model is, in the fewest words that distinguish them, for
+# the list and the cards.
+KIND_NAMES = {TEXT_KIND: "text model", IMAGE_KIND: "image model"}
+
+
+def where_to_use(kind: str) -> str:
+    """Which page a freshly loaded model is used on, so nobody has to guess.
+
+    The two kinds are loaded from the same place and driven from different
+    ones, which is exactly the sort of thing a reader should be told at the
+    moment it becomes true rather than left to find.
+    """
+
+    if kind == IMAGE_KIND:
+        return "It draws pictures: go to the **Images** page to use it."
+    return "It answers with tokens: go to the **Chat** page to use it."
 
 
 # The one word each verdict gets in a list. A model whose size or whose
@@ -803,13 +901,20 @@ def cached_fit(
     snapshot = snapshot_folder(entry.path) if entry.path is not None else None
     if snapshot is None:
         return None
+    # The size depends on the kind too: a pipeline has no checkpoint at its
+    # root to measure. The pool is already the one for this kind - the
+    # caller chose it, because choosing it here would re-read the device and
+    # discard the memory the impending unload gives back.
     estimated = estimate_snapshot_bytes(
-        snapshot, profile.dtype or ASSUMED_DTYPE, weight_bits(precision, profile)
+        snapshot,
+        profile.dtype or ASSUMED_DTYPE,
+        weight_bits(precision, profile),
+        entry.status.kind,
     )
     return model_fit(estimated, profile)
 
 
-def replacement_profile() -> DeviceProfile:
+def replacement_profile(kind: str = TEXT_KIND) -> DeviceProfile:
     """The machine as a model about to be loaded would find it.
 
     Every model a verdict is given for is one that would replace whatever is
@@ -817,26 +922,46 @@ def replacement_profile() -> DeviceProfile:
     model fits. So the weights on the device now are counted as available;
     without that, a 15 GB model already loaded would have every alternative
     marked tight and the button would then load them anyway.
+
+    ``for_kind`` does both the pool and the reclamation, because for a pool
+    that is the tighter of two the unload has to be counted into each side
+    before they are collapsed; doing it afterwards credits card memory to
+    whichever pool happened to be smaller.
     """
 
-    return device_profile().reclaimed(runtime.MANAGER.loaded_bytes)
+    return device_profile().for_kind(kind, runtime.MANAGER.loaded_bytes)
 
 
 def cached_fits(
     models: list[CachedModel], precision: str | None
 ) -> dict[str, Fit]:
-    """The fit verdict for each of ``models``, by model ID, read against one profile."""
+    """The fit verdict for each of ``models``, by model ID, one reading per kind.
 
-    profile = replacement_profile()
+    A reading per kind rather than one for the whole list, because an image
+    pipeline on CUDA is judged against a different pool; see
+    :meth:`DeviceProfile.for_kind`. Taken lazily and kept, so a list of only
+    text models still costs the one reading it always did - reading host
+    memory is a subprocess, and this runs on every rescan.
+    """
+
+    profiles: dict[str, DeviceProfile] = {}
     fits = {}
     for entry in models:
-        fit = cached_fit(entry, precision, profile)
+        kind = entry.status.kind or TEXT_KIND
+        if kind not in profiles:
+            profiles[kind] = replacement_profile(kind)
+        fit = cached_fit(entry, precision, profiles[kind])
         if fit is not None:
             fits[entry.model_id] = fit
     return fits
 
 
-def hub_fit(result: HubModel, precision: str | None, profile: DeviceProfile) -> Fit:
+def hub_fit(
+    result: HubModel,
+    precision: str | None,
+    profile: DeviceProfile,
+    kind: str = TEXT_KIND,
+) -> Fit:
     """Whether ``result`` would load now, judged from the hub's parameter count.
 
     The count is all a search result carries, so the estimate assumes a
@@ -844,6 +969,11 @@ def hub_fit(result: HubModel, precision: str | None, profile: DeviceProfile) -> 
     are packed with everything else. Both are close enough to tell a model
     that fits from one that cannot; the detail says where the figure came
     from.
+
+    An image pipeline is judged at full precision whatever the radio says.
+    The Metal quantizer is Transformers' own and ``_load_locked`` clears the
+    choice for a pipeline, so honouring it here would shrink the estimate
+    for a load that will not shrink and advertise a fit the load refuses.
     """
 
     if not result.parameters:
@@ -851,24 +981,38 @@ def hub_fit(result: HubModel, precision: str | None, profile: DeviceProfile) -> 
     estimated = estimate_parameter_bytes(
         result.parameters,
         profile.dtype or ASSUMED_DTYPE,
-        weight_bits(precision, profile),
+        weight_bits(precision, profile) if kind != IMAGE_KIND else None,
     )
     return model_fit(estimated, profile)
 
 
-def hub_fits(results: list[HubModel], precision: str | None) -> dict[str, Fit]:
-    """The fit verdict for each search result, by model ID, against one profile."""
+def hub_fits(
+    results: list[HubModel], precision: str | None, kind: str = TEXT_KIND
+) -> dict[str, Fit]:
+    """The fit verdict for each search result, by model ID, against one profile.
 
-    profile = replacement_profile()
+    ``kind`` because a search is scoped to one, and an image pipeline on CUDA
+    is judged against a different pool; see :meth:`DeviceProfile.for_kind`.
+    The estimate itself is from the parameter count either way, which says
+    nothing about how the weights are laid out.
+    """
+
+    profile = replacement_profile(kind)
     return {
-        result.model_id: hub_fit(result, precision, profile) for result in results
+        result.model_id: hub_fit(result, precision, profile, kind)
+        for result in results
     }
 
 
 def cached_model_label(entry: CachedModel, fit: Fit | None = None) -> str:
-    """``org/name · 15 GB · fits``, flagged when it is loaded or short of files."""
+    """``org/name · 15 GB · image · fits``, flagged by kind, fit and state."""
 
     label = f"{entry.model_id} · {format_bytes(entry.size_bytes)}"
+    if entry.status.kind == IMAGE_KIND:
+        # Only the image models are flagged. Text models are the majority and
+        # the default, so labelling both kinds would put a word on every row
+        # to distinguish the exception.
+        label += " · image"
     verdict = fit_word(fit)
     if verdict:
         label += f" · {verdict}"
@@ -892,12 +1036,16 @@ def describe_cached_model(entry: CachedModel, fit: Fit | None = None) -> str:
     elif entry.status.unsupported:
         verdict = f"**Unsupported:** {UNSUPPORTED_REASON}"
     else:
-        verdict = "**Downloaded · Ready to load.** Use **Load cached** to bring it into memory."
+        verdict = (
+            "**Downloaded · Ready to load.** Use **Load cached** to bring it "
+            f"into memory. {where_to_use(entry.status.kind)}"
+        )
     facts = [("On disk", describe_on_disk(entry.status))]
     if fit is not None and fit.known:
         facts.append(("Memory", fit.note))
     if entry.files:
         facts.append(("Files", f"{entry.files} in the current snapshot"))
+    facts.append(("Kind", KIND_NAMES.get(entry.status.kind, "not loadable here")))
     if entry.architecture:
         model_type = entry.architecture
         if entry.dtype:
@@ -1194,7 +1342,14 @@ def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
     except (OSError, ValueError):
         cached = CacheStatus()
     if cached.complete:
-        facts.append(("Already cached", f"{describe_on_disk(cached)}, ready to load"))
+        facts.append(
+            (
+                "Already cached",
+                f"{describe_on_disk(cached)}, ready to load as "
+                f"{'an' if cached.kind == IMAGE_KIND else 'a'} "
+                f"{KIND_NAMES.get(cached.kind, 'model')}",
+            )
+        )
     elif cached.unsupported:
         facts.append(
             ("Already cached", f"{describe_on_disk(cached)}, but not a model ChatLab can load")
@@ -1206,7 +1361,8 @@ def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
     if cached.unsupported:
         lines.append(
             "Its ID is in the model ID box, but downloading again would fetch the "
-            "same files: this repo is not a Transformers language model."
+            "same files: this repo is neither a Transformers language model nor "
+            "a diffusers pipeline."
         )
     elif cached.complete:
         lines.append("Already downloaded: use **Load cached** to bring it into memory.")
@@ -1246,15 +1402,22 @@ def refresh_after_device(
     )
 
 
-def search_models(query: str, hf_token: str, precision: str | None = None):
-    """Search the hub and list the results; nothing is selected yet."""
+def search_models(
+    query: str, hf_token: str, precision: str | None = None, kind: str = TEXT_KIND
+):
+    """Search the hub for models of one kind; nothing is selected yet.
+
+    ``precision`` is what the fit verdicts beside the results are judged at;
+    ``kind`` is which library the hub is asked for.
+    """
 
     cleared = gr.update(choices=[], value=None)
+    hint = SEARCH_HINTS.get(kind, SEARCH_HINT)
     cleaned = query.strip()
     if not cleaned:
-        return cleared, SEARCH_HINT, {}
+        return cleared, hint, {}
     try:
-        results = search_hub_models(cleaned, hf_token)
+        results = search_hub_models(cleaned, hf_token, kind=kind)
     except Exception as error:
         return (
             cleared,
@@ -1262,12 +1425,15 @@ def search_models(query: str, hf_token: str, precision: str | None = None):
             {},
         )
     if not results:
+        described = (
+            "text-to-image pipelines" if kind == IMAGE_KIND else "language models"
+        )
         return (
             cleared,
-            f"No language models matched `{html.escape(cleaned)}`.",
+            f"No {described} matched `{html.escape(cleaned)}`.",
             {},
         )
-    fits = hub_fits(results, precision)
+    fits = hub_fits(results, precision, kind)
     choices = [
         (hub_model_label(result, fits.get(result.model_id)), result.model_id)
         for result in results
@@ -1290,7 +1456,33 @@ def select_search_result(
         return gr.skip(), NO_RESULT_SELECTED
     return (
         gr.update(value=result.model_id),
-        describe_hub_model(result, hub_fit(result, precision, replacement_profile())),
+        describe_hub_model(
+            result,
+            hub_fit(
+                result,
+                precision,
+                replacement_profile(results_kind({result.model_id: result})),
+                results_kind({result.model_id: result}),
+            ),
+        ),
+    )
+
+
+def results_kind(results: dict) -> str:
+    """Which kind a held set of search results is, read from their own tags.
+
+    Derived rather than passed in so a repaint cannot disagree with the
+    search that produced the list: the kind that decided the verdicts is the
+    one the results themselves carry.
+    """
+
+    return (
+        IMAGE_KIND
+        if any(
+            getattr(result, "pipeline_tag", None) in SEARCH_IMAGE_PIPELINE_TAGS
+            for result in results.values()
+        )
+        else TEXT_KIND
     )
 
 
@@ -1306,7 +1498,7 @@ def refresh_search_results(
 
     if not results:
         return gr.skip(), gr.skip()
-    fits = hub_fits(list(results.values()), precision)
+    fits = hub_fits(list(results.values()), precision, results_kind(results))
     choices = [
         (hub_model_label(result, fits.get(model_id)), model_id)
         for model_id, result in results.items()

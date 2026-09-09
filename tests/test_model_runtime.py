@@ -12,7 +12,9 @@ from unittest import mock
 import settings
 import settings_sandbox
 import tiny_tokenizer
+import model_runtime
 from model_runtime import (
+    IMAGE_KIND,
     MIN_MODEL_POSITION_LIMIT,
     MODEL_WEIGHTS,
     SCORE_TOKEN_LIMIT,
@@ -294,12 +296,12 @@ class CacheStatusTests(unittest.TestCase):
         return snapshot
 
     def test_a_repo_of_another_kind_is_unsupported_rather_than_incomplete(self):
-        """A diffusers pipeline, a CTranslate2 export, a folder of ONNX
-        models, or an ONNX export that kept its Transformers ``config.json``
-        is whole on disk; it just is not something ChatLab loads."""
+        """A CTranslate2 export, a folder of ONNX models, or an ONNX export
+        that kept its Transformers ``config.json`` is whole on disk; it just
+        is not something ChatLab loads. A diffusers pipeline is not here:
+        that is one of the two kinds it does load, and has tests of its own."""
 
         layouts = {
-            "diffusers": {"model_index.json": b"{}", "unet/config.json": b"{}"},
             "ctranslate2": {"config.json": b'{"lang_ids": []}', "model.bin": b"x"},
             "onnx bundle": {"sam2-small/model.onnx": b"x" * 10},
             "sae weights": {"resid_post/width_16k/params.npz": b"x"},
@@ -1778,7 +1780,9 @@ class LoadProgressTests(unittest.TestCase):
         progress = LoadProgress()
         seen = []
 
-        def fake_load(model_id, local_path, torch, load_progress=None, precision="full"):
+        def fake_load(
+            model_id, local_path, torch, load_progress=None, precision="full", kind="text"
+        ):
             seen.append(load_progress)
             return "CPU"
 
@@ -3211,6 +3215,55 @@ class HubSearchTests(unittest.TestCase):
             [result.model_id for result in found],
             ["google/gemma-4-E4B-it", "allenai/Olmo-3-7B-Think"],
         )
+
+    def test_an_image_search_asks_the_hub_for_diffusers_pipelines(self):
+        # A different library and a different tag: a Transformers query and a
+        # diffusers one are different searches, not one with a wider net.
+        self.found = [
+            hub_result("stable-diffusion-v1-5/stable-diffusion-v1-5", "text-to-image"),
+            hub_result("allenai/Olmo-3-7B-Think", "text-generation"),
+        ]
+
+        found = search_hub_models("diffusion", kind=IMAGE_KIND)
+
+        self.assertEqual(self.calls[-1]["filter"], "diffusers")
+        self.assertEqual(
+            [result.model_id for result in found],
+            ["stable-diffusion-v1-5/stable-diffusion-v1-5"],
+        )
+
+    def test_an_image_search_makes_no_causal_lm_check(self):
+        """A pipeline has no model_type in that map and is built from its
+        model_index.json, so the library and the tag are what say it loads.
+        Asking the map would reject every pipeline there is."""
+
+        self.found = [hub_result("org/pipe", "text-to-image", config=None)]
+
+        with mock.patch.object(model_runtime, "causal_lm_model_types") as auto_map:
+            found = search_hub_models("pipe", kind=IMAGE_KIND)
+
+        auto_map.assert_not_called()
+        self.assertEqual([result.model_id for result in found], ["org/pipe"])
+
+    def test_an_image_search_still_leaves_out_another_runtime(self):
+        # The runtime check asks about the weight format rather than about
+        # Transformers, so it reads a converted diffusion model the same way.
+        self.found = [
+            hub_result("mlx-community/sdxl", "text-to-image", tags=["mlx"]),
+            hub_result("org/onnx-sd", "text-to-image", tags=["onnx"]),
+            hub_result("org/real-sd", "text-to-image"),
+        ]
+
+        found = search_hub_models("sd", kind=IMAGE_KIND)
+
+        self.assertEqual([result.model_id for result in found], ["org/real-sd"])
+
+    def test_a_text_search_is_what_a_caller_gets_by_default(self):
+        self.found = [hub_result("allenai/Olmo-3-7B-Think", "text-generation")]
+
+        search_hub_models("olmo")
+
+        self.assertEqual(self.calls[-1]["filter"], "transformers")
 
     def test_a_multimodal_model_needing_its_own_auto_class_is_left_out(self):
         # The pipeline tag says what a model does, not which auto class loads
