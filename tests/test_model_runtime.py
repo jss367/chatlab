@@ -15,6 +15,7 @@ from model_runtime import (
     MIN_MODEL_POSITION_LIMIT,
     MODEL_WEIGHTS,
     SCORE_TOKEN_LIMIT,
+    SEARCH_SCAN_LIMIT,
     ModelManager,
     cache_status,
     encode_for_scoring,
@@ -22,6 +23,7 @@ from model_runtime import (
     generation_prefill_token_limit,
     list_cached_models,
     score_token_limit,
+    search_hub_models,
     split_context_and_text,
     validate_model_id,
 )
@@ -2769,3 +2771,272 @@ class CountScoreTokensTests(unittest.TestCase):
 
         self.assertIsNone(manager.count_score_tokens("one two"))
         self.assertFalse(manager._lock.locked())
+
+
+def hub_result(model_id, pipeline_tag, **extra):
+    """One entry the way ``list_models`` hands it over, config and tags and all.
+
+    The config defaults to an architecture ``AutoModelForCausalLM`` loads, so
+    a test that is about something else does not have to say so.
+    """
+
+    fields = {
+        "id": model_id,
+        "pipeline_tag": pipeline_tag,
+        "config": {"model_type": "llama", "architectures": ["LlamaForCausalLM"]},
+        "downloads": 1000,
+        "likes": 1,
+        "library_name": "transformers",
+        "last_modified": None,
+        "safetensors": None,
+        "gated": False,
+        "tags": [],
+    }
+    fields.update(extra)
+    return types.SimpleNamespace(**fields)
+
+
+class HubSearchTests(unittest.TestCase):
+    """Which of the hub's answers reach the Model search list."""
+
+    def setUp(self):
+        self.calls = []
+        self.found = []
+
+        def list_models(**kwargs):
+            self.calls.append(kwargs)
+            return list(self.found)
+
+        api = mock.Mock()
+        api.list_models.side_effect = list_models
+        patched = mock.patch("huggingface_hub.HfApi", return_value=api)
+        patched.start()
+        self.addCleanup(patched.stop)
+
+    def test_a_multimodal_model_is_listed_beside_a_plain_one(self):
+        # google/gemma-4-E4B-it writes text like any other model here, and
+        # Transformers loads it through AutoModelForCausalLM, but the hub
+        # tags it for the pictures and sound it also reads. Keeping only
+        # "text-generation" hid it and every model like it.
+        self.found = [
+            hub_result(
+                "google/gemma-4-E4B-it",
+                "any-to-any",
+                config={
+                    "model_type": "gemma4",
+                    "architectures": ["Gemma4ForConditionalGeneration"],
+                },
+            ),
+            hub_result("allenai/Olmo-3-7B-Think", "text-generation"),
+        ]
+
+        found = search_hub_models("gemma")
+
+        self.assertEqual(
+            [result.model_id for result in found],
+            ["google/gemma-4-E4B-it", "allenai/Olmo-3-7B-Think"],
+        )
+
+    def test_a_multimodal_model_needing_its_own_auto_class_is_left_out(self):
+        # The pipeline tag says what a model does, not which auto class loads
+        # it: BLIP-2 and LLaVA sit under "image-text-to-text" beside Gemma 4
+        # but need Blip2ForConditionalGeneration and
+        # LlavaForConditionalGeneration. Listing them would download the whole
+        # checkpoint for a load that ends in an unsupported-config error.
+        self.found = [
+            hub_result(
+                "Salesforce/blip2-opt-2.7b",
+                "image-text-to-text",
+                config={
+                    "model_type": "blip-2",
+                    "architectures": ["Blip2ForConditionalGeneration"],
+                },
+            ),
+            hub_result(
+                "llava-hf/llava-1.5-7b-hf",
+                "image-text-to-text",
+                config={
+                    "model_type": "llava",
+                    "architectures": ["LlavaForConditionalGeneration"],
+                },
+            ),
+            hub_result(
+                "google/gemma-4-E4B-it",
+                "any-to-any",
+                config={
+                    "model_type": "gemma4",
+                    "architectures": ["Gemma4ForConditionalGeneration"],
+                },
+            ),
+        ]
+
+        found = search_hub_models("multimodal")
+
+        self.assertEqual([result.model_id for result in found], ["google/gemma-4-E4B-it"])
+
+    def test_a_config_without_a_model_type_is_left_out(self):
+        # AutoConfig resolves by model_type, not by the architectures a config
+        # lists beside it, so a mapped class name there is not a promise the
+        # load path can keep: it would place the repository nowhere and fail
+        # after the whole snapshot had come down.
+        self.found = [
+            hub_result(
+                "org/no-model-type",
+                "text-generation",
+                config={"architectures": ["LlamaForCausalLM"]},
+            ),
+            hub_result("org/no-config-at-all", "text-generation", config=None),
+        ]
+
+        self.assertEqual(search_hub_models("org"), [])
+
+    def test_the_hub_is_not_asked_to_do_the_filtering(self):
+        # The tags are checked here, so asking the hub for one pipeline tag
+        # would throw the rest away before they could be. No limit is sent
+        # either: the results are paged through until the list is full.
+        search_hub_models("gemma", limit=5)
+
+        (call,) = self.calls
+        self.assertNotIn("pipeline_tag", call)
+        self.assertNotIn("limit", call)
+        self.assertEqual(call["filter"], "transformers")
+
+    def test_a_model_that_writes_no_text_is_left_out(self):
+        self.found = [
+            hub_result("sentence-transformers/all-MiniLM-L6-v2", "feature-extraction"),
+            hub_result("openai/whisper-large-v3", "automatic-speech-recognition"),
+            hub_result("some-body/untagged-weights", None),
+            hub_result("allenai/Olmo-3-7B-Think", "text-generation"),
+        ]
+
+        found = search_hub_models("olmo")
+
+        self.assertEqual([result.model_id for result in found], ["allenai/Olmo-3-7B-Think"])
+
+    def test_a_conversion_to_another_runtime_is_left_out(self):
+        # An MLX conversion looks like the model it came from in every field
+        # the search reads - same pipeline tag, same library, weights in
+        # safetensors files - and lmstudio-community publishes one per
+        # precision, so the four of them would crowd out google's own.
+        self.found = [
+            hub_result(
+                "lmstudio-community/gemma-4-E4B-it-MLX-4bit",
+                "any-to-any",
+                tags=["transformers", "safetensors", "mlx"],
+            ),
+            hub_result(
+                "google/gemma-4-E4B-it",
+                "any-to-any",
+                tags=["transformers", "safetensors"],
+            ),
+        ]
+
+        found = search_hub_models("gemma")
+
+        self.assertEqual([result.model_id for result in found], ["google/gemma-4-E4B-it"])
+
+    def test_a_gguf_only_repository_is_left_out(self):
+        # Downloading one would fetch the whole snapshot for a load that
+        # cannot happen: AutoModelForCausalLM does not read GGUF, and
+        # judge_snapshot calls the same files unsupported once they land.
+        self.found = [
+            hub_result(
+                "unsloth/gemma-4-E4B-it-qat-GGUF",
+                "any-to-any",
+                tags=["transformers", "gguf"],
+            ),
+            hub_result(
+                "google/gemma-4-E4B-it",
+                "any-to-any",
+                tags=["transformers", "safetensors"],
+            ),
+        ]
+
+        found = search_hub_models("gemma")
+
+        self.assertEqual([result.model_id for result in found], ["google/gemma-4-E4B-it"])
+
+    def test_a_repository_shipping_both_formats_is_kept(self):
+        # The GGUF files sit beside a Transformers checkpoint that loads, so
+        # the repository is not a dead end. judge_snapshot agrees: a snapshot
+        # is only unsupported where it holds no Transformers checkpoint. Both
+        # of the formats in WEIGHT_FORMATS count, safetensors and the older
+        # pytorch_model.bin alike.
+        self.found = [
+            hub_result(
+                "org/model-with-a-gguf-folder",
+                "text-generation",
+                tags=["transformers", "safetensors", "gguf"],
+            ),
+            hub_result(
+                "org/model-from-before-safetensors",
+                "text-generation",
+                tags=["transformers", "pytorch", "gguf"],
+            ),
+        ]
+
+        found = search_hub_models("model")
+
+        self.assertEqual(
+            [result.model_id for result in found],
+            ["org/model-with-a-gguf-folder", "org/model-from-before-safetensors"],
+        )
+
+    def test_a_repository_in_another_framework_is_left_out(self):
+        # The hub files a TensorFlow or Flax checkpoint under its framework,
+        # not under the .h5 or .msgpack it is written in, and _load_locked
+        # passes neither from_tf nor from_flax. judge_snapshot already calls
+        # both suffixes foreign once they are on disk.
+        self.found = [
+            hub_result(
+                "org/tensorflow-only", "text-generation", tags=["transformers", "tf"]
+            ),
+            hub_result("org/flax-only", "text-generation", tags=["transformers", "jax"]),
+            hub_result(
+                "allenai/Olmo-3-7B-Think",
+                "text-generation",
+                tags=["transformers", "safetensors"],
+            ),
+        ]
+
+        found = search_hub_models("model")
+
+        self.assertEqual([result.model_id for result in found], ["allenai/Olmo-3-7B-Think"])
+
+    def test_matches_below_the_rejected_ones_still_fill_the_list(self):
+        # The hub sorts by downloads and the checks here run afterwards, so a
+        # query whose most-downloaded matches are all embedding models must
+        # not report that nothing matched: the reading goes on past them.
+        self.found = [
+            hub_result(f"org/embedder-{n}", "feature-extraction") for n in range(150)
+        ] + [hub_result("allenai/Olmo-3-7B-Think", "text-generation")]
+
+        found = search_hub_models("olmo", limit=3)
+
+        self.assertEqual([result.model_id for result in found], ["allenai/Olmo-3-7B-Think"])
+
+    def test_the_reading_stops_rather_than_paging_through_the_hub(self):
+        # A query that matches nothing loadable would otherwise page to the
+        # end of the hub for a list that stays empty.
+        self.found = [
+            hub_result(f"org/embedder-{n}", "feature-extraction")
+            for n in range(SEARCH_SCAN_LIMIT + 50)
+        ] + [hub_result("allenai/Olmo-3-7B-Think", "text-generation")]
+
+        self.assertEqual(search_hub_models("olmo"), [])
+
+    def test_the_list_stops_at_the_limit(self):
+        # More matches than the pane shows: the extras were fetched to make
+        # up for what the tag check drops, not to lengthen the list.
+        self.found = [hub_result(f"org/model-{n}", "text-generation") for n in range(30)]
+
+        found = search_hub_models("model", limit=3)
+
+        self.assertEqual(
+            [result.model_id for result in found],
+            ["org/model-0", "org/model-1", "org/model-2"],
+        )
+
+    def test_an_empty_query_does_not_go_online(self):
+        self.assertEqual(search_hub_models("   "), [])
+        self.assertEqual(self.calls, [])

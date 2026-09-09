@@ -14,7 +14,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -1146,6 +1146,93 @@ def remove_cached_model(model_id: str, cache_dir: Path | None = None) -> int:
 # push the search box off the pane.
 SEARCH_LIMIT = 20
 
+# The pipeline tags a model ChatLab can load is found under. A plain language
+# model is tagged "text-generation", but one that also takes pictures or sound
+# is tagged for what it reads rather than what it writes - google/gemma-4-E4B-it
+# is "any-to-any" - and Transformers maps those architectures to
+# AutoModelForCausalLM just the same, so they load here and belong in the
+# results. Asking the hub for "text-generation" alone hid every one of them.
+SEARCH_PIPELINE_TAGS = ("text-generation", "any-to-any", "image-text-to-text")
+
+# Repository tags that mark weights laid out for another runtime whatever
+# else the repository holds. An MLX conversion carries the same pipeline tag
+# and the same "transformers" library as the model it came from and keeps its
+# weights in safetensors files, so nothing else about it says otherwise, but
+# the numbers inside are quantized MLX's way and AutoModelForCausalLM cannot
+# read them - lmstudio-community publishes four of gemma-4-E4B-it alone, so
+# leaving them in would bury the model they came from.
+SEARCH_FOREIGN_TAGS = frozenset({"mlx"})
+
+# Tags for the weight formats in FOREIGN_SUFFIXES, which mark a repository as
+# foreign only where it ships nothing Transformers can read: a repository with
+# both a Transformers checkpoint and a GGUF conversion of it loads here, and
+# judge_snapshot reaches that same verdict from the files on disk. Offering a
+# GGUF-only repository would download the whole snapshot for a load that
+# cannot happen. The native tags are the two in WEIGHT_FORMATS - a repository
+# whose checkpoint predates safetensors is still one from_pretrained reads.
+SEARCH_FOREIGN_FORMAT_TAGS = frozenset(
+    # One per suffix in FOREIGN_SUFFIXES, under the names the hub files them
+    # by: a TensorFlow or Flax checkpoint is tagged for its framework rather
+    # than for the .h5 or .msgpack it is written in, and _load_locked passes
+    # neither from_tf nor from_flax.
+    {"gguf", "onnx", "tflite", "coreml", "keras", "tf", "jax", "flax"}
+)
+SEARCH_NATIVE_TAGS = frozenset({"safetensors", "pytorch"})
+
+# How many of the hub's answers to read while filling the list. The checks
+# above are made here rather than by the hub, so the results are read a page
+# at a time until the list is full; this bounds the reading for a search whose
+# matches are nearly all embedding or speech models, where going on would page
+# through the whole hub for a list that stays empty.
+SEARCH_SCAN_LIMIT = 400
+
+
+def foreign_to_transformers(tags: Iterable[str]) -> bool:
+    """Whether a repository's tags say its weights are laid out for another runtime."""
+
+    tags = set(tags)
+    if not SEARCH_FOREIGN_TAGS.isdisjoint(tags):
+        return True
+    if not SEARCH_NATIVE_TAGS.isdisjoint(tags):
+        return False
+    return not SEARCH_FOREIGN_FORMAT_TAGS.isdisjoint(tags)
+
+
+def causal_lm_model_types() -> Mapping[str, str]:
+    """Transformers' map from a config's ``model_type`` to its causal-LM class.
+
+    Imported when a search asks for it rather than at the top of the module,
+    the way the rest of the heavy imports here are: it reaches torch, and a
+    session that loads a model already knows the cost while one that only
+    reads its own cache should not pay it.
+    """
+
+    from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+
+    return MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+
+
+def loads_as_a_causal_lm(config: Mapping | None, model_types: Mapping[str, str]) -> bool:
+    """Whether ``AutoModelForCausalLM`` has a class for the ``model_type`` in ``config``.
+
+    A pipeline tag says what a model does, not which auto class loads it.
+    LLaVA, BLIP-2, PaliGemma, Idefics and the Qwen-VL models all sit under
+    "image-text-to-text" beside Gemma 4, but only Gemma 4 is in this map:
+    the rest need their own auto class, and would download in full and then
+    fail in :meth:`ModelManager._load_locked`.
+
+    ``model_type`` is the one field asked about, because it is the one
+    ``AutoConfig`` resolves by. The ``architectures`` a config also lists name
+    the classes it was saved from, and reading a mapped name there as a yes
+    would pass a repository ``AutoConfig`` cannot place at all. A config
+    without a ``model_type``, or one the hub does not carry, is left out for
+    the reason an untagged repository is: nothing about it says it would load.
+    """
+
+    if not config:
+        return False
+    return config.get("model_type") in model_types
+
 
 @dataclass(frozen=True)
 class HubModel:
@@ -1165,11 +1252,21 @@ class HubModel:
 def search_hub_models(
     query: str, hf_token: str | None = None, limit: int = SEARCH_LIMIT
 ) -> list[HubModel]:
-    """Search the hub for text-generation models Transformers can load.
+    """Search the hub for language models Transformers can load.
 
-    The filter is the one the application itself imposes: only causal
-    language models with built-in Transformers support load here, so results
-    from other libraries would be dead ends. Sorted by recent downloads.
+    The filter is the one the application itself imposes: only models with
+    built-in Transformers support load here, so results laid out for another
+    framework would be dead ends. Of those, the ones kept are the ones whose
+    pipeline tag is in :data:`SEARCH_PIPELINE_TAGS` - a model that writes
+    text, whatever else it can read - less the conversions to another runtime
+    that :func:`foreign_to_transformers` recognises, and less those whose
+    ``model_type`` :func:`loads_as_a_causal_lm` does not accept. A repository
+    the hub has no tag or config for is left out rather than guessed at; its
+    ID can still be typed into the model ID box. Sorted by recent downloads.
+
+    The hub is read a page at a time until ``limit`` results are kept, so a
+    query whose most-downloaded matches are all rejected here still fills the
+    list from further down. :data:`SEARCH_SCAN_LIMIT` caps how far down.
     """
 
     from huggingface_hub import HfApi
@@ -1178,13 +1275,14 @@ def search_hub_models(
     if not cleaned:
         return []
     token = hf_token.strip() if hf_token and hf_token.strip() else None
+    # No limit: the generator pages through the results, and the loop below
+    # stops it once the list is full or SEARCH_SCAN_LIMIT have been read.
     found = HfApi().list_models(
         search=cleaned,
-        pipeline_tag="text-generation",
         filter="transformers",
         sort="downloads",
-        limit=limit,
         expand=[
+            "config",
             "downloads",
             "likes",
             "pipeline_tag",
@@ -1196,11 +1294,20 @@ def search_hub_models(
         ],
         token=token,
     )
+    model_types = causal_lm_model_types()
     results = []
-    for info in found:
+    for scanned, info in enumerate(found, start=1):
+        if scanned > SEARCH_SCAN_LIMIT:
+            break
+        if getattr(info, "pipeline_tag", None) not in SEARCH_PIPELINE_TAGS:
+            continue
+        tags = getattr(info, "tags", None) or []
+        if foreign_to_transformers(tags):
+            continue
+        if not loads_as_a_causal_lm(getattr(info, "config", None), model_types):
+            continue
         safetensors = getattr(info, "safetensors", None)
         parameters = getattr(safetensors, "total", None) if safetensors else None
-        tags = getattr(info, "tags", None) or []
         licenses = [tag[len("license:") :] for tag in tags if tag.startswith("license:")]
         modified = getattr(info, "last_modified", None)
         results.append(
@@ -1216,6 +1323,8 @@ def search_hub_models(
                 license=licenses[0] if licenses else None,
             )
         )
+        if len(results) == limit:
+            break
     return results
 
 
