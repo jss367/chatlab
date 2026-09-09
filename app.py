@@ -3856,12 +3856,12 @@ def message_box_settings(enter_sends: bool) -> dict:
         return {
             "lines": 1,
             "max_lines": MESSAGE_BOX_MAX_LINES,
-            "placeholder": "Ask OLMo something… Enter sends, Shift+Enter starts a new line.",
+            "placeholder": "Ask anything… Enter sends, Shift+Enter starts a new line.",
         }
     return {
         "lines": 3,
         "max_lines": MESSAGE_BOX_MAX_LINES,
-        "placeholder": "Ask OLMo something… Shift+Enter sends, Enter starts a new line.",
+        "placeholder": "Ask anything… Shift+Enter sends, Enter starts a new line.",
     }
 
 
