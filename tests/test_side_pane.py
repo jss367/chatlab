@@ -876,6 +876,22 @@ class ModelFitTests(unittest.TestCase):
         roomy(self, total_gb=24, available_gb=2, held_gb=18)
         self.assertIn("· fits", self.labels()[OLMO])
 
+    def test_a_model_on_the_cpu_is_given_back_by_the_loads_own_estimate(self):
+        # Host memory keeps no allocator figure, and a CPU model's weights
+        # are anonymous memory, which the availability estimate deliberately
+        # does not count. The load's own estimate stands in, or every
+        # alternative would stay tight on a machine that would load them.
+        # The dtype is left at half precision so the estimate under test is
+        # the reclaim, not the CPU's own float32 conversion.
+        roomy(self, total_gb=24, available_gb=2, backend="cpu", dtype="float16")
+        self.manager.model_id = "org/other"
+
+        self.assertIn("· tight", self.labels()[OLMO])
+
+        self.manager.loaded_bytes = 18 * self.GB
+
+        self.assertIn("· fits", self.labels()[OLMO])
+
     def test_the_model_in_memory_is_not_judged_again(self):
         # It fits: it is there. Judging it against what is left free would
         # call the loaded model tight.

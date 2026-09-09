@@ -765,7 +765,7 @@ def replacement_profile() -> DeviceProfile:
     marked tight and the button would then load them anyway.
     """
 
-    return device_profile().reclaimed()
+    return device_profile().reclaimed(runtime.MANAGER.loaded_bytes)
 
 
 def cached_fits(

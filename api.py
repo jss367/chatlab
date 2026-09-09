@@ -79,16 +79,26 @@ def error_response(error: ApiError) -> JSONResponse:
     )
 
 
-def loaded_model(requested: Any) -> str:
-    """The model that will answer, or an :class:`ApiError` saying why none will.
+def loaded_model(requested: Any) -> tuple[str, str]:
+    """The model that will answer and the load it is, or an :class:`ApiError`.
 
-    A request may name the loaded model or leave the field out. Naming another
-    is refused: the alternative is unloading a reader's model and spending
-    minutes on a load nobody watching the interface asked for.
+    A request may name the loaded model or leave the field out. Naming
+    another is refused: the alternative is unloading a reader's model and
+    spending minutes on a load nobody watching the interface asked for.
+
+    Both come from one reading of :attr:`ModelManager.load_id`, which names
+    the model and the load together, so the model that was checked and the
+    load the request is bound to cannot be two different things - a load
+    landing between two separate reads would otherwise pass the check and
+    then answer from the new weights.
     """
 
-    in_memory = runtime.MANAGER.model_id
-    if not in_memory:
+    load_id = runtime.MANAGER.load_id
+    in_memory, _, _count = (load_id or "").rpartition("#")
+    # The load names the model it is, so identity comes from that one read;
+    # whether anything is loaded at all is asked separately, because a load
+    # ID exists for an empty runtime too.
+    if not runtime.MANAGER.loaded or not in_memory:
         raise ApiError(
             409,
             "No model is loaded. Load one on ChatLab's Models page first; the "
@@ -96,7 +106,7 @@ def loaded_model(requested: Any) -> str:
             "model_not_loaded",
         )
     if requested is None or requested == in_memory:
-        return in_memory
+        return in_memory, load_id
     if not isinstance(requested, str):
         raise ApiError(400, "The model must be named as a string.")
     raise ApiError(
@@ -286,10 +296,21 @@ def token_detail(body: dict) -> tuple[bool, int]:
     return wanted, count
 
 
-def finish_reason(generated: int, forced: int, limit: int) -> str:
-    """``length`` where the response ran into its ceiling, ``stop`` otherwise."""
+def finish_reason(update, sampling: dict) -> str:
+    """``length`` where the response ran into its ceiling, ``stop`` otherwise.
 
-    return "length" if generated - forced >= limit else "stop"
+    The count alone cannot say: a stop token sampled as the very last token
+    the ceiling allowed ended the response naturally, and a client told that
+    was the limit would treat a finished answer as truncated and continue it.
+    The runtime says which it was.
+    """
+
+    if update is None:
+        return "stop"
+    if update.ends_on_stop_token:
+        return "stop"
+    generated = len(update.metrics) - update.forced_prefix_tokens
+    return "length" if generated >= sampling["max_new_tokens"] else "stop"
 
 
 def build_router() -> APIRouter:
@@ -351,8 +372,7 @@ def build_router() -> APIRouter:
         """Answer a conversation, with every token's measurements if asked."""
 
         try:
-            model_id = loaded_model(body.get("model"))
-            load_id = runtime.MANAGER.load_id
+            model_id, load_id = loaded_model(body.get("model"))
             turns, prefill = conversation_from(body)
             sampling = sampling_from(body)
             measured, wants = token_detail(body)
@@ -447,7 +467,7 @@ def build_router() -> APIRouter:
         """Measure text the model did not write, as the Score text tab does."""
 
         try:
-            model_id = loaded_model(body.get("model"))
+            model_id, load_id = loaded_model(body.get("model"))
             text = body.get("text")
             if not isinstance(text, str):
                 raise ApiError(400, "text must be a string.")
@@ -473,7 +493,10 @@ def build_router() -> APIRouter:
             )
         try:
             scored = runtime.MANAGER.score_text(
-                text, context=context, use_chat_template=use_template
+                text,
+                context=context,
+                use_chat_template=use_template,
+                load_id=load_id,
             )
         except ValueError as error:
             return error_response(ApiError(400, str(error)))
@@ -563,9 +586,7 @@ def whole_completion(
     choice: dict[str, Any] = {
         "index": 0,
         "message": message,
-        "finish_reason": finish_reason(
-            len(metrics), last.forced_prefix_tokens, sampling["max_new_tokens"]
-        ),
+        "finish_reason": finish_reason(last, sampling),
         "logprobs": {"content": [token_entry(metric, wants) for metric in metrics]}
         if measured
         else None,
@@ -686,11 +707,7 @@ def stream_completion(
         final = {
             "index": 0,
             "delta": closing,
-            "finish_reason": finish_reason(
-                len(metrics),
-                last.forced_prefix_tokens if last is not None else 0,
-                sampling["max_new_tokens"],
-            ),
+            "finish_reason": finish_reason(last, sampling),
         }
         prompt_tokens = len(last.prompt_ids) if last is not None else 0
         payload = {

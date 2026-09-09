@@ -988,21 +988,28 @@ class DeviceProfile:
 
         return self.backend == "mps"
 
-    def reclaimed(self) -> DeviceProfile:
+    def reclaimed(self, fallback: int | None = None) -> DeviceProfile:
         """The same reading with the loaded model's memory given back.
 
         A load unloads whatever is in memory before it checks whether the
         next model fits, so the weights on the device now are not in the way
         of the model that would replace them. Anything that judges a
         replacement has to say the same, or the list and the button disagree.
-        Left alone where the device keeps no figure to give back.
+
+        ``fallback`` is what to give back where the device keeps no figure of
+        its own, which is host memory: the load's own estimate of the weights
+        it read, as :attr:`ModelManager.loaded_bytes` records it. A model on
+        the CPU is anonymous memory, which this platform's estimate of what
+        is available deliberately does not count, so without this a CPU load
+        would leave every alternative marked tight.
         """
 
-        if not self.held:
+        given = self.held or fallback
+        if not given:
             return self
         return replace(
             self,
-            available=None if self.available is None else self.available + self.held,
+            available=None if self.available is None else self.available + given,
         )
 
 DEVICE_LABELS = {"mps": "Apple Metal (MPS)", "cpu": "CPU"}
@@ -2206,6 +2213,15 @@ class GenerationUpdate:
     chose to measure.
     """
 
+    ends_on_stop_token: bool = False
+    """Whether the last token is one the model ends a response on.
+
+    The count of tokens cannot answer this on its own: a stop token sampled
+    as the very last token the ceiling allows ends the response naturally,
+    and a caller told that was the length limit would treat a finished answer
+    as truncated.
+    """
+
     model_id: str | None = None
     """Which weights produced this update, read under the model lock.
 
@@ -2703,6 +2719,10 @@ class ModelManager:
         self.local_path: Path | None = None
         self.device_name: str | None = None
         self.precision: str | None = None
+        # What the load estimated the weights would take. Host memory keeps
+        # no allocator figure, so this is what a fit verdict gives back when
+        # judging a model that would replace this one.
+        self.loaded_bytes: int | None = None
         # Counts successful loads, so state produced under one set of weights
         # can be told from state produced under the next even when both came
         # from the same repository ID (a re-download at a newer revision).
@@ -3152,6 +3172,7 @@ class ModelManager:
         self.local_path = local_path
         self.device_name = device_name
         self.precision = precision
+        self.loaded_bytes = estimated
         self.load_count += 1
         # The one record of what a load cost. Without it a later memory
         # failure cannot be told from a leak, a second copy of the weights, or
@@ -3233,6 +3254,7 @@ class ModelManager:
         self.local_path = None
         self.device_name = None
         self.precision = None
+        self.loaded_bytes = None
         gc.collect()
         self._release_device_cache(torch)
 
@@ -4275,6 +4297,10 @@ class ModelManager:
                         literal_text_spans=literal_text_spans,
                         prompt_ids=tuple(prompt_ids),
                         model_id=model_id,
+                        ends_on_stop_token=(
+                            forced[-1] in stop_ids
+                            and len(forced) > literal_prefill_tokens
+                        ),
                     )
                     if (
                         forced[-1] in stop_ids
@@ -4323,6 +4349,7 @@ class ModelManager:
                             literal_text_spans=literal_text_spans,
                             prompt_ids=tuple(prompt_ids),
                             model_id=model_id,
+                            ends_on_stop_token=token_id in stop_ids,
                         )
 
                     if stopping:
@@ -4429,14 +4456,27 @@ class ModelManager:
         *,
         context: str = "",
         use_chat_template: bool = False,
+        load_id: str | None = None,
     ) -> ScoredText:
-        """Measure text the model did not write, in one pass over the tokens."""
+        """Measure text the model did not write, in one pass over the tokens.
+
+        ``load_id`` names the load the caller checked against, as
+        :meth:`generate` takes it: compared here under the model lock, so a
+        load that finished while this waited for the lock is refused with
+        :class:`ModelChanged` rather than measuring one model's text and
+        reporting it as another's.
+        """
 
         import torch
 
         with self._lock, torch.inference_mode():
             if not self.loaded:
                 raise RuntimeError("Download and load a model before scoring text.")
+            if load_id is not None and load_id != self.load_id:
+                raise ModelChanged(
+                    f"The model in memory is {self.model_id}, not the one this "
+                    "text was to be measured against. Ask again."
+                )
 
             assert self.tokenizer is not None
             tokenizer = self.tokenizer

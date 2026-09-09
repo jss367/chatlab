@@ -50,6 +50,10 @@ class Recorder:
         self.updates = updates if updates is not None else [update("Hello")]
         self.raises = raises
 
+    @property
+    def loaded(self) -> bool:
+        return self.model_id is not None
+
     def reserve_generation(self):
         if self.busy:
             return False
@@ -379,6 +383,31 @@ class RequestPlumbingTests(ApiTestCase):
 
         self.assertEqual(self.manager.calls[0]["load_id"], "fake/model#1")
 
+    def test_the_model_checked_and_the_load_bound_are_one_reading(self):
+        # Two reads could straddle a load: the check would pass for the model
+        # named and the request would bind to - and answer from - the next
+        # one. The load ID names the model it is, so both come from it.
+        self.manager.model_id = "fake/model"
+        self.manager.load_id = "fake/model#7"
+
+        body = self.post(
+            model="fake/model", messages=[{"role": "user", "content": "hi"}]
+        ).json()
+
+        self.assertEqual(self.manager.calls[0]["load_id"], "fake/model#7")
+        self.assertEqual(body["model"], "fake/model")
+
+    def test_a_request_for_a_model_the_load_id_does_not_name_is_refused(self):
+        self.manager.model_id = "fake/model"
+        self.manager.load_id = "fake/other#2"
+
+        response = self.post(
+            model="fake/model", messages=[{"role": "user", "content": "hi"}]
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("fake/other", response.json()["error"]["message"])
+
     def test_a_load_that_landed_in_between_is_refused(self):
         self.use(
             Recorder(raises=model_runtime.ModelChanged("the model has changed"))
@@ -458,6 +487,17 @@ class CompletionShapeTests(ApiTestCase):
         body = self.answer(max_tokens=2)
 
         self.assertEqual(body["choices"][0]["finish_reason"], "length")
+
+    def test_a_stop_token_on_the_last_allowed_position_is_still_a_stop(self):
+        # The count cannot tell the two apart, and a client told a finished
+        # answer was truncated would continue it.
+        self.manager.updates = [
+            replace(self.manager.updates[0], ends_on_stop_token=True)
+        ]
+
+        body = self.answer(max_tokens=2)
+
+        self.assertEqual(body["choices"][0]["finish_reason"], "stop")
 
     def test_the_measurements_are_left_out_until_they_are_asked_for(self):
         self.assertIsNone(self.answer()["choices"][0]["logprobs"])
@@ -775,6 +815,34 @@ class ScoreTests(ApiTestCase):
 
         self.client.post("/v1/chatlab/score", json={"text": "x"})
 
+        self.assertFalse(self.manager.busy)
+
+    def test_scoring_is_bound_to_the_load_it_was_checked_against(self):
+        # Reserving the slot does not hold off a load, and score_text waits
+        # for the model lock, so the runtime is told which load the request
+        # was checked against.
+        seen = {}
+
+        def score(text, **kwargs):
+            seen.update(kwargs)
+            return ScoredText(context_metrics=[], metrics=[metric(1, "hi")])
+
+        self.manager.score_text = score
+
+        self.client.post("/v1/chatlab/score", json={"text": "hi"})
+
+        self.assertEqual(seen["load_id"], "fake/model#1")
+
+    def test_a_score_whose_model_changed_underneath_it_is_refused(self):
+        def changed(text, **kwargs):
+            raise model_runtime.ModelChanged("the model in memory is another")
+
+        self.manager.score_text = changed
+
+        response = self.client.post("/v1/chatlab/score", json={"text": "hi"})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["type"], "model_not_loaded")
         self.assertFalse(self.manager.busy)
 
     def test_scoring_needs_a_model_too(self):
