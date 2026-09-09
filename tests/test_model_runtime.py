@@ -15,7 +15,7 @@ from model_runtime import (
     MIN_MODEL_POSITION_LIMIT,
     MODEL_WEIGHTS,
     SCORE_TOKEN_LIMIT,
-    SEARCH_OVERFETCH,
+    SEARCH_SCAN_LIMIT,
     ModelManager,
     cache_status,
     encode_for_scoring,
@@ -2827,15 +2827,15 @@ class HubSearchTests(unittest.TestCase):
         )
 
     def test_the_hub_is_not_asked_to_do_the_filtering(self):
-        # The tag is checked here, so asking the hub for one would throw the
-        # rest away before they could be. It is asked for more than the list
-        # shows instead, because some of what comes back is dropped.
+        # The tags are checked here, so asking the hub for one pipeline tag
+        # would throw the rest away before they could be. No limit is sent
+        # either: the results are paged through until the list is full.
         search_hub_models("gemma", limit=5)
 
         (call,) = self.calls
         self.assertNotIn("pipeline_tag", call)
+        self.assertNotIn("limit", call)
         self.assertEqual(call["filter"], "transformers")
-        self.assertEqual(call["limit"], 5 * SEARCH_OVERFETCH)
 
     def test_a_model_that_writes_no_text_is_left_out(self):
         self.found = [
@@ -2870,6 +2870,67 @@ class HubSearchTests(unittest.TestCase):
         found = search_hub_models("gemma")
 
         self.assertEqual([result.model_id for result in found], ["google/gemma-4-E4B-it"])
+
+    def test_a_gguf_only_repository_is_left_out(self):
+        # Downloading one would fetch the whole snapshot for a load that
+        # cannot happen: AutoModelForCausalLM does not read GGUF, and
+        # judge_snapshot calls the same files unsupported once they land.
+        self.found = [
+            hub_result(
+                "unsloth/gemma-4-E4B-it-qat-GGUF",
+                "any-to-any",
+                tags=["transformers", "gguf"],
+            ),
+            hub_result(
+                "google/gemma-4-E4B-it",
+                "any-to-any",
+                tags=["transformers", "safetensors"],
+            ),
+        ]
+
+        found = search_hub_models("gemma")
+
+        self.assertEqual([result.model_id for result in found], ["google/gemma-4-E4B-it"])
+
+    def test_a_repository_shipping_both_formats_is_kept(self):
+        # The GGUF files sit beside a Transformers checkpoint that loads, so
+        # the repository is not a dead end. judge_snapshot agrees: a snapshot
+        # is only unsupported where it holds no Transformers checkpoint.
+        self.found = [
+            hub_result(
+                "org/model-with-a-gguf-folder",
+                "text-generation",
+                tags=["transformers", "safetensors", "gguf"],
+            )
+        ]
+
+        found = search_hub_models("model")
+
+        self.assertEqual(
+            [result.model_id for result in found], ["org/model-with-a-gguf-folder"]
+        )
+
+    def test_matches_below_the_rejected_ones_still_fill_the_list(self):
+        # The hub sorts by downloads and the checks here run afterwards, so a
+        # query whose most-downloaded matches are all embedding models must
+        # not report that nothing matched: the reading goes on past them.
+        self.found = [
+            hub_result(f"org/embedder-{n}", "feature-extraction") for n in range(150)
+        ] + [hub_result("allenai/Olmo-3-7B-Think", "text-generation")]
+
+        found = search_hub_models("olmo", limit=3)
+
+        self.assertEqual([result.model_id for result in found], ["allenai/Olmo-3-7B-Think"])
+
+    def test_the_reading_stops_rather_than_paging_through_the_hub(self):
+        # A query that matches nothing loadable would otherwise page to the
+        # end of the hub for a list that stays empty.
+        self.found = [
+            hub_result(f"org/embedder-{n}", "feature-extraction")
+            for n in range(SEARCH_SCAN_LIMIT + 50)
+        ] + [hub_result("allenai/Olmo-3-7B-Think", "text-generation")]
+
+        self.assertEqual(search_hub_models("olmo"), [])
 
     def test_the_list_stops_at_the_limit(self):
         # More matches than the pane shows: the extras were fetched to make

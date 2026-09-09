@@ -14,7 +14,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -1154,19 +1154,41 @@ SEARCH_LIMIT = 20
 # results. Asking the hub for "text-generation" alone hid every one of them.
 SEARCH_PIPELINE_TAGS = ("text-generation", "any-to-any", "image-text-to-text")
 
-# Repository tags that mark weights laid out for another runtime. MLX repos
-# carry the same pipeline tag and the same "transformers" library as the
-# model they were converted from, and their weights are in safetensors files,
-# but the numbers inside are quantized MLX's way and AutoModelForCausalLM
-# cannot read them - lmstudio-community publishes four of gemma-4-E4B-it
-# alone, so leaving them in would bury the model they came from.
+# Repository tags that mark weights laid out for another runtime whatever
+# else the repository holds. An MLX conversion carries the same pipeline tag
+# and the same "transformers" library as the model it came from and keeps its
+# weights in safetensors files, so nothing else about it says otherwise, but
+# the numbers inside are quantized MLX's way and AutoModelForCausalLM cannot
+# read them - lmstudio-community publishes four of gemma-4-E4B-it alone, so
+# leaving them in would bury the model they came from.
 SEARCH_FOREIGN_TAGS = frozenset({"mlx"})
 
-# How many results to ask the hub for per result shown. The tags above are
-# checked here rather than by the hub, so a search whose most-downloaded
-# matches are all embedding or speech models would come back short if the
-# request were only as long as the list.
-SEARCH_OVERFETCH = 4
+# Tags for the weight formats in FOREIGN_SUFFIXES, which mark a repository as
+# foreign only where it ships nothing Transformers can read: a repository with
+# both a Transformers checkpoint and a GGUF conversion of it loads here, and
+# judge_snapshot reaches that same verdict from the files on disk. Offering a
+# GGUF-only repository would download the whole snapshot for a load that
+# cannot happen.
+SEARCH_FOREIGN_FORMAT_TAGS = frozenset({"gguf", "onnx", "tflite", "coreml", "keras"})
+SEARCH_NATIVE_TAG = "safetensors"
+
+# How many of the hub's answers to read while filling the list. The checks
+# above are made here rather than by the hub, so the results are read a page
+# at a time until the list is full; this bounds the reading for a search whose
+# matches are nearly all embedding or speech models, where going on would page
+# through the whole hub for a list that stays empty.
+SEARCH_SCAN_LIMIT = 400
+
+
+def foreign_to_transformers(tags: Iterable[str]) -> bool:
+    """Whether a repository's tags say its weights are laid out for another runtime."""
+
+    tags = set(tags)
+    if not SEARCH_FOREIGN_TAGS.isdisjoint(tags):
+        return True
+    if SEARCH_NATIVE_TAG in tags:
+        return False
+    return not SEARCH_FOREIGN_FORMAT_TAGS.isdisjoint(tags)
 
 
 @dataclass(frozen=True)
@@ -1194,9 +1216,13 @@ def search_hub_models(
     framework would be dead ends. Of those, the ones kept are the ones whose
     pipeline tag is in :data:`SEARCH_PIPELINE_TAGS` - a model that writes
     text, whatever else it can read - less the conversions to another runtime
-    that :data:`SEARCH_FOREIGN_TAGS` names. A repository the hub has no tag
-    for is left out rather than guessed at; its ID can still be typed into
-    the model ID box. Sorted by recent downloads.
+    that :func:`foreign_to_transformers` recognises. A repository the hub has
+    no tag for is left out rather than guessed at; its ID can still be typed
+    into the model ID box. Sorted by recent downloads.
+
+    The hub is read a page at a time until ``limit`` results are kept, so a
+    query whose most-downloaded matches are all rejected here still fills the
+    list from further down. :data:`SEARCH_SCAN_LIMIT` caps how far down.
     """
 
     from huggingface_hub import HfApi
@@ -1205,11 +1231,12 @@ def search_hub_models(
     if not cleaned:
         return []
     token = hf_token.strip() if hf_token and hf_token.strip() else None
+    # No limit: the generator pages through the results, and the loop below
+    # stops it once the list is full or SEARCH_SCAN_LIMIT have been read.
     found = HfApi().list_models(
         search=cleaned,
         filter="transformers",
         sort="downloads",
-        limit=limit * SEARCH_OVERFETCH,
         expand=[
             "downloads",
             "likes",
@@ -1223,11 +1250,13 @@ def search_hub_models(
         token=token,
     )
     results = []
-    for info in found:
+    for scanned, info in enumerate(found, start=1):
+        if scanned > SEARCH_SCAN_LIMIT:
+            break
         if getattr(info, "pipeline_tag", None) not in SEARCH_PIPELINE_TAGS:
             continue
         tags = getattr(info, "tags", None) or []
-        if not SEARCH_FOREIGN_TAGS.isdisjoint(tags):
+        if foreign_to_transformers(tags):
             continue
         safetensors = getattr(info, "safetensors", None)
         parameters = getattr(safetensors, "total", None) if safetensors else None
