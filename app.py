@@ -282,6 +282,7 @@ from ui.prompts import (
     PARAGRAPH_NOTE,
     PROMPT_COUNT_HINT,
     batch_directory,
+    batch_files,
     batch_progress,
     batch_row,
     count_prompts,

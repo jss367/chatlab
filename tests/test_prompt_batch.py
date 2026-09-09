@@ -35,7 +35,7 @@ def tearDownModule():
 
 
 # The batch handlers publish app.BATCH_OUTPUT_NAMES, in that order.
-STATUS, RESULTS, RUN, STOP, FILES = range(len(app.BATCH_OUTPUT_NAMES))
+STATUS, RESULTS, RUN, STOP, FILES, DIRECTORY = range(len(app.BATCH_OUTPUT_NAMES))
 
 # The results table's columns, by name.
 (
@@ -490,6 +490,62 @@ class RunPromptsTests(unittest.TestCase):
         self.assertTrue(any("Prompt 1 of 2" in status for status in statuses))
         self.assertTrue(any("Prompt 2 of 2" in status for status in statuses))
 
+    def test_a_cancelled_prompt_keeps_the_tokens_it_produced(self):
+        # Gradio throws GeneratorExit into whichever yield the run is parked
+        # on, and the lines that write the trace come after the loop. Without
+        # a write on the way out, a Stop landing there took the answer with
+        # it - the one thing the files written as the run goes prevent.
+        run = app.run_prompts("first\n\nsecond", [], "", "", *SAMPLING)
+        opening = next(run)
+        directory = Path(opening[DIRECTORY])
+        next(run)
+        run.close()
+
+        traces = sorted(directory.glob("prompt-*.json"))
+        self.assertTrue(traces)
+        self.assertTrue((directory / "prompts.csv").exists())
+
+    def test_a_stopped_prompt_says_it_was_stopped(self):
+        # The tokens are exact but may not be the whole answer, and a trace
+        # read as a finished response would put a truncated answer in an
+        # experiment beside whole ones.
+        run = app.run_prompts("say hello", [], "", "", *SAMPLING)
+        opening = next(run)
+        directory = Path(opening[DIRECTORY])
+        run.close()
+
+        stopped = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(directory.glob("prompt-*.json"))
+        ]
+        for trace in stopped:
+            self.assertTrue(trace["sampling"].get("stopped"))
+
+    def test_a_finished_prompt_is_not_marked_stopped(self):
+        final = self.run_batch("say hello")[-1]
+        trace = trace_of(final[FILES])
+
+        self.assertNotIn("stopped", trace["sampling"])
+
+    def test_stopping_publishes_what_the_run_wrote(self):
+        run = app.run_prompts("first\n\nsecond", [], "", "", *SAMPLING)
+        opening = next(run)
+        directory = opening[DIRECTORY]
+        next(run)
+        run.close()
+
+        _status, _rows, _run, _stop, files, _directory = app.stop_batch(directory)
+
+        names = [Path(path).name for path in files["value"]]
+        self.assertIn("prompt-001.json", names)
+        self.assertIn("prompts.csv", names)
+        self.assertTrue(files["visible"])
+
+    def test_stopping_without_a_directory_leaves_the_files_alone(self):
+        _status, _rows, _run, _stop, files, _directory = app.stop_batch(None)
+
+        self.assertEqual(files, gr.skip())
+
     def test_a_finished_prompt_is_recorded_before_anything_can_cancel_it(self):
         # Stop closes the generator at whichever yield it is parked on. A
         # progress line published after the last update would sit between a
@@ -689,7 +745,7 @@ class LoadPromptFileTests(unittest.TestCase):
 
 class StopBatchTests(unittest.TestCase):
     def test_stopping_gives_the_buttons_back_and_keeps_the_rows(self):
-        status, results, run, stop, files = app.stop_batch()
+        status, results, run, stop, files, directory = app.stop_batch()
 
         self.assertIn("Stopped", status)
         self.assertEqual(results, gr.skip())

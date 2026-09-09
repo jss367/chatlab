@@ -186,6 +186,9 @@ def build_app() -> gr.Blocks:
         # prefers this list while the box still holds what loading it wrote;
         # see ui.prompts.resolve_prompts().
         loaded_prompts_state = gr.State([])
+        # Where the running batch writes its exports, so Stop can publish
+        # what is there; see ui.prompts.stop_batch().
+        batch_directory_state = gr.State(None)
         # Which load the scored token count on screen was counted against, so
         # a model swapped out from another tab can be told from this one.
         score_budget_load = gr.State(None)
@@ -1505,6 +1508,7 @@ def build_app() -> gr.Blocks:
             run_prompts_button,
             stop_prompts_button,
             batch_files,
+            batch_directory_state,
         ]
         batch_run = run_prompts_button.click(
             run_prompts,
@@ -1526,7 +1530,12 @@ def build_app() -> gr.Blocks:
         # the model lock; stop_batch() only puts the buttons back. The rows
         # and files already published stay on screen, and they describe the
         # prompts that finished.
-        stop_prompts_button.click(stop_batch, None, batch_outputs, cancels=[batch_run])
+        # Stop reads the run's directory rather than the frame the cancelled
+        # generator published last: the prompt it was in the middle of is
+        # written on the way out, after that frame is gone. See stop_batch().
+        stop_prompts_button.click(
+            stop_batch, batch_directory_state, batch_outputs, cancels=[batch_run]
+        )
         prompts_box.change(
             count_prompts,
             [prompts_box, loaded_prompts_state],

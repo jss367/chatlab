@@ -19,6 +19,7 @@ from gradio.utils import get_upload_folder
 from conversation import make_turn, model_messages
 from model_runtime import ModelChanged
 from prompt_batch import (
+    BATCH_CSV_NAME,
     BatchTable,
     parse_prompt_file,
     parse_prompts,
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 # Every batch handler publishes this tuple, in this order.
-BATCH_OUTPUT_NAMES = ("status", "results", "run", "stop", "files")
+BATCH_OUTPUT_NAMES = ("status", "results", "run", "stop", "files", "directory")
 
 BATCH_HEADERS = [
     "#",
@@ -208,7 +209,7 @@ def run_prompts(
     """
 
     skip = gr.skip()
-    refused = (skip,) * 4
+    refused = (skip,) * 5
 
     if not runtime.MANAGER.loaded:
         yield (BATCH_NO_MODEL,) + refused
@@ -280,6 +281,10 @@ def _run_batch(
         gr.update(value=[]),
         *send_stop_buttons(True),
         gr.update(value=None, visible=False),
+        # Where this run's files are. Cancellation closes this generator
+        # where it stands, so its last frame cannot list a file written on
+        # the way out; stop_batch() reads the directory instead.
+        str(directory),
     )
 
     for index, prompt in enumerate(prompts, start=1):
@@ -297,6 +302,62 @@ def _run_batch(
         literal_prefill = ""
         forced_prefix_tokens = 0
         applied_prefill = bool(assistant_prefill)
+        kept = False
+
+        def keep(*, stopped: bool = False) -> None:
+            """Write what this prompt produced, and add it to the table.
+
+            Called once for a prompt: on the way out of the ordinary path,
+            and from the finally below when the run was cancelled instead.
+            Nothing is yielded from here, because the cancellation path is
+            already inside GeneratorExit and a yield there is an error.
+            """
+
+            nonlocal kept
+            if kept or not metrics:
+                return
+            kept = True
+            sampling = {
+                "temperature": float(temperature),
+                "top_p": float(top_p),
+                "top_k": int(top_k),
+                "max_new_tokens": int(max_new_tokens),
+                "seed": used_seed,
+            }
+            if forced_prefix_tokens:
+                # The prefill's tokens are measured like any other, so a
+                # reader of the trace would take them for the model's own
+                # choices without being told how many were replayed.
+                # ui.generation says it the same way for a single response.
+                sampling["forced_prefix_tokens"] = forced_prefix_tokens
+            if applied_prefill:
+                sampling["assistant_prefill"] = assistant_prefill
+            if stopped:
+                # The tokens are exact, but they may not be the whole answer:
+                # Stop can land while the model is still writing. A trace that
+                # did not say so would be read as a finished response and put
+                # a truncated answer in an experiment beside whole ones.
+                sampling["stopped"] = True
+            traces.append(
+                build_trace(
+                    model_id=model_id,
+                    messages=request,
+                    response=text,
+                    sampling=sampling,
+                    metrics=metrics,
+                )
+            )
+            # Numbered by where the prompt sits in the box, not by how many
+            # traces came before it. A prompt that failed produces no trace,
+            # and numbering by the count would hand its name and its row
+            # number to the next prompt that worked, filing one prompt's
+            # measurements under another's.
+            trace_paths.append(write_batch_trace(traces[-1], directory, index))
+            # The files are written as the run goes, so stopping half way
+            # through still leaves every prompt that produced tokens on disk.
+            # The table takes this prompt's rows for the same reason.
+            paths[:] = [*trace_paths, table.add(traces[-1], index)]
+
         try:
             stream = runtime.MANAGER.generate(
                 request,
@@ -317,14 +378,12 @@ def _run_batch(
             with contextlib.closing(stream):
                 # The progress line for one update is published at the top of
                 # the next pass, so nothing is yielded after the update that
-                # turns out to be the last. Yielding there would put a
-                # cancellation point between a prompt finishing and its row
-                # and trace being written: Stop landing in that window used to
-                # throw GeneratorExit into the yield and take a fully
-                # generated answer with it, which is exactly the case the
-                # published-as-it-goes files exist to protect. The frame lost
-                # this way is a progress line the finishing frame replaces in
-                # the same breath.
+                # turns out to be the last: the loop falls straight through to
+                # writing this prompt's trace. Every yield left is one Stop
+                # can land on with an answer part written, and keep() in the
+                # finally is what puts that answer on disk rather than
+                # dropping it - marked stopped, since the model may have had
+                # more to say.
                 held = None
                 for update in stream:
                     if held is not None:
@@ -342,7 +401,11 @@ def _run_batch(
                         gr.skip(),
                         gr.skip(),
                         gr.skip(),
+                        gr.skip(),
                     )
+            # The stream is done and no yield stands between here and the
+            # files, so this is the whole answer rather than a stopped one.
+            keep()
         except ModelChanged:
             # This one is not a result about the prompt, so it gets no row.
             # The prompts after it would answer under weights the finished
@@ -368,57 +431,30 @@ def _run_batch(
                 gr.skip(),
                 gr.skip(),
                 gr.skip(),
+                gr.skip(),
             )
             continue
+        finally:
+            # Cancellation arrives as GeneratorExit thrown into whichever
+            # yield above is open, so the lines after this loop never run for
+            # the prompt in flight. Without this its tokens would go with it,
+            # which is the one thing the files written as the run goes are
+            # there to prevent. stop_batch() publishes what is in the
+            # directory, so a prompt kept here is still reachable.
+            keep(stopped=True)
 
         _reasoning, answer, _closed = split_response_text(
             text, literal_prefill=literal_prefill, reasoning_prefilled=prefilled
         )
-        summary = summarize(metrics)
-        sampling = {
-            "temperature": float(temperature),
-            "top_p": float(top_p),
-            "top_k": int(top_k),
-            "max_new_tokens": int(max_new_tokens),
-            "seed": used_seed,
-        }
-        if forced_prefix_tokens:
-            # The prefill's tokens are measured like any other, so a reader
-            # of the trace would take them for the model's own choices
-            # without being told how many were replayed. ui.generation says
-            # it the same way for a single response.
-            sampling["forced_prefix_tokens"] = forced_prefix_tokens
-        if applied_prefill:
-            sampling["assistant_prefill"] = assistant_prefill
-        rows.append(batch_row(index, prompt, answer, summary, used_seed))
-        if metrics:
-            traces.append(
-                build_trace(
-                    model_id=model_id,
-                    messages=request,
-                    response=text,
-                    sampling=sampling,
-                    metrics=metrics,
-                )
-            )
-            # Numbered by where the prompt sits in the box, not by how many
-            # traces came before it. A prompt that failed produces no trace,
-            # and numbering by the count would hand its name and its row
-            # number to the next prompt that worked, filing one prompt's
-            # measurements under another's.
-            trace_paths.append(write_batch_trace(traces[-1], directory, index))
-            # The files are published as the run grows, so stopping half way
-            # through still leaves every finished prompt downloadable. The
-            # table takes this prompt's rows for the same reason.
-            paths = [*trace_paths, table.add(traces[-1], index)]
+        rows.append(batch_row(index, prompt, answer, summarize(metrics), used_seed))
         yield (
             batch_progress(index, total, len(metrics), started),
             gr.update(value=list(rows)),
             gr.skip(),
             gr.skip(),
             gr.update(value=list(paths), visible=bool(paths)),
+            gr.skip(),
         )
-
     elapsed = max(time.monotonic() - started, 1e-6)
     tokens = sum(trace["token_count"] for trace in traces)
     # Counted from the rows rather than from ``total``, because a run that
@@ -448,20 +484,41 @@ def _run_batch(
         gr.update(value=list(rows)),
         *send_stop_buttons(False),
         gr.update(value=list(paths), visible=bool(paths)),
+        gr.skip(),
     )
 
 
-def stop_batch():
-    """Give the buttons back after the run was cancelled at a yield.
+def batch_files(directory) -> list[str]:
+    """Every export the run in ``directory`` has written, traces first."""
 
-    Gradio closes the generator where it stood, so the last frame it
-    published is the last word on what ran: those rows and those files are
-    the prompts that finished, and they stay on screen.
+    if not directory:
+        return []
+    place = Path(directory)
+    if not place.is_dir():
+        return []
+    traces = sorted(str(path) for path in place.glob("prompt-*.json"))
+    table = place / BATCH_CSV_NAME
+    return traces + ([str(table)] if table.exists() else [])
+
+
+def stop_batch(directory=None):
+    """Give the buttons back, and publish what the stopped run wrote.
+
+    Gradio closes the generator where it stood, so the frame it published
+    last cannot mention the prompt it was in the middle of - and that
+    prompt's tokens are on disk, written on the way out. The directory is
+    read here instead of trusting that frame, so a stopped run offers every
+    prompt that produced anything, the last one included.
+
+    The rows on screen are left alone: they are what the run itself said,
+    and this handler knows nothing about a prompt beyond its file.
     """
 
+    found = batch_files(directory)
     return (
-        "Stopped. The prompts that finished are still listed below.",
+        "Stopped. Everything the run measured is below.",
         gr.skip(),
         *send_stop_buttons(False),
+        gr.update(value=found, visible=True) if found else gr.skip(),
         gr.skip(),
     )
