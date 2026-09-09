@@ -127,20 +127,25 @@ def sampling_on_screen(values) -> dict:
     )
 
 
-def sampling_updates(forks: dict | None):
+def sampling_updates(forks: dict | None, *sampling):
     """Put the active conversation's sampling into the controls.
 
     Chained onto every path that changes which conversation is on screen, so
     switching to a fork brings back the temperature it was answered at rather
-    than leaving the last one's on the sliders. A conversation that carries
-    none - a new chat, or one from a file written before conversations carried
-    sampling - comes up with the saved settings, which is what every
-    conversation used to answer with.
+    than leaving the last one's on the sliders.
+
+    A conversation that carries none of its own - one from a file written
+    before conversations carried sampling - keeps whatever the controls are
+    showing, which is what it answers with. Reading the settings file for
+    that would be a race: its write is a separate listener, so a slider
+    moved and then a switch in quick succession would put the value just
+    moved away from back on the controls.
     """
 
     forks = forks or {}
-    values = settings.sampling_values(
-        branch_sampling(forks, forks.get("active", MAIN_BRANCH))
+    held = branch_sampling(forks, forks.get("active", MAIN_BRANCH))
+    values = (
+        settings.sampling_values(held) if held else sampling_on_screen(sampling)
     )
     return tuple(
         gr.update(value=values[name]) for name in settings.CONVERSATION_SAMPLING

@@ -366,7 +366,9 @@ it decodes to on its own; the text itself is assembled from the tokens
 together and is unaffected.
 
 `POST /v1/chatlab/score` is the **Score text** tab: give it `text` and
-optionally `context`, and it measures every token in one forward pass. It is
+optionally `context`, and it measures every token in one forward pass. It
+names the device and the weight precision that measured them, as a
+completion does. It is
 the endpoint for running a corpus past a model rather than a passage at a
 time.
 

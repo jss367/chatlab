@@ -1103,6 +1103,10 @@ class ScoreTests(ApiTestCase):
         ).json()
 
         self.assertEqual(body["object"], "chatlab.score")
+        # The same model ID can be loaded at several precisions, so a score
+        # says which weights measured it.
+        self.assertEqual(body["device"], "CPU")
+        self.assertEqual(body["precision"], "full")
         self.assertEqual([entry["token"] for entry in body["tokens"]], ["Hello", " world"])
         self.assertEqual([entry["token"] for entry in body["context_tokens"]], ["before"])
         self.assertEqual(body["summary"]["token_count"], 2)

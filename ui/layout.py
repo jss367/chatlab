@@ -999,7 +999,7 @@ def build_app() -> gr.Blocks:
 
             return event.then(
                 sampling_updates,
-                forks_state,
+                [forks_state, *sampling_controls],
                 sampling_controls,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             ).then(

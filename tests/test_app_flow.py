@@ -3134,6 +3134,26 @@ class ConversationSamplingTests(unittest.TestCase):
         forks["active"] = "Fork 1"
         self.assertEqual(self.values(app.sampling_updates(forks)), self.OWN)
 
+    def test_an_unpinned_conversation_keeps_what_the_controls_show(self):
+        # The settings write is a separate listener, so a slider moved and
+        # then a switch in quick succession would otherwise put the value
+        # just moved away from back on the controls - and that branch's next
+        # reply would use it.
+        with settings.override(**settings.sampling_defaults()):
+            shown = self.values(app.sampling_updates(new_forks(), *self.OWN.values()))
+
+        self.assertEqual(shown, self.OWN)
+
+    def test_a_pinned_conversation_still_wins_over_the_controls(self):
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
+
+        shown = self.values(
+            app.sampling_updates(forks, *settings.sampling_defaults().values())
+        )
+
+        self.assertEqual(shown, self.OWN)
+
     def test_a_value_the_settings_would_refuse_falls_back_to_the_setting(self):
         forks = new_forks()
         put_branch_sampling(forks, MAIN_BRANCH, self.OWN | {"temperature": 99.0})

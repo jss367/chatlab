@@ -649,6 +649,11 @@ def build_router() -> APIRouter:
 
         try:
             model_id, load_id = loaded_model(body.get("model"))
+            # Read with the load, as a completion does: the same model ID can
+            # be loaded at several precisions, and asking afterwards may
+            # describe a load that has since replaced this one.
+            device = runtime.MANAGER.device_name
+            precision = runtime.MANAGER.precision
             text = body.get("text")
             if not isinstance(text, str):
                 raise ApiError(400, "text must be a string.")
@@ -694,6 +699,8 @@ def build_router() -> APIRouter:
             {
                 "object": "chatlab.score",
                 "model": model_id,
+                "device": device,
+                "precision": precision,
                 "tokens": [token_entry(metric, wants) for metric in scored.metrics],
                 "context_tokens": [
                     token_entry(metric, wants) for metric in scored.context_metrics
