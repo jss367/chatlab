@@ -349,6 +349,11 @@ def judge_snapshot(snapshot: Path | None) -> tuple[tuple[str, ...], str]:
     if snapshot is None:
         return ("config.json", MODEL_WEIGHTS), TEXT_KIND
     if is_pipeline(snapshot):
+        if not pipeline_draws_from_text(snapshot):
+            # A diffusers pipeline all right, and not one the Images page
+            # can drive: it wants a picture, a video frame or a sound
+            # ChatLab has no way to give it. See pipeline_draws_from_text.
+            return (), ""
         return pipeline_missing_files(snapshot), IMAGE_KIND
     has_checkpoint = any(
         (snapshot / name).is_file() for pair in WEIGHT_FORMATS for name in pair
@@ -364,6 +369,56 @@ def is_pipeline(snapshot: Path) -> bool:
     """Whether the snapshot is a diffusers pipeline rather than one checkpoint."""
 
     return (snapshot / PIPELINE_INDEX).is_file()
+
+
+# What a pipeline class name says it needs besides a prompt. diffusers files
+# video, audio, image-conditioned and upscaling pipelines under the same
+# ``model_index.json`` as a text-to-image one, and the Images page has only a
+# prompt to give: such a pipeline would load and then fail for want of an
+# image, a video frame or an audio clip it was never handed.
+CONDITIONED_PIPELINES = (
+    "img2img",
+    "image2image",
+    "inpaint",
+    "instructpix2pix",
+    "controlnet",
+    "upscale",
+    "superresolution",
+    "depth",
+    "variation",
+    "video",
+    "audio",
+    "music",
+    "adapter",
+)
+
+# The components a pipeline needs to read a prompt at all. One without them
+# is conditioned on something else - an image embedding, a video frame - and
+# is not something a prompt alone drives, whatever its class is called.
+TEXT_TO_IMAGE_COMPONENTS = ("tokenizer", "text_encoder")
+
+
+def pipeline_draws_from_text(snapshot: Path) -> bool:
+    """Whether this pipeline is one a prompt alone can drive.
+
+    Two questions, because neither answers on its own. The components say
+    whether it can read a prompt: a pipeline with no tokenizer and no text
+    encoder is conditioned on something else and could not use one. The
+    class name says whether it wants more than a prompt: an img2img or an
+    upscaling pipeline has both components and still needs a picture handed
+    to it.
+
+    A guess either way, and deliberately the conservative one: a pipeline
+    this turns down is reported unsupported rather than offered and then
+    failed at the first draw, and its ID can still be typed into the model
+    box for a load that says what really went wrong.
+    """
+
+    name = (pipeline_class(snapshot) or "").lower()
+    if any(marker in name for marker in CONDITIONED_PIPELINES):
+        return False
+    components = pipeline_components(snapshot)
+    return all(needed in components for needed in TEXT_TO_IMAGE_COMPONENTS)
 
 
 def pipeline_components(snapshot: Path) -> tuple[str, ...]:

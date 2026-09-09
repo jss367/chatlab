@@ -418,6 +418,71 @@ class PipelineLayoutTests(unittest.TestCase):
             # Both shards are the one set and are summed.
             self.assertEqual(pipeline_weight_bytes(snapshot), 1600)
 
+    def test_a_pipeline_needing_more_than_a_prompt_is_not_an_image_model(self):
+        """diffusers files video, audio and image-conditioned pipelines
+        under the same model_index.json, and the Images page has only a
+        prompt: such a pipeline would load and then fail for want of an
+        input it was never handed."""
+
+        conditioned = {
+            "StableDiffusionImg2ImgPipeline": "wants a picture",
+            "StableDiffusionInpaintPipeline": "wants a picture and a mask",
+            "StableDiffusionUpscalePipeline": "wants a picture",
+            "StableVideoDiffusionPipeline": "wants a frame",
+            "AudioLDM2Pipeline": "makes sound",
+            "StableDiffusionControlNetPipeline": "wants a control image",
+        }
+        for class_name, why in conditioned.items():
+            files = self.whole()
+            files["model_index.json"] = json.dumps(
+                {**INDEX, "_class_name": class_name}
+            ).encode()
+            with self.subTest(pipeline=class_name, why=why), tempfile.TemporaryDirectory() as root:
+                self.snapshot(root, files)
+                status = cache_status(MODEL, Path(root))
+
+                self.assertTrue(status.unsupported)
+                self.assertEqual(status.kind, "")
+                self.assertFalse(status.complete)
+                self.assertEqual(status.missing_files, ())
+
+    def test_a_pipeline_that_cannot_read_a_prompt_at_all_is_refused(self):
+        # No tokenizer and no text encoder: conditioned on something else,
+        # whatever its class is called.
+        index = {
+            key: value
+            for key, value in INDEX.items()
+            if key not in ("tokenizer", "text_encoder")
+        }
+        files = {
+            name: content
+            for name, content in self.whole().items()
+            if not name.startswith(("tokenizer/", "text_encoder/"))
+        }
+        files["model_index.json"] = json.dumps(index).encode()
+        with tempfile.TemporaryDirectory() as root:
+            self.snapshot(root, files)
+
+            self.assertTrue(cache_status(MODEL, Path(root)).unsupported)
+
+    def test_the_text_to_image_pipelines_are_still_image_models(self):
+        for class_name in (
+            "StableDiffusionPipeline",
+            "StableDiffusionXLPipeline",
+            "FluxPipeline",
+            "PixArtAlphaPipeline",
+        ):
+            files = self.whole()
+            files["model_index.json"] = json.dumps(
+                {**INDEX, "_class_name": class_name}
+            ).encode()
+            with self.subTest(pipeline=class_name), tempfile.TemporaryDirectory() as root:
+                self.snapshot(root, files)
+                status = cache_status(MODEL, Path(root))
+
+                self.assertEqual(status.kind, IMAGE_KIND)
+                self.assertTrue(status.complete)
+
     def test_a_text_checkpoint_is_still_a_text_model(self):
         with tempfile.TemporaryDirectory() as root:
             self.snapshot(
@@ -1297,6 +1362,32 @@ class RunTests(unittest.TestCase):
         self.assertIn("Draw a smaller picture", run.attention_note)
         # The picture itself is unaffected: the maps are read alongside.
         self.assertIsNotNone(run.image)
+        self.assertEqual(run.steps_done, 2)
+
+    def test_a_pipeline_that_cannot_be_watched_is_refused_before_it_draws(self):
+        """callback_on_step_end carries every frame and is where the
+        cancellation is checked, so a pipeline without it would draw with
+        Stop doing nothing and the readings empty."""
+
+        class Legacy(FakePipeline):
+            def __call__(self, prompt=None, num_inference_steps=30, callback=None):
+                return type("Output", (), {"images": []})()
+
+        with self.assertRaises(image_runtime.Unwatchable) as caught:
+            self.run_pipeline(Legacy(), steps=2)
+
+        self.assertIn("callback_on_step_end", str(caught.exception))
+        self.assertIn("Legacy", str(caught.exception))
+
+    def test_a_pipeline_taking_varargs_is_not_refused_as_unwatchable(self):
+        # Its signature names no parameters at all, but it takes every
+        # keyword there is, callback_on_step_end among them.
+        class Anything(FakePipeline):
+            def __call__(self, *args, **kwargs):
+                return super().__call__(**kwargs)
+
+        run = self.run_pipeline(Anything(), steps=2)
+
         self.assertEqual(run.steps_done, 2)
 
     def test_a_pipeline_whose_attention_was_never_reached_reports_no_tokens(self):

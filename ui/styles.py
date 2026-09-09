@@ -203,9 +203,13 @@ html, body {{ height: 100%; overflow: hidden; }}
 }}
 @media (max-width: 850px) {{
   #conversation-pane {{ flex-basis: 160px !important; min-width: 160px !important; }}
-  #chat-columns {{ flex-direction: column; }}
-  #chat-workspace {{ flex: 1 1 60% !important; height: 60%; }}
-  #inspector-pane {{
+  #chat-columns, #images-columns {{ flex-direction: column; }}
+  #chat-workspace, #images-workspace {{ flex: 1 1 60% !important; height: 60%; }}
+  /* The Images page stacks with the Chat page and for the same reason: its
+     two panes want about 620px between them, so in a narrow window the
+     readings would sit off the side of a row that does not wrap and does
+     not scroll sideways. */
+  #inspector-pane, #image-inspector {{
     flex: 1 1 40% !important; height: 40%; border-left: 0;
     border-top: 1px solid var(--border-color-primary);
   }}

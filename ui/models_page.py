@@ -810,12 +810,14 @@ def format_timestamp(stamp: float | None) -> str:
 
 
 UNSUPPORTED_REASON = (
-    "not a model ChatLab loads: its files are all here, but its weights are "
-    "laid out for another framework (a CTranslate2 or ONNX export, say). "
-    "ChatLab loads two kinds - a Transformers causal language model, which "
+    "not a model ChatLab loads: its files are all here, but it is not one of "
+    "the two kinds. ChatLab loads a Transformers causal language model, which "
     "has a `model.safetensors` or `pytorch_model.bin` at the top of the repo, "
-    "and a diffusers image pipeline, which has a `model_index.json` - and "
-    "this repo is neither."
+    "and a diffusers pipeline that draws from a prompt, which has a "
+    "`model_index.json`, a tokenizer and a text encoder. A CTranslate2 or "
+    "ONNX export is neither; so is a diffusers pipeline that wants a picture, "
+    "a video frame or a sound alongside the prompt, because the Images page "
+    "has only a prompt to give it."
 )
 
 

@@ -1778,6 +1778,17 @@ class PageLayoutTests(unittest.TestCase):
                 )
         self.assertIn("#nav label span { font-size:", app.CSS)
 
+    def test_a_compact_window_stacks_the_images_panes_too(self):
+        # Its two panes want about 620px between them, so in a narrow window
+        # the readings would sit off the side of a row that neither wraps
+        # nor scrolls sideways.
+        compact = app.CSS[app.CSS.index("@media (max-width: 850px)") :]
+        compact = compact[: compact.index("\n}")]
+
+        self.assertIn("#images-columns", compact)
+        self.assertIn("#images-workspace", compact)
+        self.assertIn("#image-inspector", compact)
+
     def test_the_nav_names_are_on_screen_rather_than_a_hover_away(self):
         # Four pages is not a number worth hiding. Nothing clips the name
         # out of sight, and no tooltip stands in for it.

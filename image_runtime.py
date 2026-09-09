@@ -134,6 +134,10 @@ class Cancelled(RuntimeError):
     """The run was stopped between steps, at the reader's request."""
 
 
+class Unwatchable(RuntimeError):
+    """The pipeline offers no way to watch it, so there is nothing to show."""
+
+
 @dataclass(frozen=True)
 class ImageRequest:
     """One picture to draw, and how much of the drawing to record.
@@ -782,6 +786,7 @@ def run(
 
     import torch
 
+    _refuse_unwatchable(pipeline)
     started = time.monotonic()
     tokens = prompt_tokens(pipeline, request.prompt) if request.record_attention else []
     guidance = GuidanceReader()
@@ -864,6 +869,35 @@ def run(
         seconds=time.monotonic() - started,
         stopped=stopped,
     )
+
+
+def _refuse_unwatchable(pipeline) -> None:
+    """Refuse a pipeline whose steps cannot be watched, before it draws.
+
+    ``callback_on_step_end`` is the only way in: it carries every frame of
+    the trajectory and it is where the cancellation is checked. A pipeline
+    that does not take it - an old one with the legacy ``callback``, or one
+    with none - would draw its picture with the Stop button doing nothing
+    and the readings empty, which is the whole of what this page is for. Far
+    better to say so than to produce a run with nothing in it.
+    """
+
+    try:
+        parameters = inspect.signature(pipeline.__call__).parameters
+    except (TypeError, ValueError):
+        return
+    if any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        return
+    if "callback_on_step_end" not in parameters:
+        raise Unwatchable(
+            f"{type(pipeline).__name__} does not report its denoising steps "
+            "(no callback_on_step_end), so there would be no trajectory, no "
+            "guidance trace and no working Stop button. ChatLab needs a "
+            "diffusers pipeline recent enough to offer one."
+        )
 
 
 def _reading(step, timestep, latents, family, guidance, previous, torch) -> StepReading:
