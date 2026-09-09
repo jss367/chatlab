@@ -2,7 +2,7 @@
 
 import sys
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
 sys.path.insert(0, SPECPATH)
 from version import BUNDLE_IDENTIFIER, __version__  # noqa: E402
@@ -11,6 +11,11 @@ from version import BUNDLE_IDENTIFIER, __version__  # noqa: E402
 datas = []
 binaries = []
 hiddenimports = []
+
+# Diffusers checks these distributions' versions when imported. Their modules
+# alone are insufficient in a frozen bundle; retain the package metadata too.
+for package in ("requests", "filelock", "numpy"):
+    datas += copy_metadata(package)
 
 # Gradio ships its browser client as package data. Transformers and diffusers
 # both discover model implementations lazily, so include their built-in
