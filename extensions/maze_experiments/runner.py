@@ -299,7 +299,8 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
                 break
             time.sleep(.25)
     except GeneratorExit:
-        episode.phase, episode.detail = "stopped", "Viewer stopped streaming. The partial response was retained."
+        if episode.phase == "running":
+            episode.phase, episode.detail = "stopped", "Viewer stopped streaming. The partial response was retained."
         raise
     except Exception as exc:
         episode.phase, episode.detail = "error", f"{type(exc).__name__}: {exc}"

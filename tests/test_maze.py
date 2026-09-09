@@ -359,6 +359,36 @@ class MazeTests(unittest.TestCase):
         rendered = views(ep, False, selections, selections.new_session())
         self.assertIn('insertion has not been confirmed', rendered[4])
 
+    def test_closing_completed_frame_preserves_terminal_archive(self):
+        for supplied, text, ids, phase in ((1, call_text(MAZE.maze_id, 'east'), [8, 0], 'arrived'),
+                                           (0, 'I am done.', [8, 0], 'abandoned'),
+                                           (0, 'Unfinished', [8], 'budget')):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                ep = Episode(MAZE, CONFIG | {'supplied_moves': supplied, 'interruption_text': ''})
+                manager = Manager([(text, ids)])
+                stream = stream_episode(ep, manager, save_dir=Path(directory))
+                for frame in stream:
+                    if frame.phase == phase:
+                        before = copy.deepcopy(frame.payload())
+                        stream.close()
+                        break
+                self.assertEqual(ep.payload(), before)
+                saved = json.loads((Path(directory) / f'{ep.run_id}.json').read_text())
+                self.assertEqual(saved, json.loads(json.dumps(before)))
+                self.assertFalse(manager.busy)
+
+    def test_closing_active_stream_retains_partial_tokens_without_moving(self):
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        manager = Manager([(call_text(MAZE.maze_id, 'east'), [8, 0])])
+        stream = stream_episode(ep, manager)
+        next(stream)
+        next(stream)
+        stream.close()
+        self.assertEqual(ep.phase, 'stopped')
+        self.assertEqual(ep.sampled_tokens, 2)
+        self.assertEqual(ep.position, MAZE.start)
+        self.assertFalse(manager.busy)
+
     def test_failure_before_prefix_update_does_not_record_insertion(self):
         ep = Episode(MAZE, CONFIG)
         ep.request_interruption()
