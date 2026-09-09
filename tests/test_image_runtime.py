@@ -512,6 +512,90 @@ class PipelineDtypeTests(unittest.TestCase):
         self.assertEqual(text_total, card[0] + host[0])
 
 
+class KindAwareFitTests(unittest.TestCase):
+    """The fit verdicts beside the model lists have to know the two kinds.
+
+    Both halves of a verdict depend on it: a pipeline has no checkpoint at
+    its root to measure, and on CUDA it is staged in host memory before it
+    moves onto the card. Without either, every verdict beside an image model
+    would be a text-shaped guess, which is what these verdicts exist to
+    prevent.
+    """
+
+    def test_the_estimate_routes_a_pipeline_to_its_own_sizing(self):
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = PipelineDtypeTests().pipeline(
+                Path(root), {"unet": ("float16", 64)}
+            )
+
+            as_image = model_runtime.estimate_snapshot_bytes(
+                snapshot, "float16", None, IMAGE_KIND
+            )
+            as_text = model_runtime.estimate_snapshot_bytes(snapshot, "float16")
+            summed = model_runtime.pipeline_loaded_bytes(snapshot, "float16")
+
+        self.assertEqual(as_image, summed)
+        # A pipeline has no checkpoint at its root, so the text reading has
+        # nothing to measure and says so rather than guessing.
+        self.assertIsNone(as_text)
+
+    def test_a_quantized_choice_does_not_shrink_a_pipeline_estimate(self):
+        # The Metal quantizer is Transformers' own and a load has already
+        # cleared the choice, so honouring it here would report a size no
+        # load will produce.
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = PipelineDtypeTests().pipeline(
+                Path(root), {"unet": ("float16", 64)}
+            )
+
+            whole = model_runtime.estimate_snapshot_bytes(
+                snapshot, "float16", None, IMAGE_KIND
+            )
+            asked_for_4bit = model_runtime.estimate_snapshot_bytes(
+                snapshot, "float16", 4, IMAGE_KIND
+            )
+
+        self.assertEqual(asked_for_4bit, whole)
+
+    def profile(self, backend):
+        card = (8 * 1024**3, 6 * 1024**3)
+        host = (64 * 1024**3, 48 * 1024**3)
+        with (
+            mock.patch.object(model_runtime, "cuda_memory", return_value=card),
+            mock.patch.object(model_runtime, "system_memory", return_value=host),
+        ):
+            total, available, pool = model_runtime.memory_pool(backend)
+            return (
+                model_runtime.DeviceProfile(
+                    backend=backend, total=total, available=available, pool=pool
+                ),
+                card,
+                host,
+            )
+
+    def test_a_pipeline_on_cuda_reads_the_tighter_of_the_two_pools(self):
+        profile, card, host = self.profile("cuda")
+
+        with (
+            mock.patch.object(model_runtime, "cuda_memory", return_value=card),
+            mock.patch.object(model_runtime, "system_memory", return_value=host),
+        ):
+            for_images = profile.for_kind(IMAGE_KIND)
+
+        self.assertEqual(profile.total, card[0] + host[0])
+        self.assertEqual(for_images.total, min(card[0], host[0]))
+        self.assertEqual(for_images.pool, "both the GPU and this machine")
+
+    def test_a_text_model_and_every_other_backend_read_unchanged(self):
+        cuda, _card, _host = self.profile("cuda")
+        metal, _c, _h = self.profile("mps")
+
+        self.assertIs(cuda.for_kind(TEXT_KIND), cuda)
+        # Only CUDA stages in host memory before moving across, so Metal and
+        # the CPU already answer for both.
+        self.assertIs(metal.for_kind(IMAGE_KIND), metal)
+
+
 class PreviewTests(unittest.TestCase):
     """Turning a latent into a frame a person can look at."""
 

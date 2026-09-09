@@ -12,6 +12,7 @@ import webbrowser
 from pathlib import Path
 from urllib.request import urlopen
 
+import api
 import updater
 from app import build_app
 from desktop_smoke import smoke_test_metal, smoke_test_pipelines
@@ -65,6 +66,10 @@ def start_local_server():
             server_port=port,
             show_api=False,
         )
+        # The local API shares the window's port. Gradio builds the
+        # application inside launch(), so this is the first moment there is
+        # one to add routes to.
+        api.attach(demo.app)
     except Exception:
         demo.close(verbose=False)
         raise
@@ -81,6 +86,13 @@ def smoke_test() -> int:
         with urlopen(local_url, timeout=15) as response:
             if response.status != 200:
                 raise RuntimeError(f"ChatLab returned HTTP {response.status}.")
+        # The API is served from the same port, so a build that mounts it
+        # wrongly - Gradio's own routes shadowing it, say - fails here rather
+        # than in front of somebody's script.
+        status_url = f"{local_url.rstrip('/')}{api.API_PREFIX}/chatlab/status"
+        with urlopen(status_url, timeout=15) as response:
+            if response.status != 200:
+                raise RuntimeError(f"The ChatLab API returned HTTP {response.status}.")
         print(f"ChatLab desktop smoke test passed at {local_url}")
         return 0
     finally:

@@ -21,6 +21,13 @@ a lock, so two handlers saving at once cannot each merge into the same old
 copy and the second replace the first's work; two processes on one file are
 not protected against each other.
 
+A branch can also carry its own sampling - the temperature, top-p, top-k and
+response length it answers with - written beside its turns and stamped
+separately, so a page that moves a slider does not thereby claim a
+transcript it may be a reply behind on, and a newer transcript does not undo
+a slider moved on another page. A branch with no sampling of its own answers
+with the saved settings.
+
 Where it lives::
 
     ~/.local/share/chatlab/conversations.json
@@ -43,6 +50,7 @@ from uuid import uuid4
 
 from conversation import (
     MAIN_BRANCH,
+    SAMPLING_FIELDS,
     copy_forks,
     next_branch_name,
     put_branch,
@@ -95,12 +103,50 @@ def as_seen(forks: dict | None, turns: list[dict] | None) -> dict:
     return forks
 
 
+def sampling_entry(values: dict | None) -> dict:
+    """A branch's sampling as a file spells it: the known keys, rightly typed.
+
+    A value of the wrong type is dropped rather than written, so a file this
+    version reads back is one it can also parse. The types are the file's
+    business alone; what the values may be is the settings module's.
+
+    A key this version knows nothing about is carried through untouched, the
+    way the settings file carries its own unknown keys: two machines sharing
+    one file need not run the same version, and a branch's sampling written
+    by the newer of them must survive being read and saved by the older.
+    """
+
+    entry = {
+        key: value
+        for key, value in (values or {}).items()
+        if key not in SAMPLING_FIELDS
+    }
+    for key, kind in SAMPLING_FIELDS.items():
+        value = (values or {}).get(key)
+        if isinstance(value, bool):
+            continue
+        if kind is float and isinstance(value, int):
+            value = float(value)
+        if isinstance(value, kind):
+            entry[key] = value
+    return entry
+
+
 def dump(forks: dict | None) -> str:
     forks = copy_forks(forks)
     updated = forks["updated"]
     branches = []
     for name, turns in forks["branches"].items():
         entry = {"name": name, "turns": turn_entries(turns)}
+        sampling = sampling_entry(forks["sampling"].get(name))
+        if sampling:
+            entry["sampling"] = sampling
+        # Written whether or not there is sampling beside it: a stamp on its
+        # own says the sampling was taken away, and another page holding an
+        # older copy must not put it back.
+        stamp = forks["sampling_updated"].get(name)
+        if stamp:
+            entry["sampling_updated"] = stamp
         if name in updated:
             entry["updated"] = updated[name]
         branches.append(entry)
@@ -131,6 +177,8 @@ def parse(payload: str) -> dict:
         raise ValueError("The conversations file has no list of branches.")
 
     branches: dict[str, list[dict]] = {}
+    sampling: dict[str, dict] = {}
+    sampling_updated: dict[str, str] = {}
     updated: dict[str, str] = {}
     for entry in raw_branches:
         if not isinstance(entry, dict):
@@ -145,6 +193,25 @@ def parse(payload: str) -> dict:
             if not isinstance(stamp, str):
                 raise ValueError(f"The branch {name!r} has an updated time that is not a string.")
             updated[name] = stamp
+        held = entry.get("sampling")
+        if held is not None:
+            if not isinstance(held, dict):
+                raise ValueError(f"The branch {name!r} has sampling that is not an object.")
+            # Whatever is unusable is left out here and falls back to the
+            # saved setting when the conversation is answered, the same way
+            # a hand-edited settings file does.
+            kept = sampling_entry(held)
+            if kept:
+                sampling[name] = kept
+        # Read whether or not any sampling came with it: on its own it says
+        # the sampling was taken away, and when it was.
+        sampling_stamp = entry.get("sampling_updated")
+        if sampling_stamp is not None:
+            if not isinstance(sampling_stamp, str):
+                raise ValueError(
+                    f"The branch {name!r} has a sampling time that is not a string."
+                )
+            sampling_updated[name] = sampling_stamp
         turns = turns_from_entries(entry.get("turns"))
         # A response that was still streaming when the file was written is
         # kept as far as it got, and closed, so its reasoning block does not
@@ -171,7 +238,13 @@ def parse(payload: str) -> dict:
     active = data.get("active")
     if active not in branches:
         active = next(iter(branches))
-    return {"active": active, "branches": branches, "updated": updated}
+    return {
+        "active": active,
+        "branches": branches,
+        "sampling": sampling,
+        "sampling_updated": sampling_updated,
+        "updated": updated,
+    }
 
 
 def merge(mine: dict | None, theirs: dict | None) -> dict:
@@ -198,18 +271,39 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
         names += [name for name in held if name not in names]
 
     branches: dict[str, list[dict]] = {}
+    sampling: dict[str, dict] = {}
+    sampling_updated: dict[str, str] = {}
     updated: dict[str, str] = {}
-    for name in names:
-        ours = mine["updated"].get(name, "")
-        its = theirs["updated"].get(name, "")
+
+    def newer(name: str, times: str) -> dict:
+        """Whichever side touched ``name`` more recently by the ``times`` stamps."""
+
+        ours = mine[times].get(name, "")
+        its = theirs[times].get(name, "")
         if ours > its:
-            winner = mine
-        elif its > ours:
-            winner = theirs
-        else:
-            winner = mine if name in mine["branches"] else theirs
+            return mine
+        if its > ours:
+            return theirs
+        return mine if name in mine["branches"] else theirs
+
+    for name in names:
+        winner = newer(name, "updated")
         if name in winner["branches"]:
             branches[name] = winner["branches"][name]
+            # The sampling is merged on its own stamp rather than the
+            # branch's. A page that moves a slider may be a reply behind the
+            # page that made it: it must not win the transcript, and the
+            # newer transcript must not undo its slider.
+            side = newer(name, "sampling_updated")
+            stamp = side["sampling_updated"].get(name)
+            if stamp:
+                # Kept even where that side has no sampling: the stamp is
+                # then a removal, and it has to outlive this merge or the
+                # next page still holding the old entry would put it back.
+                sampling_updated[name] = stamp
+            held = side["sampling"].get(name)
+            if held:
+                sampling[name] = held
         stamp = winner["updated"].get(name)
         if stamp:
             updated[name] = stamp
@@ -217,7 +311,13 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
     if not branches:
         branches[MAIN_BRANCH] = []
     active = mine["active"] if mine["active"] in branches else next(iter(branches))
-    return {"active": active, "branches": branches, "updated": updated}
+    return {
+        "active": active,
+        "branches": branches,
+        "sampling": sampling,
+        "sampling_updated": sampling_updated,
+        "updated": updated,
+    }
 
 
 def read(path: Path | None = None) -> dict | None:

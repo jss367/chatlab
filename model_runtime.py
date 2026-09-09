@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -1186,6 +1186,411 @@ def check_memory_for_load(
         )
 
 
+def detect_backend(torch=None) -> str:
+    """Where a load would land: ``"cuda"``, ``"mps"`` or ``"cpu"``.
+
+    The same order :meth:`ModelManager._load_locked` picks in, so anything
+    that describes a load before it happens agrees with the load itself.
+    """
+
+    if torch is None:
+        import torch
+    try:
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
+    except (RuntimeError, AttributeError, ValueError, TypeError):
+        return "cpu"
+    return "cpu"
+
+
+def load_dtype(backend: str, torch=None):
+    """The dtype ``backend`` reads full weights as.
+
+    CUDA takes bfloat16 where the card supports it, Metal half precision, and
+    the CPU float32 because half-precision arithmetic there is slow or absent.
+    """
+
+    if torch is None:
+        import torch
+    if backend == "cuda":
+        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    if backend == "mps":
+        return torch.float16
+    return torch.float32
+
+
+def dtype_name(dtype) -> str:
+    """``torch.float16`` -> ``"float16"``, the spelling :data:`DTYPE_BYTES` uses."""
+
+    return str(dtype).replace("torch.", "")
+
+
+def memory_pool(
+    backend: str, ceiling: int | None = None, kind: str = TEXT_KIND
+) -> tuple[int | None, int | None, str]:
+    """Total and available memory a load on ``backend`` may use, and its name.
+
+    On CUDA a text model's weights fill the graphics cards and
+    ``device_map="auto"`` places the rest on the CPU, so the cards plus the
+    machine's memory is the pool; on Metal the GPU shares the machine's
+    memory, and on the CPU it is the machine's memory outright. ``ceiling``
+    is what the device's own allocator will hand out, which on Metal is less
+    than the machine holds: whichever of the two is smaller is what the
+    weights have to fit inside.
+
+    An image pipeline on CUDA is the exception. It is read into host memory
+    and moved onto the card whole, with nothing offloaded, so it has to fit
+    the card *and* the machine, each on its own rather than added together:
+    the combined pool would pass one that fits host memory and then fail
+    inside ``.to("cuda")``, and the card alone would pass one that exhausts
+    the machine while ``from_pretrained`` is still staging it.
+    """
+
+    if backend == "cuda" and kind == IMAGE_KIND:
+        total, available = _smaller_known(cuda_memory(), system_memory())
+        pool = "both the GPU and this machine"
+    elif backend == "cuda":
+        total, available = offload_pool(cuda_memory(), system_memory())
+        pool = "the GPU plus this machine"
+    else:
+        total, available = system_memory()
+        pool = "this machine"
+    if ceiling is not None:
+        total = ceiling if total is None else min(total, ceiling)
+        available = ceiling if available is None else min(available, ceiling)
+        if total == ceiling:
+            pool = "Metal on this machine"
+    return total, available, pool
+
+
+FITS = "fits"
+TIGHT = "tight"
+UNFIT = "unfit"
+FIT_UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class Fit:
+    """Whether a model would load right now, judged the way a load judges it.
+
+    The three verdicts are the three outcomes of
+    :func:`check_memory_for_load`: ``FITS`` is a load that would go ahead,
+    ``UNFIT`` one that could not fit the machine however idle it were, and
+    ``TIGHT`` one that fits the machine but not what is free at the moment, so
+    closing something or waiting for memory pressure to fall would let it in.
+    ``FIT_UNKNOWN`` is a model whose size or whose machine could not be
+    measured; it says so rather than guessing.
+    """
+
+    state: str
+    estimated: int | None = None
+    total: int | None = None
+    available: int | None = None
+    pool: str = "this machine"
+    note: str = ""
+
+    @property
+    def known(self) -> bool:
+        return self.state != FIT_UNKNOWN
+
+
+def fit_for(
+    estimated: int | None,
+    total: int | None,
+    available: int | None,
+    pool: str = "this machine",
+    headroom: int = MEMORY_HEADROOM_BYTES,
+) -> Fit:
+    """The verdict a load of ``estimated`` bytes would get from this machine now.
+
+    Deliberately a second reading of the same figures rather than a trial
+    load: the check that refuses a load is the authority, and this exists to
+    say beforehand what it would answer, so a reader picking a model is not
+    made to press the button to find out.
+    """
+
+    if estimated is None or (total is None and available is None):
+        return Fit(
+            FIT_UNKNOWN,
+            estimated,
+            total,
+            available,
+            pool,
+            "Size unknown until it is downloaded."
+            if estimated is None
+            else "This machine does not report its memory.",
+        )
+    needed = estimated + headroom
+    weights = f"About {format_memory(estimated)} of weights"
+    reserve = f"{format_memory(headroom)} of safety reserve"
+    if total is not None and needed > total:
+        return Fit(
+            UNFIT,
+            estimated,
+            total,
+            available,
+            pool,
+            f"{weights} plus {reserve} is more than the "
+            f"{format_memory(total)} {pool} has.",
+        )
+    if available is not None and needed > available:
+        return Fit(
+            TIGHT,
+            estimated,
+            total,
+            available,
+            pool,
+            f"{weights} plus {reserve} needs more than the "
+            f"{format_memory(available)} ChatLab estimates free right now. "
+            "Close something memory-heavy, or wait for memory pressure to fall.",
+        )
+    return Fit(
+        FITS,
+        estimated,
+        total,
+        available,
+        pool,
+        f"{weights}, inside the {memory_note(available)} ChatLab estimates free.",
+    )
+
+
+def estimate_snapshot_bytes(
+    snapshot: Path,
+    load_dtype_name: str,
+    bits: int | None = None,
+    kind: str = TEXT_KIND,
+) -> int | None:
+    """Memory the weights in ``snapshot`` would take once loaded, or ``None``.
+
+    ``None`` where the weight files cannot be measured — a snapshot short of
+    files, or an index that cannot be read. A load in that state is let
+    through to the loader, which gives its own more specific error, and a
+    reader is told the size is unknown rather than shown a guess.
+
+    An image pipeline is measured component by component, each from its own
+    stored dtype (see :func:`pipeline_loaded_bytes`), because there is no one
+    checkpoint at the root to read and no one dtype to read it as. ``bits``
+    does not apply to one: the Metal quantizer is Transformers' own and a
+    load has already cleared the choice, so it is ignored rather than
+    reported as though it had been honoured.
+    """
+
+    if kind == IMAGE_KIND:
+        return pipeline_loaded_bytes(snapshot, load_dtype_name)
+    weight_bytes = snapshot_weight_bytes(snapshot)
+    if weight_bytes is None:
+        return None
+    _architecture, checkpoint_dtype = _read_config(snapshot)
+    if bits is None:
+        return estimate_loaded_bytes(weight_bytes, checkpoint_dtype, load_dtype_name)
+    # What the quantizer will leave on the device, not what the file holds:
+    # the check is against the loaded size, and a 4-bit load of a checkpoint
+    # the machine could not hold whole is the point.
+    return estimate_quantized_bytes(
+        weight_bytes, checkpoint_dtype, bits, _embedding_params(snapshot)
+    )
+
+
+def estimate_parameter_bytes(
+    parameters: int, load_dtype_name: str, bits: int | None = None
+) -> int:
+    """Memory a model of ``parameters`` weights would take once loaded.
+
+    For a model that is not on disk yet, where the hub's parameter count is
+    all there is to go on. The checkpoint is assumed to be half precision,
+    which is what current releases ship, and the embeddings are assumed to be
+    quantized along with everything else because their share is not known
+    from a search result: a quantized estimate made this way is a little
+    lower than the model turns out to be.
+    """
+
+    half_bytes = parameters * 2
+    if bits is None:
+        return estimate_loaded_bytes(half_bytes, "float16", load_dtype_name)
+    return estimate_quantized_bytes(half_bytes, "float16", bits, None)
+
+
+@dataclass(frozen=True)
+class DeviceProfile:
+    """The device a load would use, and the memory it would draw on.
+
+    ``backend`` is ``None`` until torch has been imported. The Models page is
+    painted before anything has needed torch, and importing it takes several
+    seconds, so a first paint answers from the machine's own memory - the
+    pool on every backend but CUDA - and says the device is not known yet
+    rather than blocking the page or guessing at one. :func:`warm_device`
+    starts that import beside the interface, so by the time a reader looks
+    the full reading is there.
+    """
+
+    backend: str | None = None
+    dtype: str | None = None
+    total: int | None = None
+    available: int | None = None
+    ceiling: int | None = None
+    pool: str = "this machine"
+    recommended: int | None = None
+    """Metal's recommended working set, which the ceiling is a share of."""
+
+    fraction: float | None = None
+    """The share of that recommendation the allocator is held to."""
+
+    held: int | None = None
+    """Live tensors on the device: the loaded model, and any cache beside it.
+
+    ``None`` where the device keeps no such figure, which is host memory.
+    """
+
+    @property
+    def quantizes(self) -> bool:
+        """Whether a quantized weight precision would be honoured here."""
+
+        return self.backend == "mps"
+
+    def for_kind(self, kind: str) -> DeviceProfile:
+        """The same reading, with the pool the given kind of model would use.
+
+        Only an image pipeline on CUDA reads differently, and only because it
+        is staged in host memory before it is moved onto the card, so it has
+        to fit both pools rather than their sum; see :func:`memory_pool`.
+        Everything else is the reading it already is. Kept as a method so a
+        caller judging a list of models can take the two readings it needs
+        once rather than per model - reading host memory is a subprocess.
+        """
+
+        if kind != IMAGE_KIND or self.backend != "cuda":
+            return self
+        total, available, pool = memory_pool(self.backend, self.ceiling, kind)
+        return replace(self, total=total, available=available, pool=pool)
+
+    def reclaimed(self, estimated: int | None = None) -> DeviceProfile:
+        """The same reading with the loaded model's memory given back.
+
+        A load unloads whatever is in memory before it checks whether the
+        next model fits, so the weights on the device now are not in the way
+        of the model that would replace them. Anything that judges a
+        replacement has to say the same, or the list and the button disagree.
+
+        ``estimated`` is the load's own estimate of the weights it read, as
+        :attr:`ModelManager.loaded_bytes` records it, and the larger of the
+        two figures is what a load gives back. Neither is enough alone: host
+        memory keeps no allocator figure at all, and a CUDA model spread over
+        the cards and the machine by ``device_map="auto"`` is only counted on
+        the cards by one while the other covers the whole of it. On Metal the
+        allocator figure can be the larger, a response's key-value cache
+        being live tensors too, and that is freed with the model.
+        """
+
+        given = max(self.held or 0, estimated or 0)
+        if not given:
+            return self
+        return replace(
+            self,
+            available=None if self.available is None else self.available + given,
+        )
+
+DEVICE_LABELS = {"mps": "Apple Metal (MPS)", "cpu": "CPU"}
+
+
+def device_label(backend: str | None, torch=None) -> str:
+    """How the device names itself, in the words a loaded model's badge uses."""
+
+    if backend is None:
+        return "not determined yet"
+    if backend != "cuda":
+        return DEVICE_LABELS.get(backend, backend)
+    if torch is None:
+        torch = imported_torch()
+    try:
+        return f"CUDA ({torch.cuda.get_device_name(0)})"
+    except (AttributeError, RuntimeError, ValueError, TypeError):
+        return "CUDA"
+
+
+def device_profile(torch=None) -> DeviceProfile:
+    """Read the device and its memory now.
+
+    Nothing is cached: availability moves from one second to the next, and
+    the Metal ceiling follows a setting the reader can change. Only the
+    import is expensive, and this never pays for it - torch is used if
+    another part of the app has already brought it in.
+    """
+
+    if torch is None:
+        torch = imported_torch()
+    if torch is None:
+        total, available = system_memory()
+        return DeviceProfile(total=total, available=available)
+    backend = detect_backend(torch)
+    budget = mps_budget(torch) if backend == "mps" else MetalBudget()
+    total, available, pool = memory_pool(backend, budget.ceiling)
+    return DeviceProfile(
+        backend=backend,
+        dtype=dtype_name(load_dtype(backend, torch)),
+        total=total,
+        available=available,
+        ceiling=budget.ceiling,
+        pool=pool,
+        recommended=budget.recommended,
+        fraction=budget.fraction,
+        held=allocated_bytes(backend, torch),
+    )
+
+
+# Set once torch has finished importing. Python puts a module in
+# ``sys.modules`` before its body has run, so the module being there says
+# nothing about whether its attributes exist yet: a reader that went by
+# presence alone could find ``torch`` without ``torch.backends``, and either
+# raise or quietly report the wrong device. Nothing reads torch through
+# :func:`imported_torch` until this is set.
+_torch_ready = threading.Event()
+
+
+def imported_torch():
+    """torch, if it is imported and finished importing; otherwise ``None``.
+
+    For everything that describes the machine before a model is loaded. None
+    of it is worth paying a multi-second import for, and none of it may read
+    a module that is still being built.
+    """
+
+    return sys.modules.get("torch") if _torch_ready.is_set() else None
+
+
+def warm_device() -> None:
+    """Import torch beside the interface so the first fit verdict is the full one.
+
+    Started when the app is built. The import holds no lock the interface
+    wants and the module is imported once however many threads ask for it, so
+    a load that arrives while this is still running simply waits for it. The
+    interface never waits: until this finishes, the device is reported as not
+    read yet.
+    """
+
+    def read() -> None:
+        try:
+            import torch  # noqa: F401
+        except Exception as error:  # pragma: no cover - torch is a hard dependency
+            logger.warning("Could not import torch to read the device: %s", error)
+            return
+        # Only now is every attribute there to be read.
+        _torch_ready.set()
+        logger.info("Device: %s", device_label(detect_backend()))
+
+    threading.Thread(target=read, name="chatlab-device", daemon=True).start()
+
+
+def model_fit(
+    estimated: int | None, profile: DeviceProfile | None = None
+) -> Fit:
+    """Whether weights of ``estimated`` bytes would load on this machine now."""
+
+    profile = profile if profile is not None else device_profile()
+    return fit_for(estimated, profile.total, profile.available, profile.pool)
+
+
 def mps_memory_fraction(
     recommended: int | None = None, total: int | None = None
 ) -> float | None:
@@ -1223,6 +1628,41 @@ def default_mps_memory_fraction(
     if not recommended or not total:
         return FALLBACK_MPS_MEMORY_FRACTION
     return min(1.0, (total * DEFAULT_MPS_MEMORY_SHARE) / recommended)
+
+
+class MetalBudget(NamedTuple):
+    """Metal's own recommendation, the share of it allowed, and the product.
+
+    Any of the three is ``None`` where Metal will not say what it recommends,
+    or where the cap is being left alone - see :func:`mps_memory_fraction`.
+    """
+
+    recommended: int | None = None
+    fraction: float | None = None
+    ceiling: int | None = None
+
+
+def mps_budget(torch=None) -> MetalBudget:
+    """What Metal recommends and what ChatLab will let the allocator take.
+
+    What :meth:`ModelManager._cap_mps_memory` sets, computed without setting
+    it, so a load can be judged against the same ceiling it will meet and the
+    Settings page can say what that ceiling is.
+    """
+
+    if torch is None:
+        import torch
+    recommended = _recommended_mps_memory(torch)
+    fraction = mps_memory_fraction(recommended, system_memory()[0])
+    if fraction is None or not recommended:
+        return MetalBudget(recommended, fraction)
+    return MetalBudget(recommended, fraction, int(recommended * fraction))
+
+
+def mps_ceiling(torch=None) -> int | None:
+    """The most Metal's allocator will hand out under the cap, or ``None``."""
+
+    return mps_budget(torch).ceiling
 
 
 def _recommended_mps_memory(torch) -> int | None:
@@ -2432,6 +2872,15 @@ class GenerationUpdate:
     chose to measure.
     """
 
+    ends_on_stop_token: bool = False
+    """Whether the last token is one the model ends a response on.
+
+    The count of tokens cannot answer this on its own: a stop token sampled
+    as the very last token the ceiling allows ends the response naturally,
+    and a caller told that was the length limit would treat a finished answer
+    as truncated.
+    """
+
     model_id: str | None = None
     """Which weights produced this update, read under the model lock.
 
@@ -2919,16 +3368,32 @@ def _cache_can_crop(cache, held: int) -> bool:
     return True
 
 
-# What the loaders hand back: the causal LM and its tokenizer for a text
+class LoadedModel(NamedTuple):
+    """What is in memory, as one reading.
+
+    The four move together - a load replaces all of them - so anything that
+    reports them together has to read them together. Read field by field,
+    a caller can straddle a load and describe one model's weights with
+    another's device or precision.
+    """
+
+    model_id: str | None = None
+    device_name: str | None = None
+    precision: str | None = None
+    load_id: str | None = None
+
+
+# What the two loaders hand back: the causal LM and its tokenizer for a text
 # model, the pipeline for an image one, and the device to report either way.
 # One shape for both, so the load's own bookkeeping does not have to know
-# which of them ran.
-LoadedModel = tuple[Any, Any, Any, str]
+# which of them ran. Named apart from LoadedModel below, which is a different
+# thing entirely - what is in memory, as one reading for a caller to report.
+ReadWeights = tuple[Any, Any, Any, str]
 
 
 def _read_text_model(
     local_path: Path, torch, backend: str, dtype, bits: int | None, precision: str
-) -> LoadedModel:
+) -> ReadWeights:
     """Read one causal-LM checkpoint out of ``local_path`` onto ``backend``."""
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -3015,7 +3480,7 @@ PIPELINE_DIFFUSERS = "0.31"
 
 def _read_pipeline(
     local_path: Path, torch, backend: str, dtype, bits: int | None, precision: str
-) -> LoadedModel:
+) -> ReadWeights:
     """Read a diffusers pipeline out of ``local_path`` onto ``backend``.
 
     Built from ``model_index.json``, so whichever pipeline the repo ships is
@@ -3077,10 +3542,18 @@ class ModelManager:
         self.local_path: Path | None = None
         self.device_name: str | None = None
         self.precision: str | None = None
+        # What the load estimated the weights would take. Host memory keeps
+        # no allocator figure, so this is what a fit verdict gives back when
+        # judging a model that would replace this one.
+        self.loaded_bytes: int | None = None
         # Counts successful loads, so state produced under one set of weights
         # can be told from state produced under the next even when both came
         # from the same repository ID (a re-download at a newer revision).
         self.load_count = 0
+        # What is in memory, kept as one value beside the fields above so it
+        # can be read without straddling a load; see :meth:`loaded_model`.
+        self._loaded = LoadedModel()
+        self._loaded_lock = threading.Lock()
         # Loads claimed and not finished yet, by claim number. ``model_id``
         # is cleared for the whole of a load and set only once the weights
         # are in, so on its own it says nothing about the minutes in
@@ -3144,6 +3617,17 @@ class ModelManager:
         # token the page owned would be cleared by that second attempt even
         # though it is refused, losing the first tab's cancellation.
         self._image_cancel: threading.Event | None = None
+
+    def loaded_model(self) -> LoadedModel:
+        """What is in memory: the model, its device, its precision, its load.
+
+        One reading of the four, so a caller reporting them together cannot
+        straddle a load and describe one model with another's device. Empty
+        fields where nothing is loaded.
+        """
+
+        with self._loaded_lock:
+            return self._loaded
 
     @property
     def loaded(self) -> bool:
@@ -3427,17 +3911,8 @@ class ModelManager:
         progress = progress or LoadProgress()
         self._unload_locked(torch)
         bits = QUANTIZED_BITS.get(precision)
-        if torch.cuda.is_available():
-            backend = "cuda"
-            dtype = (
-                torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-            )
-        elif torch.backends.mps.is_available():
-            backend = "mps"
-            dtype = torch.float16
-        else:
-            backend = "cpu"
-            dtype = torch.float32
+        backend = detect_backend(torch)
+        dtype = load_dtype(backend, torch)
         if bits is not None and backend != "mps":
             logger.info(
                 "Loading %s with full weights: %s weights need Apple Metal, not %s",
@@ -3468,7 +3943,7 @@ class ModelManager:
         estimated, available = self._check_memory(
             model_id,
             local_path,
-            str(dtype).replace("torch.", ""),
+            dtype_name(dtype),
             backend,
             ceiling=ceiling,
             bits=bits,
@@ -3519,7 +3994,12 @@ class ModelManager:
         self.local_path = local_path
         self.device_name = device_name
         self.precision = precision
+        self.loaded_bytes = estimated
         self.load_count += 1
+        with self._loaded_lock:
+            self._loaded = LoadedModel(
+                model_id, device_name, precision, f"{model_id}#{self.load_count}"
+            )
         # The one record of what a load cost. Without it a later memory
         # failure cannot be told from a leak, a second copy of the weights, or
         # a machine that was already full when the load began.
@@ -3602,6 +4082,9 @@ class ModelManager:
         self.local_path = None
         self.device_name = None
         self.precision = None
+        self.loaded_bytes = None
+        with self._loaded_lock:
+            self._loaded = LoadedModel()
         gc.collect()
         self._release_device_cache(torch)
 
@@ -3720,45 +4203,13 @@ class ModelManager:
         dtype in their configs and need not agree about it either.
         """
 
-        if kind == IMAGE_KIND:
-            # Summed per component, each from its own dtype; a pipeline is
-            # never quantized here, so ``bits`` has already been cleared.
-            estimated = pipeline_loaded_bytes(local_path, load_dtype)
-        else:
-            weight_bytes = weight_bytes_for(local_path, kind)
-            if weight_bytes is None:
-                return None, None
-            _architecture, checkpoint_dtype = _read_config(local_path)
-            if bits is None:
-                estimated = estimate_loaded_bytes(
-                    weight_bytes, checkpoint_dtype, load_dtype
-                )
-            else:
-                # What the quantizer will leave on the device, not what the
-                # file holds: the check is against the loaded size, and a
-                # 4-bit load of a checkpoint the machine could not hold whole
-                # is the point.
-                estimated = estimate_quantized_bytes(
-                    weight_bytes, checkpoint_dtype, bits, _embedding_params(local_path)
-                )
+        # Through main's two helpers rather than branching here: both now
+        # take the kind, so the fit panel that also calls them sizes a
+        # pipeline the same way a load does.
+        estimated = estimate_snapshot_bytes(local_path, load_dtype, bits, kind)
         if estimated is None:
             return None, None
-        if backend == "cuda" and kind == IMAGE_KIND:
-            # Staged in host memory and then moved onto the card whole, so
-            # both pools have to hold it and the tighter one decides.
-            total, available = _smaller_known(cuda_memory(), system_memory())
-            pool = "both the GPU and this machine"
-        elif backend == "cuda":
-            total, available = offload_pool(cuda_memory(), system_memory())
-            pool = "the GPU plus this machine"
-        else:
-            total, available = system_memory()
-            pool = "this machine"
-        if ceiling is not None:
-            total = ceiling if total is None else min(total, ceiling)
-            available = ceiling if available is None else min(available, ceiling)
-            if total == ceiling:
-                pool = "Metal on this machine"
+        total, available, pool = memory_pool(backend, ceiling, kind)
         try:
             check_memory_for_load(
                 validate_model_id(model_id), estimated, total, available, pool=pool
@@ -3793,8 +4244,9 @@ class ModelManager:
         Returns the ceiling it set, so a load can record what it was.
         """
 
-        recommended = _recommended_mps_memory(torch)
-        fraction = mps_memory_fraction(recommended, system_memory()[0])
+        fraction = mps_memory_fraction(
+            _recommended_mps_memory(torch), system_memory()[0]
+        )
         setter = getattr(torch.mps, "set_per_process_memory_fraction", None)
         if fraction is None or setter is None:
             return None
@@ -3802,7 +4254,7 @@ class ModelManager:
             setter(fraction)
         except (RuntimeError, ValueError, TypeError):
             return None
-        return int(recommended * fraction) if recommended else None
+        return mps_ceiling(torch)
 
     def _prompt_token_ids(self, messages: list[dict]) -> tuple[list[int], bool]:
         """Token ids for a chat prompt, and whether it prefills ``<think>``.
@@ -4694,6 +5146,10 @@ class ModelManager:
                         literal_text_spans=literal_text_spans,
                         prompt_ids=tuple(prompt_ids),
                         model_id=model_id,
+                        ends_on_stop_token=(
+                            forced[-1] in stop_ids
+                            and len(forced) > literal_prefill_tokens
+                        ),
                     )
                     if (
                         forced[-1] in stop_ids
@@ -4742,6 +5198,7 @@ class ModelManager:
                             literal_text_spans=literal_text_spans,
                             prompt_ids=tuple(prompt_ids),
                             model_id=model_id,
+                            ends_on_stop_token=token_id in stop_ids,
                         )
 
                     if stopping:
@@ -4944,14 +5401,27 @@ class ModelManager:
         *,
         context: str = "",
         use_chat_template: bool = False,
+        load_id: str | None = None,
     ) -> ScoredText:
-        """Measure text the model did not write, in one pass over the tokens."""
+        """Measure text the model did not write, in one pass over the tokens.
+
+        ``load_id`` names the load the caller checked against, as
+        :meth:`generate` takes it: compared here under the model lock, so a
+        load that finished while this waited for the lock is refused with
+        :class:`ModelChanged` rather than measuring one model's text and
+        reporting it as another's.
+        """
 
         import torch
 
         with self._lock, torch.inference_mode():
             if not self.loaded:
                 raise RuntimeError("Download and load a model before scoring text.")
+            if load_id is not None and load_id != self.load_id:
+                raise ModelChanged(
+                    f"The model in memory is {self.model_id}, not the one this "
+                    "text was to be measured against. Ask again."
+                )
 
             assert self.tokenizer is not None
             tokenizer = self.tokenizer

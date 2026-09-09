@@ -99,9 +99,14 @@ html, body {{ height: 100%; overflow: hidden; }}
   height: 100%; overflow-y: auto; overscroll-behavior-y: contain;
   padding: 24px 32px;
 }}
+/* Keep page headers and sections at their natural height so long content
+   scrolls instead of shrinking and clipping the header. */
+#models-page > *, #settings-page > * {{ flex: 0 0 auto; }}
 
 /* The Images page is the chat layout with a picture where the transcript
-   goes: the workspace scrolls on the left, the readings scroll beside it. */
+   goes: the workspace scrolls on the left, the readings scroll beside it.
+   Its own children are pinned the same way the rule above pins the other
+   pages', so a long readout scrolls rather than squeezing the header. */
 #images-page {{ min-width: 0 !important; height: 100%; gap: 0; }}
 #images-columns {{
   height: 100%; min-height: 0; gap: 0; flex-wrap: nowrap;
@@ -253,6 +258,14 @@ html, body {{ height: 100%; overflow: hidden; }}
 }}
 .model-list label[data-testid*="· incomplete"] span {{ color: #b45309; }}
 .dark .model-list label[data-testid*="· incomplete"] span {{ color: #fbbf24; }}
+/* The fit verdicts are read off the same label. A model that cannot fit is
+   greyed rather than reddened: it is not an error, and the reader may be
+   looking at it to find that out. */
+.model-list label[data-testid*="· won't fit"]:not(.selected) span {{
+  color: var(--body-text-color-subdued);
+}}
+.model-list label[data-testid*="· tight"] span {{ color: #b45309; }}
+.dark .model-list label[data-testid*="· tight"] span {{ color: #fbbf24; }}
 .model-sort label span {{ font-size: 0.8rem; }}
 .remove-confirm {{
   border: 1px solid #d97706; border-radius: 8px; padding: 0.4rem 0.6rem;

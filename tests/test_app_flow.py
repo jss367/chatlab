@@ -15,10 +15,13 @@ from ui import runtime
 import charts
 from conversation import (
     MAIN_BRANCH,
+    branch_sampling,
     display_messages,
     make_turn,
     model_messages,
     new_forks,
+    put_branch,
+    put_branch_sampling,
 )
 from model_runtime import GenerationUpdate, ModelChanged, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
@@ -3083,6 +3086,358 @@ class WeightPrecisionWiringTests(unittest.TestCase):
     def test_the_radio_is_one_of_the_persisted_settings(self):
         self.assertIn(self.radio(), self.named("restore_settings").outputs)
         self.assertEqual(app.PERSISTED_SETTING_NAMES[-1], "weight_precision")
+
+
+class ConversationSamplingTests(unittest.TestCase):
+    """Each conversation answers with its own temperature, top-p, top-k and length."""
+
+    OWN = {"temperature": 0.0, "top_p": 1.0, "top_k": 0, "max_new_tokens": 256}
+
+    def setUp(self):
+        self.path = library.library_path()
+        if self.path.exists():
+            self.path.unlink()
+        self.addCleanup(lambda: self.path.unlink(missing_ok=True))
+
+    def values(self, updates):
+        return dict(
+            zip(
+                settings.CONVERSATION_SAMPLING,
+                [update["value"] for update in updates],
+                strict=True,
+            )
+        )
+
+    def held(self, forks, name=MAIN_BRANCH):
+        return branch_sampling(forks, name)
+
+    def test_a_conversation_with_none_of_its_own_shows_the_saved_settings(self):
+        shown = self.values(app.sampling_updates(new_forks()))
+        self.assertEqual(shown, settings.sampling_defaults())
+        # Nothing at all is the same case, since a page starts with nothing.
+        self.assertEqual(self.values(app.sampling_updates(None)), shown)
+
+    def test_a_conversation_shows_what_it_was_answered_with(self):
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
+
+        self.assertEqual(self.values(app.sampling_updates(forks)), self.OWN)
+
+    def test_only_the_active_conversation_is_shown(self):
+        forks = new_forks()
+        put_branch(forks, "Fork 1", [])
+        put_branch_sampling(forks, "Fork 1", self.OWN)
+
+        self.assertEqual(
+            self.values(app.sampling_updates(forks)), settings.sampling_defaults()
+        )
+        forks["active"] = "Fork 1"
+        self.assertEqual(self.values(app.sampling_updates(forks)), self.OWN)
+
+    def test_an_unpinned_conversation_answers_with_the_saved_settings(self):
+        # Not with the controls: on a switch they hold the conversation being
+        # left, so reading them would make an unpinned conversation answer
+        # with the sampling of whatever was looked at before it - switching
+        # from a temperature-0 fork to an unpinned Main would take Main to 0.
+        with settings.override(**self.OWN):
+            self.assertEqual(
+                self.values(app.sampling_updates(new_forks())), self.OWN
+            )
+        with settings.override(**settings.sampling_defaults()):
+            self.assertEqual(
+                self.values(app.sampling_updates(new_forks())),
+                settings.sampling_defaults(),
+            )
+
+    def test_the_settings_write_is_ordered_before_a_switch_reads_it(self):
+        # That file is what an unpinned conversation answers with, so a
+        # slider moved and then a switch in quick succession would otherwise
+        # read the value moved away from. Sharing the conversation queue is
+        # what orders the write ahead of the switch.
+        demo = app.build_app()
+        saving = [
+            fn
+            for fn in demo.fns.values()
+            if getattr(fn.fn, "__name__", None) == "remember_settings"
+            and fn.targets
+            and fn.targets[0][1] == "input"
+        ]
+
+        self.assertEqual(len(saving), len(settings.CONVERSATION_SAMPLING))
+        for fn in saving:
+            self.assertEqual(fn.concurrency_id, app.CONVERSATION_PANE_QUEUE)
+            # A slider still moving while this is pending would otherwise
+            # have its newer values dropped, leaving the file holding one
+            # from part way through the drag.
+            self.assertEqual(fn.trigger_mode, "always_last")
+
+    def test_a_value_the_settings_would_refuse_falls_back_to_the_setting(self):
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN | {"temperature": 99.0})
+
+        shown = self.values(app.sampling_updates(forks))
+
+        self.assertEqual(shown["temperature"], settings.TEMPERATURE_RANGE[1])
+        self.assertEqual(shown["top_p"], 1.0)
+
+    def test_moving_a_control_writes_it_into_the_conversation_on_screen(self):
+        forks = app.remember_branch_sampling(new_forks(), *self.OWN.values())
+
+        self.assertEqual(self.held(forks), self.OWN)
+
+    def test_a_deliberate_move_is_stored_even_at_the_saved_value(self):
+        # The same move also writes the settings file, on its own queue, so
+        # comparing against that file here would be a race: were it to land
+        # first, the conversation would be left following the file rather
+        # than pinned to the value just chosen.
+        defaults = settings.sampling_defaults()
+
+        forks = app.remember_branch_sampling(new_forks(), *defaults.values())
+
+        self.assertEqual(self.held(forks), defaults)
+
+    def test_only_the_readers_own_move_writes_the_conversation(self):
+        # Every path that changes conversation sets these controls too. A
+        # write from that would stamp a conversation nobody had touched, and
+        # would claim it from another page that really had changed it, so the
+        # write hangs off input rather than change.
+        demo = app.build_app()
+        listeners = [
+            fn
+            for fn in demo.fns.values()
+            if getattr(fn.fn, "__name__", None) == "remember_branch_sampling"
+        ]
+        sliders = [fn for fn in listeners if fn.targets[0][0] is not None]
+
+        self.assertEqual(len(sliders), len(settings.CONVERSATION_SAMPLING))
+        self.assertEqual(
+            {event for fn in sliders for _block, event in fn.targets}, {"input"}
+        )
+        self.assertEqual(len(listeners), len(sliders))
+
+    def test_a_control_reporting_what_the_conversation_already_holds_writes_nothing(self):
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
+
+        result = app.remember_branch_sampling(forks, *self.OWN.values())
+
+        self.assertEqual(result, gr.skip())
+
+    def test_a_conversation_set_back_to_the_saved_values_keeps_saying_so(self):
+        # It has an entry already, so this is a choice rather than a
+        # conversation that never had one.
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
+
+        written = app.remember_branch_sampling(
+            forks, *settings.sampling_defaults().values()
+        )
+
+        self.assertEqual(self.held(written), settings.sampling_defaults())
+
+    def test_the_write_leaves_the_state_it_was_given_alone(self):
+        forks = new_forks()
+        app.remember_branch_sampling(forks, *self.OWN.values())
+        self.assertEqual(forks["sampling"], {})
+
+    def test_a_fork_answers_the_way_the_conversation_it_came_from_does(self):
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
+
+        result = app.fork_conversation([make_turn("user", "one")], forks, None)
+        forked = result[FORK_STATE]
+
+        self.assertEqual(forked["active"], "Fork 1")
+        self.assertEqual(self.held(forked, "Fork 1"), self.OWN)
+        self.assertEqual(self.values(app.sampling_updates(forked)), self.OWN)
+
+    def test_forking_pins_both_sides_of_the_comparison(self):
+        # Forking is where a comparison is set up. A side carrying no
+        # sampling of its own follows the settings file, and the first slider
+        # moved on the other side rewrites that file - so both would answer
+        # alike, which is the one thing the fork was for.
+        result = app.fork_conversation([make_turn("user", "one")], new_forks(), None)
+        forked = result[FORK_STATE]
+
+        defaults = settings.sampling_defaults()
+        self.assertEqual(self.held(forked, MAIN_BRANCH), defaults)
+        self.assertEqual(self.held(forked, "Fork 1"), defaults)
+
+        # Moving a slider on the fork now leaves the conversation it came
+        # from where it was, whatever the settings file goes on to say.
+        moved = app.remember_branch_sampling(forked, *self.OWN.values())
+        with settings.override(**self.OWN):
+            self.assertEqual(self.held(moved, "Fork 1"), self.OWN)
+            moved["active"] = MAIN_BRANCH
+            self.assertEqual(self.values(app.sampling_updates(moved)), defaults)
+
+    def test_a_new_conversation_starts_from_the_saved_settings(self):
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
+
+        result = app.new_conversation([make_turn("user", "one")], forks)
+        started = result[FORK_STATE]
+
+        # Pinned to what the file said when it was started, rather than left
+        # following the file: a conversation that followed it would be moved
+        # by a slider touched on any other conversation.
+        self.assertEqual(
+            self.held(started, started["active"]), settings.sampling_defaults()
+        )
+        self.assertEqual(
+            self.values(app.sampling_updates(started)), settings.sampling_defaults()
+        )
+        # And the conversation it was started beside keeps its own.
+        self.assertEqual(self.held(started), self.OWN)
+
+    def test_a_clamped_response_length_reaches_the_conversation(self):
+        # Committing a lower context limit pulls the length down with it, and
+        # the conversation has to be told: it would otherwise put the longer
+        # length back the next time it was switched to.
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN | {"max_new_tokens": 1024})
+
+        with settings.override(prefill_token_limit=8192, max_new_tokens=1024):
+            _limit, length, written = app.remember_prefill_limit(
+                256, 1024, forks, 0.0, 1.0, 0, 1024
+            )
+
+        # 256 is the floor the limit can be lowered to, and the length
+        # follows it down.
+        self.assertEqual(length["value"], 256)
+        self.assertEqual(self.held(written)["max_new_tokens"], 256)
+
+    def test_a_context_limit_that_clamps_nothing_leaves_the_conversation_alone(self):
+        # A limit tabbed through, or raised, changes nothing - and writing on
+        # that would pin a conversation that had been following the file.
+        with settings.override(prefill_token_limit=1024, max_new_tokens=256):
+            _limit, _length, written = app.remember_prefill_limit(
+                4096, 256, new_forks(), *self.OWN.values()
+            )
+
+        self.assertEqual(written, gr.skip())
+
+    def test_a_new_conversation_is_pinned_from_the_controls(self):
+        # The settings file is written by its own listener, a round trip
+        # behind: a conversation started right after a slider was moved and
+        # pinned from the file would be pinned to the value just moved away
+        # from, and would then put it back on the controls.
+        with settings.override(**settings.sampling_defaults()):
+            result = app.new_conversation(
+                [make_turn("user", "one")],
+                new_forks(),
+                DEFAULT_COLOR_SCALE,
+                *self.OWN.values(),
+            )
+
+        started = result[FORK_STATE]
+        self.assertEqual(self.held(started, started["active"]), self.OWN)
+        self.assertEqual(self.values(app.sampling_updates(started)), self.OWN)
+
+    def test_a_fork_of_an_unpinned_conversation_takes_the_controls_too(self):
+        with settings.override(**settings.sampling_defaults()):
+            result = app.fork_conversation(
+                [make_turn("user", "one")],
+                new_forks(),
+                None,
+                DEFAULT_COLOR_SCALE,
+                *self.OWN.values(),
+            )
+
+        forked = result[FORK_STATE]
+        self.assertEqual(self.held(forked, MAIN_BRANCH), self.OWN)
+        self.assertEqual(self.held(forked, "Fork 1"), self.OWN)
+
+    def test_a_fork_keeps_a_key_this_version_knows_nothing_about(self):
+        # A file written by a newer version can carry an extra sampling
+        # field. It goes to both sides, or that version would find the fork
+        # answering differently from the conversation it came from.
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
+        forks["sampling"][MAIN_BRANCH]["repetition_penalty"] = 1.15
+
+        result = app.fork_conversation([make_turn("user", "one")], forks, None)
+        forked = result[FORK_STATE]
+
+        for name in (MAIN_BRANCH, "Fork 1"):
+            with self.subTest(branch=name):
+                self.assertEqual(
+                    self.held(forked, name).get("repetition_penalty"), 1.15
+                )
+                self.assertEqual(self.held(forked, name)["temperature"], 0.0)
+
+    def test_a_fork_of_a_pinned_conversation_keeps_its_sampling(self):
+        # The parent's own entry wins over the controls: the controls are
+        # showing it anyway, and the entry is what the parent answers with.
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
+
+        result = app.fork_conversation(
+            [make_turn("user", "one")],
+            forks,
+            None,
+            DEFAULT_COLOR_SCALE,
+            *settings.sampling_defaults().values(),
+        )
+
+        self.assertEqual(self.held(result[FORK_STATE], "Fork 1"), self.OWN)
+
+    def test_clearing_everything_lets_go_of_the_sampling_too(self):
+        forks = new_forks()
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
+
+        cleared = app.clear_chat(DEFAULT_COLOR_SCALE, forks)[-3]
+
+        self.assertEqual(cleared["sampling"], {})
+        # Stamped, so the copy on disk does not look like the newer of the
+        # two and pin the emptied conversation again.
+        self.assertIn(MAIN_BRANCH, cleared["sampling_updated"])
+
+    def test_switching_back_brings_the_sampling_back(self):
+        forks = new_forks()
+        put_branch(forks, "Fork 1", [])
+        put_branch_sampling(forks, MAIN_BRANCH, self.OWN)
+        forks["active"] = "Fork 1"
+
+        result = app.switch_fork(MAIN_BRANCH, [], forks)
+
+        self.assertEqual(self.values(app.sampling_updates(result[FORK_STATE])), self.OWN)
+
+    def test_a_deleted_conversation_leaves_its_sampling_behind(self):
+        forks = new_forks()
+        put_branch(forks, "Fork 1", [])
+        put_branch_sampling(forks, "Fork 1", self.OWN)
+        forks["active"] = "Fork 1"
+
+        result = app.delete_fork([], forks)
+        left = result[FORK_STATE]
+
+        self.assertEqual(left["active"], MAIN_BRANCH)
+        self.assertEqual(left["sampling"], {})
+
+    def test_the_page_comes_back_on_the_active_conversations_sampling(self):
+        # restore_settings reads the file rather than the restored state, so
+        # it does not depend on which page-load handler Gradio runs first.
+        forks = new_forks()
+        put_branch(forks, "Fork 1", [make_turn("user", "one")])
+        put_branch_sampling(forks, "Fork 1", self.OWN)
+        forks["active"] = "Fork 1"
+        library.write(forks, self.path)
+
+        updates = app.restore_settings()
+        restored = dict(zip(app.PERSISTED_SETTING_NAMES, updates, strict=False))
+
+        for name, value in self.OWN.items():
+            with self.subTest(setting=name):
+                self.assertEqual(restored[name]["value"], value)
+
+    def test_a_page_with_nothing_saved_comes_back_on_the_settings_file(self):
+        updates = app.restore_settings()
+        restored = dict(zip(app.PERSISTED_SETTING_NAMES, updates, strict=False))
+
+        for name, value in settings.sampling_defaults().items():
+            with self.subTest(setting=name):
+                self.assertEqual(restored[name]["value"], value)
 
 
 class ConversationLibraryTests(unittest.TestCase):

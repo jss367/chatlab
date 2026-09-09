@@ -3,6 +3,9 @@ accelerate>=1.2
 # loads. 0.31 is the first release whose pipelines all take
 # callback_on_step_end, which is how the denoising trajectory is read.
 diffusers>=0.31
+# The local API's routes. Gradio brings FastAPI in and the API is served from
+# Gradio's own application, but api.py imports it directly, so it is named.
+fastapi>=0.115
 # Sidebar arrived in 5.14, so the floor already covers the side pane.
 gradio>=5.20,<6
 # 1.1 is the first release whose snapshot_download reports byte progress

@@ -3,6 +3,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -2777,6 +2778,380 @@ class CountScoreTokensTests(unittest.TestCase):
         self.assertFalse(manager._lock.locked())
 
 
+class DeviceProfileTests(unittest.TestCase):
+    """Reading the device a load would use, before anything has loaded."""
+
+    GB = 1024**3
+
+    def test_the_backend_is_the_one_a_load_would_pick(self):
+        from model_runtime import detect_backend
+
+        both = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(is_available=lambda: True),
+            backends=types.SimpleNamespace(
+                mps=types.SimpleNamespace(is_available=lambda: True)
+            ),
+        )
+        self.assertEqual(detect_backend(both), "cuda")
+        metal = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(is_available=lambda: False),
+            backends=types.SimpleNamespace(
+                mps=types.SimpleNamespace(is_available=lambda: True)
+            ),
+        )
+        self.assertEqual(detect_backend(metal), "mps")
+        plain = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(is_available=lambda: False),
+            backends=types.SimpleNamespace(
+                mps=types.SimpleNamespace(is_available=lambda: False)
+            ),
+        )
+        self.assertEqual(detect_backend(plain), "cpu")
+
+    def test_a_torch_that_will_not_answer_is_the_cpu(self):
+        from model_runtime import detect_backend
+
+        def raises():
+            raise RuntimeError("no driver")
+
+        torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=raises))
+        self.assertEqual(detect_backend(torch), "cpu")
+
+    def test_each_backend_loads_the_dtype_it_can_use(self):
+        from model_runtime import dtype_name, load_dtype
+
+        torch = types.SimpleNamespace(
+            bfloat16="torch.bfloat16",
+            float16="torch.float16",
+            float32="torch.float32",
+            cuda=types.SimpleNamespace(is_bf16_supported=lambda: True),
+        )
+        self.assertEqual(dtype_name(load_dtype("cuda", torch)), "bfloat16")
+        self.assertEqual(dtype_name(load_dtype("mps", torch)), "float16")
+        self.assertEqual(dtype_name(load_dtype("cpu", torch)), "float32")
+        torch.cuda = types.SimpleNamespace(is_bf16_supported=lambda: False)
+        self.assertEqual(dtype_name(load_dtype("cuda", torch)), "float16")
+
+    def _pool_with(self, backend, host, gpu, ceiling=None):
+        import model_runtime
+
+        saved = model_runtime.system_memory, model_runtime.cuda_memory
+        model_runtime.system_memory = lambda: host
+        model_runtime.cuda_memory = lambda torch=None: gpu
+        try:
+            return model_runtime.memory_pool(backend, ceiling)
+        finally:
+            model_runtime.system_memory, model_runtime.cuda_memory = saved
+
+    def test_the_pool_is_the_one_the_load_check_judges_against(self):
+        host, gpu = (48 * self.GB, 40 * self.GB), (24 * self.GB, 20 * self.GB)
+
+        self.assertEqual(
+            self._pool_with("cpu", host, gpu), (48 * self.GB, 40 * self.GB, "this machine")
+        )
+        self.assertEqual(
+            self._pool_with("mps", host, gpu), (48 * self.GB, 40 * self.GB, "this machine")
+        )
+        self.assertEqual(
+            self._pool_with("cuda", host, gpu),
+            (72 * self.GB, 60 * self.GB, "the GPU plus this machine"),
+        )
+
+    def test_the_metal_ceiling_caps_the_pool_and_names_it(self):
+        total, available, pool = self._pool_with(
+            "mps", (48 * self.GB, 40 * self.GB), (None, None), ceiling=24 * self.GB
+        )
+        self.assertEqual((total, available), (24 * self.GB, 24 * self.GB))
+        self.assertEqual(pool, "Metal on this machine")
+
+    def test_a_machine_that_says_nothing_still_gives_the_ceiling(self):
+        total, available, _ = self._pool_with(
+            "mps", (None, None), (None, None), ceiling=24 * self.GB
+        )
+        self.assertEqual((total, available), (24 * self.GB, 24 * self.GB))
+
+    def test_the_profile_answers_from_memory_alone_before_torch_is_imported(self):
+        # The Models page is painted before anything has needed torch, and
+        # the import takes seconds. Until it lands the device is unknown
+        # rather than guessed at, and the figures are the machine's own.
+        import model_runtime
+
+        saved = model_runtime.system_memory
+        model_runtime.system_memory = lambda: (48 * self.GB, 40 * self.GB)
+        try:
+            with mock.patch.object(model_runtime, "_torch_ready", threading.Event()):
+                profile = model_runtime.device_profile()
+        finally:
+            model_runtime.system_memory = saved
+
+        self.assertIsNone(profile.backend)
+        self.assertIsNone(profile.dtype)
+        self.assertFalse(profile.quantizes)
+        self.assertEqual(profile.total, 48 * self.GB)
+        self.assertEqual(profile.available, 40 * self.GB)
+        self.assertIsNone(profile.ceiling)
+
+    def test_the_profile_reads_the_metal_ceiling_when_torch_is_there(self):
+        import model_runtime
+
+        torch = types.SimpleNamespace(
+            float16="torch.float16",
+            cuda=types.SimpleNamespace(is_available=lambda: False),
+            backends=types.SimpleNamespace(
+                mps=types.SimpleNamespace(is_available=lambda: True)
+            ),
+            mps=types.SimpleNamespace(recommended_max_memory=lambda: 36 * self.GB),
+        )
+        saved = model_runtime.system_memory
+        model_runtime.system_memory = lambda: (48 * self.GB, 40 * self.GB)
+        try:
+            profile = model_runtime.device_profile(torch)
+        finally:
+            model_runtime.system_memory = saved
+
+        self.assertEqual(profile.backend, "mps")
+        self.assertEqual(profile.dtype, "float16")
+        self.assertTrue(profile.quantizes)
+        # Half the machine, expressed against Metal's recommendation.
+        self.assertEqual(profile.ceiling, 24 * self.GB)
+        self.assertEqual(profile.total, 24 * self.GB)
+        self.assertEqual(profile.pool, "Metal on this machine")
+
+    def test_the_ceiling_is_the_one_the_cap_would_set(self):
+        # The fit verdict and the load's own check have to agree, so both
+        # read the ceiling from one formula.
+        import model_runtime
+
+        applied = []
+        torch = types.SimpleNamespace(
+            mps=types.SimpleNamespace(
+                recommended_max_memory=lambda: 36 * self.GB,
+                set_per_process_memory_fraction=applied.append,
+            )
+        )
+        saved = model_runtime.system_memory
+        model_runtime.system_memory = lambda: (48 * self.GB, 40 * self.GB)
+        try:
+            self.assertEqual(
+                ModelManager._cap_mps_memory(torch), model_runtime.mps_ceiling(torch)
+            )
+        finally:
+            model_runtime.system_memory = saved
+        self.assertEqual(applied, [24 / 36])
+
+    def test_the_loaded_models_memory_is_given_back_for_a_replacement(self):
+        from model_runtime import DeviceProfile
+
+        profile = DeviceProfile(
+            backend="mps",
+            available=2 * self.GB,
+            total=24 * self.GB,
+            held=15 * self.GB,
+        )
+
+        self.assertEqual(profile.reclaimed().available, 17 * self.GB)
+        # The total is the machine's own either way.
+        self.assertEqual(profile.reclaimed().total, 24 * self.GB)
+        # Nothing to give back, or no figure for it: unchanged.
+        self.assertEqual(
+            DeviceProfile(available=2 * self.GB).reclaimed().available, 2 * self.GB
+        )
+        self.assertIsNone(DeviceProfile(held=self.GB).reclaimed().available)
+
+    def test_whichever_figure_is_larger_is_what_a_load_gives_back(self):
+        # Neither is enough alone: a CUDA model spread over the cards and the
+        # machine is only counted on the cards by the allocator, while the
+        # load's estimate covers the whole of it; on Metal the allocator can
+        # be the larger, a response's key-value cache being live tensors too.
+        from model_runtime import DeviceProfile
+
+        profile = DeviceProfile(available=self.GB, held=4 * self.GB)
+
+        self.assertEqual(profile.reclaimed(10 * self.GB).available, 11 * self.GB)
+        self.assertEqual(profile.reclaimed(2 * self.GB).available, 5 * self.GB)
+        self.assertEqual(profile.reclaimed(None).available, 5 * self.GB)
+
+    def test_the_profile_reads_what_the_device_is_holding(self):
+        import model_runtime
+
+        torch = types.SimpleNamespace(
+            float32="torch.float32",
+            cuda=types.SimpleNamespace(is_available=lambda: False),
+            backends=types.SimpleNamespace(
+                mps=types.SimpleNamespace(is_available=lambda: False)
+            ),
+        )
+        saved = model_runtime.system_memory
+        model_runtime.system_memory = lambda: (16 * self.GB, 8 * self.GB)
+        try:
+            # Host memory keeps no such figure, so there is nothing to give back.
+            self.assertIsNone(model_runtime.device_profile(torch).held)
+        finally:
+            model_runtime.system_memory = saved
+
+    def test_a_torch_that_is_still_importing_is_not_read(self):
+        # Python puts a module in sys.modules before its body has run, so a
+        # reader that went by presence alone could find torch without
+        # torch.backends and either raise - at startup, where the hardware
+        # panel is built - or quietly report the wrong device.
+        import model_runtime
+
+        half_built = types.ModuleType("torch")  # no cuda, no backends, no dtypes
+
+        with mock.patch.dict(sys.modules, {"torch": half_built}):
+            with mock.patch.object(model_runtime, "_torch_ready", threading.Event()):
+                self.assertIsNone(model_runtime.imported_torch())
+                self.assertIsNone(model_runtime.device_profile().backend)
+            ready = threading.Event()
+            ready.set()
+            with mock.patch.object(model_runtime, "_torch_ready", ready):
+                self.assertIs(model_runtime.imported_torch(), half_built)
+
+    def test_the_import_thread_is_what_says_torch_may_be_read(self):
+        import model_runtime
+
+        with mock.patch.object(model_runtime, "_torch_ready", threading.Event()) as flag:
+            model_runtime.warm_device()
+            self.assertTrue(flag.wait(timeout=60))
+        self.assertIsNotNone(model_runtime.imported_torch())
+
+    def test_the_device_names_itself_the_way_a_loaded_model_does(self):
+        from model_runtime import device_label
+
+        self.assertEqual(device_label("mps"), "Apple Metal (MPS)")
+        self.assertEqual(device_label("cpu"), "CPU")
+        self.assertEqual(device_label(None), "not determined yet")
+        torch = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(get_device_name=lambda index: "RTX 4090")
+        )
+        self.assertEqual(device_label("cuda", torch), "CUDA (RTX 4090)")
+        self.assertEqual(device_label("cuda", types.SimpleNamespace()), "CUDA")
+
+
+class FitTests(unittest.TestCase):
+    """Saying beforehand what the load check would answer."""
+
+    GB = 1024**3
+
+    def fit(self, estimated, total, available):
+        from model_runtime import fit_for
+
+        return fit_for(estimated, total, available, headroom=4 * self.GB)
+
+    def test_a_model_with_room_beside_it_fits(self):
+        from model_runtime import FITS
+
+        fit = self.fit(10 * self.GB, 48 * self.GB, 40 * self.GB)
+        self.assertEqual(fit.state, FITS)
+        self.assertTrue(fit.known)
+        self.assertIn("10.0 GB", fit.note)
+
+    def test_a_model_larger_than_the_machine_will_not_fit(self):
+        from model_runtime import UNFIT
+
+        fit = self.fit(60 * self.GB, 48 * self.GB, 40 * self.GB)
+        self.assertEqual(fit.state, UNFIT)
+        self.assertIn("48.0 GB", fit.note)
+        self.assertIn("this machine", fit.note)
+
+    def test_the_headroom_is_part_of_the_verdict(self):
+        from model_runtime import FITS, UNFIT
+
+        # 45 GB of weights fits a 48 GB machine only without the reserve.
+        self.assertEqual(self.fit(45 * self.GB, 48 * self.GB, 48 * self.GB).state, UNFIT)
+        self.assertEqual(self.fit(44 * self.GB, 48 * self.GB, 48 * self.GB).state, FITS)
+
+    def test_a_model_the_machine_could_hold_but_has_no_room_for_now_is_tight(self):
+        from model_runtime import TIGHT
+
+        fit = self.fit(30 * self.GB, 48 * self.GB, 20 * self.GB)
+        self.assertEqual(fit.state, TIGHT)
+        self.assertTrue(fit.known)
+        self.assertIn("20.0 GB", fit.note)
+        self.assertIn("memory pressure", fit.note)
+
+    def test_a_size_that_could_not_be_measured_is_not_guessed_at(self):
+        from model_runtime import FIT_UNKNOWN
+
+        fit = self.fit(None, 48 * self.GB, 40 * self.GB)
+        self.assertEqual(fit.state, FIT_UNKNOWN)
+        self.assertFalse(fit.known)
+        self.assertIn("downloaded", fit.note)
+
+    def test_a_machine_that_reports_nothing_gets_no_verdict(self):
+        from model_runtime import FIT_UNKNOWN
+
+        fit = self.fit(10 * self.GB, None, None)
+        self.assertEqual(fit.state, FIT_UNKNOWN)
+        self.assertIn("does not report its memory", fit.note)
+
+    def test_a_verdict_agrees_with_the_refusal_it_predicts(self):
+        from model_runtime import (
+            FITS,
+            InsufficientMemoryError,
+            check_memory_for_load,
+            fit_for,
+        )
+
+        for estimated in (10, 30, 60):
+            with self.subTest(gigabytes=estimated):
+                fit = fit_for(estimated * self.GB, 48 * self.GB, 20 * self.GB)
+                try:
+                    check_memory_for_load(
+                        "org/model", estimated * self.GB, 48 * self.GB, 20 * self.GB
+                    )
+                except InsufficientMemoryError:
+                    self.assertNotEqual(fit.state, FITS)
+                else:
+                    self.assertEqual(fit.state, FITS)
+
+
+class EstimateTests(unittest.TestCase):
+    """The two ways a model's loaded size is estimated before it loads."""
+
+    def snapshot(self, weights: int, dtype: str | None = "bfloat16") -> Path:
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        (folder / "model.safetensors").write_bytes(b"\0" * weights)
+        config = {"architectures": ["OlmoForCausalLM"]}
+        if dtype is not None:
+            config["torch_dtype"] = dtype
+        (folder / "config.json").write_text(json.dumps(config))
+        return folder
+
+    def test_a_snapshot_is_measured_by_the_weights_it_holds(self):
+        from model_runtime import estimate_snapshot_bytes
+
+        snapshot = self.snapshot(2000)
+        self.assertEqual(estimate_snapshot_bytes(snapshot, "float16"), 2000)
+        # A load onto the CPU converts half precision up on the way in.
+        self.assertEqual(estimate_snapshot_bytes(snapshot, "float32"), 4000)
+
+    def test_a_quantized_estimate_is_of_what_the_device_would_hold(self):
+        from model_runtime import estimate_snapshot_bytes
+
+        snapshot = self.snapshot(2000)
+        whole = estimate_snapshot_bytes(snapshot, "float16")
+        quantized = estimate_snapshot_bytes(snapshot, "float16", bits=4)
+        self.assertLess(quantized, whole // 2)
+
+    def test_a_snapshot_that_cannot_be_measured_says_so(self):
+        from model_runtime import estimate_snapshot_bytes
+
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        (folder / "config.json").write_text("{}")
+        self.assertIsNone(estimate_snapshot_bytes(folder, "float16"))
+
+    def test_a_parameter_count_stands_in_for_a_model_not_yet_on_disk(self):
+        from model_runtime import estimate_parameter_bytes
+
+        # Half precision: two bytes a parameter.
+        self.assertEqual(estimate_parameter_bytes(1_000_000, "float16"), 2_000_000)
+        self.assertEqual(estimate_parameter_bytes(1_000_000, "float32"), 4_000_000)
+        # Quantized, with no way to know the embeddings' share: four bits a
+        # parameter plus the scale and bias each group of 64 shares.
+        self.assertEqual(estimate_parameter_bytes(1_000_000, "float16", bits=4), 562_500)
 def hub_result(model_id, pipeline_tag, **extra):
     """One entry the way ``list_models`` hands it over, config and tags and all.
 
