@@ -232,6 +232,42 @@ class SamplingFileTests(unittest.TestCase):
         self.assertEqual(restored["sampling"], {MAIN_BRANCH: {"max_new_tokens": 256}})
         self.assertEqual(first_messages(restored), {MAIN_BRANCH: "hi"})
 
+    def test_a_key_this_version_knows_nothing_about_survives_a_save(self):
+        # Two machines can share the file without running the same version,
+        # and the newer one's per-branch sampling must come back whole.
+        library.write(stamped(MAIN_BRANCH, Main="hi"), self.path)
+        saved = json.loads(self.path.read_text())
+        saved["branches"][0]["sampling"] = {
+            "temperature": 0.0,
+            "repetition_penalty": 1.15,
+        }
+        self.path.write_text(json.dumps(saved))
+
+        library.write(library.read(self.path), self.path)
+
+        written = json.loads(self.path.read_text())["branches"][0]["sampling"]
+        self.assertEqual(written["repetition_penalty"], 1.15)
+        self.assertEqual(written["temperature"], 0.0)
+
+    def test_it_survives_a_slider_moved_here_too(self):
+        # Not just a read and a save: a temperature moved on this version
+        # leaves the newer version's own key where it was.
+        library.write(stamped(MAIN_BRANCH, Main="hi"), self.path)
+        saved = json.loads(self.path.read_text())
+        saved["branches"][0]["sampling"] = {
+            "temperature": 1.9,
+            "repetition_penalty": 1.15,
+        }
+        self.path.write_text(json.dumps(saved))
+
+        restored = library.read(self.path)
+        self.assertTrue(put_branch_sampling(restored, MAIN_BRANCH, self.SAMPLING))
+        library.write(restored, self.path)
+
+        written = json.loads(self.path.read_text())["branches"][0]["sampling"]
+        self.assertEqual(written["repetition_penalty"], 1.15)
+        self.assertEqual(written["temperature"], 0.0)
+
     def test_sampling_that_is_not_an_object_is_not_a_file_this_app_wrote(self):
         library.write(stamped(MAIN_BRANCH, Main="hi"), self.path)
         saved = json.loads(self.path.read_text())

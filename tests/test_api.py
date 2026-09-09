@@ -2,6 +2,7 @@
 
 import json
 import threading
+from itertools import chain
 import time
 import unittest
 from dataclasses import replace
@@ -958,11 +959,12 @@ class FramesTests(ApiTestCase):
             time.sleep(0.01)
         self.assertFalse(self.manager.busy)
 
-    def test_a_reader_that_comes_back_to_an_abandoned_generation_is_let_go(self):
+    def test_a_reader_that_comes_back_to_an_abandoned_generation_is_told(self):
         # Abandonment leaves a full buffer and no last item in it. A reader
         # that comes back - a client that stalled for a minute and then
-        # resumed - drains what is there and must then be let go rather than
-        # waiting for a frame nobody is going to write.
+        # resumed - drains what is there and is then told the response was
+        # given up on, rather than waiting for a frame nobody is going to
+        # write, or being handed a short answer as though it were whole.
         api.ABANDONED_AFTER_SECONDS = 0.05
         api.FRAME_WAIT_SECONDS = 0.05
 
@@ -978,8 +980,60 @@ class FramesTests(ApiTestCase):
                 break
             time.sleep(0.01)
 
-        # Whatever was buffered comes out, and then the reader ends.
-        self.assertLessEqual(len(list(produced.rest())), api.FRAME_BUFFER)
+        drained = []
+        with self.assertRaises(api.ApiError) as caught:
+            for frame in produced.rest():
+                drained.append(frame)
+
+        self.assertLessEqual(len(drained), api.FRAME_BUFFER)
+        self.assertEqual(caught.exception.kind, "abandoned")
+
+    def test_an_abandoned_stream_ends_in_an_error_rather_than_a_clean_stop(self):
+        # A client that reads a truncated answer must not read it as
+        # complete: an experiment would take the short response for the
+        # model's whole answer.
+        api.ABANDONED_AFTER_SECONDS = 0.05
+        api.FRAME_WAIT_SECONDS = 0.05
+
+        def generate(messages, **kwargs):
+            for index in range(api.FRAME_BUFFER + 3):
+                yield update("x" * (index + 1))
+
+        self.manager.reserve_generation()
+        produced = api.Frames(generate([]))
+        first = produced.first()
+        for _ in range(200):
+            if not self.manager.busy:
+                break
+            time.sleep(0.01)
+
+        events = list(
+            api.stream_completion(
+                chain([first], produced.rest()),
+                "chatcmpl-x",
+                0,
+                "fake/model",
+                {"max_new_tokens": 64, "seed": 1},
+                False,
+                0,
+            )
+        )
+        payloads = [
+            json.loads(event[len("data: ") :])
+            for event in events
+            if event.startswith("data: ") and "[DONE]" not in event
+        ]
+
+        self.assertEqual(payloads[-1]["error"]["type"], "abandoned")
+        self.assertTrue(events[-1].startswith("data: [DONE]"))
+        # And no frame claimed the response had finished normally.
+        self.assertFalse(
+            [
+                payload
+                for payload in payloads
+                if payload.get("choices", [{}])[0].get("finish_reason")
+            ]
+        )
 
     def test_a_generation_that_produces_nothing_says_so(self):
         def generate(messages, **kwargs):

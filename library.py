@@ -109,9 +109,18 @@ def sampling_entry(values: dict | None) -> dict:
     A value of the wrong type is dropped rather than written, so a file this
     version reads back is one it can also parse. The types are the file's
     business alone; what the values may be is the settings module's.
+
+    A key this version knows nothing about is carried through untouched, the
+    way the settings file carries its own unknown keys: two machines sharing
+    one file need not run the same version, and a branch's sampling written
+    by the newer of them must survive being read and saved by the older.
     """
 
-    entry = {}
+    entry = {
+        key: value
+        for key, value in (values or {}).items()
+        if key not in SAMPLING_FIELDS
+    }
     for key, kind in SAMPLING_FIELDS.items():
         value = (values or {}).get(key)
         if isinstance(value, bool):

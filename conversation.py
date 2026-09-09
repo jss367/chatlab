@@ -44,9 +44,9 @@ TURN_ORIGIN_FIELDS = {"model": str, "prompt_tokens": int, "generated_tokens": in
 
 # The sampling a conversation can carry of its own, and the type each must
 # have in a saved file. The settings module owns what the values may be; this
-# is only what a file is allowed to hold. Anything else there is ignored, so
-# a file written by a newer version keeps its extra keys through a save by an
-# older one.
+# is only what a file is allowed to hold. A key this version knows nothing
+# about is carried through untouched, so a file written by a newer version
+# keeps its extra keys through a read and a save by an older one.
 SAMPLING_FIELDS = {
     "temperature": float,
     "top_p": float,
@@ -355,8 +355,14 @@ def put_branch_sampling(forks: dict, name: str, values: dict) -> bool:
     """
 
     sampling = forks.setdefault("sampling", {})
-    kept = {key: value for key, value in values.items() if key in SAMPLING_FIELDS}
-    if sampling.get(name) == kept:
+    # Whatever the branch carries that this version knows nothing about
+    # stays: a file shared with a newer version keeps its own keys through a
+    # slider moved here. See ``library.sampling_entry``.
+    held = sampling.get(name) or {}
+    kept = {
+        key: value for key, value in held.items() if key not in SAMPLING_FIELDS
+    } | {key: value for key, value in values.items() if key in SAMPLING_FIELDS}
+    if held == kept:
         return False
     sampling[name] = kept
     forks.setdefault("sampling_updated", {})[name] = branch_stamp()

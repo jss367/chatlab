@@ -121,6 +121,10 @@ class Frames:
         # last item behind, and an abandoned generation whose reader comes
         # back to a full buffer still finds its way out.
         self._finished = threading.Event()
+        # Set when the generation was given up on for want of a reader, so a
+        # reader that comes back is told the response is short rather than
+        # handed the frames that did arrive as though they were all of it.
+        self._abandoned = False
         self._worker = threading.Thread(
             target=self._run, name="chatlab-api-generation", daemon=True
         )
@@ -151,6 +155,7 @@ class Frames:
                     # Closing the generator from the thread that owns it
                     # raises GeneratorExit inside it, so its own cleanup
                     # runs: the cache goes back and the model lock is let go.
+                    self._abandoned = True
                     self._stream.close()
                     return
             self._put(_DONE)
@@ -175,6 +180,16 @@ class Frames:
                 return self._frames.get(timeout=FRAME_WAIT_SECONDS)
             except queue.Empty:
                 if self._finished.is_set():
+                    if self._abandoned:
+                        return ApiError(
+                            504,
+                            "This response was given up on: nothing had read "
+                            "it for "
+                            f"{ABANDONED_AFTER_SECONDS:.0f} seconds, so the "
+                            "model was handed back. What arrived before that "
+                            "is not the whole answer.",
+                            "abandoned",
+                        )
                     return _DONE
 
     def first(self):
@@ -675,6 +690,10 @@ def refusal(error: Exception) -> ApiError:
     the request's own doing and says so; anything else is the server's.
     """
 
+    if isinstance(error, ApiError):
+        # Already a decided answer: a refusal raised by this module, or the
+        # abandonment a reader is told about after the fact.
+        return error
     if isinstance(error, ValueError):
         return ApiError(400, str(error))
     if isinstance(error, (InsufficientMemoryError, OutOfMemoryError)):
