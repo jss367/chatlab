@@ -9,6 +9,8 @@ import time
 
 import gradio as gr
 
+from steering import normalize as normalize_steering
+
 import charts
 from conversation import (
     MAIN_BRANCH,
@@ -205,7 +207,7 @@ def stop_generation(
     kept = finalize_partial(turns)
     messages, _ = display_messages(turns)
     generation, metrics = metrics_state
-    context_generation, _context_ids, producing_load_id = context_state
+    context_generation, _context_ids, producing_load_id = context_state[:3]
     return (
         messages,
         turns,
@@ -342,6 +344,7 @@ def generate_reply(
     randomize_seed: bool,
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
+    steering: dict | None = None,
     *,
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
@@ -405,6 +408,7 @@ def generate_reply(
             randomize_seed,
             analyze_prompt,
             scale_name,
+            steering,
             forced_ids=forced_ids,
             literal_prefill_tokens=literal_prefill_tokens,
             automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
@@ -434,6 +438,7 @@ def _stream_reply(
     randomize_seed: bool,
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
+    steering: dict | None = None,
     *,
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
@@ -456,7 +461,10 @@ def _stream_reply(
         turns, system_prompt=system_prompt, include_reasoning=keep_reasoning
     )
 
+    steering = normalize_steering(steering)
     pending = make_turn("assistant", "", "")
+    if steering is not None:
+        pending["steering"] = steering
     pending["reasoning_closed"] = True
     # Where this reply came from, for the conversation list. The model is
     # stamped from the first update rather than read off runtime.MANAGER here: the
@@ -578,6 +586,7 @@ def _stream_reply(
         automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
         literal_text_ranges=literal_text_ranges,
         load_id=expected_load_id,
+        **({"steering": steering} if steering is not None else {}),
     )
 
     try:
@@ -632,6 +641,7 @@ def _stream_reply(
                         generation,
                         [int(v) for v in update.prompt_ids],
                         update.load_id,
+                        *([steering] if steering is not None else []),
                     )
                 yield snapshot(
                     highlight,
@@ -710,6 +720,8 @@ def _stream_reply(
         "max_new_tokens": int(max_new_tokens),
         "seed": used_seed,
     }
+    if steering is not None:
+        sampling["steering"] = steering
     if forced_prefix_tokens:
         # The first tokens of a branched response were replayed, not sampled,
         # or came from an assistant prefill. A reader of the export needs to
@@ -758,6 +770,7 @@ def chat(
     randomize_seed: bool,
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
+    steering: dict | None = None,
 ):
     if runtime.MANAGER.busy:
         # Before anything else, including the checks below: every other exit
@@ -790,6 +803,7 @@ def chat(
         randomize_seed,
         analyze_prompt,
         scale_name,
+        steering,
     )
 
 
@@ -808,6 +822,7 @@ def regenerate_from(
     randomize_seed: bool,
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
+    steering: dict | None = None,
 ):
     """Throw away everything after the user turn at ``position`` and reply again."""
 
@@ -839,6 +854,7 @@ def regenerate_from(
         randomize_seed,
         analyze_prompt,
         scale_name,
+        steering,
     )
 
 
@@ -855,9 +871,9 @@ def retry_message(event: gr.RetryData, prompt_text, turns, *settings):
 
 
 def edit_message(event: gr.EditData, prompt_text, turns, *settings):
-    # The color scale is the last of the settings a generation is given, and
-    # this handler needs it for the one path that clears the strips itself.
-    scale_name = settings[-1] if settings else DEFAULT_COLOR_SCALE
+    # Steering follows the eleven display/generation settings. This path
+    # clears strips itself and needs the color scale, not the vector snapshot.
+    scale_name = settings[10] if len(settings) > 10 else DEFAULT_COLOR_SCALE
     if runtime.MANAGER.busy:
         # Not just the branch that regenerates: editing an assistant turn
         # rewrites the conversation on its own, from the same stale snapshot.

@@ -57,6 +57,7 @@ from conversation import (
     turn_entries,
     turns_from_entries,
 )
+from steering import normalize as normalize_steering
 from trace_export import write_private_text
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,8 @@ def sampling_entry(values: dict | None) -> dict:
             value = float(value)
         if isinstance(value, kind):
             entry[key] = value
+    if "steering" in entry:
+        entry["steering"] = normalize_steering(entry["steering"])
     return entry
 
 

@@ -22,6 +22,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 import settings
+import steering as steering_vectors
 from conversation import THINK_CLOSE, THINK_OPEN
 from token_metrics import (
     UNSCORED_BEYOND_LIMIT,
@@ -5074,6 +5075,7 @@ class ModelManager:
         automatic_reasoning_close_tokens: int = 0,
         literal_text_ranges: Sequence[tuple[int, int]] = (),
         load_id: str | None = None,
+        steering: dict | None = None,
     ) -> Iterator[GenerationUpdate]:
         """Stream a reply to ``messages``, one batch of tokens at a time.
 
@@ -5101,6 +5103,10 @@ class ModelManager:
         is fed, so a load that finished after the caller looked is refused with
         :class:`ModelChanged` rather than replaying one model's token IDs
         through another.
+
+        ``steering`` is a portable activation-vector specification. Its hook
+        is held under the model lock across prefill and decoding, and removed
+        before the lock is released, including on cancellation.
         """
 
         # The application reserves the slot before it publishes its first
@@ -5122,7 +5128,7 @@ class ModelManager:
         self._run_device_bytes = None
         started = time.monotonic()
         try:
-            for update in self._generate(
+            with contextlib.closing(self._generate(
                 messages,
                 temperature=temperature,
                 top_p=top_p,
@@ -5137,9 +5143,11 @@ class ModelManager:
                 automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
                 literal_text_ranges=literal_text_ranges,
                 load_id=load_id,
-            ):
-                last = update
-                yield update
+                steering=steering,
+            )) as stream:
+                for update in stream:
+                    last = update
+                    yield update
         except (RuntimeError, MemoryError) as error:
             _reraise_out_of_memory(error)
         finally:
@@ -5208,10 +5216,11 @@ class ModelManager:
         automatic_reasoning_close_tokens: int = 0,
         literal_text_ranges: Sequence[tuple[int, int]] = (),
         load_id: str | None = None,
+        steering: dict | None = None,
     ) -> Iterator[GenerationUpdate]:
         import torch
 
-        with self._lock:
+        with self._lock, steering_vectors.applied(self.model, self.model_id, steering):
             try:
                 if not self.loaded:
                     raise RuntimeError("Download and load a model before chatting.")
@@ -5871,6 +5880,7 @@ class ModelManager:
         *,
         context_count: int = 0,
         load_id: str | None = None,
+        steering: dict | None = None,
     ) -> TokenInsight:
         """Explain the prediction of ``token_ids[index]`` layer by layer.
 
@@ -5893,13 +5903,17 @@ class ModelManager:
 
         import torch
 
-        with self._lock, torch.inference_mode():
+        with self._lock, torch.inference_mode(), steering_vectors.applied(self.model, self.model_id, steering):
             if not self.loaded:
                 raise RuntimeError("Download and load a model before inspecting a token.")
             if load_id is not None and load_id != self.load_id:
                 raise ModelChanged(
                     "The model has been reloaded since these tokens were produced."
                 )
+            if steering_vectors.active(steering):
+                # A cache computed without this vector cannot explain it.
+                # Steered inspections do not retain a cache for later clicks.
+                self._drop_inspect_cache()
             ids = [int(value) for value in token_ids]
             if not 1 <= index < len(ids):
                 raise ValueError(
@@ -5989,7 +6003,7 @@ class ModelManager:
             # covers the sequence through it. Kept for the next click; a
             # response or a scoring pass takes it back (see _drop_inspect_cache).
             produced = getattr(outputs, "past_key_values", None)
-            if produced is not None and self.load_id is not None:
+            if produced is not None and self.load_id is not None and not steering_vectors.active(steering):
                 self._inspect_cache = (self.load_id, ids[:index], produced)
             del outputs, past_key_values
             return TokenInsight(

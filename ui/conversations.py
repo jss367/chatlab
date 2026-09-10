@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -12,6 +13,7 @@ from gradio.utils import get_upload_folder
 import charts
 import library
 import settings
+from steering import normalize as normalize_steering
 from conversation import (
     CHAT_PREFIX,
     FORK_PREFIX,
@@ -440,7 +442,7 @@ def new_conversation(
     )
 
 
-def save_conversation(turns, system_prompt):
+def save_conversation(turns, system_prompt, steering=None):
     if not turns:
         return gr.update(value=None, visible=False), "There is nothing to save yet."
 
@@ -458,14 +460,14 @@ def save_conversation(turns, system_prompt):
     # write_private_text() makes the file owner-only before it holds a word of
     # the conversation, so there is no moment for another account to open it.
     # write_trace_export() writes its export the same way.
-    write_private_text(path, to_json(turns, system_prompt=system_prompt))
+    write_private_text(path, to_json(turns, system_prompt=system_prompt, steering=steering))
     return (
         gr.update(value=str(path), visible=True),
         f"Saved {len(turns)} message{'s' if len(turns) != 1 else ''}.",
     )
 
 
-def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE):
+def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE, *, include_steering=False):
     """Replace the conversation with a saved one.
 
     A failed load keeps the conversation already on screen, so a bad file
@@ -495,12 +497,15 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE):
             gr.skip(),
             *send_stop_buttons(False),
             *(gr.skip(),) * 6,
+            *((gr.skip(),) if include_steering else ()),
         )
 
     if not file_path:
         return keep_current("No file chosen.")
     try:
-        loaded, system_prompt = from_json(Path(file_path).read_text(encoding="utf-8"))
+        payload = Path(file_path).read_text(encoding="utf-8")
+        loaded, system_prompt = from_json(payload)
+        steering = normalize_steering(json.loads(payload).get("steering"))
     except (OSError, ValueError) as error:
         return keep_current(failure_status("Could not load that file", str(error)))
 
@@ -531,4 +536,5 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE):
         charts.summary_tiles({}),
         charts.EMPTY_CHART,
         {},
+        *((steering,) if include_steering else ()),
     )
