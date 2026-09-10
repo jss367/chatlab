@@ -1792,6 +1792,88 @@ class LoadProgressTests(unittest.TestCase):
         self.assertEqual(seen, [progress])
 
 
+class LoadingReportTests(unittest.TestCase):
+    def test_conversion_memory_error_reaches_the_manager_and_log(self):
+        import logging
+
+        manager = model_runtime.ModelManager()
+        source = logging.getLogger("transformers.modeling_utils")
+
+        def fail(*args):
+            source.warning(
+                "Qwen LOAD REPORT\nweight | CONVERSION |\n"
+                "RuntimeError: MPS backend out of memory (MPS allocated: 8.93 GiB)\n"
+            )
+            raise RuntimeError("Conversion failed. Look at the above report!")
+
+        import torch
+
+        with (
+            mock.patch("model_runtime.detect_backend", return_value="mps"),
+            mock.patch.object(manager, "_unload_locked"),
+            mock.patch.object(manager, "_cap_mps_memory", return_value=None),
+            mock.patch.object(manager, "_check_memory", return_value=(None, None)),
+            mock.patch.object(manager, "_release_device_cache") as release,
+            mock.patch("model_runtime.allocated_bytes", return_value=None),
+            mock.patch("model_runtime.reserved_bytes", return_value=None),
+            mock.patch("model_runtime._read_text_model", side_effect=fail),
+            self.assertLogs("model_runtime", level="WARNING") as logs,
+            self.assertRaises(model_runtime.OutOfMemoryError) as caught,
+        ):
+            manager._load_locked("org/model", Path("/snap"), torch, precision="4-bit")
+
+        self.assertIn("did not fit in memory", str(caught.exception))
+        self.assertIn("MPS backend out of memory", str(caught.exception))
+        self.assertTrue(any("CONVERSION" in line for line in logs.output))
+        release.assert_called_once()
+        self.assertFalse(manager.loaded)
+
+    def test_conversion_cause_is_visible_without_terminal_formatting(self):
+        import logging
+
+        source = logging.getLogger("transformers.modeling_utils")
+        parent = logging.getLogger("transformers")
+        before = list(parent.handlers)
+        with self.assertRaisesRegex(RuntimeError, "ValueError: incompatible shape") as caught:
+            with model_runtime._capture_loading_report():
+                source.warning(
+                    "\x1b[1mTiny LOAD REPORT\x1b[0m\nCONVERSION\n"
+                    "ValueError: incompatible shape\n"
+                )
+                raise RuntimeError("See the above report!")
+        self.assertNotIn("\x1b", str(caught.exception))
+        self.assertEqual(parent.handlers, before)
+
+    def test_other_threads_and_previous_loads_do_not_supply_a_report(self):
+        import logging
+
+        source = logging.getLogger("transformers.modeling_utils")
+        original = RuntimeError("See the above report!")
+        with model_runtime._capture_loading_report():
+            source.warning("Earlier LOAD REPORT\nValueError: old failure")
+        with self.assertRaises(RuntimeError) as caught:
+            with model_runtime._capture_loading_report():
+                worker = threading.Thread(target=lambda: source.warning(
+                    "Other LOAD REPORT\nRuntimeError: out of memory"
+                ))
+                worker.start()
+                worker.join()
+                raise original
+        self.assertIs(caught.exception, original)
+
+    def test_unrelated_errors_are_preserved(self):
+        import logging
+
+        original = RuntimeError("Tokenizer failed")
+        with self.assertRaises(RuntimeError) as caught:
+            with model_runtime._capture_loading_report():
+                logging.getLogger("transformers.modeling_utils").warning(
+                    "Tiny LOAD REPORT\nUnexpected key: visual"
+                )
+                raise original
+        self.assertIs(caught.exception, original)
+
+
 class QuantizedLoadTests(unittest.TestCase):
     """What the loader asks transformers for, per device and precision."""
 
@@ -2080,6 +2162,27 @@ class MemoryGuardTests(unittest.TestCase):
         # A file with no architecture at all still reads under the aliases.
         (snapshot / "config.json").write_text(json.dumps({"vocab_size": 100, "d_model": 8}))
         self.assertEqual(_embedding_params(snapshot), 1600)
+
+    def test_multimodal_text_embeddings_are_not_estimated_as_quantized(self):
+        from model_runtime import _embedding_params, estimate_snapshot_bytes
+
+        snapshot = self._snapshot({})
+        config = {
+            "model_type": "qwen3_5",
+            "text_config": {"vocab_size": 100, "hidden_size": 8, "tie_word_embeddings": False},
+        }
+        (snapshot / "config.json").write_text(json.dumps(config))
+        (snapshot / "model.safetensors").write_bytes(b"\0" * 4000)
+        # 1600 embedding/head parameters stay at two bytes; only the
+        # remaining 400 parameters cost 0.5625 bytes at four bits.
+        self.assertEqual(_embedding_params(snapshot), 1600)
+        self.assertEqual(estimate_snapshot_bytes(snapshot, "float16", bits=4), 3425)
+        # The raw config fallback must agree when the library cannot read it.
+        with mock.patch("transformers.AutoConfig.from_pretrained", side_effect=ValueError):
+            self.assertEqual(_embedding_params(snapshot), 1600)
+        config["text_config"]["tie_word_embeddings"] = True
+        (snapshot / "config.json").write_text(json.dumps(config))
+        self.assertEqual(_embedding_params(snapshot), 800)
 
     def test_a_model_larger_than_the_machine_is_refused(self):
         from model_runtime import InsufficientMemoryError, check_memory_for_load
