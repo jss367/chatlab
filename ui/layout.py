@@ -819,84 +819,89 @@ def build_app() -> gr.Blocks:
                     "already on disk. Files are kept in your normal Hugging Face cache.",
                     elem_id="models-hero",
                 )
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown("## Model")
-                        model_id = gr.Textbox(
-                            value=settings.model_id_at_startup(saved),
-                            label="Hugging Face model ID",
-                            placeholder="organization/model-name",
-                            info="The default OLMo 3 7B model is about 15 GB in full precision.",
-                        )
-                        hf_token = gr.Textbox(
-                            label="Hugging Face token (optional)",
-                            type="password",
-                            placeholder="Only needed for gated or private models",
-                        )
-                        weight_precision = gr.Radio(
-                            choices=[
-                                ("Full (16-bit)", "full"),
-                                ("8-bit", "8-bit"),
-                                ("4-bit", "4-bit"),
-                            ],
-                            value=saved.weight_precision,
-                            label="Weight precision",
-                            info=(
-                                "On Apple Metal, 8-bit and 4-bit weights take about a "
-                                "half and a quarter of the memory of full weights, at a "
-                                "small cost in accuracy; the first quantized load fetches "
-                                "the Metal kernels from the Hub. Other devices load full "
-                                "weights whatever is chosen. Applies to the next load."
-                            ),
-                        )
-                        model_availability = gr.Markdown(
-                            "Checking downloaded files…", elem_id="model-availability"
-                        )
-                        with gr.Row():
-                            download_load_button = gr.Button(
-                                "Download and load", variant="primary", size="sm"
+                with gr.Row(elem_id="models-columns"):
+                    with gr.Column(min_width=360, elem_id="model-controls"):
+                        with gr.Column(elem_classes=["model-card"]):
+                            gr.Markdown("## Model")
+                            model_id = gr.Textbox(
+                                value=settings.model_id_at_startup(saved),
+                                label="Hugging Face model ID",
+                                placeholder="organization/model-name",
+                                info="The default OLMo 3 7B model is about 15 GB in full precision.",
                             )
-                            download_button = gr.Button("Download only", size="sm")
-                            cached_button = gr.Button("Load cached", size="sm")
-                            unload_button = gr.Button("Unload", size="sm")
-                        model_status = gr.Markdown(
-                            status_card(
-                                "No model loaded",
-                                "Choose a model under My Models, or enter a Hugging Face model ID to download one. Files are kept in your normal Hugging Face cache.",
-                            ),
-                            elem_id="model-status",
-                        )
+                            hf_token = gr.Textbox(
+                                label="Hugging Face token (optional)",
+                                type="password",
+                                placeholder="Only needed for gated or private models",
+                            )
+                            weight_precision = gr.Radio(
+                                choices=[
+                                    ("Full (16-bit)", "full"),
+                                    ("8-bit", "8-bit"),
+                                    ("4-bit", "4-bit"),
+                                ],
+                                value=saved.weight_precision,
+                                label="Weight precision",
+                                info=(
+                                    "On Apple Metal, 8-bit and 4-bit weights take about a "
+                                    "half and a quarter of the memory of full weights, at a "
+                                    "small cost in accuracy; the first quantized load fetches "
+                                    "the Metal kernels from the Hub. Other devices load full "
+                                    "weights whatever is chosen. Applies to the next load."
+                                ),
+                            )
+                            model_availability = gr.Markdown(
+                                "Checking downloaded files…", elem_id="model-availability"
+                            )
+                            with gr.Row():
+                                download_load_button = gr.Button(
+                                    "Download and load", variant="primary", size="sm"
+                                )
+                                download_button = gr.Button("Download only", size="sm")
+                                cached_button = gr.Button("Load cached", size="sm")
+                                unload_button = gr.Button("Unload", size="sm")
+                            model_status = gr.Markdown(
+                                status_card(
+                                    "No model loaded",
+                                    "Choose a model under My Models, or enter a Hugging Face model ID to download one. Files are kept in your normal Hugging Face cache.",
+                                ),
+                                elem_id="model-status",
+                            )
 
-                        gr.Markdown("## Model search")
-                        # One kind at a time, because the hub's own filters
-                        # are; see SEARCH_KINDS.
-                        search_kind = gr.Radio(
-                            choices=list(SEARCH_KINDS),
-                            value=SEARCH_KINDS[0][1],
-                            show_label=False,
-                            container=False,
-                            elem_id="search-kind",
-                        )
-                        with gr.Row():
-                            search_query = gr.Textbox(
-                                label="Search Hugging Face",
-                                placeholder="Model name, organization, or topic…",
-                                max_lines=1,
-                                scale=3,
+                        with gr.Column(elem_id="model-search", elem_classes=["model-card"]):
+                            gr.Markdown("## Model search")
+                            # One kind at a time, because the hub's own filters
+                            # are; see SEARCH_KINDS.
+                            search_kind = gr.Radio(
+                                choices=list(SEARCH_KINDS),
+                                value=SEARCH_KINDS[0][1],
+                                show_label=False,
+                                container=False,
+                                elem_id="search-kind",
                             )
-                            search_button = gr.Button(
-                                "🔍 Search", size="sm", scale=0, min_width=120
+                            with gr.Row(elem_id="model-search-row"):
+                                search_query = gr.Textbox(
+                                    label="Search Hugging Face",
+                                    placeholder="Model name, organization, or topic…",
+                                    max_lines=1,
+                                    scale=3,
+                                    elem_id="model-search-query",
+                                )
+                                search_button = gr.Button(
+                                    "Search", variant="primary", size="sm", scale=0, min_width=100,
+                                    elem_id="model-search-button",
+                                )
+                            search_results = gr.Radio(
+                                choices=[],
+                                label="Search results",
+                                elem_id="model-search-results",
+                                show_label=False,
+                                elem_classes=["model-list"],
                             )
-                        search_results = gr.Radio(
-                            choices=[],
-                            label="Search results",
-                            show_label=False,
-                            elem_classes=["model-list"],
-                        )
-                        search_detail = gr.Markdown(SEARCH_HINT, elem_classes=["model-detail"])
-                        search_results_state = gr.State({})
+                            search_detail = gr.Markdown(SEARCH_HINT, elem_classes=["model-detail"])
+                            search_results_state = gr.State({})
 
-                    with gr.Column():
+                    with gr.Column(min_width=320, elem_classes=["model-card"]):
                         gr.Markdown("## My Models")
                         my_models_summary = gr.Markdown("", elem_classes=["scale-caption"])
                         sort_models = gr.Dropdown(
