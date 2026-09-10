@@ -63,6 +63,13 @@ class GenerationSession:
         self._check()
         return list(self._manager.tokenizer.encode(text, add_special_tokens=False))
 
+    def encode_replacement(self, kept_ids, text, *, literal_prefill_tokens=0):
+        """Encode typed text after exact retained IDs using this pinned model."""
+        self._check()
+        return self._manager.encode_replacement(
+            kept_ids, text, literal_prefill_tokens=literal_prefill_tokens, load_id=self.load_id,
+        )
+
     def decode(self, ids):
         self._check()
         return self._manager.tokenizer.decode(ids, skip_special_tokens=False)
@@ -182,6 +189,16 @@ class TokenSelections:
         result = self._inspector.describe(metrics[index])
         # Formatting may overlap a stream update or replay switch.
         return result if current() else (gr.skip(), gr.skip())
+
+    def resolve(self, session_id, payload, index):
+        """Resolve an actionable selection only while its view is current."""
+        stamp, metrics = payload
+        with self._lock:
+            active = self._sessions.get(session_id)
+            if (active is None or active[1] != stamp or not isinstance(index, int)
+                    or not 0 <= index < len(metrics)):
+                raise ValueError("Select a token in the current response again.")
+            return active[0], index, copy.deepcopy(metrics[index])
 
 
 class NavigationService:

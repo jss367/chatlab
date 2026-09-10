@@ -47,6 +47,8 @@ class Episode:
     stop_requested: bool = False
     busy: bool = False
     replay_only: bool = False
+    token_edit: dict | None = None
+    pending_edit: dict | None = None
     created_at: float = field(default_factory=time.time)
 
     def __deepcopy__(self, memo):
@@ -82,7 +84,7 @@ class Episode:
         keys = ("run_id", "phase", "detail", "messages", "events", "turns", "position", "model_id", "load_id",
                 "sampled_tokens", "tool_attempts", "supplied_moves", "interrupted", "intervention_turn",
                 "intervention_tokens", "intervention_attempts", "resumed", "first_move_progress", "latency",
-                "manual_intervention", "created_at")
+                "manual_intervention", "created_at", "token_edit", "pending_edit")
         return {"format": FORMAT, "maze": self.maze.to_dict(), "config": self.config,
                 "exploratory": True, "tokenizer_note": "Every turn records its actual prompt IDs. Later turns are templated from the complete prior response text, including reasoning.",
                 **{k: getattr(self, k) for k in keys}}
@@ -145,12 +147,78 @@ def interrupted_prefix(episode, manager):
     return list(ids if count == 0 else ids[:count])
 
 
+def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, candidate_id=None):
+    """Fork before one response; replay exact earlier IDs plus a replacement.
+
+    token_index addresses the full response metric list, including any supplied
+    prefix. Only generated tokens are editable. The original remains untouched.
+    """
+    with episode.lock:
+        if episode.busy:
+            raise ValueError("Pause or stop the episode before editing tokens.")
+        if episode.replay_only:
+            raise ValueError("Saved runs are read-only. Edit tokens in a live episode.")
+        if manager.load_id != episode.load_id or manager.model_id != episode.model_id:
+            raise ValueError("The model changed. Start a new episode before editing tokens.")
+        if not isinstance(turn_index, int) or not 0 <= turn_index < len(episode.turns):
+            raise ValueError("Select a response and token to edit.")
+        original = episode.turns[turn_index]
+        metrics = original["metrics"]
+        if (not isinstance(token_index, int)
+                or not original["forced_prefix_tokens"] <= token_index < len(metrics)):
+            raise ValueError("Select a model-generated token to edit.")
+        kept_ids = [m["token_id"] for m in metrics[:token_index]]
+        literal_prefill_tokens = original.get("literal_prefill_tokens", original["forced_prefix_tokens"])
+        if candidate_id is None:
+            replacement_ids = manager.encode_replacement(
+                kept_ids, replacement, literal_prefill_tokens=literal_prefill_tokens,
+            )
+        else:
+            candidates = {c["token_id"] for c in metrics[token_index].get("top_candidates", [])}
+            if candidate_id not in candidates:
+                raise ValueError("Choose an alternative for the selected token.")
+            replacement_ids = [candidate_id]
+        if not replacement_ids:
+            raise ValueError("Enter replacement text or choose a token alternative.")
+        stop_ids = manager.stop_token_ids
+        if any(t in stop_ids for t in replacement_ids[:-1]):
+            raise ValueError("A stop token can only appear at the end of the replacement.")
+        result = Episode(episode.maze, episode.config)
+        result.model_id, result.load_id = episode.model_id, episode.load_id
+        result.manual_intervention = True
+        # Rebuild history and recovery counters through the same simulator path
+        # used during generation, excluding the edited response and its future.
+        for i, previous in enumerate(episode.turns[:turn_index]):
+            turn = copy.deepcopy(previous)
+            result.turns.append(turn)
+            if episode.interrupted and episode.intervention_turn == i:
+                result.interrupted = True
+                result.intervention_turn = i
+                result.intervention_tokens = result.sampled_tokens
+                result.intervention_attempts = result.tool_attempts
+            result.phase = "running"
+            finish_turn(result, turn, stop_ids, result.config["per_turn_tokens"])
+        prefix = kept_ids + replacement_ids
+        result.token_edit = dict(parent_run_id=episode.run_id, turn=turn_index,
+                                 token_index=token_index, original_token_id=metrics[token_index]["token_id"],
+                                 replacement_ids=replacement_ids,
+                                 replacement_text=replacement if candidate_id is None else manager.decode(replacement_ids),
+                                 created_at=time.time())
+        result.pending_edit = dict(forced_ids=prefix,
+                                   literal_prefill_tokens=literal_prefill_tokens,
+                                   interruption_here=bool(episode.interrupted and episode.intervention_turn == turn_index))
+        result.phase, result.detail = "paused", "Token edit prepared. Regeneration will replace this response and its later moves in a new run."
+        return result
+
+
 def finish_turn(episode, turn, stop_ids, max_tokens):
     sampled = turn["metrics"][turn["forced_prefix_tokens"]:]
     episode.sampled_tokens += len(sampled)
     turn["sampled_tokens"] = len(sampled)
     turn["tokens_cumulative"] = episode.sampled_tokens
     natural_stop = bool(sampled and sampled[-1]["token_id"] in stop_ids)
+    if turn.get("token_edit") and not sampled and turn["metrics"]:
+        natural_stop = turn["metrics"][-1]["token_id"] in stop_ids
     if episode.stop_requested:
         episode.phase, episode.detail = "stopped", "Stopped by you. Partial tokens were retained; no partial action executed."
         turn["finish_reason"] = "user_stopped"
@@ -244,9 +312,11 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
                 break
             if manager.load_id != episode.load_id:
                 raise ValueError("The model changed during this episode. Start a new episode with the selected model.")
-            forced = interrupted_prefix(episode, manager)
+            edit = episode.pending_edit
+            forced = edit["forced_ids"] if edit else interrupted_prefix(episode, manager)
+            inserts_interruption = edit["interruption_here"] if edit else bool(forced)
             limit = min(episode.config["per_turn_tokens"], episode.config["token_budget"] - episode.sampled_tokens)
-            if forced:
+            if inserts_interruption:
                 limit = min(limit, 1024)
             elif episode.interrupted and episode.resumed is None:
                 limit = min(limit, 1024 - (episode.sampled_tokens - episode.intervention_tokens))
@@ -257,7 +327,11 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
                     "prefix_ids": [], "prefix_text": "",
                     "planned_prefix_ids": forced, "planned_prefix_text": manager.decode(forced),
                     "position_before": list(episode.position), "started_at": time.time(), "finish_reason": None}
+            turn["literal_prefill_tokens"] = edit["literal_prefill_tokens"] if edit else len(forced)
+            if edit:
+                turn["token_edit"] = copy.deepcopy(episode.token_edit)
             episode.turns.append(turn)
+            episode.pending_edit = None
             yield episode
             if episode.stop_requested:
                 finish_turn(episode, turn, set(), limit)
@@ -266,7 +340,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             generator = manager.generate(
                 episode.messages, temperature=episode.config["temperature"], top_p=1., top_k=0,
                 max_new_tokens=limit, seed=episode.config["sampling_seed"] + 100003 * (len(episode.turns) - 1),
-                analyze_prompt=False, tools=TOOLS, forced_ids=forced, literal_prefill_tokens=len(forced),
+                analyze_prompt=False, tools=TOOLS, forced_ids=forced, literal_prefill_tokens=turn["literal_prefill_tokens"],
             )
             try:
                 for update in generator:
@@ -276,13 +350,14 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
                     # The runtime emits prefix metrics only after prefill has
                     # consumed them. An opening frame or a failed model call
                     # alone is not evidence that an interruption was inserted.
-                    if forced and not episode.interrupted and update.forced_prefix_tokens and update.metrics:
+                    if forced and update.forced_prefix_tokens and update.metrics:
+                        turn.update(prefix_ids=forced, prefix_text=manager.decode(forced))
+                    if inserts_interruption and not episode.interrupted and update.forced_prefix_tokens and update.metrics:
                         episode.interrupted = True
                         episode.intervention_turn = len(episode.turns) - 1
                         episode.intervention_tokens = episode.sampled_tokens
                         episode.intervention_attempts = episode.tool_attempts
                         episode.detail = "Interruption inserted. Watching for a real movement call."
-                        turn.update(prefix_ids=forced, prefix_text=manager.decode(forced))
                     yield episode
                     if episode.stop_requested:
                         break

@@ -107,8 +107,35 @@ class TokenSelectionTests(unittest.TestCase):
         self.inspector.describe.side_effect = delayed_description
         self.assertEqual(self.selections.inspect(self.session, old, self.click), (gr.skip(), gr.skip()))
 
+    def test_actionable_selection_rejects_stale_views_and_other_sessions(self):
+        payload, _ = self.selections.view(self.session, ('run', 0), [{'token_id': 7}])
+        view, index, metric = self.selections.resolve(self.session, payload, 0)
+        self.assertEqual((view, index, metric), (('run', 0), 0, {'token_id': 7}))
+        metric['token_id'] = 99
+        self.assertEqual(payload[1][0]['token_id'], 7)
+        for session, index in [(self.session, -1), (self.session, 1), ('other', 0)]:
+            with self.assertRaises(ValueError):
+                self.selections.resolve(session, payload, index)
+        self.selections.view(self.session, ('run', 1), [])
+        with self.assertRaises(ValueError):
+            self.selections.resolve(self.session, payload, 0)
+
 
 class RuntimeBoundaryTests(unittest.TestCase):
+    def test_replacement_encoding_checks_pinned_load_and_closed_session(self):
+        manager = FakeManager()
+        manager.encode_replacement = mock.Mock(return_value=[42])
+        with ModelService(lambda: manager).open_session() as session:
+            self.assertEqual(session.encode_replacement([1], 'word', literal_prefill_tokens=1), [42])
+            manager.encode_replacement.assert_called_once_with([1], 'word', literal_prefill_tokens=1,
+                                                               load_id='first')
+            manager.load_id = 'second'
+            with self.assertRaisesRegex(ValueError, 'changed'):
+                session.encode_replacement([1], 'word')
+            manager.encode_replacement.assert_called_once()
+        with self.assertRaisesRegex(ValueError, 'closed'):
+            session.encode_replacement([1], 'word')
+
     def test_exclusive_session_pins_model_and_closes_stream(self):
         manager = FakeManager()
         service = ModelService(lambda: manager)

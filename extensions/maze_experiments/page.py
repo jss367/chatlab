@@ -9,7 +9,7 @@ from pathlib import Path
 import gradio as gr
 
 from .maze import GOAL_MODES, PASSAGES, generate
-from .runner import Episode, from_payload, stream_episode
+from .runner import Episode, fork_token_edit, from_payload, stream_episode
 from extension_api import TokenInspector
 
 TOKENS = TokenInspector()
@@ -122,9 +122,12 @@ def views(ep, reveal, selections, session_id, index=None, animate=False):
     note = (f"**Supplied interruption · {forced} tokens** · {origin}.\n\n" if forced else "No supplied interruption in this response.")
     if not forced and t.get("planned_prefix_ids"):
         note = f"**Pending interruption · {len(t['planned_prefix_ids'])} tokens** · Prefix insertion has not been confirmed."
+    if t.get("token_edit"):
+        note = (f"**{'Retained / edited' if forced else 'Pending retained / edited'} prefix · {forced or len(t.get('planned_prefix_ids', []))} tokens** · "
+                "Earlier token IDs and your replacement are supplied as context; only the new continuation counts toward sampled-token limits.")
     return (board(ep, index, reveal, animate), status(ep), TOKENS.strip(metrics[forced:]),
             t.get("text", ""), note, t.get("prefix_text") or t.get("planned_prefix_text", ""), timeline(ep), stamped,
-            gr.update(choices=[("Initial / supplied history", -1)] + [(f"Response {i+1}" + (" · interruption" if t.get("prefix_ids") else ""), i) for i, t in enumerate(ep.turns)], value=index),
+            gr.update(choices=[("Initial / supplied history", -1)] + [(f"Response {i+1}" + (" · token edit" if t.get("token_edit") else " · interruption" if t.get("prefix_ids") else ""), i) for i, t in enumerate(ep.turns)], value=index),
             "Select a model-generated token above." if changed else gr.skip(), [] if changed else gr.skip())
 
 
@@ -137,6 +140,7 @@ def _build_page(context):
     selections = context.tokens.selections()
     selection_session = gr.State(value=selections.new_session, delete_callback=selections.forget)
     metrics_state = gr.State((None, []))
+    edit_selection = gr.State(None)
     gr.Markdown("# Maze workbench\nWatch a model navigate, interrupt its response, and inspect what happens next.")
     with gr.Row():
         with gr.Column(scale=5, min_width=310):
@@ -174,7 +178,7 @@ def _build_page(context):
                     budget = gr.Number(value=8192, precision=0, minimum=1, maximum=32768, label="Total sampled-token limit")
                     attempts = gr.Number(value=32, precision=0, minimum=1, maximum=256, label="Tool-attempt limit")
                 prepare = gr.Button("New episode · apply settings", elem_id="maze-prepare")
-                gr.Markdown("Edits apply when you create a **new episode**. Run and Step continue the current episode. Seeds reproduce the maze; model sampling may vary across hardware.")
+                gr.Markdown("Setting changes apply when you create a **new episode**. Run and Step continue the current episode. Seeds reproduce the maze; model sampling may vary across hardware.")
         with gr.Column(scale=6, min_width=330):
             state_text = gr.Markdown(status(initial), elem_id="maze-status")
             gr.Markdown("### Emitted tokens\nLive output from the model, including reasoning tokens when its template exposes them. Supplied text appears separately below.")
@@ -186,6 +190,11 @@ def _build_page(context):
             with gr.Accordion("Selected token probabilities", open=False):
                 detail = gr.Markdown("Select a model-generated token above.")
                 alternatives = gr.Dataframe(headers=["Token ID", "Text", "Raw probability"], interactive=False)
+            with gr.Accordion("Edit selected token", open=True):
+                gr.Markdown("Pause or stop, then click a generated token. Choose an alternative or enter replacement text (which may contain several tokens). Regeneration creates a new run, keeping earlier tokens and rewinding this response and all later moves. The original is saved for replay.")
+                replacement = gr.Textbox(label="Replacement text", lines=2)
+                candidate = gr.Dropdown(choices=[("Use replacement text", "text")], value="text", label="Replacement token")
+                edit_button = gr.Button("Replace token and regenerate", elem_id="maze-edit-token")
             with gr.Accordion("Path and replay", open=True):
                 turn_picker = gr.Dropdown(choices=[("Initial / supplied history", -1)], value=-1, label="Inspect response", interactive=True)
                 events = gr.Dataframe(value=timeline(initial), headers=["Source", "Position (row, column)", "Direction", "Result"], interactive=False, wrap=True)
@@ -263,8 +272,39 @@ def _build_page(context):
             raise gr.Error(f"Could not load run: {exc}") from exc
         return (replay, *rendered)
 
-    def select_token(session_id, metrics, evt: gr.SelectData):
-        return selections.inspect(session_id, metrics, evt)
+    def select_token(ep, session_id, metrics, evt: gr.SelectData):
+        index = evt.index[0] if isinstance(evt.index, (tuple, list)) else evt.index
+        try:
+            view_id, index, metric = selections.resolve(session_id, metrics, index)
+        except ValueError:
+            return (gr.skip(),) * 5
+        if view_id[:2] != (ep.run_id, id(ep)):
+            return (gr.skip(),) * 5
+        choices = [("Use replacement text", "text")] + [
+            (f"{c['text']!r} · token {c['token_id']}", str(c["token_id"]))
+            for c in metric.get("top_candidates", [])]
+        return (*selections.inspect(session_id, metrics, evt),
+                dict(view_id=view_id, stamp=metrics[0], index=index), metric.get("text", ""),
+                gr.update(choices=choices, value="text"))
+
+    def edit_token(ep, show, session_id, metrics, selected, text_value, candidate_value):
+        try:
+            if selected is None or selected["stamp"] != metrics[0]:
+                raise ValueError("Select a token in the current response again.")
+            view_id, index, _ = selections.resolve(session_id, metrics, selected["index"])
+            if view_id != selected["view_id"] or view_id[:2] != (ep.run_id, id(ep)):
+                raise ValueError("Select a token in the current response again.")
+            turn_index = view_id[2]
+            token_index = ep.turns[turn_index]["forced_prefix_tokens"] + index
+            with context.models.open_session() as manager:
+                new = fork_token_edit(ep, turn_index, token_index, text_value, manager,
+                                      candidate_id=None if candidate_value == "text" else int(candidate_value))
+            ep.save(runs_dir(context))
+        except (ValueError, OSError) as exc:
+            raise gr.Error(str(exc)) from exc
+        yield (new, *views(new, show, selections, session_id), None, None)
+        for frame in play(new, show, session_id, single=True):
+            yield (new, *frame, None, None)
 
     prepare.click(prepare_episode, [episode, reveal, selection_session, *controls], [episode, *outputs, download], concurrency_id="maze", show_progress="hidden")
     run.click(play, [episode, reveal, selection_session], outputs, concurrency_id="maze", show_progress="hidden")
@@ -277,7 +317,10 @@ def _build_page(context):
                     goal_mode, [goal_hint, supplied], queue=False)
     reveal.input(lambda ep, show, i: board(ep, None if ep.busy else int(i if i is not None else -1), show), [episode, reveal, turn_picker], maze_board, queue=False)
     turn_picker.input(inspect, [episode, reveal, turn_picker, selection_session], outputs, show_progress="hidden")
-    strip.select(select_token, [selection_session, metrics_state], [detail, alternatives], queue=False, show_progress="hidden")
+    strip.select(select_token, [episode, selection_session, metrics_state],
+                 [detail, alternatives, edit_selection, replacement, candidate], queue=False, show_progress="hidden")
+    edit_button.click(edit_token, [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate],
+                      [episode, *outputs, edit_selection, download], concurrency_id="maze", show_progress="hidden")
     save.click(export, episode, download, show_progress="hidden")
     upload.upload(load, [upload, episode, reveal, selection_session], [episode, *outputs], show_progress="hidden")
     context.navigation.open_models(models)
