@@ -1759,12 +1759,14 @@ def build_app() -> gr.Blocks:
         )
         # Every other path that changes the conversation - a streaming reply
         # above all - lands here, and the list's model tag and token count
-        # follow it.
+        # follow it. Hide the loading overlay so each streaming frame updates
+        # the labels without making the whole list blink.
         conversation_state.change(
             refresh_conversation_list,
             [conversation_state, forks_state],
             [conversation_list, forks_state],
             concurrency_id=CONVERSATION_PANE_QUEUE,
+            show_progress="hidden",
         )
         # And the forks' change, which the listener above fires in turn, is
         # where the file is written - once per change, whichever path made it.
