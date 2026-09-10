@@ -1961,6 +1961,24 @@ def _reraise_out_of_memory(error: BaseException, kind: str = TEXT_KIND) -> None:
     raise OutOfMemoryError(out_of_memory_message(error, kind)) from error
 
 
+def _inference_stream(method):
+    """Apply inference mode on each resume, keeping torch's import lazy.
+
+    A context held across a yield belongs to the original worker thread.
+    Gradio can resume on another worker, enabling autograd there and retaining
+    training intermediates through the growing key-value cache. PyTorch's
+    generator decorator enters and exits on every next/send/throw/close.
+    """
+
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        import torch
+
+        yield from torch.inference_mode()(method)(*args, **kwargs)
+
+    return wrapper
+
+
 def _guards_device_memory(method):
     """Turn a run's out-of-memory failure into :class:`OutOfMemoryError`, and
     hand cached device memory back after ``method``, whatever its outcome.
@@ -5172,6 +5190,7 @@ class ModelManager:
         except Exception:  # noqa: BLE001 - a log line must not break a reply
             logger.debug("Could not record the run", exc_info=True)
 
+    @_inference_stream
     def _generate(
         self,
         messages: list[dict],
@@ -5192,7 +5211,7 @@ class ModelManager:
     ) -> Iterator[GenerationUpdate]:
         import torch
 
-        with self._lock, torch.inference_mode():
+        with self._lock:
             try:
                 if not self.loaded:
                     raise RuntimeError("Download and load a model before chatting.")

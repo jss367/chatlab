@@ -129,7 +129,80 @@ html, body {{ height: 100%; overflow: hidden; }}
 #image-inspector .form {{ border: 0; box-shadow: none; background: transparent; }}
 #image-status {{ font-size: 12px; color: var(--body-text-color-subdued); }}
 #image-output img {{ max-height: 60vh; object-fit: contain; }}
-#search-kind {{ margin-bottom: 6px; }}
+/* Models is a form-heavy page: give sections and controls visible edges
+   without adding chrome to the conversation or inspector. */
+#models-page {{
+  background: var(--background-fill-secondary);
+}}
+#models-columns {{ align-items: flex-start; gap: 24px; }}
+#model-controls {{ gap: 24px; }}
+#models-page .model-card {{
+  min-width: 0; padding: 20px; gap: 16px;
+  border: 1px solid var(--border-color-primary); border-radius: 12px;
+  background: var(--block-background-fill);
+}}
+#models-page .model-card > * {{ flex-shrink: 0; }}
+#models-page .model-card h2 {{
+  margin: 0; padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color-primary);
+  font-size: 17px; line-height: 24px; font-weight: 600;
+}}
+#models-page button {{ border-width: 1px; }}
+#models-page textarea, #models-page input[data-testid="textbox"], #models-page input[type="password"],
+#models-page .model-sort .wrap {{
+  border: 1px solid var(--input-border-color); border-radius: 8px;
+  background: var(--input-background-fill);
+}}
+#models-page textarea:focus, #models-page input[data-testid="textbox"]:focus,
+#models-page input[type="password"]:focus {{
+  border-color: var(--color-accent);
+  outline: 2px solid var(--color-accent); outline-offset: 2px;
+}}
+#search-kind {{ padding: 0; border: 0; background: transparent; }}
+#search-kind .wrap {{
+  display: flex; width: fit-content; max-width: 100%; gap: 4px; padding: 4px;
+  border: 1px solid var(--border-color-primary); border-radius: 10px;
+  background: var(--background-fill-secondary);
+}}
+#search-kind label {{
+  flex: 1 1 auto; justify-content: center; margin: 0; padding: 8px 14px;
+  border: 1px solid transparent; border-radius: 7px; background: transparent;
+}}
+#search-kind label.selected {{
+  border-color: var(--border-color-primary);
+  background: var(--block-background-fill);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 8%);
+}}
+#search-kind label.selected span {{ color: var(--color-accent); font-weight: 600; }}
+#search-kind input {{
+  position: absolute; width: 1px; height: 1px; opacity: 0;
+}}
+#search-kind label:has(input:focus-visible) {{
+  outline: 2px solid var(--color-accent); outline-offset: 2px;
+}}
+#model-search-row {{ align-items: flex-end; gap: 12px; }}
+#models-page .form, #model-search-query {{
+  border: 0; box-shadow: none; background: transparent;
+}}
+#model-search-query {{ padding: 0; }}
+#model-search-query input {{ min-height: 42px; }}
+#model-search-button {{ min-height: 42px; }}
+/* An empty Radio otherwise leaves a small, unexplained box below search. */
+#models-page .form:has(> #model-search-results):not(:has(input[type="radio"])) {{ display: none; }}
+#models-page .model-list {{ padding: 0; border: 0; }}
+#models-page .model-list label {{ padding: 12px; border-width: 1px; border-radius: 8px; }}
+#models-page .block.model-detail {{
+  padding: 12px 14px; border: 1px solid var(--border-color-primary);
+  border-width: 1px !important;
+  border-radius: 8px; background: var(--background-fill-secondary);
+  color: var(--body-text-color-subdued); line-height: 1.6;
+}}
+#models-page .block.model-detail:not(:has(.md > *)) {{ display: none; }}
+@media (max-width: 800px) {{
+  #models-page {{ padding: 20px 16px; }}
+  #models-page .model-card {{ padding: 16px; }}
+  #model-controls {{ min-width: min(360px, 100%) !important; }}
+}}
 #conversations-heading h2, #inspector-heading h2 {{
   font-size: 15px; line-height: 24px; font-weight: 600; margin: 0;
 }}
