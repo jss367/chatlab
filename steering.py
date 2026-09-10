@@ -71,6 +71,28 @@ def read_vector(path: str) -> dict:
     return result
 
 
+def from_controls(value, enabled=None, strength=None, layer=None):
+    """Snapshot visible controls without waiting for their persistence event.
+
+    Omitted controls keep the specification supplied by direct Python callers.
+    The UI supplies all three with each generation or save request.
+    """
+    if value is None:
+        if enabled:
+            raise ValueError("Import a vector before enabling steering.")
+        return None
+    value = dict(value)
+    if enabled is not None:
+        value["enabled"] = enabled
+    if strength is not None:
+        value["strength"] = strength
+    if layer is not None:
+        if isinstance(layer, bool) or int(layer) != layer:
+            raise ValueError("Layer must be a zero-based integer.")
+        value["layer"] = int(layer)
+    return normalize(value)
+
+
 def active(value: dict | None) -> bool:
     return bool(value and value.get("enabled", True) and value.get("strength", 1) != 0)
 

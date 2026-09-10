@@ -2625,7 +2625,7 @@ class BranchFromTokenTests(unittest.TestCase):
             for fn in demo.fns.values()
             if getattr(fn.fn, "__name__", None) == "branch_with_text"
         )
-        self.assertEqual(len(listener.inputs), 4 + 2 + len(SETTINGS) + 1)
+        self.assertEqual(len(listener.inputs), 4 + 2 + len(SETTINGS) + 4)
         self.assertEqual(len(listener.outputs), CHAT_OUTPUTS)
 
     def test_the_branch_button_is_wired_as_a_generation(self):
@@ -2635,7 +2635,7 @@ class BranchFromTokenTests(unittest.TestCase):
             for fn in demo.fns.values()
             if getattr(fn.fn, "__name__", None) == "branch_from"
         )
-        self.assertEqual(len(listener.inputs), 3 + 2 + len(SETTINGS) + 1)
+        self.assertEqual(len(listener.inputs), 3 + 2 + len(SETTINGS) + 4)
         self.assertEqual(len(listener.outputs), CHAT_OUTPUTS)
 
 

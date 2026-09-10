@@ -5,7 +5,7 @@ from __future__ import annotations
 import gradio as gr
 
 from conversation import MAIN_BRANCH, branch_sampling, copy_forks, put_branch_sampling
-from steering import normalize, read_vector
+from steering import from_controls, normalize, read_vector
 from ui.conversations import load_conversation
 
 
@@ -60,16 +60,12 @@ def remove_vector(forks):
 
 
 def remember_steering(forks, value, enabled, strength, layer):
-    if value is None:
-        if enabled:
-            raise gr.Error("Import a vector before enabling steering.")
-        return gr.skip(), None, EMPTY_STATUS
     try:
-        if isinstance(layer, bool) or int(layer) != layer:
-            raise ValueError("Layer must be a zero-based integer.")
-        value = normalize(dict(value, enabled=enabled, strength=strength, layer=int(layer)))
+        value = from_controls(value, enabled, strength, layer)
     except (ValueError, TypeError, OverflowError) as error:
         raise gr.Error(str(error)) from error
+    if value is None:
+        return gr.skip(), None, EMPTY_STATUS
     return store(forks, value), value, description(value)
 
 

@@ -13,7 +13,7 @@ from gradio.utils import get_upload_folder
 import charts
 import library
 import settings
-from steering import normalize as normalize_steering
+from steering import from_controls as steering_from_controls, normalize as normalize_steering
 from conversation import (
     CHAT_PREFIX,
     FORK_PREFIX,
@@ -442,7 +442,7 @@ def new_conversation(
     )
 
 
-def save_conversation(turns, system_prompt, steering=None):
+def save_conversation(turns, system_prompt, steering=None, steering_enabled=None, steering_strength=None, steering_layer=None):
     if not turns:
         return gr.update(value=None, visible=False), "There is nothing to save yet."
 
@@ -460,6 +460,7 @@ def save_conversation(turns, system_prompt, steering=None):
     # write_private_text() makes the file owner-only before it holds a word of
     # the conversation, so there is no moment for another account to open it.
     # write_trace_export() writes its export the same way.
+    steering = steering_from_controls(steering, steering_enabled, steering_strength, steering_layer)
     write_private_text(path, to_json(turns, system_prompt=system_prompt, steering=steering))
     return (
         gr.update(value=str(path), visible=True),

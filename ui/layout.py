@@ -1531,7 +1531,10 @@ def build_app() -> gr.Blocks:
             analyze_prompt,
             color_scale,
         ]
-        chat_inputs = [prompt, conversation_state, *settings_inputs, steering_state]
+        # Persistence runs separately; every request must snapshot the controls
+        # the reader sees, even while remember_steering is still queued.
+        steering_inputs = [steering_state, steering_enabled, steering_strength, steering_layer]
+        chat_inputs = [prompt, conversation_state, *settings_inputs, *steering_inputs]
 
         # Everything saved between sessions, in PERSISTED_SETTING_NAMES order.
         persisted_inputs = [*settings_inputs, enter_sends, model_id, weight_precision]
@@ -1869,7 +1872,7 @@ def build_app() -> gr.Blocks:
 
         save_button.click(
             save_conversation,
-            [conversation_state, system_prompt, steering_state],
+            [conversation_state, system_prompt, *steering_inputs],
             [saved_file, generation_status],
         )
         load_upload.upload(

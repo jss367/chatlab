@@ -166,6 +166,66 @@ class RuntimeTests(unittest.TestCase):
 
 
 class ConversationTests(unittest.TestCase):
+    def test_generation_paths_use_visible_controls_before_persistence_catches_up(self):
+        from test_app_flow import FIXED, TURNS, TRACE, METRICS, BRANCH_SOURCE
+        from ui.generation import chat, retry_last, branch_from, branch_with_text
+
+        for route in ("send", "retry", "branch", "typed_branch"):
+            for overrides in ((False, 1, 0), (True, 1, 0), (True, -2, 0), (True, 1, 1)):
+                with self.subTest(route=route, overrides=overrides):
+                    held = manager()
+                    stale = vector(enabled=overrides != (True, 1, 0))
+                    original = steering.normalize(stale)
+                    expected = dict(stale, enabled=overrides[0], strength=overrides[1], layer=overrides[2])
+                    with mock.patch.object(runtime, "MANAGER", held):
+                        # Keep a visible prefix even if the tiny random model
+                        # samples EOS immediately with steering turned off.
+                        settings = dict(FIXED, assistant_prefill="Hello")
+                        before = list(chat("Hello", [], **settings, steering=stale))[-1]
+                        generation, metrics = before[METRICS]
+                        current = (*settings.values(), stale, *overrides)
+                        if route == "send":
+                            stream = chat("Hello", [], *current)
+                        elif route == "retry":
+                            stream = retry_last("", before[TURNS], *current)
+                        elif route == "branch":
+                            metric = metrics[0]
+                            pick = dict(
+                                generation=generation, position=1, token_id=metric["token_id"],
+                                original_id=metric["token_id"], text=metric["text"], original=metric["text"],
+                            )
+                            stream = branch_from(pick, before[BRANCH_SOURCE], before[METRICS], "", before[TURNS], *current)
+                        else:
+                            selected = dict(generation=generation, index=0)
+                            stream = branch_with_text(selected, before[BRANCH_SOURCE], before[METRICS], "Hello", "", before[TURNS], *current)
+                        with mock.patch.object(held, "generate", wraps=held.generate) as generate:
+                            result = list(stream)[-1]
+                        self.assertEqual(generate.call_args.kwargs["steering"], expected)
+                        self.assertEqual(result[TURNS][-1]["steering"], expected)
+                        self.assertEqual(result[TRACE]["sampling"]["steering"], expected)
+                        self.assertEqual(stale, original)
+
+    def test_generation_and_save_listeners_capture_all_visible_steering_controls(self):
+        from ui.layout import build_app
+
+        demo = build_app()
+        listeners = [fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", "") in (
+            "chat", "retry_last", "retry_message", "edit_message", "branch_from", "branch_with_text", "save_conversation",
+        )]
+        self.assertEqual(len(listeners), 8)  # Send and Enter each call chat.
+        for listener in listeners:
+            self.assertEqual([item.label for item in listener.inputs[-3:]], [
+                "Enable steering", "Steering strength", "Target layer (starting at 0)",
+            ])
+
+    def test_save_uses_visible_controls_before_persistence_catches_up(self):
+        turns = [conversation.make_turn("user", "Hello")]
+        stale = vector()
+        saved, _ = save_conversation(turns, "", stale, False, -2, 1)
+        self.addCleanup(Path(saved["value"]).unlink)
+        self.assertEqual(json.loads(Path(saved["value"]).read_text())["steering"], dict(stale, enabled=False, strength=-2, layer=1))
+        self.assertEqual(stale, vector())
+
     def test_fork_switch_new_chat_and_library_roundtrip(self):
         forks = controls.store(conversation.new_forks(), vector())
         turns = [conversation.make_turn("user", "Hello")]

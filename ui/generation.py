@@ -9,7 +9,7 @@ import time
 
 import gradio as gr
 
-from steering import normalize as normalize_steering
+from steering import from_controls as steering_from_controls
 
 import charts
 from conversation import (
@@ -345,6 +345,9 @@ def generate_reply(
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
     steering: dict | None = None,
+    steering_enabled: bool | None = None,
+    steering_strength: float | None = None,
+    steering_layer: int | None = None,
     *,
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
@@ -409,6 +412,9 @@ def generate_reply(
             analyze_prompt,
             scale_name,
             steering,
+            steering_enabled,
+            steering_strength,
+            steering_layer,
             forced_ids=forced_ids,
             literal_prefill_tokens=literal_prefill_tokens,
             automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
@@ -439,6 +445,9 @@ def _stream_reply(
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
     steering: dict | None = None,
+    steering_enabled: bool | None = None,
+    steering_strength: float | None = None,
+    steering_layer: int | None = None,
     *,
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
@@ -461,7 +470,7 @@ def _stream_reply(
         turns, system_prompt=system_prompt, include_reasoning=keep_reasoning
     )
 
-    steering = normalize_steering(steering)
+    steering = steering_from_controls(steering, steering_enabled, steering_strength, steering_layer)
     pending = make_turn("assistant", "", "")
     if steering is not None:
         pending["steering"] = steering
@@ -771,6 +780,9 @@ def chat(
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
     steering: dict | None = None,
+    steering_enabled: bool | None = None,
+    steering_strength: float | None = None,
+    steering_layer: int | None = None,
 ):
     if runtime.MANAGER.busy:
         # Before anything else, including the checks below: every other exit
@@ -804,6 +816,9 @@ def chat(
         analyze_prompt,
         scale_name,
         steering,
+        steering_enabled,
+        steering_strength,
+        steering_layer,
     )
 
 
@@ -823,6 +838,9 @@ def regenerate_from(
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
     steering: dict | None = None,
+    steering_enabled: bool | None = None,
+    steering_strength: float | None = None,
+    steering_layer: int | None = None,
 ):
     """Throw away everything after the user turn at ``position`` and reply again."""
 
@@ -855,6 +873,9 @@ def regenerate_from(
         analyze_prompt,
         scale_name,
         steering,
+        steering_enabled,
+        steering_strength,
+        steering_layer,
     )
 
 
