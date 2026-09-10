@@ -3832,9 +3832,14 @@ class MlxHubSearchTests(unittest.TestCase):
                 tags=["mlx"],
             ),
         ]
+        # What mlx-lm implements is its own question, answered by mlx_supports
+        # and tested with it; here it is given, so the search's own rules -
+        # the tag required, an architecture mlx-lm lacks dropped - are what
+        # is checked, on a machine with or without mlx installed.
+        supported = {"qwen3", "llama", "mistral"}
         with (
             mock.patch("model_runtime.mlx_available", return_value=True),
-            mock.patch("mlx_runtime.mlx_available", return_value=True),
+            mock.patch("mlx_runtime.mlx_supports", side_effect=supported.__contains__),
         ):
             found = search_hub_models("", kind=model_runtime.MLX_KIND)
 

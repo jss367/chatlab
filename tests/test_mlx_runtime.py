@@ -8,9 +8,12 @@ skipped where mlx cannot be imported (anything but Apple silicon).
 """
 
 import json
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -19,6 +22,7 @@ from mlx_runtime import (
     MlxEngine,
     bits_from_name,
     mlx_quantization,
+    mlx_supports,
     precision_label,
     read_mlx_config,
 )
@@ -94,6 +98,50 @@ class BitsFromNameTests(unittest.TestCase):
         # A digit in the organisation is not a width.
         self.assertIsNone(bits_from_name("4bit-lab/plain-model"))
         self.assertIsNone(bits_from_name("org/model-16bit"))
+
+
+class SupportsTests(unittest.TestCase):
+    """Whether mlx-lm implements an architecture: the remapping table, then a module lookup."""
+
+    def test_nothing_is_supported_where_mlx_is_not_installed(self):
+        with mock.patch("mlx_runtime.mlx_available", return_value=False):
+            self.assertFalse(mlx_supports("llama"))
+
+    def test_the_lookup_goes_through_the_remapping_table_then_the_module_path(self):
+        # The same reasoning mlx_lm.utils._get_classes follows, without mlx:
+        # the table and the module path are both stood in for.
+        utils = types.ModuleType("mlx_lm.utils")
+        utils.MODEL_REMAPPING = {"mistral": "llama"}
+        package = types.ModuleType("mlx_lm")
+        package.utils = utils
+        modules = {"mlx_lm.models.llama"}
+        asked = []
+
+        def find_spec(name, *args):
+            asked.append(name)
+            return object() if name in modules else None
+
+        with (
+            mock.patch("mlx_runtime.mlx_available", return_value=True),
+            mock.patch.dict(sys.modules, {"mlx_lm": package, "mlx_lm.utils": utils}),
+            mock.patch("importlib.util.find_spec", side_effect=find_spec),
+        ):
+            self.assertTrue(mlx_supports("llama"))
+            self.assertTrue(mlx_supports("mistral"))
+            self.assertFalse(mlx_supports("no-such-architecture"))
+            self.assertFalse(mlx_supports(None))
+            self.assertFalse(mlx_supports(""))
+
+        # mistral was looked up as llama, the type it is remapped to.
+        self.assertEqual(asked, ["mlx_lm.models.llama"] * 2 + ["mlx_lm.models.no-such-architecture"])
+
+    @needs_mlx
+    def test_the_installed_mlx_lm_answers_for_itself(self):
+        self.assertTrue(mlx_supports("llama"))
+        self.assertTrue(mlx_supports("gpt2"))
+        # Remapped by mlx-lm: mistral runs as llama.
+        self.assertTrue(mlx_supports("mistral"))
+        self.assertFalse(mlx_supports("no-such-architecture"))
 
 
 VOCAB = 32
