@@ -63,6 +63,19 @@ class Manager:
                               load_id=self.load_id, model_id=self.model_id)
 
 
+def scored(generate):
+    """Add the display metrics and alternatives the token strip and edit panel read."""
+    def reply(*args, **kwargs):
+        for frame in generate(*args, **kwargs):
+            for position, metric in enumerate(frame.metrics):
+                metric.update(unscored_metric(position=position, token_id=metric['token_id'],
+                                              token_text=chr(metric['token_id']), fallback_text='',
+                                              segment='response').to_dict())
+                metric['top_candidates'] = [{'token_id': 120, 'text': 'x', 'probability': .1}]
+            yield frame
+    return reply
+
+
 class MazeTests(unittest.TestCase):
     def test_typed_edit_preserves_sentencepiece_boundary_and_literal_prefix(self):
         from test_streaming import sentencepiece_manager, SP_HELLO, SP_SPACE_WORLD, SP_WORLD
@@ -84,18 +97,7 @@ class MazeTests(unittest.TestCase):
 
     def test_edit_ui_callbacks_select_regenerate_archive_and_reject_stale_token(self):
         manager = Manager([('abc', [97, 98, 99, 0]), ('yz', [121, 122, 0])])
-        generate_reply = manager.generate
-
-        def rich_reply(*args, **kwargs):
-            for frame in generate_reply(*args, **kwargs):
-                for position, metric in enumerate(frame.metrics):
-                    metric.update(unscored_metric(position=position, token_id=metric['token_id'],
-                                                  token_text=chr(metric['token_id']), fallback_text='',
-                                                  segment='response').to_dict())
-                    metric['top_candidates'] = [{'token_id': 120, 'text': 'x', 'probability': .1}]
-                yield frame
-
-        manager.generate = rich_reply
+        manager.generate = scored(manager.generate)
         inspector = TokenInspector()
         selections = inspector.selections()
         inspector.selections = lambda: selections
@@ -205,8 +207,8 @@ class MazeTests(unittest.TestCase):
         manager = Manager([('abc', [97, 98, 99, 0])])
         list(stream_episode(ep, manager))
         with manager.open_session() as session:
-            for field, value, message in [('busy', True, 'Pause'), ('replay_only', True, 'read-only'),
-                                          ('load_id', 'other', 'model changed')]:
+            for field, value, message in [('busy', True, 'Pause'),
+                                          ('model_id', 'other/model', 'Load that model')]:
                 previous = getattr(ep, field)
                 setattr(ep, field, value)
                 with self.assertRaisesRegex(ValueError, message):
@@ -219,6 +221,80 @@ class MazeTests(unittest.TestCase):
                 fork_token_edit(ep, 0, 2, '', session)
             with self.assertRaisesRegex(ValueError, 'alternative'):
                 fork_token_edit(ep, 0, 2, '', session, candidate_id=123)
+
+    def test_uploaded_replay_forks_into_a_live_run_under_a_later_load(self):
+        move = call_text(MAZE.maze_id, "east")
+        ids = list(move.encode()) + [0]
+        ep = Episode(MAZE, CONFIG | {"interruption_text": "", "per_turn_tokens": 200, "token_budget": 1000})
+        list(stream_episode(ep, Manager([(move, ids)]), single_step=True))
+        replay = from_payload(json.loads(json.dumps(ep.payload())))
+        self.assertTrue(replay.replay_only)
+
+        # The same repository ID reloaded: a new load_id, the same tokenizer.
+        reloaded = Manager([])
+        reloaded.load_id = "test-load#2"
+        index = move.index("east")
+        with reloaded.open_session() as session:
+            forked = fork_token_edit(replay, 0, index, "west", session)
+        self.assertFalse(forked.replay_only)
+        self.assertEqual((forked.load_id, forked.model_id), ("test-load#2", "test/model"))
+        self.assertEqual(forked.token_edit["parent_run_id"], ep.run_id)
+        self.assertEqual(forked.token_edit["parent_load_id"], "test-load")
+        self.assertTrue(forked.token_edit["parent_replay"])
+        self.assertEqual(forked.pending_edit["forced_ids"], ids[:index] + list(b"west"))
+        self.assertEqual(forked.turns, [])
+        self.assertEqual(forked.position, MAZE.start)
+
+        suffix = move[index + len("east"):]
+        reloaded.replies = iter([(suffix, list(suffix.encode()) + [0])])
+        list(stream_episode(forked, reloaded, single_step=True))
+        self.assertEqual(forked.phase, "paused")
+        self.assertEqual(forked.turns[0]["text"], move.replace("east", "west"))
+        self.assertEqual(forked.events[-1]["error"], "blocked_move")
+        self.assertEqual(forked.position, MAZE.start)
+        self.assertTrue(replay.replay_only)
+        self.assertEqual(json.loads(json.dumps(replay.payload())), json.loads(json.dumps(ep.payload())))
+
+    def test_replay_edit_leaves_a_newer_archive_of_the_same_run_alone(self):
+        move = call_text(MAZE.maze_id, "east")
+        ids = list(move.encode()) + [0]
+        manager = Manager([(move, ids), (move, ids)])
+        manager.generate = scored(manager.generate)
+        inspector = TokenInspector()
+        selections = inspector.selections()
+        inspector.selections = lambda: selections
+        session_id = selections.new_session()
+        ep = Episode(MAZE, CONFIG | {"interruption_text": "", "per_turn_tokens": 200, "token_budget": 1000})
+        with tempfile.TemporaryDirectory() as directory:
+            list(stream_episode(ep, manager, single_step=True, save_dir=Path(directory)))
+            snapshot = json.loads(json.dumps(ep.payload()))
+            list(stream_episode(ep, manager, save_dir=Path(directory)))
+            self.assertEqual(ep.phase, "arrived")
+            archive = Path(directory) / f"{ep.run_id}.json"
+            completed = archive.read_bytes()
+
+            replay = from_payload(snapshot)
+            manager.load_id = "test-load#2"
+            index = move.index("east")
+            suffix = move[index + len("east"):]
+            manager.replies = iter([(suffix, list(suffix.encode()) + [0])])
+            context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values()}
+                metrics = views(replay, False, selections, session_id)[7]
+                selected = callbacks["select_token"].fn(replay, session_id, metrics, SimpleNamespace(index=index))
+                frames = list(callbacks["edit_token"].fn(replay, False, session_id, metrics,
+                                                         selected[2], "west", "text"))
+                forked = frames[-1][0]
+            finally:
+                demo.close()
+            self.assertFalse(forked.replay_only)
+            self.assertEqual(forked.events[-1]["error"], "blocked_move")
+            self.assertEqual(archive.read_bytes(), completed)
+            self.assertTrue((Path(directory) / f"{forked.run_id}.json").exists())
 
     def test_edit_to_stop_token_finishes_without_executing_partial_action(self):
         ep = Episode(MAZE, CONFIG | {"interruption_text": ""})
