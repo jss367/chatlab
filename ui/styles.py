@@ -89,12 +89,34 @@ html, body {{ height: 100%; overflow: hidden; }}
   overflow-y: auto; overscroll-behavior-y: contain;
 }}
 #inspector-pane {{
-  flex: 0 0 clamp(310px, 27vw, 400px) !important; min-width: 0 !important;
+  flex: 0 0 var(--inspector-pane-width, clamp(310px, 27vw, 400px)) !important;
+  min-width: 0 !important;
   height: 100%; padding: 18px 18px 28px; gap: 18px;
   overflow-y: auto; overscroll-behavior-y: contain;
   border-left: 1px solid var(--border-color-primary);
 }}
 #inspector-pane > *, #conversation-pane > *, #chat-workspace > * {{ flex: 0 0 auto; }}
+#inspector-resizer, #image-inspector-resizer {{
+  flex: 0 0 7px !important; min-width: 0 !important; padding: 0 !important;
+  align-self: stretch; background: transparent; border: 0;
+  /* The seam the pane draws sits under this strip, so the strip holds the
+     hit area and the pane keeps the line. */
+  margin-right: -1px; z-index: 2; position: relative;
+}}
+/* Laid over the strip rather than inside it: Gradio wraps the markup of an
+   HTML block in containers of its own, and one of them is a loading overlay
+   that would otherwise take the width the handle wants. */
+.pane-resizer {{ position: absolute; inset: 0; cursor: col-resize; }}
+/* Under the pointer the seam thickens into an accent line rather than
+   filling the whole hit area, which would be a band of color the width of
+   a scrollbar for what is a one-pixel edge. */
+.pane-resizer:hover, .pane-resizer:focus-visible, .pane-resizer.dragging {{
+  background: linear-gradient(
+    to right, transparent 0 2px, var(--color-accent) 2px 5px, transparent 5px
+  );
+  outline: none;
+}}
+body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 #models-page, #settings-page {{
   height: 100%; overflow-y: auto; overscroll-behavior-y: contain;
   padding: 24px 32px;
@@ -118,7 +140,8 @@ html, body {{ height: 100%; overflow: hidden; }}
   overflow-y: auto; overscroll-behavior-y: contain;
 }}
 #image-inspector {{
-  flex: 0 0 clamp(310px, 30vw, 440px) !important; min-width: 0 !important;
+  flex: 0 0 var(--image-inspector-width, clamp(310px, 30vw, 440px)) !important;
+  min-width: 0 !important;
   height: 100%; padding: 18px 18px 28px; gap: 18px;
   overflow-y: auto; overscroll-behavior-y: contain;
   border-left: 1px solid var(--border-color-primary);
@@ -272,7 +295,10 @@ html, body {{ height: 100%; overflow: hidden; }}
 @media (max-width: 1050px) {{
   #conversation-pane {{ flex-basis: 200px !important; min-width: 200px !important; }}
   #chat-workspace {{ padding: 16px; }}
-  #inspector-pane {{ flex-basis: 300px !important; padding: 18px 14px; }}
+  #inspector-pane {{
+    flex-basis: var(--inspector-pane-width, 300px) !important; padding: 18px 14px;
+  }}
+  #image-inspector {{ flex-basis: var(--image-inspector-width, 310px) !important; }}
 }}
 @media (max-width: 850px) {{
   #conversation-pane {{ flex-basis: 160px !important; min-width: 160px !important; }}
@@ -286,6 +312,7 @@ html, body {{ height: 100%; overflow: hidden; }}
     flex: 1 1 40% !important; height: 40%; border-left: 0;
     border-top: 1px solid var(--border-color-primary);
   }}
+  #inspector-resizer, #image-inspector-resizer {{ display: none !important; }}
 }}
 
 /* The nav is a Radio drawn as a column of tiles. Its inputs are hidden, the
@@ -563,6 +590,157 @@ SHORTCUT_JS = """
     if (!stop) { return; }
     event.preventDefault();
     stop.click();
+  });
+}
+"""
+
+
+# Each of the two workspaces has a readings pane beside it, and each seam
+# between them carries a handle: a thin flex item, drawn by Gradio between
+# the two columns, that the reader drags to give one pane the other's room.
+# A drag writes a width to a custom property the stylesheet reads, so the
+# default width stays in the stylesheet as a fallback and the stacked layout
+# under 850px - where the panes are rows and a width would mean a height -
+# ignores it by not naming the property at all.
+#
+# The listeners are on the document rather than on the handles, because a
+# page the nav is not showing is not in the document at all: the Images page
+# and its handle are built when the reader first opens it, long after this
+# script has run. Each handle carries what it needs in data attributes, and
+# a restored width is written to the property without looking for the pane,
+# so it is already in force when the page it belongs to arrives.
+#
+# The chosen width is kept in localStorage, per pane, so it survives a reload
+# and a restart. It is clamped on the way in as well as on the way out: a
+# width saved on a wide screen must not leave the workspace unusable on a
+# narrow one. Double-clicking the handle drops the saved width and gives the
+# pane the stylesheet's own. Arrow keys move a focused handle, so the pane
+# can be sized without a pointer.
+def pane_handle(pane: str) -> str:
+    """The markup for the handle on a pane's seam; see RESIZE_JS.
+
+    ``pane`` is the elem_id of the pane the handle sizes, and it names both
+    the custom property the width is written to and the localStorage key it
+    is kept under, so the two panes never read each other's width.
+    """
+    return (
+        '<div class="pane-resizer" role="separator" aria-orientation="vertical"'
+        f' tabindex="0" data-pane="{pane}"'
+        f' data-property="--{pane}-width" data-store="chatlab.{pane}-width"'
+        ' aria-label="Resize the pane. Drag it, or use the arrow keys."'
+        ' title="Drag to resize. Double-click to reset."></div>'
+    )
+
+
+RESIZE_JS = """
+() => {
+  if (window.__chatlabPaneResize) { return; }
+  window.__chatlabPaneResize = true;
+  const MIN_PANE = 240;
+  const MIN_WORKSPACE = 360;
+  // What the nav and the conversations pane take before either workspace
+  // starts, used only while clamping a restored width against a window
+  // whose panes are not on screen yet.
+  const SIDE_PANES = 260;
+
+  const clamp = (width, room) => {
+    const most = Math.max(MIN_PANE, room - MIN_WORKSPACE);
+    return Math.round(Math.min(Math.max(width, MIN_PANE), most));
+  };
+
+  const store = (key, width) => {
+    try {
+      if (width === null) { localStorage.removeItem(key); }
+      else { localStorage.setItem(key, String(width)); }
+    } catch (error) { /* A window that refuses storage still drags. */ }
+  };
+
+  const recall = (key) => {
+    try {
+      const saved = parseFloat(localStorage.getItem(key));
+      return Number.isFinite(saved) ? saved : null;
+    } catch (error) { return null; }
+  };
+
+  const write = (property, width) => {
+    if (width === null) {
+      document.documentElement.style.removeProperty(property);
+      return;
+    }
+    document.documentElement.style.setProperty(property, width + 'px');
+  };
+
+  const paneOf = (handle) => document.getElementById(handle.dataset.pane);
+  const roomFor = (pane) => (pane.parentElement || document.body).clientWidth;
+
+  // Whatever the last session left, before either page is on screen.
+  for (const pane of ['inspector-pane', 'image-inspector']) {
+    const saved = recall('chatlab.' + pane + '-width');
+    if (saved === null) { continue; }
+    write('--' + pane + '-width', clamp(saved, window.innerWidth - SIDE_PANES));
+  }
+
+  let dragging = null;
+
+  const move = (event) => {
+    if (!dragging) { return; }
+    // The pane is on the right of its handle, so dragging left widens it.
+    const width = clamp(
+      dragging.start + (dragging.origin - event.clientX), roomFor(dragging.pane)
+    );
+    write(dragging.property, width);
+  };
+
+  const finish = () => {
+    if (!dragging) { return; }
+    dragging.handle.classList.remove('dragging');
+    document.body.classList.remove('pane-dragging');
+    store(dragging.key, Math.round(dragging.pane.getBoundingClientRect().width));
+    dragging = null;
+  };
+
+  document.addEventListener('pointerdown', (event) => {
+    const handle = event.target.closest && event.target.closest('.pane-resizer');
+    if (!handle || event.button !== 0) { return; }
+    const pane = paneOf(handle);
+    if (!pane) { return; }
+    event.preventDefault();
+    dragging = {
+      handle,
+      pane,
+      property: handle.dataset.property,
+      key: handle.dataset.store,
+      origin: event.clientX,
+      start: pane.getBoundingClientRect().width,
+    };
+    handle.classList.add('dragging');
+    document.body.classList.add('pane-dragging');
+  });
+  // On the window, so a drag that outruns the pointer keeps the pane with it
+  // and a release anywhere ends it.
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', finish);
+  window.addEventListener('pointercancel', finish);
+
+  document.addEventListener('dblclick', (event) => {
+    const handle = event.target.closest && event.target.closest('.pane-resizer');
+    if (!handle) { return; }
+    event.preventDefault();
+    write(handle.dataset.property, null);
+    store(handle.dataset.store, null);
+  });
+
+  document.addEventListener('keydown', (event) => {
+    const handle = event.target.closest && event.target.closest('.pane-resizer');
+    if (!handle) { return; }
+    const step = event.key === 'ArrowLeft' ? 16 : event.key === 'ArrowRight' ? -16 : 0;
+    if (!step) { return; }
+    const pane = paneOf(handle);
+    if (!pane) { return; }
+    event.preventDefault();
+    const width = clamp(pane.getBoundingClientRect().width + step, roomFor(pane));
+    write(handle.dataset.property, width);
+    store(handle.dataset.store, width);
   });
 }
 """

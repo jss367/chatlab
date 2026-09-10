@@ -351,6 +351,7 @@ from ui.settings_page import (
 from ui.styles import (
     CSS,
     MESSAGE_BOX_MAX_LINES,
+    RESIZE_JS,
     SHORTCUT_JS,
     message_box_settings,
     set_message_box_keys,

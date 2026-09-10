@@ -1859,6 +1859,44 @@ class PageLayoutTests(unittest.TestCase):
         self.assertIn("#images-workspace", compact)
         self.assertIn("#image-inspector", compact)
 
+    def test_each_readings_pane_has_a_handle_on_its_seam(self):
+        # The handle is a flex item between the workspace and the pane, so
+        # the seam it sits on is the edge the reader drags.
+        for pane_id, handle_id in [
+            ("inspector-pane", "inspector-resizer"),
+            ("image-inspector", "image-inspector-resizer"),
+        ]:
+            with self.subTest(pane=pane_id):
+                pane = self.by_id(pane_id)
+                handle = self.by_id(handle_id)
+                self.assertIs(handle.parent, pane.parent)
+                self.assertIn(f'data-pane="{pane_id}"', handle.value)
+                self.assertIn(f'data-property="--{pane_id}-width"', handle.value)
+                self.assertIn(f'data-store="chatlab.{pane_id}-width"', handle.value)
+                # A width the reader chose is written to that property, so
+                # every rule that sizes the pane has to read it - including
+                # the narrower window's, which sets a smaller default.
+                for rule in [
+                    line
+                    for line in app.CSS.splitlines()
+                    if "flex" in line and f"--{pane_id}-width" in line
+                ]:
+                    self.assertIn(f"var(--{pane_id}-width,", rule)
+                self.assertEqual(
+                    app.CSS.count(f"var(--{pane_id}-width,"), 2, pane_id
+                )
+                # And the script that writes it knows the pane by the same name.
+                self.assertIn(f"'{pane_id}'", app.RESIZE_JS)
+
+    def test_the_stacked_layout_drops_the_handles(self):
+        # Under 850px the panes are rows, one above the other, where a width
+        # would mean a height and a sideways drag would mean nothing.
+        compact = app.CSS[app.CSS.index("@media (max-width: 850px)") :]
+        compact = compact[: compact.index("\n}")]
+
+        self.assertIn("#inspector-resizer, #image-inspector-resizer", compact)
+        self.assertIn("display: none", compact)
+
     def test_the_nav_names_are_on_screen_rather_than_a_hover_away(self):
         # Four pages is not a number worth hiding. Nothing clips the name
         # out of sight, and no tooltip stands in for it.
