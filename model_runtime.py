@@ -5220,7 +5220,7 @@ class ModelManager:
     ) -> Iterator[GenerationUpdate]:
         import torch
 
-        with self._lock, steering_vectors.applied(self.model, self.model_id, steering):
+        with self._lock, contextlib.ExitStack() as steering_scope:
             try:
                 if not self.loaded:
                     raise RuntimeError("Download and load a model before chatting.")
@@ -5228,6 +5228,10 @@ class ModelManager:
                     raise ModelChanged(
                         "The model has been reloaded since these tokens were produced."
                     )
+
+                # A stale branch must raise ModelChanged before vector/model
+                # compatibility is checked, so its handler restores the reply.
+                steering_scope.enter_context(steering_vectors.applied(self.model, self.model_id, steering))
 
                 assert self.model is not None
                 assert self.tokenizer is not None
@@ -5903,13 +5907,14 @@ class ModelManager:
 
         import torch
 
-        with self._lock, torch.inference_mode(), steering_vectors.applied(self.model, self.model_id, steering):
+        with self._lock, torch.inference_mode(), contextlib.ExitStack() as steering_scope:
             if not self.loaded:
                 raise RuntimeError("Download and load a model before inspecting a token.")
             if load_id is not None and load_id != self.load_id:
                 raise ModelChanged(
                     "The model has been reloaded since these tokens were produced."
                 )
+            steering_scope.enter_context(steering_vectors.applied(self.model, self.model_id, steering))
             if steering_vectors.active(steering):
                 # A cache computed without this vector cannot explain it.
                 # Steered inspections do not retain a cache for later clicks.

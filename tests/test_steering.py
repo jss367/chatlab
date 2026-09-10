@@ -12,7 +12,7 @@ import conversation
 import library
 import settings_sandbox
 import steering
-from model_runtime import ModelManager
+from model_runtime import ModelChanged, ModelManager
 from test_streaming import FakeTokenizer, PIECES, EOS_ID
 from ui import runtime
 from ui import steering as controls
@@ -94,6 +94,17 @@ class VectorTests(unittest.TestCase):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_load_stamp_is_checked_before_vector_compatibility(self):
+        held = manager()
+        previous_load = held.load_id
+        held.model_id = "other/model"
+        with self.assertRaises(ModelChanged):
+            list(held.generate(MESSAGES, **SAMPLING, steering=vector(), load_id=previous_load))
+        with self.assertRaises(ModelChanged):
+            held.inspect([0, 1], 1, steering=vector(), load_id=previous_load)
+        self.assertFalse(steering.decoder_layers(held.model)[0]._forward_hooks)
+        self.assertFalse(held.busy)
+
     def test_real_decoder_outputs_change_and_weights_do_not(self):
         for architecture in ("llama", "gpt2"):
             with self.subTest(architecture=architecture):
@@ -166,6 +177,37 @@ class RuntimeTests(unittest.TestCase):
 
 
 class ConversationTests(unittest.TestCase):
+    def test_model_reload_during_steered_branch_restores_original_response(self):
+        from test_app_flow import FIXED, TURNS, METRICS, BRANCH_SOURCE, STATUS
+        from ui.generation import chat, branch_from, branch_with_text, BRANCH_MODEL_CHANGED
+
+        for route in ("branch", "typed_branch"):
+            with self.subTest(route=route):
+                held = manager()
+                settings = dict(FIXED, assistant_prefill="Hello")
+                with mock.patch.object(runtime, "MANAGER", held):
+                    before = list(chat("Hello", [], **settings, steering=vector()))[-1]
+                    generation, metrics = before[METRICS]
+                    current = (*settings.values(), steering.compact(vector()), True, 1, 0)
+                    if route == "branch":
+                        metric = metrics[0]
+                        pick = dict(generation=generation, position=1, token_id=metric["token_id"], original_id=metric["token_id"], text=metric["text"], original=metric["text"])
+                        stream = branch_from(pick, before[BRANCH_SOURCE], before[METRICS], "", before[TURNS], *current)
+                    else:
+                        stream = branch_with_text(dict(generation=generation, index=0), before[BRANCH_SOURCE], before[METRICS], "Hello", "", before[TURNS], *current)
+                    generate = held.generate
+
+                    def reloaded_before_generation(*args, **kwargs):
+                        held.model_id = "other/model"
+                        return generate(*args, **kwargs)
+
+                    with mock.patch.object(held, "generate", side_effect=reloaded_before_generation):
+                        result = list(stream)[-1]
+                    self.assertEqual(result[STATUS], BRANCH_MODEL_CHANGED)
+                    self.assertEqual(result[TURNS], before[TURNS])
+                    self.assertFalse(steering.decoder_layers(held.model)[0]._forward_hooks)
+                    self.assertFalse(held.busy)
+
     def test_large_vector_is_stored_once_and_not_copied_into_streamed_turns(self):
         from test_app_flow import FIXED, TURNS, TRACE
         from test_streaming import loaded_manager
