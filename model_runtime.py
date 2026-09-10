@@ -2093,6 +2093,9 @@ HIDDEN_SIZE_ALIASES = ("hidden_size", "n_embd", "d_model", "hidden_dim", "model_
 def _embedding_params_from(config: Mapping[str, Any]) -> int | None:
     """Parameters in the embedding and output matrices, from a config's fields, or ``None``."""
 
+    text_config = config.get("text_config")
+    if isinstance(text_config, Mapping):
+        return _embedding_params_from(text_config)
     vocab = config.get("vocab_size")
     hidden = next(
         (config[name] for name in HIDDEN_SIZE_ALIASES if isinstance(config.get(name), int)),
@@ -2120,6 +2123,9 @@ def _embedding_params(snapshot: Path | None) -> int | None:
         from transformers import AutoConfig
 
         loaded = AutoConfig.from_pretrained(snapshot, local_files_only=True)
+        get_text_config = getattr(loaded, "get_text_config", None)
+        if callable(get_text_config):
+            loaded = get_text_config()
         params = _embedding_params_from(
             {
                 "vocab_size": getattr(loaded, "vocab_size", None),
@@ -3731,6 +3737,51 @@ class LoadedModel(NamedTuple):
 ReadWeights = tuple[Any, Any, Any, str]
 
 
+@contextlib.contextmanager
+def _capture_loading_report() -> Iterator[None]:
+    """Keep Transformers' report when it raises an error referring to it.
+
+    Transformers normally sends this to its own stderr handler, which the
+    desktop UI cannot show and the app's file logger never receives. In
+    particular, quantization wraps an out-of-memory error as a conversion
+    failure, hiding it from our memory-error handling too.
+    """
+
+    thread_id = threading.get_ident()
+    reports = []
+
+    class ReportHandler(logging.Handler):
+        def emit(self, record):
+            if record.thread != thread_id:
+                return
+            message = record.getMessage()
+            if "LOAD REPORT" in message:
+                plain = re.sub(r"\x1b\[[0-9;]*m", "", message)
+                reports[:] = ["\n".join(line.rstrip() for line in plain.splitlines())]
+
+    source = logging.getLogger("transformers")
+    handler = ReportHandler(level=logging.WARNING)
+    source.addHandler(handler)
+    try:
+        yield
+    except RuntimeError as error:
+        if reports and "above report" in str(error):
+            report = reports[-1]
+            logger.warning("%s", report)
+            causes = list(dict.fromkeys(re.findall(
+                r"^((?:[\w.]+)?(?:Error|Exception): .+)$", report, re.MULTILINE
+            )))
+            # Prefer the memory failure even if an earlier conversion also
+            # failed: the caller must still recognize that memory ran out.
+            memory = next((cause for cause in causes if is_out_of_memory_error(RuntimeError(cause))), None)
+            detail = memory or "\n".join(causes[:3]) or report[:8000]
+            raise RuntimeError(f"Weight loading failed: {detail}") from error
+        raise
+    finally:
+        source.removeHandler(handler)
+        handler.close()
+
+
 def _read_text_model(
     local_path: Path, torch, backend: str, dtype, bits: int | None, precision: str
 ) -> ReadWeights:
@@ -3831,8 +3882,18 @@ def _read_mlx_model(
     return model, tokenizer, None, f"Apple Metal (MLX), {precision} weights"
 
 
-# Which reader brings each kind in.
-READERS = {TEXT_KIND: _read_text_model, MLX_KIND: _read_mlx_model}
+def _reader(kind: str):
+    """The function that brings a checkpoint of ``kind`` in.
+
+    Looked up when a load runs rather than kept in a table at import, so a
+    stand-in for one reader (a test's, or a future hook's) is the one called.
+    """
+
+    if kind == MLX_KIND:
+        return _read_mlx_model
+    if kind == IMAGE_KIND:
+        return _read_pipeline
+    return _read_text_model
 
 
 # The first diffusers release whose DiffusionPipeline takes a local folder
@@ -4534,8 +4595,8 @@ class ModelManager:
         if allocated_bytes(backend, torch) is not None:
             progress.measure_bytes(estimated, lambda: allocated_bytes(backend, torch))
         try:
-            with progress.watch():
-                read = READERS.get(kind, _read_pipeline)
+            with progress.watch(), _capture_loading_report():
+                read = _reader(kind)
                 model, tokenizer, pipeline, device_name = read(
                     local_path, torch, backend, dtype, bits, precision
                 )

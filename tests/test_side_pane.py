@@ -1426,6 +1426,29 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertEqual([value for _, value in radio["choices"]], [INSTRUCT.model_id])
         self.assertIsNone(radio["value"])
 
+    def test_recommended_query_matching_a_starter_stays_offline(self):
+        self.results = ConnectionError("offline")
+        radio, detail, state = app.search_models("qwen", "", order="Recommended")
+        self.assertEqual(self.queries, [])
+        self.assertEqual(list(state), ["Qwen/Qwen3-0.6B"])
+        self.assertIn("Curated starters", detail)
+
+    def test_recommended_query_with_no_starter_match_searches_the_hub(self):
+        radio, detail, state = app.search_models("gemma", "tok", order="Recommended")
+        self.assertEqual(self.queries, [("gemma", "tok", TEXT_KIND)])
+        self.assertEqual(len(state), 2)
+        self.assertIn("No starters matched", detail)
+        self.assertIn("most downloaded first", detail)
+        self.assertNotIn("Curated starters", detail)
+
+    def test_recommended_fallthrough_failure_points_back_to_starters(self):
+        self.results = ConnectionError("offline")
+        radio, detail, state = app.search_models("gemma", "", order="Recommended")
+        self.assertEqual(radio["choices"], [])
+        self.assertIn("Search failed", detail)
+        self.assertIn("Clear the search to see offline starters", detail)
+        self.assertEqual(state, {})
+
     def test_image_recommendations_are_separate_and_do_not_guess_memory(self):
         radio, _, state = app.search_models("", "", kind=IMAGE_KIND, order="Recommended")
         self.assertEqual(list(state), ["stabilityai/sd-turbo"])

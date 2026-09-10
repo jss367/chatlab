@@ -1465,23 +1465,25 @@ def search_models(
 
     cleared = gr.update(choices=[], value=None)
     cleaned = (query or "").strip()
+    # A query that matches no starter searches the Hub instead of dead-ending,
+    # so the "Search Hugging Face" box does what it says in every view.
+    searched_hub = order != "Recommended"
     try:
-        results = (
-            recommended_models(cleaned, kind)
-            if order == "Recommended"
-            else search_hub_models(
-                cleaned, hf_token, kind=kind, order=order, limit=DISCOVERY_CANDIDATES
+        results = [] if searched_hub else recommended_models(cleaned, kind)
+        if searched_hub or (cleaned and not results):
+            searched_hub = True
+            results = search_hub_models(
+                cleaned, hf_token, kind=kind,
+                order="Popular" if order == "Recommended" else order,
+                limit=DISCOVERY_CANDIDATES,
             )
-        )
     except Exception as error:
-        return (
-            cleared,
-            failure_card(
-                "Search failed",
-                f"{html.escape(str(error))} Choose Recommended for offline starters, or retry.",
-            ),
-            {},
+        hint = (
+            "Clear the search to see offline starters, or retry."
+            if order == "Recommended"
+            else "Choose Recommended for offline starters, or retry."
         )
+        return cleared, failure_card("Search failed", f"{html.escape(str(error))} {hint}"), {}
     if not results:
         described = {IMAGE_KIND: "text-to-image models", MLX_KIND: "MLX models"}.get(
             kind, "language models"
@@ -1490,17 +1492,18 @@ def search_models(
             f"No {described} matched `{html.escape(cleaned)}`."
             if cleaned else f"No {described} found in this browse window."
         )
-        if order == "Recommended":
-            message += " Choose Popular, Trending, or New to search the full Hub."
         return cleared, message, {}
     state = {result.model_id: result for result in results}
     radio, detail = refresh_search_results(None, state, precision, fits_only)
-    ordering = {
-        "Recommended": "Curated starters, available to browse offline.",
-        "Popular": "Most downloaded first.",
-        "Trending": "Trending on Hugging Face.",
-        "New": "Newest repositories first (not latest updates).",
-    }[order]
+    if order == "Recommended" and searched_hub:
+        ordering = "No starters matched; showing Hugging Face results, most downloaded first."
+    else:
+        ordering = {
+            "Recommended": "Curated starters, available to browse offline.",
+            "Popular": "Most downloaded first.",
+            "Trending": "Trending on Hugging Face.",
+            "New": "Newest repositories first (not latest updates).",
+        }[order]
     return radio, f"{ordering} {detail}", state
 
 
