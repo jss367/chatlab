@@ -3465,6 +3465,21 @@ class HubSearchTests(unittest.TestCase):
             ["org/model-0", "org/model-1", "org/model-2"],
         )
 
-    def test_an_empty_query_does_not_go_online(self):
-        self.assertEqual(search_hub_models("   "), [])
+    def test_empty_queries_browse_with_each_hub_order_and_keep_compatibility_checks(self):
+        self.found = [
+            hub_result("org/converted", "text-generation", tags=["mlx"]),
+            hub_result("org/native", "text-generation"),
+        ]
+        for order, expected in [
+            ("Popular", "downloads"), ("Trending", "trending_score"), ("New", "created_at")
+        ]:
+            with self.subTest(order=order):
+                results = search_hub_models("   ", order=order)
+                self.assertEqual([r.model_id for r in results], ["org/native"])
+                self.assertIsNone(self.calls[-1]["search"])
+                self.assertEqual(self.calls[-1]["sort"], expected)
+
+    def test_invalid_order_does_not_go_online(self):
+        with self.assertRaises(ValueError):
+            search_hub_models("", order="wrong")
         self.assertEqual(self.calls, [])

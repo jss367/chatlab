@@ -893,7 +893,7 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertIsNone(radio["value"])
         self.assertEqual(detail, "")
         self.assertIn("No models", summary)
-        self.assertIn("Model search", summary)
+        self.assertIn("Discover models", summary)
 
     def test_refresh_does_not_replace_an_uncached_typed_id_with_the_loaded_model(self):
         self.manager.model_id = OLMO
@@ -1353,7 +1353,7 @@ class ModelSearchPaneTests(unittest.TestCase):
             or setattr(models_page, "cache_status", original_status)
         )
 
-    def search(self, query, hf_token, kind=TEXT_KIND):
+    def search(self, query, hf_token, kind=TEXT_KIND, order="Popular", limit=100):
         self.queries.append((query, hf_token, kind))
         if isinstance(self.results, Exception):
             raise self.results
@@ -1379,13 +1379,60 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertIn("2 results", detail)
         self.assertEqual(set(state), {INSTRUCT.model_id, GATED.model_id})
 
-    def test_an_empty_query_does_not_go_online(self):
+    def test_an_empty_query_browses_popular_models(self):
         radio, detail, state = app.search_models("   ", "")
+        self.assertEqual(self.queries, [("", "", TEXT_KIND)])
+        self.assertEqual(len(radio["choices"]), 2)
+        self.assertIn("Most downloaded first", detail)
+        self.assertEqual(len(state), 2)
 
+    def test_recommended_starters_work_offline(self):
+        self.results = ConnectionError("offline")
+        # Gradio sends None for an untouched textbox on initial page load.
+        radio, detail, state = app.search_models(None, "", order="Recommended")
         self.assertEqual(self.queries, [])
+        self.assertEqual(len(state), 3)
+        self.assertIsNone(radio["value"])
+        self.assertIn("offline", detail)
+        box, description = app.select_search_result("Qwen/Qwen3-0.6B", state)
+        self.assertEqual(box["value"], "Qwen/Qwen3-0.6B")
+        self.assertIn("Compact reasoning", description)
+        self.assertIn("Full download", description)
+        self.assertIn("not this download", description)
+
+    def test_filtering_uses_candidates_beyond_the_first_twenty(self):
+        self.results = [
+            HubModel(model_id=f"org/huge-{i}", parameters=500_000_000_000)
+            for i in range(25)
+        ] + [INSTRUCT, GATED]
+        radio, detail, state = app.search_models("", "", fits_only=True)
+        self.assertEqual([value for _, value in radio["choices"]], [INSTRUCT.model_id])
+        self.assertEqual(len(state), 27)
+        self.assertIn("unknown sizes are hidden", detail)
+        radio, _ = models_page.refresh_search_results(None, state, fits_only=False)
+        self.assertEqual(len(radio["choices"]), 20)
+        self.assertEqual(len(self.queries), 1)
+
+    def test_filtered_selection_clears_and_returns_after_precision_change(self):
+        roomy(self, total_gb=16, available_gb=10, backend="mps", dtype="float16")
+        state = {INSTRUCT.model_id: INSTRUCT, GATED.model_id: GATED}
+        radio, detail = models_page.refresh_search_results(
+            INSTRUCT.model_id, state, "full", True
+        )
         self.assertEqual(radio["choices"], [])
-        self.assertEqual(detail, app.SEARCH_HINT)
-        self.assertEqual(state, {})
+        self.assertIsNone(radio["value"])
+        self.assertIn("No estimated fits", detail)
+        radio, _ = models_page.refresh_search_results(None, state, "4-bit", True)
+        self.assertEqual([value for _, value in radio["choices"]], [INSTRUCT.model_id])
+        self.assertIsNone(radio["value"])
+
+    def test_image_recommendations_are_separate_and_do_not_guess_memory(self):
+        radio, _, state = app.search_models("", "", kind=IMAGE_KIND, order="Recommended")
+        self.assertEqual(list(state), ["stabilityai/sd-turbo"])
+        self.assertEqual(models_page.results_kind(state), IMAGE_KIND)
+        radio, detail = models_page.refresh_search_results(None, state, "4-bit", True)
+        self.assertEqual(radio["choices"], [])
+        self.assertIn("unknown sizes are hidden", detail)
 
     def test_a_failed_search_is_reported(self):
         self.results = ConnectionError("hub <unreachable>")

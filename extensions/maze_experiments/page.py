@@ -8,7 +8,7 @@ from pathlib import Path
 
 import gradio as gr
 
-from .maze import PASSAGES, generate
+from .maze import GOAL_MODES, PASSAGES, generate
 from .runner import Episode, fork_token_edit, from_payload, stream_episode
 from extension_api import TokenInspector
 
@@ -99,6 +99,7 @@ def status(ep):
             f"{ep.maze.size} × {ep.maze.size} · shortest route {len(ep.maze.route())-1} moves · "
             f"{ep.moves-ep.supplied_moves} model moves + {ep.supplied_moves} supplied · "
             f"{ep.sampled_tokens+partial:,} sampled tokens · {ep.tool_attempts} calls\n\n"
+            f"**Goal information:** {GOAL_MODES[ep.config['goal_mode']]}\n\n"
             f"**Recovery:** {recovery} · **Model:** {html.escape(ep.model_id or 'load one on the Models page')}")
 
 
@@ -159,8 +160,13 @@ def _build_page(context):
                 with gr.Row():
                     seed = gr.Number(value=20260911, precision=0, label="Maze seed")
                     openness = gr.Slider(.35, .95, value=.7, step=.05, label="Open-cell probability")
+                goal_mode = gr.Dropdown(choices=[(label, mode) for mode, label in GOAL_MODES.items()],
+                                        value="coordinates", label="Goal information", elem_id="maze-goal-mode",
+                                        info="Controls what the model knows. You always see the destination on the board.")
+                goal_hint = gr.Textbox(label="Goal hint", lines=2, visible=False, elem_id="maze-goal-hint",
+                                       info="Write a clue about the destination shown on the board. This text goes to the model verbatim; check it after changing the maze.")
                 with gr.Row():
-                    supplied = gr.Number(value=3, precision=0, minimum=0, maximum=223, label="Supplied starting moves", info="Set 0 to watch the model navigate from the start.")
+                    supplied = gr.Number(value=3, precision=0, minimum=0, maximum=223, label="Supplied starting moves", info="These moves follow the shortest route toward the goal. Use 0 for exploration without a demonstrated path.")
                     after = gr.Number(value=3, precision=0, minimum=0, maximum=255, label="Interrupt after accepted moves", info="Includes supplied moves. Inserted at the next response.")
                 passage = gr.Dropdown(["None", *PASSAGES, "Custom"], value=next(iter(PASSAGES)), label="Interruption passage")
                 text = gr.Textbox(value=next(iter(PASSAGES.values())), label="Interruption text", lines=3)
@@ -199,16 +205,17 @@ def _build_page(context):
             gr.Markdown("Exploratory tool: movement requires a completed, valid `move` call. Text claiming movement does not move the character. A natural end without a call ends the episode. After interruption, recovery allows 1,024 sampled tokens / 4 attempts. Run JSON records prompts, token IDs, probabilities, supplied text, actions and settings. The current tool parser supports Qwen-style `<tool_call>` responses. This view does not train a model.")
             models = gr.Button("Choose / load model", size="sm")
     outputs = [maze_board, state_text, strip, raw, prefix_note, prefix_text, events, metrics_state, turn_picker, detail, alternatives]
-    controls = [size, seed, distance, openness, supplied, after, text, prefix, temperature, sampling_seed, per_turn, budget, attempts]
+    controls = [size, seed, distance, openness, supplied, after, text, prefix, temperature, sampling_seed, per_turn, budget, attempts, goal_mode, goal_hint]
 
     def prepare_episode(ep, show, session_id, *values):
         if ep.busy:
             raise gr.Error("Stop or pause this episode before starting another.")
-        n, s, d, o, supplied_n, trigger, passage_text, count, temp, sample_seed, per, total, tries = values
+        n, s, d, o, supplied_n, trigger, passage_text, count, temp, sample_seed, per, total, tries, mode, hint = values
         try:
             new = Episode(generate(n, s, d, o), dict(supplied_moves=int(supplied_n), interrupt_after=int(trigger),
                           interruption_text=passage_text, prefix_tokens=int(count), temperature=float(temp),
-                          sampling_seed=int(sample_seed), per_turn_tokens=int(per), token_budget=int(total), attempt_budget=int(tries)))
+                          sampling_seed=int(sample_seed), per_turn_tokens=int(per), token_budget=int(total), attempt_budget=int(tries),
+                          goal_mode=mode, goal_hint=hint))
         except (ValueError, TypeError) as exc:
             raise gr.Error(str(exc)) from exc
         return (new, *views(new, show, selections, session_id), None)
@@ -306,6 +313,8 @@ def _build_page(context):
     stop.click(lambda ep: command(ep, "stop"), episode, state_text, queue=False)
     interrupt.click(lambda ep: command(ep, "interrupt"), episode, state_text, queue=False)
     passage.input(lambda name: "" if name == "None" else PASSAGES.get(name, ""), passage, text, queue=False)
+    goal_mode.input(lambda mode: (gr.update(visible=mode == "hint"), 0 if mode != "coordinates" else gr.skip()),
+                    goal_mode, [goal_hint, supplied], queue=False)
     reveal.input(lambda ep, show, i: board(ep, None if ep.busy else int(i if i is not None else -1), show), [episode, reveal, turn_picker], maze_board, queue=False)
     turn_picker.input(inspect, [episode, reveal, turn_picker, selection_session], outputs, show_progress="hidden")
     strip.select(select_token, [episode, selection_session, metrics_state],

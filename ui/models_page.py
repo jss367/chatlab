@@ -12,13 +12,16 @@ from pathlib import Path
 import gradio as gr
 
 import settings
+from model_discovery import recommended_models
 from model_runtime import (
     DEFAULT_MODEL_SORT,
+    DISCOVERY_CANDIDATES,
     FITS,
     IMAGE_KIND,
     MODEL_WEIGHTS,
     QUANTIZED_BITS,
     SEARCH_IMAGE_PIPELINE_TAGS,
+    SEARCH_LIMIT,
     TEXT_KIND,
     TIGHT,
     UNFIT,
@@ -788,11 +791,11 @@ SEARCH_KINDS = (("Text models", TEXT_KIND), ("Image models", IMAGE_KIND))
 
 SEARCH_HINTS = {
     TEXT_KIND: (
-        "Searching Hugging Face for language models Transformers can load. "
+        "Browse recommended starters, or choose Popular, Trending, or New to explore Hugging Face. "
         "Selecting a result puts its ID in the model ID box; **Download and load** fetches it."
     ),
     IMAGE_KIND: (
-        "Searching Hugging Face for text-to-image diffusers pipelines. "
+        "Browse image starters, or choose Popular, Trending, or New for more text-to-image models. "
         "Selecting a result puts its ID in the model ID box; **Download and load** fetches it."
     ),
 }
@@ -1065,7 +1068,7 @@ def my_models_summary(models: list[CachedModel]) -> str:
     if not models:
         return (
             f"No models in the Hugging Face cache yet ({root}). "
-            "Search for one under **Model search**."
+            "Find one under **Discover models**."
         )
     total = format_bytes(sum(entry.size_bytes for entry in models))
     count = f"{len(models)} model{'s' if len(models) != 1 else ''}"
@@ -1302,6 +1305,8 @@ def hide_remove_confirm():
 
 def hub_model_label(result: HubModel, fit: Fit | None = None) -> str:
     parts = [result.model_id]
+    if result.summary:
+        parts.append(result.summary)
     if result.parameters:
         parts.append(f"{format_count(result.parameters)} params")
     verdict = fit_word(fit)
@@ -1315,11 +1320,23 @@ def hub_model_label(result: HubModel, fit: Fit | None = None) -> str:
 def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
     name = html.escape(result.model_id)
     lines = [f"[{name} on Hugging Face](https://huggingface.co/{name})"]
+    if result.summary:
+        lines.extend(["", html.escape(result.summary), ""])
     facts = []
     if result.parameters:
         facts.append(("Parameters", format_count(result.parameters)))
     if fit is not None and fit.known:
         facts.append(("Memory", f"{fit.note} Estimated from the parameter count."))
+    else:
+        facts.append(("Memory", "Unknown — there is not enough information to estimate a fit."))
+    if result.download_bytes:
+        facts.append((
+            "Full download",
+            f"About {format_bytes(result.download_bytes)} for all repository files "
+            "(catalog estimate). Choosing 4-bit or 8-bit reduces loaded memory, not this download.",
+        ))
+    else:
+        facts.append(("Full download", "Size unavailable; see the files on Hugging Face."))
     counts = []
     if result.downloads is not None:
         counts.append(f"{format_count(result.downloads)} downloads in the last month")
@@ -1335,6 +1352,8 @@ def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
         facts.append(
             ("Gated", "accept its terms on Hugging Face and enter a token first")
         )
+    else:
+        facts.append(("Access", "No access approval indicated"))
     # A cache that cannot be read (a permission, a drive that has gone away)
     # is simply nothing on disk: the search succeeded, so the pick must too.
     try:
@@ -1379,6 +1398,7 @@ def refresh_after_device(
     model_id: str | None = None,
     result: str | None = None,
     results: dict | None = None,
+    fits_only: bool = False,
 ):
     """Repaint both model lists once the device is known, and only then.
 
@@ -1397,53 +1417,54 @@ def refresh_after_device(
         return (gr.skip(),) * 6
     return (
         *refresh_my_models(selected, order, precision, model_id),
-        *refresh_search_results(result, results or {}, precision),
+        *refresh_search_results(result, results or {}, precision, fits_only),
         True,
     )
 
 
 def search_models(
-    query: str, hf_token: str, precision: str | None = None, kind: str = TEXT_KIND
+    query: str | None, hf_token: str, precision: str | None = None, kind: str = TEXT_KIND,
+    order: str = "Popular", fits_only: bool = False,
 ):
-    """Search the hub for models of one kind; nothing is selected yet.
-
-    ``precision`` is what the fit verdicts beside the results are judged at;
-    ``kind`` is which library the hub is asked for.
-    """
+    """Browse or search; retain candidates so memory filtering needs no network."""
 
     cleared = gr.update(choices=[], value=None)
-    hint = SEARCH_HINTS.get(kind, SEARCH_HINT)
-    cleaned = query.strip()
-    if not cleaned:
-        return cleared, hint, {}
+    cleaned = (query or "").strip()
     try:
-        results = search_hub_models(cleaned, hf_token, kind=kind)
+        results = (
+            recommended_models(cleaned, kind)
+            if order == "Recommended"
+            else search_hub_models(
+                cleaned, hf_token, kind=kind, order=order, limit=DISCOVERY_CANDIDATES
+            )
+        )
     except Exception as error:
         return (
             cleared,
-            failure_card("Search failed", html.escape(str(error))),
+            failure_card(
+                "Search failed",
+                f"{html.escape(str(error))} Choose Recommended for offline starters, or retry.",
+            ),
             {},
         )
     if not results:
-        described = (
-            "text-to-image pipelines" if kind == IMAGE_KIND else "language models"
+        described = "text-to-image models" if kind == IMAGE_KIND else "language models"
+        message = (
+            f"No {described} matched `{html.escape(cleaned)}`."
+            if cleaned else f"No {described} found in this browse window."
         )
-        return (
-            cleared,
-            f"No {described} matched `{html.escape(cleaned)}`.",
-            {},
-        )
-    fits = hub_fits(results, precision, kind)
-    choices = [
-        (hub_model_label(result, fits.get(result.model_id)), result.model_id)
-        for result in results
-    ]
-    count = f"{len(results)} result{'s' if len(results) != 1 else ''}"
-    return (
-        gr.update(choices=choices, value=None),
-        f"{count}, most downloaded first. {NO_RESULT_SELECTED}",
-        {result.model_id: result for result in results},
-    )
+        if order == "Recommended":
+            message += " Choose Popular, Trending, or New to search the full Hub."
+        return cleared, message, {}
+    state = {result.model_id: result for result in results}
+    radio, detail = refresh_search_results(None, state, precision, fits_only)
+    ordering = {
+        "Recommended": "Curated starters, available to browse offline.",
+        "Popular": "Most downloaded first.",
+        "Trending": "Trending on Hugging Face.",
+        "New": "Newest repositories first (not latest updates).",
+    }[order]
+    return radio, f"{ordering} {detail}", state
 
 
 def select_search_result(
@@ -1487,25 +1508,35 @@ def results_kind(results: dict) -> str:
 
 
 def refresh_search_results(
-    selected: str | None, results: dict, precision: str | None = None
+    selected: str | None, results: dict, precision: str | None = None,
+    fits_only: bool = False,
 ):
-    """Repaint the search list for a new weight precision, without searching again.
-
-    The results are held in a state, so a changed precision only needs the
-    verdicts recomputed. An empty list is left alone rather than replaced
-    with an empty one, which would clear the hint under it.
-    """
+    """Recompute fit filtering from retained candidates, clearing hidden selections."""
 
     if not results:
         return gr.skip(), gr.skip()
     fits = hub_fits(list(results.values()), precision, results_kind(results))
+    visible = [
+        result for model_id, result in results.items()
+        if not fits_only or (fits.get(model_id) and fits[model_id].state == FITS)
+    ][:SEARCH_LIMIT]
+    visible_ids = {result.model_id for result in visible}
+    selected = selected if selected in visible_ids else None
     choices = [
-        (hub_model_label(result, fits.get(model_id)), model_id)
-        for model_id, result in results.items()
+        (hub_model_label(result, fits.get(result.model_id)), result.model_id)
+        for result in visible
     ]
-    detail = (
-        describe_hub_model(results[selected], fits.get(selected))
-        if selected in results
-        else gr.skip()
-    )
+    if selected:
+        detail = describe_hub_model(results[selected], fits.get(selected))
+    else:
+        detail = f"{len(visible)} results shown from {len(results)} candidates. "
+        if fits_only:
+            detail += (
+                "Only estimated fits at the selected precision; tight, too large, "
+                "and unknown sizes are hidden. "
+            )
+        if not visible:
+            detail += "No estimated fits in these candidates. Turn off the filter or narrow your search."
+        else:
+            detail += NO_RESULT_SELECTED
     return gr.update(choices=choices, value=selected), detail

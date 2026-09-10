@@ -89,6 +89,7 @@ from ui.inspection import (
     render_attention,
     reset_inspection,
 )
+from model_discovery import DISCOVERY_ORDERS
 from ui.models_page import (
     BADGE_REFRESH_SECONDS,
     SEARCH_HINT,
@@ -819,84 +820,103 @@ def build_app() -> gr.Blocks:
                     "already on disk. Files are kept in your normal Hugging Face cache.",
                     elem_id="models-hero",
                 )
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown("## Model")
-                        model_id = gr.Textbox(
-                            value=settings.model_id_at_startup(saved),
-                            label="Hugging Face model ID",
-                            placeholder="organization/model-name",
-                            info="The default OLMo 3 7B model is about 15 GB in full precision.",
-                        )
-                        hf_token = gr.Textbox(
-                            label="Hugging Face token (optional)",
-                            type="password",
-                            placeholder="Only needed for gated or private models",
-                        )
-                        weight_precision = gr.Radio(
-                            choices=[
-                                ("Full (16-bit)", "full"),
-                                ("8-bit", "8-bit"),
-                                ("4-bit", "4-bit"),
-                            ],
-                            value=saved.weight_precision,
-                            label="Weight precision",
-                            info=(
-                                "On Apple Metal, 8-bit and 4-bit weights take about a "
-                                "half and a quarter of the memory of full weights, at a "
-                                "small cost in accuracy; the first quantized load fetches "
-                                "the Metal kernels from the Hub. Other devices load full "
-                                "weights whatever is chosen. Applies to the next load."
-                            ),
-                        )
-                        model_availability = gr.Markdown(
-                            "Checking downloaded files…", elem_id="model-availability"
-                        )
-                        with gr.Row():
-                            download_load_button = gr.Button(
-                                "Download and load", variant="primary", size="sm"
+                with gr.Row(elem_id="models-columns"):
+                    with gr.Column(min_width=360, elem_id="model-controls"):
+                        with gr.Column(elem_classes=["model-card"]):
+                            gr.Markdown("## Model")
+                            model_id = gr.Textbox(
+                                value=settings.model_id_at_startup(saved),
+                                label="Hugging Face model ID",
+                                placeholder="organization/model-name",
+                                info="The default OLMo 3 7B model is about 15 GB in full precision.",
                             )
-                            download_button = gr.Button("Download only", size="sm")
-                            cached_button = gr.Button("Load cached", size="sm")
-                            unload_button = gr.Button("Unload", size="sm")
-                        model_status = gr.Markdown(
-                            status_card(
-                                "No model loaded",
-                                "Choose a model under My Models, or enter a Hugging Face model ID to download one. Files are kept in your normal Hugging Face cache.",
-                            ),
-                            elem_id="model-status",
-                        )
+                            hf_token = gr.Textbox(
+                                label="Hugging Face token (optional)",
+                                type="password",
+                                placeholder="Only needed for gated or private models",
+                            )
+                            weight_precision = gr.Radio(
+                                choices=[
+                                    ("Full (16-bit)", "full"),
+                                    ("8-bit", "8-bit"),
+                                    ("4-bit", "4-bit"),
+                                ],
+                                value=saved.weight_precision,
+                                label="Weight precision",
+                                info=(
+                                    "On Apple Metal, 8-bit and 4-bit weights take about a "
+                                    "half and a quarter of the memory of full weights, at a "
+                                    "small cost in accuracy; the first quantized load fetches "
+                                    "the Metal kernels from the Hub. Other devices load full "
+                                    "weights whatever is chosen. Applies to the next load."
+                                ),
+                            )
+                            model_availability = gr.Markdown(
+                                "Checking downloaded files…", elem_id="model-availability"
+                            )
+                            with gr.Row():
+                                download_load_button = gr.Button(
+                                    "Download and load", variant="primary", size="sm"
+                                )
+                                download_button = gr.Button("Download only", size="sm")
+                                cached_button = gr.Button("Load cached", size="sm")
+                                unload_button = gr.Button("Unload", size="sm")
+                            model_status = gr.Markdown(
+                                status_card(
+                                    "No model loaded",
+                                    "Choose a model under My Models, or enter a Hugging Face model ID to download one. Files are kept in your normal Hugging Face cache.",
+                                ),
+                                elem_id="model-status",
+                            )
 
-                        gr.Markdown("## Model search")
-                        # One kind at a time, because the hub's own filters
-                        # are; see SEARCH_KINDS.
-                        search_kind = gr.Radio(
-                            choices=list(SEARCH_KINDS),
-                            value=SEARCH_KINDS[0][1],
-                            show_label=False,
-                            container=False,
-                            elem_id="search-kind",
-                        )
-                        with gr.Row():
-                            search_query = gr.Textbox(
-                                label="Search Hugging Face",
-                                placeholder="Model name, organization, or topic…",
-                                max_lines=1,
-                                scale=3,
+                        with gr.Column(elem_id="model-search", elem_classes=["model-card"]):
+                            gr.Markdown("## Discover models")
+                            gr.Markdown(
+                                "Start with a recommendation, or browse Hugging Face without a model name. "
+                                "Selecting a model shows its details before you download.",
+                                elem_classes=["scale-caption"],
                             )
-                            search_button = gr.Button(
-                                "🔍 Search", size="sm", scale=0, min_width=120
+                            # One kind at a time, because the hub's own filters
+                            # are; see SEARCH_KINDS.
+                            search_kind = gr.Radio(
+                                choices=list(SEARCH_KINDS),
+                                value=SEARCH_KINDS[0][1],
+                                show_label=False,
+                                container=False,
+                                elem_id="search-kind",
                             )
-                        search_results = gr.Radio(
-                            choices=[],
-                            label="Search results",
-                            show_label=False,
-                            elem_classes=["model-list"],
-                        )
-                        search_detail = gr.Markdown(SEARCH_HINT, elem_classes=["model-detail"])
-                        search_results_state = gr.State({})
+                            with gr.Row():
+                                search_order = gr.Dropdown(
+                                    choices=list(DISCOVERY_ORDERS), value="Recommended",
+                                    label="Browse", interactive=True,
+                                )
+                                fits_only = gr.Checkbox(
+                                    label="Fits this computer", value=False,
+                                    info="Estimated at the chosen weight precision. Unknown sizes are hidden.",
+                                )
+                            with gr.Row(elem_id="model-search-row"):
+                                search_query = gr.Textbox(
+                                    label="Search Hugging Face",
+                                    placeholder="Model name or organization; leave blank to browse…",
+                                    max_lines=1,
+                                    scale=3,
+                                    elem_id="model-search-query",
+                                )
+                                search_button = gr.Button(
+                                    "Search / refresh", variant="primary", size="sm", scale=0, min_width=120,
+                                    elem_id="model-search-button",
+                                )
+                            search_results = gr.Radio(
+                                choices=[],
+                                label="Search results",
+                                elem_id="model-search-results",
+                                show_label=False,
+                                elem_classes=["model-list"],
+                            )
+                            search_detail = gr.Markdown(SEARCH_HINT, elem_classes=["model-detail"])
+                            search_results_state = gr.State({})
 
-                    with gr.Column():
+                    with gr.Column(min_width=320, elem_classes=["model-card"]):
                         gr.Markdown("## My Models")
                         my_models_summary = gr.Markdown("", elem_classes=["scale-caption"])
                         sort_models = gr.Dropdown(
@@ -1292,7 +1312,7 @@ def build_app() -> gr.Blocks:
         # does nothing for the rest of the session.
         badge_timer.tick(
             refresh_after_device,
-            [device_read, *models_inputs, search_results, search_results_state],
+            [device_read, *models_inputs, search_results, search_results_state, fits_only],
             [*models_outputs, search_results, search_detail, device_read],
             show_progress="hidden",
         )
@@ -1356,15 +1376,20 @@ def build_app() -> gr.Blocks:
         cancel_remove_button.click(hide_remove_confirm, None, confirm_outputs)
 
         search_outputs = [search_results, search_detail, search_results_state]
-        # In search_models' own parameter order: the precision the fit
-        # verdicts are judged at, then the kind the hub is asked for.
-        search_inputs = [search_query, hf_token, weight_precision, search_kind]
+        search_inputs = [
+            search_query, hf_token, weight_precision, search_kind, search_order, fits_only
+        ]
+        # The default Recommended view is bundled and does not go online.
+        demo.load(search_models, search_inputs, search_outputs)
         search_button.click(search_models, search_inputs, search_outputs)
         search_query.submit(search_models, search_inputs, search_outputs)
-        # Switching kinds re-runs the query rather than leaving the other
-        # kind's results under the new label. With an empty box it just
-        # replaces the hint, which is what says which hub filter is on.
         search_kind.input(search_models, search_inputs, search_outputs)
+        search_order.input(search_models, search_inputs, search_outputs)
+        fits_only.input(
+            refresh_search_results,
+            [search_results, search_results_state, weight_precision, fits_only],
+            [search_results, search_detail],
+        )
         # Picking a search result names a model too, so it withdraws the My
         # Models selection the same way typing an ID does.
         search_results.input(
@@ -1379,7 +1404,7 @@ def build_app() -> gr.Blocks:
             refresh_my_models, models_inputs, models_outputs
         ).then(
             refresh_search_results,
-            [search_results, search_results_state, weight_precision],
+            [search_results, search_results_state, weight_precision, fits_only],
             [search_results, search_detail],
         )
         enter_sends.change(set_message_box_keys, enter_sends, prompt)

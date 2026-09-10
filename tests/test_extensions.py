@@ -257,6 +257,39 @@ class ExtensionSettingsTests(unittest.TestCase):
         settings.update(enabled_extensions=[])
         settings.ensure_file()
 
+    def test_maze_goal_controls_apply_only_to_new_episodes(self):
+        save_extensions(['maze_experiments'], [])
+        demo = app.build_app()
+        try:
+            mode = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'maze-goal-mode')
+            hint = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'maze-goal-hint')
+            select = next(fn for fn in demo.fns.values() if fn.targets == [(mode._id, 'input')])
+            prepare = next(fn for fn in demo.fns.values() if getattr(fn.fn, '__name__', '') == 'prepare_episode')
+            values = [b.value for b in prepare.inputs]
+            original = values[0]
+            supplied = select.outputs[1]
+            for choice in ('hidden', 'hint', 'coordinates'):
+                updates = select.fn(choice)
+                self.assertEqual(updates[0]['visible'], choice == 'hint')
+                self.assertEqual(updates[1], gr.skip() if choice == 'coordinates' else 0)
+                self.assertEqual(original.config['goal_mode'], 'coordinates')
+                values[prepare.inputs.index(mode)] = choice
+                values[prepare.inputs.index(hint)] = 'The goal lies near an edge.'
+                values[prepare.inputs.index(supplied)] = 0
+                result = prepare.fn(*values)
+                new = result[0]
+                self.assertEqual(new.config['goal_mode'], choice)
+                self.assertEqual(new.supplied_moves, 0)
+                self.assertEqual('destination' in new.model_state(), choice == 'coordinates')
+                label = {'hidden': 'Hidden location', 'hint': 'Hint only', 'coordinates': 'Exact coordinates'}[choice]
+                self.assertIn(f'**Goal information:** {label}', result[2])
+            values[prepare.inputs.index(mode)] = 'hint'
+            values[prepare.inputs.index(hint)] = ' '
+            with self.assertRaises(gr.Error):
+                prepare.fn(*values)
+        finally:
+            demo.close()
+
     def test_settings_survive_other_changes_and_restart(self):
         note = save_extensions(['maze_experiments'], [])
         self.assertIn('Restart ChatLab', note)
