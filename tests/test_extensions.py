@@ -107,6 +107,19 @@ class TokenSelectionTests(unittest.TestCase):
         self.inspector.describe.side_effect = delayed_description
         self.assertEqual(self.selections.inspect(self.session, old, self.click), (gr.skip(), gr.skip()))
 
+    def test_actionable_selection_rejects_stale_views_and_other_sessions(self):
+        payload, _ = self.selections.view(self.session, ('run', 0), [{'token_id': 7}])
+        view, index, metric = self.selections.resolve(self.session, payload, 0)
+        self.assertEqual((view, index, metric), (('run', 0), 0, {'token_id': 7}))
+        metric['token_id'] = 99
+        self.assertEqual(payload[1][0]['token_id'], 7)
+        for session, index in [(self.session, -1), (self.session, 1), ('other', 0)]:
+            with self.assertRaises(ValueError):
+                self.selections.resolve(session, payload, index)
+        self.selections.view(self.session, ('run', 1), [])
+        with self.assertRaises(ValueError):
+            self.selections.resolve(self.session, payload, 0)
+
 
 class RuntimeBoundaryTests(unittest.TestCase):
     def test_exclusive_session_pins_model_and_closes_stream(self):

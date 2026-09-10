@@ -11,6 +11,9 @@ Enable **Maze experiments** under **Settings → Extensions**, restart ChatLab, 
 5. Watch the character and path alongside generated tokens. Click tokens for probabilities and alternatives. The exact supplied prefix is shown separately, and the full raw response retains both parts. For a reasoning model, tokens emitted inside its exposed reasoning block remain visible; these are not access to hidden internal reasoning. Qwen2.5 Instruct has no separate reasoning channel.
 6. **Pause after response** waits for the current response to end. **Stop now** retains partial tokens and does not execute a partial action. **Interrupt next response** overrides the scheduled insertion time, recording the run as manually intervened.
 7. Select a response under **Path and replay** to inspect its board and tokens. Pause before selecting. Export JSON or upload a previous export for read-only replay.
+8. To change generated output, pause or stop the episode, select a response, and click a token. Under **Edit selected token**, enter **Replacement text** or choose an exact alternative under **Replacement token**, then click **Replace token and regenerate**. Completed episodes can also be edited while the same model remains loaded. Regeneration finishes one response; use Run or Step to continue.
+
+Token editing saves the original run and creates a new run with the maze, message history, and recovery state rewound to just before the edited response. Earlier token IDs in that response are kept exactly, the selected token is replaced, and its remaining output and later moves are regenerated. Replacement text may encode to several tokens. The retained tokens and replacement appear in the supplied prefix panel and do not count toward the new continuation's sampled-token limits; completed earlier responses keep their token counts. The exported JSON records the parent run, edited response and token index, original token ID, and replacement IDs. Edited runs are marked as manual interventions. Saved replays and supplied prefix tokens remain read-only; reloading or changing the model requires starting a new episode.
 
 A dashed path marks supplied moves; the solid indigo path marks actual accepted model moves. The amber ring marks the position where the interruption was inserted. The shortest-route overlay is only for the viewer, never part of the prompt.
 
@@ -34,6 +37,6 @@ This is an exploratory workbench, not the batch experiment or a training impleme
 
 ## Verification
 
-`python -m unittest discover -s tests` runs the existing ChatLab suite plus simulator/controller tests. Maze tests cover deterministic maps and route length, blocked/fake/quoted/unfinished actions, supplied-token accounting, recovery and arrival, abandonment, pause/stop, native tool-template forwarding and replay path validation.
+`python -m unittest discover -s tests` runs the existing ChatLab suite plus simulator/controller tests. Maze tests cover deterministic maps and route length, blocked/fake/quoted/unfinished actions, supplied-token accounting, recovery and arrival, abandonment, pause/stop, token editing and state rewind, native tool-template forwarding and replay path validation.
 
 The extension boundary and enable/disable lifecycle are documented in [Optional extensions for ChatLab](EXTENSIONS.md). Existing JSON exports remain compatible. Legacy `~/.local/share/chatlab/maze_runs` files remain available to upload.

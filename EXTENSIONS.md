@@ -49,6 +49,8 @@ The host passes `extension_api.ExtensionContext`:
 
 For an interactive token strip, create one `selections = context.tokens.selections()` controller per view. Store its session ID using `gr.State(value=selections.new_session, delete_callback=selections.forget)`. `selections.view(session_id, response_identity, metrics)` returns a stamped metrics payload and a flag telling the UI to clear its selected-token details when the response changes. Keep the identity stable while appending tokens to that response. Pass the stamped payload to `selections.inspect(session_id, payload, event)` in the strip's selection callback: it discards delayed clicks from replaced responses. Current stamps stay in the controller, outside Gradio's event input snapshots, and are isolated from other browser sessions, extension views and core Chat.
 
+For actions such as token editing, `selections.resolve(session_id, payload, index)` returns the current response identity, token index, and a copied metric. It raises `ValueError` for stale selections or invalid indices. Resolve again when applying an edit and verify that the response belongs to the episode being changed.
+
 ```python
 with context.models.open_session() as session:
     prefix_ids = session.encode("A supplied response prefix")

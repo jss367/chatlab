@@ -183,6 +183,16 @@ class TokenSelections:
         # Formatting may overlap a stream update or replay switch.
         return result if current() else (gr.skip(), gr.skip())
 
+    def resolve(self, session_id, payload, index):
+        """Resolve an actionable selection only while its view is current."""
+        stamp, metrics = payload
+        with self._lock:
+            active = self._sessions.get(session_id)
+            if (active is None or active[1] != stamp or not isinstance(index, int)
+                    or not 0 <= index < len(metrics)):
+                raise ValueError("Select a token in the current response again.")
+            return active[0], index, copy.deepcopy(metrics[index])
+
 
 class NavigationService:
     """Register navigation actions while building an extension's page.

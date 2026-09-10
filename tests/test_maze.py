@@ -8,11 +8,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 from extensions.maze_experiments.maze import Maze, apply_call, call_text, generate, parse_call
-from extensions.maze_experiments.runner import Episode, TERMINAL, from_payload, stream_episode
+from extensions.maze_experiments.runner import Episode, TERMINAL, fork_token_edit, from_payload, stream_episode
 from model_runtime import ModelManager
 from extension_api import ModelService
 from extension_api import TokenInspector
-from extensions.maze_experiments.page import export_run, views
+from token_metrics import unscored_metric
+from extensions.maze_experiments.page import build_page, export_run, views
 import gradio as gr
 
 CONFIG = dict(supplied_moves=0, interrupt_after=0, interruption_text="Distracted", prefix_tokens=2,
@@ -58,6 +59,157 @@ class Manager:
 
 
 class MazeTests(unittest.TestCase):
+    def test_edit_ui_callbacks_select_regenerate_archive_and_reject_stale_token(self):
+        manager = Manager([('abc', [97, 98, 99, 0]), ('yz', [121, 122, 0])])
+        generate_reply = manager.generate
+
+        def rich_reply(*args, **kwargs):
+            for frame in generate_reply(*args, **kwargs):
+                for position, metric in enumerate(frame.metrics):
+                    metric.update(unscored_metric(position=position, token_id=metric['token_id'],
+                                                  token_text=chr(metric['token_id']), fallback_text='',
+                                                  segment='response').to_dict())
+                    metric['top_candidates'] = [{'token_id': 120, 'text': 'x', 'probability': .1}]
+                yield frame
+
+        manager.generate = rich_reply
+        inspector = TokenInspector()
+        selections = inspector.selections()
+        inspector.selections = lambda: selections
+        session_id = selections.new_session()
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        list(stream_episode(ep, manager))
+        original = copy.deepcopy(ep.payload())
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values()}
+                metrics = views(ep, False, selections, session_id)[7]
+                selected = callbacks['select_token'].fn(ep, session_id, metrics, SimpleNamespace(index=1))
+                self.assertEqual(selected[3], 'b')
+                self.assertIn(("'x' · token 120", '120'), selected[4]['choices'])
+                edit = callbacks['edit_token']
+                frames = list(edit.fn(ep, False, session_id, metrics, selected[2], 'ignored', '120'))
+                self.assertTrue(all(len(frame) == len(edit.outputs) for frame in frames))
+                result = frames[-1][0]
+                self.assertEqual(result.turns[0]['text'], 'axyz')
+                self.assertEqual(result.phase, 'abandoned')
+                self.assertEqual(json.loads((Path(directory) / f'{ep.run_id}.json').read_text()),
+                                 json.loads(json.dumps(original)))
+                self.assertTrue((Path(directory) / f'{result.run_id}.json').exists())
+                self.assertEqual(ep.payload(), original)
+                with self.assertRaisesRegex(gr.Error, 'current response'):
+                    list(edit.fn(ep, False, session_id, metrics, selected[2], 'x', 'text'))
+            finally:
+                demo.close()
+
+    def test_token_edit_rewinds_history_and_moves_and_preserves_original(self):
+        move = call_text(MAZE.maze_id, "east")
+        ids = list(move.encode()) + [0]
+        manager = Manager([(move, ids), (move, ids)])
+        ep = Episode(MAZE, CONFIG | {"interruption_text": "", "per_turn_tokens": 200, "token_budget": 1000})
+        list(stream_episode(ep, manager))
+        self.assertEqual(ep.phase, "arrived")
+        before = copy.deepcopy(ep.payload())
+        index = move.index('east')
+        with manager.open_session() as session:
+            edited = fork_token_edit(ep, 1, index, "west", session)
+        self.assertEqual(edited.position, (0, 1))
+        self.assertEqual(len(edited.turns), 1)
+        self.assertEqual(len(edited.events), 1)
+        self.assertEqual(edited.tool_attempts, 1)
+        self.assertEqual(edited.sampled_tokens, len(ids))
+        self.assertNotEqual(edited.run_id, ep.run_id)
+        self.assertEqual(edited.token_edit["parent_run_id"], ep.run_id)
+        self.assertTrue(edited.manual_intervention)
+        self.assertEqual(edited.pending_edit["forced_ids"], ids[:index] + list(b'west'))
+        suffix = move[index + len('east'):]
+        manager.replies = iter([(suffix, list(suffix.encode()) + [0])])
+        list(stream_episode(edited, manager, single_step=True))
+        self.assertEqual(edited.phase, "paused")
+        self.assertEqual(edited.position, MAZE.start)
+        self.assertEqual(edited.events[-1]["direction"], "west")
+        self.assertEqual(edited.messages[-2]["content"], move.replace('east', 'west'))
+        self.assertEqual(manager.calls[-1][0], ep.messages[:4])
+        self.assertEqual(manager.calls[-1][1]["literal_prefill_tokens"], 0)
+        self.assertEqual(edited.sampled_tokens, len(ids) + len(suffix) + 1)
+        self.assertEqual(ep.payload(), before)
+        replay = from_payload(copy.deepcopy(edited.payload()))
+        self.assertEqual(replay.token_edit, edited.token_edit)
+        self.assertEqual(replay.position, MAZE.start)
+
+    def test_token_edit_can_choose_exact_candidate_and_regenerate_stopped_response(self):
+        manager = Manager([('abc', [97, 98, 99])])
+        ep = Episode(MAZE, CONFIG | {"interruption_text": ""})
+        list(stream_episode(ep, manager))
+        ep.turns[0]["metrics"][1]["top_candidates"] = [{"token_id": 120, "text": "x"}]
+        with manager.open_session() as session:
+            edited = fork_token_edit(ep, 0, 1, "ignored", session, candidate_id=120)
+        self.assertEqual(edited.pending_edit["forced_ids"], [97, 120])
+        manager.replies = iter([('yz', [121, 122, 0])])
+        list(stream_episode(edited, manager))
+        self.assertEqual(edited.turns[0]["text"], 'axyz')
+        self.assertEqual(edited.phase, 'abandoned')
+        self.assertFalse(edited.interrupted)
+        self.assertEqual(edited.sampled_tokens, 3)
+
+    def test_token_edit_restores_interruption_and_recovery_at_rewind_point(self):
+        move = '\n' + call_text(MAZE.maze_id, "east")
+        manager = Manager([(move, list(move.encode()) + [0])] * 2)
+        ep = Episode(MAZE, CONFIG | {"per_turn_tokens": 200, "token_budget": 1000})
+        list(stream_episode(ep, manager))
+        with manager.open_session() as session:
+            first = fork_token_edit(ep, 0, 2, '\n', session)
+            second = fork_token_edit(ep, 1, 0, '\n', session)
+        self.assertFalse(first.interrupted)
+        self.assertTrue(first.pending_edit["interruption_here"])
+        self.assertEqual(first.pending_edit["literal_prefill_tokens"], 2)
+        self.assertTrue(second.interrupted)
+        self.assertTrue(second.resumed)
+        self.assertEqual(second.latency, ep.latency)
+        self.assertEqual(second.intervention_turn, 0)
+        manager.replies = iter([(move, list(move.encode()) + [0])])
+        list(stream_episode(first, manager, single_step=True))
+        self.assertTrue(first.interrupted)
+        self.assertTrue(first.resumed)
+        self.assertEqual(first.intervention_turn, 0)
+
+    def test_token_edit_rejects_busy_replay_changed_model_and_invalid_selection(self):
+        ep = Episode(MAZE, CONFIG)
+        manager = Manager([('abc', [97, 98, 99, 0])])
+        list(stream_episode(ep, manager))
+        with manager.open_session() as session:
+            for field, value, message in [('busy', True, 'Pause'), ('replay_only', True, 'read-only'),
+                                          ('load_id', 'other', 'model changed')]:
+                previous = getattr(ep, field)
+                setattr(ep, field, value)
+                with self.assertRaisesRegex(ValueError, message):
+                    fork_token_edit(ep, 0, 2, 'x', session)
+                setattr(ep, field, previous)
+            for turn, token in [(-1, 2), (1, 2), (0, -1), (0, 0), (0, 99)]:
+                with self.assertRaises(ValueError):
+                    fork_token_edit(ep, turn, token, 'x', session)
+            with self.assertRaisesRegex(ValueError, 'replacement text'):
+                fork_token_edit(ep, 0, 2, '', session)
+            with self.assertRaisesRegex(ValueError, 'alternative'):
+                fork_token_edit(ep, 0, 2, '', session, candidate_id=123)
+
+    def test_edit_to_stop_token_finishes_without_executing_partial_action(self):
+        ep = Episode(MAZE, CONFIG | {"interruption_text": ""})
+        manager = Manager([('abc', [97, 98, 99, 0])])
+        list(stream_episode(ep, manager))
+        ep.turns[0]["metrics"][1]["top_candidates"] = [{"token_id": 0, "text": "EOS"}]
+        with manager.open_session() as session:
+            edited = fork_token_edit(ep, 0, 1, '', session, candidate_id=0)
+        manager.replies = iter([('', [])])  # Runtime returns after consuming a forced stop token.
+        list(stream_episode(edited, manager))
+        self.assertEqual(edited.phase, 'abandoned')
+        self.assertEqual(edited.turns[0]["finish_reason"], 'stop')
+        self.assertEqual(edited.tool_attempts, 0)
+
     def test_new_response_reset_and_replay_clear_selection_but_streaming_preserves_it(self):
         selections = TokenInspector().selections()
         session = selections.new_session()
