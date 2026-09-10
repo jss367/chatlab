@@ -1,6 +1,8 @@
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 import torch
@@ -285,6 +287,61 @@ class IncrementalDecoderTests(unittest.TestCase):
 
 
 class GenerateStreamingTests(unittest.TestCase):
+    def test_inference_follows_the_stream_between_workers(self):
+        # Gradio may use a different worker for each next(). Check a real
+        # parameter operation as well as the flags: no forward may build a
+        # training graph, and a suspended stream must not change its caller.
+        for ending in ("finish", "close", "error"):
+            with self.subTest(ending=ending):
+                manager = loaded_manager([0, 1, 2])
+                forwards = []
+
+                def observe(model, _args):
+                    forwards.append(
+                        (torch.is_inference_mode_enabled(), (model.anchor * 2).requires_grad)
+                    )
+                    if ending == "error" and len(forwards) == 3:
+                        raise RuntimeError("forward failed")
+
+                manager.model.register_forward_pre_hook(observe)
+                stream = manager.generate(
+                    [{"role": "user", "content": "hi"}],
+                    temperature=0, top_p=1, top_k=0, max_new_tokens=4, seed=1,
+                )
+
+                def advance():
+                    return next(stream, None)
+
+                def modes():
+                    return torch.is_inference_mode_enabled(), torch.is_grad_enabled()
+
+                with (
+                    mock.patch.object(model_runtime, "STREAM_BATCH_TOKENS", 1),
+                    ThreadPoolExecutor(1) as first,
+                    ThreadPoolExecutor(1) as second,
+                ):
+                    try:
+                        first.submit(advance).result()
+                        self.assertEqual(first.submit(modes).result(), (False, True))
+                        second.submit(advance).result()
+                        self.assertEqual(second.submit(modes).result(), (False, True))
+                        if ending == "finish":
+                            while first.submit(advance).result() is not None:
+                                pass
+                        elif ending == "error":
+                            with self.assertRaisesRegex(RuntimeError, "forward failed"):
+                                second.submit(advance).result()
+                        else:
+                            second.submit(stream.close).result()
+                        self.assertEqual(first.submit(modes).result(), (False, True))
+                        self.assertEqual(second.submit(modes).result(), (False, True))
+                        self.assertGreaterEqual(len(forwards), 2)
+                        self.assertTrue(all(state == (True, False) for state in forwards))
+                        self.assertFalse(manager.busy)
+                        self.assertFalse(manager._lock.locked())
+                    finally:
+                        second.submit(stream.close).result()
+
     def collect(self, manager, **kwargs):
         options = {
             "temperature": 0.0,
