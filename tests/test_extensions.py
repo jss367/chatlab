@@ -122,6 +122,20 @@ class TokenSelectionTests(unittest.TestCase):
 
 
 class RuntimeBoundaryTests(unittest.TestCase):
+    def test_replacement_encoding_checks_pinned_load_and_closed_session(self):
+        manager = FakeManager()
+        manager.encode_replacement = mock.Mock(return_value=[42])
+        with ModelService(lambda: manager).open_session() as session:
+            self.assertEqual(session.encode_replacement([1], 'word', literal_prefill_tokens=1), [42])
+            manager.encode_replacement.assert_called_once_with([1], 'word', literal_prefill_tokens=1,
+                                                               load_id='first')
+            manager.load_id = 'second'
+            with self.assertRaisesRegex(ValueError, 'changed'):
+                session.encode_replacement([1], 'word')
+            manager.encode_replacement.assert_called_once()
+        with self.assertRaisesRegex(ValueError, 'closed'):
+            session.encode_replacement([1], 'word')
+
     def test_exclusive_session_pins_model_and_closes_stream(self):
         manager = FakeManager()
         service = ModelService(lambda: manager)

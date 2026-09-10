@@ -74,6 +74,8 @@ with context.models.open_session() as session:
 
 `open_session()` fails clearly if no model is loaded or another page owns generation. The session pins the model/load identifiers and retains ownership across multiple responses until closed. Token encoding/decoding and `stop_token_ids` are exposed on the session; extensions do not access the model manager or tokenizer directly. Each streamed update owns its token-metric lists.
 
+For typed token replacements, use `session.encode_replacement(kept_ids, text, literal_prefill_tokens=0)` to encode in the retained tokens' decoder context. It preserves the retained IDs and checks that the visible continuation matches the text exactly, including boundary spaces; pass the original literal-prefill count when retaining supplied text.
+
 Close a generation iterator before closing its session, including on errors or interrupted UI streams. `session.cancel()` may be called from another thread to stop at the next generation update; cancellation remains set for that session. A stopped stream does not execute domain actions. The extension decides which completed responses count as valid actions and which partial results to retain.
 
 ### Storage and compatibility

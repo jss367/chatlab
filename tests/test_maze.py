@@ -48,6 +48,11 @@ class Manager:
     def _stop_token_ids(self):
         return {0}
 
+    def encode_replacement(self, kept_ids, text, **kwargs):
+        # This fixture encodes independent UTF-8 bytes; context-sensitive
+        # behavior is exercised separately through the real runtime encoder.
+        return list(text.encode())
+
     def generate(self, messages, **kwargs):
         self.calls.append((copy.deepcopy(messages), kwargs))
         text, ids = next(self.replies)
@@ -59,6 +64,24 @@ class Manager:
 
 
 class MazeTests(unittest.TestCase):
+    def test_typed_edit_preserves_sentencepiece_boundary_and_literal_prefix(self):
+        from test_streaming import sentencepiece_manager, SP_HELLO, SP_SPACE_WORLD, SP_WORLD
+        for text, expected_id in [('world', SP_WORLD), (' world', SP_SPACE_WORLD)]:
+            with self.subTest(replacement=text):
+                manager = sentencepiece_manager()
+                ep = Episode(MAZE, CONFIG)
+                ep.model_id, ep.load_id = manager.model_id, manager.load_id
+                ep.turns = [dict(metrics=[{'token_id': SP_HELLO}, {'token_id': SP_SPACE_WORLD}],
+                                 forced_prefix_tokens=1, literal_prefill_tokens=1)]
+                with ModelService(lambda: manager).open_session() as session:
+                    with mock.patch.object(manager, 'encode_replacement', wraps=manager.encode_replacement) as encode:
+                        edited = fork_token_edit(ep, 0, 1, text, session)
+                    encode.assert_called_once_with([SP_HELLO], text, literal_prefill_tokens=1,
+                                                   load_id=ep.load_id)
+                    self.assertEqual(edited.pending_edit['forced_ids'], [SP_HELLO, expected_id])
+                    self.assertEqual(session.decode(edited.pending_edit['forced_ids']), 'Hello' + text)
+                    self.assertEqual(edited.token_edit['replacement_text'], text)
+
     def test_edit_ui_callbacks_select_regenerate_archive_and_reject_stale_token(self):
         manager = Manager([('abc', [97, 98, 99, 0]), ('yz', [121, 122, 0])])
         generate_reply = manager.generate

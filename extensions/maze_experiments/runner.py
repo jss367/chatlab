@@ -167,8 +167,12 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
         if (not isinstance(token_index, int)
                 or not original["forced_prefix_tokens"] <= token_index < len(metrics)):
             raise ValueError("Select a model-generated token to edit.")
+        kept_ids = [m["token_id"] for m in metrics[:token_index]]
+        literal_prefill_tokens = original.get("literal_prefill_tokens", original["forced_prefix_tokens"])
         if candidate_id is None:
-            replacement_ids = manager.encode(replacement)
+            replacement_ids = manager.encode_replacement(
+                kept_ids, replacement, literal_prefill_tokens=literal_prefill_tokens,
+            )
         else:
             candidates = {c["token_id"] for c in metrics[token_index].get("top_candidates", [])}
             if candidate_id not in candidates:
@@ -194,13 +198,14 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
                 result.intervention_attempts = result.tool_attempts
             result.phase = "running"
             finish_turn(result, turn, stop_ids, result.config["per_turn_tokens"])
-        prefix = [m["token_id"] for m in metrics[:token_index]] + replacement_ids
+        prefix = kept_ids + replacement_ids
         result.token_edit = dict(parent_run_id=episode.run_id, turn=turn_index,
                                  token_index=token_index, original_token_id=metrics[token_index]["token_id"],
-                                 replacement_ids=replacement_ids, replacement_text=manager.decode(replacement_ids),
+                                 replacement_ids=replacement_ids,
+                                 replacement_text=replacement if candidate_id is None else manager.decode(replacement_ids),
                                  created_at=time.time())
         result.pending_edit = dict(forced_ids=prefix,
-                                   literal_prefill_tokens=original.get("literal_prefill_tokens", original["forced_prefix_tokens"]),
+                                   literal_prefill_tokens=literal_prefill_tokens,
                                    interruption_here=bool(episode.interrupted and episode.intervention_turn == turn_index))
         result.phase, result.detail = "paused", "Token edit prepared. Regeneration will replace this response and its later moves in a new run."
         return result

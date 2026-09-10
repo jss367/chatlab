@@ -63,6 +63,13 @@ class GenerationSession:
         self._check()
         return list(self._manager.tokenizer.encode(text, add_special_tokens=False))
 
+    def encode_replacement(self, kept_ids, text, *, literal_prefill_tokens=0):
+        """Encode typed text after exact retained IDs using this pinned model."""
+        self._check()
+        return self._manager.encode_replacement(
+            kept_ids, text, literal_prefill_tokens=literal_prefill_tokens, load_id=self.load_id,
+        )
+
     def decode(self, ids):
         self._check()
         return self._manager.tokenizer.decode(ids, skip_special_tokens=False)
