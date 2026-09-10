@@ -25,6 +25,7 @@ from mlx_runtime import (
     mlx_supports,
     precision_label,
     read_mlx_config,
+    read_stop_ids,
 )
 
 try:
@@ -82,6 +83,62 @@ class ConfigTests(unittest.TestCase):
             (snapshot / "config.json").write_text(json.dumps({"quantization": {"bits": 4}}))
             # No model_type: not a model config at all.
             self.assertIsNone(read_mlx_config(snapshot))
+
+
+class StopTokenTests(unittest.TestCase):
+    """Stop tokens need no mlx: they are read from the checkpoint's JSON files."""
+
+    def write(self, snapshot: Path, name: str, value) -> None:
+        (snapshot / name).write_text(value if isinstance(value, str) else json.dumps(value))
+
+    def test_stop_tokens_come_from_the_config(self):
+        self.assertEqual(MlxEngine(object(), {"eos_token_id": 2}).eos_token_ids(), {2})
+        self.assertEqual(MlxEngine(object(), {"eos_token_id": [2, 7]}).eos_token_ids(), {2, 7})
+        self.assertEqual(MlxEngine(object(), {}).eos_token_ids(), set())
+        self.assertEqual(MlxEngine(object(), {"eos_token_id": True}).eos_token_ids(), set())
+        self.assertEqual(MlxEngine(object(), {"eos_token_id": [2, True, "x"]}).eos_token_ids(), {2})
+
+    def test_the_generation_config_adds_its_end_of_turn_tokens(self):
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = Path(root)
+            self.write(snapshot, "config.json", {"model_type": "llama", "eos_token_id": 2})
+            self.write(snapshot, "generation_config.json", {"eos_token_id": [2, 7]})
+            self.assertEqual(read_stop_ids(snapshot), {2, 7})
+            engine = MlxEngine.from_snapshot(object(), snapshot)
+            self.assertEqual(engine.eos_token_ids(), {2, 7})
+            self.assertEqual(engine.config["model_type"], "llama")
+
+    def test_a_missing_generation_config_leaves_the_configs_own_token(self):
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = Path(root)
+            self.write(snapshot, "config.json", {"model_type": "llama", "eos_token_id": 2})
+            self.assertEqual(read_stop_ids(snapshot), {2})
+            self.assertEqual(MlxEngine.from_snapshot(object(), snapshot).eos_token_ids(), {2})
+
+    def test_a_generation_config_alone_is_enough(self):
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = Path(root)
+            self.write(snapshot, "generation_config.json", {"eos_token_id": 7})
+            self.assertEqual(read_stop_ids(snapshot), {7})
+
+    def test_junk_in_either_file_is_ignored(self):
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = Path(root)
+            self.write(snapshot, "config.json", {"model_type": "llama", "eos_token_id": 2})
+            self.write(snapshot, "generation_config.json", "not json")
+            self.assertEqual(read_stop_ids(snapshot), {2})
+            self.write(snapshot, "generation_config.json", [1, 2])
+            self.assertEqual(read_stop_ids(snapshot), {2})
+            self.write(snapshot, "generation_config.json", {"eos_token_id": "<|eot_id|>"})
+            self.assertEqual(read_stop_ids(snapshot), {2})
+            self.write(snapshot, "generation_config.json", {"eos_token_id": [7, True, None, "x"]})
+            self.assertEqual(read_stop_ids(snapshot), {2, 7})
+            self.assertEqual(read_stop_ids(snapshot / "missing"), set())
+
+    def test_the_engines_set_is_a_copy(self):
+        engine = MlxEngine(object(), {"eos_token_id": 2})
+        engine.eos_token_ids().add(9)
+        self.assertEqual(engine.eos_token_ids(), {2})
 
 
 class BitsFromNameTests(unittest.TestCase):
@@ -204,12 +261,6 @@ class ForwardTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             engine.forward([4], cache, 2)
-
-    def test_stop_tokens_come_from_the_config(self):
-        self.assertEqual(MlxEngine(object(), {"eos_token_id": 2}).eos_token_ids(), {2})
-        self.assertEqual(MlxEngine(object(), {"eos_token_id": [2, 7]}).eos_token_ids(), {2, 7})
-        self.assertEqual(MlxEngine(object(), {}).eos_token_ids(), set())
-        self.assertEqual(MlxEngine(object(), {"eos_token_id": True}).eos_token_ids(), set())
 
 
 @needs_mlx

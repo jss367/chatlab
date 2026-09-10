@@ -113,6 +113,55 @@ def read_mlx_config(snapshot: Path) -> dict[str, Any] | None:
     return config if mlx_quantization(config) is not None else None
 
 
+def _token_ids(candidate: Any) -> set[int]:
+    """The token ids in an ``eos_token_id`` value: one int, or a list of them.
+
+    Anything else - ``None``, a bool, a string, a nested list - contributes
+    nothing rather than raising, so a malformed config only loses its stop
+    tokens.
+    """
+
+    if isinstance(candidate, bool):
+        return set()
+    if isinstance(candidate, int):
+        return {candidate}
+    if isinstance(candidate, (list, tuple)):
+        return {
+            int(value)
+            for value in candidate
+            if isinstance(value, int) and not isinstance(value, bool)
+        }
+    return set()
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    """``path`` parsed as a JSON object; ``{}`` when missing, unreadable or not one."""
+
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def read_stop_ids(snapshot: Path) -> set[int]:
+    """Every end-of-sequence token the checkpoint at ``snapshot`` declares.
+
+    ``config.json`` names the tokenizer's ``eos_token_id``; instruction-tuned
+    checkpoints often add their end-of-turn token (Llama 3's ``<|eot_id|>``,
+    Gemma's ``<end_of_turn>``) only in ``generation_config.json``, which is
+    where Transformers' ``generation_config`` and mlx-lm's own loader read it
+    from. Both files are merged, so a model that emits either token stops.
+    """
+
+    snapshot = Path(snapshot)
+    values = _token_ids(_read_json_object(snapshot / "config.json").get("eos_token_id"))
+    values |= _token_ids(
+        _read_json_object(snapshot / "generation_config.json").get("eos_token_id")
+    )
+    return values
+
+
 def precision_label(config: Mapping[str, Any] | None) -> str:
     """``"4-bit"``, from the config's quantization block; ``"full"`` when it has none."""
 
@@ -278,30 +327,39 @@ class MlxEngine:
 
     backend = "mlx"
 
-    def __init__(self, model, config: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        model,
+        config: Mapping[str, Any] | None = None,
+        stop_ids: set[int] | None = None,
+    ) -> None:
         self.model = model
         self.config = dict(config or {})
+        # The config's own eos_token_id unless the caller has already merged
+        # the checkpoint's files; see :meth:`from_snapshot`.
+        self.stop_ids = (
+            set(stop_ids) if stop_ids is not None else _token_ids(self.config.get("eos_token_id"))
+        )
 
     @classmethod
     def from_snapshot(cls, model, local_path: Path) -> MlxEngine:
-        try:
-            config = json.loads((Path(local_path) / "config.json").read_text())
-        except (OSError, ValueError):
-            config = {}
-        return cls(model, config if isinstance(config, dict) else {})
+        """The engine for the checkpoint at ``local_path``.
+
+        Reads its ``config.json`` for the head transforms :meth:`read_head`
+        applies, and its stop tokens from that file and
+        ``generation_config.json`` together; see :func:`read_stop_ids`.
+        """
+
+        local_path = Path(local_path)
+        config = _read_json_object(local_path / "config.json")
+        return cls(model, config, stop_ids=read_stop_ids(local_path))
 
     # -- what the manager asks about the model -------------------------------
 
     def eos_token_ids(self) -> set[int]:
-        """The stop tokens the config names, which a converted repo keeps there."""
+        """The stop tokens the checkpoint declares; a copy, so callers may add to it."""
 
-        values: set[int] = set()
-        candidate = self.config.get("eos_token_id")
-        if isinstance(candidate, int) and not isinstance(candidate, bool):
-            values.add(candidate)
-        elif isinstance(candidate, (list, tuple)):
-            values.update(int(value) for value in candidate if isinstance(value, int))
-        return values
+        return set(self.stop_ids)
 
     @staticmethod
     def device_bytes() -> int | None:
