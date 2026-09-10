@@ -1693,10 +1693,17 @@ class DeviceProfile:
     def for_kind(self, kind: str, reclaimed: int | None = None) -> DeviceProfile:
         """The reading a load of this kind would get, with the unload counted in.
 
-        Only an image pipeline on CUDA reads differently, and only because it
-        is staged in host memory before it is moved onto the card, so it has
-        to fit both pools rather than their sum; see :func:`memory_pool`.
-        Everything else is :meth:`reclaimed` on the reading it already is.
+        Two kinds read differently. An image pipeline on CUDA is staged in
+        host memory before it is moved onto the card, so it has to fit both
+        pools rather than their sum; see :func:`memory_pool`. An MLX
+        conversion under a Metal ceiling is not held to it: the ceiling is
+        PyTorch's allocator cap, and mlx-lm allocates through Metal on its
+        own, so ``_load_locked`` judges an MLX load against the machine alone
+        and this has to say the same. Judged against the capped figures, a
+        conversion that fits the Mac but not PyTorch's half of it would be
+        listed as tight or unfit - and hidden by **Fits this computer** -
+        while the button loads it. Everything else is :meth:`reclaimed` on
+        the reading it already is.
 
         The unload is counted into each pool *before* they are collapsed to
         the tighter one, which is why this does both rather than leaving the
@@ -1711,6 +1718,15 @@ class DeviceProfile:
         is a subprocess.
         """
 
+        if kind == MLX_KIND and self.ceiling is not None:
+            # The same call the load check makes, ceiling and all: the
+            # capped figures cannot be uncapped from here, and the machine
+            # is what MLX has to fit. Reading it is the subprocess the
+            # docstring mentions, paid once per list rather than per model.
+            total, available, pool = memory_pool(self.backend, None, kind)
+            return replace(
+                self, total=total, available=available, ceiling=None, pool=pool
+            ).reclaimed(reclaimed)
         if kind != IMAGE_KIND or self.backend != "cuda":
             return self.reclaimed(reclaimed)
         card_total, card_free = cuda_device_memory()

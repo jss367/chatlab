@@ -3092,6 +3092,59 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertEqual(profile.reclaimed(2 * self.GB).available, 5 * self.GB)
         self.assertEqual(profile.reclaimed(None).available, 5 * self.GB)
 
+    def test_an_mlx_load_is_judged_against_the_machine_not_the_metal_cap(self):
+        # The ceiling is PyTorch's allocator cap, and _load_locked passes
+        # none for an MLX load because mlx-lm allocates on its own. The
+        # profile's figures are already clamped to it, so the MLX reading
+        # has to go back to the machine, or the list calls a conversion
+        # tight that the button then loads.
+        import model_runtime
+        from model_runtime import MLX_KIND, TEXT_KIND, DeviceProfile
+
+        capped = DeviceProfile(
+            backend="mps",
+            dtype="float16",
+            total=16 * self.GB,
+            available=16 * self.GB,
+            ceiling=16 * self.GB,
+            pool="Metal on this machine",
+            held=2 * self.GB,
+        )
+        saved = model_runtime.system_memory
+        model_runtime.system_memory = lambda: (48 * self.GB, 20 * self.GB)
+        try:
+            mlx = capped.for_kind(MLX_KIND)
+            replacing = capped.for_kind(MLX_KIND, 8 * self.GB)
+            text = capped.for_kind(TEXT_KIND)
+        finally:
+            model_runtime.system_memory = saved
+
+        # The machine's figures, with what the device holds given back on
+        # top of them - the unload is counted in here as everywhere else.
+        self.assertEqual((mlx.total, mlx.available), (48 * self.GB, 22 * self.GB))
+        self.assertIsNone(mlx.ceiling)
+        self.assertEqual(mlx.pool, "this machine")
+        self.assertEqual(replacing.available, 28 * self.GB)
+        # A Transformers load is held to the cap as before.
+        self.assertEqual((text.total, text.available), (16 * self.GB, 18 * self.GB))
+        self.assertEqual(text.ceiling, 16 * self.GB)
+        self.assertEqual(text.pool, "Metal on this machine")
+
+    def test_an_mlx_reading_without_a_cap_is_the_one_already_taken(self):
+        # No ceiling means the figures are the machine's already; a second
+        # vm_stat subprocess would buy nothing.
+        import model_runtime
+        from model_runtime import MLX_KIND, DeviceProfile
+
+        def unexpected():
+            raise AssertionError("the machine was read again")
+
+        profile = DeviceProfile(
+            backend="mps", total=48 * self.GB, available=20 * self.GB, held=self.GB
+        )
+        with mock.patch.object(model_runtime, "system_memory", unexpected):
+            self.assertEqual(profile.for_kind(MLX_KIND).available, 21 * self.GB)
+
     def test_the_profile_reads_what_the_device_is_holding(self):
         import model_runtime
 

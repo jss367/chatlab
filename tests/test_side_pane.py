@@ -3019,3 +3019,41 @@ class MlxModelsPaneTests(unittest.TestCase):
 
         self.assertEqual(packed.estimated, estimate_parameter_bytes(7_000_000_000, "float16", 4))
         self.assertEqual(whole.estimated, estimate_parameter_bytes(7_000_000_000, "float16", None))
+
+    def test_an_mlx_model_is_judged_against_the_machine_not_the_metal_cap(self):
+        # 20 GB of packed weights on a 48 GB Mac with 30 GB free and a 16 GB
+        # PyTorch cap. Load lets the MLX conversion through, because mlx-lm
+        # is not under that cap, so the list has to say fits; the same bytes
+        # as a Transformers checkpoint are held to the cap and will not fit.
+        GB = 1024**3
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        config = json.dumps({"architectures": ["Qwen3ForCausalLM"], "dtype": "float16"})
+        entries = []
+        for model_id, kind in ((MLX.model_id, model_runtime.MLX_KIND), (OLMO, TEXT_KIND)):
+            folder = lay_out(
+                root, model_id, {"config.json": config.encode(), "model.safetensors": b""}
+            )
+            with (folder / "blobs" / "blob1").open("r+b") as weights:
+                weights.truncate(20 * GB)
+            entries.append(
+                cached(model_id, status=CacheStatus(cached_bytes=20 * GB, kind=kind), path=folder)
+            )
+        self.entries = entries
+        capped = model_runtime.DeviceProfile(
+            backend="mps",
+            dtype="float16",
+            total=16 * GB,
+            available=16 * GB,
+            ceiling=16 * GB,
+            pool="Metal on this machine",
+        )
+        with mock.patch.object(models_page, "device_profile", lambda torch=None: capped):
+            with mock.patch.object(
+                model_runtime, "system_memory", lambda: (48 * GB, 30 * GB)
+            ):
+                radio, _, _ = app.refresh_my_models(None, "Name")
+
+        labels = dict((value, label) for label, value in radio["choices"])
+        self.assertIn("· fits", labels[MLX.model_id])
+        self.assertIn("· won't fit", labels[OLMO])
