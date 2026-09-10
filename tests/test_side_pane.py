@@ -2900,3 +2900,99 @@ class SavedSettingsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+MLX = cached(
+    "mlx-community/Qwen3-4B-4bit",
+    status=CacheStatus(cached_bytes=2_300_000_000, kind=model_runtime.MLX_KIND),
+    architecture="Qwen3ForCausalLM",
+    dtype="4-bit MLX",
+)
+
+
+class MlxModelsPaneTests(unittest.TestCase):
+    """An MLX conversion in My Models and in Discover."""
+
+    def setUp(self):
+        self.entries = [cached(OLMO), MLX]
+        self.manager = ModelManager()
+        originals = (runtime.MANAGER, models_page.list_cached_models, models_page.cache_root)
+        runtime.MANAGER = self.manager
+        models_page.list_cached_models = lambda: list(self.entries)
+        models_page.cache_root = lambda: Path("/cache")
+        self.addCleanup(
+            lambda: setattr(runtime, "MANAGER", originals[0])
+            or setattr(models_page, "list_cached_models", originals[1])
+            or setattr(models_page, "cache_root", originals[2])
+        )
+
+    def test_an_mlx_model_is_listed_as_one_and_points_at_the_chat_page(self):
+        radio, _, _ = app.refresh_my_models(None)
+        _, detail = app.select_my_model(MLX.model_id)
+
+        labels = dict((value, label) for label, value in radio["choices"])
+        self.assertIn("· MLX", labels[MLX.model_id])
+        self.assertNotIn("· MLX", labels[OLMO])
+        self.assertIn("Ready to load", detail)
+        self.assertIn("**Chat** page", detail)
+        self.assertIn("**Kind:** MLX text model", detail)
+        self.assertIn("4-bit MLX", detail)
+        self.assertNotIn("Unsupported", detail)
+
+    def test_an_mlx_row_carries_its_kind_before_its_fit_verdict(self):
+        from model_runtime import FITS, Fit
+
+        label = models_page.cached_model_label(MLX, Fit(FITS))
+
+        self.assertIn("· MLX", label)
+        self.assertIn("· fits", label)
+        self.assertLess(label.index("· MLX"), label.index("· fits"))
+
+    def test_moving_the_precision_radio_does_not_rejudge_a_loaded_mlx_model(self):
+        # Load cached at a new precision is how a Transformers model is
+        # requantized; an MLX model loads at its own width whatever the radio
+        # says, so the loaded one has nothing to be judged again for.
+        from model_runtime import DeviceProfile
+
+        self.manager.model_id = MLX.model_id
+        self.manager.precision = "4-bit"
+        profile = DeviceProfile(backend="mps", dtype="float16", total=10**11, available=10**11)
+
+        self.assertIsNone(models_page.cached_fit(MLX, "full", profile))
+        self.assertIsNone(models_page.cached_fit(MLX, "8-bit", profile))
+
+    def test_mlx_recommendations_are_their_own_list_and_judged_at_their_width(self):
+        radio, _, state = app.search_models(
+            "", "", kind=model_runtime.MLX_KIND, order="Recommended"
+        )
+
+        self.assertEqual(
+            list(state),
+            [
+                "mlx-community/Qwen3-0.6B-4bit",
+                "mlx-community/Qwen3-4B-4bit",
+                "mlx-community/Olmo-3-7B-Think-4bit",
+            ],
+        )
+        self.assertEqual(models_page.results_kind(state), model_runtime.MLX_KIND)
+        _, detail = models_page.select_search_result("mlx-community/Qwen3-4B-4bit", state, "full")
+        self.assertIn("quantized already", detail)
+        self.assertNotIn("Choosing 4-bit or 8-bit", detail)
+
+    def test_an_mlx_result_is_sized_from_the_width_in_its_name(self):
+        from model_runtime import DeviceProfile, HubModel, estimate_parameter_bytes
+
+        profile = DeviceProfile(backend="mps", dtype="float16", total=10**11, available=10**11)
+        four_bit = HubModel(
+            model_id="mlx-community/Some-7B-4bit", parameters=7_000_000_000, kind=model_runtime.MLX_KIND
+        )
+        unnamed = HubModel(
+            model_id="mlx-community/Some-7B", parameters=7_000_000_000, kind=model_runtime.MLX_KIND
+        )
+
+        # The radio says full; the name says 4 bits, and the name wins.
+        packed = models_page.hub_fit(four_bit, "full", profile, model_runtime.MLX_KIND)
+        whole = models_page.hub_fit(unnamed, "4-bit", profile, model_runtime.MLX_KIND)
+
+        self.assertEqual(packed.estimated, estimate_parameter_bytes(7_000_000_000, "float16", 4))
+        self.assertEqual(whole.estimated, estimate_parameter_bytes(7_000_000_000, "float16", None))
