@@ -220,10 +220,18 @@ html, body {{ height: 100%; overflow: hidden; }}
 #model-bar #model-badge, #image-model-bar #image-model-badge {{
   flex: 0 1 auto; width: auto; min-width: 0; padding: 0;
 }}
-#model-bar #load-model, #model-bar #default-model,
-#image-model-bar #image-load-model {{
+#model-bar #default-model, #image-model-bar #image-load-model {{
   flex: 0 0 auto; width: auto; min-width: 0; font-size: 12px;
 }}
+/* The switcher is a control the size of the badge, not a form field. The
+   theme draws inputs without borders, so it gets the badge's here. */
+#model-bar #model-switch {{ flex: 0 1 auto; width: auto; min-width: 220px; max-width: 360px; padding: 0; }}
+#model-bar #model-switch .wrap {{
+  border: 1px solid var(--border-color-primary); border-radius: 6px;
+  background: var(--block-background-fill);
+}}
+#model-bar #model-switch .wrap-inner {{ padding: 3px 8px; min-height: 0; }}
+#model-bar #model-switch input {{ font-size: 12px; line-height: 1.4; }}
 .model-badge {{
   display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
   padding: 4px 8px; border-radius: 6px;

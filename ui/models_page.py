@@ -58,6 +58,7 @@ from ui.common import (
     LOAD_POLL_SECONDS,
     MODELS_PAGE,
     RATE_WINDOW_SECONDS,
+    alarm,
     describe_duration,
     failure_card,
     progress_bar,
@@ -725,11 +726,10 @@ def _setup_links(snapshot, kind: str):
 
 
 def refresh_model_badge():
-    """Refresh the Chat page's badge and setup links from the same reading."""
+    """Refresh the Chat page's badge and its setup link from the same reading."""
 
     snapshot = model_snapshot()
-    links = _setup_links(snapshot, TEXT_KIND)
-    return loaded_model_badge(snapshot, kind=TEXT_KIND), links, links
+    return loaded_model_badge(snapshot, kind=TEXT_KIND), _setup_links(snapshot, TEXT_KIND)
 
 
 def refresh_image_badge():
@@ -740,6 +740,132 @@ def refresh_image_badge():
         loaded_model_badge(snapshot, kind=IMAGE_KIND),
         _setup_links(snapshot, IMAGE_KIND),
     )
+
+
+# The chat page's model switcher: a dropdown beside the badge that swaps the
+# model in memory for another one already on disk, without a trip to the
+# Models page. It offers only the cached text models a load would take right
+# now, so picking one never ends in the refusal the Models page exists to
+# explain; anything else - a download, a model that will not fit, a new
+# precision - is still that page's business.
+SWITCH_BUSY = (
+    "The model is still answering. Press Stop, or wait for the reply to "
+    "finish, before switching."
+)
+SWITCH_LOADING = "Another load is already under way. Wait for it to finish."
+
+
+def switch_value() -> str | None:
+    """The ID the switcher should show: the model in memory, else the one coming in.
+
+    Named the way the badge names them: a load that has emptied memory is
+    the only thing left to name, and a switcher showing nothing for the
+    minutes the weights are on their way in would invite a second load on
+    top of the first.
+    """
+
+    return runtime.MANAGER.model_id or runtime.MANAGER.loading_id
+
+
+def switch_choices(precision: str | None = None) -> list[tuple[str, str]]:
+    """The cached text models the Chat page can switch to, as (label, ID) pairs.
+
+    Whole and supported text models that fit at ``precision``, plus the one in
+    memory, in the list's default order. A model the load would refuse -
+    tight or too large - is left out rather than offered and then declined:
+    the refusal names figures and a remedy, and a dropdown has no room for
+    either. A model whose size could not be judged stays in, as the load will
+    try it all the same.
+    """
+
+    models = sort_cached_models(list_cached_models(), DEFAULT_MODEL_SORT)
+    fits = cached_fits(models, precision)
+    current = switch_value()
+    choices = []
+    for entry in models:
+        if entry.status.kind != TEXT_KIND:
+            continue
+        if entry.status.missing_files or entry.status.unsupported:
+            continue
+        fit = fits.get(entry.model_id)
+        if fit is not None and fit.known and fit.state != FITS and entry.model_id != current:
+            continue
+        choices.append((entry.model_id, entry.model_id))
+    return choices
+
+
+def expected_switch_value() -> str | None:
+    """What the switcher shows once it agrees with memory, read without a scan.
+
+    An image model is never among the choices, so the switcher shows nothing
+    while one is loaded; the badge is what names it. Reading the kind here
+    rather than looking the ID up in the cache is what lets the timer's
+    check stay a few attribute reads.
+    """
+
+    if runtime.MANAGER.image_loaded:
+        return None
+    return switch_value()
+
+
+def refresh_model_switch(precision: str | None = None):
+    """Repaint the switcher: the loadable models, with the current one chosen.
+
+    Hidden when there is nothing to offer, which is when the setup link
+    beside it is the way forward.
+    """
+
+    choices = switch_choices(precision)
+    current = switch_value()
+    ids = {value for _, value in choices}
+    return gr.update(
+        choices=choices,
+        value=current if current in ids else None,
+        visible=bool(choices),
+    )
+
+
+def refresh_stale_model_switch(shown: str | None, precision: str | None = None):
+    """The timer's refresh: repaint only when the switcher disagrees with memory.
+
+    The badge's timer reads a few attributes; this one would scan the cache
+    and read the machine's memory, and a repaint every couple of seconds
+    would also close the list under a reader who has just opened it. So
+    nothing is redrawn while the switcher still shows what memory says it
+    should, which is nearly always. A load or unload in another tab is what
+    changes the answer, and that is caught here on its next tick.
+    """
+
+    if (shown or None) == expected_switch_value():
+        return gr.skip()
+    return refresh_model_switch(precision)
+
+
+def switch_model(selected: str | None, precision: str = "full"):
+    """Load the model picked in the switcher, at the Models page's precision.
+
+    Yields the switcher's own update and the Models page's status card, so
+    the load shows there exactly as **Load cached** would show it, and the
+    badge beside the switcher names the load as it goes. A pick during a
+    reply is refused and the switcher put back: the load would only queue
+    behind the generation, and its first act on winning the lock would be
+    to unload the model still producing the tokens.
+    """
+
+    current = switch_value()
+    if not selected or selected == current:
+        yield gr.skip(), gr.skip()
+        return
+    if runtime.MANAGER.busy:
+        alarm("Cannot switch models now", SWITCH_BUSY)
+        yield gr.update(value=current), gr.skip()
+        return
+    if runtime.MANAGER.loading_id:
+        alarm("Cannot switch models now", SWITCH_LOADING)
+        yield gr.update(value=current), gr.skip()
+        return
+    for card in load_cached_model(selected, None, precision):
+        yield gr.skip(), card
 
 
 def go_to_models():
