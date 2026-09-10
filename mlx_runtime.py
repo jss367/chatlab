@@ -44,8 +44,12 @@ logger = logging.getLogger(__name__)
 # Where an mlx-lm ``Model`` keeps its decoder stack and its final norm. Most
 # architectures wrap them in ``model``; the GPT-2 family in ``transformer``.
 # The same containers :data:`model_runtime.FINAL_NORM_CONTAINERS` lists, and
-# the same norm names, so the two lenses look in the same places.
+# the same norm names, so the two lenses look in the same places. The stack
+# itself is ``layers`` almost everywhere, ``h`` in the GPT-2 family (gpt2,
+# gpt_bigcode, gpt_neox, exaone, qwen, phixtral, nanochat) and ``blocks`` in
+# DBRX and OLMo; see :meth:`MlxEngine._layer_stack`.
 LAYER_CONTAINERS = ("model", "transformer", "decoder", "language_model")
+LAYER_ATTRIBUTES = ("layers", "h", "blocks")
 FINAL_NORM_ATTRIBUTES = ("norm", "final_layer_norm", "ln_f", "final_norm", "norm_f")
 EMBEDDING_ATTRIBUTES = ("embed_tokens", "wte", "embeddings")
 
@@ -362,15 +366,44 @@ class MlxEngine:
 
     # -- the logit lens -----------------------------------------------------
 
+    def _layer_stack(self) -> tuple[Any, str | None]:
+        """The module that owns the decoder stack, and the name it keeps it under.
+
+        ``(owner, name)`` such that ``getattr(owner, name)`` is the list the
+        forward pass walks, or ``(None, None)``. The containers are searched
+        before the model itself, one level down and then two (OLMo keeps its
+        blocks under ``model.transformer``), and a read-only property is never
+        the answer: every mlx-lm ``Model`` exposes ``layers`` as one, over the
+        same list, but recording swaps the list, so it has to be the attribute
+        the forward pass reads - ``layers`` for most, ``h`` for the GPT-2
+        family, ``blocks`` for DBRX and OLMo.
+        """
+
+        model = self.model
+        owners = []
+        for name in LAYER_CONTAINERS:
+            container = getattr(model, name, None)
+            if container is None:
+                continue
+            owners.append(container)
+            for inner_name in LAYER_CONTAINERS:
+                nested = getattr(container, inner_name, None)
+                if nested is not None:
+                    owners.append(nested)
+        owners.append(model)
+        for owner in owners:
+            for attribute in LAYER_ATTRIBUTES:
+                if isinstance(getattr(type(owner), attribute, None), property):
+                    continue
+                if isinstance(getattr(owner, attribute, None), list):
+                    return owner, attribute
+        return None, None
+
     def _inner(self):
         """The module that owns the decoder layers and the final norm."""
 
-        model = self.model
-        for name in LAYER_CONTAINERS:
-            inner = getattr(model, name, None)
-            if inner is not None and isinstance(getattr(inner, "layers", None), list):
-                return inner
-        return model if isinstance(getattr(model, "layers", None), list) else None
+        owner, _ = self._layer_stack()
+        return owner
 
     def final_norm(self):
         inner = self._inner()
@@ -433,11 +466,11 @@ class MlxEngine:
         whatever happens, so a failed inspection leaves the model as it was.
         """
 
-        inner = self._inner()
-        if inner is None:
+        owner, attribute = self._layer_stack()
+        if owner is None or attribute is None:
             yield
             return
-        original = inner.layers
+        original = getattr(owner, attribute)
         wrapped = [
             _RecordingLayer(layer, index, recorder) for index, layer in enumerate(original)
         ]
@@ -449,11 +482,11 @@ class MlxEngine:
                 continue
             patched.append((module, function))
             setattr(module, ATTENTION_FUNCTION, _recording_attention(function, recorder))
-        inner.layers = wrapped
+        setattr(owner, attribute, wrapped)
         try:
             yield
         finally:
-            inner.layers = original
+            setattr(owner, attribute, original)
             for module, function in patched:
                 setattr(module, ATTENTION_FUNCTION, function)
 

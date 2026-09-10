@@ -29,9 +29,10 @@ from mlx_runtime import (
 
 try:
     import mlx.core as mx
-    from mlx_lm.models import llama
+    from mlx_lm.models import gpt2, llama
 except ImportError:  # pragma: no cover - the engine tests skip themselves
     mx = None
+    gpt2 = None
     llama = None
 
 needs_mlx = unittest.skipIf(mx is None, "mlx and mlx-lm are installed on Apple silicon only")
@@ -359,6 +360,67 @@ class LensTests(unittest.TestCase):
 
         self.assertIs(model.model.layers, layers_before)
         self.assertIs(llama.scaled_dot_product_attention, kernel_before)
+
+
+def tiny_gpt2(seed: int = 0):
+    """A two-layer GPT-2 with random weights: the family that keeps its stack under ``h``."""
+
+    args = gpt2.ModelArgs(
+        model_type="gpt2",
+        n_ctx=64,
+        n_embd=HIDDEN,
+        n_head=HEADS,
+        n_layer=LAYERS,
+        n_positions=64,
+        layer_norm_epsilon=1e-5,
+        vocab_size=VOCAB,
+    )
+    mx.random.seed(seed)
+    model = gpt2.Model(args)
+    model.eval()
+    mx.eval(model.parameters())
+    return model
+
+
+@needs_mlx
+class Gpt2LensTests(unittest.TestCase):
+    """mlx-lm's GPT-2 keeps its blocks under ``model.h``; the outer ``layers`` is a property."""
+
+    def test_the_stack_is_found_where_the_forward_pass_reads_it(self):
+        model = tiny_gpt2()
+        engine = MlxEngine(model)
+
+        owner, attribute = engine._layer_stack()
+        self.assertIs(owner, model.model)
+        self.assertEqual(attribute, "h")
+        self.assertIs(engine.final_norm(), model.model.ln_f)
+
+    def test_every_layer_is_read_through_and_the_model_is_restored(self):
+        model = tiny_gpt2()
+        ids = [3, 5, 7, 11, 13]
+        engine = MlxEngine(model)
+        stack_before = model.model.h
+        kernel_before = gpt2.scaled_dot_product_attention
+
+        _, cache = engine.forward(ids[:-1], None, 0)
+        reading = engine.inspect_step(ids[-1], cache, len(ids) - 1)
+
+        np.testing.assert_allclose(
+            reading.final_logits, reference_logits(model, ids)[-1], rtol=1e-2, atol=1e-2
+        )
+        self.assertEqual(reading.layer_count, LAYERS + 1)
+        self.assertEqual(len(reading.layer_logits), LAYERS)
+        for logits in reading.layer_logits:
+            self.assertEqual(logits.shape, (VOCAB,))
+            self.assertTrue(np.isfinite(logits).all())
+        self.assertEqual(len(reading.attention), LAYERS)
+        for row in reading.attention:
+            self.assertEqual(len(row), len(ids))
+            self.assertAlmostEqual(sum(row), 1.0, places=3)
+        # The stack was put back under h, as the same list, and the kernel too.
+        self.assertIs(model.model.h, stack_before)
+        self.assertIsInstance(model.model.h[0], gpt2.TransformerBlock)
+        self.assertIs(gpt2.scaled_dot_product_attention, kernel_before)
 
 
 @needs_mlx
