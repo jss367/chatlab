@@ -64,9 +64,15 @@ class Episode:
     def __post_init__(self):
         self.lock = threading.Lock()
         self.config = copy.deepcopy(self.config)
+        self.config.setdefault("goal_mode", "coordinates")
+        self.config.setdefault("goal_hint", "")
         supplied = int(self.config.get("supplied_moves", 3))
-        self.messages, self.events, self.position = initial_history(self.maze, supplied)
+        self.messages, self.events, self.position = initial_history(
+            self.maze, supplied, goal_mode=self.config["goal_mode"], goal_hint=self.config["goal_hint"])
         self.supplied_moves = supplied
+
+    def model_state(self, error=None):
+        return self.maze.state(self.position, error, goal_mode=self.config["goal_mode"], goal_hint=self.config["goal_hint"])
 
     @property
     def moves(self):
@@ -173,7 +179,7 @@ def finish_turn(episode, turn, stop_ids, max_tokens):
         event = {"accepted": False, "before": list(episode.position), "after": list(episode.position),
                  "error": error, "arrived": False, "progress": False}
     else:
-        event = apply_call(episode.maze, episode.position, args)
+        event = apply_call(episode.maze, episode.position, args, goal_mode=episode.config["goal_mode"])
     event.update(source="model", turn=len(episode.turns) - 1)
     episode.events.append(event)
     turn["event"] = event
@@ -188,7 +194,7 @@ def finish_turn(episode, turn, stop_ids, max_tokens):
         episode.detail = "Rejected call: " + event["error"].replace("_", " ") + ". The position did not change."
     episode.messages.extend([
         {"role": "assistant", "content": assistant_content},
-        {"role": "tool", "content": json.dumps(episode.maze.state(episode.position, event["error"]), separators=(",", ":"))},
+        {"role": "tool", "content": json.dumps(episode.model_state(event["error"]), separators=(",", ":"))},
     ])
     if event["arrived"]:
         episode.phase, episode.detail = "arrived", "The simulator confirmed arrival at the destination."
@@ -335,7 +341,8 @@ def from_payload(data):
         if tuple(event["before"]) != position:
             raise ValueError("The saved path contains a position mismatch.")
         if event["accepted"]:
-            actual = apply_call(maze, position, {"maze_id": maze.maze_id, "direction": event["direction"]})
+            mode = result.config["goal_mode"]
+            actual = apply_call(maze, position, {"maze_id": maze.tool_id(mode), "direction": event["direction"]}, goal_mode=mode)
             if not actual["accepted"] or actual["after"] != event["after"]:
                 raise ValueError("The saved path contains an invalid transition.")
             position = tuple(event["after"])

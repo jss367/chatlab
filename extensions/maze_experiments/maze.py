@@ -16,6 +16,27 @@ INSTRUCTION = (
     "Use the move tool to change position. The simulator's map and position are authoritative. "
     "The task ends when the simulator reports arrival at the destination."
 )
+GOAL_MODES = {"coordinates": "Exact coordinates", "hidden": "Hidden location", "hint": "Hint only"}
+
+
+def goal_instruction(mode, hint=""):
+    if mode not in GOAL_MODES:
+        raise ValueError("Choose exact coordinates, hidden location, or hint only for goal information.")
+    if mode == "coordinates":
+        return INSTRUCTION
+    instruction = (
+        "There is a destination somewhere in an open cell of this maze. Its location is hidden. "
+        "Explore using legal moves until you find it. Use the move tool to change position. "
+        "The simulator's map and position are authoritative. "
+        "The task ends when the simulator reports arrival at the destination."
+    )
+    if mode == "hint":
+        if not isinstance(hint, str) or not hint.strip():
+            raise ValueError("Enter a goal hint for hint-only mode.")
+        instruction += " Use the goal_hint in the state as a clue to the destination."
+    return instruction
+
+
 TOOLS = [{"type": "function", "function": {
     "name": "move", "description": "Move one cell in the specified direction in the identified maze.",
     "parameters": {"type": "object", "properties": {
@@ -58,6 +79,14 @@ class Maze:
         raw = json.dumps([self.grid, self.start, self.goal], separators=(",", ":"))
         return "maze-" + hashlib.sha256(raw.encode()).hexdigest()[:12]
 
+    def tool_id(self, goal_mode="coordinates"):
+        if goal_mode == "coordinates":
+            return self.maze_id
+        # A hash containing the goal can be enumerated over the visible cells.
+        # Concealed goals therefore use an identifier independent of the goal.
+        raw = json.dumps([self.grid, self.start], separators=(",", ":"))
+        return "maze-" + hashlib.sha256(raw.encode()).hexdigest()[:12]
+
     def open(self, point):
         r, c = point
         return 0 <= r < self.size and 0 <= c < self.size and self.grid[r][c] == "."
@@ -87,12 +116,18 @@ class Maze:
             path.append(next(q for q in self.neighbors(path[-1]).values() if distances[q] < distances[path[-1]]))
         return path
 
-    def state(self, position, error=None):
-        return {"maze_id": self.maze_id, "row_labels": list(range(self.size)),
+    def state(self, position, error=None, *, goal_mode="coordinates", goal_hint=""):
+        goal_instruction(goal_mode, goal_hint)
+        state = {"maze_id": self.tool_id(goal_mode), "row_labels": list(range(self.size)),
                 "column_labels": list(range(self.size)), "grid": list(self.grid),
-                "current": list(position), "destination": list(self.goal),
-                "valid_directions": list(self.neighbors(position)) if tuple(position) != self.goal else [],
-                "arrived": tuple(position) == self.goal, "error": error}
+                "current": list(position)}
+        if goal_mode == "coordinates":
+            state["destination"] = list(self.goal)
+        elif goal_mode == "hint":
+            state["goal_hint"] = goal_hint
+        state.update(valid_directions=list(self.neighbors(position)) if tuple(position) != self.goal else [],
+                     arrived=tuple(position) == self.goal, error=error)
+        return state
 
     def to_dict(self):
         return {**asdict(self), "maze_id": self.maze_id, "distance": len(self.route()) - 1}
@@ -178,12 +213,12 @@ def parse_call(text):
     return args, None
 
 
-def apply_call(maze, position, args):
+def apply_call(maze, position, args, *, goal_mode="coordinates"):
     position = tuple(position)
     error = None
     if position == maze.goal:
         error = "already_arrived"
-    elif args["maze_id"] != maze.maze_id:
+    elif args["maze_id"] != maze.tool_id(goal_mode):
         error = "wrong_maze"
     elif args["direction"] not in maze.neighbors(position):
         error = "blocked_move"
@@ -196,20 +231,21 @@ def apply_call(maze, position, args):
             "error": None, "arrived": after == maze.goal, "progress": distances[after] < distances[position]}
 
 
-def initial_history(maze, supplied_moves=3):
+def initial_history(maze, supplied_moves=3, *, goal_mode="coordinates", goal_hint=""):
+    instruction = goal_instruction(goal_mode, goal_hint)
     route = maze.route()
     if not 0 <= supplied_moves < len(route) - 1:
         raise ValueError("Supplied moves must leave at least one move before the destination.")
     position = maze.start
     messages = [{"role": "system", "content": SYSTEM},
-                {"role": "user", "content": INSTRUCTION + "\n" + json.dumps(maze.state(position), separators=(",", ":"))}]
+                {"role": "user", "content": instruction + "\n" + json.dumps(maze.state(position, goal_mode=goal_mode, goal_hint=goal_hint), separators=(",", ":"))}]
     events = []
     for after in route[1:supplied_moves + 1]:
         direction = next(d for d, q in maze.neighbors(position).items() if q == after)
-        messages.append({"role": "assistant", "content": call_text(maze.maze_id, direction)})
-        event = apply_call(maze, position, {"maze_id": maze.maze_id, "direction": direction})
+        messages.append({"role": "assistant", "content": call_text(maze.tool_id(goal_mode), direction)})
+        event = apply_call(maze, position, {"maze_id": maze.tool_id(goal_mode), "direction": direction}, goal_mode=goal_mode)
         event["source"] = "supplied"
         events.append(event)
         position = after
-        messages.append({"role": "tool", "content": json.dumps(maze.state(position), separators=(",", ":"))})
+        messages.append({"role": "tool", "content": json.dumps(maze.state(position, goal_mode=goal_mode, goal_hint=goal_hint), separators=(",", ":"))})
     return messages, events, position

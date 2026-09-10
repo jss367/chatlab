@@ -58,6 +58,66 @@ class Manager:
 
 
 class MazeTests(unittest.TestCase):
+    def test_goal_modes_cover_prompts_errors_supplied_moves_arrival_and_replay(self):
+        hint = "The destination is in the top row."
+        for mode in ("coordinates", "hidden", "hint"):
+            for supplied in (0, 1):
+                with self.subTest(mode=mode, supplied=supplied):
+                    ep = Episode(MAZE, CONFIG | dict(goal_mode=mode, goal_hint=hint,
+                                                    supplied_moves=supplied, interruption_text=""))
+                    maze_id = ep.model_state()["maze_id"]
+                    replies = [call_text(maze_id, "south"), call_text("wrong", "east"),
+                               '<tool_call>{}</tool_call>'] + [call_text(maze_id, "east")] * (2 - supplied)
+                    manager = Manager([(reply, [8, 0]) for reply in replies])
+                    with mock.patch('extensions.maze_experiments.runner.time.sleep'):
+                        list(stream_episode(ep, manager))
+                    self.assertEqual(ep.phase, "arrived")
+                    self.assertEqual(ep.position, MAZE.goal)
+                    self.assertEqual([e['error'] for e in ep.events if not e['accepted']],
+                                     ['blocked_move', 'wrong_maze', 'invalid_tool_schema'])
+                    # Check the actual messages passed to generation as well as the final reply.
+                    for history in [ep.messages, *(call[0] for call in manager.calls)]:
+                        for message in history:
+                            if message['role'] not in ('user', 'tool'):
+                                continue
+                            content = message['content']
+                            state = json.loads(content.split('\n', 1)[1] if message['role'] == 'user' else content)
+                            self.assertEqual(state['grid'], list(MAZE.grid))
+                            self.assertEqual(state['maze_id'], maze_id)
+                            self.assertEqual('destination' in state, mode == 'coordinates')
+                            self.assertEqual('goal_hint' in state, mode == 'hint')
+                            self.assertNotIn('progress', state)
+                            if mode == 'coordinates':
+                                self.assertEqual(state['destination'], list(MAZE.goal))
+                            elif mode == 'hint':
+                                self.assertEqual(state['goal_hint'], hint)
+                    self.assertTrue(json.loads(ep.messages[-1]['content'])['arrived'])
+                    replay = from_payload(json.loads(json.dumps(ep.payload())))
+                    self.assertEqual(replay.config['goal_mode'], mode)
+                    self.assertEqual(replay.config['goal_hint'], hint)
+                    self.assertEqual(replay.messages, ep.messages)
+                    self.assertEqual(replay.position, MAZE.goal)
+                    self.assertTrue(replay.replay_only)
+
+    def test_concealed_state_does_not_encode_destination_in_identifier(self):
+        other = Maze(MAZE.grid, MAZE.start, (2, 0))
+        for mode in ('hidden', 'hint'):
+            options = dict(goal_mode=mode, goal_hint='The destination is on an outer row.')
+            self.assertEqual(MAZE.state(MAZE.start, **options), other.state(other.start, **options))
+        self.assertNotEqual(MAZE.maze_id, other.maze_id)
+
+    def test_goal_mode_validation_and_legacy_replay(self):
+        for options in ({'goal_mode': 'unknown'}, {'goal_mode': 'hint'},
+                        {'goal_mode': 'hint', 'goal_hint': '  '}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                Episode(MAZE, CONFIG | options)
+        old = Episode(MAZE, CONFIG).payload()
+        old['config'].pop('goal_mode')
+        old['config'].pop('goal_hint')
+        replay = from_payload(json.loads(json.dumps(old)))
+        self.assertEqual(replay.config['goal_mode'], 'coordinates')
+        self.assertEqual(replay.model_state()['destination'], list(MAZE.goal))
+
     def test_new_response_reset_and_replay_clear_selection_but_streaming_preserves_it(self):
         selections = TokenInspector().selections()
         session = selections.new_session()
