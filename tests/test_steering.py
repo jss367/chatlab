@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -62,6 +63,39 @@ MESSAGES = [{"role": "user", "content": "Hello"}]
 
 
 class VectorTests(unittest.TestCase):
+    def test_offline_cleanup_keeps_response_and_inactive_disabled_references(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {library.LIBRARY_PATH_ENV: str(Path(directory) / "conversations.json")}):
+            response = steering.compact(vector())
+            disabled = steering.compact(dict(vector(), vector=[2.0] * 8, enabled=False))
+            unused = steering.compact(dict(vector(), vector=[3.0] * 8))
+            forks = conversation.new_forks()
+            conversation.put_branch(forks, conversation.MAIN_BRANCH, [dict(conversation.make_turn("assistant", "Hello"), steering=response)])
+            conversation.put_branch(forks, "Inactive", [])
+            conversation.put_branch_sampling(forks, "Inactive", {"steering": disabled})
+            library.write(forks)
+            unrelated = steering.asset_directory() / "notes.json"
+            unrelated.write_text("keep")
+            unused_path = steering.asset_directory() / f"{unused['vector_id']}.json"
+            unused_bytes = unused_path.stat().st_size
+            self.assertEqual(steering.cleanup_unused_assets(), (1, unused_bytes))
+            self.assertFalse(unused_path.exists())
+            self.assertEqual(steering.expand(response), vector())
+            self.assertEqual(steering.expand(disabled), dict(vector(), vector=[2.0] * 8, enabled=False))
+            self.assertEqual(unrelated.read_text(), "keep")
+
+    def test_offline_cleanup_refuses_invalid_library_and_handles_empty_library(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {library.LIBRARY_PATH_ENV: str(Path(directory) / "conversations.json")}):
+            reference = steering.compact(vector())
+            asset = steering.asset_directory() / f"{reference['vector_id']}.json"
+            for invalid in ("not json", '{"format":"future-format"}', '{"format":"chatlab-library-1","branches":null}'):
+                library.library_path().write_text(invalid)
+                with self.assertRaises(ValueError):
+                    steering.cleanup_unused_assets()
+                self.assertTrue(asset.exists())
+            library.library_path().unlink()
+            self.assertEqual(steering.cleanup_unused_assets()[0], 1)
+            self.assertFalse(asset.exists())
+
     def test_file_roundtrip_and_invalid_values(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "vector.json"

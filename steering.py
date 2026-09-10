@@ -161,6 +161,33 @@ def import_assets(values, assets):
         checked.add(identity)
 
 
+def cleanup_unused_assets():
+    """Offline maintenance: remove assets with no saved-library reference.
+
+    ChatLab must be closed: another running session can hold references that
+    have not reached the saved library yet. Invalid libraries fail closed.
+    """
+    from library import library_path, parse
+
+    try:
+        payload = library_path().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        forks = {"branches": {}, "sampling": {}}
+    else:
+        forks = parse(payload)
+    values = [turn.get("steering") for turns in forks["branches"].values() for turn in turns]
+    values.extend(settings.get("steering") for settings in forks["sampling"].values())
+    referenced = {value["vector_id"] for value in values if value is not None}
+    removed = total_bytes = 0
+    for path in asset_directory().glob("*.json"):
+        if re.fullmatch(r"[0-9a-f]{64}", path.stem) and path.stem not in referenced and path.is_file():
+            size = path.stat().st_size
+            path.unlink()
+            removed += 1
+            total_bytes += size
+    return removed, total_bytes
+
+
 def read_vector(path: str) -> dict:
     # Read a bounded amount even if the file changes after opening it.
     with Path(path).open("rb") as stream:
@@ -272,3 +299,26 @@ def applied(model, model_id: str | None, value: dict | None):
         yield
     finally:
         handle.remove()
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="ChatLab steering-vector maintenance")
+    parser.add_argument(
+        "--cleanup-unused", action="store_true",
+        help="with ChatLab closed, remove vector files not referenced by the saved conversation library",
+    )
+    args = parser.parse_args()
+    if not args.cleanup_unused:
+        parser.print_help()
+        return
+    try:
+        removed, total_bytes = cleanup_unused_assets()
+    except (OSError, ValueError) as error:
+        parser.exit(1, f"Cleanup failed: {error}\n")
+    print(f"Removed {removed} unused vector file(s), freeing {total_bytes:,} bytes.")
+
+
+if __name__ == "__main__":
+    main()

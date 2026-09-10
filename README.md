@@ -339,6 +339,20 @@ original upload. **Inspect layers** replays the vector and strength recorded for
 that response even after the controls change. Its probabilities describe the
 steered model before sampling filters.
 
+To reclaim vector files left behind after removing vectors or deleting
+conversations, first quit ChatLab and close any other running ChatLab servers,
+then run this from the source checkout:
+
+```bash
+.venv/bin/python -m steering --cleanup-unused
+```
+
+The command keeps vectors referenced by any saved response or conversation
+setting, including inactive forks and disabled steering. It uses the same
+`CHATLAB_LIBRARY_PATH` / `XDG_DATA_HOME` location as the app and refuses cleanup
+if the saved library is unreadable or invalid. Cleanup runs only when explicitly
+requested; keeping ChatLab closed protects references still held by live sessions.
+
 ## Branching from a token
 
 Every response token comes with the alternatives the model ranked highest. Branching lets you take one of them instead and see where the model goes from there.
