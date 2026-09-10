@@ -89,6 +89,7 @@ from ui.inspection import (
     render_attention,
     reset_inspection,
 )
+from model_discovery import DISCOVERY_ORDERS
 from ui.models_page import (
     BADGE_REFRESH_SECONDS,
     SEARCH_HINT,
@@ -869,7 +870,12 @@ def build_app() -> gr.Blocks:
                             )
 
                         with gr.Column(elem_id="model-search", elem_classes=["model-card"]):
-                            gr.Markdown("## Model search")
+                            gr.Markdown("## Discover models")
+                            gr.Markdown(
+                                "Start with a recommendation, or browse Hugging Face without a model name. "
+                                "Selecting a model shows its details before you download.",
+                                elem_classes=["scale-caption"],
+                            )
                             # One kind at a time, because the hub's own filters
                             # are; see SEARCH_KINDS.
                             search_kind = gr.Radio(
@@ -879,16 +885,25 @@ def build_app() -> gr.Blocks:
                                 container=False,
                                 elem_id="search-kind",
                             )
+                            with gr.Row():
+                                search_order = gr.Dropdown(
+                                    choices=list(DISCOVERY_ORDERS), value="Recommended",
+                                    label="Browse", interactive=True,
+                                )
+                                fits_only = gr.Checkbox(
+                                    label="Fits this computer", value=False,
+                                    info="Estimated at the chosen weight precision. Unknown sizes are hidden.",
+                                )
                             with gr.Row(elem_id="model-search-row"):
                                 search_query = gr.Textbox(
                                     label="Search Hugging Face",
-                                    placeholder="Model name, organization, or topic…",
+                                    placeholder="Model name or organization; leave blank to browse…",
                                     max_lines=1,
                                     scale=3,
                                     elem_id="model-search-query",
                                 )
                                 search_button = gr.Button(
-                                    "Search", variant="primary", size="sm", scale=0, min_width=100,
+                                    "Search / refresh", variant="primary", size="sm", scale=0, min_width=120,
                                     elem_id="model-search-button",
                                 )
                             search_results = gr.Radio(
@@ -1297,7 +1312,7 @@ def build_app() -> gr.Blocks:
         # does nothing for the rest of the session.
         badge_timer.tick(
             refresh_after_device,
-            [device_read, *models_inputs, search_results, search_results_state],
+            [device_read, *models_inputs, search_results, search_results_state, fits_only],
             [*models_outputs, search_results, search_detail, device_read],
             show_progress="hidden",
         )
@@ -1361,15 +1376,20 @@ def build_app() -> gr.Blocks:
         cancel_remove_button.click(hide_remove_confirm, None, confirm_outputs)
 
         search_outputs = [search_results, search_detail, search_results_state]
-        # In search_models' own parameter order: the precision the fit
-        # verdicts are judged at, then the kind the hub is asked for.
-        search_inputs = [search_query, hf_token, weight_precision, search_kind]
+        search_inputs = [
+            search_query, hf_token, weight_precision, search_kind, search_order, fits_only
+        ]
+        # The default Recommended view is bundled and does not go online.
+        demo.load(search_models, search_inputs, search_outputs)
         search_button.click(search_models, search_inputs, search_outputs)
         search_query.submit(search_models, search_inputs, search_outputs)
-        # Switching kinds re-runs the query rather than leaving the other
-        # kind's results under the new label. With an empty box it just
-        # replaces the hint, which is what says which hub filter is on.
         search_kind.input(search_models, search_inputs, search_outputs)
+        search_order.input(search_models, search_inputs, search_outputs)
+        fits_only.input(
+            refresh_search_results,
+            [search_results, search_results_state, weight_precision, fits_only],
+            [search_results, search_detail],
+        )
         # Picking a search result names a model too, so it withdraws the My
         # Models selection the same way typing an ID does.
         search_results.input(
@@ -1384,7 +1404,7 @@ def build_app() -> gr.Blocks:
             refresh_my_models, models_inputs, models_outputs
         ).then(
             refresh_search_results,
-            [search_results, search_results_state, weight_precision],
+            [search_results, search_results_state, weight_precision, fits_only],
             [search_results, search_detail],
         )
         enter_sends.change(set_message_box_keys, enter_sends, prompt)

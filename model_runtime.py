@@ -2285,10 +2285,10 @@ def remove_cached_model(model_id: str, cache_dir: Path | None = None) -> int:
     return freed
 
 
-# How many hub search results are shown. The hub sorts them by downloads, so
-# the ones a reader is likely to want come first, and a longer list would only
-# push the search box off the pane.
+# How many hub results are shown at once.
 SEARCH_LIMIT = 20
+DISCOVERY_CANDIDATES = 100
+HUB_SORTS = {"Popular": "downloads", "Trending": "trending_score", "New": "created_at"}
 
 # The pipeline tags a model ChatLab can load is found under. A plain language
 # model is tagged "text-generation", but one that also takes pictures or sound
@@ -2391,6 +2391,8 @@ class HubModel:
     gated: bool | str = False
     last_modified: str | None = None
     license: str | None = None
+    summary: str | None = None
+    download_bytes: int | None = None
 
 
 # The library each kind of model has to be published under, which is the one
@@ -2409,6 +2411,7 @@ def search_hub_models(
     hf_token: str | None = None,
     limit: int = SEARCH_LIMIT,
     kind: str = TEXT_KIND,
+    order: str = "Popular",
 ) -> list[HubModel]:
     """Search the hub for models of one kind that ChatLab can load.
 
@@ -2432,8 +2435,9 @@ def search_hub_models(
     ``model_type`` in that map and is built from its ``model_index.json``, so
     the library and the tag are what say it would load.
 
-    Sorted by recent downloads. The hub is read a page at a time until
-    ``limit`` results are kept, so a query whose most-downloaded matches are
+    An empty query browses the Hub. ``order`` selects popularity, trending,
+    or creation date. The hub is read a page at a time until
+    ``limit`` results are kept, so a query whose first matches are
     all rejected here still fills the list from further down.
     :data:`SEARCH_SCAN_LIMIT` caps how far down.
     """
@@ -2441,16 +2445,18 @@ def search_hub_models(
     from huggingface_hub import HfApi
 
     cleaned = query.strip()
-    if not cleaned:
+    if limit <= 0:
         return []
+    if order not in HUB_SORTS:
+        raise ValueError(f"Unknown model order: {order}")
     images = kind == IMAGE_KIND
     token = hf_token.strip() if hf_token and hf_token.strip() else None
     # No limit: the generator pages through the results, and the loop below
     # stops it once the list is full or SEARCH_SCAN_LIMIT have been read.
     found = HfApi().list_models(
-        search=cleaned,
+        search=cleaned or None,
         filter=HUB_LIBRARIES.get(kind, HUB_LIBRARIES[TEXT_KIND]),
-        sort="downloads",
+        sort=HUB_SORTS[order],
         expand=[
             "config",
             "downloads",
