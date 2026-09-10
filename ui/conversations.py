@@ -13,7 +13,7 @@ from gradio.utils import get_upload_folder
 import charts
 import library
 import settings
-from steering import from_controls as steering_from_controls, normalize as normalize_steering
+from steering import from_controls as steering_from_controls, compact as compact_steering
 from conversation import (
     CHAT_PREFIX,
     FORK_PREFIX,
@@ -506,7 +506,7 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE, *
     try:
         payload = Path(file_path).read_text(encoding="utf-8")
         loaded, system_prompt = from_json(payload)
-        steering = normalize_steering(json.loads(payload).get("steering"))
+        steering = compact_steering(json.loads(payload).get("steering"))
     except (OSError, ValueError) as error:
         return keep_current(failure_status("Could not load that file", str(error)))
 

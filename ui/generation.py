@@ -9,7 +9,7 @@ import time
 
 import gradio as gr
 
-from steering import from_controls as steering_from_controls
+from steering import compact as compact_steering, from_controls as steering_from_controls
 
 import charts
 from conversation import (
@@ -470,7 +470,7 @@ def _stream_reply(
         turns, system_prompt=system_prompt, include_reasoning=keep_reasoning
     )
 
-    steering = steering_from_controls(steering, steering_enabled, steering_strength, steering_layer)
+    steering = compact_steering(steering_from_controls(steering, steering_enabled, steering_strength, steering_layer))
     pending = make_turn("assistant", "", "")
     if steering is not None:
         pending["steering"] = steering

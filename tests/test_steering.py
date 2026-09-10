@@ -166,6 +166,81 @@ class RuntimeTests(unittest.TestCase):
 
 
 class ConversationTests(unittest.TestCase):
+    def test_large_vector_is_stored_once_and_not_copied_into_streamed_turns(self):
+        from test_app_flow import FIXED, TURNS, TRACE
+        from test_streaming import loaded_manager
+        from ui.generation import chat
+        from trace_export import trace_to_json
+
+        large = dict(vector(), model_id="fake/model", vector=[i / steering.MAX_WIDTH for i in range(steering.MAX_WIDTH)])
+        reference = steering.compact(large)
+        path = steering.asset_directory() / f"{reference['vector_id']}.json"
+        original_stamp = path.stat().st_mtime_ns
+        self.assertGreater(path.stat().st_size, 500_000)
+        turns = []
+        for _ in range(10):
+            turns.extend([conversation.make_turn("user", "Hi"), dict(conversation.make_turn("assistant", "Hello"), steering=reference)])
+        forks = controls.store(conversation.new_forks(), reference)
+        held = loaded_manager([0, 1, EOS_ID])
+        original_generate = held.generate
+
+        def generate(messages, **kwargs):
+            # This test measures transport/storage cost, independent of model
+            # width; the inference tests cover applying actual vector values.
+            self.assertEqual(kwargs.pop("steering"), reference)
+            yield from original_generate(messages, **kwargs)
+
+        with mock.patch.object(runtime, "MANAGER", held), mock.patch.object(held, "generate", side_effect=generate):
+            frames = list(chat("Hi", turns, **FIXED, steering=reference))
+        for frame in frames:
+            self.assertLess(len(json.dumps(frame[TURNS])), 8_000)
+            for turn in frame[TURNS]:
+                if turn.get("steering"):
+                    self.assertNotIn("vector", turn["steering"])
+            seen = library.as_seen(forks, frame[TURNS])
+            self.assertLess(len(library.dump(seen)), 12_000)
+            self.assertIsNotNone(library.write(seen))
+            self.assertEqual(path.stat().st_mtime_ns, original_stamp)
+        self.assertNotIn("vector", frames[-1][TRACE]["sampling"]["steering"])
+        exported = json.loads(trace_to_json(frames[-1][TRACE]))
+        self.assertEqual(exported["sampling"]["steering"], large)
+
+    def test_portable_conversation_deduplicates_and_restores_into_empty_storage(self):
+        reference = steering.compact(vector())
+        changed = dict(reference, strength=-2, layer=1)
+        turns = [dict(conversation.make_turn("assistant", "Hello"), steering=item) for item in (reference, changed, reference)]
+        payload = conversation.to_json(turns, steering=changed)
+        data = json.loads(payload)
+        self.assertEqual(len(data["steering_vectors"]), 1)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(steering, "asset_directory", return_value=Path(directory)):
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                steering.expand(reference)
+            loaded, _ = conversation.from_json(payload)
+            self.assertEqual(loaded, turns)
+            self.assertEqual(steering.expand(changed), dict(vector(), strength=-2, layer=1))
+            assets = list(Path(directory).glob("*.json"))
+            self.assertEqual(len(assets), 1)
+            # Reading the compact library after restart needs no embedded copy.
+            restored = library.parse(library.dump(controls.store(conversation.new_forks(), changed)))
+            self.assertEqual(steering.expand(controls.steering_updates(restored)[0]), dict(vector(), strength=-2, layer=1))
+            assets[0].write_text("damaged")
+            with self.assertRaisesRegex(ValueError, "integrity"):
+                steering.expand(reference)
+            conversation.from_json(payload)
+            self.assertEqual(steering.expand(reference), vector())
+
+    def test_portable_conversation_rejects_missing_or_changed_vector_data(self):
+        reference = steering.compact(vector())
+        data = json.loads(conversation.to_json([dict(conversation.make_turn("assistant", "Hello"), steering=reference)]))
+        missing = dict(data, steering_vectors={})
+        with self.assertRaisesRegex(ValueError, "missing"):
+            conversation.from_json(json.dumps(missing))
+        data["steering_vectors"][reference["vector_id"]]["vector"][0] += 1
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            conversation.from_json(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "identifier"):
+            steering.normalize(dict(reference, vector_id="../../not-a-vector"))
+
     def test_generation_paths_use_visible_controls_before_persistence_catches_up(self):
         from test_app_flow import FIXED, TURNS, TRACE, METRICS, BRANCH_SOURCE
         from ui.generation import chat, retry_last, branch_from, branch_with_text
@@ -200,9 +275,9 @@ class ConversationTests(unittest.TestCase):
                             stream = branch_with_text(selected, before[BRANCH_SOURCE], before[METRICS], "Hello", "", before[TURNS], *current)
                         with mock.patch.object(held, "generate", wraps=held.generate) as generate:
                             result = list(stream)[-1]
-                        self.assertEqual(generate.call_args.kwargs["steering"], expected)
-                        self.assertEqual(result[TURNS][-1]["steering"], expected)
-                        self.assertEqual(result[TRACE]["sampling"]["steering"], expected)
+                        self.assertEqual(steering.expand(generate.call_args.kwargs["steering"]), expected)
+                        self.assertEqual(steering.expand(result[TURNS][-1]["steering"]), expected)
+                        self.assertEqual(steering.expand(result[TRACE]["sampling"]["steering"]), expected)
                         self.assertEqual(stale, original)
 
     def test_generation_and_save_listeners_capture_all_visible_steering_controls(self):
@@ -223,25 +298,25 @@ class ConversationTests(unittest.TestCase):
         stale = vector()
         saved, _ = save_conversation(turns, "", stale, False, -2, 1)
         self.addCleanup(Path(saved["value"]).unlink)
-        self.assertEqual(json.loads(Path(saved["value"]).read_text())["steering"], dict(stale, enabled=False, strength=-2, layer=1))
+        self.assertEqual(steering.expand(json.loads(Path(saved["value"]).read_text())["steering"]), dict(stale, enabled=False, strength=-2, layer=1))
         self.assertEqual(stale, vector())
 
     def test_fork_switch_new_chat_and_library_roundtrip(self):
         forks = controls.store(conversation.new_forks(), vector())
         turns = [conversation.make_turn("user", "Hello")]
         forked = fork_conversation(turns, forks, None)[3]
-        self.assertEqual(controls.steering_updates(forked)[0], vector())
+        self.assertEqual(steering.expand(controls.steering_updates(forked)[0]), vector())
         changed, state, _ = controls.remember_steering(forked, vector(), True, -2, 1)
         self.assertEqual(state["strength"], -2)
         changed["active"] = conversation.MAIN_BRANCH
-        self.assertEqual(controls.steering_updates(changed)[0], vector())
+        self.assertEqual(steering.expand(controls.steering_updates(changed)[0]), vector())
         restored = library.parse(library.dump(changed))
-        self.assertEqual(controls.steering_updates(restored)[0], vector())
+        self.assertEqual(steering.expand(controls.steering_updates(restored)[0]), vector())
         fresh = new_conversation(turns, restored)[3]
         self.assertIsNone(controls.steering_updates(fresh)[0])
         copied = conversation.copy_forks(forks)
-        copied["sampling"][conversation.MAIN_BRANCH]["steering"]["vector"][0] = 99
-        self.assertEqual(controls.steering_updates(forks)[0], vector())
+        copied["sampling"][conversation.MAIN_BRANCH]["steering"]["layer"] = 99
+        self.assertEqual(steering.expand(controls.steering_updates(forks)[0]), vector())
 
     def test_portable_save_load_keeps_current_and_per_response_vectors(self):
         turns = [dict(conversation.make_turn("assistant", "Hello"), steering=vector(strength=-2))]
@@ -249,9 +324,9 @@ class ConversationTests(unittest.TestCase):
             path = Path(directory) / "conversation.json"
             path.write_text(conversation.to_json(turns, steering=vector()))
             loaded = controls.load_with_steering(str(path), [], "Raw rank", conversation.new_forks())
-            self.assertEqual(loaded[1], turns)
-            self.assertEqual(loaded[-5], vector())
-            self.assertEqual(controls.steering_updates(loaded[-6])[0], vector())
+            self.assertEqual(conversation.turn_entries(loaded[1]), conversation.turn_entries(turns))
+            self.assertEqual(steering.expand(loaded[-5]), vector())
+            self.assertEqual(steering.expand(controls.steering_updates(loaded[-6])[0]), vector())
             path.write_text(conversation.to_json(turns))
             loaded = controls.load_with_steering(str(path), turns, "Raw rank", loaded[-6])
             self.assertIsNone(loaded[-5])
@@ -261,7 +336,7 @@ class ConversationTests(unittest.TestCase):
             self.assertEqual(refused[-5], {"__type__": "update"})
         saved, _ = save_conversation(turns, "", vector())
         self.addCleanup(Path(saved["value"]).unlink)
-        self.assertEqual(json.loads(Path(saved["value"]).read_text())["steering"], vector())
+        self.assertEqual(steering.expand(json.loads(Path(saved["value"]).read_text())["steering"]), vector())
 
     def test_ui_records_response_vector_and_inspects_that_snapshot(self):
         from test_app_flow import FIXED, TURNS, TRACE, CONTEXT_IDS, METRICS, PROMPT_METRICS
@@ -271,15 +346,15 @@ class ConversationTests(unittest.TestCase):
         with mock.patch.object(runtime, "MANAGER", manager()):
             frames = list(chat("Hello", [], **FIXED, steering=vector()))
             frame = frames[-1]
-            self.assertEqual(frame[TURNS][-1]["steering"], vector())
-            self.assertEqual(frame[TRACE]["sampling"]["steering"], vector())
+            self.assertEqual(steering.expand(frame[TURNS][-1]["steering"]), vector())
+            self.assertEqual(steering.expand(frame[TRACE]["sampling"]["steering"]), vector())
             generation, rows = frame[METRICS]
             context = next(row[CONTEXT_IDS] for row in frames if isinstance(row[CONTEXT_IDS], tuple) and len(row[CONTEXT_IDS]) == 4)
             prompt_metrics = next(row[PROMPT_METRICS] for row in frames[1:] if isinstance(row[PROMPT_METRICS], tuple))
-            self.assertEqual(context[3], vector())
+            self.assertEqual(steering.expand(context[3]), vector())
             target = dict(generation=generation, strip="response", index=0)
             result = list(inspect_layers(target, frame[METRICS], prompt_metrics, context, 0))[0]
             np.testing.assert_allclose(result[3]["layers"][-1]["probability"], rows[0]["raw_probability"], rtol=1e-5)
             copied = conversation.copy_turns(frame[TURNS])
-            copied[-1]["steering"]["vector"][0] = 999
-            self.assertEqual(frame[TURNS][-1]["steering"], vector())
+            copied[-1]["steering"]["layer"] = 999
+            self.assertEqual(steering.expand(frame[TURNS][-1]["steering"]), vector())

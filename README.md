@@ -330,11 +330,14 @@ Model weights are unchanged, and the addition is removed when a response finishe
 fails, or is stopped.
 
 Forks inherit their parent's vector and controls; **New conversation** starts
-without a vector. The vector itself is embedded in the saved conversation, so
-restarting ChatLab or transferring a conversation file does not depend on the
-original upload. Each generated response and JSON trace also keeps the vector and
-strength it used. **Inspect layers** replays those settings even after the controls
-change. Its probabilities describe the steered model before sampling filters.
+without a vector. ChatLab stores each vector once in `conversations-vectors/`
+beside its conversation library; responses and settings keep small references,
+so streaming does not copy or rewrite the vector for every token. **Save
+conversation** embeds each referenced vector once for transfer to another machine,
+and JSON trace exports include the response's full vector. Neither depends on the
+original upload. **Inspect layers** replays the vector and strength recorded for
+that response even after the controls change. Its probabilities describe the
+steered model before sampling filters.
 
 ## Branching from a token
 

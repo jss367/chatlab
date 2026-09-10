@@ -29,7 +29,7 @@ import json
 from collections.abc import Iterable
 from datetime import datetime, timezone
 
-from steering import normalize as normalize_steering
+from steering import compact as compact_steering, export_assets, import_assets
 
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
@@ -571,7 +571,7 @@ def turn_entries(turns: list[dict] | None) -> list[dict]:
             if isinstance(value, kind) and not isinstance(value, bool):
                 entry[key] = value
         if turn.get("steering") is not None:
-            entry["steering"] = normalize_steering(turn["steering"])
+            entry["steering"] = compact_steering(turn["steering"])
         entries.append(entry)
     return entries
 
@@ -604,7 +604,7 @@ def turns_from_entries(raw_turns) -> list[dict]:
                 raise ValueError(f"Turn {key} cannot be negative.")
             turn[key] = value
         if entry.get("steering") is not None:
-            turn["steering"] = normalize_steering(entry["steering"])
+            turn["steering"] = compact_steering(entry["steering"])
         turns.append(turn)
     return turns
 
@@ -616,7 +616,10 @@ def to_json(turns: list[dict] | None, *, system_prompt: str = "", steering: dict
         "turns": turn_entries(turns),
     }
     if steering is not None:
-        payload["steering"] = normalize_steering(steering)
+        payload["steering"] = compact_steering(steering)
+    assets = export_assets([payload.get("steering"), *(turn.get("steering") for turn in payload["turns"])])
+    if assets:
+        payload["steering_vectors"] = assets
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
@@ -629,7 +632,12 @@ def from_json(payload: str) -> tuple[list[dict], str]:
     if not isinstance(data, dict) or data.get("format") != SAVE_FORMAT:
         raise ValueError(f"Expected a {SAVE_FORMAT} file saved by this app.")
 
-    turns = turns_from_entries(data.get("turns"))
+    raw_turns = data.get("turns")
+    values = [data.get("steering")]
+    if isinstance(raw_turns, list):
+        values.extend(turn.get("steering") for turn in raw_turns if isinstance(turn, dict))
+    import_assets(values, data.get("steering_vectors"))
+    turns = turns_from_entries(raw_turns)
 
     system_prompt = data.get("system_prompt", "")
     if not isinstance(system_prompt, str):

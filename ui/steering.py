@@ -5,7 +5,7 @@ from __future__ import annotations
 import gradio as gr
 
 from conversation import MAIN_BRANCH, branch_sampling, copy_forks, put_branch_sampling
-from steering import from_controls, normalize, read_vector
+from steering import compact, from_controls, normalize, read_vector
 from ui.conversations import load_conversation
 
 
@@ -19,12 +19,13 @@ def description(value):
     # Model names are file-supplied text, so keep them out of Markdown markup.
     return (
         f"{state} · {value['model_id']} · layer {value['layer']} · "
-        f"{len(value['vector']):,} entries · strength {value['strength']:g}. "
+        f"{value.get('width', len(value.get('vector', []))):,} entries · strength {value['strength']:g}. "
         "Applies to the prompt and response. Compatibility is checked before generation."
     )
 
 
 def controls(value):
+    value = compact(value)
     return (
         value,
         gr.update(value=value["enabled"] if value else False, interactive=value is not None),
@@ -42,14 +43,14 @@ def steering_updates(forks):
 def store(forks, value):
     forks = copy_forks(forks)
     held = branch_sampling(forks, forks["active"])
-    held["steering"] = value
+    held["steering"] = compact(value)
     put_branch_sampling(forks, forks["active"], held)
     return forks
 
 
 def import_vector(path, forks):
     try:
-        value = read_vector(path)
+        value = compact(read_vector(path))
     except (OSError, ValueError, TypeError) as error:
         raise gr.Error(str(error)) from error
     return store(forks, value), *controls(value)
@@ -61,7 +62,7 @@ def remove_vector(forks):
 
 def remember_steering(forks, value, enabled, strength, layer):
     try:
-        value = from_controls(value, enabled, strength, layer)
+        value = compact(from_controls(value, enabled, strength, layer))
     except (ValueError, TypeError, OverflowError) as error:
         raise gr.Error(str(error)) from error
     if value is None:

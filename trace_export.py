@@ -54,6 +54,12 @@ def build_trace(
 def trace_to_json(trace: dict) -> str:
     """Serialize a trace without escaping token text or conversation content."""
 
+    from steering import expand
+
+    sampling = dict(trace.get("sampling") or {})
+    if sampling.get("steering") is not None:
+        sampling["steering"] = expand(sampling["steering"])
+        trace = dict(trace, sampling=sampling)
     return json.dumps(trace, ensure_ascii=False, indent=2) + "\n"
 
 
