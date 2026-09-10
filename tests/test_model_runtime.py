@@ -2220,6 +2220,42 @@ class MemoryGuardTests(unittest.TestCase):
             check_memory_for_load("org/big", 30 * self.GB, 24 * self.GB, 24 * self.GB, pool="the GPU")
         self.assertIn("and the GPU has 24.0 GB in total", str(caught.exception))
 
+    def test_the_message_names_the_precision_the_estimate_was_made_at(self):
+        # The same figure is a refusal to a reader who chose four bits and a
+        # fair reading to one who did not, so the number alone leaves them
+        # unable to tell whether a smaller precision would lift the refusal.
+        from model_runtime import (
+            InsufficientMemoryError,
+            check_memory_for_load,
+            weights_note,
+        )
+
+        for bits, named in ((None, "for full 16-bit weights"), (4, "for 4-bit weights")):
+            with self.subTest(bits=bits):
+                for total, available in ((48, 20), (24, 24)):
+                    with self.assertRaises(InsufficientMemoryError) as caught:
+                        check_memory_for_load(
+                            "org/big",
+                            30 * self.GB,
+                            total * self.GB,
+                            available * self.GB,
+                            weights=weights_note("float16", bits),
+                        )
+                    self.assertIn(named, str(caught.exception))
+
+    def test_the_precision_note_is_the_width_the_weights_will_take(self):
+        from model_runtime import weights_note
+
+        self.assertEqual(weights_note("float16"), "full 16-bit weights")
+        self.assertEqual(weights_note("bfloat16"), "full 16-bit weights")
+        self.assertEqual(weights_note("float32"), "full 32-bit weights")
+        self.assertEqual(weights_note("float16", 8), "8-bit weights")
+        self.assertEqual(weights_note("float32", 4), "4-bit weights")
+        # A device not read yet, or a dtype nothing is known about, names no
+        # width rather than inventing one.
+        self.assertEqual(weights_note(None), "full weights")
+        self.assertEqual(weights_note("mystery"), "full weights")
+
     @staticmethod
     def _fake_torch(*figures, failing=False):
         class Cuda:
@@ -2248,7 +2284,7 @@ class MemoryGuardTests(unittest.TestCase):
         torch = self._fake_torch((1, 1), failing=True)
         self.assertEqual(cuda_memory(torch), (None, None))
 
-    def _check_with(self, snapshot, backend, host, gpu, ceiling=None):
+    def _check_with(self, snapshot, backend, host, gpu, ceiling=None, bits=None):
         import model_runtime
         from model_runtime import ModelManager
 
@@ -2257,7 +2293,7 @@ class MemoryGuardTests(unittest.TestCase):
         model_runtime.cuda_memory = lambda torch=None: gpu
         try:
             return ModelManager._check_memory(
-                "org/model", snapshot, "float16", backend, ceiling=ceiling
+                "org/model", snapshot, "float16", backend, ceiling=ceiling, bits=bits
             )
         finally:
             model_runtime.system_memory, model_runtime.cuda_memory = saved
@@ -2333,6 +2369,29 @@ class MemoryGuardTests(unittest.TestCase):
         message = str(refused.exception)
         self.assertIn("Metal on this machine", message)
         self.assertIn("24.0 GB", message)
+
+    def test_a_refusal_reports_the_precision_the_load_would_have_used(self):
+        # The bits are cleared before the check on anything but Metal, so
+        # what the card and the log name is what the load would really have
+        # done - which is how a reader on a graphics card learns their 4-bit
+        # choice did not shrink anything.
+        from model_runtime import InsufficientMemoryError
+
+        snapshot = self._sparse_snapshot("model.safetensors", 25 * self.GB)
+        with self.assertRaises(InsufficientMemoryError) as caught:
+            self._check_with(
+                snapshot, "cpu", host=(32 * self.GB, 20 * self.GB), gpu=(None, None)
+            )
+        self.assertIn("for full 16-bit weights", str(caught.exception))
+        # Quantized, the same checkpoint is a fraction of that, and it is the
+        # smaller figure the message has to be about.
+        with self.assertLogs("model_runtime", level="WARNING") as logged:
+            with self.assertRaises(InsufficientMemoryError) as caught:
+                self._check_with(
+                    snapshot, "mps", host=(8 * self.GB, 8 * self.GB), gpu=(None, None), bits=4
+                )
+        self.assertIn("for 4-bit weights", str(caught.exception))
+        self.assertIn("as 4-bit weights", "\n".join(logged.output))
 
     def test_a_refused_load_is_recorded(self):
         # The refusal is the outcome most worth explaining afterwards, and the
@@ -3187,6 +3246,35 @@ class FitTests(unittest.TestCase):
         fit = self.fit(10 * self.GB, None, None)
         self.assertEqual(fit.state, FIT_UNKNOWN)
         self.assertIn("does not report its memory", fit.note)
+
+    def test_the_verdict_names_the_precision_it_was_measured_at(self):
+        # The panel and the refusal have to agree about the precision as well
+        # as the figure: a note that left it out would look as though the
+        # estimate had changed by itself when the radio moved.
+        from model_runtime import fit_for, weights_note
+
+        for bits, named in ((None, "of full 16-bit weights"), (4, "of 4-bit weights")):
+            for estimated in (10, 30, 60):
+                with self.subTest(bits=bits, gigabytes=estimated):
+                    fit = fit_for(
+                        estimated * self.GB,
+                        48 * self.GB,
+                        20 * self.GB,
+                        weights=weights_note("float16", bits),
+                    )
+                    self.assertIn(named, fit.note)
+
+    def test_model_fit_takes_the_precision_from_the_device_and_the_bits(self):
+        from model_runtime import DeviceProfile, model_fit
+
+        profile = DeviceProfile(
+            backend="mps", dtype="float16", total=48 * self.GB, available=20 * self.GB
+        )
+        self.assertIn("of full 16-bit weights", model_fit(30 * self.GB, profile).note)
+        self.assertIn("of 4-bit weights", model_fit(30 * self.GB, profile, 4).note)
+        # Before torch is imported there is no dtype to name.
+        unread = DeviceProfile(total=48 * self.GB, available=20 * self.GB)
+        self.assertIn("of full weights", model_fit(30 * self.GB, unread).note)
 
     def test_a_verdict_agrees_with_the_refusal_it_predicts(self):
         from model_runtime import (

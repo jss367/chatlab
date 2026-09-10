@@ -1055,8 +1055,26 @@ class ModelFitTests(unittest.TestCase):
         _box, detail = app.select_my_model(OLMO, "full")
 
         self.assertIn("Memory", detail)
-        self.assertIn("15.0 GB of weights", detail)
+        self.assertIn("15.0 GB of full 16-bit weights", detail)
         self.assertIn("40.0 GB", detail)
+
+    def test_the_verdict_names_the_precision_it_was_measured_at(self):
+        # The figure moves several-fold with the radio, so a note that left
+        # the precision out would look as though it had changed by itself.
+        _box, detail = app.select_my_model(OLMO, "4-bit")
+
+        self.assertIn("of 4-bit weights", detail)
+        self.assertNotIn("15.0 GB", detail)
+
+    def test_a_precision_this_device_ignores_is_not_claimed_in_the_verdict(self):
+        # A quantized choice is honoured on Apple Metal alone, and the load
+        # clears it everywhere else. Naming what the load will really do is
+        # how a reader on a graphics card learns their choice changed nothing.
+        roomy(self, backend="cuda", dtype="bfloat16")
+
+        _box, detail = app.select_my_model(OLMO, "4-bit")
+
+        self.assertIn("15.0 GB of full 16-bit weights", detail)
 
     def test_a_replacement_is_judged_after_the_loaded_model_is_given_back(self):
         # A load unloads first and only then checks whether the next model

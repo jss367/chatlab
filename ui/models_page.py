@@ -908,13 +908,14 @@ def cached_fit(
     # root to measure. The pool is already the one for this kind - the
     # caller chose it, because choosing it here would re-read the device and
     # discard the memory the impending unload gives back.
+    bits = weight_bits(precision, profile)
     estimated = estimate_snapshot_bytes(
         snapshot,
         profile.dtype or ASSUMED_DTYPE,
-        weight_bits(precision, profile),
+        bits,
         entry.status.kind,
     )
-    return model_fit(estimated, profile)
+    return model_fit(estimated, profile, bits)
 
 
 def replacement_profile(kind: str = TEXT_KIND) -> DeviceProfile:
@@ -981,12 +982,11 @@ def hub_fit(
 
     if not result.parameters:
         return model_fit(None, profile)
+    bits = weight_bits(precision, profile) if kind != IMAGE_KIND else None
     estimated = estimate_parameter_bytes(
-        result.parameters,
-        profile.dtype or ASSUMED_DTYPE,
-        weight_bits(precision, profile) if kind != IMAGE_KIND else None,
+        result.parameters, profile.dtype or ASSUMED_DTYPE, bits
     )
-    return model_fit(estimated, profile)
+    return model_fit(estimated, profile, bits)
 
 
 def hub_fits(

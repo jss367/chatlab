@@ -101,7 +101,12 @@ A model has to fit in memory with room to spare: the weights, the key-value
 cache that grows with every token of a conversation, the app itself, and the
 rest of the system all share it, and on Apple silicon the GPU draws from the
 same pool. Before reading any weights, ChatLab estimates the loaded size from
-the checkpoint and requires a 4 GB safety reserve beside the weights.
+the checkpoint and requires a 4 GB safety reserve beside the weights. Every
+estimate names the precision it was measured at - full weights at the device's
+own dtype, or the 4- or 8-bit width a quantized load would pack the linear
+layers into - because the same checkpoint is several times smaller at four
+bits, and because a quantized choice is honoured on Apple Metal alone, so a
+refusal on a graphics card is about full weights however the radio is set.
 On macOS, the available-memory estimate includes reclaimable file cache when
 the system reports normal memory pressure. When pressure is elevated or cannot
 be read, it uses a stricter estimate: free, speculative and purgeable pages,
