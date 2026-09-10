@@ -21,18 +21,23 @@ MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_WIDTH = 65536
 
 
+class SteeringError(ValueError):
+    """A steering request cannot be applied; no replacement reply is implied."""
+
+
 def normalize(value: dict | None) -> dict | None:
     """Validate and copy a vector, without importing the model runtime."""
     if value is None:
         return None
     if not isinstance(value, dict) or value.get("format", FORMAT) not in (FORMAT, REFERENCE_FORMAT):
-        raise ValueError(f"Expected a {FORMAT} JSON object.")
+        raise SteeringError(f"Expected a {FORMAT} JSON object.")
     model_id = value.get("model_id")
     if not isinstance(model_id, str) or not model_id.strip():
-        raise ValueError("The vector must name its model_id.")
+        raise SteeringError("The vector must name its model_id.")
     layer = value.get("layer")
     if type(layer) is not int or layer < 0:
-        raise ValueError("Layer must be a zero-based, non-negative integer.")
+        raise SteeringError("Layer must be a zero-based, non-negative integer.")
+
     def finite(number):
         try:
             return type(number) in (int, float) and math.isfinite(number)
@@ -41,10 +46,10 @@ def normalize(value: dict | None) -> dict | None:
 
     strength = value.get("strength", 1.0)
     if not finite(strength) or abs(strength) > 100:
-        raise ValueError("Strength must be a finite number between -100 and 100.")
+        raise SteeringError("Strength must be a finite number between -100 and 100.")
     enabled = value.get("enabled", True)
     if type(enabled) is not bool:
-        raise ValueError("Enabled must be true or false.")
+        raise SteeringError("Enabled must be true or false.")
     result = {
         "format": value.get("format", FORMAT),
         "model_id": model_id.strip(),
@@ -55,16 +60,16 @@ def normalize(value: dict | None) -> dict | None:
     if result["format"] == REFERENCE_FORMAT:
         vector_id, width = value.get("vector_id"), value.get("width")
         if not isinstance(vector_id, str) or not re.fullmatch(r"[0-9a-f]{64}", vector_id):
-            raise ValueError("Invalid steering vector identifier.")
+            raise SteeringError("Invalid steering vector identifier.")
         if type(width) is not int or not 1 <= width <= MAX_WIDTH:
-            raise ValueError("Invalid steering vector width.")
+            raise SteeringError("Invalid steering vector width.")
         result.update(vector_id=vector_id, width=width)
     else:
         vector = value.get("vector")
         if not isinstance(vector, list) or not 1 <= len(vector) <= MAX_WIDTH:
-            raise ValueError(f"Vector must be a list of 1–{MAX_WIDTH:,} numbers.")
+            raise SteeringError(f"Vector must be a list of 1–{MAX_WIDTH:,} numbers.")
         if not all(finite(number) for number in vector):
-            raise ValueError("Every vector entry must be a finite number.")
+            raise SteeringError("Every vector entry must be a finite number.")
         result["vector"] = [float(number) for number in vector]
     return result
 
@@ -117,12 +122,12 @@ def expand(value):
         with path.open("rb") as stream:
             data = stream.read(MAX_FILE_BYTES * 2 + 1)
         if len(data) > MAX_FILE_BYTES * 2 or hashlib.sha256(data).hexdigest() != value["vector_id"]:
-            raise ValueError("Stored steering vector failed its integrity check.")
+            raise SteeringError("Stored steering vector failed its integrity check.")
         asset = json.loads(data)
         if asset["model_id"] != value["model_id"] or len(asset["vector"]) != value["width"]:
-            raise ValueError("Stored steering vector does not match its reference.")
+            raise SteeringError("Stored steering vector does not match its reference.")
     except OSError as error:
-        raise ValueError("The stored steering vector is unavailable; import the vector or conversation again.") from error
+        raise SteeringError("The stored steering vector is unavailable; import the vector or conversation again.") from error
     return normalize(dict(value, format=FORMAT, vector=asset["vector"]))
 
 
@@ -148,10 +153,10 @@ def import_assets(values, assets):
             continue
         asset = assets.get(reference["vector_id"]) if isinstance(assets, dict) else None
         if not isinstance(asset, dict) or asset.get("model_id") != reference["model_id"]:
-            raise ValueError("The conversation is missing an embedded steering vector.")
+            raise SteeringError("The conversation is missing an embedded steering vector.")
         full = normalize(dict(reference, format=FORMAT, vector=asset.get("vector")))
         if len(full["vector"]) != reference["width"] or hashlib.sha256(_asset_text(full).encode()).hexdigest() != reference["vector_id"]:
-            raise ValueError("An embedded steering vector does not match its reference.")
+            raise SteeringError("An embedded steering vector does not match its reference.")
         compact(full)
         checked.add(identity)
 
@@ -161,13 +166,13 @@ def read_vector(path: str) -> dict:
     with Path(path).open("rb") as stream:
         data = stream.read(MAX_FILE_BYTES + 1)
     if len(data) > MAX_FILE_BYTES:
-        raise ValueError("Vector files must be smaller than 4 MiB.")
+        raise SteeringError("Vector files must be smaller than 4 MiB.")
     try:
         result = normalize(json.loads(data))
     except (UnicodeError, json.JSONDecodeError) as error:
-        raise ValueError("The vector file must contain valid JSON.") from error
+        raise SteeringError("The vector file must contain valid JSON.") from error
     if result is None or result["format"] != FORMAT:
-        raise ValueError("The vector file must contain a JSON object.")
+        raise SteeringError("The vector file must contain a JSON object.")
     return result
 
 
@@ -179,7 +184,7 @@ def from_controls(value, enabled=None, strength=None, layer=None):
     """
     if value is None:
         if enabled:
-            raise ValueError("Import a vector before enabling steering.")
+            raise SteeringError("Import a vector before enabling steering.")
         return None
     value = dict(value)
     if enabled is not None:
@@ -188,7 +193,7 @@ def from_controls(value, enabled=None, strength=None, layer=None):
         value["strength"] = strength
     if layer is not None:
         if isinstance(layer, bool) or int(layer) != layer:
-            raise ValueError("Layer must be a zero-based integer.")
+            raise SteeringError("Layer must be a zero-based integer.")
         value["layer"] = int(layer)
     return normalize(value)
 
@@ -211,17 +216,17 @@ def decoder_layers(model):
             candidate = getattr(candidate, name, None)
         if isinstance(candidate, torch.nn.ModuleList) and len(candidate):
             return candidate
-    raise ValueError("Steering is not supported for this model's decoder architecture.")
+    raise SteeringError("Steering is not supported for this model's decoder architecture.")
 
 
 def validate_model(model, model_id: str | None, value: dict):
     if model is None:
-        raise ValueError("Load the vector's model before enabling steering.")
+        raise SteeringError("Load the vector's model before enabling steering.")
     if value["model_id"] != model_id:
-        raise ValueError(f"This vector requires {value['model_id']}; load that model or disable steering.")
+        raise SteeringError(f"This vector requires {value['model_id']}; load that model or disable steering.")
     layers = decoder_layers(model)
     if value["layer"] >= len(layers):
-        raise ValueError(f"This model has {len(layers)} layers; choose 0–{len(layers) - 1}.")
+        raise SteeringError(f"This model has {len(layers)} layers; choose 0–{len(layers) - 1}.")
     config = getattr(model, "config", None)
     if callable(getattr(config, "get_text_config", None)):
         config = config.get_text_config()
@@ -229,7 +234,7 @@ def validate_model(model, model_id: str | None, value: dict):
     if width is None:
         width = model.get_input_embeddings().weight.shape[-1]
     if len(value["vector"]) != width:
-        raise ValueError(f"This model requires a vector with {width} entries, not {len(value['vector'])}.")
+        raise SteeringError(f"This model requires a vector with {width} entries, not {len(value['vector'])}.")
     return layers[value["layer"]]
 
 
@@ -250,13 +255,13 @@ def applied(model, model_id: str | None, value: dict | None):
         nonlocal cached
         hidden = output[0] if isinstance(output, tuple) else output
         if not isinstance(hidden, torch.Tensor) or hidden.shape[-1] != len(value["vector"]):
-            raise ValueError("The selected layer does not return a compatible residual tensor.")
+            raise SteeringError("The selected layer does not return a compatible residual tensor.")
         if cached is None or cached.device != hidden.device or cached.dtype != hidden.dtype:
             # Scale before casting so representable small products stay usable.
             cached = torch.tensor(value["vector"], dtype=torch.float64)
             cached = (cached * value["strength"]).to(device=hidden.device, dtype=hidden.dtype)
             if not torch.isfinite(cached).all().item():
-                raise ValueError("The scaled vector overflows this model's activation precision.")
+                raise SteeringError("The scaled vector overflows this model's activation precision.")
         changed = hidden + cached
         return (changed, *output[1:]) if isinstance(output, tuple) else changed
 

@@ -177,6 +177,47 @@ class RuntimeTests(unittest.TestCase):
 
 
 class ConversationTests(unittest.TestCase):
+    def test_incompatible_steering_preserves_response_on_retry_edit_and_branches(self):
+        import gradio as gr
+        from test_app_flow import FIXED, TURNS, METRICS, BRANCH_SOURCE, STATUS
+        from ui.generation import chat, retry_last, edit_message, branch_from, branch_with_text
+
+        for route in ("retry", "edit", "branch", "typed_branch"):
+            for invalid in (dict(vector(), model_id="other/model"), dict(vector(), layer=99), dict(vector(), vector=[1.0])):
+                with self.subTest(route=route, invalid=invalid):
+                    held = manager()
+                    settings = dict(FIXED, assistant_prefill="Hello")
+                    with mock.patch.object(runtime, "MANAGER", held):
+                        before = list(chat("Hello", [], **settings, steering=vector()))[-1]
+                        generation, metrics = before[METRICS]
+                        current = (*settings.values(), steering.compact(invalid), True, 1, invalid["layer"])
+                        if route == "retry":
+                            stream = retry_last("", before[TURNS], *current)
+                        elif route == "edit":
+                            event = gr.EditData(None, dict(index=0, previous_value="Hello", value="Changed question"))
+                            stream = edit_message(event, "", before[TURNS], *current)
+                        elif route == "branch":
+                            metric = metrics[0]
+                            pick = dict(generation=generation, position=1, token_id=metric["token_id"], original_id=metric["token_id"], text=metric["text"], original=metric["text"])
+                            stream = branch_from(pick, before[BRANCH_SOURCE], before[METRICS], "", before[TURNS], *current)
+                        else:
+                            stream = branch_with_text(dict(generation=generation, index=0), before[BRANCH_SOURCE], before[METRICS], "Hello", "", before[TURNS], *current)
+                        result = list(stream)[-1]
+                        self.assertEqual(result[TURNS], before[TURNS])
+                        self.assertTrue("Steering failed" in result[STATUS] or "Could not branch" in result[STATUS])
+                        self.assertFalse(held.busy)
+                        self.assertFalse(steering.decoder_layers(held.model)[0]._forward_hooks)
+
+    def test_incompatible_steering_keeps_new_user_message_without_empty_reply(self):
+        from test_app_flow import FIXED, TURNS, STATUS
+        from ui.generation import chat
+
+        with mock.patch.object(runtime, "MANAGER", manager()):
+            result = list(chat("Hello", [], **FIXED, steering=dict(vector(), layer=99)))[-1]
+            self.assertEqual(result[TURNS], [conversation.make_turn("user", "Hello")])
+            self.assertIn("Steering failed", result[STATUS])
+            self.assertFalse(runtime.MANAGER.busy)
+
     def test_queued_pane_actions_read_steering_from_latest_gradio_session_state(self):
         import asyncio
         import gradio as gr

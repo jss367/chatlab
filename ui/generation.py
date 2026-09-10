@@ -9,7 +9,7 @@ import time
 
 import gradio as gr
 
-from steering import compact as compact_steering, from_controls as steering_from_controls
+from steering import SteeringError, compact as compact_steering, from_controls as steering_from_controls
 
 import charts
 from conversation import (
@@ -676,6 +676,10 @@ def _stream_reply(
         # correction. generate_reply() releases the slot on the way out.
         raise
     except Exception as error:
+        # A refused steering request has not replaced the previous response.
+        # Let the caller restore its original transcript on retry/branch.
+        if first and isinstance(error, SteeringError):
+            raise
         # The diagnostic only goes to the status line. Storing it as the
         # assistant turn would feed the failure back to the model next turn.
         # The traceback goes to the log so the cause is recoverable.
@@ -801,25 +805,28 @@ def chat(
         return
 
     turns.append(make_turn("user", message))
-    yield from generate_reply(
-        turns,
-        "",
-        system_prompt,
-        keep_reasoning,
-        assistant_prefill,
-        temperature,
-        top_p,
-        top_k,
-        max_new_tokens,
-        seed,
-        randomize_seed,
-        analyze_prompt,
-        scale_name,
-        steering,
-        steering_enabled,
-        steering_strength,
-        steering_layer,
-    )
+    try:
+        yield from generate_reply(
+            turns,
+            "",
+            system_prompt,
+            keep_reasoning,
+            assistant_prefill,
+            temperature,
+            top_p,
+            top_k,
+            max_new_tokens,
+            seed,
+            randomize_seed,
+            analyze_prompt,
+            scale_name,
+            steering,
+            steering_enabled,
+            steering_strength,
+            steering_layer,
+        )
+    except SteeringError as error:
+        yield idle_state("", turns, failure_status("Steering failed", str(error)), clear_tokens=True, scale_name=scale_name)
 
 
 def regenerate_from(
@@ -841,6 +848,8 @@ def regenerate_from(
     steering_enabled: bool | None = None,
     steering_strength: float | None = None,
     steering_layer: int | None = None,
+    *,
+    restore_turns: list[dict] | None = None,
 ):
     """Throw away everything after the user turn at ``position`` and reply again."""
 
@@ -858,25 +867,31 @@ def regenerate_from(
         yield idle_state(prompt_text, turns, "Download and load a model first.")
         return
 
-    yield from generate_reply(
-        turns[: position + 1],
-        prompt_text,
-        system_prompt,
-        keep_reasoning,
-        assistant_prefill,
-        temperature,
-        top_p,
-        top_k,
-        max_new_tokens,
-        seed,
-        randomize_seed,
-        analyze_prompt,
-        scale_name,
-        steering,
-        steering_enabled,
-        steering_strength,
-        steering_layer,
-    )
+    try:
+        yield from generate_reply(
+            turns[: position + 1],
+            prompt_text,
+            system_prompt,
+            keep_reasoning,
+            assistant_prefill,
+            temperature,
+            top_p,
+            top_k,
+            max_new_tokens,
+            seed,
+            randomize_seed,
+            analyze_prompt,
+            scale_name,
+            steering,
+            steering_enabled,
+            steering_strength,
+            steering_layer,
+        )
+    except SteeringError as error:
+        yield idle_state(
+            prompt_text, restore_turns if restore_turns is not None else turns,
+            failure_status("Steering failed", str(error)), clear_tokens=True, scale_name=scale_name,
+        )
 
 
 def retry_last(prompt_text, turns, *settings):
@@ -967,9 +982,10 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
         yield idle_state(prompt_text, turns, "Download and load a model first.")
         return
 
+    original_turns = copy_turns(turns)
     turns = turns[: position + 1]
     turns[position]["content"] = edited
-    yield from regenerate_from(position, prompt_text, turns, *settings)
+    yield from regenerate_from(position, prompt_text, turns, *settings, restore_turns=original_turns)
 
 
 def literal_prefill_count(metrics: list[dict], kept: int) -> int:
@@ -1167,6 +1183,8 @@ def _branch_with_text(
     except ModelChanged:
         # ``turns`` is still the whole conversation, old response included.
         yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+    except SteeringError as error:
+        yield idle_state(prompt_text, turns, failure_status("Could not branch", str(error)), clear_tokens=True)
 
 
 def branch_from(
@@ -1260,6 +1278,8 @@ def branch_from(
     except ModelChanged:
         # ``turns`` is still the whole conversation, old response included.
         yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+    except SteeringError as error:
+        yield idle_state(prompt_text, turns, failure_status("Could not branch", str(error)), clear_tokens=True)
 
 
 def undo_from(
