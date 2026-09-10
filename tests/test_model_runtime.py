@@ -2726,7 +2726,8 @@ class OutOfMemoryTests(unittest.TestCase):
 
     def test_a_finished_generation_hands_its_cache_back(self):
         manager = self._manager()
-        manager._generate = lambda *a, **k: iter(["only frame"])
+        # The real stream is a generator, explicitly closed on every exit.
+        manager._generate = lambda *a, **k: (frame for frame in ["only frame"])
         self.assertEqual(
             list(manager.generate([], temperature=1, top_p=1, top_k=0, max_new_tokens=1, seed=0)),
             ["only frame"],
