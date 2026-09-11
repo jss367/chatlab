@@ -241,7 +241,19 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 #images-hero {{ padding: 0; }}
 #images-hero h1 {{ font-size: 18px; line-height: 26px; font-weight: 600; margin: 0; }}
 #images-hero p {{ font-size: 12px; color: var(--body-text-color-subdued); margin: 2px 0 0; }}
-#model-status {{ min-height: 128px; }}
+#model-status {{ min-height: 0; }}
+#model-id-row {{ align-items: flex-end; gap: 8px; }}
+#model-id-row > button {{ margin-bottom: 12px; min-height: 40px; }}
+#current-model-row {{ align-items: center; gap: 12px; }}
+#currently-loaded-model {{ flex: 1; min-width: 0; }}
+#models-page .model-access > button, #models-page .model-activity > button {{ border: 0; }}
+#models-page .model-activity {{
+  padding: 16px 20px; border: 1px solid var(--border-color-primary); border-radius: 12px;
+  background: var(--block-background-fill);
+}}
+#model-repository {{ padding: 12px; border-radius: 8px; background: var(--background-fill-secondary); }}
+#model-repository p {{ margin: 0 0 8px; }}
+#model-repository p:last-child {{ margin-bottom: 0; }}
 
 /* The model badge stays small and wraps with its actions in narrow columns. */
 #model-bar, #image-model-bar {{ flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; }}
