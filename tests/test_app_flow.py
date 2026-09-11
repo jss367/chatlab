@@ -16,6 +16,7 @@ from gradio.utils import get_function_with_locals
 
 import app
 from ui import runtime
+from ui.token_edit import close_token_editor, open_token_editor, save_token_edit
 import charts
 from conversation import (
     MAIN_BRANCH,
@@ -25,6 +26,7 @@ from conversation import (
     from_json,
     make_turn,
     turn_entries,
+    turns_from_entries,
     model_messages,
     new_forks,
     put_branch,
@@ -33,6 +35,7 @@ from conversation import (
 )
 from model_runtime import GENERATING, GenerationUpdate, ModelChanged, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
+from steering import SteeringError
 
 import library
 import settings
@@ -125,7 +128,9 @@ def painted(value):
     when the measurements go.
     """
 
-    return [span for span in strip_of(value) if span[1] is not None]
+    # An empty categorized span keeps plain restored messages clickable;
+    # it is only a renderer hint, never a measured token.
+    return [span for span in strip_of(value) if span[0] and span[1] is not None]
 
 
 def select(index):
@@ -213,6 +218,20 @@ class PanelSessionTests(unittest.TestCase):
         self.bound(0, app.clear_chat)()
         self.assertEqual(self.click(0, first), (gr.skip(),) * 5)
         self.assertSelected(1, second)
+
+    def test_restored_messages_are_editable_in_each_new_browser_session(self):
+        forks = new_forks()
+        forks["branches"][MAIN_BRANCH] = [make_turn("user", "Saved question")]
+        with mock.patch("library.read", return_value=forks):
+            first = self.bound(0, app.restore_conversations)()
+            second = self.bound(1, app.restore_conversations)()
+        for session, restored in enumerate((first, second)):
+            result = self.bound(session, open_token_editor)(
+                restored[1], restored[4],
+                gr.SelectData(None, {"index": 1, "value": ["Saved question", None]}),
+            )
+            self.assertTrue(result[0]["visible"])
+            self.assertEqual(result[1], "Saved question")
 
     def test_scored_epochs_are_isolated_but_rescoring_still_invalidates(self):
         scored = self.bound(0, score_known_passage)()
@@ -1187,6 +1206,163 @@ class TokenViewTests(unittest.TestCase):
 
     def respond(self, message="hi", turns=()):
         return list(app.chat(message, list(turns), *SETTINGS))[-1]
+
+    def open_editor(self, frame, turn=0):
+        spans, mapping = app.transcript_entries(frame[TURNS], DEFAULT_COLOR_SCALE)
+        index = mapping.index((turn, None)) + 1
+        return open_token_editor(
+            frame[TURNS], frame[METRICS],
+            gr.SelectData(None, {"index": index, "value": list(spans[index])}),
+        )
+
+    def test_editing_an_earlier_user_message_regenerates_in_token_view(self):
+        first = self.respond()
+        final = self.respond("follow-up", first[TURNS])
+        app.show_token_view(True, final[TURNS], DEFAULT_COLOR_SCALE)
+        self.addCleanup(app.show_token_view, False, [], DEFAULT_COLOR_SCALE)
+        panel, text, target = self.open_editor(final)
+        self.assertTrue(panel["visible"])
+        self.assertEqual(text, "hi")
+        edited = list(save_token_edit(target, "revised question", "draft", final[TURNS], *SETTINGS))[-1]
+        self.assertEqual([t["role"] for t in edited[TURNS]], ["user", "assistant"])
+        self.assertEqual(edited[TURNS][0]["content"], "revised question")
+        self.assertTrue(edited[TURNS][1]["tokens"])
+        self.assertIn(("revised question", None), strip_of(edited[STRIP]))
+        self.assertFalse(edited[-2]["visible"])
+        self.assertIsNone(edited[-1])
+        self.assertEqual(final[TURNS][0]["content"], "hi")
+
+    def test_empty_edit_keeps_the_draft_open_and_conversation_intact(self):
+        final = self.respond()
+        _, _, target = self.open_editor(final)
+        edited = list(save_token_edit(target, "  ", "draft", final[TURNS], *SETTINGS))[-1]
+        self.assertEqual(edited[TURNS], final[TURNS])
+        self.assertIn("cannot be empty", edited[STATUS])
+        self.assertEqual(edited[-2:], (gr.skip(), gr.skip()))
+
+    def test_imported_reasoning_only_user_message_leaves_editor_untouched(self):
+        turns = turns_from_entries([
+            {"role": "user", "content": "", "reasoning": "Imported reasoning"},
+        ])
+        spans, _ = app.transcript_entries(turns, DEFAULT_COLOR_SCALE)
+        for index, span in enumerate(spans):
+            with self.subTest(span=span):
+                result = open_token_editor(
+                    turns, app.empty_metrics(),
+                    gr.SelectData(None, {"index": index, "value": list(span)}),
+                )
+                self.assertEqual(result, (gr.skip(),) * 3)
+        self.assertEqual(turns[0]["content"], "")
+        self.assertEqual(turns[0]["reasoning"], "Imported reasoning")
+
+    def test_only_user_content_opens_editor_even_when_other_spans_match(self):
+        for content, reasoning in (("\n\nYOU\n", ""), ("Same text\n", "Same text")):
+            turns = turns_from_entries([
+                {"role": "user", "content": content, "reasoning": reasoning},
+            ])
+            spans, _ = app.transcript_entries(turns, DEFAULT_COLOR_SCALE)
+            for index, span in enumerate(spans):
+                with self.subTest(content=content, index=index):
+                    result = open_token_editor(
+                        turns, app.empty_metrics(),
+                        gr.SelectData(None, {"index": index, "value": list(span)}),
+                    )
+                    if index == len(spans) - 1:
+                        self.assertTrue(result[0]["visible"])
+                        self.assertEqual(result[1], content)
+                    else:
+                        self.assertEqual(result, (gr.skip(),) * 3)
+
+    def test_stale_edit_cannot_replace_a_new_conversation(self):
+        final = self.respond()
+        _, _, target = self.open_editor(final)
+        newer = self.respond("another question")
+        edited = list(save_token_edit(target, "replacement", "draft", newer[TURNS], *SETTINGS))[-1]
+        self.assertEqual(edited[TURNS], gr.skip())
+        self.assertIn("conversation changed", edited[STATUS])
+
+    def test_edit_without_a_loaded_model_preserves_the_conversation_and_draft(self):
+        final = self.respond()
+        _, _, target = self.open_editor(final)
+        with mock.patch.object(type(runtime.MANAGER), "loaded", new_callable=mock.PropertyMock, return_value=False):
+            edited = list(save_token_edit(target, "replacement", "draft", final[TURNS], *SETTINGS))[-1]
+        self.assertEqual(edited[TURNS], final[TURNS])
+        self.assertEqual(edited[STATUS], app.NO_MODEL_STATUS)
+        self.assertEqual(edited[-2:], (gr.skip(), gr.skip()))
+
+    def test_edit_during_generation_does_not_overwrite_streaming_state(self):
+        final = self.respond()
+        _, _, target = self.open_editor(final)
+        self.assertIsNone(runtime.MANAGER.claim_generation())
+        try:
+            edited = list(save_token_edit(target, "replacement", "draft", final[TURNS], *SETTINGS))[-1]
+        finally:
+            runtime.MANAGER.release_generation()
+        self.assertEqual(edited[TURNS], gr.skip())
+        self.assertEqual(edited[-2:], (gr.skip(), gr.skip()))
+
+    def test_regeneration_rollback_restores_editor_and_allows_retry(self):
+        final = self.respond()
+        _, _, target = self.open_editor(final)
+
+        def refused():
+            raise SteeringError("Steering is unavailable for this model")
+            yield  # Make refusal happen on the first model step.
+
+        with mock.patch.object(runtime.MANAGER, "generate", return_value=refused()):
+            frames = list(save_token_edit(target, "replacement", "draft", final[TURNS], *SETTINGS))
+        self.assertFalse(frames[0][-2]["visible"])
+        restored = frames[-1]
+        self.assertEqual(restored[TURNS], final[TURNS])
+        self.assertIn("Steering failed", restored[STATUS])
+        self.assertTrue(restored[-2]["visible"])
+        self.assertEqual(restored[-1]["index"], target["index"])
+        retried = list(save_token_edit(restored[-1], "replacement", "draft", restored[TURNS], *SETTINGS))[-1]
+        self.assertEqual(retried[TURNS][0]["content"], "replacement")
+        self.assertTrue(retried[TURNS][1]["tokens"])
+        self.assertFalse(retried[-2]["visible"])
+
+    def test_refusal_before_opening_frame_keeps_edit_retryable(self):
+        final = self.respond()
+        _, _, target = self.open_editor(final)
+        with mock.patch("ui.generation.steering_from_controls", side_effect=SteeringError("Invalid steering")):
+            restored = list(save_token_edit(target, "replacement", "draft", final[TURNS], *SETTINGS))[-1]
+        self.assertEqual(restored[TURNS], final[TURNS])
+        self.assertTrue(restored[-2]["visible"])
+        retried = list(save_token_edit(restored[-1], "replacement", "draft", restored[TURNS], *SETTINGS))[-1]
+        self.assertEqual(retried[TURNS][0]["content"], "replacement")
+
+    def test_assistant_click_does_not_open_or_replace_a_user_draft(self):
+        final = self.respond()
+        result = open_token_editor(final[TURNS], final[METRICS], token_span(final[TURNS], 0))
+        self.assertEqual(result, (gr.skip(),) * 3)
+
+    def test_cancel_clears_editor_without_conversation_outputs(self):
+        self.assertEqual(close_token_editor(), (gr.update(visible=False), "", None))
+
+    def test_plain_transcript_uses_clickable_renderer_without_a_phantom_turn(self):
+        turns = [make_turn("user", "Saved question")]
+        value = app.transcript_value(turns, DEFAULT_COLOR_SCALE)
+        spans, _ = app.transcript_entries(turns, DEFAULT_COLOR_SCALE)
+        self.assertEqual(value[:-1], spans)
+        self.assertEqual(value[-1][0], "")
+        self.assertIsNotNone(value[-1][1])
+        self.assertEqual(painted(value), [])
+        result = open_token_editor(
+            turns, app.empty_metrics(),
+            gr.SelectData(None, {"index": len(value) - 1, "value": list(value[-1])}),
+        )
+        self.assertEqual(result, (gr.skip(),) * 3)
+
+    def test_token_editor_is_wired_to_click_save_and_stop(self):
+        demo = app.build_app()
+        opener = next(fn for fn in demo.fns.values() if fn.fn is open_token_editor)
+        saver = next(fn for fn in demo.fns.values() if fn.fn is save_token_edit)
+        self.assertEqual(opener.outputs[0].elem_id, "token-editor")
+        self.assertEqual(saver.outputs[3].elem_id, "token-strip")
+        self.assertEqual(saver.outputs[-2].elem_id, "token-editor")
+        restore = next(fn for fn in demo.fns.values() if fn.fn is app.restore_conversations)
+        self.assertIs(restore.outputs[-1], opener.inputs[1])
 
     def test_a_reply_is_drawn_token_by_token_under_its_heading(self):
         final = self.respond()
@@ -3930,7 +4106,7 @@ class ConversationListWiringTests(unittest.TestCase):
         forks = self.named("remember_forks").inputs[1]
         self.assertEqual(restore.targets, [(self.demo._id, "load")])
         self.assertEqual(restore.inputs, [])
-        self.assertEqual(restore.outputs[1:], [state, forks, self.conversation_list()])
+        self.assertEqual(restore.outputs[1:4], [state, forks, self.conversation_list()])
 
     def test_everything_that_rewrites_the_conversation_in_one_step_runs_on_one_queue(self):
         # A redraw queued by a streaming frame must not run after a click on
@@ -4405,7 +4581,9 @@ class ConversationLibraryTests(unittest.TestCase):
         self.assertEqual(list(library.read(self.path)["branches"]), [MAIN_BRANCH, "Fork 1"])
 
     def test_nothing_saved_leaves_the_page_as_built(self):
-        self.assertEqual(app.restore_conversations(), (gr.skip(),) * 4)
+        restored = app.restore_conversations()
+        self.assertEqual(restored[:4], (gr.skip(),) * 4)
+        self.assertEqual(restored[4][1], [])
 
     def test_the_active_branch_is_put_back_on_screen(self):
         forks = {
@@ -4417,7 +4595,8 @@ class ConversationLibraryTests(unittest.TestCase):
         }
         library.write(forks, self.path)
 
-        messages, turns, restored, update = app.restore_conversations()
+        messages, turns, restored, update, metrics = app.restore_conversations()
+        self.assertEqual(metrics[1], [])
 
         self.assertEqual([turn["content"] for turn in turns], ["hi", "there"])
         self.assertTrue(turns[-1]["reasoning_closed"])
@@ -4505,6 +4684,7 @@ class CancelWiringTests(unittest.TestCase):
                 "retry_last",
                 "retry_message",
                 "edit_message",
+                "save_token_edit",
                 "stop_generation",
                 "undo_last",
                 "undo_message",
@@ -4513,6 +4693,7 @@ class CancelWiringTests(unittest.TestCase):
                 "branch_from",
                 "branch_with_text",
                 "next_token",
+                "branch_from_menu",
                 "fork_conversation",
                 "switch_fork",
                 "delete_fork",

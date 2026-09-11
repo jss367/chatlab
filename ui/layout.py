@@ -27,6 +27,7 @@ from token_metrics import (
 )
 from trace_export import write_trace_export
 from ui import runtime
+from ui.token_edit import close_token_editor, open_token_editor, save_token_edit
 from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from extensions.registry import load_enabled
 from ui.extensions_page import build_extension_settings, data_directory, extension_css, restore_extensions
@@ -38,7 +39,6 @@ from ui.common import (
     PAGES,
     TRANSCRIPT_LABEL,
     show_page,
-    status_card,
 )
 from token_metrics import (
     PROMPT_ATTENTION_SCALE,
@@ -96,6 +96,7 @@ from ui.inspection import (
     reset_inspection,
 )
 from model_discovery import DISCOVERY_ORDERS
+from ui.model_repository import UNCHECKED, check_model_repository, repository_view
 from ui.models_page import (
     BADGE_REFRESH_SECONDS,
     SEARCH_HINT,
@@ -112,6 +113,7 @@ from ui.models_page import (
     refresh_after_device,
     refresh_image_badge,
     refresh_model_actions,
+    refresh_current_model,
     refresh_model_badge,
     refresh_model_switch,
     refresh_my_models,
@@ -160,6 +162,9 @@ from ui.settings_page import (
     sampling_label,
     update_sampling_label,
 )
+from ui.token_menu import (
+    TOKEN_MENU_CSS, TOKEN_MENU_JS, branch_from_menu, token_menu_payload,
+)
 from ui.styles import (
     CSS,
     THEME,
@@ -202,7 +207,7 @@ def build_app() -> gr.Blocks:
     # The shell wants every pixel: the two side panes are a fixed width, so the
     # width the cap was holding back goes to the chat and the panel beside it.
     with gr.Blocks(
-        title="ChatLab", css=CSS + extension_css(extensions), theme=THEME, fill_width=True
+        title="ChatLab", css=CSS + TOKEN_MENU_CSS + extension_css(extensions), theme=THEME, fill_width=True
     ) as demo:
         conversation_state = gr.State([])
         metrics_state = gr.State(empty_metrics())
@@ -216,11 +221,15 @@ def build_app() -> gr.Blocks:
         # which of its tokens - and the alternative picked for it. Both name a
         # turn rather than a strip position, so a click keeps meaning what it
         # meant however the conversation moves under it.
+        menu_request = gr.Textbox(elem_id="token-menu-request", elem_classes=["token-menu-bridge"])
+        menu_response = gr.HTML(elem_id="token-menu-response", elem_classes=["token-menu-bridge"])
+        menu_action = gr.Textbox(elem_id="token-menu-action", elem_classes=["token-menu-bridge"])
         selected_token = gr.State(None)
         branch_pick = gr.State(None)
         # Forking: the other transcripts, and the chatbot message last clicked.
         forks_state = gr.State(new_forks())
         selected_message = gr.State(None)
+        token_edit_target = gr.State(None)
         # Layer inspection: the prompt ids behind the strips, the strip
         # position last clicked, and the last readout for re-rendering.
         context_ids_state = gr.State((*empty_metrics(), None))
@@ -347,8 +356,9 @@ def build_app() -> gr.Blocks:
                                     label="Token view",
                                     info=(
                                         "Show the conversation as the tokens it "
-                                        "is made of. Click one to inspect it or "
-                                        "branch from it."
+                                        "is made of. Click to inspect; right-click "
+                                        "for alternatives or your own text. "
+                                        "Click your own message to edit it."
                                     ),
                                     elem_id="token-view",
                                 )
@@ -369,6 +379,14 @@ def build_app() -> gr.Blocks:
                                     visible=False,
                                     elem_id="token-strip",
                                 )
+                                with gr.Group(visible=False, elem_id="token-editor") as token_editor:
+                                    token_edit_text = gr.Textbox(
+                                        label="Edit your message", lines=3,
+                                        info="Saving replaces the replies after this message and generates a new reply.",
+                                    )
+                                    with gr.Row():
+                                        token_edit_save = gr.Button("Save and regenerate", variant="primary")
+                                        token_edit_cancel = gr.Button("Cancel")
                                 prompt = gr.Textbox(
                                     label="Message",
                                     show_label=False,
@@ -942,18 +960,29 @@ def build_app() -> gr.Blocks:
                 with gr.Row(elem_id="models-columns"):
                     with gr.Column(min_width=360, elem_id="model-controls"):
                         with gr.Column(elem_classes=["model-card"]):
-                            gr.Markdown("## Model")
-                            model_id = gr.Textbox(
-                                value=settings.model_id_at_startup(saved),
-                                label="Hugging Face model ID",
-                                placeholder="organization/model-name",
-                                info="The default OLMo 3 7B model is about 15 GB in full precision.",
-                            )
-                            hf_token = gr.Textbox(
-                                label="Hugging Face token (optional)",
-                                type="password",
-                                placeholder="Only needed for gated or private models",
-                            )
+                            gr.Markdown("## Currently loaded")
+                            with gr.Row(elem_id="current-model-row"):
+                                current_model = gr.HTML(refresh_current_model(), elem_id="currently-loaded-model", container=False, padding=False)
+                                unload_button = gr.Button("Unload", size="sm", scale=0, min_width=80)
+                        with gr.Column(elem_classes=["model-card"]):
+                            gr.Markdown("## Choose a model")
+                            with gr.Row(elem_id="model-id-row"):
+                                model_id = gr.Textbox(
+                                    value=settings.model_id_at_startup(saved),
+                                    label="Hugging Face model ID",
+                                    placeholder="organization/model-name",
+                                    info="Paste an ID or select a model below.",
+                                    scale=4,
+                                )
+                                check_model_button = gr.Button("Check model", size="sm", scale=1, min_width=100)
+                            repository_result = gr.State(None)
+                            repository_detail = gr.Markdown(UNCHECKED, elem_id="model-repository")
+                            with gr.Accordion("Access token", open=False, elem_classes=["model-access"]):
+                                hf_token = gr.Textbox(
+                                    label="Hugging Face token (optional)",
+                                    type="password",
+                                    placeholder="Only needed for gated or private models",
+                                )
                             weight_precision = gr.Radio(
                                 choices=[
                                     ("Full (16-bit)", "full"),
@@ -963,11 +992,9 @@ def build_app() -> gr.Blocks:
                                 value=saved.weight_precision,
                                 label="Weight precision",
                                 info=(
-                                    "On Apple Metal, 8-bit and 4-bit weights take about a "
-                                    "half and a quarter of the memory of full weights, at a "
-                                    "small cost in accuracy; the first quantized load fetches "
-                                    "the Metal kernels from the Hub. Other devices load full "
-                                    "weights whatever is chosen. Applies to the next load."
+                                    "Lower precision saves memory with some loss of accuracy. "
+                                    "Applies to the next Transformers load on Apple Metal; "
+                                    "MLX checkpoints use their existing precision."
                                 ),
                             )
                             model_availability = gr.Markdown(
@@ -979,14 +1006,8 @@ def build_app() -> gr.Blocks:
                                 )
                                 download_button = gr.Button("Download only", size="sm")
                                 cached_button = gr.Button("Load cached", size="sm")
-                                unload_button = gr.Button("Unload", size="sm")
-                            model_status = gr.Markdown(
-                                status_card(
-                                    "No model loaded",
-                                    "Choose a model under My Models, or enter a Hugging Face model ID to download one. Files are kept in your normal Hugging Face cache.",
-                                ),
-                                elem_id="model-status",
-                            )
+                        with gr.Accordion("Latest model action", open=True, elem_classes=["model-activity"]):
+                            model_status = gr.Markdown("No downloads or loads started in this tab.", elem_id="model-status")
 
                         with gr.Column(elem_id="model-search", elem_classes=["model-card"]):
                             gr.Markdown("## Discover models")
@@ -1359,7 +1380,7 @@ def build_app() -> gr.Blocks:
         # rather than displacing it.
         models_inputs = [my_models, sort_models, weight_precision, model_id]
         models_outputs = [my_models, my_model_detail, my_models_summary]
-        action_inputs = [model_id, my_models]
+        action_inputs = [model_id, my_models, repository_result, hf_token]
         action_outputs = [
             model_availability, download_load_button, download_button, cached_button
         ]
@@ -1373,10 +1394,36 @@ def build_app() -> gr.Blocks:
                 concurrency_id="model-actions",
             )
 
+        # Slow network requests scope state to the ID and credentials; rendering
+        # reads both again so an old request cannot verify a newer selection.
+        # Keep checks explicit: clicking the button also blurs the textbox,
+        # which would otherwise enqueue a second request for the same ID.
+        for event in (check_model_button.click, model_id.submit):
+            event(
+                check_model_repository, [model_id, hf_token], repository_result,
+                show_progress="hidden", concurrency_id="model-repository-check",
+                trigger_mode="always_last",
+            )
+        repository_inputs = [model_id, repository_result, hf_token, my_models]
+        repository_outputs = [repository_detail, weight_precision]
+        for event in (
+            *(control.change for control in repository_inputs), demo.load, nav.change,
+        ):
+            event(
+                repository_view, repository_inputs, repository_outputs, show_progress="hidden",
+                concurrency_id="model-repository-view", trigger_mode="always_last",
+            )
+        hf_token.input(lambda: None, None, repository_result, show_progress="hidden")
+        for event in (demo.load, nav.change, badge_timer.tick):
+            event(refresh_current_model, None, current_model, show_progress="hidden")
+
         def refresh_actions(event):
             return event.then(
                 refresh_model_actions, action_inputs, action_outputs,
                 show_progress="hidden", concurrency_id="model-actions",
+            ).then(
+                repository_view, repository_inputs, repository_outputs,
+                show_progress="hidden", concurrency_id="model-repository-view",
             )
 
         # Refresh model-dependent displays after explicit model actions.
@@ -1387,6 +1434,7 @@ def build_app() -> gr.Blocks:
 
             event = event.then(refresh_my_models, models_inputs, models_outputs)
             event = refresh_actions(event)
+            event = event.then(refresh_current_model, None, current_model, show_progress="hidden")
             # What is on disk is what the switcher offers, so it follows every
             # rescan, download-only included.
             event = event.then(
@@ -1465,6 +1513,8 @@ def build_app() -> gr.Blocks:
             [*models_outputs, search_results, search_detail, device_read],
             show_progress="hidden",
         )
+        # The menu handles Escape before the global generation shortcut.
+        demo.load(None, None, None, js=TOKEN_MENU_JS)
         # Escape stops a running generation, from anywhere on the page.
         demo.load(None, None, None, js=SHORTCUT_JS)
         # The two readings panes are dragged wider or narrower by the handle
@@ -1792,12 +1842,18 @@ def build_app() -> gr.Blocks:
         ]
 
         running = [
+            menu_action.input(branch_from_menu, [menu_action, *chat_inputs], chat_outputs),
             send_button.click(chat, chat_inputs, chat_outputs),
             prompt.submit(chat, chat_inputs, chat_outputs),
             retry_button.click(retry_last, chat_inputs, chat_outputs),
             next_token_button.click(next_token, [branch_pick, *chat_inputs], chat_outputs),
             chatbot.retry(retry_message, chat_inputs, chat_outputs),
             chatbot.edit(edit_message, chat_inputs, chat_outputs),
+            token_edit_save.click(
+                save_token_edit,
+                [token_edit_target, token_edit_text, *chat_inputs],
+                [*chat_outputs, token_editor, token_edit_target],
+            ),
             branch_button.click(
                 branch_from,
                 [branch_pick, *chat_inputs],
@@ -1999,7 +2055,7 @@ def build_app() -> gr.Blocks:
             demo.load(
                 restore_conversations,
                 None,
-                [chatbot, conversation_state, forks_state, conversation_list],
+                [chatbot, conversation_state, forks_state, conversation_list, metrics_state],
                 cancels=running,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
@@ -2125,6 +2181,15 @@ def build_app() -> gr.Blocks:
             [chatbot, token_strip],
             show_progress="hidden",
         )
+        editor_outputs = [token_editor, token_edit_text, token_edit_target]
+        token_view.change(close_token_editor, outputs=editor_outputs, show_progress="hidden")
+        token_edit_cancel.click(close_token_editor, outputs=editor_outputs, show_progress="hidden")
+        token_strip.select(
+            open_token_editor,
+            [conversation_state, metrics_state],
+            editor_outputs,
+            show_progress="hidden",
+        )
 
         # One click in the conversation answers every question the inspector
         # asks of it, so it is one listener rather than four.
@@ -2133,7 +2198,14 @@ def build_app() -> gr.Blocks:
             [conversation_state, metrics_state],
             [token_detail, alternatives, selected_token, inspect_target, branch_pick],
         )
-        # And a second that keeps the message it landed in, so Fork works from
+        token_strip.select(
+            token_menu_payload,
+            [conversation_state, metrics_state, menu_request],
+            menu_response,
+            show_progress="hidden",
+            queue=False,
+        )
+        # Also keep the message it landed in, so Fork works from
         # the token view exactly as it does from the chatbot.
         token_strip.select(
             remember_transcript_message, conversation_state, selected_message

@@ -2855,10 +2855,13 @@ class PageLayoutTests(unittest.TestCase):
         listeners = self.listeners("refresh_model_actions")
         radio = self.labelled("Downloaded models")
         model_id = self.labelled("Hugging Face model ID")
-        for control in (radio, model_id):
+        token = self.labelled("Hugging Face token (optional)")
+        for control in (radio, model_id, token):
             self.assertTrue(any(fn.targets == [(control._id, "change")] for fn in listeners))
         for fn in listeners:
-            self.assertEqual(fn.inputs, [model_id, radio])
+            self.assertEqual(fn.inputs[:2], [model_id, radio])
+            self.assertIsInstance(fn.inputs[2], gr.State)
+            self.assertEqual(fn.inputs[3:], [token])
             self.assertEqual(fn.outputs[0], self.by_id("model-availability"))
             self.assertEqual(
                 [button.value for button in fn.outputs[1:]],
@@ -2873,6 +2876,51 @@ class PageLayoutTests(unittest.TestCase):
         # All seven mutations (the switcher included), manual refresh, and
         # startup refresh the controls even when the radio's selected value
         # stays the same.
+        self.assertEqual(len(chained), 9)
+
+    def test_explicit_repository_checks_make_one_request_after_leaving_the_id_field(self):
+        model_id = self.labelled("Hugging Face model ID")
+        (button,) = [
+            block for block in self.demo.blocks.values()
+            if isinstance(block, gr.Button) and block.value == "Check model"
+        ]
+        checks = self.listeners("check_model_repository")
+        info = mock.Mock(
+            tags=[], config={}, library_name="transformers", siblings=[],
+            private=False, gated=False,
+        )
+        for events, expected in (
+            ([(model_id._id, "blur"), (button._id, "click")], 1),
+            ([(model_id._id, "submit"), (model_id._id, "blur")], 1),
+            ([(model_id._id, "blur")], 0),
+        ):
+            with self.subTest(events=events), mock.patch(
+                "huggingface_hub.HfApi.model_info", return_value=info
+            ) as request:
+                # Dispatch the actual registered dependencies in browser event
+                # order: clicking Check first blurs the focused model ID field.
+                for event in events:
+                    for listener in checks:
+                        if event in listener.targets:
+                            states = list(listener.fn("org/model", ""))
+                            self.assertEqual(states[-1]["status"], "found")
+                self.assertEqual(request.call_count, expected)
+
+    def test_repository_precision_refreshes_for_cached_selections_and_rescans(self):
+        views = self.listeners("repository_view")
+        selected = self.labelled("Downloaded models")
+        self.assertTrue(any(fn.targets == [(selected._id, "change")] for fn in views))
+        self.assertTrue(any(event == "load" for fn in views for _, event in fn.targets))
+        for fn in views:
+            self.assertEqual(fn.inputs[-1], selected)
+            self.assertEqual(fn.inputs[0], self.labelled("Hugging Face model ID"))
+            self.assertEqual(fn.inputs[2], self.labelled("Hugging Face token (optional)"))
+        action_ids = {fn._id for fn in self.listeners("refresh_model_actions")}
+        chained = [
+            dependency for dependency in self.demo.config["dependencies"]
+            if dependency["id"] in {fn._id for fn in views}
+            and dependency["trigger_after"] in action_ids
+        ]
         self.assertEqual(len(chained), 9)
 
     def test_every_load_reads_the_my_models_selection(self):

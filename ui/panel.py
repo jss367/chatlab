@@ -121,7 +121,15 @@ EMPTY_TRANSCRIPT = [("No messages yet. Send one to see it token by token.", None
 
 
 def transcript_value(turns: list[dict] | None, scale_name: str):
-    return transcript_entries(turns, scale_name)[0] or EMPTY_TRANSCRIPT
+    spans = transcript_entries(turns, scale_name)[0]
+    if spans and all(label is None for _, label in spans):
+        # Gradio's all-uncolored renderer has no select handlers. An empty
+        # categorized span selects its clickable renderer without coloring
+        # any message or adding visible text. It belongs to no turn and is
+        # intentionally absent from transcript_entries()'s selection map.
+        category = next(iter(resolve_scale(scale_name).color_map))
+        return [*spans, ("", category)]
+    return spans or EMPTY_TRANSCRIPT
 
 
 def transcript_update(turns: list[dict] | None, scale_name: str):
