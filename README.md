@@ -30,6 +30,7 @@ drove.
 - A system prompt, plus temperature, top-p, top-k, seed, and response-length controls
 - Every setting saved to one JSON file you can edit by hand or share between machines
 - Temperature, top-p, top-k and response length kept per conversation, so two forks can be compared at different settings
+- Per-conversation activation steering: import a vector, choose its layer and strength, and compare forks with steering enabled or disabled
 - Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
@@ -305,6 +306,72 @@ therefore appears as the visible answer rather than hidden reasoning. Clear the
 field to return to ordinary generation. JSON metric exports record the supplied
 text as `assistant_prefill` and the replayed token count as
 `forced_prefix_tokens`.
+
+### Steering a conversation
+
+Open **Chat → Conversation tools → Steering vector** and choose **Import vector**.
+The JSON file contains a direction previously extracted from the model. ChatLab
+imports one vector per conversation; it does not extract vectors from examples.
+This is the file shape (the three-entry vector below is only an illustration):
+
+```json
+{
+  "format": "chatlab-steering-1",
+  "model_id": "organization/model-name",
+  "layer": 12,
+  "vector": [0.12, -0.04, 0.09],
+  "strength": 1.0,
+  "enabled": true
+}
+```
+
+Use the loaded model's exact ID and a full vector with one finite number per
+hidden dimension. Layers start at **0**. `format`, `strength`, and `enabled` are
+optional; their defaults are the values shown above. Files must be at most
+4 MiB, with at most 65,536 vector entries. ChatLab checks the model ID, decoder
+architecture, target layer, and vector width before applying steering. The file
+should come from the same checkpoint and use the same layer-output convention;
+the ID and shape checks cannot establish that a direction has the intended meaning.
+
+**Enable steering**, **Steering strength**, and **Target layer** control subsequent
+Chat responses, retries, and token branches. Strength ranges from -100 to 100;
+zero disables the addition and negative values reverse the direction. The
+operation is `layer_output + strength × vector`, applied to every token position
+during both prompt processing and response generation. Vectors are not normalized
+automatically, so useful strength values depend on how the vector was created.
+Model weights are unchanged, and the addition is removed when a response finishes,
+fails, or is stopped.
+
+Steering needs a PyTorch model: it adds its vector through a forward hook on a
+decoder block, and an MLX checkpoint has none. With an MLX model loaded, an
+enabled vector is refused with a message saying so and the previous response is
+left in place; load the same model's unquantized Transformers version to steer
+it. A vector that is switched off, or at strength zero, adds nothing and runs on
+either backend.
+
+Forks inherit their parent's vector and controls; **New conversation** starts
+without a vector. ChatLab stores each vector once in `conversations-vectors/`
+beside its conversation library; responses and settings keep small references,
+so streaming does not copy or rewrite the vector for every token. **Save
+conversation** embeds each referenced vector once for transfer to another machine,
+and JSON trace exports include the response's full vector. Neither depends on the
+original upload. **Inspect layers** replays the vector and strength recorded for
+that response even after the controls change. Its probabilities describe the
+steered model before sampling filters.
+
+To reclaim vector files left behind after removing vectors or deleting
+conversations, first quit ChatLab and close any other running ChatLab servers,
+then run this from the source checkout:
+
+```bash
+.venv/bin/python -m steering --cleanup-unused
+```
+
+The command keeps vectors referenced by any saved response or conversation
+setting, including inactive forks and disabled steering. It uses the same
+`CHATLAB_LIBRARY_PATH` / `XDG_DATA_HOME` location as the app and refuses cleanup
+if the saved library is unreadable or invalid. Cleanup runs only when explicitly
+requested; keeping ChatLab closed protects references still held by live sessions.
 
 ## Branching from a token
 

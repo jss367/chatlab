@@ -100,7 +100,8 @@ def inspect_layers(
         return
     generation, metrics = metrics_state
     _prompt_generation, prompt_metrics = prompt_metrics_state
-    context_generation, context_ids, load_id = context_state
+    context_generation, context_ids, load_id = context_state[:3]
+    steering = context_state[3] if len(context_state) > 3 else None
     if generation != target["generation"] or context_generation != generation:
         yield (*refused, INSPECT_GONE)
         return
@@ -145,7 +146,8 @@ def inspect_layers(
         started = time.monotonic()
         try:
             insight = runtime.MANAGER.inspect(
-                sequence, index, context_count=len(context_ids), load_id=load_id
+                sequence, index, context_count=len(context_ids), load_id=load_id,
+                **({"steering": steering} if steering is not None else {}),
             ).to_dict()
         except ModelChanged:
             yield (*refused, INSPECT_MODEL_CHANGED)

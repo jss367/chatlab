@@ -573,6 +573,34 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual({metric["segment"] for metric in scored.metrics}, {"response"})
         self.assertTrue(scored.seam_verified)
 
+    def test_steering_is_refused_by_name_and_an_inactive_vector_still_runs(self):
+        # Steering adds its vector through a torch forward hook, which an
+        # mlx-lm model cannot carry. The refusal has to say so, rather than
+        # letting the decoder-block search blame the architecture.
+        import steering
+
+        manager = self.manager()
+        wanted = steering.normalize(
+            {"model_id": manager.model_id, "layer": 0, "vector": [0.5] * HIDDEN}
+        )
+        sampling = dict(temperature=0.0, top_p=1.0, top_k=0, max_new_tokens=2, seed=0)
+        messages = [{"role": "user", "content": "t3 t5"}]
+
+        with self.assertRaises(steering.SteeringError) as refused:
+            list(manager.generate(messages, **sampling, steering=wanted))
+        self.assertIn("MLX", str(refused.exception))
+        with self.assertRaises(steering.SteeringError):
+            manager.inspect([3, 5, 7, 11], 2, steering=wanted)
+        self.assertFalse(manager.busy)
+
+        # Nothing is added when the switch is off or the strength is zero,
+        # so those runs are ordinary MLX runs and must not be refused.
+        for inactive in (dict(wanted, enabled=False), dict(wanted, strength=0.0)):
+            with self.subTest(inactive=inactive):
+                updates = list(manager.generate(messages, **sampling, steering=inactive))
+                self.assertTrue(updates[-1].metrics)
+                self.assertTrue(manager.inspect([3, 5, 7, 11], 2, steering=inactive).layers)
+
 
 if __name__ == "__main__":
     unittest.main()
