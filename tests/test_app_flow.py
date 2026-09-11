@@ -7,6 +7,7 @@ import unittest
 from dataclasses import replace
 from unittest import mock
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import gradio as gr
 import numpy as np
@@ -21,12 +22,14 @@ from conversation import (
     branch_sampling,
     display_messages,
     forget_measurements,
+    from_json,
     make_turn,
     turn_entries,
     model_messages,
     new_forks,
     put_branch,
     put_branch_sampling,
+    to_json,
 )
 from model_runtime import GENERATING, GenerationUpdate, ModelChanged, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
@@ -3343,6 +3346,37 @@ class NextTokenTests(unittest.TestCase):
         self.assertEqual(len(last[TURNS][-1]["tokens"]), 9)
         self.assertIn("has ended", self.step(last)[STATUS])
 
+    def test_oversized_step_preserves_the_reply_before_any_stream_frame(self):
+        sampling = dict(FIXED, max_new_tokens=260)
+        initial = list(app.chat("hi", [], *sampling.values()))[-1]
+        with settings.override(prefill_token_limit=256):
+            for pick in (None, self.pick(initial, index=259)):
+                with self.subTest(selected=pick is not None):
+                    with mock.patch.object(runtime.MANAGER, "generate") as generate:
+                        frames = list(app.next_token(pick, "draft", initial[TURNS], *SETTINGS))
+                    generate.assert_not_called()
+                    self.assertEqual(len(frames), 1)
+                    self.assertEqual(frames[0][TURNS], initial[TURNS])
+                    self.assertEqual(frames[0][CHATBOT], initial[CHATBOT])
+                    self.assertIn("256 token limit", frames[0][STATUS])
+                    self.assertFalse(runtime.MANAGER.busy)
+
+    def test_step_holds_the_generation_slot_during_validation(self):
+        initial = self.reply()
+        validate = runtime.MANAGER.validate_generation_prefix
+
+        def during_validation(*args, **kwargs):
+            self.assertTrue(runtime.MANAGER.busy)
+            refused = list(app.chat("competing", initial[TURNS], *SETTINGS))[-1]
+            self.assertEqual(refused[TURNS], gr.skip())
+            self.assertEqual(refused[STATUS], app.BUSY_STATUS)
+            return validate(*args, **kwargs)
+
+        with mock.patch.object(runtime.MANAGER, "validate_generation_prefix", side_effect=during_validation):
+            stepped = self.step(initial)
+        self.assertEqual(len(stepped[TURNS][-1]["tokens"]), 9)
+        self.assertFalse(runtime.MANAGER.busy)
+
     def test_invisible_reasoning_tokens_survive_until_visible_text(self):
         initial = self.reply()
         runtime.MANAGER.model.script = [1]
@@ -3388,6 +3422,35 @@ class NextTokenTests(unittest.TestCase):
                     ])
                     self.assertTrue(final[TURNS][-1]["content"].startswith("Hello"))
                     self.assertEqual(final[TURNS][1]["tokens"], paused[TURNS][1]["tokens"])
+
+    def test_send_after_reloading_an_invisible_step_preserves_the_assistant_slot(self):
+        initial = self.reply()
+        runtime.MANAGER.model.script = [1]
+        paused = self.step(initial, self.pick(initial, token_id=0))
+        exported, _ = from_json(to_json(paused[TURNS]))
+        forks = new_forks()
+        forks["branches"][MAIN_BRANCH] = paused[TURNS]
+        # Switching conversations finalizes the current reply before saving.
+        # A paused step is complete and must survive that cleanup too.
+        finalized = app.fork_refused(paused[TURNS], forks, "Already on Main.")
+        self.assertEqual(finalized[2], paused[TURNS])
+        path = Path(self.enterContext(TemporaryDirectory())) / "library.json"
+        library.write(forks, path)
+        autosaved = library.read(path)["branches"][MAIN_BRANCH]
+        for restored in (exported, autosaved):
+            self.assertTrue(restored[-1]["token_step_paused"])
+            self.assertNotIn("tokens", restored[-1])
+            messages, _ = display_messages(restored)
+            self.assertEqual(messages[-1]["content"], "Paused before visible text.")
+            runtime.MANAGER.model.script = [2]
+            with mock.patch.object(runtime.MANAGER, "generate", wraps=runtime.MANAGER.generate) as generate:
+                final = list(app.chat("continue", restored, *SETTINGS))[-1]
+            self.assertEqual(generate.call_args.args[0], [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": ""},
+                {"role": "user", "content": "continue"},
+            ])
+            self.assertTrue(final[TURNS][-1]["content"].startswith("Hello"))
 
     def test_reloaded_model_and_edited_reply_are_refused(self):
         initial = self.reply()

@@ -1261,17 +1261,28 @@ def branch_from(
     branch a different continuation rather than an edit in the middle.
     """
 
-    held = occupied()
+    # Validation tokenizes the prompt under the model lock. Own the generation
+    # slot first so a competing Send cannot replace the conversation meanwhile.
+    held = runtime.MANAGER.claim_generation()
     if held:
         yield busy_state(held)
         return
+
+    try:
+        yield from _branch_from(pick, prompt_text, turns, *settings, single_step=single_step)
+    finally:
+        runtime.MANAGER.release_generation()
+
+
+def _branch_from(pick, prompt_text, turns, *settings, single_step=False):
+    """Validate and replay a token branch with the generation slot held."""
 
     turns = copy_turns(turns)
     if not pick:
         yield idle_state(prompt_text, turns, BRANCH_HINT)
         return
     if not runtime.MANAGER.loaded:
-        yield no_model_state(prompt_text, turns)
+        yield idle_state(prompt_text, turns, NO_MODEL_STATUS)
         return
     found = branch_target(turns, pick)
     if isinstance(found, str):
@@ -1308,7 +1319,25 @@ def branch_from(
     # runtime compares the same load again under the model lock.
     expected_load = turns[position].get("load_id")
     try:
-        yield from generate_reply(
+        runtime.MANAGER.validate_generation_prefix(
+            model_messages(
+                turns[:position],
+                system_prompt=settings[0],
+                include_reasoning=settings[1],
+            ),
+            forced,
+            max_new_tokens=int(settings[6]),
+            load_id=expected_load,
+        )
+    except ModelChanged:
+        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+        return
+    except (ValueError, RuntimeError) as error:
+        yield idle_state(prompt_text, turns, f"🌱 {error}")
+        return
+
+    try:
+        yield from _stream_reply(
             turns[:position],
             prompt_text,
             *settings,

@@ -328,7 +328,8 @@ def finalize_partial(turns: list[dict]) -> bool:
 
     if not turns or turns[-1]["role"] != "assistant":
         return False
-    if not (turns[-1].get("content") or turns[-1].get("reasoning")):
+    if not (turns[-1].get("content") or turns[-1].get("reasoning")
+            or turns[-1].get("token_step_paused")):
         turns.pop()
         return False
     turns[-1]["reasoning_closed"] = True
