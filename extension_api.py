@@ -71,8 +71,18 @@ class GenerationSession:
         )
 
     def decode(self, ids):
+        """Decode exactly as the runtime does when it records per-token text.
+
+        clean_up_tokenization_spaces is not left to the tokenizer's own default,
+        which some repositories set true: that rewrites spacing around
+        punctuation, so the same IDs would decode one way into a recorded metric
+        and another way here, and a caller comparing the two would see a
+        difference the vocabulary does not have.
+        """
         self._check()
-        return self._manager.tokenizer.decode(ids, skip_special_tokens=False)
+        return self._manager.tokenizer.decode(
+            ids, skip_special_tokens=False, clean_up_tokenization_spaces=False,
+        )
 
     @property
     def stop_token_ids(self):
