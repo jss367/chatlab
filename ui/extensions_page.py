@@ -55,13 +55,22 @@ def restore_extensions(active_ids):
 
 
 def build_extension_settings(active_ids, errors):
-    gr.Markdown("## Extensions\nOptional tools that share ChatLab’s loaded model and token inspection. Changes take effect after restarting ChatLab.")
+    gr.Markdown("## Extensions")
+    gr.Markdown(
+        "Optional tools that share ChatLab’s loaded model and token inspection. "
+        "Changes take effect after restarting ChatLab.",
+        elem_classes=["scale-caption"],
+    )
     for spec in CATALOGUE:
-        gr.Markdown(f"**{html.escape(spec.title)}** — {html.escape(spec.description)}")
+        gr.Markdown(
+            f"**{html.escape(spec.title)}** — {html.escape(spec.description)}",
+            elem_classes=["extension-summary"],
+        )
     enabled = gr.CheckboxGroup(
         choices=[(spec.title, spec.id) for spec in CATALOGUE],
         value=[spec.id for spec in CATALOGUE if spec.id in settings.current().enabled_extensions],
         label="Enabled extensions", elem_id="enabled-extensions",
+        info="Each one adds a page of its own to the sidebar.",
     )
     note = gr.Markdown("Bundled extensions are optional and disabled by default.", elem_id="extensions-status")
     if errors:

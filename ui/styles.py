@@ -157,32 +157,38 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 #image-inspector .form {{ border: 0; box-shadow: none; background: transparent; }}
 #image-status {{ font-size: 12px; color: var(--body-text-color-subdued); }}
 #image-output img {{ max-height: 60vh; object-fit: contain; }}
-/* Models is a form-heavy page: give sections and controls visible edges
-   without adding chrome to the conversation or inspector. */
-#models-page {{
+/* Models and Settings are form-heavy pages: give sections and controls
+   visible edges without adding chrome to the conversation or inspector.
+   Both are built from the same card, so a reader moving between them is
+   reading one page design rather than two. */
+#models-page, #settings-page {{
   background: var(--background-fill-secondary);
 }}
 #models-columns {{ align-items: flex-start; gap: 24px; }}
 #model-controls {{ gap: 24px; }}
-#models-page .model-card {{
+#models-page .model-card, #settings-page .settings-card {{
   min-width: 0; padding: 20px; gap: 16px;
   border: 1px solid var(--border-color-primary); border-radius: 12px;
   background: var(--block-background-fill);
 }}
-#models-page .model-card > * {{ flex-shrink: 0; }}
-#models-page .model-card h2 {{
+#models-page .model-card > *, #settings-page .settings-card > * {{ flex-shrink: 0; }}
+#models-page .model-card h2, #settings-page .settings-card h2 {{
   margin: 0; padding-bottom: 12px;
   border-bottom: 1px solid var(--border-color-primary);
   font-size: 17px; line-height: 24px; font-weight: 600;
 }}
-#models-page button {{ border-width: 1px; }}
+#models-page button, #settings-page button {{ border-width: 1px; }}
 #models-page textarea, #models-page input[data-testid="textbox"], #models-page input[type="password"],
-#models-page .model-sort .wrap {{
+#models-page .model-sort .wrap,
+#settings-page textarea, #settings-page input[data-testid="textbox"],
+#settings-page input[type="number"] {{
   border: 1px solid var(--input-border-color); border-radius: 8px;
   background: var(--input-background-fill);
 }}
 #models-page textarea:focus, #models-page input[data-testid="textbox"]:focus,
-#models-page input[type="password"]:focus {{
+#models-page input[type="password"]:focus,
+#settings-page textarea:focus, #settings-page input[data-testid="textbox"]:focus,
+#settings-page input[type="number"]:focus {{
   border-color: var(--color-accent);
   outline: 2px solid var(--color-accent); outline-offset: 2px;
 }}
@@ -219,7 +225,7 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 #models-page .form:has(> #model-search-results):not(:has(input[type="radio"])) {{ display: none; }}
 #models-page .model-list {{ padding: 0; border: 0; }}
 #models-page .model-list label {{ padding: 12px; border-width: 1px; border-radius: 8px; }}
-#models-page .block.model-detail {{
+#models-page .block.model-detail, #settings-page .block.model-detail {{
   padding: 12px 14px; border: 1px solid var(--border-color-primary);
   border-width: 1px !important;
   border-radius: 8px; background: var(--background-fill-secondary);
@@ -227,10 +233,56 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 }}
 #models-page .block.model-detail:not(:has(.md > *)) {{ display: none; }}
 @media (max-width: 800px) {{
-  #models-page {{ padding: 20px 16px; }}
-  #models-page .model-card {{ padding: 16px; }}
+  #models-page, #settings-page {{ padding: 20px 16px; }}
+  #models-page .model-card, #settings-page .settings-card {{ padding: 16px; }}
   #model-controls {{ min-width: min(360px, 100%) !important; }}
 }}
+
+/* Settings. The two columns each hold a stack of cards: the boxes that are
+   typed into on the left, what the machine reports and what is only chosen
+   once on the right. The gap between the cards is the gap between the
+   columns, so the page reads as a grid however wide the window is. */
+#settings-columns {{ align-items: flex-start; gap: 24px; }}
+#settings-prompting, #settings-machine {{ gap: 24px; }}
+/* A setting's own explanation is a caption, not body text: Gradio's prose
+   sizes the paragraph, so the class has to reach it. */
+#settings-page .scale-caption p {{
+  margin: 0; font-size: 0.85rem; line-height: 1.55;
+  color: var(--body-text-color-subdued);
+}}
+#settings-page .settings-card .form {{
+  border: 0; box-shadow: none; background: transparent;
+}}
+/* A lone checkbox reads as a switch for the card it sits in rather than as
+   a bordered field of its own. */
+#settings-page .settings-card label > input[type="checkbox"] {{ flex: 0 0 auto; }}
+#settings-page #enabled-extensions {{ border: 0; padding: 0; background: transparent; }}
+/* A checkbox inside a group comes without the border the lone ones have,
+   which left the box invisible against the card. */
+#settings-page #enabled-extensions input[type="checkbox"] {{
+  border: 1px solid var(--checkbox-border-color); border-radius: 4px;
+}}
+#settings-page .extension-summary p {{
+  margin: 0; font-size: 0.85rem; color: var(--body-text-color-subdued);
+}}
+#settings-page #extensions-status p {{ margin: 0; font-size: 0.85rem; }}
+/* The machine's figures as a table of readings: a name against a value, one
+   per line, rather than a bulleted list of sentences. */
+#settings-page .hardware-panel .md > p:first-child {{
+  margin: 0 0 8px; color: var(--body-text-color); font-size: 0.95rem;
+}}
+#settings-page .hardware-panel ul {{ margin: 0; padding: 0; list-style: none; }}
+#settings-page .hardware-panel li {{
+  margin: 0; padding: 7px 0;
+  border-top: 1px solid var(--border-color-primary);
+}}
+#settings-page .hardware-panel li:first-child {{ border-top: 0; }}
+#settings-page .hardware-panel li strong {{
+  color: var(--body-text-color); font-weight: 600;
+}}
+#hardware-footer {{ align-items: center; gap: 12px; }}
+#hardware-footer > button {{ align-self: flex-start; }}
+#settings-hero p {{ max-width: 78ch; }}
 #conversations-heading h2, #inspector-heading h2 {{
   font-size: 15px; line-height: 24px; font-weight: 600; margin: 0;
 }}

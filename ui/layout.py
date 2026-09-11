@@ -1107,108 +1107,120 @@ def build_app() -> gr.Blocks:
                     "box, because they are moved between one reply and the next.",
                     elem_id="settings-hero",
                 )
-                extensions_control, extensions_note, active_extensions = build_extension_settings([ext.spec.id for ext in extensions], extension_errors)
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown("## System prompt, reasoning, and prefill")
-                        system_prompt = gr.Textbox(
-                            value=saved.system_prompt,
-                            label="System prompt",
-                            placeholder="You are a careful assistant that answers concisely.",
-                            lines=3,
-                            info="Sent as a system message ahead of the conversation. Leave empty to use the model's default behavior.",
-                        )
-                        assistant_prefill = gr.Textbox(
-                            value=saved.assistant_prefill,
-                            label="Assistant prefill (optional)",
-                            placeholder="Start every reply with these exact words…",
-                            lines=2,
-                            info=(
-                                "Replays this text as the start of each answer, then lets the "
-                                "model continue. For reasoning models, ChatLab closes the "
-                                "reasoning block first so this remains visible answer text."
-                            ),
-                        )
-                        thinking_mode = gr.Radio(
-                            choices=THINKING_CHOICES,
-                            value=saved.thinking_mode,
-                            label="Thinking mode",
-                            info=(
-                                "Applies to the next chat reply. Model default uses the model's "
-                                "normal behavior. Token branches keep the original reply's mode. "
-                                "An assistant prefill starts directly in the answer."
-                            ),
-                            visible=runtime.MANAGER.supports_thinking,
-                        )
-                        keep_reasoning = gr.Checkbox(
-                            value=saved.keep_reasoning,
-                            label="Send previous reasoning back to the model",
-                            info="Off by default. Think models write a fresh reasoning block each turn, so replaying old ones burns context and usually hurts the next answer.",
-                        )
+                # One card per subject, the same cards the Models page is
+                # built from. The long text boxes take the left column on
+                # their own; the short readings stack beside them, which is
+                # what keeps either column from running far past the other.
+                with gr.Row(elem_id="settings-columns"):
+                    with gr.Column(min_width=360, elem_id="settings-prompting"):
+                        with gr.Column(elem_classes=["settings-card"]):
+                            gr.Markdown("## Prompting")
+                            system_prompt = gr.Textbox(
+                                value=saved.system_prompt,
+                                label="System prompt",
+                                placeholder="You are a careful assistant that answers concisely.",
+                                lines=3,
+                                info="Sent as a system message ahead of the conversation. Leave empty to use the model's default behavior.",
+                            )
+                            assistant_prefill = gr.Textbox(
+                                value=saved.assistant_prefill,
+                                label="Assistant prefill (optional)",
+                                placeholder="Start every reply with these exact words…",
+                                lines=2,
+                                info=(
+                                    "Replays this text as the start of each answer, then lets the "
+                                    "model continue. For reasoning models, ChatLab closes the "
+                                    "reasoning block first so this remains visible answer text."
+                                ),
+                            )
+                            thinking_mode = gr.Radio(
+                                choices=THINKING_CHOICES,
+                                value=saved.thinking_mode,
+                                label="Thinking mode",
+                                info=(
+                                    "Applies to the next chat reply. Model default uses the model's "
+                                    "normal behavior. Token branches keep the original reply's mode. "
+                                    "An assistant prefill starts directly in the answer."
+                                ),
+                                visible=runtime.MANAGER.supports_thinking,
+                            )
+                            keep_reasoning = gr.Checkbox(
+                                value=saved.keep_reasoning,
+                                label="Send previous reasoning back to the model",
+                                info="Off by default. Think models write a fresh reasoning block each turn, so replaying old ones burns context and usually hurts the next answer.",
+                            )
 
-                    with gr.Column():
-                        gr.Markdown("## Input")
-                        enter_sends = gr.Checkbox(
-                            value=saved.enter_sends,
-                            label="Enter sends the message",
-                            info="Shift+Enter starts a new line. Turn off to swap the two.",
-                        )
-                        gr.Markdown(
-                            "Escape stops a response that is still being written, "
-                            "from anywhere on the Chat page - including the message "
-                            "box and the Score text tab.",
-                            elem_classes=["scale-caption"],
-                        )
+                        with gr.Column(elem_classes=["settings-card"]):
+                            gr.Markdown("## Input")
+                            enter_sends = gr.Checkbox(
+                                value=saved.enter_sends,
+                                label="Enter sends the message",
+                                info="Shift+Enter starts a new line. Turn off to swap the two.",
+                            )
+                            gr.Markdown(
+                                "Escape stops a response that is still being written, "
+                                "from anywhere on the Chat page - including the message "
+                                "box and the Score text tab.",
+                                elem_classes=["scale-caption"],
+                            )
 
-                        gr.Markdown("## Analysis")
-                        analyze_prompt = gr.Checkbox(
-                            value=saved.analyze_prompt,
-                            label="Measure prompt tokens",
-                            info="Scores every prompt token during the same pass that warms the cache.",
-                        )
+                        with gr.Column(elem_classes=["settings-card"]):
+                            gr.Markdown("## Analysis")
+                            analyze_prompt = gr.Checkbox(
+                                value=saved.analyze_prompt,
+                                label="Measure prompt tokens",
+                                info="Scores every prompt token during the same pass that warms the cache.",
+                            )
 
-                        gr.Markdown("## Memory")
-                        prefill_token_limit = gr.Number(
-                            value=saved.prefill_token_limit,
-                            precision=0,
-                            minimum=settings.PREFILL_TOKEN_LIMIT_RANGE[0],
-                            maximum=settings.PREFILL_TOKEN_LIMIT_RANGE[1],
-                            label="Context limit (tokens)",
-                            info=(
-                                "The most tokens one prompt may carry, and the "
-                                "ceiling on the response length. Every token in "
-                                "the conversation costs memory for as long as the "
-                                "answer runs, so this is the control to lower when "
-                                "a model runs out of it."
-                            ),
-                        )
-                        gr.Markdown(
-                            f"Settings are saved to `{settings.settings_path()}` as "
-                            "you change them, and read from there at startup. The "
-                            "Metal memory cap lives in that file as "
-                            "`mps_memory_fraction`.",
-                            elem_classes=["scale-caption"],
-                        )
+                    with gr.Column(min_width=360, elem_id="settings-machine"):
+                        with gr.Column(elem_classes=["settings-card"]):
+                            gr.Markdown("## Memory")
+                            prefill_token_limit = gr.Number(
+                                value=saved.prefill_token_limit,
+                                precision=0,
+                                minimum=settings.PREFILL_TOKEN_LIMIT_RANGE[0],
+                                maximum=settings.PREFILL_TOKEN_LIMIT_RANGE[1],
+                                label="Context limit (tokens)",
+                                info=(
+                                    "The most tokens one prompt may carry, and the "
+                                    "ceiling on the response length. Every token in "
+                                    "the conversation costs memory for as long as the "
+                                    "answer runs, so this is the control to lower when "
+                                    "a model runs out of it."
+                                ),
+                            )
+                            gr.Markdown(
+                                f"Settings are saved to `{settings.settings_path()}` as "
+                                "you change them, and read from there at startup. The "
+                                "Metal memory cap lives in that file as "
+                                "`mps_memory_fraction`.",
+                                elem_classes=["scale-caption"],
+                            )
 
                         # What the memory guard is reading when it refuses a
                         # load. These figures were in the log alone, which
                         # made a refusal something to look up afterwards
                         # rather than something to check first.
-                        gr.Markdown("## Hardware")
-                        hardware_view = gr.Markdown(
-                            hardware_card(),
-                            elem_id="hardware",
-                            elem_classes=["model-detail"],
-                        )
-                        refresh_hardware_button = gr.Button(
-                            "↻ Refresh", size="sm", scale=0, min_width=120
-                        )
-                        gr.Markdown(
-                            "Estimates, not guarantees: they are what ChatLab "
-                            "judges a load against, and each load and reply is "
-                            "recorded in the log with the same figures.",
-                            elem_classes=["scale-caption"],
-                        )
+                        with gr.Column(elem_classes=["settings-card"]):
+                            gr.Markdown("## Hardware")
+                            hardware_view = gr.Markdown(
+                                hardware_card(),
+                                elem_id="hardware",
+                                elem_classes=["model-detail", "hardware-panel"],
+                            )
+                            with gr.Row(elem_id="hardware-footer"):
+                                gr.Markdown(
+                                    "Estimates, not guarantees: they are what ChatLab "
+                                    "judges a load against, and each load and reply is "
+                                    "recorded in the log with the same figures.",
+                                    elem_classes=["scale-caption"],
+                                )
+                                refresh_hardware_button = gr.Button(
+                                    "↻ Refresh", size="sm", scale=0, min_width=110
+                                )
+
+                        with gr.Column(elem_classes=["settings-card"]):
+                            extensions_control, extensions_note, active_extensions = build_extension_settings([ext.spec.id for ext in extensions], extension_errors)
 
         nav.change(
             show_page,
