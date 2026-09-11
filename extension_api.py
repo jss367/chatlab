@@ -71,13 +71,36 @@ class GenerationSession:
         )
 
     def decode(self, ids):
+        """Decode exactly as the runtime does when it records per-token text.
+
+        clean_up_tokenization_spaces is not left to the tokenizer's own default,
+        which some repositories set true: that rewrites spacing around
+        punctuation, so the same IDs would decode one way into a recorded metric
+        and another way here, and a caller comparing the two would see a
+        difference the vocabulary does not have.
+        """
         self._check()
-        return self._manager.tokenizer.decode(ids, skip_special_tokens=False)
+        return self._manager.tokenizer.decode(
+            ids, skip_special_tokens=False, clean_up_tokenization_spaces=False,
+        )
 
     @property
     def stop_token_ids(self):
         self._check()
         return set(self._manager._stop_token_ids())
+
+    @property
+    def hidden_token_ids(self):
+        """Special token IDs that never reach a recorded response text.
+
+        The streaming decoder drops these rather than decoding them, so a
+        caller checking recorded text against a fresh decode of the same IDs
+        has to leave out exactly this set. Reader-supplied prefill is the
+        exception the runtime makes: replay forces those tokens visible,
+        special-token spellings included.
+        """
+        self._check()
+        return set(self._manager.hidden_token_ids())
 
     def generate(self, messages, *, temperature, top_p, top_k, max_new_tokens, seed,
                  tools=None, forced_ids=(), literal_prefill_tokens=0, analyze_prompt=False):

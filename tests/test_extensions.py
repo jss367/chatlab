@@ -136,6 +136,23 @@ class RuntimeBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'closed'):
             session.encode_replacement([1], 'word')
 
+    def test_decode_matches_how_the_runtime_records_per_token_text(self):
+        # A tokenizer whose own default rewrites spacing would otherwise decode
+        # the same ID one way into a recorded metric and another way here,
+        # which reads as a vocabulary change that never happened.
+        manager = FakeManager()
+        seen = {}
+
+        def decode(ids, **kw):
+            seen.update(kw)
+            text = ''.join(map(chr, ids))
+            return text.lstrip() if kw.get('clean_up_tokenization_spaces', True) else text
+
+        manager.tokenizer = SimpleNamespace(encode=FakeManager.tokenizer.encode, decode=decode)
+        with ModelService(lambda: manager).open_session() as session:
+            self.assertEqual(session.decode([32, 104, 105]), ' hi')
+        self.assertIs(seen['clean_up_tokenization_spaces'], False)
+
     def test_exclusive_session_pins_model_and_closes_stream(self):
         manager = FakeManager()
         service = ModelService(lambda: manager)

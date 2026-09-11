@@ -196,7 +196,7 @@ def _build_page(context):
                 detail = gr.Markdown("Select a model-generated token above.")
                 alternatives = gr.Dataframe(headers=["Token ID", "Text", "Raw probability"], interactive=False)
             with gr.Accordion("Edit selected token", open=True):
-                gr.Markdown("Pause or stop, then click a generated token. Choose an alternative or enter replacement text (which may contain several tokens). Regeneration creates a new run, keeping earlier tokens and rewinding this response and all later moves. The original is saved for replay.")
+                gr.Markdown("Pause or stop, then click a generated token. Choose an alternative or enter replacement text (which may contain several tokens). Regeneration creates a new run, keeping earlier tokens and rewinding this response and all later moves. The original is saved for replay. A run uploaded below can be edited the same way once its own model is loaded; the edit forks it into a live episode and leaves the uploaded file untouched.")
                 replacement = gr.Textbox(label="Replacement text", lines=2)
                 candidate = gr.Dropdown(choices=[("Use replacement text", "text")], value="text", label="Replacement token")
                 edit_button = gr.Button("Replace token and regenerate", elem_id="maze-edit-token")
@@ -213,7 +213,7 @@ def _build_page(context):
                 with gr.Row():
                     save = gr.Button("Export run JSON", size="sm")
                     download = gr.File(label="Saved run", interactive=False)
-                upload = gr.File(label="Load a saved run for replay", file_types=[".json"], type="filepath")
+                upload = gr.File(label="Load a saved run for replay or token editing", file_types=[".json"], type="filepath")
             gr.Markdown("Exploratory tool: movement requires a completed, valid `move` call. Text claiming movement does not move the character. A natural end without a call ends the episode. After interruption, recovery allows 1,024 sampled tokens / 4 attempts. Run JSON records prompts, token IDs, probabilities, supplied text, actions and settings. The current tool parser supports Qwen-style `<tool_call>` responses. This view does not train a model.")
             models = gr.Button("Choose / load model", size="sm")
     outputs = [maze_board, state_text, strip, raw, prefix_note, prefix_text, events, metrics_state, turn_picker, detail, alternatives]
@@ -346,7 +346,10 @@ def _build_page(context):
             with context.models.open_session() as manager:
                 new = fork_token_edit(ep, turn_index, token_index, text_value, manager,
                                       candidate_id=None if candidate_value == "text" else int(candidate_value))
-            ep.save(runs_dir(context))
+            if not ep.replay_only:
+                # A saved run's snapshot must never overwrite a newer archive
+                # holding the same run_id. The uploaded file is the parent copy.
+                ep.save(runs_dir(context))
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
         yield (new, *views(new, show, selections, session_id), None, None)
