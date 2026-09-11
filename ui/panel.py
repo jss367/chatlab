@@ -513,7 +513,11 @@ def branch_ready_text(pick: dict) -> str:
     )
 
 
-def select_transcript_token(turns: list[dict] | None, event: gr.SelectData):
+def select_transcript_token(
+    turns: list[dict] | None,
+    metrics_state: tuple[int, list[dict]],
+    event: gr.SelectData,
+):
     """Publish the token the reader clicked in the conversation's token view.
 
     One listener rather than four, because all of them ask the same question
@@ -522,6 +526,16 @@ def select_transcript_token(turns: list[dict] | None, event: gr.SelectData):
     layer inspector would explain, and an empty pick - a row chosen for the
     previous token must not stay armed under a different one.
 
+    ``metrics_state`` is read for its stamp alone, and it is the whole reason
+    the stamp still exists here. Gradio resolves a listener's inputs when it
+    gets round to processing the event, so a click made a moment before Retry,
+    Undo, Clear or a switch arrives holding the conversation as it was - and
+    would answer confidently about a reply that has since been replaced,
+    landing on top of the reset frame that removed it, which every later
+    streaming frame then skips. The stamp travels with the conversation it was
+    snapshotted beside; comparing it against the live one is what tells a
+    click that was overtaken from one that was not.
+
     The layer inspector is offered for the live reply alone. It rebuilds the
     model's input from the prompt token ids published with that reply, and an
     older turn's prompt is not on screen to rebuild from; the turn carries the
@@ -529,9 +543,12 @@ def select_transcript_token(turns: list[dict] | None, event: gr.SelectData):
     guess.
     """
 
+    generation, _metrics = metrics_state
+    if generation != current_metrics_generation():
+        return (gr.skip(),) * 5
     found = transcript_pick(turns, event)
     if found is None:
-        return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
+        return (gr.skip(),) * 5
     position, token_index = found
     turn = (turns or [])[position]
     if token_index is None:

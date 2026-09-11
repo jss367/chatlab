@@ -2031,7 +2031,7 @@ def build_app() -> gr.Blocks:
         # asks of it, so it is one listener rather than four.
         token_strip.select(
             select_transcript_token,
-            conversation_state,
+            [conversation_state, metrics_state],
             [token_detail, alternatives, selected_token, inspect_target, branch_pick],
         )
         # And a second that keeps the message it landed in, so Fork works from

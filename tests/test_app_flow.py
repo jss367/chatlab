@@ -135,7 +135,7 @@ def click_token(frame, token_index, turn=-1):
 
     turns = frame[TURNS]
     _detail, _rows, selection, _target, _pick = app.select_transcript_token(
-        turns, token_span(turns, token_index, turn)
+        turns, frame[METRICS], token_span(turns, token_index, turn)
     )
     return selection
 
@@ -1061,7 +1061,7 @@ class TokenViewTests(unittest.TestCase):
         final = self.respond()
         turns = final[TURNS]
         detail, rows, selection, target, pick = app.select_transcript_token(
-            turns, token_span(turns, 1)
+            turns, final[METRICS], token_span(turns, 1)
         )
         self.assertIn("Token 2", detail)
         self.assertTrue(rows)
@@ -1072,12 +1072,38 @@ class TokenViewTests(unittest.TestCase):
         self.assertEqual(target, {"generation": final[METRICS][0], "strip": "response", "index": 1})
         self.assertIsNone(pick)
 
+    def test_a_click_overtaken_by_a_conversation_change_is_dropped(self):
+        """A click queued just before Retry, Undo, Clear or a switch.
+
+        Gradio resolves a listener's inputs when it gets round to the event,
+        so the handler is handed the conversation as it was. Answering would
+        land a token from the replaced reply on top of the reset frame that
+        removed it, and every later streaming frame skips those outputs, so it
+        would stay there.
+        """
+
+        final = self.respond()
+        turns, stamp = final[TURNS], final[METRICS]
+        app.new_metrics_generation()  # what the reset frame mints
+
+        published = app.select_transcript_token(turns, stamp, token_span(turns, 1))
+        self.assertEqual(published, (gr.skip(),) * 5)
+
+    def test_a_click_made_against_the_panel_on_screen_is_published(self):
+        final = self.respond()
+        turns = final[TURNS]
+        detail, _rows, selection, _target, _pick = app.select_transcript_token(
+            turns, final[METRICS], token_span(turns, 1)
+        )
+        self.assertIn("Token 2", detail)
+        self.assertIsNotNone(selection)
+
     def test_clicking_a_heading_empties_the_panel(self):
         final = self.respond()
         turns = final[TURNS]
         spans, index = app.transcript_entries(turns, DEFAULT_COLOR_SCALE)
         detail, rows, selection, target, pick = app.select_transcript_token(
-            turns, select(index.index((0, None)))
+            turns, final[METRICS], select(index.index((0, None)))
         )
         self.assertEqual(detail, app.NO_TOKEN_SELECTED)
         self.assertEqual(rows, [])
@@ -1093,7 +1119,7 @@ class TokenViewTests(unittest.TestCase):
         second = self.respond("again", first[TURNS])
         turns = second[TURNS]
         _detail, _rows, selection, target, _pick = app.select_transcript_token(
-            turns, token_span(turns, 1, turn=1)
+            turns, second[METRICS], token_span(turns, 1, turn=1)
         )
         self.assertEqual(selection["turn"], 1)
         self.assertIsNone(target)
@@ -1102,7 +1128,7 @@ class TokenViewTests(unittest.TestCase):
         final = self.respond()
         runtime.MANAGER.load_count += 1
         detail, _rows, selection, _target, _pick = app.select_transcript_token(
-            final[TURNS], token_span(final[TURNS], 1)
+            final[TURNS], final[METRICS], token_span(final[TURNS], 1)
         )
         self.assertIn(app.BRANCH_MODEL_CHANGED, detail)
         # Still published: the numbers describe what the model did produce,
@@ -1148,7 +1174,7 @@ class TokenViewTests(unittest.TestCase):
         # longer see must not stay waiting on the button.
         final = self.respond()
         detail, _rows, selection, _target, _pick = app.select_transcript_token(
-            final[TURNS], token_span(final[TURNS], 1)
+            final[TURNS], final[METRICS], token_span(final[TURNS], 1)
         )
         self.assertIsNotNone(selection)
         scored = list(app.score_text("", "hi", False, DEFAULT_COLOR_SCALE))[-1]
