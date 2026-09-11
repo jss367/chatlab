@@ -1018,11 +1018,11 @@ class ModelFitTests(unittest.TestCase):
 
         # Nothing to correct yet: torch is still importing.
         self.assertEqual(
-            app.refresh_after_device(False, None, "Name", "4-bit"), (gr.skip(),) * 6
+            app.refresh_after_device(False, None, "Name", "4-bit"), (gr.skip(),) * 7
         )
 
         models_page.imported_torch = lambda: object()
-        radio, _detail, _summary, _results, _search_detail, known = (
+        radio, _detail, _summary, _results, _search_detail, _selected, known = (
             app.refresh_after_device(False, None, "Name", "4-bit")
         )
 
@@ -1030,7 +1030,7 @@ class ModelFitTests(unittest.TestCase):
         self.assertIn("· tight", dict((v, k) for k, v in radio["choices"])[OLMO])
         # And once it has run, it never runs again.
         self.assertEqual(
-            app.refresh_after_device(True, None, "Name", "4-bit"), (gr.skip(),) * 6
+            app.refresh_after_device(True, None, "Name", "4-bit"), (gr.skip(),) * 7
         )
 
     def test_a_search_run_before_the_device_was_read_is_repainted_too(self):
@@ -1044,12 +1044,12 @@ class ModelFitTests(unittest.TestCase):
         models_page.imported_torch = lambda: object()
         self.addCleanup(lambda: setattr(models_page, "imported_torch", original))
 
-        _radio, _detail, _summary, results, _search, known = app.refresh_after_device(
-            False, None, "Name", "full", None, None, held
+        _radio, _detail, _summary, results, _search, _selected, known = (
+            app.refresh_after_device(False, None, "Name", "full", None, None, held)
         )
 
         self.assertTrue(known)
-        self.assertIn("fits", results["choices"][0][0])
+        self.assertEqual(cells(results, "Fit"), ["fits"])
 
     def test_the_selected_model_says_what_the_verdict_rests_on(self):
         _box, detail = app.select_my_model(OLMO, "full")
@@ -1338,6 +1338,25 @@ INSTRUCT = HubModel(
 GATED = HubModel(model_id="meta-llama/Llama-3.1-8B", gated="manual")
 
 
+def cells(table, column):
+    """One column of a search table update, top to bottom, as the numbers underneath."""
+
+    return list(table["value"].data[column])
+
+
+def painted(table) -> dict:
+    """What the browser is sent for a search table: headers, data, and metadata."""
+
+    return gr.Dataframe(interactive=False).postprocess(table["value"]).model_dump()
+
+
+def picked(model_id: str | None, *rest) -> gr.SelectData:
+    """A click on a row whose first cell is ``model_id``; None for no row at all."""
+
+    row = [model_id, *rest] if model_id else None
+    return gr.SelectData(None, {"index": [0, 0], "value": model_id, "row_value": row})
+
+
 class ModelSearchPaneTests(unittest.TestCase):
     """What Model search lists, and what choosing a result does."""
 
@@ -1359,43 +1378,87 @@ class ModelSearchPaneTests(unittest.TestCase):
             raise self.results
         return list(self.results)
 
-    def test_results_are_listed_with_size_and_popularity(self):
-        radio, detail, state = app.search_models("  olmo 3 ", "tok")
+    def test_results_are_tabled_with_size_and_popularity(self):
+        table, detail, state, selected = app.search_models("  olmo 3 ", "tok")
 
         self.assertEqual(self.queries, [("olmo 3", "tok", TEXT_KIND)])
+        sent = painted(table)
         self.assertEqual(
-            radio["choices"],
+            sent["headers"], ["Model", "Params", "Fit", "Downloads", "Likes", "Updated"]
+        )
+        # The numbers underneath are numbers, so the browser sorts them as
+        # such; a result whose parameter count the hub did not give has no
+        # size to judge, so it is listed without a verdict.
+        self.assertEqual(
+            sent["data"],
             [
-                (
-                    "allenai/Olmo-3-7B-Instruct · 7.3B params · fits · 281K downloads",
-                    "allenai/Olmo-3-7B-Instruct",
-                ),
-                # A result whose parameter count the hub did not give has no
-                # size to judge, so it is listed without a verdict.
-                ("meta-llama/Llama-3.1-8B", "meta-llama/Llama-3.1-8B"),
+                ["allenai/Olmo-3-7B-Instruct", 7_298_011_136, "fits", 281_405, 143, "2026-06-25"],
+                ["meta-llama/Llama-3.1-8B", None, "", None, None, None],
             ],
         )
-        self.assertIsNone(radio["value"])
+        # And they are shown the way the hub shows them.
+        self.assertEqual(
+            sent["metadata"]["display_value"],
+            [
+                ["allenai/Olmo-3-7B-Instruct", "7.3B", "fits", "281K", "143", "2026-06-25"],
+                ["meta-llama/Llama-3.1-8B", "—", "", "—", "—", "—"],
+            ],
+        )
+        self.assertIsNone(selected)
         self.assertIn("2 results", detail)
         self.assertEqual(set(state), {INSTRUCT.model_id, GATED.model_id})
+        # The columns share the width by weight, so the Model column cannot
+        # grow to its longest ID and push the last columns out of view.
+        self.assertEqual(table["column_widths"], ["38%", "11%", "10%", "14%", "10%", "17%"])
+
+    def test_rows_are_tinted_by_fit(self):
+        # Room on the machine for the 7B, but not free right now: tight.
+        roomy(self, total_gb=48, available_gb=10, backend="mps", dtype="float16")
+        self.results = [
+            INSTRUCT,
+            HubModel(model_id="org/huge", parameters=500_000_000_000),
+            HubModel(model_id="org/small", parameters=100_000_000),
+        ]
+        table, _, _, _ = app.search_models("", "")
+
+        self.assertEqual(cells(table, "Fit"), ["tight", "won't fit", "fits"])
+        styling = painted(table)["metadata"]["styling"]
+        self.assertEqual({style for style in styling[0]}, {"color: var(--fit-tight)"})
+        self.assertEqual(
+            {style for style in styling[1]}, {"color: var(--body-text-color-subdued)"}
+        )
+        self.assertEqual({style for style in styling[2]}, {""})
 
     def test_an_empty_query_browses_popular_models(self):
-        radio, detail, state = app.search_models("   ", "")
+        table, detail, state, _ = app.search_models("   ", "")
         self.assertEqual(self.queries, [("", "", TEXT_KIND)])
-        self.assertEqual(len(radio["choices"]), 2)
+        self.assertEqual(len(cells(table, "Model")), 2)
         self.assertIn("Most downloaded first", detail)
         self.assertEqual(len(state), 2)
 
     def test_recommended_starters_work_offline(self):
         self.results = ConnectionError("offline")
         # Gradio sends None for an untouched textbox on initial page load.
-        radio, detail, state = app.search_models(None, "", order="Recommended")
+        table, detail, state, selected = app.search_models(None, "", order="Recommended")
         self.assertEqual(self.queries, [])
         self.assertEqual(len(state), 3)
-        self.assertIsNone(radio["value"])
+        self.assertIsNone(selected)
         self.assertIn("offline", detail)
-        box, description = app.select_search_result("Qwen/Qwen3-0.6B", state)
+        # Starters carry a download size and no popularity, so their table
+        # has that column and not the hub's; the note sits under the name.
+        sent = painted(table)
+        self.assertEqual(sent["headers"], ["Model", "Params", "Download size", "Fit"])
+        self.assertEqual(table["column_widths"], ["51%", "15%", "20%", "14%"])
+        self.assertEqual(sent["metadata"]["display_value"][1][2], "1.5 GB")
+        self.assertEqual(
+            sent["data"][1][0], "Qwen/Qwen3-0.6B\nCompact reasoning — try a thinking model with modest memory needs."
+        )
+        # A click reports the whole cell, and the note is not part of the ID.
+        box, description, chosen = app.select_search_result(
+            state, None, picked(sent["data"][1][0])
+        )
         self.assertEqual(box["value"], "Qwen/Qwen3-0.6B")
+        self.assertEqual(chosen, "Qwen/Qwen3-0.6B")
         self.assertIn("Compact reasoning", description)
         self.assertIn("Full download", description)
         self.assertIn("not this download", description)
@@ -1405,60 +1468,77 @@ class ModelSearchPaneTests(unittest.TestCase):
             HubModel(model_id=f"org/huge-{i}", parameters=500_000_000_000)
             for i in range(25)
         ] + [INSTRUCT, GATED]
-        radio, detail, state = app.search_models("", "", fits_only=True)
-        self.assertEqual([value for _, value in radio["choices"]], [INSTRUCT.model_id])
+        table, detail, state, _ = app.search_models("", "", fits_only=True)
+        self.assertEqual(cells(table, "Model"), [INSTRUCT.model_id])
         self.assertEqual(len(state), 27)
         self.assertIn("unknown sizes are hidden", detail)
-        radio, _ = models_page.refresh_search_results(None, state, fits_only=False)
-        self.assertEqual(len(radio["choices"]), 20)
+        table, _, _ = models_page.refresh_search_results(None, state, fits_only=False)
+        self.assertEqual(len(cells(table, "Model")), 20)
         self.assertEqual(len(self.queries), 1)
 
     def test_filtered_selection_clears_and_returns_after_precision_change(self):
         roomy(self, total_gb=16, available_gb=10, backend="mps", dtype="float16")
         state = {INSTRUCT.model_id: INSTRUCT, GATED.model_id: GATED}
-        radio, detail = models_page.refresh_search_results(
+        table, detail, selected = models_page.refresh_search_results(
             INSTRUCT.model_id, state, "full", True
         )
-        self.assertEqual(radio["choices"], [])
-        self.assertIsNone(radio["value"])
+        self.assertEqual(cells(table, "Model"), [])
+        self.assertIsNone(selected)
         self.assertIn("No estimated fits", detail)
-        radio, _ = models_page.refresh_search_results(None, state, "4-bit", True)
-        self.assertEqual([value for _, value in radio["choices"]], [INSTRUCT.model_id])
-        self.assertIsNone(radio["value"])
+        table, _, selected = models_page.refresh_search_results(None, state, "4-bit", True)
+        self.assertEqual(cells(table, "Model"), [INSTRUCT.model_id])
+        self.assertIsNone(selected)
+
+    def test_a_selection_survives_a_filter_that_keeps_it(self):
+        state = {INSTRUCT.model_id: INSTRUCT, GATED.model_id: GATED}
+        table, detail, selected = models_page.refresh_search_results(
+            INSTRUCT.model_id, state, "full", True
+        )
+        self.assertEqual(cells(table, "Model"), [INSTRUCT.model_id])
+        self.assertEqual(selected, INSTRUCT.model_id)
+        self.assertIn("https://huggingface.co/allenai/Olmo-3-7B-Instruct", detail)
 
     def test_image_recommendations_are_separate_and_do_not_guess_memory(self):
-        radio, _, state = app.search_models("", "", kind=IMAGE_KIND, order="Recommended")
+        table, _, state, _ = app.search_models("", "", kind=IMAGE_KIND, order="Recommended")
         self.assertEqual(list(state), ["stabilityai/sd-turbo"])
         self.assertEqual(models_page.results_kind(state), IMAGE_KIND)
-        radio, detail = models_page.refresh_search_results(None, state, "4-bit", True)
-        self.assertEqual(radio["choices"], [])
+        # No parameter count, so no Params column either.
+        self.assertNotIn("Params", painted(table)["headers"])
+        table, detail, _ = models_page.refresh_search_results(None, state, "4-bit", True)
+        self.assertEqual(cells(table, "Model"), [])
         self.assertIn("unknown sizes are hidden", detail)
 
     def test_a_failed_search_is_reported(self):
         self.results = ConnectionError("hub <unreachable>")
 
-        radio, detail, state = app.search_models("olmo", "")
+        table, detail, state, selected = app.search_models("olmo", "")
 
-        self.assertEqual(radio["choices"], [])
+        self.assertEqual(cells(table, "Model"), [])
         self.assertIn("Search failed", detail)
         self.assertIn("hub &lt;unreachable&gt;", detail)
         self.assertEqual(state, {})
+        self.assertIsNone(selected)
 
     def test_no_matches_is_said_plainly(self):
         self.results = []
 
-        radio, detail, _ = app.search_models("zzzz", "")
+        table, detail, _, _ = app.search_models("zzzz", "")
 
-        self.assertEqual(radio["choices"], [])
+        self.assertEqual(cells(table, "Model"), [])
         self.assertIn("No language models matched", detail)
         self.assertIn("zzzz", detail)
 
     def test_choosing_a_result_fills_the_id_box_and_describes_it(self):
-        _, _, state = app.search_models("olmo", "")
+        _, _, state, _ = app.search_models("olmo", "")
 
-        box, detail = app.select_search_result(INSTRUCT.model_id, state)
+        # The click lands on a row of the table as the browser has sorted it,
+        # so the row is known by its first cell, not its position.
+        box, detail, selected = app.select_search_result(
+            state, None, picked(INSTRUCT.model_id, 7_298_011_136, "fits")
+        )
 
         self.assertEqual(box["value"], INSTRUCT.model_id)
+        self.assertEqual(selected, INSTRUCT.model_id)
         self.assertIn("https://huggingface.co/allenai/Olmo-3-7B-Instruct", detail)
         self.assertIn("7.3B", detail)
         self.assertIn("281K downloads", detail)
@@ -1469,18 +1549,18 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertIn("Download and load", detail)
 
     def test_a_gated_result_says_a_token_is_needed(self):
-        _, _, state = app.search_models("llama", "")
+        _, _, state, _ = app.search_models("llama", "")
 
-        _, detail = app.select_search_result(GATED.model_id, state)
+        _, detail, _ = app.select_search_result(state, None, picked(GATED.model_id))
 
         self.assertIn("Gated", detail)
         self.assertIn("token", detail)
 
     def test_a_result_already_on_disk_says_so(self):
         models_page.cache_status = lambda model_id: CacheStatus(cached_bytes=15_000_000_000)
-        _, _, state = app.search_models("olmo", "")
+        _, _, state, _ = app.search_models("olmo", "")
 
-        _, detail = app.select_search_result(INSTRUCT.model_id, state)
+        _, detail, _ = app.select_search_result(state, None, picked(INSTRUCT.model_id))
 
         self.assertIn("Already cached", detail)
         self.assertIn("15.0 GB cached", detail)
@@ -1491,9 +1571,9 @@ class ModelSearchPaneTests(unittest.TestCase):
         models_page.cache_status = lambda model_id: CacheStatus(
             cached_bytes=5_500_000_000, kind=""
         )
-        _, _, state = app.search_models("olmo", "")
+        _, _, state, _ = app.search_models("olmo", "")
 
-        _, detail = app.select_search_result(INSTRUCT.model_id, state)
+        _, detail, _ = app.select_search_result(state, None, picked(INSTRUCT.model_id))
 
         self.assertIn("Already cached", detail)
         self.assertIn("not a model ChatLab can load", detail)
@@ -1504,9 +1584,9 @@ class ModelSearchPaneTests(unittest.TestCase):
         models_page.cache_status = lambda model_id: CacheStatus(
             cached_bytes=100, missing_files=(MODEL_WEIGHTS,)
         )
-        _, _, state = app.search_models("olmo", "")
+        _, _, state, _ = app.search_models("olmo", "")
 
-        _, detail = app.select_search_result(INSTRUCT.model_id, state)
+        _, detail, _ = app.select_search_result(state, None, picked(INSTRUCT.model_id))
 
         self.assertIn("Partly cached", detail)
 
@@ -1515,9 +1595,9 @@ class ModelSearchPaneTests(unittest.TestCase):
             raise PermissionError(13, "Permission denied")
 
         models_page.cache_status = refuse
-        _, _, state = app.search_models("olmo", "")
+        _, _, state, _ = app.search_models("olmo", "")
 
-        box, detail = app.select_search_result(INSTRUCT.model_id, state)
+        box, detail, _ = app.select_search_result(state, None, picked(INSTRUCT.model_id))
 
         self.assertEqual(box["value"], INSTRUCT.model_id)
         self.assertNotIn("cached", detail)
@@ -1525,11 +1605,12 @@ class ModelSearchPaneTests(unittest.TestCase):
 
     def test_choosing_nothing_leaves_the_id_box_alone(self):
         self.assertEqual(
-            app.select_search_result(None, {}), (gr.skip(), app.NO_RESULT_SELECTED)
+            app.select_search_result({}, None, picked(None)),
+            (gr.skip(), app.NO_RESULT_SELECTED, None),
         )
         self.assertEqual(
-            app.select_search_result("stale/pick", {}),
-            (gr.skip(), app.NO_RESULT_SELECTED),
+            app.select_search_result({}, None, picked("stale/pick")),
+            (gr.skip(), app.NO_RESULT_SELECTED, None),
         )
 
 
@@ -2204,7 +2285,9 @@ class PageLayoutTests(unittest.TestCase):
                 # A row picked earlier outranks the ID box, so it goes.
                 self.labelled("Downloaded models"),
                 self.by_id("my-model-detail"),
-                self.labelled("Search results"),
+                # The search selection is a State beside the table, so it is
+                # found through the handler that writes it.
+                self.listeners("select_search_result")[0].outputs[2],
                 self.listeners("select_search_result")[0].outputs[1],
                 self.by_id("model-status"),
                 self.listeners("hide_remove_confirm")[0].outputs[0],

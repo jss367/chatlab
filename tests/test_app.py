@@ -1330,7 +1330,8 @@ class DefaultModelSelectionTests(unittest.TestCase):
                 self.assertIsNone(row["value"])
                 self.assertEqual(app.chosen_model(model_id, row["value"]), model_id)
                 self.assertEqual(detail, app.NO_CACHED_MODEL_SELECTED)
-                self.assertIsNone(search["value"])
+                # The search selection is a plain state, so it is just None.
+                self.assertIsNone(search)
                 self.assertEqual(search_detail, app.NO_RESULT_SELECTED)
                 self.assertFalse(confirmation["visible"])
                 self.assertIsNone(pending)
