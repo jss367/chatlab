@@ -364,7 +364,10 @@ def _build_page(context):
     passage.input(lambda name: "" if name == "None" else PASSAGES.get(name, ""), passage, text, queue=False)
     goal_mode.input(lambda mode: (gr.update(visible=mode == "hint"), 0 if mode != "coordinates" else gr.skip()),
                     goal_mode, [goal_hint, supplied], queue=False)
-    reveal.input(lambda ep, show: board(ep, None if ep.busy else ep.viewing, show), [episode, reveal], maze_board, queue=False)
+    # Playback holds the overlay setting it started with, so toggling the route
+    # mid-playback ends it rather than letting the next frame undo the toggle.
+    reveal.input(lambda ep, show: board(ep, None if ep.busy else ep.viewing, show), [episode, reveal], maze_board,
+                 queue=False, cancels=playback)
     turn_picker.input(inspect, [episode, reveal, turn_picker, selection_session], outputs, show_progress="hidden")
     strip.select(select_token, [episode, selection_session, metrics_state],
                  [detail, alternatives, edit_selection, replacement, candidate], queue=False, show_progress="hidden")
