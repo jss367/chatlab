@@ -24,6 +24,7 @@ from conversation import (
     forget_measurements,
     make_turn,
     turn_entries,
+    turns_from_entries,
     model_messages,
     new_forks,
     put_branch,
@@ -1218,6 +1219,21 @@ class TokenViewTests(unittest.TestCase):
         self.assertEqual(edited[TURNS], final[TURNS])
         self.assertIn("cannot be empty", edited[STATUS])
         self.assertEqual(edited[-2:], (gr.skip(), gr.skip()))
+
+    def test_imported_reasoning_only_user_message_leaves_editor_untouched(self):
+        turns = turns_from_entries([
+            {"role": "user", "content": "", "reasoning": "Imported reasoning"},
+        ])
+        spans, _ = app.transcript_entries(turns, DEFAULT_COLOR_SCALE)
+        for index, span in enumerate(spans):
+            with self.subTest(span=span):
+                result = open_token_editor(
+                    turns, app.empty_metrics(),
+                    gr.SelectData(None, {"index": index, "value": list(span)}),
+                )
+                self.assertEqual(result, (gr.skip(),) * 3)
+        self.assertEqual(turns[0]["content"], "")
+        self.assertEqual(turns[0]["reasoning"], "Imported reasoning")
 
     def test_stale_edit_cannot_replace_a_new_conversation(self):
         final = self.respond()

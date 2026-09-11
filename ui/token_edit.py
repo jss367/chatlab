@@ -28,7 +28,12 @@ def open_token_editor(turns, metrics_state, event: gr.SelectData):
         return (gr.skip(),) * 3
     position, _ = found
     _, index_map = display_messages(turns)
-    index = index_map.index((position, "content"))
+    try:
+        index = index_map.index((position, "content"))
+    except ValueError:
+        # Imported user turns can contain reasoning alone. There is no
+        # message text to edit, so leave any existing draft untouched.
+        return (gr.skip(),) * 3
     target = {
         "index": index,
         "generation": current_metrics_generation(),
