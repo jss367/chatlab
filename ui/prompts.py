@@ -227,18 +227,26 @@ def run_prompts(
     skip = gr.skip()
     refused = (skip,) * 5
 
-    if not runtime.MANAGER.loaded:
-        yield (BATCH_NO_MODEL,) + refused
-        return
-    prompts = resolve_prompts(prompts_text, loaded_prompts)
-    if not prompts:
-        yield (BATCH_NO_PROMPTS,) + refused
-        return
+    # Claimed before the run is checked over rather than after it. A load
+    # empties memory before it reads the new weights, so the loaded check
+    # below answers "no model" for the whole of that phase and the run would
+    # be told to load one while a load was under way. Holding the slot is
+    # also what keeps that answer true: no load can start under a claim, so
+    # nothing read below is unloaded between the check and the first prompt.
+    # Everything it guards here is list and string work, and the slot goes
+    # straight back on each refusal.
     held = runtime.MANAGER.claim_generation()
     if held:
         yield ((BATCH_LOADING if held == LOADING else BATCH_BUSY),) + refused
         return
     try:
+        if not runtime.MANAGER.loaded:
+            yield (BATCH_NO_MODEL,) + refused
+            return
+        prompts = resolve_prompts(prompts_text, loaded_prompts)
+        if not prompts:
+            yield (BATCH_NO_PROMPTS,) + refused
+            return
         yield from _run_batch(
             prompts,
             system_prompt,

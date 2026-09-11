@@ -39,6 +39,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 import settings
 from model_runtime import (
+    GENERATING,
     LOADING,
     MLX_KIND,
     TEXT_KIND,
@@ -574,17 +575,31 @@ def build_router() -> APIRouter:
         # One reading of the four, so a status asked for while a load is
         # landing cannot describe one model's weights with another's device.
         in_memory = runtime.MANAGER.loaded_model()
+        # One reading of what has the model, for the same reason. The two
+        # flags below are two words for one answer, and asking twice would
+        # publish a state the manager was never in: a response ending as a
+        # load starts would report both, and a load ending as a response
+        # starts would report neither. This is the call a client is told to
+        # make before it sends work, so it must not say the model is free an
+        # instant before refusing the request, or busy with two things at
+        # once. Nothing is claimed here - a status reserves nothing - so this
+        # is the one read, and by the time the answer is on the wire it is
+        # already only a report of the instant it was taken.
+        held = runtime.MANAGER.occupant
         return JSONResponse(
             {
                 "model": in_memory.model_id,
                 "device": in_memory.device_name or device_label(profile.backend),
                 "precision": in_memory.precision,
-                "busy": runtime.MANAGER.busy,
+                "busy": held == GENERATING,
                 # Separate from busy on purpose: a load turns a request away
                 # as a response does, but nothing is generating and there is
                 # nothing to stop. A client that only read busy would find a
-                # 409 where it was told the model was free.
-                "loading": runtime.MANAGER.occupant == LOADING,
+                # 409 where it was told the model was free. A load is named
+                # ahead of a response when both are somehow under way, which
+                # is what ModelManager.occupant answers and what the 409 a
+                # request would get says, so the two agree.
+                "loading": held == LOADING,
                 "memory": {
                     "total_bytes": profile.total,
                     "available_bytes": profile.available,
@@ -598,6 +613,20 @@ def build_router() -> APIRouter:
     def chat_completions(body: dict = Body(default_factory=dict)):
         """Answer a conversation, with every token's measurements if asked."""
 
+        # Claimed before the request is checked, not after it. A load empties
+        # memory before it reads the new weights, so "no model is loaded" is
+        # what a load looks like from here for the whole of that phase, and a
+        # request arriving in it was told to load a model on the Models page
+        # while the Models page was loading one. Claiming first is not only
+        # the right order, it is the only stable one: the claim is refused
+        # while a load is claimed, and once it is held no load can start, so
+        # what the checks below read cannot be unloaded under them. The slot
+        # is given back at once when the request turns out not to be
+        # answerable - the checks are string and number work, so nothing is
+        # held for longer than it takes to read the body.
+        held = runtime.MANAGER.claim_generation()
+        if held:
+            return error_response(occupied_error(held))
         try:
             model_id, load_id = loaded_model(body.get("model"))
             # Read with the load, not after the generation: by then the model
@@ -613,11 +642,9 @@ def build_router() -> APIRouter:
             streaming = _flag(body, "stream")
             prompt_logprobs = _flag(body, "prompt_logprobs")
         except ApiError as error:
+            runtime.MANAGER.release_generation()
             return error_response(error)
 
-        held = runtime.MANAGER.claim_generation()
-        if held:
-            return error_response(occupied_error(held))
         request_id = f"chatcmpl-{uuid4().hex}"
         created = int(time.time())
         # The load the request was checked against. A load from the Models
@@ -688,6 +715,16 @@ def build_router() -> APIRouter:
     def score(body: dict = Body(default_factory=dict)):
         """Measure text the model did not write, as the Score text tab does."""
 
+        # Scoring and generating take the same model lock, so a score that
+        # did not reserve the slot would wait out a whole response rather
+        # than say the model was busy - and would hold the lock a later
+        # response was refused for. Claimed before the request is checked for
+        # the reason a completion is: memory stands empty for the weight-
+        # reading phase of a load, and a request that validated first would
+        # be told to load a model rather than that one is loading.
+        held = runtime.MANAGER.claim_generation()
+        if held:
+            return error_response(occupied_error(held))
         try:
             model_id, load_id = loaded_model(body.get("model"))
             # Read with the load, as a completion does: the same model ID can
@@ -709,14 +746,8 @@ def build_router() -> APIRouter:
             use_template = _flag(body, "use_chat_template")
             _measured, wants = token_detail(body)
         except ApiError as error:
+            runtime.MANAGER.release_generation()
             return error_response(error)
-        # Scoring and generating take the same model lock, so a score that
-        # did not reserve the slot would wait out a whole response rather
-        # than say the model was busy - and would hold the lock a later
-        # response was refused for.
-        held = runtime.MANAGER.claim_generation()
-        if held:
-            return error_response(occupied_error(held))
         try:
             scored = runtime.MANAGER.score_text(
                 text,

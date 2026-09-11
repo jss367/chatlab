@@ -520,7 +520,10 @@ answer = client.chat.completions.create(
 memory, says whether a response is already running and whether a load is under
 way - two different reasons a request is turned away, and only one of them
 ends by itself - and reports the memory
-figures the hardware panel shows. `GET /v1/models` lists every complete model
+figures the hardware panel shows. `busy` and `loading` come from one reading of
+what has the model, so they are never both true and never disagree with the 409
+a request sent at that moment would get; a load is named ahead of a response.
+`GET /v1/models` lists every complete model
 in the cache and marks the loaded one.
 
 `POST /v1/chat/completions` answers a conversation. It takes `messages`,

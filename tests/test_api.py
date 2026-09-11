@@ -6,6 +6,7 @@ from itertools import chain
 import time
 import unittest
 from dataclasses import replace
+from unittest import mock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -253,6 +254,44 @@ class ModelListTests(ApiTestCase):
         self.assertFalse(body["busy"])
         self.assertTrue(body["loading"])
 
+    def test_the_status_reads_what_has_the_model_once(self):
+        # Read once per flag, a transition between the two reads publishes a
+        # state the manager was never in: a response ending as a load starts
+        # reports both, and a load ending as a response starts reports
+        # neither. This is the call clients are told to make before they send
+        # work, so a pair that never existed sends them either into a 409 or
+        # into waiting for two things at once.
+        answers = iter([model_runtime.GENERATING, model_runtime.LOADING])
+        reads = []
+
+        def occupant(_self):
+            reads.append(True)
+            return next(answers)
+
+        with mock.patch.object(Recorder, "occupant", property(occupant)):
+            body = self.client.get("/v1/chatlab/status").json()
+
+        self.assertEqual(len(reads), 1)
+        self.assertTrue(body["busy"])
+        self.assertFalse(body["loading"])
+
+    def test_the_status_never_reports_both_or_neither_across_a_transition(self):
+        # The same race the other way round, driven from the far side: what
+        # the endpoint publishes has to be one of the manager's three states,
+        # whichever instant it lands in.
+        for answer in (None, model_runtime.LOADING, model_runtime.GENERATING):
+            with self.subTest(occupant=answer):
+                with mock.patch.object(
+                    Recorder, "occupant", property(lambda _self, a=answer: a)
+                ):
+                    body = self.client.get("/v1/chatlab/status").json()
+
+                self.assertEqual(
+                    (body["busy"], body["loading"]),
+                    (answer == model_runtime.GENERATING, answer == model_runtime.LOADING),
+                )
+                self.assertFalse(body["busy"] and body["loading"])
+
     def test_the_status_reads_the_four_as_one(self):
         # Asked for while a load is landing, field-by-field reads can
         # straddle it and describe one model's weights with another's
@@ -327,6 +366,48 @@ class RefusalTests(ApiTestCase):
         self.assertIn("loading", body["error"]["message"])
         self.assertNotIn("generating", body["error"]["message"])
         self.assertEqual(self.manager.calls, [])
+
+    def test_a_request_while_the_weights_are_being_read_is_told_the_same(self):
+        # The other half of a load, and the longer half: _load_locked()
+        # unloads the old weights before it reads the new ones, so memory
+        # stands empty for minutes. Checking what is loaded before claiming
+        # answered that phase with "no model is loaded" - which reads as
+        # "load one", over a machine already loading one, and it is the
+        # opposite of the model_loading the status endpoint promises.
+        self.manager.loading = True
+        self.manager.model_id = None
+        self.manager.load_id = None
+
+        for path in ("/v1/chat/completions", "/v1/chatlab/score"):
+            with self.subTest(path=path):
+                response = self.post(
+                    path, messages=[{"role": "user", "content": "hi"}], text="hi"
+                )
+
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json()["error"]["type"], "model_loading")
+        self.assertEqual(self.manager.calls, [])
+
+    def test_a_malformed_request_gives_the_slot_back(self):
+        # The claim is taken before the body is read, so every way out of
+        # that reading has to hand it back or the next reply is refused.
+        for path, body in (
+            ("/v1/chat/completions", {"messages": []}),
+            ("/v1/chatlab/score", {"text": 7}),
+        ):
+            with self.subTest(path=path):
+                response = self.post(path, **body)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertFalse(self.manager.busy, "the refusal kept the slot")
+
+    def test_a_request_naming_another_model_gives_the_slot_back(self):
+        response = self.post(
+            model="org/other", messages=[{"role": "user", "content": "hi"}]
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(self.manager.busy, "the refusal kept the slot")
 
     def test_a_second_request_is_told_the_model_is_busy(self):
         self.manager.busy = True

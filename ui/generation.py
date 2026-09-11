@@ -330,6 +330,36 @@ def busy_status(held: str | None = None) -> str:
     return LOADING_STATUS if (held or runtime.MANAGER.occupant) == LOADING else BUSY_STATUS
 
 
+NO_MODEL_STATUS = "Download and load a model first."
+
+
+def no_model_state(prompt_text: str, turns: list[dict]):
+    """What to show when memory is empty: the load that emptied it, or the advice.
+
+    The occupancy read comes *after* the emptiness rather than before it, and
+    the order is the point. A load unloads the old weights before it reads
+    the new ones, so memory stands empty for the whole of that phase, and the
+    advice below would send a reader to the Models page to start the load
+    they are already waiting for. occupied() at the top of each handler is
+    the early exit for a load that was under way when the click arrived; this
+    is the one that started since.
+
+    Claiming instead of asking - what the Score, Inspect, batch, API and
+    extension paths do, since a claim cannot go stale - is not open to these
+    handlers: generate_reply() claims further down, and a claim taken here
+    would refuse its own generation. What is left is an instant-wide window
+    in which a load finishing between the two reads leaves this saying "load
+    a model" just after one finished loading, and the next Send works. That
+    is the harmless way round; the other order is wrong for the minutes a
+    load takes.
+    """
+
+    held = occupied()
+    if held:
+        return busy_state(held)
+    return idle_state(prompt_text, turns, NO_MODEL_STATUS)
+
+
 def busy_state(held: str | None = None):
     """Refuse to start a generation while one is running, touching nothing else.
 
@@ -835,7 +865,7 @@ def chat(
         yield idle_state(prompt_text, turns, "Enter a message first.")
         return
     if not runtime.MANAGER.loaded:
-        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        yield no_model_state(prompt_text, turns)
         return
 
     turns.append(make_turn("user", message))
@@ -899,7 +929,7 @@ def regenerate_from(
         yield idle_state(prompt_text, turns, "There is nothing to retry.")
         return
     if not runtime.MANAGER.loaded:
-        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        yield no_model_state(prompt_text, turns)
         return
 
     try:
@@ -1016,7 +1046,7 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
         # regenerate_from() would refuse too, but only after the truncation
         # below had already thrown away every later turn for a reply that is
         # never generated.
-        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        yield no_model_state(prompt_text, turns)
         return
 
     original_turns = copy_turns(turns)
@@ -1262,7 +1292,7 @@ def branch_from(
         yield idle_state(prompt_text, turns, "There is no response to branch from.")
         return
     if not runtime.MANAGER.loaded:
-        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        yield no_model_state(prompt_text, turns)
         return
 
     try:

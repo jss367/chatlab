@@ -208,6 +208,31 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
         self.assertEqual(result[7], app.SCORE_LOADING)
         self.assertNotIn("response", app.SCORE_LOADING)
 
+    def test_an_emptied_memory_during_a_load_still_names_the_load(self):
+        # The longer half of a load: the old weights are unloaded before the
+        # new ones are read, so nothing is loaded for the whole of that
+        # phase. Looking at that before claiming sent the reader to the
+        # Models page to start the load they were already waiting for.
+        self.manager.loading = True
+        self.manager.loaded = False
+
+        result = self.score()
+
+        self.assertEqual(result[7], app.SCORE_LOADING)
+
+    def test_an_empty_memory_is_reported_and_the_slot_given_back(self):
+        # The claim now comes first, so the one refusal that is really about
+        # an empty machine has to hand it back.
+        self.manager.loaded = False
+
+        result = self.score()
+
+        self.assertEqual(result[7], "Download and load a model first.")
+        self.assertTrue(
+            self.manager.reserve_generation(), "the refusal kept the slot"
+        )
+        self.manager.release_generation()
+
     def test_a_refusal_touches_nothing_but_the_status(self):
         # The strips still describe the response that is streaming, and the
         # stamp on them still has to match the clicks it is collecting.

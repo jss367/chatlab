@@ -99,6 +99,25 @@ class RefusalTests(ImagePageTestCase):
         self.assertEqual(frame[ROW["status"]], images_page.NO_IMAGE_MODEL)
         self.assertIn("**Models** page", frame[ROW["status"]])
 
+    def test_a_load_is_named_rather_than_an_empty_machine(self):
+        # A load empties memory before it reads the new weights, so the
+        # pipeline check answered the whole of that phase with "load an image
+        # model" - over a machine already loading one. The run is claimed
+        # first now, and start_image_run() names a load in one step.
+        _checked_id, claim = self.manager.claim_exclusive_load("org/pipe").claim
+        self.addCleanup(self.manager.release_load, claim)
+
+        (frame,) = self.frames()
+
+        self.assertIn("loading", frame[ROW["status"]])
+        self.assertNotIn("**Models** page", frame[ROW["status"]])
+
+    def test_a_refusal_with_nothing_loaded_gives_the_run_slot_back(self):
+        (frame,) = self.frames()
+
+        self.assertEqual(frame[ROW["status"]], images_page.NO_IMAGE_MODEL)
+        self.assertFalse(self.manager.busy, "the refusal kept the slot")
+
     def test_a_text_model_in_memory_is_named_as_the_wrong_kind(self):
         # A page that just said "no model loaded" would send a reader off to
         # load a second model on top of the one filling the machine.

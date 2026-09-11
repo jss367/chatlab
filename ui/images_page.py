@@ -329,11 +329,25 @@ def draw(
     if not cleaned:
         yield _idle(EMPTY_PROMPT)
         return
+
+    chosen = resolve_seed(seed, randomize_seed)
+    # Reserved before the pipeline is looked for, not after it. A load empties
+    # memory before it reads the new weights, so for the whole of that phase
+    # there is no pipeline and the check below would tell the reader to load
+    # an image model while one was on its way in. start_image_run() answers
+    # that in one step and names a load apart from a run, and holding what it
+    # takes is what keeps the pipeline found below from being unloaded before
+    # the first step is drawn.
+    try:
+        cancel = runtime.MANAGER.start_image_run()
+    except ModelBusy as error:
+        yield _idle(_failure(error), seed=chosen)
+        return
     if not runtime.MANAGER.image_loaded:
+        runtime.MANAGER.finish_image_run()
         yield _idle(TEXT_MODEL_LOADED if runtime.MANAGER.loaded else NO_IMAGE_MODEL)
         return
 
-    chosen = resolve_seed(seed, randomize_seed)
     request = ImageRequest(
         prompt=cleaned,
         negative_prompt=(negative_prompt or "").strip(),
@@ -347,19 +361,13 @@ def draw(
     readings: list = []
     outcome: dict = {}
 
-    # Reserved before the first frame is published, not after. Gradio does
-    # not resume a streaming handler until the browser has been sent that
-    # frame, so a run reserved afterwards leaves a network round trip in
-    # which the page shows a Stop button over nothing, Stop reports that
-    # nothing is drawing, and a load arriving in between replaces the
-    # pipeline this handler checked. The Chat page reserves before its own
-    # first frame for the same reason.
-    try:
-        cancel = runtime.MANAGER.start_image_run()
-    except ModelBusy as error:
-        yield _idle(_failure(error), seed=chosen)
-        return
-
+    # The reservation above stands from before the first frame is published,
+    # not from after it. Gradio does not resume a streaming handler until the
+    # browser has been sent that frame, so a run reserved afterwards leaves a
+    # network round trip in which the page shows a Stop button over nothing,
+    # Stop reports that nothing is drawing, and a load arriving in between
+    # replaces the pipeline this handler checked. The Chat page reserves
+    # before its own first frame for the same reason.
     def work() -> None:
         try:
             outcome["run"] = runtime.MANAGER.generate_image(

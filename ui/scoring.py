@@ -57,10 +57,6 @@ def score_text(
 
     skip = gr.skip()
     refused = (skip,) * 7
-    if not runtime.MANAGER.loaded:
-        yield refused + ("Download and load a model first.", skip, skip, skip)
-        return
-
     # A generation holds the model lock across every one of its yields, so
     # without the slot this pass would simply wait on it: the button would sit
     # dead for the length of the response and then fire, with nothing on screen
@@ -69,11 +65,22 @@ def score_text(
     # minting a stamp over the strips this is about to replace, which would
     # leave the scored tokens on screen refusing every click. inspect_layers()
     # takes the slot for both reasons.
+    #
+    # Claimed before memory is looked at, not after. A load unloads the old
+    # weights before it reads the new ones, so for the whole of that phase
+    # there is no model loaded and the check below would send the reader to
+    # the Models page to load one - which is where the load they are waiting
+    # for already is. The claim is the question that cannot go stale: it is
+    # refused while a load is claimed, and while it is held no load can
+    # start, so "loaded" read under it stays true until the slot goes back.
     held = runtime.MANAGER.claim_generation()
     if held:
         yield refused + (score_busy(held), skip, skip, skip)
         return
     try:
+        if not runtime.MANAGER.loaded:
+            yield refused + ("Download and load a model first.", skip, skip, skip)
+            return
         try:
             result = runtime.MANAGER.score_text(
                 text, context=context or "", use_chat_template=bool(use_chat_template)

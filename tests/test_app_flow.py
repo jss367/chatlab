@@ -5,6 +5,7 @@ import os
 import stat
 import unittest
 from dataclasses import replace
+from unittest import mock
 from pathlib import Path
 
 import gradio as gr
@@ -1438,6 +1439,39 @@ class LoadRefusalTests(unittest.TestCase):
 
         self.assertGreater(len(frames), 1, "still refusing after the load")
         self.assertNotEqual(frames[-1][STATUS], app.LOADING_STATUS)
+
+    def test_a_load_that_has_emptied_memory_is_still_named_as_a_load(self):
+        # The claim stands for the whole load, but the weights come out
+        # before the new ones go in, so for most of it nothing is loaded.
+        # These handlers cannot claim ahead of that check - generate_reply()
+        # claims further down and a claim here would refuse its own reply -
+        # so they read what is in memory first and ask what has the model
+        # only when it is empty. Read the other way round, the whole of the
+        # load answered "Download and load a model first."
+        with mock.patch.object(
+            type(runtime.MANAGER), "loaded", property(lambda self: False)
+        ):
+            self.assert_refused(app.chat("new question", self.turns(), *SETTINGS))
+            self.assert_refused(app.retry_last("", self.turns(), *SETTINGS))
+            self.assert_refused(
+                app.regenerate_from(0, "", self.turns(), *SETTINGS)
+            )
+            event = gr.EditData(
+                None, {"index": 0, "previous_value": "old q", "value": "new q"}
+            )
+            self.assert_refused(app.edit_message(event, "", self.turns(), *SETTINGS))
+
+    def test_an_empty_machine_still_says_to_load_a_model(self):
+        # The other side of that order: with no load claimed, an empty
+        # memory is what it looks like and the advice is the right answer.
+        runtime.MANAGER.release_load(self.claim)
+
+        with mock.patch.object(
+            type(runtime.MANAGER), "loaded", property(lambda self: False)
+        ):
+            frames = list(app.chat("new question", self.turns(), *SETTINGS))
+
+        self.assertEqual(frames[-1][STATUS], app.NO_MODEL_STATUS)
 
 
 class BusyFlagTests(unittest.TestCase):
@@ -3924,6 +3958,50 @@ class LayerInspectionTests(unittest.TestCase):
         self.assertEqual(status, app.INSPECT_LOADING)
         self.assertNotIn("response", app.INSPECT_LOADING)
         self.assertEqual(self.calls, [])
+
+    def test_a_load_that_has_emptied_memory_is_still_named_as_a_load(self):
+        # The claim comes before the loaded check now, so the phase of a load
+        # in which memory stands empty is still answered as a load rather
+        # than with advice to go and load a model.
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        _checked_id, claim = runtime.MANAGER.claim_exclusive_load("org/other").claim
+        self.addCleanup(runtime.MANAGER.release_load, claim)
+        with mock.patch.object(
+            type(runtime.MANAGER), "loaded", property(lambda self: False)
+        ):
+            *_rest, status = self.inspect(
+                target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+            )
+
+        self.assertEqual(status, app.INSPECT_LOADING)
+        self.assertEqual(self.calls, [])
+
+    def test_a_pass_refused_by_an_empty_machine_gives_the_slot_back(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        with mock.patch.object(
+            type(runtime.MANAGER), "loaded", property(lambda self: False)
+        ):
+            *_rest, status = self.inspect(
+                target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+            )
+
+        self.assertEqual(status, "Download and load a model first.")
+        self.assertFalse(runtime.MANAGER.busy, "the refusal kept the slot")
+
+    def test_a_strip_from_another_load_gives_the_slot_back(self):
+        # Every early exit between the claim and the pass has to, not only
+        # the one about an empty machine.
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        context = (*final[CONTEXT_IDS][:2], "other/model#9")
+        *_rest, status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], context, 0
+        )
+
+        self.assertEqual(status, app.INSPECT_MODEL_CHANGED)
+        self.assertFalse(runtime.MANAGER.busy, "the refusal kept the slot")
 
     def test_the_pass_holds_the_generation_slot_and_gives_it_back(self):
         final = self.finished()

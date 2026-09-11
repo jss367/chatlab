@@ -214,6 +214,17 @@ class RuntimeBoundaryTests(unittest.TestCase):
             ModelService(lambda: manager).open_session()
         self.assertFalse(manager.busy)
 
+    def test_an_emptied_memory_during_a_load_still_names_the_load(self):
+        # A load unloads the old weights before it reads the new ones, so
+        # memory is empty for most of it. Looking at that before claiming
+        # told the extension to load a model on the page already loading one.
+        manager = FakeManager()
+        manager.loading = True
+        manager.loaded = False
+        with self.assertRaisesRegex(ValueError, 'loading'):
+            ModelService(lambda: manager).open_session()
+        self.assertFalse(manager.busy)
+
 
 class RegistryTests(unittest.TestCase):
     def test_disabled_code_is_not_imported(self):

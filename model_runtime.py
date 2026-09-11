@@ -6345,11 +6345,17 @@ class ModelManager:
         cost grows with what has been pasted - runs outside it, against the
         tokenizer object already in hand. Holding the lock across it was the
         real hazard: a generation claims its slot before it goes for the
-        lock, so between the :attr:`busy` check below and the acquire there
-        is a window in which a keystroke could take the lock and then keep a
-        reply waiting for as long as tokenizing a large paste took. That
-        window still exists and always will, but what it now costs is three
-        attribute reads.
+        lock, so between the :attr:`occupant` check below and the acquire
+        there is a window in which a keystroke could take the lock and then
+        keep a reply waiting for as long as tokenizing a large paste took.
+        That window still exists and always will, but what it now costs is
+        three attribute reads.
+
+        That check asks :attr:`occupant` rather than :attr:`busy` so that a
+        claimed load gives up the count as a running reply does. A load takes
+        its claim minutes before it takes the lock, and a count produced in
+        between describes weights that are on their way out; giving up says
+        so, in the words ``score_count_unavailable`` has for a load.
 
         Encoding outside the lock means a load can land mid-count, so the
         load is read again afterwards and a count from the wrong weights is
@@ -6363,7 +6369,7 @@ class ModelManager:
         half-typed passage is not yet worth complaining about.
         """
 
-        if not self.loaded or self.busy:
+        if not self.loaded or self.occupant is not None:
             return None
         if not self._lock.acquire(blocking=False):
             return None

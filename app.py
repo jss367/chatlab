@@ -184,6 +184,7 @@ from ui.generation import (
     CHAT_OUTPUT_NAMES,
     LOADING_STATUS,
     NOTHING_TO_CLEAR,
+    NO_MODEL_STATUS,
     ask_clear_chat,
     automatic_reasoning_close_count,
     branch_from,
