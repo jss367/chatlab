@@ -7,13 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from extensions.maze_experiments.maze import Maze, apply_call, call_text, generate, parse_call
+from extensions.maze_experiments.maze import Maze, apply_call, call_text, default_instruction, generate, parse_call
 from extensions.maze_experiments.runner import Episode, TERMINAL, fork_token_edit, from_payload, stream_episode
 from model_runtime import GENERATING, ModelManager
 from extension_api import ModelService
 from extension_api import TokenInspector
 from token_metrics import unscored_metric
-from extensions.maze_experiments.page import board, build_page, export_run, views, timeline, transport_text
+from extensions.maze_experiments.page import board, build_page, export_run, status, views, timeline, transport_text
 import gradio as gr
 
 CONFIG = dict(supplied_moves=0, interrupt_after=0, interruption_text="Distracted", prefix_tokens=2,
@@ -945,6 +945,63 @@ class MazeTests(unittest.TestCase):
                     self.assertEqual(list(stream), [])
                 ep.interrupt_next = True
                 self.assertIn('Interruption queued', transport_text(ep))
+            finally:
+                demo.close()
+
+    def test_setup_prompt_reaches_the_model_and_travels_with_the_run(self):
+        ep = Episode(MAZE, CONFIG | dict(system_prompt="You are a maze runner.", instruction="Go to the star."))
+        self.assertEqual(ep.messages[0], {"role": "system", "content": "You are a maze runner."})
+        self.assertTrue(ep.messages[1]["content"].startswith("Go to the star.\n{"))
+        self.assertIn("**Setup prompt:** Edited", status(ep))
+        replay = from_payload(json.loads(json.dumps(ep.payload())))
+        self.assertEqual(replay.messages, ep.messages)
+        self.assertEqual(replay.config["system_prompt"], "You are a maze runner.")
+        self.assertEqual(replay.config["instruction"], "Go to the star.")
+        # Blank wording is deliberate: the state goes on its own, with no instruction line.
+        blank = Episode(MAZE, CONFIG | dict(system_prompt="", instruction=""))
+        self.assertEqual(blank.messages[0]["content"], "")
+        self.assertEqual(json.loads(blank.messages[1]["content"])["grid"], list(MAZE.grid))
+        # Each goal mode still supplies its own wording, and the mode is validated regardless.
+        for mode, hint in (("coordinates", ""), ("hidden", ""), ("hint", "The destination is in the top row.")):
+            episode = Episode(MAZE, CONFIG | dict(goal_mode=mode, goal_hint=hint))
+            self.assertEqual(episode.config["instruction"], default_instruction(mode))
+            self.assertTrue(episode.messages[1]["content"].startswith(default_instruction(mode) + "\n{"))
+            self.assertIn("**Setup prompt:** Default", status(episode))
+        with self.assertRaises(ValueError):
+            Episode(MAZE, CONFIG | dict(goal_mode="hint", goal_hint="", instruction="Find it."))
+        # Runs predating the setting keep the wording their goal mode sent.
+        old = ep.payload()
+        old["config"].pop("system_prompt")
+        old["config"].pop("instruction")
+        legacy = from_payload(json.loads(json.dumps(old)))
+        self.assertEqual(legacy.config["instruction"], default_instruction("coordinates"))
+        self.assertIn("**Setup prompt:** Default", status(legacy))
+
+    def test_setup_prompt_controls_start_episodes_and_follow_a_loaded_run(self):
+        inspector = TokenInspector()
+        selections = inspector.selections()
+        inspector.selections = lambda: selections
+        session = selections.new_session()
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=inspector, models=Manager([]), data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                callbacks = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}
+                change = callbacks['change_goal_mode']
+                for mode in ('hidden', 'hint', 'coordinates'):
+                    self.assertEqual(change(mode, default_instruction('coordinates'))[2], default_instruction(mode))
+                self.assertEqual(change('hidden', 'Find the star yourself.')[2], gr.skip())
+                ep = Episode(MAZE, CONFIG)
+                values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10,
+                          'coordinates', '', 'Be brief.', 'Reach the star.')
+                new = callbacks['prepare_episode'](ep, False, session, *values)[0]
+                self.assertEqual(new.messages[0]['content'], 'Be brief.')
+                self.assertTrue(new.messages[1]['content'].startswith('Reach the star.\n{'))
+                loaded = callbacks['load'](str(new.export()), ep, False, session)
+                self.assertEqual(loaded[0].config['instruction'], 'Reach the star.')
+                self.assertEqual(loaded[-2:], ('Be brief.', 'Reach the star.'))
             finally:
                 demo.close()
 
