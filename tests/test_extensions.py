@@ -15,6 +15,7 @@ import app
 import settings
 import settings_sandbox
 from extension_api import ModelService, NavigationService, TokenInspector
+from model_runtime import GENERATING, LOADING
 from extensions.registry import ExtensionSpec, LoadedExtension, load_enabled
 from ui.extensions_page import save_extensions
 
@@ -35,15 +36,23 @@ class FakeManager:
 
     def __init__(self):
         self.busy = False
+        # A load claimed but not finished: the weights on their way out are
+        # still in memory, so the session passes its loaded check.
+        self.loading = False
         self.releases = 0
         self.closed_streams = 0
         self.options = None
 
-    def reserve_generation(self):
+    def claim_generation(self):
+        if self.loading:
+            return LOADING
         if self.busy:
-            return False
+            return GENERATING
         self.busy = True
-        return True
+        return None
+
+    def reserve_generation(self):
+        return self.claim_generation() is None
 
     def release_generation(self):
         self.busy = False
@@ -188,6 +197,15 @@ class RuntimeBoundaryTests(unittest.TestCase):
                 session.encode('text')
         with self.assertRaisesRegex(ValueError, 'closed'):
             session.decode([1])
+
+    def test_a_load_is_named_rather_than_a_response(self):
+        # An extension turned away by a load has no response to wait for,
+        # and the model it checked for is the one being replaced.
+        manager = FakeManager()
+        manager.loading = True
+        with self.assertRaisesRegex(ValueError, 'loading'):
+            ModelService(lambda: manager).open_session()
+        self.assertFalse(manager.busy)
 
     def test_missing_model_does_not_reserve(self):
         manager = FakeManager()

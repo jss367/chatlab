@@ -19,6 +19,7 @@ from model_runtime import (
     DISCOVERY_CANDIDATES,
     FITS,
     IMAGE_KIND,
+    LOADING,
     MODEL_WEIGHTS,
     QUANTIZED_BITS,
     SEARCH_IMAGE_PIPELINE_TAGS,
@@ -500,9 +501,13 @@ def occupied_reason(loading: str, generating: str) -> str:
     at the instant the reservation was refused, one of them was, and by now
     either may have ended. The refusal itself stands on the reservation, not
     on this.
+
+    The same two the generation side names, read from the same place, so a
+    load and a reply cannot describe the manager differently; see
+    :attr:`ModelManager.occupant`.
     """
 
-    return loading if runtime.MANAGER.loading_id else generating
+    return loading if runtime.MANAGER.occupant == LOADING else generating
 
 
 def refused_load_card(extra: str = "") -> str:

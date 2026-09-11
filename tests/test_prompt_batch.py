@@ -767,6 +767,19 @@ class RunPromptsTests(unittest.TestCase):
 
         self.assertEqual(frames[-1][STATUS], app.BATCH_BUSY)
 
+    def test_a_batch_refused_by_a_load_says_so_rather_than_naming_a_reply(self):
+        # The model being replaced is still in memory, so the batch passes
+        # its loaded check and is turned away by the claim. Nothing is
+        # generating, so "wait for the response to finish" names a response
+        # that does not exist.
+        _checked_id, claim = runtime.MANAGER.reserve_exclusive_load("org/other")
+        self.addCleanup(runtime.MANAGER.release_load, claim)
+
+        frames = self.run_batch("say hello")
+
+        self.assertEqual(frames[-1][STATUS], app.BATCH_LOADING)
+        self.assertNotIn("response", app.BATCH_LOADING)
+
     def test_the_generation_slot_comes_back_when_the_run_is_cancelled(self):
         # Gradio closes the generator where it stood. A slot left reserved
         # there would refuse every reply for the rest of the session.

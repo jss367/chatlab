@@ -39,6 +39,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 import settings
 from model_runtime import (
+    LOADING,
     TEXT_KIND,
     InsufficientMemoryError,
     ModelChanged,
@@ -90,6 +91,31 @@ class ApiError(Exception):
         self.status = status
         self.message = message
         self.kind = kind
+
+
+def occupied_error(held: str) -> ApiError:
+    """The 409 for a request refused because something else has the model.
+
+    One generation runs at a time, and a load turns a request away for the
+    same reason - but it is not a generation, and a client told to try again
+    when the response has finished would be waiting on something that is not
+    running. The type is what a script branches on, so the two have their
+    own: a load ends by itself, a response can be stopped from the interface.
+    """
+
+    if held == LOADING:
+        return ApiError(
+            409,
+            "ChatLab is loading a model. Nothing can run against it until "
+            "the weights are in; try again when the load has finished.",
+            "model_loading",
+        )
+    return ApiError(
+        409,
+        "ChatLab is generating a response already. Only one runs at "
+        "a time; try again when it has finished.",
+        "model_busy",
+    )
 
 
 class Frames:
@@ -553,6 +579,11 @@ def build_router() -> APIRouter:
                 "device": in_memory.device_name or device_label(profile.backend),
                 "precision": in_memory.precision,
                 "busy": runtime.MANAGER.busy,
+                # Separate from busy on purpose: a load turns a request away
+                # as a response does, but nothing is generating and there is
+                # nothing to stop. A client that only read busy would find a
+                # 409 where it was told the model was free.
+                "loading": runtime.MANAGER.occupant == LOADING,
                 "memory": {
                     "total_bytes": profile.total,
                     "available_bytes": profile.available,
@@ -583,15 +614,9 @@ def build_router() -> APIRouter:
         except ApiError as error:
             return error_response(error)
 
-        if not runtime.MANAGER.reserve_generation():
-            return error_response(
-                ApiError(
-                    409,
-                    "ChatLab is generating a response already. Only one runs at "
-                    "a time; try again when it has finished.",
-                    "model_busy",
-                )
-            )
+        held = runtime.MANAGER.claim_generation()
+        if held:
+            return error_response(occupied_error(held))
         request_id = f"chatcmpl-{uuid4().hex}"
         created = int(time.time())
         # The load the request was checked against. A load from the Models
@@ -688,15 +713,9 @@ def build_router() -> APIRouter:
         # did not reserve the slot would wait out a whole response rather
         # than say the model was busy - and would hold the lock a later
         # response was refused for.
-        if not runtime.MANAGER.reserve_generation():
-            return error_response(
-                ApiError(
-                    409,
-                    "ChatLab is generating a response already. Only one run at "
-                    "a time; try again when it has finished.",
-                    "model_busy",
-                )
-            )
+        held = runtime.MANAGER.claim_generation()
+        if held:
+            return error_response(occupied_error(held))
         try:
             scored = runtime.MANAGER.score_text(
                 text,

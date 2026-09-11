@@ -12,6 +12,8 @@ import app
 from ui import models_page, panel, runtime
 import settings
 from model_runtime import (
+    GENERATING,
+    LOADING,
     MODEL_WEIGHTS,
     PROMPT_SCORE_LIMIT,
     CacheStatus,
@@ -78,9 +80,23 @@ class StubManager:
         # Lock, taken without blocking, so a caller that loses reports instead
         # of queueing.
         self._generating = threading.Lock()
+        # And a load claimed but not finished, which refuses the slot first
+        # as the real manager does, with the old weights still in memory.
+        self.loading = False
+
+    @property
+    def occupant(self) -> str | None:
+        if self.loading:
+            return LOADING
+        return GENERATING if self._generating.locked() else None
+
+    def claim_generation(self) -> str | None:
+        if self.loading:
+            return LOADING
+        return None if self._generating.acquire(blocking=False) else GENERATING
 
     def reserve_generation(self) -> bool:
-        return self._generating.acquire(blocking=False)
+        return self.claim_generation() is None
 
     def release_generation(self) -> None:
         self._generating.release()
@@ -180,6 +196,16 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
             self.manager.release_generation()
 
         self.assertEqual(result[7], app.SCORE_BUSY)
+
+    def test_a_load_is_named_rather_than_a_response(self):
+        # A load turns the pass away as a reply does, and the reader has no
+        # response to wait for: the wording has to say which it is.
+        self.manager.loading = True
+
+        result = self.score()
+
+        self.assertEqual(result[7], app.SCORE_LOADING)
+        self.assertNotIn("response", app.SCORE_LOADING)
 
     def test_a_refusal_touches_nothing_but_the_status(self):
         # The strips still describe the response that is streaming, and the
@@ -1179,6 +1205,7 @@ class ScoreBudgetTests(unittest.TestCase):
 
     class Counting:
         loaded = True
+        occupant = None
 
         def __init__(self, answer, load_id="stub/model#1"):
             self.answer = answer
@@ -1232,6 +1259,15 @@ class ScoreBudgetTests(unittest.TestCase):
         # none: the whole point of the line is that it matches the check.
         self.assertEqual(self.budget(self.Counting(None)), app.SCORE_COUNT_UNKNOWN)
 
+    def test_a_count_lost_to_a_load_names_the_load(self):
+        # The model lock is held by the load, not by a response, and the box
+        # is read by someone who can see there is no response running.
+        loading = self.Counting(None)
+        loading.occupant = LOADING
+
+        self.assertEqual(self.budget(loading), app.SCORE_COUNT_LOADING)
+        self.assertNotIn("response", app.SCORE_COUNT_LOADING)
+
     def test_the_count_is_asked_for_exactly_what_would_be_scored(self):
         counting = self.Counting((10, 4096))
 
@@ -1251,6 +1287,7 @@ class ScoreBudgetRecoveryTests(unittest.TestCase):
 
     class Counting:
         loaded = True
+        occupant = None
 
         def __init__(self, answer, load_id="stub/model#1"):
             self.answer = answer
@@ -1275,6 +1312,17 @@ class ScoreBudgetRecoveryTests(unittest.TestCase):
         counting = self.Counting((12, 4096))
 
         recovered, load_id = self.recover(counting, app.SCORE_COUNT_UNKNOWN)
+
+        self.assertEqual(recovered, "12 of 4,096 tokens.")
+        self.assertEqual(load_id, "stub/model#1")
+        self.assertEqual(counting.asked, 1)
+
+    def test_a_count_stuck_behind_a_load_is_recomputed_too(self):
+        # The timer un-sticks both messages, so the one a load leaves has to
+        # be recognized as well - it is just as permanent otherwise.
+        counting = self.Counting((12, 4096))
+
+        recovered, load_id = self.recover(counting, app.SCORE_COUNT_LOADING)
 
         self.assertEqual(recovered, "12 of 4,096 tokens.")
         self.assertEqual(load_id, "stub/model#1")

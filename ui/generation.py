@@ -29,6 +29,7 @@ from conversation import (
     user_index_at_or_before,
 )
 from model_runtime import (
+    LOADING,
     ModelChanged,
 )
 from token_metrics import (
@@ -306,25 +307,30 @@ BUSY_STATUS = "A response is already generating. Press Stop first."
 LOADING_STATUS = "A model is loading. Wait for it to finish."
 
 
-def occupied() -> bool:
-    """Whether something else has the model: a reply streaming, or a load.
+def occupied() -> str | None:
+    """What else has the model - a reply streaming, or a load - or ``None``.
 
-    The early exit the handlers below take. Never the guard - the guard is
-    the reservation each of them goes on to make, which settles the same
-    question in one step with the claim. See
-    :meth:`ModelManager.reserve_generation`.
+    The early exit the handlers below take, and the answer is what the
+    refusal is worded from. Never the guard - the guard is the reservation
+    each of them goes on to make, which settles the same question in one step
+    with the claim. See :meth:`ModelManager.claim_generation`.
     """
 
-    return runtime.MANAGER.busy or runtime.MANAGER.loading_id is not None
+    return runtime.MANAGER.occupant
 
 
-def busy_status() -> str:
-    """Which refusal to show, read at the moment the refusal is written."""
+def busy_status(held: str | None = None) -> str:
+    """Which refusal to show, for whatever ``held`` says has the model.
 
-    return LOADING_STATUS if runtime.MANAGER.loading_id else BUSY_STATUS
+    ``held`` is what the refused claim or :func:`occupied` answered, passed
+    down rather than read again here: a load that ends in between would leave
+    this saying "press Stop" over a model nobody is holding.
+    """
+
+    return LOADING_STATUS if (held or runtime.MANAGER.occupant) == LOADING else BUSY_STATUS
 
 
-def busy_state():
+def busy_state(held: str | None = None):
     """Refuse to start a generation while one is running, touching nothing else.
 
     Gradio reads a listener's inputs when the request is queued, so a Retry or
@@ -345,12 +351,13 @@ def busy_state():
     generation restores the idle pair itself on whichever path it exits.
 
     A load blocks a reply for the same reason and is refused the same way,
-    with its own wording; see :func:`busy_status`.
+    with its own wording; ``held`` is which of the two the caller was turned
+    away by. See :func:`busy_status`.
     """
 
     return (
         (gr.skip(),) * 5
-        + (busy_status(),)
+        + (busy_status(held),)
         + (gr.skip(),) * (len(CHAT_OUTPUT_NAMES) - 6)
     )
 
@@ -417,8 +424,9 @@ def generate_reply(
     slot itself and calls _stream_reply() directly.
     """
 
-    if not runtime.MANAGER.reserve_generation():
-        yield busy_state()
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        yield busy_state(held)
         return
 
     try:
@@ -813,11 +821,12 @@ def chat(
     steering_strength: float | None = None,
     steering_layer: int | None = None,
 ):
-    if occupied():
+    held = occupied()
+    if held:
         # Before anything else, including the checks below: every other exit
         # from this function writes the conversation back, and while another
         # generation is streaming that write is a stale overwrite.
-        yield busy_state()
+        yield busy_state(held)
         return
 
     turns = copy_turns(turns)
@@ -878,10 +887,11 @@ def regenerate_from(
 ):
     """Throw away everything after the user turn at ``position`` and reply again."""
 
-    if occupied():
+    held = occupied()
+    if held:
         # Covers Retry and the chatbot's own retry button, which reach a
         # generation only through here.
-        yield busy_state()
+        yield busy_state(held)
         return
 
     turns = copy_turns(turns)
@@ -935,10 +945,11 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
     # Steering follows the eleven display/generation settings. This path
     # clears strips itself and needs the color scale, not the vector snapshot.
     scale_name = settings[10] if len(settings) > 10 else DEFAULT_COLOR_SCALE
-    if occupied():
+    held = occupied()
+    if held:
         # Not just the branch that regenerates: editing an assistant turn
         # rewrites the conversation on its own, from the same stale snapshot.
-        yield busy_state()
+        yield busy_state(held)
         return
 
     turns = copy_turns(turns)
@@ -973,8 +984,9 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
         # and whichever frame landed second would erase the other's work. The
         # slot is held across the yield, because releasing before the frame
         # reaches the browser reopens exactly that window.
-        if not runtime.MANAGER.reserve_generation():
-            yield busy_state()
+        held = runtime.MANAGER.claim_generation()
+        if held:
+            yield busy_state(held)
             return
         try:
             turns[position] = edited_turn
@@ -1085,8 +1097,9 @@ def branch_with_text(
     generation can replace under it.
     """
 
-    if not runtime.MANAGER.reserve_generation():
-        yield busy_state()
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        yield busy_state(held)
         return
 
     try:
@@ -1228,8 +1241,9 @@ def branch_from(
     checks was made against the reply on screen.
     """
 
-    if occupied():
-        yield busy_state()
+    held = occupied()
+    if held:
+        yield busy_state(held)
         return
 
     turns = copy_turns(turns)

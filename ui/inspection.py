@@ -9,6 +9,7 @@ import gradio as gr
 
 import charts
 from model_runtime import (
+    LOADING,
     ModelChanged,
 )
 from ui import runtime
@@ -27,6 +28,11 @@ INSPECT_HINT = "Click a token above, then press **Inspect layers**."
 
 
 INSPECT_BUSY = "Wait for the response to finish before inspecting a token."
+
+
+# A load has the model instead, and the strip being inspected belongs to the
+# weights on their way out: there is no response to wait for.
+INSPECT_LOADING = "Wait for the model to finish loading before inspecting a token."
 
 
 INSPECT_GONE = "That token is no longer on screen. Click one and try again."
@@ -139,8 +145,9 @@ def inspect_layers(
         return
     sequence = context_ids + [int(metric["token_id"]) for metric in metrics]
 
-    if not runtime.MANAGER.reserve_generation():
-        yield (*refused, INSPECT_BUSY)
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        yield (*refused, INSPECT_LOADING if held == LOADING else INSPECT_BUSY)
         return
     try:
         started = time.monotonic()

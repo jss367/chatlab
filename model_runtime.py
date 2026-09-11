@@ -169,6 +169,15 @@ WEIGHT_FORMATS = (
 TEXT_KIND = "text"
 IMAGE_KIND = "image"
 
+# What has the model, when something does. One generation and one load are
+# refused for each other as well as for themselves, so a refusal that only
+# says "busy" is wrong half the time: a reader told to wait for a response
+# that is not running, or to press a Stop button that is not there, looks for
+# something that is not on the page. Every refusal a reader sees is worded
+# from one of these; see ModelManager.claim_generation.
+GENERATING = "generating"
+LOADING = "loading"
+
 # A diffusers pipeline announces itself with this file, which also names
 # every component folder it is made of.
 PIPELINE_INDEX = "model_index.json"
@@ -4039,6 +4048,47 @@ class ModelManager:
 
         return self._generating.locked()
 
+    @property
+    def occupant(self) -> str | None:
+        """What has the model right now: :data:`LOADING`, :data:`GENERATING`, or nothing.
+
+        The same question :meth:`claim_generation` settles, asked without
+        taking anything, so it is only ever an early exit or a label - a
+        caller about to generate takes the slot and reads the answer the
+        claim gives back. Loads come first because that is the order the
+        claim decides in, so the two cannot disagree about which to name.
+        """
+
+        with self._claims_lock:
+            if self._load_claims or self._active_load is not None:
+                return LOADING
+            if self._generating.locked():
+                return GENERATING
+            return None
+
+    def claim_generation(self) -> str | None:
+        """Claim the right to run a generation, or name what has the model.
+
+        ``None`` when the slot is now the caller's. Otherwise
+        :data:`LOADING` or :data:`GENERATING`, decided in the same step as
+        the refusal, which is the point of returning it here rather than
+        leaving each caller to read :attr:`occupant` afterwards: by then the
+        load can have finished and the refusal on screen would name the
+        wrong thing. Every refusal a reader sees is worded from this, and
+        "wait for the response to finish" is a lie when no response is
+        running.
+
+        Everything :meth:`reserve_generation` says about reserving applies
+        here; that method is this one with the reason thrown away.
+        """
+
+        with self._claims_lock:
+            if self._load_claims or self._active_load is not None:
+                return LOADING
+            if self._generating.acquire(blocking=False):
+                return None
+            return GENERATING
+
     def reserve_generation(self) -> bool:
         """Claim the right to run a generation, or report that it is taken.
 
@@ -4062,12 +4112,12 @@ class ModelManager:
         only answer that keeps the reply and the badge agreeing. The
         :meth:`reserve_exclusive_load` side of the same rule is what stops a
         load starting while a reply is streaming.
+
+        A caller that has to tell the reader why it refused wants
+        :meth:`claim_generation`, which is this with the reason kept.
         """
 
-        with self._claims_lock:
-            if self._load_claims or self._active_load is not None:
-                return False
-            return self._generating.acquire(blocking=False)
+        return self.claim_generation() is None
 
     def release_generation(self) -> None:
         """Give the generation slot back. Pairs with a successful reservation."""
@@ -5730,9 +5780,17 @@ class ModelManager:
         The caller must release with :meth:`finish_image_run` in a
         ``finally``. :meth:`generate_image` picks up a run started this way
         rather than starting a second one.
+
+        A load holds this off as well as a generation, and the refusal says
+        which: an image page told to wait for a run to finish while a model
+        is loading sends the reader looking for a Stop button nothing is
+        under.
         """
 
-        if not self.reserve_generation():
+        held = self.claim_generation()
+        if held == LOADING:
+            raise ModelBusy("A model is loading. Wait for it to finish.")
+        if held is not None:
             raise ModelBusy("The model is busy. Wait for the current run to finish.")
         cancel = threading.Event()
         self._image_cancel = cancel

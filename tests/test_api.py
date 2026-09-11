@@ -49,6 +49,10 @@ class Recorder:
         self.device_name = "CPU"
         self.precision = "full"
         self.busy = False
+        # A load claimed but not finished. The old weights are still in
+        # memory, so a request passes its loaded-model check and is then
+        # turned away by something that is not a response.
+        self.loading = False
         self.calls = []
         self.updates = updates if updates is not None else [update("Hello")]
         self.raises = raises
@@ -62,11 +66,24 @@ class Recorder:
             self.model_id, self.device_name, self.precision, self.load_id
         )
 
-    def reserve_generation(self):
+    @property
+    def occupant(self):
+        if self.loading:
+            return model_runtime.LOADING
+        return model_runtime.GENERATING if self.busy else None
+
+    def claim_generation(self):
+        # The real manager answers with what has the model, and the API
+        # words its 409 from that. A load is checked first there too.
+        if self.loading:
+            return model_runtime.LOADING
         if self.busy:
-            return False
+            return model_runtime.GENERATING
         self.busy = True
-        return True
+        return None
+
+    def reserve_generation(self):
+        return self.claim_generation() is None
 
     def release_generation(self):
         self.busy = False
@@ -223,7 +240,18 @@ class ModelListTests(ApiTestCase):
         self.assertEqual(body["device"], "CPU")
         self.assertEqual(body["precision"], "full")
         self.assertFalse(body["busy"])
+        self.assertFalse(body["loading"])
         self.assertIn("pool", body["memory"])
+
+    def test_the_status_tells_a_load_apart_from_a_response(self):
+        # The call to make first, so a client that reads busy alone would
+        # find a 409 where it was told the model was free.
+        self.manager.loading = True
+
+        body = self.client.get("/v1/chatlab/status").json()
+
+        self.assertFalse(body["busy"])
+        self.assertTrue(body["loading"])
 
     def test_the_status_reads_the_four_as_one(self):
         # Asked for while a load is landing, field-by-field reads can
@@ -283,6 +311,22 @@ class RefusalTests(ApiTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
+
+    def test_a_request_during_a_load_is_told_about_the_load(self):
+        # The model in memory is the one on its way out, so the request
+        # passes its loaded-model check and is refused by the load. Saying a
+        # response is already generating would be a plain falsehood: nothing
+        # is generating, and there is nothing to wait for finishing.
+        self.manager.loading = True
+
+        response = self.post(messages=[{"role": "user", "content": "hi"}])
+
+        self.assertEqual(response.status_code, 409)
+        body = response.json()
+        self.assertEqual(body["error"]["type"], "model_loading")
+        self.assertIn("loading", body["error"]["message"])
+        self.assertNotIn("generating", body["error"]["message"])
+        self.assertEqual(self.manager.calls, [])
 
     def test_a_second_request_is_told_the_model_is_busy(self):
         self.manager.busy = True
@@ -1262,6 +1306,18 @@ class ScoreTests(ApiTestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"]["type"], "model_busy")
+
+    def test_scoring_during_a_load_is_told_about_the_load(self):
+        self.manager.loading = True
+        self.manager.score_text = lambda text, **kwargs: self.fail("scored anyway")
+
+        response = self.client.post("/v1/chatlab/score", json={"text": "hi"})
+
+        self.assertEqual(response.status_code, 409)
+        body = response.json()
+        self.assertEqual(body["error"]["type"], "model_loading")
+        self.assertIn("loading", body["error"]["message"])
+        self.assertNotIn("generating", body["error"]["message"])
 
     def test_the_slot_is_given_back_after_a_refused_score(self):
         def refuse(text, **kwargs):

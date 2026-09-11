@@ -1812,8 +1812,24 @@ class ManagerImageRunTests(unittest.TestCase):
         self.assertTrue(manager.reserve_generation())
         self.addCleanup(manager.release_generation)
 
-        with self.assertRaises(ModelBusy):
+        with self.assertRaises(ModelBusy) as caught:
             manager.generate_image(self.request())
+
+        self.assertIn("current run", str(caught.exception))
+
+    def test_a_run_refused_by_a_load_says_so_rather_than_naming_a_run(self):
+        # The pipeline in memory is the one being replaced, so the page
+        # passes its loaded check and the claim turns it away. There is no
+        # run to wait for, and no Stop button over one.
+        manager = self.loaded()
+        _checked_id, claim = manager.reserve_exclusive_load("org/other")
+        self.addCleanup(manager.release_load, claim)
+
+        with self.assertRaises(ModelBusy) as caught:
+            manager.generate_image(self.request())
+
+        self.assertIn("loading", str(caught.exception))
+        self.assertNotIn("current run", str(caught.exception))
 
     def test_running_out_of_memory_advises_something_a_reader_can_see(self):
         # A conversation and a response length mean nothing to someone who

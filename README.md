@@ -495,7 +495,9 @@ answer = client.chat.completions.create(
 ```
 
 `GET /v1/chatlab/status` is the call to make first: it names the model in
-memory, says whether a response is already running, and reports the memory
+memory, says whether a response is already running and whether a load is under
+way - two different reasons a request is turned away, and only one of them
+ends by itself - and reports the memory
 figures the hardware panel shows. `GET /v1/models` lists every complete model
 in the cache and marks the loaded one.
 
@@ -541,7 +543,10 @@ model is refused by name, and a request that passes that check is bound to
 the load it was checked against: a load that lands before the first token is
 refused rather than answered by weights the request did not name. Only one generation runs at a time, as in the
 interface, and a second request is told the model is busy rather than queued
-behind an answer thousands of tokens long. Each generation runs on one thread
+behind an answer thousands of tokens long. A request that arrives while the
+Models page is loading something is refused too - one load and one generation
+exclude each other - and it is told that rather than told a response is
+running: the error type is `model_loading` instead of `model_busy`. Each generation runs on one thread
 of its own and its frames cross to the response through a queue, so a
 streaming answer is never resumed on a different worker; a client that stops
 reading is noticed within a minute, and the model is handed back rather than

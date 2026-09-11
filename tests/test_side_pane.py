@@ -638,6 +638,44 @@ class LoadingIdTests(unittest.TestCase):
         self.assertTrue(manager.reserve_generation())
         manager.release_generation()
 
+    def test_a_refused_claim_names_what_has_the_model(self):
+        # The refusal and the reason are decided in one step, because every
+        # caller that turns a refusal into words - the API, the batch, Score
+        # text, Inspect layers, the image page, an extension - would
+        # otherwise read a load that had ended in between and say the wrong
+        # one of "a reply is running" and "a model is loading".
+        manager = ModelManager()
+        _checked_id, claim = manager.reserve_load(OLMO)
+
+        self.assertEqual(manager.claim_generation(), model_runtime.LOADING)
+        self.assertEqual(manager.occupant, model_runtime.LOADING)
+
+        manager.release_load(claim)
+        self.assertIsNone(manager.claim_generation(), "the slot was free")
+        self.assertEqual(manager.occupant, model_runtime.GENERATING)
+        self.assertEqual(manager.claim_generation(), model_runtime.GENERATING)
+        manager.release_generation()
+        self.assertIsNone(manager.occupant)
+
+    def test_a_load_reading_weights_is_named_as_a_load(self):
+        manager = ModelManager()
+        with manager._reading_weights(OLMO):
+            self.assertEqual(manager.claim_generation(), model_runtime.LOADING)
+            self.assertEqual(manager.occupant, model_runtime.LOADING)
+
+    def test_a_refused_claim_does_not_take_the_slot(self):
+        # Naming the reason must not leave the slot taken on the way out: a
+        # non-blocking acquire that is never released wedges the chat page.
+        manager = ModelManager()
+        _checked_id, claim = manager.reserve_load(OLMO)
+
+        self.assertEqual(manager.claim_generation(), model_runtime.LOADING)
+
+        manager.release_load(claim)
+        self.assertFalse(manager.busy)
+        self.assertTrue(manager.reserve_generation())
+        manager.release_generation()
+
     def test_a_refused_generation_does_not_take_the_slot(self):
         # A non-blocking acquire that is never reached cannot be released,
         # and a slot left taken would wedge the chat page for good.

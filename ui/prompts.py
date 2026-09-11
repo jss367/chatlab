@@ -17,7 +17,7 @@ import gradio as gr
 from gradio.utils import get_upload_folder
 
 from conversation import make_turn, model_messages
-from model_runtime import ModelChanged
+from model_runtime import LOADING, ModelChanged
 from prompt_batch import (
     BATCH_CSV_NAME,
     BatchTable,
@@ -51,6 +51,9 @@ BATCH_HEADERS = [
 BATCH_NO_MODEL = "Download and load a model first."
 BATCH_NO_PROMPTS = "Add some prompts first. A blank line separates one from the next."
 BATCH_BUSY = "Wait for the response to finish before running a batch."
+# A load has the model instead. There is no response to wait for, and the
+# batch would have nothing to run against until the weights are in.
+BATCH_LOADING = "Wait for the model to finish loading before running a batch."
 PROMPT_COUNT_HINT = "Prompts are separated by a blank line."
 BATCH_MODEL_CHANGED = "The model was replaced while the batch was running"
 
@@ -231,8 +234,9 @@ def run_prompts(
     if not prompts:
         yield (BATCH_NO_PROMPTS,) + refused
         return
-    if not runtime.MANAGER.reserve_generation():
-        yield (BATCH_BUSY,) + refused
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        yield ((BATCH_LOADING if held == LOADING else BATCH_BUSY),) + refused
         return
     try:
         yield from _run_batch(

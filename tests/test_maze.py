@@ -9,7 +9,7 @@ from unittest import mock
 
 from extensions.maze_experiments.maze import Maze, apply_call, call_text, generate, parse_call
 from extensions.maze_experiments.runner import Episode, TERMINAL, fork_token_edit, from_payload, stream_episode
-from model_runtime import ModelManager
+from model_runtime import GENERATING, ModelManager
 from extension_api import ModelService
 from extension_api import TokenInspector
 from token_metrics import unscored_metric
@@ -36,11 +36,14 @@ class Manager:
     def open_session(self):
         return ModelService(lambda: self).open_session()
 
-    def reserve_generation(self):
+    def claim_generation(self):
         if self.busy:
-            return False
+            return GENERATING
         self.busy = True
-        return True
+        return None
+
+    def reserve_generation(self):
+        return self.claim_generation() is None
 
     def release_generation(self):
         self.busy = False

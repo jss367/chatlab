@@ -23,7 +23,7 @@ from conversation import (
     put_branch,
     put_branch_sampling,
 )
-from model_runtime import GenerationUpdate, ModelChanged, TokenInsight
+from model_runtime import GENERATING, GenerationUpdate, ModelChanged, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
 
 import library
@@ -392,9 +392,10 @@ class ChatFlowTests(unittest.TestCase):
             loaded = True
             busy = False
             loading_id = None
+            occupant = GENERATING
 
-            def reserve_generation(self):
-                return False
+            def claim_generation(self):
+                return GENERATING
 
             def release_generation(self):  # pragma: no cover - never reached
                 raise AssertionError("released a slot it never held")
@@ -482,11 +483,12 @@ class ChatFlowTests(unittest.TestCase):
             loaded = True
             busy = False
             loading_id = None
+            occupant = None
             model_id = "fake/model"
             load_id = "fake/model#1"
 
-            def reserve_generation(self):
-                return True
+            def claim_generation(self):
+                return None
 
             def release_generation(self):
                 pass
@@ -2338,13 +2340,13 @@ class BranchFromTokenTests(unittest.TestCase):
 
         final = self.respond()[-1]
         manager = runtime.MANAGER
-        real = manager.reserve_generation
+        real = manager.claim_generation
 
         def replace_strips_first():
             app.new_metrics_generation()
             return real()
 
-        manager.reserve_generation = replace_strips_first
+        manager.claim_generation = replace_strips_first
         encodings = []
         self.record_encodings(encodings)
         frames = self.branch_text(final, "Hello")
@@ -3904,6 +3906,23 @@ class LayerInspectionTests(unittest.TestCase):
         finally:
             runtime.MANAGER.release_generation()
         self.assertEqual(status, app.INSPECT_BUSY)
+        self.assertEqual(self.calls, [])
+
+    def test_a_load_is_named_rather_than_a_response(self):
+        # A load turns the pass away as a reply does, and the strip being
+        # inspected belongs to the weights on their way out. Telling the
+        # reader to wait for a response points at nothing on the page.
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        _checked_id, claim = runtime.MANAGER.reserve_exclusive_load("org/other")
+        try:
+            *_rest, status = self.inspect(
+                target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+            )
+        finally:
+            runtime.MANAGER.release_load(claim)
+        self.assertEqual(status, app.INSPECT_LOADING)
+        self.assertNotIn("response", app.INSPECT_LOADING)
         self.assertEqual(self.calls, [])
 
     def test_the_pass_holds_the_generation_slot_and_gives_it_back(self):
