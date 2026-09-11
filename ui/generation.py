@@ -1554,7 +1554,7 @@ def ask_clear_chat(turns: list[dict] | None, forks: dict | None):
     else:
         loss = "the conversation on screen"
     advice = (
-        " To remove only this one, use **🗑️ Delete** in the conversations pane."
+        " To remove only this one, use **🗑️ Delete** above."
         if forks["active"] != MAIN_BRANCH
         else ""
     )

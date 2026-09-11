@@ -3164,6 +3164,18 @@ class PageLayoutTests(unittest.TestCase):
 
         self.assertEqual(self.demo.blocks[block_id].value, "🗑️ Clear all")
 
+    def test_clear_stands_under_the_list_of_what_it_takes(self):
+        # Under the message box it sat among Retry, Undo and Send, all of
+        # which act on the one conversation on screen, and read as another
+        # of them. It takes every conversation, so it belongs under the list
+        # of them, beside New, Fork and Delete.
+        (ask,) = self.listeners("ask_clear_chat")
+        ((block_id, _),) = ask.targets
+        pane = self.by_id("conversation-pane")
+
+        self.assertTrue(self.within(self.demo.blocks[block_id], pane))
+        self.assertTrue(self.within(self.by_id("clear-confirm"), pane))
+
     def test_the_offer_sits_beside_the_badge_that_says_it_is_needed(self):
         # The badge names the missing model; the offer is what to do about
         # it, and both belong where the reader already is.

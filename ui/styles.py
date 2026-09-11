@@ -471,11 +471,14 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
   background: rgba(217, 119, 6, 0.09);
 }}
 /* Clear deletes every conversation, so it asks first, in the same amber
-   panel the model removal uses. */
+   panel the model removal uses. It stands in the conversations pane, which
+   is narrow, so the question is set smaller than body text and the two
+   answers stack. */
 .clear-confirm {{
   border: 1px solid #d97706; border-radius: 8px; padding: 0.4rem 0.6rem;
-  background: rgba(217, 119, 6, 0.09);
+  background: rgba(217, 119, 6, 0.09); gap: 0.4rem;
 }}
+#clear-confirm p {{ font-size: 0.8rem; margin: 0; }}
 .model-detail {{ font-size: 0.85rem; }}
 .model-detail p, .model-detail ul, .model-detail li {{ margin: 0.15rem 0; }}
 .model-detail code {{ word-break: break-all; }}
