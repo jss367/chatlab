@@ -606,7 +606,8 @@ SHORTCUT_JS = """
 # The listeners are on the document rather than on the handles, because a
 # page the nav is not showing is not in the document at all: the Images page
 # and its handle are built when the reader first opens it, long after this
-# script has run. Each handle carries what it needs in data attributes, and
+# script has run, and built afresh every time the reader comes back to them.
+# Each handle carries what it needs in data attributes, and
 # a restored width is written to the property without looking for the pane,
 # so it is already in force when the page it belongs to arrives.
 #
@@ -736,36 +737,39 @@ RESIZE_JS = """
   // Whatever the last session left, before either page is on screen.
   fit();
 
-  // A row changes size when the window does, when the page it belongs to
-  // stops being the hidden one, and when it is first built. Every one of
-  // those is a moment a stored width wants fitting again, and watching the
-  // rows hears about all three without listening to the whole page.
+  // A row changes size when the window does and when the page it belongs to
+  // is built or laid out for the first time. Both are moments a stored width
+  // wants fitting again, and watching the rows hears about them without
+  // listening to the whole page.
   const rows = new ResizeObserver(refit);
 
   // The Images page is built the first time the reader opens it, so its row
-  // can arrive long after this script ran. Watch the shell until both panes
-  // have turned up, then leave the rows to report their own sizes.
-  const arrived = new Set();
+  // can arrive long after this script ran, and the nav takes a page back out
+  // of the document when it turns away from it, so the same pane returns in
+  // a row that has never been watched. The shell is therefore watched for as
+  // long as the app is open, and every time it changes the row each pane is
+  // in now is handed to the observer. Handing over a row that is already
+  // being watched costs nothing, so only a row that has just been built
+  // starts anything.
+  const watched = new Map();
   const collect = () => {
     for (const name of PANES) {
-      if (arrived.has(name)) { continue; }
       const pane = document.getElementById(name);
-      if (!pane || !pane.parentElement) { continue; }
-      arrived.add(name);
-      rows.observe(pane.parentElement);
+      const row = pane && pane.parentElement;
+      if (!row || watched.get(name) === row) { continue; }
+      const gone = watched.get(name);
+      if (gone) { rows.unobserve(gone); }
+      watched.set(name, row);
+      rows.observe(row);
       refit();
     }
-    return arrived.size === PANES.length;
   };
 
-  if (!collect()) {
-    const watch = new MutationObserver(() => {
-      if (collect()) { watch.disconnect(); }
-    });
-    watch.observe(document.getElementById('shell') || document.body, {
-      childList: true, subtree: true,
-    });
-  }
+  collect();
+  new MutationObserver(collect).observe(
+    document.getElementById('shell') || document.body,
+    { childList: true, subtree: true }
+  );
 
   window.addEventListener('resize', () => {
     // Until the reader has dragged something there is nothing stored, and
@@ -778,6 +782,9 @@ RESIZE_JS = """
 
   const move = (event) => {
     if (!dragging) { return; }
+    // A pointer back over the window with no button held was let go
+    // somewhere the page never heard about, and the drag ended with it.
+    if (!event.buttons) { finish(); return; }
     // The pane is on the right of its handle, so dragging left widens it.
     const width = clamp(
       dragging.start + (dragging.origin - event.clientX), roomFor(dragging.pane)
@@ -787,6 +794,9 @@ RESIZE_JS = """
 
   const finish = () => {
     if (!dragging) { return; }
+    if (dragging.handle.hasPointerCapture(dragging.pointer)) {
+      dragging.handle.releasePointerCapture(dragging.pointer);
+    }
     dragging.handle.classList.remove('dragging');
     document.body.classList.remove('pane-dragging');
     store(dragging.key, Math.round(dragging.pane.getBoundingClientRect().width));
@@ -802,16 +812,25 @@ RESIZE_JS = """
     dragging = {
       handle,
       pane,
+      pointer: event.pointerId,
       property: handle.dataset.property,
       key: handle.dataset.store,
       origin: event.clientX,
       start: pane.getBoundingClientRect().width,
     };
+    // The handle keeps the pointer for the whole drag, so a release out
+    // beyond the edge of the window is still delivered here and still ends
+    // the drag. Without it the reader comes back to a pane that follows a
+    // pointer with nothing held down, and to a page that has kept the
+    // cursor and the ban on selecting text that a drag puts on it.
+    handle.setPointerCapture(event.pointerId);
     handle.classList.add('dragging');
     document.body.classList.add('pane-dragging');
   });
-  // On the window, so a drag that outruns the pointer keeps the pane with it
-  // and a release anywhere ends it.
+  // On the window, because the handle for a page the nav has not shown yet
+  // is not in the document when this runs. A captured pointer's events are
+  // aimed at the handle and go on to reach the window from there, so the
+  // capture above and these listeners want the same thing.
   window.addEventListener('pointermove', move);
   window.addEventListener('pointerup', finish);
   window.addEventListener('pointercancel', finish);

@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1902,10 +1903,12 @@ class PageLayoutTests(unittest.TestCase):
         # narrows, and the figure to cut it to is the row the pane sits in
         # rather than the window itself: the Chat row gives up space to the
         # conversations pane and the Images row does not. Watching the rows
-        # covers a page that was hidden while the window changed as well,
-        # since it learns its own size when the nav turns to it.
+        # covers a page that was away while the window changed as well, since
+        # the row it is built into reports its size the moment it has one.
+        # What that watching is worth when a page comes and goes is run
+        # through in PaneResizeScriptTests.
         self.assertIn("new ResizeObserver", app.RESIZE_JS)
-        self.assertIn("rows.observe(pane.parentElement)", app.RESIZE_JS)
+        self.assertIn("rows.observe(row)", app.RESIZE_JS)
         self.assertIn("window.addEventListener('resize'", app.RESIZE_JS)
         # Where the panes become rows a width would mean a height, so the
         # script stops fitting at the same width the stylesheet stops
@@ -2554,6 +2557,260 @@ class PageLayoutTests(unittest.TestCase):
             with self.subTest(handler=name):
                 (listener,) = self.listeners(name)
                 self.assertIs(listener.outputs[0], box)
+
+
+# Enough of a page for RESIZE_JS to run against: two rows of the shape the
+# layout builds, and stand-ins for the browser it talks to. Nothing here
+# lays anything out, so every element is told its own width, and the frames
+# and the mutations are delivered by the checks rather than by a clock.
+RESIZE_PAGE = """
+'use strict';
+const assert = require('node:assert');
+
+class Style {
+  constructor() { this.props = {}; }
+  setProperty(name, value) { this.props[name] = value; }
+  removeProperty(name) { delete this.props[name]; }
+}
+
+class Element {
+  constructor(id, width) {
+    this.id = id || '';
+    this.width = width || 0;
+    this.children = [];
+    this.parentElement = null;
+    this.dataset = {};
+    this.style = new Style();
+    this.names = new Set();
+    this.pointer = null;
+    this.classList = {
+      add: (name) => this.names.add(name),
+      remove: (name) => this.names.delete(name),
+      contains: (name) => this.names.has(name),
+    };
+  }
+  get clientWidth() { return this.width; }
+  getBoundingClientRect() { return { width: this.width }; }
+  append(child) {
+    child.parentElement = this;
+    this.children.push(child);
+    return child;
+  }
+  remove() {
+    const siblings = this.parentElement.children;
+    siblings.splice(siblings.indexOf(this), 1);
+    this.parentElement = null;
+  }
+  closest(selector) {
+    if (selector === '.pane-resizer' && this.names.has('pane-resizer')) { return this; }
+    return this.parentElement ? this.parentElement.closest(selector) : null;
+  }
+  setPointerCapture(pointer) { this.pointer = pointer; }
+  releasePointerCapture(pointer) {
+    if (this.pointer === pointer) { this.pointer = null; }
+  }
+  hasPointerCapture(pointer) { return this.pointer === pointer; }
+}
+
+const find = (node, id) => {
+  if (node.id === id) { return node; }
+  for (const child of node.children) {
+    const found = find(child, id);
+    if (found) { return found; }
+  }
+  return null;
+};
+
+let watchers = [];
+class MutationObserver {
+  constructor(react) { this.react = react; }
+  observe() { watchers.push(this.react); }
+  disconnect() { watchers = watchers.filter((react) => react !== this.react); }
+}
+const mutated = () => { for (const react of watchers.slice()) { react(); } };
+
+const resizers = [];
+class ResizeObserver {
+  constructor(react) {
+    this.react = react;
+    this.targets = new Set();
+    resizers.push(this);
+  }
+  observe(target) {
+    if (this.targets.has(target)) { return; }
+    this.targets.add(target);
+    this.react();
+  }
+  unobserve(target) { this.targets.delete(target); }
+  disconnect() { this.targets.clear(); }
+}
+
+let frames = [];
+const requestAnimationFrame = (frame) => frames.push(frame);
+const paint = () => {
+  const due = frames;
+  frames = [];
+  for (const frame of due) { frame(); }
+};
+
+const kept = new Map();
+const localStorage = {
+  getItem: (key) => (kept.has(key) ? kept.get(key) : null),
+  setItem: (key, value) => kept.set(key, value),
+  removeItem: (key) => kept.delete(key),
+};
+
+const documentElement = new Element('html', 1200);
+const body = documentElement.append(new Element('body', 1200));
+const heard = { document: {}, window: {} };
+const document = {
+  documentElement,
+  body,
+  getElementById: (id) => find(documentElement, id),
+  addEventListener: (type, fn) => {
+    (heard.document[type] = heard.document[type] || []).push(fn);
+  },
+};
+const window = {
+  innerWidth: 1200,
+  matchMedia: () => ({ matches: window.innerWidth <= 850 }),
+  addEventListener: (type, fn) => {
+    (heard.window[type] = heard.window[type] || []).push(fn);
+  },
+};
+const fire = (where, type, event) => {
+  for (const fn of (heard[where][type] || []).slice()) { fn(event); }
+};
+const shell = body.append(new Element('shell', 1200));
+
+// A handle of the kind pane_handle() writes, carrying the same attributes.
+const seam = (pane) => {
+  const handle = new Element('', 6);
+  handle.names.add('pane-resizer');
+  handle.dataset.pane = pane;
+  handle.dataset.property = '--' + pane + '-width';
+  handle.dataset.store = 'chatlab.' + pane + '-width';
+  return handle;
+};
+
+// The Chat row gives up space to the conversations pane beside it, and the
+// Images row has only its handle to pay for.
+const chatRow = (width) => {
+  const row = shell.append(new Element('chat-columns', width));
+  row.append(new Element('conversation-pane', 260));
+  row.append(new Element('chat-workspace', width - 580));
+  row.append(seam('inspector-pane'));
+  row.append(new Element('inspector-pane', 314));
+  return row;
+};
+
+const imagesRow = (width) => {
+  const row = shell.append(new Element('images-columns', width));
+  row.append(new Element('images-workspace', width - 320));
+  row.append(seam('image-inspector'));
+  row.append(new Element('image-inspector', 314));
+  return row;
+};
+"""
+
+
+class PaneResizeScriptTests(unittest.TestCase):
+    """RESIZE_JS itself, run over a stand-in page.
+
+    The script is the one part of the resizing that no Python call can
+    reach, so these run the real string in node and let its own assertions
+    report. A machine without node skips them.
+    """
+
+    def check(self, checks: str):
+        script = f"{RESIZE_PAGE}\nconst start = {app.RESIZE_JS};\n{checks}"
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "resize.js"
+            path.write_text(script)
+            result = subprocess.run(
+                ["node", str(path)], capture_output=True, text=True, timeout=60
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the script")
+    def test_a_page_built_again_comes_back_to_a_fitted_width(self):
+        # The nav takes a page out of the document when it turns away and
+        # Gradio builds it afresh on the way back, in a row nothing has
+        # measured yet. A width fitted to the window while the page was away
+        # is a guess, and the page returning is the moment to correct it.
+        self.check(
+            """
+const chat = chatRow(1200);
+start();
+paint();
+
+const [rows] = resizers;
+assert.ok(rows.targets.has(chat), 'the row on screen is watched from the start');
+
+// The Images page is built the first time the reader opens it.
+const first = imagesRow(1200);
+mutated();
+paint();
+assert.ok(rows.targets.has(first), 'a row that has just arrived is watched');
+
+// The nav turns away, taking that page out of the document, and the window
+// is dragged narrower while it is gone. With no row left to measure, the
+// width the reader chose is cut to what the window alone suggests.
+kept.set('chatlab.image-inspector-width', '900');
+first.remove();
+mutated();
+window.innerWidth = 1000;
+fire('window', 'resize', {});
+paint();
+assert.strictEqual(documentElement.style.props['--image-inspector-width'], '380px');
+
+// The nav turns back and the page is built again. Its row has more room
+// than the window alone suggested, and the pane is given it.
+const second = imagesRow(1000);
+mutated();
+paint();
+assert.ok(rows.targets.has(second), 'the row a rebuilt page comes back in is watched');
+assert.ok(!rows.targets.has(first), 'and the row it left is let go');
+assert.strictEqual(documentElement.style.props['--image-inspector-width'], '634px');
+"""
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the script")
+    def test_a_drag_that_ends_outside_the_window_still_ends(self):
+        # A button let go beyond the edge of the window is a release the
+        # page never hears, so the pointer is captured for the length of the
+        # drag and a pointer that comes back with nothing held ends it.
+        self.check(
+            """
+const chat = chatRow(1200);
+start();
+paint();
+
+const handle = chat.children[2];
+const pane = document.getElementById('inspector-pane');
+fire('document', 'pointerdown', {
+  target: handle, button: 0, buttons: 1, clientX: 800, pointerId: 7,
+  preventDefault: () => {},
+});
+assert.ok(handle.hasPointerCapture(7), 'the handle keeps the pointer for the drag');
+assert.ok(body.classList.contains('pane-dragging'));
+
+// The pane is on the right of its handle, so dragging left widens it.
+fire('window', 'pointermove', { buttons: 1, clientX: 760 });
+assert.strictEqual(documentElement.style.props['--inspector-pane-width'], '354px');
+
+// The reader let go out beyond the edge of the window and brought the
+// pointer back with the button up.
+fire('window', 'pointermove', { buttons: 0, clientX: 600 });
+assert.ok(!body.classList.contains('pane-dragging'), 'the page stops being dragged');
+assert.ok(!handle.hasPointerCapture(7), 'and the handle gives the pointer back');
+assert.strictEqual(kept.get('chatlab.inspector-pane-width'), String(pane.width));
+
+// So moving the pointer over the page again leaves the pane where it was.
+fire('window', 'pointermove', { buttons: 1, clientX: 400 });
+assert.strictEqual(documentElement.style.props['--inspector-pane-width'], '354px');
+"""
+        )
 
 
 class HardwarePanelTests(unittest.TestCase):
