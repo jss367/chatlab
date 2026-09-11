@@ -2906,6 +2906,23 @@ class PageLayoutTests(unittest.TestCase):
                             self.assertEqual(states[-1]["status"], "found")
                 self.assertEqual(request.call_count, expected)
 
+    def test_repository_precision_refreshes_for_cached_selections_and_rescans(self):
+        views = self.listeners("repository_view")
+        selected = self.labelled("Downloaded models")
+        self.assertTrue(any(fn.targets == [(selected._id, "change")] for fn in views))
+        self.assertTrue(any(event == "load" for fn in views for _, event in fn.targets))
+        for fn in views:
+            self.assertEqual(fn.inputs[-1], selected)
+            self.assertEqual(fn.inputs[0], self.labelled("Hugging Face model ID"))
+            self.assertEqual(fn.inputs[2], self.labelled("Hugging Face token (optional)"))
+        action_ids = {fn._id for fn in self.listeners("refresh_model_actions")}
+        chained = [
+            dependency for dependency in self.demo.config["dependencies"]
+            if dependency["id"] in {fn._id for fn in views}
+            and dependency["trigger_after"] in action_ids
+        ]
+        self.assertEqual(len(chained), 9)
+
     def test_every_load_reads_the_my_models_selection(self):
         # The ID box lags a row selection by a server round trip, so a button
         # clicked in that window would act on the box's previous contents -

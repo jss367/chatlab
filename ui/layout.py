@@ -1335,10 +1335,13 @@ def build_app() -> gr.Blocks:
                 show_progress="hidden", concurrency_id="model-repository-check",
                 trigger_mode="always_last",
             )
-        for control in (model_id, repository_result, hf_token):
-            control.change(
-                repository_view, [model_id, repository_result, hf_token],
-                [repository_detail, weight_precision], show_progress="hidden",
+        repository_inputs = [model_id, repository_result, hf_token, my_models]
+        repository_outputs = [repository_detail, weight_precision]
+        for event in (
+            *(control.change for control in repository_inputs), demo.load, nav.change,
+        ):
+            event(
+                repository_view, repository_inputs, repository_outputs, show_progress="hidden",
                 concurrency_id="model-repository-view", trigger_mode="always_last",
             )
         hf_token.input(lambda: None, None, repository_result, show_progress="hidden")
@@ -1349,6 +1352,9 @@ def build_app() -> gr.Blocks:
             return event.then(
                 refresh_model_actions, action_inputs, action_outputs,
                 show_progress="hidden", concurrency_id="model-actions",
+            ).then(
+                repository_view, repository_inputs, repository_outputs,
+                show_progress="hidden", concurrency_id="model-repository-view",
             )
 
         # Refresh model-dependent displays after explicit model actions.

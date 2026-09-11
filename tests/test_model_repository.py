@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import httpx
-from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
 from model_runtime import CacheStatus, cache_status, list_cached_models
 from ui import model_repository as repository, models_page
@@ -114,18 +114,78 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("MLX · 8-bit weights", detail)
         self.assertFalse(precision["visible"])
 
-    def test_failed_config_lookup_keeps_repository_found_without_fixed_precision(self):
+    def test_failed_config_lookup_preserves_metadata_and_only_denies_proven_access_failures(self):
         request = httpx.Request("GET", "https://huggingface.co/org/model/resolve/main/config.json")
-        for error in (
-            httpx.ConnectError("offline"),
-            GatedRepoError("gated", response=httpx.Response(403, request=request)),
+        for error, denied in (
+            (httpx.ConnectError("offline"), False),
+            (HfHubHTTPError("missing config", response=httpx.Response(404, request=request)), False),
+            (GatedRepoError("gated", response=httpx.Response(403, request=request)), True),
+            (HfHubHTTPError("invalid token", response=httpx.Response(401, request=request)), True),
         ):
             with self.subTest(error=type(error).__name__):
-                states, _ = self.check(self.info(), config_error=error)
+                states, _ = self.check(self.info(gated="auto"), config_error=error)
                 self.assertEqual(states[-1]["status"], "found")
+                self.assertEqual(states[-1]["access_restricted"], denied)
                 detail, precision = repository.repository_view("org/model", states[-1])
                 self.assertTrue(precision["visible"])
+                self.assertIn("Repository found", detail)
+                self.assertEqual("Access required" in detail, denied)
                 self.assertIn("Configuration could not be verified", detail)
+                for cached_status in (CacheStatus(), CacheStatus(cached_bytes=100)):
+                    with mock.patch.object(models_page, "cache_status", return_value=cached_status):
+                        _, load, download, cached = models_page.refresh_model_actions(
+                            "org/model", None, states[-1]
+                        )
+                    self.assertEqual(load["interactive"], not denied)
+                    self.assertEqual(download["interactive"], not denied)
+                    self.assertEqual(cached["visible"], cached_status.complete)
+
+    def test_gated_repository_with_configuration_access_allows_download(self):
+        states, _ = self.check(self.info(gated="auto"))
+        detail, _ = repository.repository_view("org/model", states[-1])
+        self.assertIn("Access to the configuration was verified", detail)
+        self.assertNotIn("Access required", detail)
+        with mock.patch.object(models_page, "cache_status", return_value=CacheStatus()):
+            _, load, download, _ = models_page.refresh_model_actions("org/model", None, states[-1])
+        self.assertTrue(load["interactive"])
+        self.assertTrue(download["interactive"])
+
+    def test_cached_quantization_controls_precision_offline_and_follows_selected_model(self):
+        from huggingface_hub import constants
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            constants, "HF_HUB_CACHE", directory
+        ), mock.patch("huggingface_hub.HfApi.model_info") as online_check:
+            for name, config in (
+                ("quantized", {"model_type": "qwen3_5", "quantization": {"bits": 4}}),
+                ("unquantized", {"model_type": "qwen3_5", "torch_dtype": "bfloat16"}),
+            ):
+                folder = Path(directory) / f"models--org--{name}"
+                snapshot = folder / "snapshots" / ("a" * 40)
+                snapshot.mkdir(parents=True)
+                (folder / "refs").mkdir()
+                (folder / "refs" / "main").write_text("a" * 40)
+                (snapshot / "config.json").write_text(json.dumps(config))
+                (snapshot / "model.safetensors").write_bytes(b"weights")
+            for result in (
+                None,
+                {"model_id": "org/other", "token_scope": repository.token_scope(None), "mlx": True},
+                {"model_id": "org/quantized", "token_scope": repository.token_scope("old-token"), "mlx": True},
+                {"model_id": "org/quantized", "token_scope": repository.token_scope(None), "status": "error", "detail": "Offline"},
+            ):
+                with self.subTest(result=result):
+                    detail, precision = repository.repository_view(
+                        "org/unquantized", result, selected="org/quantized"
+                    )
+                    self.assertFalse(precision["visible"])
+                    self.assertIn("Cached checkpoint", detail)
+                    self.assertIn("4-bit weights", detail)
+                    self.assertNotIn("Repository found", detail)
+            for selected in ("org/unquantized", "org/missing"):
+                detail, precision = repository.repository_view("org/quantized", None, selected=selected)
+                self.assertTrue(precision["visible"])
+                self.assertNotIn("Cached checkpoint", detail)
+            online_check.assert_not_called()
 
     def test_a_late_old_token_response_cannot_restore_the_result_for_the_same_id(self):
         request = httpx.Request("GET", "https://huggingface.co/api/models/org/model")

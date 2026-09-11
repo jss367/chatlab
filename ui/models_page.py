@@ -463,7 +463,10 @@ def refresh_model_actions(
         detail = "**Not downloaded** · No local files for this model." if cleaned else "Enter a model ID or select a model."
     download = not (cached.complete or cached.unsupported)
     checked = matching_repository(cleaned, repository, hf_token)
-    can_download = checked.get("status") not in {"invalid", "missing", "checking", "restricted"}
+    can_download = (
+        checked.get("status") not in {"invalid", "missing", "checking", "restricted"}
+        and not checked.get("access_restricted", False)
+    )
     can_load = can_download and not checked.get("unsupported", False)
     return (
         detail,
