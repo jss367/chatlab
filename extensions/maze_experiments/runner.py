@@ -257,6 +257,29 @@ def verify_recorded_candidate(episode, manager):
                          "Replacement text instead, which is checked in place against those tokens.")
 
 
+def verify_visible_candidate(candidate_id, manager, stop_ids):
+    """Refuse an alternative the loaded model never shows in a response.
+
+    The replacement reaches the runtime as forced_ids past the literal prefill,
+    where IncrementalDecoder.push drops a hidden special instead of decoding it.
+    Choosing one would leave the response text exactly as it was while the token
+    still entered the model's context, so the branch the panel advertised never
+    appears and the edit reads as a no-op that quietly changed the run.
+
+    A hidden stop token is the exception, because the runtime cuts a forced
+    sequence at its first stop token past the literal prefill: the response ends
+    there, which is a visible outcome even though the token itself never shows.
+
+    This holds whatever the run's provenance, so it is asked before the
+    provenance question: a hidden alternative is no more usable in the session
+    that offered it than on an uploaded run.
+    """
+    if candidate_id in manager.hidden_token_ids and candidate_id not in stop_ids:
+        raise ValueError("The loaded model does not show that token in a response, so choosing it would leave "
+                         "the text unchanged while still feeding the token to the model. Type the branch you "
+                         "want in Replacement text instead.")
+
+
 def stop_deciding_id(turn):
     """The token whose membership in the stop set decides this turn's outcome.
 
@@ -347,6 +370,7 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
             if not any(c["token_id"] == candidate_id
                        for c in metrics[token_index].get("top_candidates", [])):
                 raise ValueError("Choose an alternative for the selected token.")
+            verify_visible_candidate(candidate_id, manager, stop_ids)
             verify_recorded_candidate(episode, manager)
             replacement_ids = [candidate_id]
         if not replacement_ids:

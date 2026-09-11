@@ -478,6 +478,41 @@ class MazeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Choose an alternative"):
                 fork_token_edit(ep, 0, index, "ignored", session, candidate_id=121)
 
+    def test_fork_refuses_an_alternative_the_loaded_model_hides_from_responses(self):
+        """A hidden non-stop alternative would change the context without changing the text.
+
+        The replacement is forced past the literal prefill, where the runtime's
+        decoder drops a hidden special instead of decoding it. Applying one
+        would leave the response reading exactly as it did while the model
+        still saw the token, so the branch the panel advertised never appears.
+        """
+        ep = Episode(MAZE, CONFIG | {"interruption_text": ""})
+        manager = Manager([('abc', [97, 98, 99, 0])])
+        list(stream_episode(ep, manager))
+        ep.turns[0]["metrics"][1]["top_candidates"] = [{"token_id": 7, "text": "<pad>"},
+                                                       {"token_id": 0, "text": "\x00"}]
+        # 7 is special and so never reaches a response text; 0 is special too
+        # but ends the response, which is an outcome the reader can see.
+        manager.hidden_token_ids = lambda: {0, 7}
+
+        with manager.open_session() as session:
+            with self.assertRaisesRegex(ValueError, "does not show that token"):
+                fork_token_edit(ep, 0, 1, '', session, candidate_id=7)
+
+        # This asks about the loaded model rather than about the run, so it is
+        # answered the same way, and first, on an uploaded replay.
+        replay = from_payload(json.loads(json.dumps(ep.payload())))
+        self.assertTrue(replay.replay_only)
+        with manager.open_session() as session:
+            with self.assertRaisesRegex(ValueError, "does not show that token"):
+                fork_token_edit(replay, 0, 1, '', session, candidate_id=7)
+
+        # A hidden stop token stays available: the runtime cuts the forced
+        # sequence there and the response ends, which is visible.
+        with manager.open_session() as session:
+            edited = fork_token_edit(ep, 0, 1, '', session, candidate_id=0)
+        self.assertEqual(edited.pending_edit["forced_ids"], [97, 0])
+
     def test_fork_refuses_an_alternative_a_respelled_vocabulary_would_reproduce(self):
         """An alternative is recorded by decoding it alone, which drops a word boundary.
 
