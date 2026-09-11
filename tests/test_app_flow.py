@@ -3645,7 +3645,7 @@ class ForkTests(unittest.TestCase):
 
     def test_starting_a_new_chat_puts_the_current_one_away(self):
         result = app.new_conversation(self.turns(), new_forks())
-        self.assertEqual(len(result), 20)
+        self.assertEqual(len(result), 21)
         self.assertEqual(result[FORK_TURNS], [])
         self.assertEqual(result[FORK_CHATBOT], [])
         self.assertEqual(result[FORK_STATE]["active"], "Chat 1")
@@ -3662,6 +3662,7 @@ class ForkTests(unittest.TestCase):
         # The token panel described a reply that is no longer on screen.
         self.assertEqual(result[FORK_DETAIL], app.NO_TOKEN_SELECTED)
         self.assertEqual(strip_of(result[FORK_STRIP]), app.EMPTY_TRANSCRIPT)
+        self.assertEqual(result[-1], "")
 
     def test_new_chats_and_forks_are_numbered_separately(self):
         forked = app.fork_conversation(self.turns(), new_forks(), None)
