@@ -221,8 +221,21 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 #model-search-query {{ padding: 0; }}
 #model-search-query input {{ min-height: 42px; }}
 #model-search-button {{ min-height: 42px; }}
-/* An empty Radio otherwise leaves a small, unexplained box below search. */
-#models-page .form:has(> #model-search-results):not(:has(input[type="radio"])) {{ display: none; }}
+/* The search results table. Its rows are picked by clicking, and its cells
+   are tinted by fit from Python (see FIT_STYLES), which reads the tight
+   colour from this variable because the two themes disagree on it. */
+:root {{ --fit-tight: #b45309; }}
+.dark {{ --fit-tight: #fbbf24; }}
+#model-search-results table {{ font-family: var(--font); font-size: 0.82rem; }}
+#model-search-results tbody td {{ cursor: pointer; }}
+/* A starter's note sits under its name in the first cell; see search_row. */
+#model-search-results tbody td:first-child .text {{ white-space: pre-line; }}
+/* Counts, sizes, verdicts and dates read as one token each. */
+#model-search-results tbody td:not(:first-child) .text {{ white-space: nowrap; }}
+/* The page's own button border (above) would box every column heading. */
+#model-search-results button {{ border-width: 0; }}
+/* A click picks a model, so whole-row and whole-column selection mean nothing here. */
+#model-search-results .selection-button {{ display: none; }}
 #models-page .model-list {{ padding: 0; border: 0; }}
 #models-page .model-list label {{ padding: 12px; border-width: 1px; border-radius: 8px; }}
 #models-page .block.model-detail, #settings-page .block.model-detail {{

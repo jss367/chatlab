@@ -122,6 +122,7 @@ from ui.models_page import (
     refresh_stale_model_switch,
     remove_my_model,
     search_models,
+    search_table,
     select_default_model,
     select_my_model,
     select_search_result,
@@ -1046,15 +1047,26 @@ def build_app() -> gr.Blocks:
                                     "Search / refresh", variant="primary", size="sm", scale=0, min_width=120,
                                     elem_id="model-search-button",
                                 )
-                            search_results = gr.Radio(
-                                choices=[],
+                            # A table rather than a list, so the results can
+                            # be sorted by any column: clicking a heading
+                            # sorts in the browser, and a click on a row is
+                            # traced back to its model by the row's own ID.
+                            search_results = gr.Dataframe(
+                                value=search_table([])["value"],
+                                column_widths=search_table([])["column_widths"],
                                 label="Search results",
-                                elem_id="model-search-results",
                                 show_label=False,
-                                elem_classes=["model-list"],
+                                interactive=False,
+                                wrap=True,
+                                elem_id="model-search-results",
+                                elem_classes=["model-table"],
                             )
                             search_detail = gr.Markdown(SEARCH_HINT, elem_classes=["model-detail"])
                             search_results_state = gr.State({})
+                            # The model ID of the selected row, kept apart from
+                            # the table: its own highlight is a cell, and a
+                            # sort moves it.
+                            search_selection = gr.State(None)
 
                     with gr.Column(min_width=320, elem_classes=["model-card"]):
                         gr.Markdown("## My Models")
@@ -1536,8 +1548,8 @@ def build_app() -> gr.Blocks:
         # does nothing for the rest of the session.
         badge_timer.tick(
             refresh_after_device,
-            [device_read, *models_inputs, search_results, search_results_state, fits_only],
-            [*models_outputs, search_results, search_detail, device_read],
+            [device_read, *models_inputs, search_selection, search_results_state, fits_only],
+            [*models_outputs, search_results, search_detail, search_selection, device_read],
             show_progress="hidden",
         )
         # The menu handles Escape before the global generation shortcut.
@@ -1550,6 +1562,13 @@ def build_app() -> gr.Blocks:
 
         # Selecting a default is navigation only. The Models page owns the
         # explicit download and load actions, including their errors.
+        #
+        # The search table is not among the outputs. Its highlight is kept
+        # by the browser, and the click on this button is itself a click
+        # outside the table, which Gradio's Dataframe answers by clearing
+        # that highlight (Table.svelte, handle_click_outside). Repainting
+        # the table would not clear it: a new value leaves the selected
+        # cells alone, and an identical value is not applied at all.
         default_model_button.click(
             select_default_model,
             None,
@@ -1557,7 +1576,7 @@ def build_app() -> gr.Blocks:
                 model_id,
                 my_models,
                 my_model_detail,
-                search_results,
+                search_selection,
                 search_detail,
                 model_status,
                 remove_confirm,
@@ -1604,7 +1623,9 @@ def build_app() -> gr.Blocks:
         )
         cancel_remove_button.click(hide_remove_confirm, None, confirm_outputs)
 
-        search_outputs = [search_results, search_detail, search_results_state]
+        search_outputs = [
+            search_results, search_detail, search_results_state, search_selection
+        ]
         search_inputs = [
             search_query, hf_token, weight_precision, search_kind, search_order, fits_only
         ]
@@ -1616,15 +1637,15 @@ def build_app() -> gr.Blocks:
         search_order.input(search_models, search_inputs, search_outputs)
         fits_only.input(
             refresh_search_results,
-            [search_results, search_results_state, weight_precision, fits_only],
-            [search_results, search_detail],
+            [search_selection, search_results_state, weight_precision, fits_only],
+            [search_results, search_detail, search_selection],
         )
         # Picking a search result names a model too, so it withdraws the My
         # Models selection the same way typing an ID does.
-        search_results.input(
+        search_results.select(
             select_search_result,
-            [search_results, search_results_state, weight_precision],
-            [model_id, search_detail],
+            [search_results_state, weight_precision],
+            [model_id, search_detail, search_selection],
         ).then(clear_my_model_selection, None, [my_models, my_model_detail])
         # Whether a model fits depends on how its weights would be held, so
         # both lists are repainted when that choice changes. Neither touches
@@ -1633,8 +1654,8 @@ def build_app() -> gr.Blocks:
             refresh_my_models, models_inputs, models_outputs
         ).then(
             refresh_search_results,
-            [search_results, search_results_state, weight_precision, fits_only],
-            [search_results, search_detail],
+            [search_selection, search_results_state, weight_precision, fits_only],
+            [search_results, search_detail, search_selection],
         ).then(refresh_model_switch, weight_precision, switch_outputs)
         enter_sends.change(set_message_box_keys, enter_sends, prompt)
 

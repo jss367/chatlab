@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import gradio as gr
+import pandas as pd
 
 import settings
 from model_discovery import recommended_models
@@ -1165,7 +1166,7 @@ def select_default_model():
     return (
         settings.DEFAULT_MODEL_ID,
         *clear_my_model_selection(),
-        gr.update(value=None),
+        None,
         NO_RESULT_SELECTED,
         status_card(
             "Default model selected",
@@ -1199,11 +1200,13 @@ SEARCH_KINDS = (
 SEARCH_HINTS = {
     TEXT_KIND: (
         "Browse recommended starters, or choose Popular, Trending, or New to explore Hugging Face. "
-        "Selecting a result puts its ID in the model ID box; **Download and load** fetches it."
+        "Click a column heading to sort. Selecting a row puts its ID in the model ID box; "
+        "**Download and load** fetches it."
     ),
     IMAGE_KIND: (
         "Browse image starters, or choose Popular, Trending, or New for more text-to-image models. "
-        "Selecting a result puts its ID in the model ID box; **Download and load** fetches it."
+        "Click a column heading to sort. Selecting a row puts its ID in the model ID box; "
+        "**Download and load** fetches it."
     ),
     MLX_KIND: (
         "Browse language models quantized for MLX, which run on Apple silicon at the precision "
@@ -1775,18 +1778,118 @@ def hide_remove_confirm():
     return gr.update(visible=False), None
 
 
-def hub_model_label(result: HubModel, fit: Fit | None = None) -> str:
-    parts = [result.model_id]
-    if result.summary:
-        parts.append(result.summary)
-    if result.parameters:
-        parts.append(f"{format_count(result.parameters)} params")
-    verdict = fit_word(fit)
-    if verdict:
-        parts.append(verdict)
-    if result.downloads is not None:
-        parts.append(f"{format_count(result.downloads)} downloads")
-    return " · ".join(parts)
+# The columns a search result can fill, in the order they are shown. A column
+# is shown only when some result has something in it: the bundled starters
+# carry a download size, and hub results carry popularity and a date, so the
+# two browse modes get different tables rather than one table that is half
+# dashes. A starter's note goes under its name in the Model cell: the table
+# is narrow, and a column of prose would push the verdicts out of view.
+SEARCH_COLUMNS = (
+    "Model", "Params", "Download size", "Fit", "Downloads", "Likes", "Updated"
+)
+# The heading row of a table with nothing in it: what a hub search would show.
+EMPTY_SEARCH_COLUMNS = ("Model", "Params", "Fit", "Downloads", "Likes", "Updated")
+ALWAYS_SHOWN_COLUMNS = ("Model", "Fit")
+# How the width is shared between the columns shown, as relative weights:
+# the browser would otherwise size the Model column to its longest ID and
+# push the last columns out of view. A count or a date never wraps, so the
+# weights are also what keeps each on one line; see styles.py.
+COLUMN_WEIGHTS = {
+    "Model": 38, "Params": 11, "Download size": 15, "Fit": 10,
+    "Downloads": 14, "Likes": 10, "Updated": 17,
+}
+
+# How a row is tinted by its verdict, matching the .model-list rules in
+# styles.py, which tint the My Models list the same way. A model that cannot
+# fit is greyed rather than reddened: it is not an error, and the reader may
+# be looking at it to find that out. The tight colour is a variable because
+# it differs between the light and dark themes.
+FIT_STYLES = {
+    TIGHT: "color: var(--fit-tight)",
+    UNFIT: "color: var(--body-text-color-subdued)",
+}
+
+# How the numbers are shown: the hub's own ``7.3B`` and ``281K``, and a byte
+# size in the unit it is usually quoted in. The numbers underneath stay
+# numbers, so the browser sorts them as such.
+CELL_FORMATS = {
+    "Params": lambda count: format_count(int(count)),
+    "Downloads": lambda count: format_count(int(count)),
+    "Likes": lambda count: format_count(int(count)),
+    "Download size": lambda count: format_bytes(int(count)),
+}
+
+
+def search_row(result: HubModel, fit: Fit | None = None) -> dict:
+    return {
+        "Model": (
+            f"{result.model_id}\n{result.summary}" if result.summary else result.model_id
+        ),
+        "Params": result.parameters or None,
+        "Download size": result.download_bytes or None,
+        "Fit": fit_word(fit),
+        "Downloads": result.downloads,
+        "Likes": result.likes,
+        "Updated": result.last_modified,
+    }
+
+
+def column_widths(shown: list[str]) -> list[str]:
+    """Each shown column's share of the table, as percentages summing to 100."""
+
+    total = sum(COLUMN_WEIGHTS[column] for column in shown)
+    return [f"{100 * COLUMN_WEIGHTS[column] / total:.0f}%" for column in shown]
+
+
+def search_table(results: list[HubModel], fits: dict[str, Fit] | None = None):
+    """The results as a table, one row each, which the browser sorts by column.
+
+    Returned as a component update: the table itself, and the widths of the
+    columns it has. The table is a pandas Styler: the numbers are kept as
+    numbers so a sort by downloads or size is numeric, and the Styler says
+    how each is displayed and which rows are tinted. The model ID is always
+    the first column, which is how a click on a sorted table is traced back
+    to its model; see :func:`picked_model`.
+    """
+
+    fits = fits or {}
+    rows = [search_row(result, fits.get(result.model_id)) for result in results]
+    if not rows:
+        shown = list(EMPTY_SEARCH_COLUMNS)
+        return gr.update(
+            value=pd.DataFrame(columns=shown).style, column_widths=column_widths(shown)
+        )
+    shown = [
+        column for column in SEARCH_COLUMNS
+        if column in ALWAYS_SHOWN_COLUMNS
+        or any(row[column] not in (None, "") for row in rows)
+    ]
+    # Object columns, so a missing number is None rather than NaN and reaches
+    # the browser as null.
+    frame = pd.DataFrame(rows, columns=shown).astype(object)
+    frame = frame.where(frame.notna(), None)
+    states = [
+        fits[result.model_id].state if result.model_id in fits else ""
+        for result in results
+    ]
+    table = (
+        frame.style
+        .format({name: fmt for name, fmt in CELL_FORMATS.items() if name in shown}, na_rep="—")
+        .apply(lambda row: [FIT_STYLES.get(states[row.name], "")] * len(row), axis=1)
+    )
+    return gr.update(value=table, column_widths=column_widths(shown))
+
+
+def picked_model(event: gr.SelectData | None) -> str | None:
+    """The model ID of the row a click landed on, or None for no row.
+
+    Read from the row's own cells rather than its position: the table sorts in
+    the browser, so where a row is says nothing about which model it is. The
+    first cell is the ID, with a starter's note under it; see search_row.
+    """
+
+    row = getattr(event, "row_value", None)
+    return str(row[0]).split("\n", 1)[0] if row and row[0] else None
 
 
 def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
@@ -1891,7 +1994,7 @@ def refresh_after_device(
     """
 
     if known or imported_torch() is None:
-        return (gr.skip(),) * 6
+        return (gr.skip(),) * 7
     return (
         *refresh_my_models(selected, order, precision, model_id),
         *refresh_search_results(result, results or {}, precision, fits_only),
@@ -1903,9 +2006,12 @@ def search_models(
     query: str | None, hf_token: str, precision: str | None = None, kind: str = TEXT_KIND,
     order: str = "Popular", fits_only: bool = False,
 ):
-    """Browse or search; retain candidates so memory filtering needs no network."""
+    """Browse or search; retain candidates so memory filtering needs no network.
 
-    cleared = gr.update(choices=[], value=None)
+    A search drops the previous selection along with the previous results.
+    """
+
+    cleared = search_table([])
     cleaned = (query or "").strip()
     # A query that matches no starter searches the Hub instead of dead-ending,
     # so the "Search Hugging Face" box does what it says in every view.
@@ -1925,7 +2031,12 @@ def search_models(
             if order == "Recommended"
             else "Choose Recommended for offline starters, or retry."
         )
-        return cleared, failure_card("Search failed", f"{html.escape(str(error))} {hint}"), {}
+        return (
+            cleared,
+            failure_card("Search failed", f"{html.escape(str(error))} {hint}"),
+            {},
+            None,
+        )
     if not results:
         described = {IMAGE_KIND: "text-to-image models", MLX_KIND: "MLX models"}.get(
             kind, "language models"
@@ -1934,9 +2045,9 @@ def search_models(
             f"No {described} matched `{html.escape(cleaned)}`."
             if cleaned else f"No {described} found in this browse window."
         )
-        return cleared, message, {}
+        return cleared, message, {}, None
     state = {result.model_id: result for result in results}
-    radio, detail = refresh_search_results(None, state, precision, fits_only)
+    table, detail, _ = refresh_search_results(None, state, precision, fits_only)
     if order == "Recommended" and searched_hub:
         ordering = "No starters matched; showing Hugging Face results, most downloaded first."
     else:
@@ -1946,17 +2057,20 @@ def search_models(
             "Trending": "Trending on Hugging Face.",
             "New": "Newest repositories first (not latest updates).",
         }[order]
-    return radio, f"{ordering} {detail}", state
+    return table, f"{ordering} {detail}", state, None
 
 
-def select_search_result(
-    selected: str | None, results: dict, precision: str | None = None
-):
-    """Put the chosen search result in the ID box and describe it."""
+def select_search_result(results: dict, precision: str | None, event: gr.SelectData):
+    """Put the clicked result in the ID box, describe it, and remember which it was.
 
+    The selection is kept apart from the table because the table's own
+    highlight is a cell, and a sort moves it.
+    """
+
+    selected = picked_model(event)
     result = results.get(selected) if selected else None
     if result is None:
-        return gr.skip(), NO_RESULT_SELECTED
+        return gr.skip(), NO_RESULT_SELECTED, None
     return (
         gr.update(value=result.model_id),
         describe_hub_model(
@@ -1968,6 +2082,7 @@ def select_search_result(
                 results_kind({result.model_id: result}),
             ),
         ),
+        result.model_id,
     )
 
 
@@ -1993,10 +2108,14 @@ def refresh_search_results(
     selected: str | None, results: dict, precision: str | None = None,
     fits_only: bool = False,
 ):
-    """Recompute fit filtering from retained candidates, clearing hidden selections."""
+    """Recompute fit filtering from retained candidates, clearing hidden selections.
+
+    Returns the table, the detail beside it, and the selection as it stands
+    after the filter: the model that was selected, or None if it is now hidden.
+    """
 
     if not results:
-        return gr.skip(), gr.skip()
+        return gr.skip(), gr.skip(), gr.skip()
     fits = hub_fits(list(results.values()), precision, results_kind(results))
     visible = [
         result for model_id, result in results.items()
@@ -2004,10 +2123,7 @@ def refresh_search_results(
     ][:SEARCH_LIMIT]
     visible_ids = {result.model_id for result in visible}
     selected = selected if selected in visible_ids else None
-    choices = [
-        (hub_model_label(result, fits.get(result.model_id)), result.model_id)
-        for result in visible
-    ]
+    table = search_table(visible, fits)
     if selected:
         detail = describe_hub_model(results[selected], fits.get(selected))
     else:
@@ -2021,4 +2137,4 @@ def refresh_search_results(
             detail += "No estimated fits in these candidates. Turn off the filter or narrow your search."
         else:
             detail += NO_RESULT_SELECTED
-    return gr.update(choices=choices, value=selected), detail
+    return table, detail, selected

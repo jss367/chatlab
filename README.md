@@ -12,7 +12,7 @@ drove.
 ## What it includes
 
 - Hugging Face model download and cache controls
-- A Models page listing the models already downloaded, with recommended starters and browsing of popular, trending, and new Hugging Face models
+- A Models page listing the models already downloaded, with recommended starters and browsing of popular, trending, and new Hugging Face models in a table sortable by parameters, downloads, likes, or date
 - Every model in both lists marked *fits*, *tight* or *won't fit* against the memory this machine has free, at the weight precision chosen
 - A badge above the chat naming the model in memory and the device it runs on, or saying that none is loaded
 - A chat interface that collapses OLMo reasoning blocks into an expandable section
