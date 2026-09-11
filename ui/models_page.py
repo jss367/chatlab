@@ -8,6 +8,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+from typing import NamedTuple
 
 import gradio as gr
 
@@ -58,6 +59,7 @@ from ui.common import (
     LOAD_POLL_SECONDS,
     MODELS_PAGE,
     RATE_WINDOW_SECONDS,
+    Card,
     alarm,
     describe_duration,
     failure_card,
@@ -868,6 +870,15 @@ def switch_choices(precision: str | None = None) -> list[tuple[str, str]]:
     ``active_downloads`` says that picking it would be refused. The chat
     page's timer hears about a download starting because
     :meth:`ModelManager.note_cache_change` counts it.
+
+    The fit verdict is the one thing here that a reading taken now can stop
+    being true of a pick made later: free memory moves with whatever else the
+    machine is running. Offering everything and letting the load explain
+    itself is the tempting simplification, and it is the wrong one, because
+    :meth:`ModelManager._load_locked` unloads before it checks - a refused
+    switch would cost the reader the model they were talking to and leave
+    them with nothing loaded. So the list is filtered, and the list is dated:
+    :data:`SWITCH_FIT_SECONDS` is how often an idle switcher re-reads this.
     """
 
     models = sort_cached_models(list_cached_models(), DEFAULT_MODEL_SORT)
@@ -906,14 +917,42 @@ def expected_switch_value() -> str | None:
     return switch_value()
 
 
+# How long an idle switcher goes before it re-reads whether what it offers
+# still fits. The model in memory and the cache revision are attribute reads
+# and are checked on every tick; fit is neither, and is also the one input to
+# the list that nothing in ChatLab moves. Another process taking or giving
+# back several gigabytes changes every verdict without touching the cache or
+# the model in memory, and until the list is re-read it can offer a model the
+# load would now refuse - which costs the reader the model they were talking
+# to, because a load unloads before it checks (see
+# ``ModelManager._load_locked``) - or go on hiding one that has become
+# loadable again. Fifteen seconds is long enough that the scan and the memory
+# reading are rare beside the two-second tick, and short enough that neither
+# mistake stands for long.
+SWITCH_FIT_SECONDS = 15.0
+
+
+class SwitchStamp(NamedTuple):
+    """What a tab's switcher was drawn from, so a later tick can date it.
+
+    ``revision`` is the cache revision the choices were read at, ``offered``
+    the model IDs they came to, and ``checked`` the moment the fit behind
+    them was last read.
+    """
+
+    revision: int
+    offered: tuple[str, ...]
+    checked: float
+
+
 def refresh_model_switch(precision: str | None = None):
     """Repaint the switcher: the loadable models, with the current one chosen.
 
     Hidden when there is nothing to offer, which is when the setup link
     beside it is the way forward.
 
-    Returns the update and the cache revision the choices were read at, which
-    is what :func:`refresh_stale_model_switch` compares against on each tick.
+    Returns the update and the stamp the choices were drawn at, which is what
+    :func:`refresh_stale_model_switch` dates the list against on each tick.
     The revision is read before the scan, not after: a download that finishes
     while the scan is running is then seen as a change still to come rather
     than as one this list already has.
@@ -922,19 +961,19 @@ def refresh_model_switch(precision: str | None = None):
     revision = runtime.MANAGER.cache_revision
     choices = switch_choices(precision)
     current = switch_value()
-    ids = {value for _, value in choices}
+    ids = [value for _, value in choices]
     return (
         gr.update(
             choices=choices,
             value=current if current in ids else None,
             visible=bool(choices),
         ),
-        revision,
+        SwitchStamp(revision, tuple(ids), time.monotonic()),
     )
 
 
 def refresh_stale_model_switch(
-    shown: str | None, revision: int | None, precision: str | None = None
+    shown: str | None, stamp: SwitchStamp | None, precision: str | None = None
 ):
     """The timer's refresh: repaint only when the switcher has fallen behind.
 
@@ -942,23 +981,39 @@ def refresh_stale_model_switch(
     and read the machine's memory, and a repaint every couple of seconds
     would also close the list under a reader who has just opened it. So
     nothing is redrawn while the switcher is still right, which is nearly
-    always. Two things can make it wrong, and both are an attribute read:
-    the model in memory changed, so the wrong one is selected, and what a
-    cache scan would find changed, so a model this tab has never heard of is
-    missing from the list, or a deleted one is still in it, or one whose
-    files are being rewritten is still offered. Either is caught on the next
-    tick.
+    always.
 
-    ``revision`` is the cache revision the tab last painted at; a tab that
-    has not painted yet passes ``None`` and is repainted.
+    Three things can make it wrong. Two are an attribute read and are asked
+    on every tick: the model in memory changed, so the wrong one is selected,
+    and what a cache scan would find changed, so a model this tab has never
+    heard of is missing from the list, or a deleted one is still in it, or one
+    whose files are being rewritten is still offered.
+
+    The third is fit, which no attribute records: the verdict behind every
+    choice is a reading of the machine's free memory, and another process is
+    free to move it. That one is re-read on its own slower beat
+    (:data:`SWITCH_FIT_SECONDS`) because reading it is the expensive half of
+    a repaint, and the re-read only redraws the dropdown when the models on
+    offer actually changed - a list that came out the same is left exactly as
+    it is, open or closed, and only its stamp moves on.
+
+    ``stamp`` is what the tab last painted from; a tab that has not painted
+    yet passes ``None`` and is repainted.
     """
 
+    if stamp is None:
+        return refresh_model_switch(precision)
     if (
-        (shown or None) == expected_switch_value()
-        and revision == runtime.MANAGER.cache_revision
+        (shown or None) != expected_switch_value()
+        or stamp.revision != runtime.MANAGER.cache_revision
     ):
+        return refresh_model_switch(precision)
+    if time.monotonic() - stamp.checked < SWITCH_FIT_SECONDS:
         return gr.skip(), gr.skip()
-    return refresh_model_switch(precision)
+    update, fresh = refresh_model_switch(precision)
+    if fresh.offered == stamp.offered:
+        return gr.skip(), fresh
+    return update, fresh
 
 
 def switch_model(selected: str | None, precision: str = "full"):
@@ -981,6 +1036,10 @@ def switch_model(selected: str | None, precision: str = "full"):
     under one lock and leaves a claim behind that turns away the next asker,
     whichever of the two it is. The claim stands for the whole of the load,
     the early refusals included, and is given back in the ``finally``.
+
+    A load that is accepted and then comes to nothing is announced where the
+    reader is rather than left on the Models page's card; see
+    :func:`announce_switch_outcome`.
     """
 
     current = switch_value()
@@ -1002,11 +1061,38 @@ def switch_model(selected: str | None, precision: str = "full"):
         yield gr.update(value=current), gr.skip()
         return
     _checked_id, claim = claimed
+    last = None
     try:
         for card in load_cached_model(selected, None, precision, claim):
+            last = card
             yield gr.skip(), card
     finally:
         runtime.MANAGER.release_load(claim)
+    announce_switch_outcome(last)
+
+
+def announce_switch_outcome(card: str | None) -> None:
+    """Say, where the reader is, why an accepted switch did not happen.
+
+    The load's cards go to the Models page's status area, because that is
+    where a load reports its progress and the switcher's own repaint would
+    otherwise drop it mid-load. But the reader who picked from the switcher
+    is on the Chat page and can see none of it, so a switch that is accepted
+    and then comes to nothing - the model removed, gone partial, or a
+    redownload begun between the list being drawn and the pick - would show
+    only as the badge falling back to "No model loaded", with no explanation
+    anywhere the reader is looking.
+
+    A toast is what the rest of the app raises for a failure a reader may not
+    have their eyes on, and :func:`failure_card` already raises one for every
+    failure it writes; those are marked as announced and left alone rather
+    than told twice. What is left is the outcomes that only ever wrote a
+    card, and the last card is the one that says how the load ended.
+    """
+
+    if not isinstance(card, Card) or card.announced or card.tone == "success":
+        return
+    alarm(card.title, card.detail)
 
 
 def go_to_models():

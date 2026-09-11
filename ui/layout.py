@@ -300,12 +300,14 @@ def build_app() -> gr.Blocks:
                                 elem_id="default-model",
                             )
 
-                        # The cache revision the switcher above was last drawn
-                        # at, per tab. The timer needs it to tell a list that
-                        # is merely idle from one that another tab's download
-                        # or removal has left out of date; see
+                        # What the switcher above was last drawn from, per tab:
+                        # the cache revision, the models it came to, and when
+                        # their fit was read. The timer needs all three to tell
+                        # a list that is merely idle from one that another
+                        # tab's download or removal, or a change in the
+                        # machine's free memory, has left out of date; see
                         # refresh_stale_model_switch.
-                        switch_revision = gr.State(None)
+                        switch_stamp = gr.State(None)
 
                         # Nothing to see: the timer is what makes the badge tell every
                         # open tab about a load or unload, not just the one that asked
@@ -1155,15 +1157,15 @@ def build_app() -> gr.Blocks:
         demo.load(refresh_model_badge, None, badge_outputs)
         # The switcher is drawn on the same two occasions. Its choices cost a
         # cache scan and a memory reading, so the timer only redraws it once
-        # what it shows or what is on disk has moved; see
-        # refresh_stale_model_switch. Every draw hands back the cache revision
-        # it read, which is how the next tick knows the difference.
-        switch_outputs = [model_switch, switch_revision]
+        # what it shows, what is on disk, or what would now fit has moved; see
+        # refresh_stale_model_switch. Every draw hands back the stamp it read,
+        # which is how the next tick knows the difference.
+        switch_outputs = [model_switch, switch_stamp]
         nav.change(refresh_model_switch, weight_precision, switch_outputs)
         demo.load(refresh_model_switch, weight_precision, switch_outputs)
         badge_timer.tick(
             refresh_stale_model_switch,
-            [model_switch, switch_revision, weight_precision],
+            [model_switch, switch_stamp, weight_precision],
             switch_outputs,
             show_progress="hidden",
         )
@@ -1362,7 +1364,9 @@ def build_app() -> gr.Blocks:
         # A pick in the chat page's switcher is a load from the cache, and is
         # followed by the same rescan as the button. Its status goes to the
         # Models page's card, where the switcher's own repaint would
-        # otherwise drop the progress the load is reporting.
+        # otherwise drop the progress the load is reporting. That page is not
+        # the one the reader is on, so switch_model also toasts an ending the
+        # card alone would have kept to itself; see announce_switch_outcome.
         rescan(
             model_switch.input(
                 switch_model,

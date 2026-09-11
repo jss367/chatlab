@@ -1754,11 +1754,26 @@ class ModelSwitchTests(unittest.TestCase):
         self.manager.device_name = "Apple Metal (MPS)"
 
     def painted(self, precision=None):
-        """A draw of the switcher, without the cache revision beside it."""
+        """A draw of the switcher, without the stamp beside it."""
 
-        update, revision = app.refresh_model_switch(precision)
-        self.assertEqual(revision, self.manager.cache_revision)
+        update, stamp = app.refresh_model_switch(precision)
+        self.assertEqual(stamp.revision, self.manager.cache_revision)
         return update
+
+    def stamp(self, precision=None):
+        """The stamp a tab holds after a draw of the switcher."""
+
+        _update, stamp = app.refresh_model_switch(precision)
+        return stamp
+
+    def aged(self, stamp):
+        """The same stamp, with its fit reading dated past SWITCH_FIT_SECONDS.
+
+        Which is the tick on which the timer reads the machine's memory again
+        rather than skipping on the two attribute checks alone.
+        """
+
+        return stamp._replace(checked=stamp.checked - app.SWITCH_FIT_SECONDS - 1)
 
     def test_only_whole_supported_text_models_that_fit_are_offered(self):
         # The partial download, the CTranslate2 export, the image pipeline
@@ -1811,10 +1826,10 @@ class ModelSwitchTests(unittest.TestCase):
         # A repaint would close the list under a reader who just opened it,
         # and costs a cache scan; nothing is redrawn until the answer changes.
         idle = (gr.skip(), gr.skip())
-        revision = self.manager.cache_revision
-        self.assertEqual(app.refresh_stale_model_switch(None, revision), idle)
+        stamp = self.stamp()
+        self.assertEqual(app.refresh_stale_model_switch(None, stamp), idle)
         self.load()
-        self.assertEqual(app.refresh_stale_model_switch(OLMO, revision), idle)
+        self.assertEqual(app.refresh_stale_model_switch(OLMO, stamp), idle)
 
     def test_an_image_model_in_memory_leaves_an_empty_switcher_alone(self):
         # An image model is never a choice, so the switcher rightly shows
@@ -1826,21 +1841,20 @@ class ModelSwitchTests(unittest.TestCase):
         self.manager.device_name = "Apple Metal (MPS)"
 
         self.assertEqual(
-            app.refresh_stale_model_switch(None, self.manager.cache_revision),
+            app.refresh_stale_model_switch(None, self.stamp()),
             (gr.skip(), gr.skip()),
         )
         self.assertIsNone(self.painted()["value"])
 
     def test_the_timer_repaints_a_switcher_another_tab_made_stale(self):
+        stamp = self.stamp()
         self.load()
 
-        update, revision = app.refresh_stale_model_switch(
-            None, self.manager.cache_revision
-        )
+        update, drawn = app.refresh_stale_model_switch(None, stamp)
 
         self.assertEqual(update["value"], OLMO)
         self.assertIn((OLMO, OLMO), update["choices"])
-        self.assertEqual(revision, self.manager.cache_revision)
+        self.assertEqual(drawn.revision, self.manager.cache_revision)
 
     def test_the_timer_repaints_after_another_tab_changed_the_cache(self):
         # A download or a removal in another tab leaves the model in memory
@@ -1848,16 +1862,16 @@ class ModelSwitchTests(unittest.TestCase):
         # wrong: without the revision this tab would skip for ever and never
         # offer the new model, or go on offering the deleted one.
         self.load()
-        revision = self.manager.cache_revision
+        stamp = self.stamp()
         self.assertEqual(
-            app.refresh_stale_model_switch(OLMO, revision), (gr.skip(), gr.skip())
+            app.refresh_stale_model_switch(OLMO, stamp), (gr.skip(), gr.skip())
         )
 
         self.manager.note_cache_change()
-        update, drawn = app.refresh_stale_model_switch(OLMO, revision)
+        update, drawn = app.refresh_stale_model_switch(OLMO, stamp)
 
         self.assertIn((OLMO, OLMO), update["choices"])
-        self.assertEqual(drawn, self.manager.cache_revision)
+        self.assertEqual(drawn.revision, self.manager.cache_revision)
         self.assertEqual(
             app.refresh_stale_model_switch(OLMO, drawn),
             (gr.skip(), gr.skip()),
@@ -1865,11 +1879,11 @@ class ModelSwitchTests(unittest.TestCase):
         )
 
     def test_a_tab_that_has_not_drawn_the_switcher_yet_is_painted(self):
-        # The State starts empty, which no revision ever equals.
-        update, revision = app.refresh_stale_model_switch(None, None)
+        # The State starts empty, which no stamp ever equals.
+        update, stamp = app.refresh_stale_model_switch(None, None)
 
         self.assertTrue(update["visible"])
-        self.assertEqual(revision, self.manager.cache_revision)
+        self.assertEqual(stamp.revision, self.manager.cache_revision)
 
     def test_picking_the_model_already_in_memory_does_nothing(self):
         self.load()
@@ -2024,21 +2038,137 @@ class ModelSwitchTests(unittest.TestCase):
         # did not start it hears about it: the revision moves at both ends
         # of a download, not only when it finishes.
         self.load()
-        revision = self.manager.cache_revision
+        stamp = self.stamp()
         self.assertEqual(
-            app.refresh_stale_model_switch(OLMO, revision), (gr.skip(), gr.skip())
+            app.refresh_stale_model_switch(OLMO, stamp), (gr.skip(), gr.skip())
         )
 
         progress, _reserved = self.manager.reserve_download("org/small")
-        update, drawn = app.refresh_stale_model_switch(OLMO, revision)
+        update, drawn = app.refresh_stale_model_switch(OLMO, stamp)
 
         self.assertNotIn(("org/small", "org/small"), update["choices"])
-        self.assertEqual(drawn, self.manager.cache_revision)
+        self.assertEqual(drawn.revision, self.manager.cache_revision)
 
         self.manager.release_download("org/small", progress)
         update, _drawn = app.refresh_stale_model_switch(OLMO, drawn)
 
         self.assertIn(("org/small", "org/small"), update["choices"])
+
+    def test_memory_taken_by_another_process_withdraws_a_model(self):
+        # Fit is the one input to the list that nothing in ChatLab moves.
+        # Another process taking several gigabytes leaves the model in memory
+        # and the cache exactly as they were, so the two attribute checks
+        # skip for ever and the dropdown goes on offering a load that would
+        # now be refused - and a refused load has already unloaded the model
+        # the reader was talking to.
+        self.load("org/small")
+        stamp = self.stamp()
+        self.assertIn(OLMO, stamp.offered)
+        roomy(self, total_gb=48, available_gb=6)
+
+        self.assertEqual(
+            app.refresh_stale_model_switch("org/small", stamp),
+            (gr.skip(), gr.skip()),
+            "not on every tick: this reading costs a cache scan",
+        )
+        update, drawn = app.refresh_stale_model_switch("org/small", self.aged(stamp))
+
+        self.assertNotIn((OLMO, OLMO), update["choices"])
+        self.assertNotIn(OLMO, drawn.offered)
+
+    def test_memory_given_back_puts_a_model_on_offer_again(self):
+        roomy(self, total_gb=48, available_gb=6)
+        self.load("org/small")
+        stamp = self.stamp()
+        self.assertNotIn(OLMO, stamp.offered)
+        roomy(self, total_gb=48, available_gb=40)
+
+        update, drawn = app.refresh_stale_model_switch("org/small", self.aged(stamp))
+
+        self.assertIn((OLMO, OLMO), update["choices"])
+        self.assertIn(OLMO, drawn.offered)
+
+    def test_a_re_read_that_says_the_same_thing_leaves_the_list_alone(self):
+        # The beat is how often the fit is read, not how often the dropdown
+        # is redrawn: a list that comes out the same is left exactly as it
+        # is, open or closed, and only its stamp moves on.
+        self.load()
+        stamp = self.aged(self.stamp())
+
+        update, drawn = app.refresh_stale_model_switch(OLMO, stamp)
+
+        self.assertEqual(update, gr.skip())
+        self.assertEqual(drawn.offered, stamp.offered)
+        self.assertGreater(drawn.checked, stamp.checked)
+        self.assertEqual(
+            app.refresh_stale_model_switch(OLMO, drawn),
+            (gr.skip(), gr.skip()),
+            "and the next tick is two attribute reads again",
+        )
+
+    def test_a_switch_that_comes_to_nothing_is_announced_to_the_reader(self):
+        # The load's cards go to the Models page, which is not the page the
+        # pick was made on. Without a toast the reader watching the chat page
+        # sees the badge fall back to "No model loaded" and nothing anywhere
+        # saying why.
+        self.load()
+        card = models_page.status_card(
+            "Not cached", "Nothing for `org/small` is in the cache.", "error"
+        )
+
+        with mock.patch.object(
+            models_page, "load_cached_model", side_effect=lambda *args: iter([card])
+        ):
+            with mock.patch.object(models_page, "alarm") as alarm:
+                frames = list(app.switch_model("org/small"))
+
+        self.assertEqual(frames, [(gr.skip(), card)])
+        alarm.assert_called_once_with(
+            "Not cached", "Nothing for `org/small` is in the cache."
+        )
+
+    def test_a_model_removed_between_the_draw_and_the_pick_says_so(self):
+        # The race the filter cannot close, end to end: the list is drawn,
+        # the model goes, and the pick lands on a cache without it.
+        self.load()
+
+        with mock.patch.object(models_page, "alarm") as alarm:
+            frames = list(app.switch_model("org/gone"))
+
+        self.assertIn("Not cached", frames[-1][1])
+        alarm.assert_called_once()
+        self.assertEqual(alarm.call_args.args[0], "Not cached")
+        self.assertIsNone(self.manager.loading_id, "the claim is still given back")
+
+    def test_a_failure_that_has_already_spoken_is_not_told_twice(self):
+        # failure_card raises its own toast, so the switcher covers only the
+        # endings that never wrote anything but a card.
+        self.load()
+
+        with mock.patch.object(gr, "Warning") as warning:
+            card = models_page.failure_card(
+                "Could not load cached model", "It did not fit."
+            )
+            with mock.patch.object(
+                models_page, "load_cached_model", side_effect=lambda *args: iter([card])
+            ):
+                list(app.switch_model("org/small"))
+
+        warning.assert_called_once()
+
+    def test_a_switch_that_works_says_nothing_extra(self):
+        self.load()
+        card = models_page.status_card(
+            "Model ready", "`org/small` is loaded on **CPU**.", "success"
+        )
+
+        with mock.patch.object(
+            models_page, "load_cached_model", side_effect=lambda *args: iter([card])
+        ):
+            with mock.patch.object(models_page, "alarm") as alarm:
+                list(app.switch_model("org/small"))
+
+        alarm.assert_not_called()
 
 
 class ModelBadgeTests(unittest.TestCase):
