@@ -1323,9 +1323,15 @@ class ModelFitTests(unittest.TestCase):
     def test_the_verdicts_are_the_words_the_stylesheet_looks_for(self):
         # The CSS tints options by their label text, the only hook Gradio's
         # Radio gives a stylesheet, so the words and the selectors have to
-        # stay spelled the same.
-        for verdict in ("· won't fit", "· tight"):
+        # stay spelled the same. "unsupported" is greyed by the same rule as
+        # "won't fit": both mean the row will not load.
+        for verdict in ("· won't fit", "· tight", "· unsupported"):
             self.assertIn(f'[data-testid*="{verdict}"]', app.CSS)
+
+    def test_a_row_that_fits_is_left_untinted(self):
+        # Most of the list fits, so tinting it would leave nothing to stand
+        # out; only the rows that need a second look are coloured.
+        self.assertNotIn('[data-testid*="· fits"]', app.CSS)
 
     def test_a_reload_at_another_precision_is_judged_again(self):
         # Load cached on the model in memory is how a new precision is

@@ -454,8 +454,13 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 .dark .model-list label[data-testid*="· incomplete"] span {{ color: #fbbf24; }}
 /* The fit verdicts are read off the same label. A model that cannot fit is
    greyed rather than reddened: it is not an error, and the reader may be
-   looking at it to find that out. */
-.model-list label[data-testid*="· won't fit"]:not(.selected) span {{
+   looking at it to find that out. A model in a format ChatLab cannot load
+   is greyed for the same reason and by the same rule: both words mean the
+   row will not load, so both rows look alike. Rows that fit are left plain,
+   as they are most of the list and tinting them would leave nothing to
+   stand out. */
+.model-list label[data-testid*="· won't fit"]:not(.selected) span,
+.model-list label[data-testid*="· unsupported"]:not(.selected) span {{
   color: var(--body-text-color-subdued);
 }}
 .model-list label[data-testid*="· tight"] span {{ color: #b45309; }}
