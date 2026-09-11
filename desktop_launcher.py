@@ -19,9 +19,19 @@ from desktop_smoke import smoke_test_metal, smoke_test_mlx, smoke_test_pipelines
 from version import __version__
 
 
+logger = logging.getLogger(__name__)
+
 APP_NAME = "ChatLab"
 WINDOW_TITLE = "ChatLab"
 LOOPBACK_ADDRESS = "127.0.0.1"
+# The window is served on the same port every launch. Anything the browser
+# keeps per origin - the width of the pane beside the transcript is kept
+# that way - is kept per port with it, so a port chosen afresh each launch
+# would be a new origin each launch, and those choices would be gone every
+# time the app opened. The number is arbitrary beyond being outside the
+# range macOS hands out for connections of its own, so a window that has to
+# fall back to any free port cannot be handed this one by accident.
+DESKTOP_PORT = 47890
 
 
 def app_support_directory() -> Path:
@@ -52,10 +62,21 @@ def find_available_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def port_is_free(port: int) -> bool:
+    """Whether the window can be served on ``port`` right now."""
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind((LOOPBACK_ADDRESS, port))
+    except OSError:
+        return False
+    return True
+
+
 def start_local_server():
     """Start Gradio in the background and return its app and local URL."""
 
-    port = find_available_port()
+    port = DESKTOP_PORT if port_is_free(DESKTOP_PORT) else find_available_port()
     demo = build_app().queue(default_concurrency_limit=1)
     try:
         _, local_url, _ = demo.launch(

@@ -34,6 +34,7 @@ drove.
 - Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
+- A draggable seam between the transcript and the panel beside it, remembered between sessions
 - Every conversation kept between sessions in one JSON file, so a reload or a restart brings the pane back as it was
 - Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response, or a run of prompts, from anywhere on the Chat page
 - Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
@@ -167,9 +168,11 @@ the Settings page is the direct way to bound it.
 
 A pane at the far left switches between four pages, each tile an icon above the page's name. **Chat** is the conversation, with the conversations pane beside it and the inspector to its right: whatever token you last clicked, and what the model was doing when it produced it. **Images** is the same shape with a picture where the transcript goes. **Models** is everything about which model is running. **Settings**, at the bottom of the pane, is how every reply is prompted and measured.
 
+The seam between a transcript and the panel beside it is a handle: drag it to give either one the other's room, or use the arrow keys once it has focus. Double-click it to go back to the width it started at. Each page remembers its own width between sessions. In a window under 850px wide the panel sits under the transcript instead, and the handle goes away with the seam it sat on.
+
 One model is in memory at a time whichever kind it is, because the two share the device and, on Apple silicon, the machine's memory. So loading an image model unloads a text one and the other way round, and each page's badge says whether what is in memory is a model it can use: a model of the other kind is named and greyed rather than reported as nothing loaded, which would send you off to load a second one on top of it.
 
-A badge above the tabs names the model that would answer. Until one is loaded, **Set up the default model** opens Models with the default selected, and **Choose another** opens Models to browse. Selecting the default does not start a download or replace a loaded model. On Models, choose **Load cached** to use local files without a network check, or **Download and load** to fetch and load the model. A full default-model download is about 15 GB; the setup guidance states this before you start. Progress and any load errors appear on the Models page.
+A badge above the tabs names the model that would answer. Beside it, a dropdown lists the downloaded text models that would load on this machine at the chosen weight precision, MLX conversions among them, each at the width it was converted to; picking one loads it in place of the model in memory, and the badge follows the load. A pick during a reply is refused. Models that are still downloading, would not fit, or are not yet on disk are not offered: those go through the Models page. Until a model is loaded, **Set up the default model** opens Models with the default selected. Selecting the default does not start a download or replace a loaded model. On Models, choose **Load cached** to use local files without a network check, or **Download and load** to fetch and load the model. A full default-model download is about 15 GB; the setup guidance states this before you start. Progress and any load errors appear on the Models page.
 
 ### Models
 
@@ -542,8 +545,13 @@ answer = client.chat.completions.create(
 ```
 
 `GET /v1/chatlab/status` is the call to make first: it names the model in
-memory, says whether a response is already running, and reports the memory
-figures the hardware panel shows. `GET /v1/models` lists every complete model
+memory, says whether a response is already running and whether a load is under
+way - two different reasons a request is turned away, and only one of them
+ends by itself - and reports the memory
+figures the hardware panel shows. `busy` and `loading` come from one reading of
+what has the model, so they are never both true and never disagree with the 409
+a request sent at that moment would get; a load is named ahead of a response.
+`GET /v1/models` lists every complete model
 in the cache and marks the loaded one.
 
 `POST /v1/chat/completions` answers a conversation. It takes `messages`,
@@ -588,7 +596,10 @@ model is refused by name, and a request that passes that check is bound to
 the load it was checked against: a load that lands before the first token is
 refused rather than answered by weights the request did not name. Only one generation runs at a time, as in the
 interface, and a second request is told the model is busy rather than queued
-behind an answer thousands of tokens long. Each generation runs on one thread
+behind an answer thousands of tokens long. A request that arrives while the
+Models page is loading something is refused too - one load and one generation
+exclude each other - and it is told that rather than told a response is
+running: the error type is `model_loading` instead of `model_busy`. Each generation runs on one thread
 of its own and its frames cross to the response through a queue, so a
 streaming answer is never resumed on a different worker; a client that stops
 reading is noticed within a minute, and the model is handed back rather than

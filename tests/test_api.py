@@ -6,6 +6,7 @@ from itertools import chain
 import time
 import unittest
 from dataclasses import replace
+from unittest import mock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -49,6 +50,10 @@ class Recorder:
         self.device_name = "CPU"
         self.precision = "full"
         self.busy = False
+        # A load claimed but not finished. The old weights are still in
+        # memory, so a request passes its loaded-model check and is then
+        # turned away by something that is not a response.
+        self.loading = False
         self.calls = []
         self.updates = updates if updates is not None else [update("Hello")]
         self.raises = raises
@@ -62,11 +67,24 @@ class Recorder:
             self.model_id, self.device_name, self.precision, self.load_id
         )
 
-    def reserve_generation(self):
+    @property
+    def occupant(self):
+        if self.loading:
+            return model_runtime.LOADING
+        return model_runtime.GENERATING if self.busy else None
+
+    def claim_generation(self):
+        # The real manager answers with what has the model, and the API
+        # words its 409 from that. A load is checked first there too.
+        if self.loading:
+            return model_runtime.LOADING
         if self.busy:
-            return False
+            return model_runtime.GENERATING
         self.busy = True
-        return True
+        return None
+
+    def reserve_generation(self):
+        return self.claim_generation() is None
 
     def release_generation(self):
         self.busy = False
@@ -223,7 +241,56 @@ class ModelListTests(ApiTestCase):
         self.assertEqual(body["device"], "CPU")
         self.assertEqual(body["precision"], "full")
         self.assertFalse(body["busy"])
+        self.assertFalse(body["loading"])
         self.assertIn("pool", body["memory"])
+
+    def test_the_status_tells_a_load_apart_from_a_response(self):
+        # The call to make first, so a client that reads busy alone would
+        # find a 409 where it was told the model was free.
+        self.manager.loading = True
+
+        body = self.client.get("/v1/chatlab/status").json()
+
+        self.assertFalse(body["busy"])
+        self.assertTrue(body["loading"])
+
+    def test_the_status_reads_what_has_the_model_once(self):
+        # Read once per flag, a transition between the two reads publishes a
+        # state the manager was never in: a response ending as a load starts
+        # reports both, and a load ending as a response starts reports
+        # neither. This is the call clients are told to make before they send
+        # work, so a pair that never existed sends them either into a 409 or
+        # into waiting for two things at once.
+        answers = iter([model_runtime.GENERATING, model_runtime.LOADING])
+        reads = []
+
+        def occupant(_self):
+            reads.append(True)
+            return next(answers)
+
+        with mock.patch.object(Recorder, "occupant", property(occupant)):
+            body = self.client.get("/v1/chatlab/status").json()
+
+        self.assertEqual(len(reads), 1)
+        self.assertTrue(body["busy"])
+        self.assertFalse(body["loading"])
+
+    def test_the_status_never_reports_both_or_neither_across_a_transition(self):
+        # The same race the other way round, driven from the far side: what
+        # the endpoint publishes has to be one of the manager's three states,
+        # whichever instant it lands in.
+        for answer in (None, model_runtime.LOADING, model_runtime.GENERATING):
+            with self.subTest(occupant=answer):
+                with mock.patch.object(
+                    Recorder, "occupant", property(lambda _self, a=answer: a)
+                ):
+                    body = self.client.get("/v1/chatlab/status").json()
+
+                self.assertEqual(
+                    (body["busy"], body["loading"]),
+                    (answer == model_runtime.GENERATING, answer == model_runtime.LOADING),
+                )
+                self.assertFalse(body["busy"] and body["loading"])
 
     def test_the_status_reads_the_four_as_one(self):
         # Asked for while a load is landing, field-by-field reads can
@@ -283,6 +350,114 @@ class RefusalTests(ApiTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
+
+    def test_a_request_during_a_load_is_told_about_the_load(self):
+        # The model in memory is the one on its way out, so the request
+        # passes its loaded-model check and is refused by the load. Saying a
+        # response is already generating would be a plain falsehood: nothing
+        # is generating, and there is nothing to wait for finishing.
+        self.manager.loading = True
+
+        response = self.post(messages=[{"role": "user", "content": "hi"}])
+
+        self.assertEqual(response.status_code, 409)
+        body = response.json()
+        self.assertEqual(body["error"]["type"], "model_loading")
+        self.assertIn("loading", body["error"]["message"])
+        self.assertNotIn("generating", body["error"]["message"])
+        self.assertEqual(self.manager.calls, [])
+
+    def test_a_request_while_the_weights_are_being_read_is_told_the_same(self):
+        # The other half of a load, and the longer half: _load_locked()
+        # unloads the old weights before it reads the new ones, so memory
+        # stands empty for minutes. Checking what is loaded before claiming
+        # answered that phase with "no model is loaded" - which reads as
+        # "load one", over a machine already loading one, and it is the
+        # opposite of the model_loading the status endpoint promises.
+        self.manager.loading = True
+        self.manager.model_id = None
+        self.manager.load_id = None
+
+        for path in ("/v1/chat/completions", "/v1/chatlab/score"):
+            with self.subTest(path=path):
+                response = self.post(
+                    path, messages=[{"role": "user", "content": "hi"}], text="hi"
+                )
+
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json()["error"]["type"], "model_loading")
+        self.assertEqual(self.manager.calls, [])
+
+    def test_a_malformed_request_gives_the_slot_back(self):
+        # The claim is taken before the body is read, so every way out of
+        # that reading has to hand it back or the next reply is refused.
+        for path, body in (
+            ("/v1/chat/completions", {"messages": []}),
+            ("/v1/chatlab/score", {"text": 7}),
+        ):
+            with self.subTest(path=path):
+                response = self.post(path, **body)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertFalse(self.manager.busy, "the refusal kept the slot")
+
+    def test_a_body_that_fails_unexpectedly_gives_the_slot_back(self):
+        # Every check in there means to raise ApiError, and only ApiError was
+        # caught. But real code runs inside them - settings.sanitize, the
+        # token detail - and anything else it raised would carry the claim
+        # out of the handler with it. Nothing could then give the slot back:
+        # there is no generation to stop, so every later request and every
+        # later load would be refused as busy for the life of the process.
+        for name, path, body in (
+            (
+                "sampling_from",
+                "/v1/chat/completions",
+                {"messages": [{"role": "user", "content": "hi"}]},
+            ),
+            ("token_detail", "/v1/chatlab/score", {"text": "hi"}),
+        ):
+            with self.subTest(path=path):
+                self.explode(name)
+
+                with self.assertRaises(RuntimeError):
+                    self.post(path, **body)
+
+                self.assertFalse(self.manager.busy, "the failure kept the slot")
+                self.assertTrue(
+                    self.manager.reserve_generation(), "nothing could follow it"
+                )
+                self.manager.release_generation()
+
+    def test_a_generation_that_never_reaches_its_thread_gives_the_slot_back(self):
+        # Frames owns the slot from the moment its thread is running, and
+        # gives it back when the generator is done with the model. Until then
+        # the handler owns it, so a thread that will not start - the one
+        # failure there is between the claim and the hand-over - must not
+        # leave it held by a generation that never happened.
+        self.explode("Frames")
+
+        with self.assertRaises(RuntimeError):
+            self.post(messages=[{"role": "user", "content": "hi"}])
+
+        self.assertFalse(self.manager.busy, "the failure kept the slot")
+
+    def explode(self, name):
+        """Make ``api.<name>`` raise something the routes do not expect."""
+
+        def boom(*arguments, **keywords):
+            raise RuntimeError("boom")
+
+        original = getattr(api, name)
+        setattr(api, name, boom)
+        self.addCleanup(setattr, api, name, original)
+
+    def test_a_request_naming_another_model_gives_the_slot_back(self):
+        response = self.post(
+            model="org/other", messages=[{"role": "user", "content": "hi"}]
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(self.manager.busy, "the refusal kept the slot")
 
     def test_a_second_request_is_told_the_model_is_busy(self):
         self.manager.busy = True
@@ -1262,6 +1437,18 @@ class ScoreTests(ApiTestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"]["type"], "model_busy")
+
+    def test_scoring_during_a_load_is_told_about_the_load(self):
+        self.manager.loading = True
+        self.manager.score_text = lambda text, **kwargs: self.fail("scored anyway")
+
+        response = self.client.post("/v1/chatlab/score", json={"text": "hi"})
+
+        self.assertEqual(response.status_code, 409)
+        body = response.json()
+        self.assertEqual(body["error"]["type"], "model_loading")
+        self.assertIn("loading", body["error"]["message"])
+        self.assertNotIn("generating", body["error"]["message"])
 
     def test_the_slot_is_given_back_after_a_refused_score(self):
         def refuse(text, **kwargs):

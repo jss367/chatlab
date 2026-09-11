@@ -9,6 +9,7 @@ import gradio as gr
 
 import charts
 from model_runtime import (
+    LOADING,
     ModelChanged,
 )
 from ui import runtime
@@ -27,6 +28,11 @@ INSPECT_HINT = "Click a token above, then press **Inspect layers**."
 
 
 INSPECT_BUSY = "Wait for the response to finish before inspecting a token."
+
+
+# A load has the model instead, and the strip being inspected belongs to the
+# weights on their way out: there is no response to wait for.
+INSPECT_LOADING = "Wait for the model to finish loading before inspecting a token."
 
 
 INSPECT_GONE = "That token is no longer on screen. Click one and try again."
@@ -114,44 +120,54 @@ def inspect_layers(
     if generation != target["generation"] or context_generation != generation:
         yield (*refused, INSPECT_GONE)
         return
-    if not runtime.MANAGER.loaded:
-        yield (*refused, "Download and load a model first.")
-        return
-    # Loading a model leaves the strips on screen, and their token ids mean
-    # nothing to a different tokenizer, so the ids carry the load that
-    # produced them and only that load may explain them. The load, not the
-    # model ID: re-downloading the same ID can bring in a newer snapshot.
-    # This is the early exit; the check that counts is the one inspect()
-    # makes under the model lock, since a load can land between here and it.
-    if load_id != runtime.MANAGER.load_id:
-        yield (*refused, INSPECT_MODEL_CHANGED)
-        return
-
-    context_ids = [int(value) for value in context_ids]
-    position = int(target["index"])
-    if target["strip"] == "prompt":
-        if (
-            position >= len(prompt_metrics)
-            or position >= len(context_ids)
-            or int(prompt_metrics[position]["token_id"]) != context_ids[position]
-        ):
-            yield (*refused, INSPECT_GONE)
-            return
-        index = position
-    else:
-        if position >= len(metrics):
-            yield (*refused, INSPECT_GONE)
-            return
-        index = len(context_ids) + position
-    if index == 0:
-        yield (*refused, INSPECT_FIRST)
-        return
-    sequence = context_ids + [int(metric["token_id"]) for metric in metrics]
-
-    if not runtime.MANAGER.reserve_generation():
-        yield (*refused, INSPECT_BUSY)
+    # Claimed before memory is looked at, not after it. A load empties memory
+    # before it reads the new weights, so the check below finds nothing
+    # loaded for the whole of that phase and would send the reader off to
+    # load a model while one was already loading. The claim is also what
+    # makes the load check after it worth making: while the slot is held no
+    # load can start, so the weights the token ids came from cannot be
+    # swapped out between that check and the pass that reads them. What it
+    # guards here is list arithmetic, and the slot goes back on each refusal.
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        yield (*refused, INSPECT_LOADING if held == LOADING else INSPECT_BUSY)
         return
     try:
+        if not runtime.MANAGER.loaded:
+            yield (*refused, "Download and load a model first.")
+            return
+        # Loading a model leaves the strips on screen, and their token ids
+        # mean nothing to a different tokenizer, so the ids carry the load
+        # that produced them and only that load may explain them. The load,
+        # not the model ID: re-downloading the same ID can bring in a newer
+        # snapshot. inspect() compares it again under the model lock, which
+        # is where it is finally decided; read under the claim, this one can
+        # no longer be overtaken by a load starting behind it.
+        if load_id != runtime.MANAGER.load_id:
+            yield (*refused, INSPECT_MODEL_CHANGED)
+            return
+
+        context_ids = [int(value) for value in context_ids]
+        position = int(target["index"])
+        if target["strip"] == "prompt":
+            if (
+                position >= len(prompt_metrics)
+                or position >= len(context_ids)
+                or int(prompt_metrics[position]["token_id"]) != context_ids[position]
+            ):
+                yield (*refused, INSPECT_GONE)
+                return
+            index = position
+        else:
+            if position >= len(metrics):
+                yield (*refused, INSPECT_GONE)
+                return
+            index = len(context_ids) + position
+        if index == 0:
+            yield (*refused, INSPECT_FIRST)
+            return
+        sequence = context_ids + [int(metric["token_id"]) for metric in metrics]
+
         started = time.monotonic()
         try:
             insight = runtime.MANAGER.inspect(

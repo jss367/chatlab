@@ -39,6 +39,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 import settings
 from model_runtime import (
+    GENERATING,
+    LOADING,
     MLX_KIND,
     TEXT_KIND,
     InsufficientMemoryError,
@@ -91,6 +93,31 @@ class ApiError(Exception):
         self.status = status
         self.message = message
         self.kind = kind
+
+
+def occupied_error(held: str) -> ApiError:
+    """The 409 for a request refused because something else has the model.
+
+    One generation runs at a time, and a load turns a request away for the
+    same reason - but it is not a generation, and a client told to try again
+    when the response has finished would be waiting on something that is not
+    running. The type is what a script branches on, so the two have their
+    own: a load ends by itself, a response can be stopped from the interface.
+    """
+
+    if held == LOADING:
+        return ApiError(
+            409,
+            "ChatLab is loading a model. Nothing can run against it until "
+            "the weights are in; try again when the load has finished.",
+            "model_loading",
+        )
+    return ApiError(
+        409,
+        "ChatLab is generating a response already. Only one runs at "
+        "a time; try again when it has finished.",
+        "model_busy",
+    )
 
 
 class Frames:
@@ -548,12 +575,31 @@ def build_router() -> APIRouter:
         # One reading of the four, so a status asked for while a load is
         # landing cannot describe one model's weights with another's device.
         in_memory = runtime.MANAGER.loaded_model()
+        # One reading of what has the model, for the same reason. The two
+        # flags below are two words for one answer, and asking twice would
+        # publish a state the manager was never in: a response ending as a
+        # load starts would report both, and a load ending as a response
+        # starts would report neither. This is the call a client is told to
+        # make before it sends work, so it must not say the model is free an
+        # instant before refusing the request, or busy with two things at
+        # once. Nothing is claimed here - a status reserves nothing - so this
+        # is the one read, and by the time the answer is on the wire it is
+        # already only a report of the instant it was taken.
+        held = runtime.MANAGER.occupant
         return JSONResponse(
             {
                 "model": in_memory.model_id,
                 "device": in_memory.device_name or device_label(profile.backend),
                 "precision": in_memory.precision,
-                "busy": runtime.MANAGER.busy,
+                "busy": held == GENERATING,
+                # Separate from busy on purpose: a load turns a request away
+                # as a response does, but nothing is generating and there is
+                # nothing to stop. A client that only read busy would find a
+                # 409 where it was told the model was free. A load is named
+                # ahead of a response when both are somehow under way, which
+                # is what ModelManager.occupant answers and what the 409 a
+                # request would get says, so the two agree.
+                "loading": held == LOADING,
                 "memory": {
                     "total_bytes": profile.total,
                     "available_bytes": profile.available,
@@ -567,54 +613,72 @@ def build_router() -> APIRouter:
     def chat_completions(body: dict = Body(default_factory=dict)):
         """Answer a conversation, with every token's measurements if asked."""
 
+        # Claimed before the request is checked, not after it. A load empties
+        # memory before it reads the new weights, so "no model is loaded" is
+        # what a load looks like from here for the whole of that phase, and a
+        # request arriving in it was told to load a model on the Models page
+        # while the Models page was loading one. Claiming first is not only
+        # the right order, it is the only stable one: the claim is refused
+        # while a load is claimed, and once it is held no load can start, so
+        # what the checks below read cannot be unloaded under them. The slot
+        # is given back at once when the request turns out not to be
+        # answerable - the checks are string and number work, so nothing is
+        # held for longer than it takes to read the body.
+        held = runtime.MANAGER.claim_generation()
+        if held:
+            return error_response(occupied_error(held))
+        # True until Frames has the run and the slot with it. Every way out
+        # of the block below - a refusal, a malformed body that raises
+        # something other than an ApiError, a thread that will not start -
+        # passes through the finally, so a claim cannot be stranded by a path
+        # nobody thought of. A stranded claim is not recoverable: there is no
+        # generation to stop, so every later request and every later load is
+        # refused as busy for the life of the process.
+        handed_on = False
         try:
-            model_id, load_id = loaded_model(body.get("model"))
-            # Read with the load, not after the generation: by then the model
-            # lock is free and a queued load can have replaced both. A load
-            # that lands in between makes the runtime refuse this request
-            # against its load ID, so these can only describe the weights
-            # that answered.
-            device = runtime.MANAGER.device_name
-            precision = runtime.MANAGER.precision
-            turns, prefill = conversation_from(body)
-            sampling = sampling_from(body)
-            measured, wants = token_detail(body)
-            streaming = _flag(body, "stream")
-            prompt_logprobs = _flag(body, "prompt_logprobs")
-        except ApiError as error:
-            return error_response(error)
+            try:
+                model_id, load_id = loaded_model(body.get("model"))
+                # Read with the load, not after the generation: by then the
+                # model lock is free and a queued load can have replaced both.
+                # A load that lands in between makes the runtime refuse this
+                # request against its load ID, so these can only describe the
+                # weights that answered.
+                device = runtime.MANAGER.device_name
+                precision = runtime.MANAGER.precision
+                turns, prefill = conversation_from(body)
+                sampling = sampling_from(body)
+                measured, wants = token_detail(body)
+                streaming = _flag(body, "stream")
+                prompt_logprobs = _flag(body, "prompt_logprobs")
+            except ApiError as error:
+                return error_response(error)
 
-        if not runtime.MANAGER.reserve_generation():
-            return error_response(
-                ApiError(
-                    409,
-                    "ChatLab is generating a response already. Only one runs at "
-                    "a time; try again when it has finished.",
-                    "model_busy",
-                )
+            request_id = f"chatcmpl-{uuid4().hex}"
+            created = int(time.time())
+            # The load the request was checked against. A load from the Models
+            # page can take the model lock between that check and the first
+            # token, and without this the answer would come from the new
+            # weights while the response named the old ones; the runtime
+            # compares it under the lock and refuses instead.
+            stream = runtime.MANAGER.generate(
+                turns,
+                temperature=sampling["temperature"],
+                top_p=sampling["top_p"],
+                top_k=sampling["top_k"],
+                max_new_tokens=sampling["max_new_tokens"],
+                seed=sampling["seed"],
+                analyze_prompt=prompt_logprobs,
+                answer_prefill=prefill,
+                load_id=load_id,
             )
-        request_id = f"chatcmpl-{uuid4().hex}"
-        created = int(time.time())
-        # The load the request was checked against. A load from the Models
-        # page can take the model lock between that check and the first
-        # token, and without this the answer would come from the new weights
-        # while the response named the old ones; the runtime compares it
-        # under the lock and refuses instead.
-        stream = runtime.MANAGER.generate(
-            turns,
-            temperature=sampling["temperature"],
-            top_p=sampling["top_p"],
-            top_k=sampling["top_k"],
-            max_new_tokens=sampling["max_new_tokens"],
-            seed=sampling["seed"],
-            analyze_prompt=prompt_logprobs,
-            answer_prefill=prefill,
-            load_id=load_id,
-        )
-        # One thread owns the generator from here on; see Frames. It also
-        # gives the generation slot back when the model is done with, so
-        # nothing below releases it.
-        produced = Frames(stream)
+            # One thread owns the generator from here on; see Frames. It also
+            # gives the generation slot back when the model is done with, so
+            # nothing below releases it.
+            produced = Frames(stream)
+            handed_on = True
+        finally:
+            if not handed_on:
+                runtime.MANAGER.release_generation()
         try:
             first = produced.first()
         except ApiError as error:
@@ -663,52 +727,57 @@ def build_router() -> APIRouter:
     def score(body: dict = Body(default_factory=dict)):
         """Measure text the model did not write, as the Score text tab does."""
 
-        try:
-            model_id, load_id = loaded_model(body.get("model"))
-            # Read with the load, as a completion does: the same model ID can
-            # be loaded at several precisions, and asking afterwards may
-            # describe a load that has since replaced this one.
-            device = runtime.MANAGER.device_name
-            precision = runtime.MANAGER.precision
-            text = body.get("text")
-            if not isinstance(text, str):
-                raise ApiError(400, "text must be a string.")
-            context = body.get("context")
-            if context is None:
-                context = ""
-            # Checked after the default rather than through it: `or ""` would
-            # turn a 0 or a [] into an empty context and measure the text
-            # against nothing at all, rather than saying what was wrong.
-            if not isinstance(context, str):
-                raise ApiError(400, "context must be a string.")
-            use_template = _flag(body, "use_chat_template")
-            _measured, wants = token_detail(body)
-        except ApiError as error:
-            return error_response(error)
         # Scoring and generating take the same model lock, so a score that
         # did not reserve the slot would wait out a whole response rather
         # than say the model was busy - and would hold the lock a later
-        # response was refused for.
-        if not runtime.MANAGER.reserve_generation():
-            return error_response(
-                ApiError(
-                    409,
-                    "ChatLab is generating a response already. Only one run at "
-                    "a time; try again when it has finished.",
-                    "model_busy",
-                )
-            )
+        # response was refused for. Claimed before the request is checked for
+        # the reason a completion is: memory stands empty for the weight-
+        # reading phase of a load, and a request that validated first would
+        # be told to load a model rather than that one is loading.
+        held = runtime.MANAGER.claim_generation()
+        if held:
+            return error_response(occupied_error(held))
+        # Nothing here hands the slot on to a worker, so one finally covers
+        # the whole of it: the refusals, the score itself, and a malformed
+        # body that raises something other than an ApiError on its way
+        # through the checks. A claim left behind by any of them would refuse
+        # every later request and every later load, with no generation to
+        # stop and give it back.
         try:
-            scored = runtime.MANAGER.score_text(
-                text,
-                context=context,
-                use_chat_template=use_template,
-                load_id=load_id,
-            )
-        except ValueError as error:
-            return error_response(ApiError(400, str(error)))
-        except Exception as error:
-            return error_response(refusal(error))
+            try:
+                model_id, load_id = loaded_model(body.get("model"))
+                # Read with the load, as a completion does: the same model ID
+                # can be loaded at several precisions, and asking afterwards
+                # may describe a load that has since replaced this one.
+                device = runtime.MANAGER.device_name
+                precision = runtime.MANAGER.precision
+                text = body.get("text")
+                if not isinstance(text, str):
+                    raise ApiError(400, "text must be a string.")
+                context = body.get("context")
+                if context is None:
+                    context = ""
+                # Checked after the default rather than through it: `or ""`
+                # would turn a 0 or a [] into an empty context and measure the
+                # text against nothing at all, rather than saying what was
+                # wrong.
+                if not isinstance(context, str):
+                    raise ApiError(400, "context must be a string.")
+                use_template = _flag(body, "use_chat_template")
+                _measured, wants = token_detail(body)
+            except ApiError as error:
+                return error_response(error)
+            try:
+                scored = runtime.MANAGER.score_text(
+                    text,
+                    context=context,
+                    use_chat_template=use_template,
+                    load_id=load_id,
+                )
+            except ValueError as error:
+                return error_response(ApiError(400, str(error)))
+            except Exception as error:
+                return error_response(refusal(error))
         finally:
             runtime.MANAGER.release_generation()
         return JSONResponse(

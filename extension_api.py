@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from model_runtime import LOADING
 from trace_export import write_private_text
 
 API_VERSION = 1
@@ -26,13 +27,28 @@ class ModelService:
         return self._provider().loaded
 
     def open_session(self):
-        """Reserve the shared model until close; fail rather than queue behind Chat."""
+        """Reserve the shared model until close; fail rather than queue behind Chat.
+
+        A load turns the session away as a running reply does, and says so in
+        its own words: there is no response to wait for while weights are
+        being read, and the model the extension checked for is on its way out.
+
+        The slot is claimed before memory is looked at, because a load empties
+        it before it reads the new weights: an extension asking in that window
+        would be told to load a model on the Models page, which is the page
+        already loading one. The claim is also what keeps the answer good -
+        no load can start while it is held, so the model the session pins
+        cannot be unloaded between the check and the first token.
+        """
         manager = self._provider()
-        if not manager.loaded:
-            raise ValueError("Load a model on the Models page before running an extension.")
-        if not manager.reserve_generation():
+        held = manager.claim_generation()
+        if held == LOADING:
+            raise ValueError("A model is loading. Wait for it to finish, then try again.")
+        if held is not None:
             raise ValueError("The model is busy in another view. Wait for that response to finish.")
         try:
+            if not manager.loaded:
+                raise ValueError("Load a model on the Models page before running an extension.")
             return GenerationSession(manager)
         except BaseException:
             manager.release_generation()
@@ -71,13 +87,36 @@ class GenerationSession:
         )
 
     def decode(self, ids):
+        """Decode exactly as the runtime does when it records per-token text.
+
+        clean_up_tokenization_spaces is not left to the tokenizer's own default,
+        which some repositories set true: that rewrites spacing around
+        punctuation, so the same IDs would decode one way into a recorded metric
+        and another way here, and a caller comparing the two would see a
+        difference the vocabulary does not have.
+        """
         self._check()
-        return self._manager.tokenizer.decode(ids, skip_special_tokens=False)
+        return self._manager.tokenizer.decode(
+            ids, skip_special_tokens=False, clean_up_tokenization_spaces=False,
+        )
 
     @property
     def stop_token_ids(self):
         self._check()
         return set(self._manager._stop_token_ids())
+
+    @property
+    def hidden_token_ids(self):
+        """Special token IDs that never reach a recorded response text.
+
+        The streaming decoder drops these rather than decoding them, so a
+        caller checking recorded text against a fresh decode of the same IDs
+        has to leave out exactly this set. Reader-supplied prefill is the
+        exception the runtime makes: replay forces those tokens visible,
+        special-token spellings included.
+        """
+        self._check()
+        return set(self._manager.hidden_token_ids())
 
     def generate(self, messages, *, temperature, top_p, top_k, max_new_tokens, seed,
                  tools=None, forced_ids=(), literal_prefill_tokens=0, analyze_prompt=False):

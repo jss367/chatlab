@@ -30,6 +30,7 @@ from conversation import (
     user_index_at_or_before,
 )
 from model_runtime import (
+    LOADING,
     ModelChanged,
 )
 from token_metrics import (
@@ -300,9 +301,66 @@ def idle_state(
 
 
 BUSY_STATUS = "A response is already generating. Press Stop first."
+# A load has the model instead. There is no Stop to press for one, so the
+# message cannot be the one above; telling a reader to press a button that
+# is not there is worse than saying nothing.
+LOADING_STATUS = "A model is loading. Wait for it to finish."
 
 
-def busy_state():
+def occupied() -> str | None:
+    """What else has the model - a reply streaming, or a load - or ``None``.
+
+    The early exit the handlers below take, and the answer is what the
+    refusal is worded from. Never the guard - the guard is the reservation
+    each of them goes on to make, which settles the same question in one step
+    with the claim. See :meth:`ModelManager.claim_generation`.
+    """
+
+    return runtime.MANAGER.occupant
+
+
+def busy_status(held: str | None = None) -> str:
+    """Which refusal to show, for whatever ``held`` says has the model.
+
+    ``held`` is what the refused claim or :func:`occupied` answered, passed
+    down rather than read again here: a load that ends in between would leave
+    this saying "press Stop" over a model nobody is holding.
+    """
+
+    return LOADING_STATUS if (held or runtime.MANAGER.occupant) == LOADING else BUSY_STATUS
+
+
+NO_MODEL_STATUS = "Download and load a model first."
+
+
+def no_model_state(prompt_text: str, turns: list[dict]):
+    """What to show when memory is empty: the load that emptied it, or the advice.
+
+    The occupancy read comes *after* the emptiness rather than before it, and
+    the order is the point. A load unloads the old weights before it reads
+    the new ones, so memory stands empty for the whole of that phase, and the
+    advice below would send a reader to the Models page to start the load
+    they are already waiting for. occupied() at the top of each handler is
+    the early exit for a load that was under way when the click arrived; this
+    is the one that started since.
+
+    Claiming instead of asking - what the Score, Inspect, batch, API and
+    extension paths do, since a claim cannot go stale - is not open to these
+    handlers: generate_reply() claims further down, and a claim taken here
+    would refuse its own generation. What is left is an instant-wide window
+    in which a load finishing between the two reads leaves this saying "load
+    a model" just after one finished loading, and the next Send works. That
+    is the harmless way round; the other order is wrong for the minutes a
+    load takes.
+    """
+
+    held = occupied()
+    if held:
+        return busy_state(held)
+    return idle_state(prompt_text, turns, NO_MODEL_STATUS)
+
+
+def busy_state(held: str | None = None):
     """Refuse to start a generation while one is running, touching nothing else.
 
     Gradio reads a listener's inputs when the request is queued, so a Retry or
@@ -321,11 +379,15 @@ def busy_state():
     and never arrives at all if inference stalls. Skipping leaves the busy
     pair the running generation already published in place, and that
     generation restores the idle pair itself on whichever path it exits.
+
+    A load blocks a reply for the same reason and is refused the same way,
+    with its own wording; ``held`` is which of the two the caller was turned
+    away by. See :func:`busy_status`.
     """
 
     return (
         (gr.skip(),) * 5
-        + (BUSY_STATUS,)
+        + (busy_status(held),)
         + (gr.skip(),) * (len(CHAT_OUTPUT_NAMES) - 6)
     )
 
@@ -392,8 +454,9 @@ def generate_reply(
     slot itself and calls _stream_reply() directly.
     """
 
-    if not runtime.MANAGER.reserve_generation():
-        yield busy_state()
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        yield busy_state(held)
         return
 
     try:
@@ -788,11 +851,12 @@ def chat(
     steering_strength: float | None = None,
     steering_layer: int | None = None,
 ):
-    if runtime.MANAGER.busy:
+    held = occupied()
+    if held:
         # Before anything else, including the checks below: every other exit
         # from this function writes the conversation back, and while another
         # generation is streaming that write is a stale overwrite.
-        yield busy_state()
+        yield busy_state(held)
         return
 
     turns = copy_turns(turns)
@@ -801,7 +865,7 @@ def chat(
         yield idle_state(prompt_text, turns, "Enter a message first.")
         return
     if not runtime.MANAGER.loaded:
-        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        yield no_model_state(prompt_text, turns)
         return
 
     turns.append(make_turn("user", message))
@@ -853,10 +917,11 @@ def regenerate_from(
 ):
     """Throw away everything after the user turn at ``position`` and reply again."""
 
-    if runtime.MANAGER.busy:
+    held = occupied()
+    if held:
         # Covers Retry and the chatbot's own retry button, which reach a
         # generation only through here.
-        yield busy_state()
+        yield busy_state(held)
         return
 
     turns = copy_turns(turns)
@@ -864,7 +929,7 @@ def regenerate_from(
         yield idle_state(prompt_text, turns, "There is nothing to retry.")
         return
     if not runtime.MANAGER.loaded:
-        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        yield no_model_state(prompt_text, turns)
         return
 
     try:
@@ -910,10 +975,11 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
     # Steering follows the eleven display/generation settings. This path
     # clears strips itself and needs the color scale, not the vector snapshot.
     scale_name = settings[10] if len(settings) > 10 else DEFAULT_COLOR_SCALE
-    if runtime.MANAGER.busy:
+    held = occupied()
+    if held:
         # Not just the branch that regenerates: editing an assistant turn
         # rewrites the conversation on its own, from the same stale snapshot.
-        yield busy_state()
+        yield busy_state(held)
         return
 
     turns = copy_turns(turns)
@@ -948,8 +1014,9 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
         # and whichever frame landed second would erase the other's work. The
         # slot is held across the yield, because releasing before the frame
         # reaches the browser reopens exactly that window.
-        if not runtime.MANAGER.reserve_generation():
-            yield busy_state()
+        held = runtime.MANAGER.claim_generation()
+        if held:
+            yield busy_state(held)
             return
         try:
             turns[position] = edited_turn
@@ -979,7 +1046,7 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
         # regenerate_from() would refuse too, but only after the truncation
         # below had already thrown away every later turn for a reply that is
         # never generated.
-        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        yield no_model_state(prompt_text, turns)
         return
 
     original_turns = copy_turns(turns)
@@ -1058,8 +1125,9 @@ def branch_with_text(
     it.
     """
 
-    if not runtime.MANAGER.reserve_generation():
-        yield busy_state()
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        yield busy_state(held)
         return
 
     try:
@@ -1184,8 +1252,9 @@ def branch_from(
     branch a different continuation rather than an edit in the middle.
     """
 
-    if runtime.MANAGER.busy:
-        yield busy_state()
+    held = occupied()
+    if held:
+        yield busy_state(held)
         return
 
     turns = copy_turns(turns)
@@ -1193,7 +1262,7 @@ def branch_from(
         yield idle_state(prompt_text, turns, BRANCH_HINT)
         return
     if not runtime.MANAGER.loaded:
-        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        yield no_model_state(prompt_text, turns)
         return
     found = branch_target(turns, pick)
     if isinstance(found, str):

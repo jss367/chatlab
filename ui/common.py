@@ -179,7 +179,52 @@ def metric_term(name: str) -> str:
     return f'<abbr title="{meaning}">{name}</abbr>'
 
 
-def status_card(title: str, detail: str, tone: str = "neutral") -> str:
+class Card(str):
+    """A status card's markdown, with the parts it was built from kept beside it.
+
+    A card is the only thing a load hands back as it runs, and a caller
+    sometimes needs more of it than the markdown: the switcher has to say on
+    the chat page why a switch it accepted did not happen, which means
+    knowing whether the last card was a failure, what it said, and whether
+    that failure has already announced itself. Subclassing ``str`` keeps
+    every existing reader working on the text alone - Gradio renders it, the
+    pages pass it through, the tests search it - and adds the reading for
+    the one caller that asks.
+    """
+
+    __slots__ = ("title", "detail", "tone", "announced")
+
+    def __new__(
+        cls,
+        markdown: str = "",
+        *,
+        title: str = "",
+        detail: str = "",
+        tone: str = "neutral",
+        announced: bool = False,
+    ) -> "Card":
+        card = super().__new__(cls, markdown)
+        card.title = title
+        card.detail = detail
+        card.tone = tone
+        card.announced = announced
+        return card
+
+    def __getnewargs__(self) -> tuple[str]:
+        """Keep the markdown through a copy or a pickle.
+
+        Gradio deep-copies the values it holds, and the default rebuild of a
+        ``str`` subclass calls ``__new__`` with nothing: without this a card
+        that went through one would come back empty. The parts beside the
+        markdown are restored from the instance's own state.
+        """
+
+        return (str(self),)
+
+
+def status_card(
+    title: str, detail: str, tone: str = "neutral", *, announced: bool = False
+) -> Card:
     icon = {"success": "●", "error": "⚠", "working": "◌"}.get(tone, "○")
     heading = f"{icon} {title}"
     if tone == "error":
@@ -187,7 +232,13 @@ def status_card(title: str, detail: str, tone: str = "neutral") -> str:
         # in backticks, a progress bar - and wrapping it in a tag would stop
         # that from rendering.
         heading = f'<span class="failure-text">{heading}</span>'
-    return f"### {heading}\n\n{detail}"
+    return Card(
+        f"### {heading}\n\n{detail}",
+        title=title,
+        detail=detail,
+        tone=tone,
+        announced=announced,
+    )
 
 
 def alarm(title: str, detail: str) -> None:
@@ -220,16 +271,19 @@ def failure_status(title: str, detail: str) -> str:
     return f'<div class="failure">{safe}</div>'
 
 
-def failure_card(title: str, detail: str) -> str:
+def failure_card(title: str, detail: str) -> Card:
     """A red status card, and the toast that announces it.
 
     ``detail`` is markdown the caller has already made safe, because a card
     spells out file names in backticks and draws bars out of block
     characters. Both the card and the toast render it as it is given.
+
+    The card is marked as announced, so a caller that toasts the outcome of a
+    whole run of cards does not raise a second toast over this one.
     """
 
     alarm(title, detail)
-    return status_card(title, detail, "error")
+    return status_card(title, detail, "error", announced=True)
 
 
 def describe_duration(seconds: float) -> str:
