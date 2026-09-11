@@ -347,6 +347,103 @@ class MazeTests(unittest.TestCase):
         self.assertEqual(forked.position, (0, 1))
         self.assertEqual(len(forked.turns), 1)
 
+    def test_fork_refuses_a_retained_prefix_the_loaded_model_would_stop_inside(self):
+        """forced_ids is cut at its first stop token, so one inside the kept prefix ends the response early."""
+        move = call_text(MAZE.maze_id, "east")
+        ids = list(move.encode()) + [0]
+        ep = Episode(MAZE, CONFIG | {"interruption_text": "", "per_turn_tokens": 200, "token_budget": 1000})
+        author = Manager([(move, ids)])
+        author.generate = scored(author.generate)
+        list(stream_episode(ep, author, single_step=True))
+        replay = from_payload(json.loads(json.dumps(ep.payload())))
+        index = move.index("east")
+        self.assertIn(10, ids[:index])
+
+        # Every ID still decodes the same and the response still ends on a stop
+        # token, but the newline inside the retained prefix is now one too.
+        restopped = Manager([])
+        restopped.load_id = "test-load#2"
+        restopped._stop_token_ids = lambda: {0, 10}
+        with restopped.open_session() as session:
+            with self.assertRaisesRegex(ValueError, "retained prefix"):
+                fork_token_edit(replay, 0, index, "west", session)
+
+        # Editing before that token leaves it out of the prefix, so it is fine.
+        with restopped.open_session() as session:
+            forked = fork_token_edit(replay, 0, 5, "west", session)
+        self.assertEqual(forked.pending_edit["forced_ids"], ids[:5] + list(b"west"))
+
+    def test_fork_refuses_an_alternative_the_loaded_model_decodes_differently(self):
+        """The chosen candidate is the one replayed ID no other token in the run stands behind."""
+        move = call_text(MAZE.maze_id, "east")
+        ids = list(move.encode()) + [0]
+        ep = Episode(MAZE, CONFIG | {"interruption_text": "", "per_turn_tokens": 200, "token_budget": 1000})
+        author = Manager([(move, ids)])
+        author.generate = scored(author.generate)
+        list(stream_episode(ep, author, single_step=True))
+        replay = from_payload(json.loads(json.dumps(ep.payload())))
+        index = move.index("east")
+        self.assertNotIn(120, ids)
+
+        # A vocabulary that moved only the unused alternative: every retained ID
+        # decodes as it did, so nothing but the candidate check can catch it.
+        moved = Manager([])
+        moved.load_id = "test-load#2"
+        moved.tokenizer = SimpleNamespace(
+            encode=lambda s, **kw: list(s.encode()),
+            decode=lambda ids, **kw: bytes(113 if i == 120 else i for i in ids).decode())
+        with moved.open_session() as session:
+            with self.assertRaisesRegex(ValueError, "decodes this alternative differently"):
+                fork_token_edit(replay, 0, index, "ignored", session, candidate_id=120)
+
+        # An alternative recorded from a vocabulary name rather than characters
+        # identifies no ID, so an uploaded run cannot apply it either.
+        fragment = from_payload(json.loads(json.dumps(ep.payload())))
+        fragment.turns[0]["metrics"][index]["top_candidates"] = [{"token_id": 120, "text": "�"}]
+        reloaded = Manager([])
+        reloaded.load_id = "test-load#2"
+        with reloaded.open_session() as session:
+            with self.assertRaisesRegex(ValueError, "byte fragment"):
+                fork_token_edit(fragment, 0, index, "ignored", session, candidate_id=120)
+
+        # Unchanged, the same later load applies the recorded alternative.
+        intact = from_payload(json.loads(json.dumps(ep.payload())))
+        with reloaded.open_session() as session:
+            forked = fork_token_edit(intact, 0, index, "ignored", session, candidate_id=120)
+        self.assertEqual(forked.pending_edit["forced_ids"], ids[:index] + [120])
+
+    def test_fork_refuses_an_uploaded_byte_fragment_but_allows_the_session_that_made_it(self):
+        """A piece of a multi-byte character records the same text whatever ID carries it."""
+        move = call_text(MAZE.maze_id, "east")
+        ids = list(move.encode()) + [0]
+        ep = Episode(MAZE, CONFIG | {"interruption_text": "", "per_turn_tokens": 200, "token_budget": 1000})
+        author = Manager([(move, ids)])
+        author.generate = scored(author.generate)
+        list(stream_episode(ep, author, single_step=True))
+        index = move.index("east")
+
+        replay = from_payload(json.loads(json.dumps(ep.payload())))
+        replay.turns[0]["metrics"][3]["text"] = "�"
+        reloaded = Manager([])
+        reloaded.load_id = "test-load#2"
+        with reloaded.open_session() as session:
+            with self.assertRaisesRegex(ValueError, "byte fragment"):
+                fork_token_edit(replay, 0, index, "west", session)
+
+        # A live episode of this session names the load in memory now, so the
+        # same fragment is editable where the run was produced.
+        ep.turns[0]["metrics"][3]["text"] = "�"
+        with author.open_session() as session:
+            forked = fork_token_edit(ep, 0, index, "west", session)
+        self.assertEqual(forked.pending_edit["forced_ids"], ids[:index] + list(b"west"))
+
+        # A fragment past the edited token is not replayed, so it is not checked.
+        ahead = from_payload(json.loads(json.dumps(ep.payload())))
+        ahead.turns[0]["metrics"][3]["text"] = chr(ids[3])
+        ahead.turns[0]["metrics"][index + 1]["text"] = "�"
+        with reloaded.open_session() as session:
+            self.assertTrue(fork_token_edit(ahead, 0, index, "west", session).pending_edit)
+
     def test_replay_edit_leaves_a_newer_archive_of_the_same_run_alone(self):
         move = call_text(MAZE.maze_id, "east")
         ids = list(move.encode()) + [0]
@@ -392,7 +489,9 @@ class MazeTests(unittest.TestCase):
         ep = Episode(MAZE, CONFIG | {"interruption_text": ""})
         manager = Manager([('abc', [97, 98, 99, 0])])
         list(stream_episode(ep, manager))
-        ep.turns[0]["metrics"][1]["top_candidates"] = [{"token_id": 0, "text": "EOS"}]
+        # The fixture's stop token decodes to the character of its ID, which is
+        # what the run recorded for this alternative and what the fork checks.
+        ep.turns[0]["metrics"][1]["top_candidates"] = [{"token_id": 0, "text": "\x00"}]
         with manager.open_session() as session:
             edited = fork_token_edit(ep, 0, 1, '', session, candidate_id=0)
         manager.replies = iter([('', [])])  # Runtime returns after consuming a forced stop token.

@@ -147,6 +147,31 @@ def interrupted_prefix(episode, manager):
     return list(ids if count == 0 else ids[:count])
 
 
+def identifies_its_token(text):
+    """Whether recorded text pins down the ID it came from.
+
+    A byte-level piece of a character decodes on its own to the replacement
+    character, and a token carrying no characters decodes to nothing. Either
+    way the recorded text is the same for any ID of that shape, so a later
+    vocabulary can move the ID to other bytes and still produce a decode that
+    looks identical while the joint sequence reads differently.
+    """
+    return bool(text) and "�" not in text
+
+
+def forkable_without_evidence(episode, manager):
+    """Whether this episode may be forked where the run records nothing to check.
+
+    Only a live episode of this session qualifies: its load identifier was
+    assigned by this process, so it names the load in memory now. An uploaded
+    replay never qualifies, because load_count restarts at zero in each
+    process, and the first load of a repository in one session answers to the
+    same name as the first load in the next.
+    """
+    return (not episode.replay_only and manager.load_id is not None
+            and manager.load_id == episode.load_id)
+
+
 def verify_recorded_tokens(episode, turn_index, kept, manager):
     """Refuse a fork whose stored IDs no longer decode to the text they recorded.
 
@@ -169,7 +194,7 @@ def verify_recorded_tokens(episode, turn_index, kept, manager):
         # Exports predating per-token text carry nothing to check against. Only
         # a live episode of this session, whose load identifier this process
         # assigned and so can trust, may be forked without that evidence.
-        if episode.replay_only or manager.load_id is None or manager.load_id != episode.load_id:
+        if not forkable_without_evidence(episode, manager):
             raise ValueError("This run predates the recorded token text needed to confirm that the loaded "
                              "tokenizer is the one that produced it, so it can no longer be forked.")
         return
@@ -179,13 +204,52 @@ def verify_recorded_tokens(episode, turn_index, kept, manager):
         raise ValueError("The loaded model cannot decode this run's token IDs, so its tokenizer is not the "
                          f"one that produced the run ({exc}). This happens when the same model ID has been "
                          "re-downloaded at a different revision.") from exc
-    # A character split across several tokens decodes to replacement characters
-    # token by token, and an empty decode was recorded from a fallback name, so
-    # neither carries a value worth comparing.
     if any(now != then["text"] for now, then in zip(current, replayed)
-           if then["text"] and "�" not in then["text"]):
+           if identifies_its_token(then["text"])):
         raise ValueError("The loaded weights tokenize differently from the ones that produced this run, so "
                          "its tokens cannot be replayed. This happens when the same model ID has been "
+                         "re-downloaded at a different revision; load that snapshot to fork this run.")
+    # A byte fragment records text that identifies no particular ID, so nothing
+    # in the run shows that this load still maps it to the bytes it carried
+    # then, and the forced sequence would decode to different text without any
+    # of the comparisons above noticing. The session that produced the run is
+    # the one place that evidence is not needed.
+    if not all(identifies_its_token(metric["text"]) for metric in replayed):
+        if not forkable_without_evidence(episode, manager):
+            raise ValueError("A token this fork replays recorded a byte fragment rather than text, so there "
+                             "is nothing to confirm that the loaded tokenizer still maps it to the same "
+                             "bytes. A run containing one can only be forked by the session that produced "
+                             "it; load that snapshot and run it again to edit this response.")
+
+
+def verify_recorded_candidate(episode, candidate, manager):
+    """Refuse a fork onto an alternative the loaded model decodes differently.
+
+    The chosen alternative is the one ID the fork replays that the run never
+    generated, so no other token in the response stands behind it. A revised
+    vocabulary can leave every retained ID decoding as it always did and still
+    move this one, and the panel's offer of "'x' · token 120" would then put
+    some other text into the response. Its recorded text is checked the same
+    way the replayed tokens are.
+    """
+    try:
+        current = manager.decode([candidate["token_id"]])
+    except (IndexError, KeyError, OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("The loaded model cannot decode the token ID of this alternative, so its tokenizer "
+                         f"is not the one that offered it ({exc}). This happens when the same model ID has "
+                         "been re-downloaded at a different revision.") from exc
+    recorded = candidate.get("text")
+    if not identifies_its_token(current) or not identifies_its_token(recorded):
+        # An alternative that decodes to no characters was recorded under the
+        # vocabulary's own name for it, which names no particular ID either.
+        if not forkable_without_evidence(episode, manager):
+            raise ValueError("This alternative recorded a byte fragment rather than text, so there is "
+                             "nothing to confirm that the loaded tokenizer still maps it to the same bytes. "
+                             "It can only be applied by the session that offered it.")
+        return
+    if current != recorded:
+        raise ValueError("The loaded model decodes this alternative differently from the model that offered "
+                         "it, so it cannot be applied. This happens when the same model ID has been "
                          "re-downloaded at a different revision; load that snapshot to fork this run.")
 
 
@@ -204,8 +268,8 @@ def stop_deciding_id(turn):
     return None
 
 
-def verify_recorded_stops(episode, turn_index, stop_ids):
-    """Refuse a fork whose earlier responses no longer end the way they recorded.
+def verify_recorded_stops(episode, turn_index, kept, literal_prefill_tokens, stop_ids):
+    """Refuse a fork whose replayed tokens no longer behave as they did under the stop set.
 
     Each earlier response is replayed through finish_turn against the stop set
     of the load in memory now. An ID that decodes to the same text can still
@@ -213,6 +277,14 @@ def verify_recorded_stops(episode, turn_index, stop_ids):
     ended naturally is read as a length failure: its tool call is never parsed,
     so its messages, event and maze position never reach the forked episode and
     regeneration starts from the wrong state.
+
+    The retained prefix of the edited response is checked too. It reaches the
+    runtime as forced_ids, which cuts the forced sequence at the first stop
+    token past the literal prefill, so an ID this load newly treats as a stop
+    token ends the response inside the prefix and the selected token is never
+    reached. kept stops before the edited token, so the response's own closing
+    stop token is not part of it and any stop ID found there is one this load
+    added.
     """
     for turn in episode.turns[:turn_index]:
         last = stop_deciding_id(turn)
@@ -221,6 +293,11 @@ def verify_recorded_stops(episode, turn_index, stop_ids):
                              "its earlier responses cannot be reconstructed. This happens when the same model "
                              "ID has been re-downloaded at a different revision; load that snapshot to fork "
                              "this run.")
+    if any(metric["token_id"] in stop_ids for metric in kept[literal_prefill_tokens:]):
+        raise ValueError("The loaded model treats one of the tokens kept before your edit as a stop token, "
+                         "so it would end this response inside the retained prefix and never reach the token "
+                         "you selected. This happens when the same model ID has been re-downloaded at a "
+                         "different revision; load that snapshot to fork this run.")
 
 
 def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, candidate_id=None):
@@ -249,19 +326,22 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
         if (not isinstance(token_index, int)
                 or not original["forced_prefix_tokens"] <= token_index < len(metrics)):
             raise ValueError("Select a model-generated token to edit.")
-        kept_ids = [m["token_id"] for m in metrics[:token_index]]
+        kept = metrics[:token_index]
+        kept_ids = [m["token_id"] for m in kept]
         stop_ids = manager.stop_token_ids
-        verify_recorded_tokens(episode, turn_index, metrics[:token_index], manager)
-        verify_recorded_stops(episode, turn_index, stop_ids)
         literal_prefill_tokens = original.get("literal_prefill_tokens", original["forced_prefix_tokens"])
+        verify_recorded_tokens(episode, turn_index, kept, manager)
+        verify_recorded_stops(episode, turn_index, kept, literal_prefill_tokens, stop_ids)
         if candidate_id is None:
             replacement_ids = manager.encode_replacement(
                 kept_ids, replacement, literal_prefill_tokens=literal_prefill_tokens,
             )
         else:
-            candidates = {c["token_id"] for c in metrics[token_index].get("top_candidates", [])}
-            if candidate_id not in candidates:
+            candidate = next((c for c in metrics[token_index].get("top_candidates", [])
+                              if c["token_id"] == candidate_id), None)
+            if candidate is None:
                 raise ValueError("Choose an alternative for the selected token.")
+            verify_recorded_candidate(episode, candidate, manager)
             replacement_ids = [candidate_id]
         if not replacement_ids:
             raise ValueError("Enter replacement text or choose a token alternative.")
