@@ -1,9 +1,10 @@
 """Exercise the dependencies the desktop bundle only imports lazily.
 
 Nothing here is about whether the code is right. It is about whether
-PyInstaller put it in the bundle: the Metal quantizer and every diffusers
-pipeline class are reached by name at run time, so a missing hidden import in
-``ChatLab.spec`` shows up as a failure on a user's Mac and nowhere else.
+PyInstaller put it in the bundle: the Metal quantizer, every diffusers
+pipeline class and every mlx-lm architecture are reached by name at run time,
+so a missing hidden import in ``ChatLab.spec`` shows up as a failure on a
+user's Mac and nowhere else.
 """
 
 from __future__ import annotations
@@ -62,6 +63,57 @@ def smoke_test_pipelines() -> None:
             "probabilities, so the Images page could map no prompt token."
         )
     print("ChatLab diffusers pipeline class checks passed")
+
+
+def smoke_test_mlx() -> None:
+    """Check the bundle can build and run an mlx-lm model, on Apple silicon.
+
+    mlx-lm resolves each architecture by importing ``mlx_lm.models.<type>``
+    from the ``model_type`` in a downloaded config, so a bundle that left the
+    model modules or MLX's Metal library out fails on a user's Mac and
+    nowhere else. Built from random weights; no download is needed. Skipped
+    where mlx is not installed, which is every machine but an Apple silicon
+    Mac.
+    """
+
+    import mlx_runtime
+
+    if not mlx_runtime.mlx_available():
+        print("SKIP: MLX models need mlx and mlx-lm, which install on Apple silicon only")
+        return
+
+    mx = importlib.import_module("mlx.core")
+    llama = importlib.import_module("mlx_lm.models.llama")
+    importlib.import_module("mlx_lm.utils")
+    cache = importlib.import_module("mlx_lm.models.cache")
+    args = llama.ModelArgs(
+        model_type="llama",
+        hidden_size=64,
+        num_hidden_layers=2,
+        intermediate_size=128,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        rms_norm_eps=1e-5,
+        vocab_size=128,
+        max_position_embeddings=32,
+    )
+    model = llama.Model(args)
+    model.eval()
+    mx.eval(model.parameters())
+    engine = mlx_runtime.MlxEngine(model, {"model_type": "llama"})
+    logits, kv = engine.forward([1, 2, 3], None, 0)
+    row = logits.row(-1)
+    if row.shape != (128,) or not all(map(lambda value: value == value, row)):
+        raise RuntimeError("MLX smoke model produced invalid logits.")
+    reading = engine.inspect_step(4, kv, 3)
+    if len(reading.layer_logits) != 2 or len(reading.attention) != 2:
+        raise RuntimeError(
+            "MLX smoke model could not be read layer by layer: "
+            f"{len(reading.layer_logits)} lens rows, {len(reading.attention)} attention rows."
+        )
+    if not isinstance(cache.make_prompt_cache(model)[0], cache.KVCache):
+        raise RuntimeError("MLX smoke model did not build a key-value cache.")
+    print("ChatLab MLX load, forward pass and lens checks passed")
 
 
 def smoke_test_metal() -> None:

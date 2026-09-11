@@ -15,7 +15,7 @@ from urllib.request import urlopen
 import api
 import updater
 from app import build_app
-from desktop_smoke import smoke_test_metal, smoke_test_pipelines
+from desktop_smoke import smoke_test_metal, smoke_test_mlx, smoke_test_pipelines
 from version import __version__
 
 
@@ -77,9 +77,10 @@ def start_local_server():
 
 
 def smoke_test() -> int:
-    """Verify packaged Metal and diffusers support, and the local server."""
+    """Verify packaged Metal, MLX and diffusers support, and the local server."""
 
     smoke_test_metal()
+    smoke_test_mlx()
     smoke_test_pipelines()
     demo, local_url = start_local_server()
     try:

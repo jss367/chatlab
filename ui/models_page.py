@@ -18,6 +18,7 @@ from model_runtime import (
     DISCOVERY_CANDIDATES,
     FITS,
     IMAGE_KIND,
+    MLX_KIND,
     MODEL_WEIGHTS,
     QUANTIZED_BITS,
     SEARCH_IMAGE_PIPELINE_TAGS,
@@ -45,6 +46,9 @@ from model_runtime import (
     format_bytes,
     format_count,
     list_cached_models,
+    mlx_available,
+    mlx_bits_from_id,
+    mlx_snapshot_bits,
     model_fit,
     search_hub_models,
     snapshot_folder,
@@ -787,7 +791,14 @@ NO_CACHED_MODEL_SELECTED = "Select a model to see its details and put it in the 
 # The search is scoped to one kind at a time, because the hub files them
 # under different libraries: a Transformers query and a diffusers one are
 # different searches, not one search with a wider net.
-SEARCH_KINDS = (("Text models", TEXT_KIND), ("Image models", IMAGE_KIND))
+SEARCH_KINDS = (
+    ("Text models", TEXT_KIND),
+    ("Image models", IMAGE_KIND),
+    # Offered where the backend exists, which is Apple silicon with mlx-lm
+    # installed: elsewhere the search would find models that then land in
+    # the cache as unsupported.
+    *((("MLX models", MLX_KIND),) if mlx_available() else ()),
+)
 
 SEARCH_HINTS = {
     TEXT_KIND: (
@@ -797,6 +808,11 @@ SEARCH_HINTS = {
     IMAGE_KIND: (
         "Browse image starters, or choose Popular, Trending, or New for more text-to-image models. "
         "Selecting a result puts its ID in the model ID box; **Download and load** fetches it."
+    ),
+    MLX_KIND: (
+        "Browse language models quantized for MLX, which run on Apple silicon at the precision "
+        "they were converted to. Selecting a result puts its ID in the model ID box; "
+        "**Download and load** fetches it."
     ),
 }
 
@@ -814,19 +830,22 @@ def format_timestamp(stamp: float | None) -> str:
 
 UNSUPPORTED_REASON = (
     "not a model ChatLab loads: its files are all here, but it is not one of "
-    "the two kinds. ChatLab loads a Transformers causal language model, which "
+    "the kinds. ChatLab loads a Transformers causal language model, which "
     "has a `model.safetensors` or `pytorch_model.bin` at the top of the repo, "
-    "and a diffusers pipeline that draws from a prompt, which has a "
-    "`model_index.json`, a tokenizer and a text encoder. A CTranslate2 or "
-    "ONNX export is neither; so is a diffusers pipeline that wants a picture, "
-    "a video frame or a sound alongside the prompt, because the Images page "
-    "has only a prompt to give it."
+    "a diffusers pipeline that draws from a prompt, which has a "
+    "`model_index.json`, a tokenizer and a text encoder, and on Apple silicon "
+    "a language model quantized for MLX. A CTranslate2 or ONNX export is "
+    "none of these, and neither is a GGUF file; so is a diffusers pipeline "
+    "that wants a picture, a video frame or a sound alongside the prompt, "
+    "because the Images page has only a prompt to give it. An MLX model on a "
+    "machine without Apple silicon and the mlx-lm package is unsupported for "
+    "the same reason: nothing here runs it."
 )
 
 
 # What each kind of model is, in the fewest words that distinguish them, for
 # the list and the cards.
-KIND_NAMES = {TEXT_KIND: "text model", IMAGE_KIND: "image model"}
+KIND_NAMES = {TEXT_KIND: "text model", IMAGE_KIND: "image model", MLX_KIND: "MLX text model"}
 
 
 def where_to_use(kind: str) -> str:
@@ -878,19 +897,40 @@ def weight_bits(precision: str | None, profile: DeviceProfile) -> int | None:
     return QUANTIZED_BITS.get(precision or "full")
 
 
-def pipeline_aware_bits(
+def requested_bits(
     precision: str | None, profile: DeviceProfile, kind: str | None
 ) -> int | None:
-    """:func:`weight_bits`, except that an image pipeline is never quantized.
+    """:func:`weight_bits`, except where the radio has no say over the width.
 
     A pipeline is estimated whole whatever the radio says, because the Metal
     quantizer is Transformers' own and ``_load_locked`` clears the choice for
-    one. A verdict that carried the bits anyway would put a quantized label
-    on a full-size figure, and moving the radio would mark the loaded
-    pipeline as being about to reload when nothing would change.
+    one. An MLX repo was packed when it was converted and loads at that
+    width, so the radio has nothing to add there either. A verdict that
+    carried the bits anyway would put a quantized label on a figure not
+    measured at one, and moving the radio would mark the loaded model as
+    being about to reload when nothing would change.
     """
 
-    return weight_bits(precision, profile) if kind != IMAGE_KIND else None
+    if kind in (IMAGE_KIND, MLX_KIND):
+        return None
+    return weight_bits(precision, profile)
+
+
+def packed_bits(
+    snapshot: Path | None, kind: str | None, requested: int | None
+) -> int | None:
+    """The width a load of ``snapshot`` will really pack its linear layers into.
+
+    ``requested`` for anything but MLX, where the radio decides as far as
+    the device allows. An MLX repo answers for itself, out of the config
+    ``mlx_lm.convert`` wrote: that is the width the estimate is of and the
+    width the verdict has to name, because saying "full 16-bit weights"
+    over a 4-bit conversion's figure would misread it by four times.
+    """
+
+    if kind != MLX_KIND or snapshot is None:
+        return requested
+    return mlx_snapshot_bits(snapshot)
 
 
 def cached_fit(
@@ -912,17 +952,22 @@ def cached_fit(
     if entry.status.missing_files or entry.status.unsupported:
         return None
     kind = entry.status.kind
-    bits = pipeline_aware_bits(precision, profile, kind)
-    reloading = bits != pipeline_aware_bits(runtime.MANAGER.precision, profile, kind)
+    # What the radio asks of this kind, which for a pipeline and an MLX repo
+    # is nothing: moving it asks nothing new of either, so neither is marked
+    # as about to reload.
+    requested = requested_bits(precision, profile, kind)
+    reloading = requested != requested_bits(runtime.MANAGER.precision, profile, kind)
     if runtime.MANAGER.model_id == entry.model_id and not reloading:
         return None
     snapshot = snapshot_folder(entry.path) if entry.path is not None else None
     if snapshot is None:
         return None
     # The size depends on the kind too: a pipeline has no checkpoint at its
-    # root to measure. The pool is already the one for this kind - the
-    # caller chose it, because choosing it here would re-read the device and
+    # root to measure, and an MLX repo is measured as the packed file it
+    # already is. The pool is already the one for this kind - the caller
+    # chose it, because choosing it here would re-read the device and
     # discard the memory the impending unload gives back.
+    bits = packed_bits(snapshot, kind, requested)
     estimated = estimate_snapshot_bytes(
         snapshot, profile.dtype or ASSUMED_DTYPE, bits, kind
     )
@@ -989,11 +1034,22 @@ def hub_fit(
     The Metal quantizer is Transformers' own and ``_load_locked`` clears the
     choice for a pipeline, so honouring it here would shrink the estimate
     for a load that will not shrink and advertise a fit the load refuses.
+    An MLX repo is judged at the width its name claims, again whatever the
+    radio says, because that is the width it was converted to.
     """
 
     if not result.parameters:
         return model_fit(None, profile)
-    bits = pipeline_aware_bits(precision, profile, kind)
+    if kind == MLX_KIND:
+        # Packed already, at whatever width the converter chose; the radio
+        # has no say. The width is read off the repository's name, which is
+        # how mlx-community spells it, and a name that does not say is
+        # judged whole rather than at a width it may not have. It is the
+        # width the verdict names too, so a 4-bit conversion is not
+        # described as full weights.
+        bits = mlx_bits_from_id(result.model_id)
+    else:
+        bits = requested_bits(precision, profile, kind)
     estimated = estimate_parameter_bytes(
         result.parameters, profile.dtype or ASSUMED_DTYPE, bits
     )
@@ -1023,10 +1079,12 @@ def cached_model_label(entry: CachedModel, fit: Fit | None = None) -> str:
 
     label = f"{entry.model_id} · {format_bytes(entry.size_bytes)}"
     if entry.status.kind == IMAGE_KIND:
-        # Only the image models are flagged. Text models are the majority and
-        # the default, so labelling both kinds would put a word on every row
-        # to distinguish the exception.
+        # Only the exceptions are flagged. Text models are the majority and
+        # the default, so labelling every kind would put a word on every row
+        # to distinguish the exceptions.
         label += " · image"
+    elif entry.status.kind == MLX_KIND:
+        label += " · MLX"
     verdict = fit_word(fit)
     if verdict:
         label += f" · {verdict}"
@@ -1119,7 +1177,15 @@ def refresh_my_models(
 
 
 def select_my_model(selected: str | None, precision: str | None = None):
-    """Put the chosen cached model in the ID box and describe it."""
+    """Put the chosen cached model in the ID box and describe it.
+
+    The profile is taken for the row's own kind, the same as
+    :func:`cached_fits` takes it for the list. Without that, an MLX
+    conversion on a Mac with a Metal ceiling would be judged here against
+    PyTorch's cap while the list and the button judge it against the
+    machine, so selecting a row that reads *fits* would describe it as tight
+    or unfit.
+    """
 
     if not selected:
         return gr.skip(), NO_CACHED_MODEL_SELECTED
@@ -1128,11 +1194,10 @@ def select_my_model(selected: str | None, precision: str | None = None):
     )
     if entry is None:
         return gr.skip(), f"`{selected}` is no longer in the cache. Press **Refresh**."
+    profile = replacement_profile(entry.status.kind or TEXT_KIND)
     return (
         gr.update(value=selected),
-        describe_cached_model(
-            entry, cached_fit(entry, precision, replacement_profile())
-        ),
+        describe_cached_model(entry, cached_fit(entry, precision, profile)),
     )
 
 
@@ -1341,10 +1406,15 @@ def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
     else:
         facts.append(("Memory", "Unknown — there is not enough information to estimate a fit."))
     if result.download_bytes:
+        precision_note = (
+            "The weights are quantized already, so the precision choice does not apply."
+            if result.kind == MLX_KIND
+            else "Choosing 4-bit or 8-bit reduces loaded memory, not this download."
+        )
         facts.append((
             "Full download",
             f"About {format_bytes(result.download_bytes)} for all repository files "
-            "(catalog estimate). Choosing 4-bit or 8-bit reduces loaded memory, not this download.",
+            f"(catalog estimate). {precision_note}",
         ))
     else:
         facts.append(("Full download", "Size unavailable; see the files on Hugging Face."))
@@ -1461,7 +1531,9 @@ def search_models(
         )
         return cleared, failure_card("Search failed", f"{html.escape(str(error))} {hint}"), {}
     if not results:
-        described = "text-to-image models" if kind == IMAGE_KIND else "language models"
+        described = {IMAGE_KIND: "text-to-image models", MLX_KIND: "MLX models"}.get(
+            kind, "language models"
+        )
         message = (
             f"No {described} matched `{html.escape(cleaned)}`."
             if cleaned else f"No {described} found in this browse window."
@@ -1511,14 +1583,14 @@ def results_kind(results: dict) -> str:
     one the results themselves carry.
     """
 
-    return (
-        IMAGE_KIND
-        if any(
-            getattr(result, "pipeline_tag", None) in SEARCH_IMAGE_PIPELINE_TAGS
-            for result in results.values()
-        )
-        else TEXT_KIND
-    )
+    if any(
+        getattr(result, "pipeline_tag", None) in SEARCH_IMAGE_PIPELINE_TAGS
+        for result in results.values()
+    ):
+        return IMAGE_KIND
+    if any(getattr(result, "kind", None) == MLX_KIND for result in results.values()):
+        return MLX_KIND
+    return TEXT_KIND
 
 
 def refresh_search_results(
