@@ -161,9 +161,31 @@ def forkable_without_evidence(episode, manager):
     replay never qualifies, because load_count restarts at zero in each
     process, and the first load of a repository in one session answers to the
     same name as the first load in the next.
+
+    This is an episode-level question, and forking copies earlier responses
+    forward into an episode that is live and stamped with the load in memory,
+    so it is not on its own enough to trust one of those responses. Ask
+    candidate_trusted() about the response being edited instead.
     """
     return (not episode.replay_only and manager.load_id is not None
             and manager.load_id == episode.load_id)
+
+
+def candidate_trusted(episode, turn, manager):
+    """Whether an alternative this response recorded may be replayed as chosen.
+
+    Provenance belongs to the response, not to the episode holding it. Forking
+    an uploaded run rebuilds it as a live episode stamped with the current load,
+    and copies the responses before the edited one into it verbatim, alternatives
+    included. Those responses were still produced by the uploaded session, so
+    editing one of them afterwards must not read the new episode's stamp as
+    evidence about the vocabulary that offered them. fork_token_edit marks every
+    such copy, and propagates the mark, so a fork of a fork stays honest.
+
+    A response this process generated carries no mark, so a fork of a live
+    same-session episode keeps the alternatives of the responses it copies.
+    """
+    return forkable_without_evidence(episode, manager) and not turn.get("inherited")
 
 
 def visible_token_ids(metrics, literal_prefill_tokens, hidden_ids):
@@ -227,8 +249,8 @@ def verify_recorded_text(episode, turn_index, manager):
                              "re-downloaded at a different revision; load that snapshot to fork this run.")
 
 
-def verify_recorded_candidate(episode, manager):
-    """Refuse a recorded alternative on a run this session did not produce.
+def verify_recorded_candidate(episode, turn, manager):
+    """Refuse a recorded alternative on a response this session did not produce.
 
     The chosen alternative is the one ID the fork replays that the run never
     generated, so no response text stands behind it, and nothing an export
@@ -240,8 +262,10 @@ def verify_recorded_candidate(episode, manager):
     "Hello" reads "Hello world" under one and "Helloworld" under the other. The
     recording is the same in both directions, so no comparison against the
     loaded vocabulary can establish which one offered the alternative, and the
-    session that offered it is the only place it can be applied: its load
-    identifier names the load in memory now.
+    session that produced that response is the only place it can be applied:
+    there its load identifier names the load in memory now. A response carried
+    into a live episode by an earlier fork was produced elsewhere and keeps
+    that answer, which is what the inherited mark records.
 
     This costs nothing, because Replacement text expresses the same branch and
     is checked more strictly. ModelManager.encode_replacement validates typed
@@ -250,11 +274,11 @@ def verify_recorded_candidate(episode, manager):
     loaded vocabulary. Someone who wants the alternative "world" types "world"
     and gets a correctly spelled branch.
     """
-    if not forkable_without_evidence(episode, manager):
-        raise ValueError("A recorded alternative can only be applied in the session that offered it. The run "
-                         "records how the alternative decodes on its own, which cannot say how the model that "
-                         "offered it spelled that token after your retained tokens. Type the text you want in "
-                         "Replacement text instead, which is checked in place against those tokens.")
+    if not candidate_trusted(episode, turn, manager):
+        raise ValueError("A recorded alternative can only be applied in the session that produced that response. "
+                         "The run records how the alternative decodes on its own, which cannot say how the model "
+                         "that offered it spelled that token after your retained tokens. Type the text you want "
+                         "in Replacement text instead, which is checked in place against those tokens.")
 
 
 def verify_visible_candidate(candidate_id, manager, stop_ids):
@@ -371,7 +395,7 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
                        for c in metrics[token_index].get("top_candidates", [])):
                 raise ValueError("Choose an alternative for the selected token.")
             verify_visible_candidate(candidate_id, manager, stop_ids)
-            verify_recorded_candidate(episode, manager)
+            verify_recorded_candidate(episode, original, manager)
             replacement_ids = [candidate_id]
         if not replacement_ids:
             raise ValueError("Enter replacement text or choose a token alternative.")
@@ -386,6 +410,14 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
         # used during generation, excluding the edited response and its future.
         for i, previous in enumerate(episode.turns[:turn_index]):
             turn = copy.deepcopy(previous)
+            # The copy lands in an episode that is live and stamped with the
+            # load in memory, which says nothing about the session that
+            # produced this response or spelled the alternatives it recorded.
+            # Mark it so a later edit here asks about the response rather than
+            # about the episode, and propagate the mark down a chain of forks.
+            # A copy of a response this process generated carries no mark.
+            if episode.replay_only or previous.get("inherited"):
+                turn["inherited"] = True
             result.turns.append(turn)
             if episode.interrupted and episode.intervention_turn == i:
                 result.interrupted = True
