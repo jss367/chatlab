@@ -10,6 +10,7 @@ import gradio as gr
 
 import charts
 import settings
+from thinking import THINKING_CHOICES
 from conversation import (
     MAIN_BRANCH,
     branch_choices,
@@ -154,6 +155,7 @@ from ui.scoring import (
 from ui.settings_page import (
     hardware_card,
     refresh_hardware,
+    refresh_thinking_mode,
     remember_committed_seed,
     remember_prefill_limit,
     remember_settings,
@@ -1123,6 +1125,17 @@ def build_app() -> gr.Blocks:
                                 "reasoning block first so this remains visible answer text."
                             ),
                         )
+                        thinking_mode = gr.Radio(
+                            choices=THINKING_CHOICES,
+                            value=saved.thinking_mode,
+                            label="Thinking mode",
+                            info=(
+                                "Applies to the next chat reply. Model default uses the model's "
+                                "normal behavior. Token branches keep the original reply's mode. "
+                                "An assistant prefill starts directly in the answer."
+                            ),
+                            visible=runtime.MANAGER.supports_thinking,
+                        )
                         keep_reasoning = gr.Checkbox(
                             value=saved.keep_reasoning,
                             label="Send previous reasoning back to the model",
@@ -1239,6 +1252,9 @@ def build_app() -> gr.Blocks:
         # The badge is refreshed on the way to the chat page as well, so a
         # load started a moment ago shows as one in progress rather than as
         # the "no model" state the page was left in.
+        nav.change(refresh_thinking_mode, None, thinking_mode, show_progress="hidden")
+        demo.load(refresh_thinking_mode, None, thinking_mode)
+        badge_timer.tick(refresh_thinking_mode, None, thinking_mode, show_progress="hidden")
         badge_outputs = [model_badge_view, default_model_button]
         nav.change(refresh_model_badge, None, badge_outputs)
         demo.load(refresh_model_badge, None, badge_outputs)
@@ -1452,6 +1468,7 @@ def build_app() -> gr.Blocks:
                 # memory sees, so the hardware panel is re-read after it
                 # rather than left showing what was true before.
                 .then(refresh_hardware, None, hardware_view)
+                .then(refresh_thinking_mode, None, thinking_mode)
             )
 
         # Download-only changes the cache without changing the loaded model.
@@ -1703,11 +1720,12 @@ def build_app() -> gr.Blocks:
         # Persistence runs separately; every request must snapshot the controls
         # the reader sees, even while remember_steering is still queued.
         steering_inputs = [steering_state, steering_enabled, steering_strength, steering_layer]
-        chat_inputs = [prompt, conversation_state, *settings_inputs, *steering_inputs]
+        chat_inputs = [prompt, conversation_state, *settings_inputs, *steering_inputs, thinking_mode]
 
         # Everything saved between sessions, in PERSISTED_SETTING_NAMES order.
-        persisted_inputs = [*settings_inputs, enter_sends, model_id, weight_precision]
+        persisted_inputs = [*settings_inputs, thinking_mode, enter_sends, model_id, weight_precision]
         for control in (
+            thinking_mode,
             system_prompt,
             keep_reasoning,
             assistant_prefill,
