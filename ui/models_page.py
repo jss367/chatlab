@@ -878,6 +878,21 @@ def weight_bits(precision: str | None, profile: DeviceProfile) -> int | None:
     return QUANTIZED_BITS.get(precision or "full")
 
 
+def pipeline_aware_bits(
+    precision: str | None, profile: DeviceProfile, kind: str | None
+) -> int | None:
+    """:func:`weight_bits`, except that an image pipeline is never quantized.
+
+    A pipeline is estimated whole whatever the radio says, because the Metal
+    quantizer is Transformers' own and ``_load_locked`` clears the choice for
+    one. A verdict that carried the bits anyway would put a quantized label
+    on a full-size figure, and moving the radio would mark the loaded
+    pipeline as being about to reload when nothing would change.
+    """
+
+    return weight_bits(precision, profile) if kind != IMAGE_KIND else None
+
+
 def cached_fit(
     entry: CachedModel, precision: str | None, profile: DeviceProfile
 ) -> Fit | None:
@@ -896,9 +911,9 @@ def cached_fit(
 
     if entry.status.missing_files or entry.status.unsupported:
         return None
-    reloading = weight_bits(precision, profile) != weight_bits(
-        runtime.MANAGER.precision, profile
-    )
+    kind = entry.status.kind
+    bits = pipeline_aware_bits(precision, profile, kind)
+    reloading = bits != pipeline_aware_bits(runtime.MANAGER.precision, profile, kind)
     if runtime.MANAGER.model_id == entry.model_id and not reloading:
         return None
     snapshot = snapshot_folder(entry.path) if entry.path is not None else None
@@ -908,12 +923,8 @@ def cached_fit(
     # root to measure. The pool is already the one for this kind - the
     # caller chose it, because choosing it here would re-read the device and
     # discard the memory the impending unload gives back.
-    bits = weight_bits(precision, profile)
     estimated = estimate_snapshot_bytes(
-        snapshot,
-        profile.dtype or ASSUMED_DTYPE,
-        bits,
-        entry.status.kind,
+        snapshot, profile.dtype or ASSUMED_DTYPE, bits, kind
     )
     return model_fit(estimated, profile, bits)
 
@@ -982,7 +993,7 @@ def hub_fit(
 
     if not result.parameters:
         return model_fit(None, profile)
-    bits = weight_bits(precision, profile) if kind != IMAGE_KIND else None
+    bits = pipeline_aware_bits(precision, profile, kind)
     estimated = estimate_parameter_bytes(
         result.parameters, profile.dtype or ASSUMED_DTYPE, bits
     )

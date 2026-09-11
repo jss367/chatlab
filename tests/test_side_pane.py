@@ -856,6 +856,32 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertIn("· fits", label)
         self.assertLess(label.index("· image"), label.index("· fits"))
 
+    def test_an_image_pipeline_is_judged_at_the_precision_it_is_measured_at(self):
+        # A pipeline is sized whole whatever the radio says - the Metal
+        # quantizer is Transformers' own and the load clears the choice for
+        # one - so carrying the bits into the verdict would put a quantized
+        # label on a full-size figure.
+        profile = model_runtime.DeviceProfile(
+            backend="mps",
+            dtype="float16",
+            total=48 * 1024**3,
+            available=40 * 1024**3,
+        )
+        measured = []
+
+        def estimate(snapshot, dtype, bits, kind):
+            measured.append((kind, bits))
+            return 5 * 1024**3
+
+        with mock.patch.object(models_page, "estimate_snapshot_bytes", estimate):
+            with mock.patch.object(models_page, "snapshot_folder", lambda path: path):
+                pipeline = models_page.cached_fit(PIPELINE, "4-bit", profile)
+                text = models_page.cached_fit(cached("org/text"), "4-bit", profile)
+
+        self.assertEqual(measured, [(IMAGE_KIND, None), (TEXT_KIND, 4)])
+        self.assertIn("of full 16-bit weights", pipeline.note)
+        self.assertIn("of 4-bit weights", text.note)
+
     def test_a_text_model_is_not_flagged_with_a_kind_in_the_list(self):
         # Text models are the majority and the default: a word on every row
         # to distinguish the exception would put one on every row.
