@@ -84,6 +84,8 @@ SETTINGS = tuple(FIXED.values())
     SURPRISE,
     TRACE,
     CONTEXT_IDS,
+    CHAT_METRICS,
+    CHAT_CONTEXT_IDS,
     SELECTED_TOKEN,
     BRANCH_PICK,
 ) = range(len(app.CHAT_OUTPUT_NAMES))
@@ -242,6 +244,26 @@ class PanelSessionTests(unittest.TestCase):
             stream.close()
         # A different browser still starts with the toggle off.
         self.assertTrue(all(frame[STRIP] == gr.skip() for frame in self.respond(1)))
+
+    def test_a_queued_toggle_reads_the_published_final_or_cleared_conversation(self):
+        with mock.patch("model_runtime.STREAM_BATCH_TOKENS", 1):
+            frames = self.respond(0)
+        queued_turns = frames[1][TURNS]
+        final_turns = frames[-1][TURNS]
+        self.assertNotEqual(queued_turns, final_turns)
+        chat = next(fn for fn in self.demo.fns.values() if fn.fn is app.chat)
+        toggle = next(
+            fn.fn for fn in self.demo.fns.values()
+            if getattr(fn.fn, "func", None) is app.show_token_view
+        )
+        # This is the SessionState that Gradio's postprocessor writes and
+        # restore_session_state retrieves for the next request from this tab.
+        self.demo.state_holder.session_data["0"] = self.sessions[0]
+        for published in (final_turns, []):
+            with self.subTest(cleared=not published):
+                self.sessions[0][chat.outputs[TURNS]._id] = published
+                _, shown = self.bound(0, toggle)(True, queued_turns, DEFAULT_COLOR_SCALE)
+                self.assertEqual(shown["value"], app.transcript_value(published, DEFAULT_COLOR_SCALE))
 
 
 class ChatFlowTests(unittest.TestCase):
@@ -4330,7 +4352,7 @@ class LayerInspectionTests(unittest.TestCase):
 
         frames = list(app.chat("hi", [], *SETTINGS))
         final = list(frames[-1])
-        for slot in (PROMPT_METRICS, CONTEXT_IDS):
+        for slot in (PROMPT_METRICS, CONTEXT_IDS, CHAT_CONTEXT_IDS):
             final[slot] = next(
                 frame[slot] for frame in reversed(frames) if isinstance(frame[slot], tuple)
             )
@@ -4369,6 +4391,33 @@ class LayerInspectionTests(unittest.TestCase):
         self.assertEqual(self.calls, [(expected, context_count, context_count)])
         self.assertEqual(insight["token_id"], scored[2][1][0]["token_id"])
         self.assertIn("Token 1", status)
+
+    def test_chat_layers_use_the_reply_sequence_after_scoring(self):
+        final = self.finished()
+        scored = score_known_passage()
+        # A click queued before scoring still cannot overwrite its reset.
+        self.assertEqual(
+            app.select_transcript_token(final[TURNS], final[METRICS], token_span(final[TURNS], 1)),
+            (gr.skip(),) * 5,
+        )
+        _, _, _, target, _ = app.select_transcript_token(
+            final[TURNS], scored[1], token_span(final[TURNS], 1)
+        )
+        self.assertEqual(target, {"generation": final[METRICS][0], "strip": "response", "index": 1})
+        *_, insight, status = self.inspect(
+            target, scored[1], scored[4], scored[13], 0,
+            scored[2], scored[14], final[CHAT_METRICS], final[CHAT_CONTEXT_IDS],
+        )
+        self.assertEqual(self.calls, [([0, 2, 3, THINK_EOS], 2, 1)])
+        self.assertEqual(insight["token_id"], 3)
+        self.assertIn("Token 2", status)
+        app.clear_chat()
+        *_, status = self.inspect(
+            target, scored[1], scored[4], scored[13], 0,
+            scored[2], scored[14], final[CHAT_METRICS], final[CHAT_CONTEXT_IDS],
+        )
+        self.assertEqual(status, app.INSPECT_HINT)
+        self.assertEqual(len(self.calls), 1)
 
     def test_rescoring_rejects_queued_score_clicks_and_inspection(self):
         scored = score_known_passage()
@@ -4435,7 +4484,10 @@ class LayerInspectionTests(unittest.TestCase):
         chat = next(fn for fn in demo.fns.values() if fn.fn is app.chat)
         inspect = next(fn for fn in demo.fns.values() if fn.fn is app.inspect_layers)
         self.assertEqual(inspect.inputs[3], chat.outputs[CONTEXT_IDS])
-        self.assertEqual(inspect.inputs[-2:], [score.outputs[2], score.outputs[14]])
+        self.assertEqual(inspect.inputs[5:7], [score.outputs[2], score.outputs[14]])
+        self.assertEqual(inspect.inputs[7:], [chat.outputs[CHAT_METRICS], chat.outputs[CHAT_CONTEXT_IDS]])
+        self.assertNotIn(chat.outputs[CHAT_METRICS], score.outputs)
+        self.assertNotIn(chat.outputs[CHAT_CONTEXT_IDS], score.outputs)
         self.assertNotIn(score.outputs[14], chat.outputs)
 
     def test_a_response_token_is_inspected_in_its_full_sequence(self):

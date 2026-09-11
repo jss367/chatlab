@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import html
+from functools import partial
 
 import gradio as gr
 
@@ -223,6 +224,10 @@ def build_app() -> gr.Blocks:
         # position last clicked, and the last readout for re-rendering.
         context_ids_state = gr.State((*empty_metrics(), None))
         score_context_ids_state = gr.State((0, [], None))
+        # The latest reply stays inspectable when scoring replaces the shared
+        # prompt panel. Its measurements and exact input belong to the chat.
+        chat_metrics_state = gr.State((0, []))
+        chat_context_ids_state = gr.State((0, [], None))
         steering_state = gr.State(None)
         inspect_target = gr.State(None)
         insight_state = gr.State(None)
@@ -1754,6 +1759,8 @@ def build_app() -> gr.Blocks:
             surprise_panel,
             trace_state,
             context_ids_state,
+            chat_metrics_state,
+            chat_context_ids_state,
             selected_token,
             branch_pick,
         ]
@@ -2106,7 +2113,7 @@ def build_app() -> gr.Blocks:
         # redrawn on the way in rather than left to the next frame, since the
         # conversation may have moved on while it was hidden.
         token_view.change(
-            show_token_view,
+            partial(show_token_view, conversation_id=conversation_state._id),
             [token_view, conversation_state, color_scale],
             [chatbot, token_strip],
             show_progress="hidden",
@@ -2163,6 +2170,8 @@ def build_app() -> gr.Blocks:
                 attention_layer,
                 score_metrics_state,
                 score_context_ids_state,
+                chat_metrics_state,
+                chat_context_ids_state,
             ],
             [lens_panel, attention_panel, attention_layer, insight_state, inspect_status],
         )

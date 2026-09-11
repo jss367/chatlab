@@ -83,6 +83,8 @@ def inspect_layers(
     layer,
     score_metrics_state: tuple[int, list[dict]] | None = None,
     score_context_state: tuple | None = None,
+    chat_metrics_state: tuple[int, list[dict]] | None = None,
+    chat_context_state: tuple | None = None,
 ):
     """Run the logit lens and attention readout for the clicked token.
 
@@ -97,8 +99,9 @@ def inspect_layers(
     slip in between the two and have the readout land on top of their
     reset. Paths that replace the strips without taking the slot - Clear,
     Undo, Load, a fork switch - are caught by the stamp instead. Scored tokens
-    use their own stamp and context: only another scoring pass replaces that
-    strip. The relevant stamp is checked before the frame goes out and again
+    and chat replies retain independent metrics, context and stamps, so a
+    scoring pass cannot take away the latest reply's inspection target.
+    The relevant stamp is checked before the frame goes out and again
     once it has arrived, so a readout for a token that is gone is taken down.
     """
 
@@ -113,6 +116,9 @@ def inspect_layers(
             return
         metrics_state = score_metrics_state
         context_state = score_context_state
+    elif target["strip"] == "response" and chat_metrics_state is not None:
+        metrics_state = chat_metrics_state
+        context_state = chat_context_state
     generation, metrics = metrics_state
     _prompt_generation, prompt_metrics = prompt_metrics_state
     context_generation, context_ids, load_id = context_state[:3]

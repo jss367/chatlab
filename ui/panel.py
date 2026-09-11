@@ -133,7 +133,7 @@ def transcript_update(turns: list[dict] | None, scale_name: str):
     )
 
 
-def show_token_view(on, turns: list[dict] | None, scale_name: str):
+def show_token_view(on, turns: list[dict] | None, scale_name: str, *, conversation_id=None):
     """Swap the chatbot for the conversation's token view, or back.
 
     The token view is rebuilt from the conversation on the way in. Hidden
@@ -144,6 +144,13 @@ def show_token_view(on, turns: list[dict] | None, scale_name: str):
     _session_panel().token_view = bool(on)
     if not on:
         return gr.update(visible=True), gr.update(visible=False)
+    request = LocalContext.request.get(None)
+    blocks = LocalContext.blocks.get(None)
+    if conversation_id is not None and request is not None and request.session_hash:
+        # Read the state that Gradio has actually published, not the turns
+        # captured when this toggle was queued. A final hidden frame can land
+        # in between, with no later frame left to repair a partial redraw.
+        turns = blocks.state_holder[request.session_hash][conversation_id]
     scale = resolve_scale(scale_name)
     return (
         gr.update(visible=False),
@@ -235,6 +242,7 @@ _metrics_lock = threading.Lock()
 @dataclass
 class _PanelSession:
     generation: int = 0
+    chat_generation: int = 0
     score_generation: int = 0
     token_view: bool = False
 
@@ -270,6 +278,8 @@ def new_metrics_generation(*, scored: bool = False) -> int:
         session.generation = _metrics_generation
         if scored:
             session.score_generation = _metrics_generation
+        else:
+            session.chat_generation = _metrics_generation
         return _metrics_generation
 
 
@@ -285,10 +295,14 @@ def current_metrics_generation() -> int:
 
 
 def current_strip_generation(source: str) -> int:
-    """Scored passages survive chat changes, but another scoring replaces them."""
+    """Date each source independently; only the ambient prompt uses the panel epoch."""
 
     session = _session_panel()
-    return session.score_generation if source == "score" else session.generation
+    if source == "score":
+        return session.score_generation
+    if source == "response":
+        return session.chat_generation
+    return session.generation
 
 
 def stamped(metrics: list[dict], generation: int | None = None):
@@ -569,11 +583,10 @@ def select_transcript_token(
     snapshotted beside; comparing it against the live one is what tells a
     click that was overtaken from one that was not.
 
-    The layer inspector is offered for the live reply alone. It rebuilds the
-    model's input from the prompt token ids published with that reply, and an
-    older turn's prompt is not on screen to rebuild from; the turn carries the
-    stamp it was drawn under, so "the live one" is a comparison rather than a
-    guess.
+    The layer inspector is offered for the latest reply whose metrics and
+    prompt IDs are retained. Scoring replaces the ambient panel but preserves
+    that chat context, so its epoch is separate from the click/reset epoch.
+    Conversation changes invalidate it; scoring alone does not.
     """
 
     generation, _metrics = metrics_state
@@ -600,11 +613,11 @@ def select_transcript_token(
         summary = f"{summary}\n\n{BRANCH_MODEL_CHANGED}"
     target = (
         {
-            "generation": current_metrics_generation(),
+            "generation": current_strip_generation("response"),
             "strip": "response",
             "index": token_index,
         }
-        if turn.get("metrics_generation") == current_metrics_generation()
+        if turn.get("metrics_generation") == current_strip_generation("response")
         else None
     )
     return summary, rows, selection, target, None
