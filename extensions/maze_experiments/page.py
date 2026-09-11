@@ -355,8 +355,13 @@ def _build_page(context):
     prepare.click(prepare_episode, [episode, reveal, selection_session, *controls], [episode, *outputs, download], concurrency_id="maze", show_progress="hidden", cancels=playback)
     run.click(play, [episode, reveal, selection_session], outputs, concurrency_id="maze", show_progress="hidden", cancels=playback)
     step.click(one_step, [episode, reveal, selection_session], outputs, concurrency_id="maze", show_progress="hidden", cancels=playback)
-    back.click(step_back, [episode, reveal, selection_session], outputs, show_progress="hidden", cancels=playback)
-    forward.click(step_forward, [episode, reveal, selection_session], outputs, show_progress="hidden", cancels=playback)
+    # One queue for every listener that moves the viewed response: Gradio limits
+    # concurrency per listener, so separate queues would let a Previous and a
+    # Next click read ep.viewing together or land out of order.
+    back.click(step_back, [episode, reveal, selection_session], outputs, show_progress="hidden",
+               concurrency_id="maze-view", cancels=playback)
+    forward.click(step_forward, [episode, reveal, selection_session], outputs, show_progress="hidden",
+                  concurrency_id="maze-view", cancels=playback)
     halt.click(stop_playback, episode, state_text, queue=False, cancels=playback)
     pause.click(lambda ep: command(ep, "pause"), episode, state_text, queue=False)
     stop.click(lambda ep: command(ep, "stop"), episode, state_text, queue=False)
@@ -368,7 +373,8 @@ def _build_page(context):
     # mid-playback ends it rather than letting the next frame undo the toggle.
     reveal.input(lambda ep, show: board(ep, None if ep.busy else ep.viewing, show), [episode, reveal], maze_board,
                  queue=False, cancels=playback)
-    turn_picker.input(inspect, [episode, reveal, turn_picker, selection_session], outputs, show_progress="hidden", cancels=playback)
+    turn_picker.input(inspect, [episode, reveal, turn_picker, selection_session], outputs, show_progress="hidden",
+                      concurrency_id="maze-view", cancels=playback)
     # Each playback frame re-stamps the token strip, which clears a selection,
     # so choosing a token also means "stop here and let me look at it".
     strip.select(select_token, [episode, selection_session, metrics_state],
