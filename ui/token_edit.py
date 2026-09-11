@@ -71,11 +71,23 @@ def save_token_edit(target, text, prompt_text, turns, *settings):
         "previous_value": messages[target["index"]]["content"],
         "value": text,
     })
+    replaced = False
     for frame in edit_message(event, prompt_text, turns, *settings):
         updated = frame[CHAT_OUTPUT_NAMES.index("turns")]
         accepted = isinstance(updated, list) and updated != turns
-        yield (
-            *frame,
-            gr.update(visible=False) if accepted else gr.skip(),
-            None if accepted else gr.skip(),
-        )
+        if accepted:
+            replaced = True
+            yield (*frame, gr.update(visible=False), None)
+        elif (
+            isinstance(updated, list) and updated == turns
+            and (replaced or target["generation"] != current_metrics_generation())
+        ):
+            # The opening frame is provisional: a refusal on the first model
+            # step restores the old conversation. The textbox still holds the
+            # draft; reopen it and refresh its stamp so Save can be retried.
+            # Validation before the opening frame can advance the stamp too.
+            replaced = False
+            restored_target = {**target, "generation": current_metrics_generation()}
+            yield (*frame, gr.update(visible=True), restored_target)
+        else:
+            yield (*frame, gr.skip(), gr.skip())

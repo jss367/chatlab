@@ -32,6 +32,7 @@ from conversation import (
 )
 from model_runtime import GENERATING, GenerationUpdate, ModelChanged, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
+from steering import SteeringError
 
 import library
 import settings
@@ -1280,6 +1281,37 @@ class TokenViewTests(unittest.TestCase):
             runtime.MANAGER.release_generation()
         self.assertEqual(edited[TURNS], gr.skip())
         self.assertEqual(edited[-2:], (gr.skip(), gr.skip()))
+
+    def test_regeneration_rollback_restores_editor_and_allows_retry(self):
+        final = self.respond()
+        _, _, target = self.open_editor(final)
+
+        def refused():
+            raise SteeringError("Steering is unavailable for this model")
+            yield  # Make refusal happen on the first model step.
+
+        with mock.patch.object(runtime.MANAGER, "generate", return_value=refused()):
+            frames = list(save_token_edit(target, "replacement", "draft", final[TURNS], *SETTINGS))
+        self.assertFalse(frames[0][-2]["visible"])
+        restored = frames[-1]
+        self.assertEqual(restored[TURNS], final[TURNS])
+        self.assertIn("Steering failed", restored[STATUS])
+        self.assertTrue(restored[-2]["visible"])
+        self.assertEqual(restored[-1]["index"], target["index"])
+        retried = list(save_token_edit(restored[-1], "replacement", "draft", restored[TURNS], *SETTINGS))[-1]
+        self.assertEqual(retried[TURNS][0]["content"], "replacement")
+        self.assertTrue(retried[TURNS][1]["tokens"])
+        self.assertFalse(retried[-2]["visible"])
+
+    def test_refusal_before_opening_frame_keeps_edit_retryable(self):
+        final = self.respond()
+        _, _, target = self.open_editor(final)
+        with mock.patch("ui.generation.steering_from_controls", side_effect=SteeringError("Invalid steering")):
+            restored = list(save_token_edit(target, "replacement", "draft", final[TURNS], *SETTINGS))[-1]
+        self.assertEqual(restored[TURNS], final[TURNS])
+        self.assertTrue(restored[-2]["visible"])
+        retried = list(save_token_edit(restored[-1], "replacement", "draft", restored[TURNS], *SETTINGS))[-1]
+        self.assertEqual(retried[TURNS][0]["content"], "replacement")
 
     def test_assistant_click_does_not_open_or_replace_a_user_draft(self):
         final = self.respond()
