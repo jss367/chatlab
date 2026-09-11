@@ -3833,13 +3833,16 @@ class ModelManager:
         # claimed in need not be the order they win the lock in, and the
         # badge on the chat page names the load that is really reading.
         self._active_load: str | None = None
-        # Counts the changes this process has made to the Hugging Face cache:
-        # a download that finished, a model deleted. Read by anything drawn
-        # from a scan of the cache and too dear to redo on a timer - the chat
-        # page's model switcher - so a tab that did not make the change can
-        # tell "nothing has moved" from "rescan" in an attribute read. A
-        # change made outside ChatLab does not move it, which is the bargain
-        # My Models already makes with its Refresh button.
+        # Counts the changes this process has made to what a scan of the
+        # Hugging Face cache would find: a download that started or finished,
+        # a model deleted. A download that is running counts because a model
+        # whose folder is being written cannot be loaded, so it is not
+        # something to offer. Read by anything drawn from such a scan and too
+        # dear to redo on a timer - the chat page's model switcher - so a tab
+        # that did not make the change can tell "nothing has moved" from
+        # "rescan" in an attribute read. A change made outside ChatLab does
+        # not move it, which is the bargain My Models already makes with its
+        # Refresh button.
         self.cache_revision = 0
         self._cache_revision_lock = threading.Lock()
         # Downloads under way right now, by model ID, so a second request for
@@ -3954,9 +3957,21 @@ class ModelManager:
         same thing: those two steps are separated by a yield, and Gradio does
         not resume a streaming handler until the browser has been sent the
         frame, so the window between them is a network round trip wide.
+
+        A claimed load refuses this too, and under the same lock the load was
+        claimed with, so the two decisions cannot both say yes. A generation
+        admitted while a load is under way does not run on the model the
+        reader was looking at: it waits on the model lock behind the load and
+        then answers from whatever the load brought in. Refusing it is the
+        only answer that keeps the reply and the badge agreeing. The
+        :meth:`reserve_exclusive_load` side of the same rule is what stops a
+        load starting while a reply is streaming.
         """
 
-        return self._generating.acquire(blocking=False)
+        with self._claims_lock:
+            if self._load_claims or self._active_load is not None:
+                return False
+            return self._generating.acquire(blocking=False)
 
     def release_generation(self) -> None:
         """Give the generation slot back. Pairs with a successful reservation."""
@@ -3984,8 +3999,7 @@ class ModelManager:
         checked_id = validate_model_id(model_id)
         progress = progress or DownloadProgress()
         try:
-            with self._downloads_lock:
-                self.active_downloads.setdefault(checked_id, progress)
+            self._list_download(checked_id, progress)
             from huggingface_hub import snapshot_download
 
             path = snapshot_download(
@@ -3994,18 +4008,42 @@ class ModelManager:
                 tqdm_class=progress.bar_class(),
             )
         finally:
+            # The end of the download is noted by release_download, which
+            # covers both halves of what changed: the files that landed, and
+            # the model becoming loadable again now that nothing is writing
+            # its folder.
             self.release_download(checked_id, progress)
-        # Noted even when every file was already cached: the alternative is
-        # comparing the folder before and after, which costs the scan this
-        # counter exists to spare. One repaint too many is the cheaper error.
-        self.note_cache_change()
         return Path(path)
 
     def note_cache_change(self) -> None:
-        """Record that what is on disk has changed; see :attr:`cache_revision`."""
+        """Record that what a scan of the cache would find has changed.
+
+        A download that started or ended, a model deleted: anything that
+        changes which models a reader can be offered. See
+        :attr:`cache_revision`.
+        """
 
         with self._cache_revision_lock:
             self.cache_revision += 1
+
+    def _list_download(
+        self, checked_id: str, progress: DownloadProgress
+    ) -> DownloadProgress | None:
+        """List ``progress`` as ``checked_id``'s download unless one already is.
+
+        Returns the download that was already listed, or ``None`` when this
+        call is the one that listed ``progress`` - which is also when the
+        cache revision moves: a model being written is a model that cannot be
+        loaded, so the lists drawn from a cache scan have to hear about it.
+        """
+
+        with self._downloads_lock:
+            running = self.active_downloads.get(checked_id)
+            if running is not None:
+                return running
+            self.active_downloads[checked_id] = progress
+        self.note_cache_change()
+        return None
 
     def reserve_download(self, model_id: str) -> tuple[DownloadProgress, bool]:
         """Claim ``model_id`` for a new download, or point at the one running.
@@ -4024,21 +4062,34 @@ class ModelManager:
         """
 
         checked_id = validate_model_id(model_id)
+        progress = DownloadProgress()
+        running = self._list_download(checked_id, progress)
+        if running is not None:
+            return running, False
+        return progress, True
+
+    def downloading_ids(self) -> frozenset[str]:
+        """Every model being downloaded right now, read as one step.
+
+        For a caller filtering a list: iterating :attr:`active_downloads`
+        itself would race a download starting or ending, which in CPython is
+        a "dictionary changed size during iteration" in the middle of
+        drawing a page.
+        """
+
         with self._downloads_lock:
-            running = self.active_downloads.get(checked_id)
-            if running is not None:
-                return running, False
-            progress = DownloadProgress()
-            self.active_downloads[checked_id] = progress
-            return progress, True
+            return frozenset(self.active_downloads)
 
     def release_download(self, model_id: str, progress: DownloadProgress) -> None:
         """Remove ``progress`` only when it still owns ``model_id``'s entry."""
 
         checked_id = validate_model_id(model_id)
         with self._downloads_lock:
-            if self.active_downloads.get(checked_id) is progress:
+            removed = self.active_downloads.get(checked_id) is progress
+            if removed:
                 del self.active_downloads[checked_id]
+        if removed:
+            self.note_cache_change()
 
     @property
     def loading_id(self) -> str | None:
@@ -4090,16 +4141,24 @@ class ModelManager:
             return checked_id, self._next_claim
 
     def reserve_exclusive_load(self, model_id: str) -> tuple[str, int] | None:
-        """Claim a load of ``model_id`` only if no other load is claimed.
+        """Claim a load of ``model_id`` only if nothing else has the model.
 
-        Returns what :meth:`reserve_load` returns, or ``None`` when a load is
-        already under way and the caller must refuse rather than queue. For
-        callers whose promise is "one load at a time": reading
-        :attr:`loading_id` and then loading is two steps, and a handler that
+        Returns what :meth:`reserve_load` returns, or ``None`` when another
+        load is claimed or a generation is running and the caller must refuse
+        rather than queue. This is the gate every load a reader asks for goes
+        through, so "no other load is claimed" really means no other load:
+        once this returns a claim, the ordinary :meth:`reserve_load` that the
+        load itself makes is the only one that can appear, and the next
+        reader to reach this gate sees that claim and is turned away.
+
+        Refusing rather than queuing is the point. Reading :attr:`loading_id`
+        or :attr:`busy` and then loading is two steps, and a handler that
         yields between them - as a streaming one must, to show its first card
         - leaves a window a whole browser round trip wide for a second load
-        to be claimed. This closes it, the way :meth:`reserve_generation`
-        closes the same window for a reply.
+        to be claimed. Both halves of the question are answered here under
+        :attr:`_claims_lock`, and :meth:`reserve_generation` answers the
+        mirror image under the same lock, so a load and a reply can never
+        both be admitted: one of them sees the other.
 
         The claim stands from here, so the caller owns it and must give it
         back with :meth:`release_load` in a ``finally``; the load it goes on
@@ -4109,6 +4168,8 @@ class ModelManager:
         checked_id = validate_model_id(model_id)
         with self._claims_lock:
             if self._load_claims or self._active_load is not None:
+                return None
+            if self._generating.locked():
                 return None
             self._next_claim += 1
             self._load_claims[self._next_claim] = checked_id

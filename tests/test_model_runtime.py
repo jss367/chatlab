@@ -1542,23 +1542,30 @@ class DownloadProgressTests(unittest.TestCase):
         self.assertEqual(seen["active"]["org/model"].snapshot().files_done, 1)
         self.assertEqual(manager.active_downloads, {}, "cleared when the download ends")
 
-    def test_a_finished_download_notes_the_change_to_the_cache(self):
+    def test_a_download_notes_its_start_and_its_finish(self):
         # What a tab that did not run the download reads to learn that its
-        # list of cached models is out of date; see cache_revision.
+        # list of cached models is out of date; see cache_revision. Both ends
+        # count: a model whose files are being written cannot be loaded, so
+        # it has to leave the lists while the download runs and come back
+        # when it ends.
         from unittest import mock
 
         manager = ModelManager()
-        before = manager.cache_revision
+        seen = []
 
-        with mock.patch(
-            "huggingface_hub.snapshot_download",
-            lambda **kwargs: "/cache/snapshots/abc",
-        ):
+        def fetch(**kwargs):
+            seen.append(manager.cache_revision)
+            return "/cache/snapshots/abc"
+
+        with mock.patch("huggingface_hub.snapshot_download", fetch):
             manager.download("org/model")
 
-        self.assertEqual(manager.cache_revision, before + 1)
+        self.assertEqual(seen, [1], "noted before the first byte")
+        self.assertEqual(manager.cache_revision, 2)
 
-    def test_a_download_that_failed_leaves_the_cache_revision_alone(self):
+    def test_a_download_that_failed_still_notes_that_it_ended(self):
+        # The model is loadable again, which is a change the lists have to
+        # hear about however the download went.
         from unittest import mock
 
         manager = ModelManager()
@@ -1570,7 +1577,23 @@ class DownloadProgressTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 manager.download("org/model")
 
-        self.assertEqual(manager.cache_revision, 0)
+        self.assertEqual(manager.cache_revision, 2)
+
+    def test_a_download_that_joins_a_running_one_notes_nothing(self):
+        # The entry is already there, so nothing about what can be offered
+        # has changed and no tab needs to redraw.
+        manager = ModelManager()
+        progress, reserved = manager.reserve_download("org/model")
+        self.assertTrue(reserved)
+        self.assertEqual(manager.cache_revision, 1)
+
+        self.assertEqual(manager.reserve_download("org/model"), (progress, False))
+
+        self.assertEqual(manager.cache_revision, 1)
+        manager.release_download("org/model", progress)
+        self.assertEqual(manager.cache_revision, 2)
+        manager.release_download("org/model", progress)
+        self.assertEqual(manager.cache_revision, 2, "releasing twice is harmless")
 
     def test_the_registration_is_cleared_when_the_download_fails(self):
         from unittest import mock

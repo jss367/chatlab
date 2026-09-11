@@ -298,6 +298,28 @@ def idle_state(
 
 
 BUSY_STATUS = "A response is already generating. Press Stop first."
+# A load has the model instead. There is no Stop to press for one, so the
+# message cannot be the one above; telling a reader to press a button that
+# is not there is worse than saying nothing.
+LOADING_STATUS = "A model is loading. Wait for it to finish."
+
+
+def occupied() -> bool:
+    """Whether something else has the model: a reply streaming, or a load.
+
+    The early exit the handlers below take. Never the guard - the guard is
+    the reservation each of them goes on to make, which settles the same
+    question in one step with the claim. See
+    :meth:`ModelManager.reserve_generation`.
+    """
+
+    return runtime.MANAGER.busy or runtime.MANAGER.loading_id is not None
+
+
+def busy_status() -> str:
+    """Which refusal to show, read at the moment the refusal is written."""
+
+    return LOADING_STATUS if runtime.MANAGER.loading_id else BUSY_STATUS
 
 
 def busy_state():
@@ -319,11 +341,14 @@ def busy_state():
     and never arrives at all if inference stalls. Skipping leaves the busy
     pair the running generation already published in place, and that
     generation restores the idle pair itself on whichever path it exits.
+
+    A load blocks a reply for the same reason and is refused the same way,
+    with its own wording; see :func:`busy_status`.
     """
 
     return (
         (gr.skip(),) * 5
-        + (BUSY_STATUS,)
+        + (busy_status(),)
         + (gr.skip(),) * (len(CHAT_OUTPUT_NAMES) - 6)
     )
 
@@ -759,7 +784,7 @@ def chat(
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
 ):
-    if runtime.MANAGER.busy:
+    if occupied():
         # Before anything else, including the checks below: every other exit
         # from this function writes the conversation back, and while another
         # generation is streaming that write is a stale overwrite.
@@ -811,7 +836,7 @@ def regenerate_from(
 ):
     """Throw away everything after the user turn at ``position`` and reply again."""
 
-    if runtime.MANAGER.busy:
+    if occupied():
         # Covers Retry and the chatbot's own retry button, which reach a
         # generation only through here.
         yield busy_state()
@@ -858,7 +883,7 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
     # The color scale is the last of the settings a generation is given, and
     # this handler needs it for the one path that clears the strips itself.
     scale_name = settings[-1] if settings else DEFAULT_COLOR_SCALE
-    if runtime.MANAGER.busy:
+    if occupied():
         # Not just the branch that regenerates: editing an assistant turn
         # rewrites the conversation on its own, from the same stale snapshot.
         yield busy_state()
@@ -1148,7 +1173,7 @@ def branch_from(
     checks was made against the reply on screen.
     """
 
-    if runtime.MANAGER.busy:
+    if occupied():
         yield busy_state()
         return
 

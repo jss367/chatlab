@@ -302,6 +302,20 @@ class FakeDownloads(ModelManager):
                     del self.active_downloads[model_id]
 
 
+class LendsTheLoad:
+    """A stand-in manager that hands out the exclusive load without argument.
+
+    load_cached_model() claims the load before its first card, so a double
+    that only answers the cache questions is no longer enough.
+    """
+
+    def reserve_exclusive_load(self, model_id):
+        return model_id, 1
+
+    def release_load(self, claim):
+        pass
+
+
 class DownloadCardTests(unittest.TestCase):
     """What the model panel says while a download runs, and after."""
 
@@ -517,7 +531,7 @@ class DownloadCardTests(unittest.TestCase):
         rebuild = progress.bar_class()(desc="Reconstructing", total=16_000_000_000, unit="B")
         rebuild.update(4_000_000_000)
 
-        class Manager:
+        class Manager(LendsTheLoad):
             active_downloads = {"org/model": progress}
 
         runtime.MANAGER = Manager()
@@ -530,7 +544,7 @@ class DownloadCardTests(unittest.TestCase):
         self.assertIn("Download and load", frames[0])
 
     def test_load_cached_on_a_partial_snapshot_says_how_to_finish_it(self):
-        class Manager:
+        class Manager(LendsTheLoad):
             active_downloads = {}
 
             def find_cached(self, model_id):
@@ -554,6 +568,103 @@ class DownloadCardTests(unittest.TestCase):
         self.assertIn("model-00003-of-00003.safetensors", frames[-1])
         self.assertIn("Download and load", frames[-1])
         self.assertNotIn("local_files_only", frames[-1])
+
+    def test_load_cached_claims_the_load_before_its_first_card(self):
+        # The claim and the check have to be one step. Gradio does not resume
+        # a streaming handler until the browser has its frame, so a load that
+        # claimed nothing until stream_load - a cache scan and several cards
+        # later - left a round-trip-wide window for a second one.
+        manager = ModelManager()
+        runtime.MANAGER = manager
+
+        stream = app.load_cached_model("org/model")
+        first = next(stream)
+
+        self.assertIn("Finding cached model", first)
+        self.assertEqual(manager.loading_id, "org/model")
+        stream.close()
+        self.assertIsNone(manager.loading_id, "GeneratorExit gives the claim back")
+
+    def test_load_cached_is_refused_while_another_load_stands(self):
+        manager = ModelManager()
+        runtime.MANAGER = manager
+        manager.reserve_load("org/other")
+
+        frames = list(app.load_cached_model("org/model"))
+
+        self.assertEqual(len(frames), 1, "refused before it looked at the cache")
+        self.assertIn("Cannot load now", frames[0])
+        self.assertIn(models_page.LOAD_WHILE_LOADING, frames[0])
+
+    def test_load_cached_is_refused_while_a_reply_is_running(self):
+        # A load admitted here would not run beside the reply; it would wait
+        # on the model lock and then unload the model producing the tokens.
+        manager = ModelManager()
+        runtime.MANAGER = manager
+        self.assertTrue(manager.reserve_generation())
+        self.addCleanup(manager.release_generation)
+
+        frames = list(app.load_cached_model("org/model"))
+
+        self.assertEqual(len(frames), 1)
+        self.assertIn(models_page.LOAD_WHILE_GENERATING, frames[0])
+
+    def test_load_cached_gives_the_claim_back_when_it_refuses(self):
+        manager = ModelManager()
+        runtime.MANAGER = manager
+
+        list(app.load_cached_model("not a model id"))
+        self.assertIsNone(manager.loading_id, "a malformed ID claims nothing")
+
+        with mock.patch.object(
+            models_page, "cache_status", side_effect=OSError("unreadable")
+        ):
+            frames = list(app.load_cached_model("org/model"))
+
+        self.assertIn("Could not load cached model", frames[-1])
+        self.assertIsNone(manager.loading_id)
+
+    def test_download_and_load_claims_the_load_only_once_the_files_are_here(self):
+        # A claim taken before the download would refuse every reply on the
+        # chat page for the length of the fetch, which can be an hour.
+        claimed = []
+
+        class Manager(FakeDownloads):
+            def fetch(self, model_id, token, progress):
+                claimed.append(runtime.MANAGER.loading_id)
+                return Path("/cache/snap")
+
+            def load(self, model_id, local_path, progress=None, precision="full", kind="text"):
+                return "cpu"
+
+        runtime.MANAGER = Manager()
+        with mock.patch.object(
+            models_page, "cache_status", return_value=CacheStatus(cached_bytes=1)
+        ):
+            frames = list(app.download_and_load_model("org/model", ""))
+
+        self.assertEqual(claimed, [None], "nothing claimed while the bytes arrive")
+        self.assertIn("Model ready", frames[-1])
+        self.assertIsNone(runtime.MANAGER.loading_id, "the claim is given back")
+
+    def test_download_and_load_stops_short_when_something_else_has_the_model(self):
+        class Manager(FakeDownloads):
+            def fetch(self, model_id, token, progress):
+                # A reply starts while the download is running.
+                self.reserve_generation()
+                return Path("/cache/snap")
+
+            def load(self, model_id, local_path, progress=None, precision="full", kind="text"):
+                raise AssertionError("loaded on top of a running reply")
+
+        runtime.MANAGER = Manager()
+        self.addCleanup(runtime.MANAGER.release_generation)
+
+        frames = list(app.download_and_load_model("org/model", ""))
+
+        self.assertIn("Cannot load now", frames[-1])
+        self.assertIn(models_page.LOAD_WHILE_GENERATING, frames[-1])
+        self.assertIn("Load cached", frames[-1])
 
 
 class DownloadManager(FakeDownloads):

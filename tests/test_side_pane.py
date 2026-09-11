@@ -592,6 +592,96 @@ class LoadingIdTests(unittest.TestCase):
 
         self.assertIsNotNone(manager.reserve_exclusive_load("org/other"))
 
+    def test_an_exclusive_claim_is_refused_while_a_reply_is_running(self):
+        # The other half of the switcher's promise. A load admitted beside a
+        # generation does not run beside it - it waits on the model lock and
+        # then unloads the model that was producing the tokens.
+        manager = ModelManager()
+        self.assertTrue(manager.reserve_generation())
+
+        self.assertIsNone(manager.reserve_exclusive_load(OLMO))
+
+        manager.release_generation()
+        self.assertIsNotNone(manager.reserve_exclusive_load(OLMO))
+
+    def test_a_generation_is_refused_while_a_load_is_claimed(self):
+        # The mirror image, and the reason the switcher can stop asking
+        # whether anything is generating: a reply that started after the
+        # load was claimed would wait out the load and answer from whatever
+        # it brought in.
+        manager = ModelManager()
+        _checked_id, claim = manager.reserve_exclusive_load(OLMO)
+
+        self.assertFalse(manager.reserve_generation())
+
+        manager.release_load(claim)
+        self.assertTrue(manager.reserve_generation())
+        manager.release_generation()
+
+    def test_a_generation_is_refused_while_an_ordinary_load_is_claimed(self):
+        # Not only the exclusive ones: the Models page's buttons claim
+        # through reserve_load, and a reply must not slip past those either.
+        manager = ModelManager()
+        _checked_id, claim = manager.reserve_load(OLMO)
+
+        self.assertFalse(manager.reserve_generation())
+
+        manager.release_load(claim)
+        self.assertTrue(manager.reserve_generation())
+        manager.release_generation()
+
+    def test_a_generation_is_refused_while_a_load_reads_weights(self):
+        manager = ModelManager()
+        with manager._reading_weights(OLMO):
+            self.assertFalse(manager.reserve_generation())
+
+        self.assertTrue(manager.reserve_generation())
+        manager.release_generation()
+
+    def test_a_refused_generation_does_not_take_the_slot(self):
+        # A non-blocking acquire that is never reached cannot be released,
+        # and a slot left taken would wedge the chat page for good.
+        manager = ModelManager()
+        _checked_id, claim = manager.reserve_load(OLMO)
+
+        self.assertFalse(manager.reserve_generation())
+
+        self.assertFalse(manager.busy)
+        manager.release_load(claim)
+
+    def test_only_one_of_a_crowd_of_loads_and_replies_is_admitted(self):
+        # Every path a reader can start work on the model by, raced against
+        # each other on real threads: one winner, whichever it is, and the
+        # rest told no. The two reservations answer under the same lock, so
+        # there is no interleaving in which both say yes.
+        manager = ModelManager()
+        start = threading.Barrier(8)
+        won: list[str] = []
+        lock = threading.Lock()
+
+        def switch():
+            start.wait()
+            claimed = manager.reserve_exclusive_load("org/one")
+            if claimed is not None:
+                with lock:
+                    won.append("load")
+
+        def reply():
+            start.wait()
+            if manager.reserve_generation():
+                with lock:
+                    won.append("reply")
+
+        threads = [
+            threading.Thread(target=switch if turn % 2 else reply) for turn in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len(won), 1, f"admitted {won}")
+
     def test_a_load_does_not_clear_a_claim_it_did_not_take(self):
         # One load finishing used to leave the other looking idle while it
         # waited for the lock, which is the window a removal needs.
@@ -1747,7 +1837,10 @@ class ModelSwitchTests(unittest.TestCase):
         ) as load:
             frames = list(app.switch_model("org/small", "4-bit"))
 
-        load.assert_called_once_with("org/small", None, "4-bit")
+        # The claim it took is handed down rather than left to be taken
+        # again: load_cached_model claims the load itself for the Models
+        # page's buttons, and a second claim here would refuse this one.
+        load.assert_called_once_with("org/small", None, "4-bit", mock.ANY)
         # The switcher itself is left to the rescan that follows; the cards
         # go to the Models page, as Load cached's do.
         self.assertEqual(frames, [(gr.skip(), "loading card"), (gr.skip(), "ready card")])
@@ -1799,6 +1892,86 @@ class ModelSwitchTests(unittest.TestCase):
         self.assertEqual(frames[0][0], gr.update(value=OLMO))
         self.assertIn("Could not load cached model", frames[0][1])
         self.assertIsNone(self.manager.loading_id)
+
+    def test_the_models_page_cannot_load_while_a_pick_holds_the_load(self):
+        # The claim the switcher takes has to turn away the other buttons,
+        # not only another pick: Load cached reaching stream_load beside it
+        # would fill memory twice over and leave whichever load finished
+        # last in it, which is not the one the reader chose.
+        self.load()
+        during = {}
+        real = models_page.load_cached_model
+
+        def cards(*_args):
+            during["frames"] = list(real("org/huge"))
+            yield "card"
+
+        with mock.patch.object(models_page, "load_cached_model", side_effect=cards):
+            list(app.switch_model("org/small"))
+
+        self.assertEqual(len(during["frames"]), 1, "refused before any other card")
+        self.assertIn("Cannot load now", during["frames"][0])
+        self.assertIn(models_page.LOAD_WHILE_LOADING, during["frames"][0])
+
+    def test_a_reply_cannot_start_while_a_pick_holds_the_load(self):
+        # The generation slot and the load claim used to be unrelated, so a
+        # reply starting after the switcher's busy check was admitted and
+        # then ran on whatever the switch had just loaded.
+        self.load()
+        during = {}
+
+        def cards(*_args):
+            during["reserved"] = self.manager.reserve_generation()
+            yield "card"
+
+        with mock.patch.object(models_page, "load_cached_model", side_effect=cards):
+            list(app.switch_model("org/small"))
+
+        self.assertFalse(during["reserved"], "a reply was admitted beside the load")
+        self.assertTrue(self.manager.reserve_generation(), "and can start after it")
+        self.manager.release_generation()
+
+    def test_a_model_being_redownloaded_is_not_offered(self):
+        # Redownload leaves the cache entry complete for the whole fetch, so
+        # nothing but active_downloads says the pick would be refused.
+        progress, reserved = self.manager.reserve_download("org/small")
+        self.assertTrue(reserved)
+
+        self.assertNotIn(("org/small", "org/small"), app.switch_choices())
+        self.assertIn((OLMO, OLMO), app.switch_choices())
+
+        self.manager.release_download("org/small", progress)
+        self.assertIn(("org/small", "org/small"), app.switch_choices())
+
+    def test_the_model_in_memory_stays_offered_while_it_is_redownloaded(self):
+        # It is what the switcher has to show as chosen, and picking it is a
+        # no-op; dropping it would blank the dropdown instead.
+        self.load("org/small")
+        self.manager.reserve_download("org/small")
+
+        self.assertIn(("org/small", "org/small"), app.switch_choices())
+        self.assertEqual(self.painted()["value"], "org/small")
+
+    def test_the_timer_repaints_when_a_download_starts(self):
+        # Filtering a download out is only worth anything if the tab that
+        # did not start it hears about it: the revision moves at both ends
+        # of a download, not only when it finishes.
+        self.load()
+        revision = self.manager.cache_revision
+        self.assertEqual(
+            app.refresh_stale_model_switch(OLMO, revision), (gr.skip(), gr.skip())
+        )
+
+        progress, _reserved = self.manager.reserve_download("org/small")
+        update, drawn = app.refresh_stale_model_switch(OLMO, revision)
+
+        self.assertNotIn(("org/small", "org/small"), update["choices"])
+        self.assertEqual(drawn, self.manager.cache_revision)
+
+        self.manager.release_download("org/small", progress)
+        update, _drawn = app.refresh_stale_model_switch(OLMO, drawn)
+
+        self.assertIn(("org/small", "org/small"), update["choices"])
 
 
 class ModelBadgeTests(unittest.TestCase):

@@ -181,6 +181,7 @@ from ui.images_page import (
 from ui.generation import (
     BUSY_STATUS,
     CHAT_OUTPUT_NAMES,
+    LOADING_STATUS,
     NOTHING_TO_CLEAR,
     ask_clear_chat,
     automatic_reasoning_close_count,

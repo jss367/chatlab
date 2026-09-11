@@ -391,6 +391,7 @@ class ChatFlowTests(unittest.TestCase):
 
             loaded = True
             busy = False
+            loading_id = None
 
             def reserve_generation(self):
                 return False
@@ -480,6 +481,7 @@ class ChatFlowTests(unittest.TestCase):
         class Exploding:
             loaded = True
             busy = False
+            loading_id = None
             model_id = "fake/model"
             load_id = "fake/model#1"
 
@@ -1373,6 +1375,67 @@ class BusyRefusalTests(unittest.TestCase):
     def test_an_edit_of_a_missing_message_is_refused(self):
         event = gr.EditData(None, {"index": 99, "previous_value": "gone", "value": "x"})
         self.assert_refused(app.edit_message(event, "", self.turns(), *SETTINGS))
+
+
+class LoadRefusalTests(unittest.TestCase):
+    """A load has the model too, and a reply must not be admitted beside one.
+
+    The generation slot and the load claim used to be unrelated things, so a
+    Send arriving while the chat page's switcher - or either of the Models
+    page's buttons - was loading was accepted. It did not run beside the
+    load: it waited on the model lock and then answered from whatever the
+    load had brought in, under a badge naming the model the reader had
+    asked the question of.
+    """
+
+    def setUp(self):
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
+        _checked_id, self.claim = runtime.MANAGER.reserve_exclusive_load("org/other")
+        self.addCleanup(runtime.MANAGER.release_load, self.claim)
+
+    def turns(self):
+        return [make_turn("user", "old q"), make_turn("assistant", "old a")]
+
+    def assert_refused(self, stream):
+        frames = list(stream)
+        self.assertEqual(len(frames), 1)
+        (frame,) = frames
+        self.assertEqual(frame[STATUS], app.LOADING_STATUS)
+        # As for a running generation: the two outputs that would carry the
+        # stale snapshot are skipped rather than republished.
+        self.assertEqual(frame[TURNS], gr.skip())
+        self.assertEqual(frame[CHATBOT], gr.skip())
+
+    def test_sending_while_a_model_loads_is_refused(self):
+        self.assert_refused(app.chat("new question", self.turns(), *SETTINGS))
+
+    def test_retrying_while_a_model_loads_is_refused(self):
+        self.assert_refused(app.retry_last("", self.turns(), *SETTINGS))
+
+    def test_regenerating_while_a_model_loads_is_refused(self):
+        self.assert_refused(app.regenerate_from(0, "", self.turns(), *SETTINGS))
+
+    def test_editing_while_a_model_loads_is_refused(self):
+        event = gr.EditData(
+            None, {"index": 1, "previous_value": "old a", "value": "fixed"}
+        )
+        self.assert_refused(app.edit_message(event, "", self.turns(), *SETTINGS))
+
+    def test_the_refusal_does_not_point_at_a_stop_button(self):
+        # There is no Stop for a load, so the generating wording would send
+        # the reader looking for a button that is not on the page.
+        self.assertNotIn("Stop", app.LOADING_STATUS)
+        self.assertIn("Stop", app.BUSY_STATUS)
+
+    def test_a_reply_is_admitted_again_once_the_load_ends(self):
+        runtime.MANAGER.release_load(self.claim)
+
+        frames = list(app.chat("new question", self.turns(), *SETTINGS))
+
+        self.assertGreater(len(frames), 1, "still refusing after the load")
+        self.assertNotEqual(frames[-1][STATUS], app.LOADING_STATUS)
 
 
 class BusyFlagTests(unittest.TestCase):

@@ -484,10 +484,43 @@ def download_model(model_id: str, hf_token: str, selected: str | None = None):
     )
 
 
+LOAD_WHILE_GENERATING = (
+    "The model is answering a message. Press Stop, or wait for the reply to "
+    "finish, before loading another model."
+)
+LOAD_WHILE_LOADING = "Another load is already under way. Wait for it to finish."
+
+
+def occupied_reason(loading: str, generating: str) -> str:
+    """Which of the two refusals fits, for a reservation that came back empty.
+
+    Read afterwards and only to choose wording: whichever of the two was true
+    at the instant the reservation was refused, one of them was, and by now
+    either may have ended. The refusal itself stands on the reservation, not
+    on this.
+    """
+
+    return loading if runtime.MANAGER.loading_id else generating
+
+
+def refused_load_card(extra: str = "") -> str:
+    """The card a load gets when a reply or another load already has the model."""
+
+    reason = occupied_reason(LOAD_WHILE_LOADING, LOAD_WHILE_GENERATING)
+    return status_card("Cannot load now", f"{reason}{extra}", "error")
+
+
 def download_and_load_model(
     model_id: str, hf_token: str, selected: str | None = None, precision: str = "full"
 ):
-    """Download and load the model explicitly selected on the Models page."""
+    """Download and load the model explicitly selected on the Models page.
+
+    The load is claimed after the download rather than before it: the files
+    can take an hour to arrive, and a claim standing for all of it would
+    refuse every reply on the chat page for the duration. The claim covers
+    what it has to - the load itself, which is where two loads would collide
+    and where a reply would find the model swapped underneath it.
+    """
 
     model_id = chosen_model(model_id, selected)
     started = time.monotonic()
@@ -499,18 +532,30 @@ def download_and_load_model(
     yield status_card(*describe_cache(model_id, before), "working")
     try:
         path = yield from stream_download(model_id, hf_token)
-        fetched = describe_fetched(
-            before, cache_status(model_id), time.monotonic() - started
-        )
-        yield status_card(
-            "Loading model",
-            f"{fetched} Moving `{model_id.strip()}` onto the best available device…",
-            "working",
-        )
-        # Read after the download rather than before it: what the repo turns
-        # out to hold is only knowable once its files are here.
-        fetched_status = cache_status(model_id)
-        device = yield from stream_load(model_id, path, precision, fetched_status.kind)
+        claimed = runtime.MANAGER.reserve_exclusive_load(model_id)
+        if claimed is None:
+            yield refused_load_card(
+                f" `{model_id.strip()}` is on disk; use **Load cached** to "
+                "finish the job."
+            )
+            return
+        try:
+            fetched = describe_fetched(
+                before, cache_status(model_id), time.monotonic() - started
+            )
+            yield status_card(
+                "Loading model",
+                f"{fetched} Moving `{model_id.strip()}` onto the best available device…",
+                "working",
+            )
+            # Read after the download rather than before it: what the repo turns
+            # out to hold is only knowable once its files are here.
+            fetched_status = cache_status(model_id)
+            device = yield from stream_load(
+                model_id, path, precision, fetched_status.kind
+            )
+        finally:
+            runtime.MANAGER.release_load(claimed[1])
     except Exception as error:
         yield failure_card("Model setup failed", html.escape(str(error)))
         return
@@ -543,11 +588,50 @@ def incomplete_snapshot_detail(model_id: str, error: Exception) -> str:
 
 
 def load_cached_model(
-    model_id: str, selected: str | None = None, precision: str = "full"
+    model_id: str,
+    selected: str | None = None,
+    precision: str = "full",
+    claim: int | None = None,
 ):
-    """Load the selected model from local files, preserving any load error."""
+    """Load the selected model from local files, preserving any load error.
+
+    The load is claimed here, before the first card, and given back in a
+    ``finally``. It is claimed exclusively: a load refuses while a reply is
+    streaming or another load is under way rather than queuing behind it,
+    because a queued load's first act on winning the model lock is to unload
+    the model the reader is looking at, and a second load only fills the
+    machine's memory twice over to leave whichever finished last in it.
+    Claiming and checking have to be one step - Gradio does not resume a
+    streaming handler until the browser has its frame, so a check before the
+    first card and a claim after it are a round trip apart.
+
+    ``claim`` is for a caller that already holds the exclusive reservation
+    and is passing it down - :func:`switch_model`, which has to refuse in the
+    switcher's own way before it yields anything. Its claim is not released
+    here; the caller that took it releases it.
+    """
 
     cleaned = chosen_model(model_id, selected)
+    if claim is not None:
+        yield from _load_cached_model(cleaned, precision)
+        return
+    try:
+        claimed = runtime.MANAGER.reserve_exclusive_load(cleaned)
+    except ValueError as error:
+        yield failure_card("Could not load cached model", html.escape(str(error)))
+        return
+    if claimed is None:
+        yield refused_load_card()
+        return
+    try:
+        yield from _load_cached_model(cleaned, precision)
+    finally:
+        runtime.MANAGER.release_load(claimed[1])
+
+
+def _load_cached_model(cleaned: str, precision: str):
+    """The cards of a cached load, with the load already claimed."""
+
     active = runtime.MANAGER.active_downloads.get(cleaned)
     if active is not None:
         snap = active.snapshot()
@@ -772,20 +856,34 @@ def switch_choices(precision: str | None = None) -> list[tuple[str, str]]:
 
     Whole and supported text models that fit at ``precision``, plus the one in
     memory, in the list's default order. A model the load would refuse -
-    tight or too large - is left out rather than offered and then declined:
-    the refusal names figures and a remedy, and a dropdown has no room for
-    either. A model whose size could not be judged stays in, as the load will
-    try it all the same.
+    tight or too large, or being downloaded right now - is left out rather
+    than offered and then declined: the refusal names figures and a remedy,
+    and a dropdown has no room for either. A model whose size could not be
+    judged stays in, as the load will try it all the same.
+
+    A **Redownload** is the case the download check is for. An interrupted
+    download leaves files missing and is filtered out by that alone, but a
+    redownload of a model already complete on disk leaves the cache entry
+    looking whole for the whole of the fetch, so nothing but
+    ``active_downloads`` says that picking it would be refused. The chat
+    page's timer hears about a download starting because
+    :meth:`ModelManager.note_cache_change` counts it.
     """
 
     models = sort_cached_models(list_cached_models(), DEFAULT_MODEL_SORT)
     fits = cached_fits(models, precision)
     current = switch_value()
+    downloading = runtime.MANAGER.downloading_ids()
     choices = []
     for entry in models:
         if entry.status.kind != TEXT_KIND:
             continue
         if entry.status.missing_files or entry.status.unsupported:
+            continue
+        # The model in memory stays on the list whatever is happening to its
+        # files, as it does for a fit it would fail: it is what the switcher
+        # has to show as chosen, and picking it is a no-op anyway.
+        if entry.model_id in downloading and entry.model_id != current:
             continue
         fit = fits.get(entry.model_id)
         if fit is not None and fit.known and fit.state != FITS and entry.model_id != current:
@@ -845,9 +943,11 @@ def refresh_stale_model_switch(
     would also close the list under a reader who has just opened it. So
     nothing is redrawn while the switcher is still right, which is nearly
     always. Two things can make it wrong, and both are an attribute read:
-    the model in memory changed, so the wrong one is selected, and the cache
-    changed, so a model this tab has never heard of is missing from the list
-    or a deleted one is still in it. Either is caught on the next tick.
+    the model in memory changed, so the wrong one is selected, and what a
+    cache scan would find changed, so a model this tab has never heard of is
+    missing from the list, or a deleted one is still in it, or one whose
+    files are being rewritten is still offered. Either is caught on the next
+    tick.
 
     ``revision`` is the cache revision the tab last painted at; a tab that
     has not painted yet passes ``None`` and is repainted.
@@ -871,23 +971,21 @@ def switch_model(selected: str | None, precision: str = "full"):
     behind the generation, and its first act on winning the lock would be
     to unload the model still producing the tokens.
 
-    A second load is refused by taking the load for this one rather than by
-    asking whether anyone else has it. The load itself claims nothing until
-    ``stream_load``, several cards and a cache scan later, and Gradio gives
-    a picked-up-and-put-down handler no exclusivity across those yields; two
-    tabs picking at once would both look, both find the manager idle, and
-    both go on to fill the machine's memory in turn. The claim taken here
-    stands for the whole of the load, the early refusals included, and is
-    given back in the ``finally``.
+    Both refusals are one reservation, not a pair of checks. A second load
+    and a reply starting in the same instant are the same hazard read from
+    two sides: the load itself claims nothing until ``stream_load``, several
+    cards and a cache scan later, Gradio gives a picked-up-and-put-down
+    handler no exclusivity across those yields, and a generation slot taken
+    after this handler looked at it is a reply that will run on whatever
+    this load brings in. ``reserve_exclusive_load`` answers both questions
+    under one lock and leaves a claim behind that turns away the next asker,
+    whichever of the two it is. The claim stands for the whole of the load,
+    the early refusals included, and is given back in the ``finally``.
     """
 
     current = switch_value()
     if not selected or selected == current:
         yield gr.skip(), gr.skip()
-        return
-    if runtime.MANAGER.busy:
-        alarm("Cannot switch models now", SWITCH_BUSY)
-        yield gr.update(value=current), gr.skip()
         return
     try:
         claimed = runtime.MANAGER.reserve_exclusive_load(selected)
@@ -897,12 +995,15 @@ def switch_model(selected: str | None, precision: str = "full"):
         )
         return
     if claimed is None:
-        alarm("Cannot switch models now", SWITCH_LOADING)
+        alarm(
+            "Cannot switch models now",
+            occupied_reason(SWITCH_LOADING, SWITCH_BUSY),
+        )
         yield gr.update(value=current), gr.skip()
         return
     _checked_id, claim = claimed
     try:
-        for card in load_cached_model(selected, None, precision):
+        for card in load_cached_model(selected, None, precision, claim):
             yield gr.skip(), card
     finally:
         runtime.MANAGER.release_load(claim)
