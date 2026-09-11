@@ -1889,6 +1889,16 @@ class PageLayoutTests(unittest.TestCase):
                 # And the script that writes it knows the pane by the same name.
                 self.assertIn(f"'{pane_id}'", app.RESIZE_JS)
 
+    def test_the_handle_keeps_touch_gestures_off_its_strip(self):
+        # A touch device wider than the stacking breakpoint still drags the
+        # handle, and a browser that reads that drag as a pan or a zoom takes
+        # the pointer back mid-resize, which leaves the pane part-moved.
+        # Refusing the pointerdown does not stop it; only this does.
+        rule = app.CSS[app.CSS.index(".pane-resizer {") :]
+        rule = rule[: rule.index("}")]
+
+        self.assertIn("touch-action: none", rule)
+
     def test_the_stacked_layout_drops_the_handles(self):
         # Under 850px the panes are rows, one above the other, where a width
         # would mean a height and a sideways drag would mean nothing.
@@ -2582,6 +2592,7 @@ class Element {
     this.dataset = {};
     this.style = new Style();
     this.names = new Set();
+    this.attributes = {};
     this.pointer = null;
     this.classList = {
       add: (name) => this.names.add(name),
@@ -2591,6 +2602,10 @@ class Element {
   }
   get clientWidth() { return this.width; }
   getBoundingClientRect() { return { width: this.width }; }
+  setAttribute(name, value) { this.attributes[name] = value; }
+  getAttribute(name) {
+    return name in this.attributes ? this.attributes[name] : null;
+  }
   append(child) {
     child.parentElement = this;
     this.children.push(child);
@@ -2619,6 +2634,13 @@ const find = (node, id) => {
     if (found) { return found; }
   }
   return null;
+};
+
+// The one selector the script asks the document for.
+const gather = (node, name, found) => {
+  if (node.names.has(name)) { found.push(node); }
+  for (const child of node.children) { gather(child, name, found); }
+  return found;
 };
 
 let watchers = [];
@@ -2667,6 +2689,10 @@ const document = {
   documentElement,
   body,
   getElementById: (id) => find(documentElement, id),
+  querySelectorAll: (selector) => {
+    assert.strictEqual(selector, '.pane-resizer', 'the page answers one selector');
+    return gather(documentElement, 'pane-resizer', []);
+  },
   addEventListener: (type, fn) => {
     (heard.document[type] = heard.document[type] || []).push(fn);
   },
@@ -2813,6 +2839,62 @@ assert.strictEqual(kept.get('chatlab.inspector-pane-width'), String(pane.width))
 // So moving the pointer over the page again leaves the pane where it was.
 fire('window', 'pointermove', { buttons: 1, clientX: 400 });
 assert.strictEqual(documentElement.style.props['--inspector-pane-width'], '354px');
+"""
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the script")
+    def test_the_separator_carries_the_position_it_has_put_the_pane_in(self):
+        # Focusing a separator is meant to tell a screen reader how the room
+        # has been divided, and nothing else on the page can say. So every
+        # write of a width says it again, and a pane with no width on screen
+        # to speak of says nothing at all.
+        self.check(
+            """
+const chat = chatRow(1200);
+start();
+paint();
+
+const handle = chat.children[2];
+const pane = document.getElementById('inspector-pane');
+
+// The row of 1200 gives 260 to the conversations pane and 6 to the handle,
+// leaving 934 for the pane and its workspace to divide, of which the
+// workspace keeps at least 360.
+assert.strictEqual(handle.getAttribute('aria-valuemin'), '240');
+assert.strictEqual(handle.getAttribute('aria-valuemax'), '574');
+// Nobody has dragged anything yet, so the figure is the width the
+// stylesheet gave the pane.
+assert.strictEqual(handle.getAttribute('aria-valuenow'), String(pane.width));
+assert.strictEqual(handle.getAttribute('aria-valuetext'), pane.width + ' pixels');
+
+fire('document', 'pointerdown', {
+  target: handle, button: 0, buttons: 1, clientX: 800, pointerId: 7,
+  preventDefault: () => {},
+});
+fire('window', 'pointermove', { buttons: 1, clientX: 760 });
+fire('window', 'pointerup', {});
+assert.strictEqual(handle.getAttribute('aria-valuenow'), '354');
+assert.strictEqual(handle.getAttribute('aria-valuetext'), '354 pixels');
+
+// An arrow key steps the same figure along.
+fire('document', 'keydown', {
+  target: handle, key: 'ArrowLeft', preventDefault: () => {},
+});
+assert.strictEqual(handle.getAttribute('aria-valuenow'), '330');
+
+// A double-click hands the pane back to the stylesheet, whose width only
+// the layout knows, so the separator reports what it measures next.
+fire('document', 'dblclick', { target: handle, preventDefault: () => {} });
+paint();
+assert.strictEqual(documentElement.style.props['--inspector-pane-width'], undefined);
+assert.strictEqual(handle.getAttribute('aria-valuenow'), String(pane.width));
+
+// The handle of a page the nav is not showing measures nothing, and a
+// position invented for it would describe a layout that never happened.
+const images = imagesRow(0);
+mutated();
+paint();
+assert.strictEqual(images.children[1].getAttribute('aria-valuenow'), null);
 """
         )
 

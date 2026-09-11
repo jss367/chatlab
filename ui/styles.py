@@ -105,8 +105,13 @@ html, body {{ height: 100%; overflow: hidden; }}
 }}
 /* Laid over the strip rather than inside it: Gradio wraps the markup of an
    HTML block in containers of its own, and one of them is a loading overlay
-   that would otherwise take the width the handle wants. */
-.pane-resizer {{ position: absolute; inset: 0; cursor: col-resize; }}
+   that would otherwise take the width the handle wants. Touch gestures are
+   turned off over it because a browser that decides a drag along the strip
+   is a pan or a zoom takes the pointer away part-way through the resize and
+   leaves the pane at whatever width it had reached by then. */
+.pane-resizer {{
+  position: absolute; inset: 0; cursor: col-resize; touch-action: none;
+}}
 /* Under the pointer the seam thickens into an accent line rather than
    filling the whole hit area, which would be a band of color the width of
    a scrollbar for what is a one-pixel edge. */
@@ -622,6 +627,11 @@ SHORTCUT_JS = """
 # widens again gives the pane back what it had. Double-clicking the handle
 # drops the saved width and gives the pane the stylesheet's own. Arrow keys
 # move a focused handle, so the pane can be sized without a pointer.
+#
+# A handle is a separator the reader can focus, which is a control with a
+# position, and every one of those writes hands it the width the pane has
+# now along with the ends of the travel its row allows. Nothing on the page
+# says how the room has been divided, so this is all a screen reader has.
 def pane_handle(pane: str) -> str:
     """The markup for the handle on a pane's seam; see RESIZE_JS.
 
@@ -650,10 +660,12 @@ RESIZE_JS = """
   const SIDE_PANES = 260;
   const PANES = ['inspector-pane', 'image-inspector'];
 
-  const clamp = (width, room) => {
-    const most = Math.max(MIN_PANE, room - MIN_WORKSPACE);
-    return Math.round(Math.min(Math.max(width, MIN_PANE), most));
-  };
+  // The most a pane may take of the room it is dividing, which is all of it
+  // bar the least a workspace can be read in.
+  const widest = (room) => Math.max(MIN_PANE, room - MIN_WORKSPACE);
+
+  const clamp = (width, room) =>
+    Math.round(Math.min(Math.max(width, MIN_PANE), widest(room)));
 
   const store = (key, width) => {
     try {
@@ -679,6 +691,15 @@ RESIZE_JS = """
 
   const paneOf = (handle) => document.getElementById(handle.dataset.pane);
 
+  // A handle sits beside the pane it sizes rather than inside it, so going
+  // the other way means matching the name it carries.
+  const handleFor = (name) => {
+    for (const handle of document.querySelectorAll('.pane-resizer')) {
+      if (handle.dataset.pane === name) { return handle; }
+    }
+    return null;
+  };
+
   // The room a pane and its workspace divide between them, which is their
   // row less everything else the row is carrying: on the Chat page that is
   // the conversations pane and the handle, and on the Images page it is the
@@ -698,6 +719,23 @@ RESIZE_JS = """
     return room;
   };
 
+  // A focusable separator is a control with a position, and a screen reader
+  // has no way to work that position out from the page, so it is spelled out
+  // here every time the width moves: what the pane has now, and the ends of
+  // the travel the row it is in allows. A pane on a page the nav is not
+  // showing measures nothing, and a figure of nothing would be a claim about
+  // a layout that has not happened, so those are left alone.
+  const announce = (handle, width, room) => {
+    if (!handle || room <= 0) { return; }
+    handle.setAttribute('aria-valuemin', String(MIN_PANE));
+    handle.setAttribute('aria-valuemax', String(widest(room)));
+    handle.setAttribute('aria-valuenow', String(width));
+    // The number on its own is read out with no unit, and some readers turn
+    // it into a percentage of the range instead, which tells a listener even
+    // less about a pane they are trying to size.
+    handle.setAttribute('aria-valuetext', width + ' pixels');
+  };
+
   let dragging = null;
 
   // Under 850px the panes are rows one above the other, where a width would
@@ -715,14 +753,20 @@ RESIZE_JS = """
   const fit = () => {
     if (dragging || stacked()) { return; }
     for (const name of PANES) {
-      const saved = recall('chatlab.' + name + '-width');
-      if (saved === null) { continue; }
       const pane = document.getElementById(name);
       const room = pane ? roomFor(pane) : 0;
-      write(
-        '--' + name + '-width',
-        clamp(saved, room > 0 ? room : window.innerWidth - SIDE_PANES)
-      );
+      const saved = recall('chatlab.' + name + '-width');
+      // A pane the reader has never dragged keeps the width the stylesheet
+      // gives it, which is still the width its separator has to report, so
+      // the measurement is taken whether or not there is a choice to put
+      // back. This is also how the separator comes by a position at all,
+      // since a row reports its size as soon as it has one.
+      let width = pane ? Math.round(pane.getBoundingClientRect().width) : 0;
+      if (saved !== null) {
+        width = clamp(saved, room > 0 ? room : window.innerWidth - SIDE_PANES);
+        write('--' + name + '-width', width);
+      }
+      announce(handleFor(name), width, room);
     }
   };
 
@@ -791,10 +835,10 @@ RESIZE_JS = """
     // somewhere the page never heard about, and the drag ended with it.
     if (!event.buttons) { finish(); return; }
     // The pane is on the right of its handle, so dragging left widens it.
-    const width = clamp(
-      dragging.start + (dragging.origin - event.clientX), roomFor(dragging.pane)
-    );
+    const room = roomFor(dragging.pane);
+    const width = clamp(dragging.start + (dragging.origin - event.clientX), room);
     write(dragging.property, width);
+    announce(dragging.handle, width, room);
   };
 
   const finish = () => {
@@ -846,6 +890,10 @@ RESIZE_JS = """
     event.preventDefault();
     write(handle.dataset.property, null);
     store(handle.dataset.store, null);
+    // The width the pane falls back to is the stylesheet's, which only the
+    // layout can say, so the separator picks it up from the next fit rather
+    // than from a figure this handler would have to guess at.
+    refit();
   });
 
   document.addEventListener('keydown', (event) => {
@@ -856,9 +904,11 @@ RESIZE_JS = """
     const pane = paneOf(handle);
     if (!pane) { return; }
     event.preventDefault();
-    const width = clamp(pane.getBoundingClientRect().width + step, roomFor(pane));
+    const room = roomFor(pane);
+    const width = clamp(pane.getBoundingClientRect().width + step, room);
     write(handle.dataset.property, width);
     store(handle.dataset.store, width);
+    announce(handle, width, room);
   });
 }
 """
