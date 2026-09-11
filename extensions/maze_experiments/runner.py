@@ -154,7 +154,9 @@ def identifies_its_token(text):
     character, and a token carrying no characters decodes to nothing. Either
     way the recorded text is the same for any ID of that shape, so a later
     vocabulary can move the ID to other bytes and still produce a decode that
-    looks identical while the joint sequence reads differently.
+    looks identical. Text recorded as part of a response needs no such test,
+    because the characters its neighbours complete name the bytes it carried;
+    a token recorded on its own, with nothing around it, does.
     """
     return bool(text) and "�" not in text
 
@@ -172,65 +174,75 @@ def forkable_without_evidence(episode, manager):
             and manager.load_id == episode.load_id)
 
 
-def verify_recorded_tokens(episode, turn_index, kept, manager):
+def visible_token_ids(turn, hidden_ids):
+    """The IDs this response's recorded text was decoded from.
+
+    The runtime streams each response through IncrementalDecoder, which drops
+    a hidden special rather than decoding it, so those IDs appear among the
+    turn's metrics and never in its text. Reader-supplied prefill is the
+    exception the runtime makes: replay forces those tokens visible, including
+    special-token spellings.
+    """
+    literal_prefill_tokens = turn.get("literal_prefill_tokens", turn["forced_prefix_tokens"])
+    return [metric["token_id"] for index, metric in enumerate(turn["metrics"])
+            if index < literal_prefill_tokens or metric["token_id"] not in hidden_ids]
+
+
+def verify_recorded_text(episode, turn_index, manager):
     """Refuse a fork whose stored IDs no longer decode to the text they recorded.
 
     The same repository ID can be re-downloaded at a revision whose tokenizer or
     vocabulary changed, so a matching model_id is not on its own evidence that
-    replaying stored IDs reproduces the original run. Every metric records the
-    text its own ID decoded to at generation time, so the loaded tokenizer can
+    replaying stored IDs reproduces the original run. Every response records the
+    text its own IDs decoded to at generation time, so the loaded tokenizer can
     be checked against the run itself, with no fingerprint that existing exports
     never carried.
 
-    The check covers every ID the fork replays: the kept prefix of the edited
-    response and the whole of each earlier response, which is rebuilt from its
-    stored IDs too. A load identifier is not evidence of anything here, because
-    load_count restarts at zero in each process, so the first load of a
-    repository in one session and its first load in the next both answer to the
-    same name.
+    Each response is compared as a whole rather than a token at a time, because
+    decoding is not piecewise. A revision that moves an ID from the word-boundary
+    piece "▁world" to "world" leaves it decoding alone to "world" either way,
+    while the sequence after "Hello" reads "Hello world" under one vocabulary and
+    "Helloworld" under the other. Decoding the response as a whole also puts a
+    byte-level piece among the neighbours that complete its character, so a
+    fragment that names no ID by itself is still pinned down by the text it
+    makes with them.
+
+    Every earlier response is verified in full, because the fork rebuilds each of
+    them from its stored IDs. The edited response is verified in full too, past
+    the edited token as well as before it: boundary semantics only mean anything
+    in context, so a vocabulary that has moved anywhere in that response is
+    evidence the tokenizer is not the one that produced the run.
+
+    A load identifier is not evidence of anything here, because load_count
+    restarts at zero in each process, so the first load of a repository in one
+    session and its first load in the next both answer to the same name.
     """
-    replayed = [metric for turn in episode.turns[:turn_index] for metric in turn["metrics"]] + list(kept)
-    if any(metric.get("text") is None for metric in replayed):
-        # Exports predating per-token text carry nothing to check against. Only
-        # a live episode of this session, whose load identifier this process
-        # assigned and so can trust, may be forked without that evidence.
-        if not forkable_without_evidence(episode, manager):
-            raise ValueError("This run predates the recorded token text needed to confirm that the loaded "
-                             "tokenizer is the one that produced it, so it can no longer be forked.")
-        return
-    try:
-        current = [manager.decode([metric["token_id"]]) for metric in replayed]
-    except (IndexError, KeyError, OverflowError, TypeError, ValueError) as exc:
-        raise ValueError("The loaded model cannot decode this run's token IDs, so its tokenizer is not the "
-                         f"one that produced the run ({exc}). This happens when the same model ID has been "
-                         "re-downloaded at a different revision.") from exc
-    if any(now != then["text"] for now, then in zip(current, replayed)
-           if identifies_its_token(then["text"])):
-        raise ValueError("The loaded weights tokenize differently from the ones that produced this run, so "
-                         "its tokens cannot be replayed. This happens when the same model ID has been "
-                         "re-downloaded at a different revision; load that snapshot to fork this run.")
-    # A byte fragment records text that identifies no particular ID, so nothing
-    # in the run shows that this load still maps it to the bytes it carried
-    # then, and the forced sequence would decode to different text without any
-    # of the comparisons above noticing. The session that produced the run is
-    # the one place that evidence is not needed.
-    if not all(identifies_its_token(metric["text"]) for metric in replayed):
-        if not forkable_without_evidence(episode, manager):
-            raise ValueError("A token this fork replays recorded a byte fragment rather than text, so there "
-                             "is nothing to confirm that the loaded tokenizer still maps it to the same "
-                             "bytes. A run containing one can only be forked by the session that produced "
-                             "it; load that snapshot and run it again to edit this response.")
+    hidden = manager.hidden_token_ids
+    for turn in episode.turns[:turn_index + 1]:
+        try:
+            current = manager.decode(visible_token_ids(turn, hidden))
+        except (IndexError, KeyError, OverflowError, TypeError, ValueError) as exc:
+            raise ValueError("The loaded model cannot decode this run's token IDs, so its tokenizer is not the "
+                             f"one that produced the run ({exc}). This happens when the same model ID has been "
+                             "re-downloaded at a different revision.") from exc
+        if current != turn["text"]:
+            raise ValueError("The loaded weights tokenize differently from the ones that produced this run, so "
+                             "its tokens cannot be replayed. This happens when the same model ID has been "
+                             "re-downloaded at a different revision; load that snapshot to fork this run.")
 
 
 def verify_recorded_candidate(episode, candidate, manager):
     """Refuse a fork onto an alternative the loaded model decodes differently.
 
     The chosen alternative is the one ID the fork replays that the run never
-    generated, so no other token in the response stands behind it. A revised
-    vocabulary can leave every retained ID decoding as it always did and still
-    move this one, and the panel's offer of "'x' · token 120" would then put
-    some other text into the response. Its recorded text is checked the same
-    way the replayed tokens are.
+    generated, so no response text stands behind it and it is the one ID that
+    has to be checked on its own. A revised vocabulary can leave every recorded
+    response decoding as it always did and still move this one, and the panel's
+    offer of "'x' · token 120" would then put some other text into the response.
+    Recorded with nothing around it, its text also has to name an ID before the
+    comparison means anything, which is where the run itself can run out of
+    evidence and the session that offered the alternative is the only place
+    that does not need any.
     """
     try:
         current = manager.decode([candidate["token_id"]])
@@ -330,7 +342,7 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
         kept_ids = [m["token_id"] for m in kept]
         stop_ids = manager.stop_token_ids
         literal_prefill_tokens = original.get("literal_prefill_tokens", original["forced_prefix_tokens"])
-        verify_recorded_tokens(episode, turn_index, kept, manager)
+        verify_recorded_text(episode, turn_index, manager)
         verify_recorded_stops(episode, turn_index, kept, literal_prefill_tokens, stop_ids)
         if candidate_id is None:
             replacement_ids = manager.encode_replacement(

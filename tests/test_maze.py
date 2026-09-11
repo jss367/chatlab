@@ -48,6 +48,11 @@ class Manager:
     def _stop_token_ids(self):
         return {0}
 
+    def hidden_token_ids(self):
+        # The stop token is a special: generate() leaves it out of the response
+        # text the way the runtime's decoder does, and records it in metrics.
+        return {0}
+
     def encode_replacement(self, kept_ids, text, **kwargs):
         # This fixture encodes independent UTF-8 bytes; context-sensitive
         # behavior is exercised separately through the real runtime encoder.
@@ -84,8 +89,8 @@ class MazeTests(unittest.TestCase):
                 manager = sentencepiece_manager()
                 ep = Episode(MAZE, CONFIG)
                 ep.model_id, ep.load_id = manager.model_id, manager.load_id
-                ep.turns = [dict(metrics=[{'token_id': SP_HELLO}, {'token_id': SP_SPACE_WORLD}],
-                                 forced_prefix_tokens=1, literal_prefill_tokens=1)]
+                ep.turns = [dict(text='Hello world', forced_prefix_tokens=1, literal_prefill_tokens=1,
+                                 metrics=[{'token_id': SP_HELLO}, {'token_id': SP_SPACE_WORLD}])]
                 with ModelService(lambda: manager).open_session() as session:
                     with mock.patch.object(manager, 'encode_replacement', wraps=manager.encode_replacement) as encode:
                         edited = fork_token_edit(ep, 0, 1, text, session)
@@ -94,6 +99,50 @@ class MazeTests(unittest.TestCase):
                     self.assertEqual(edited.pending_edit['forced_ids'], [SP_HELLO, expected_id])
                     self.assertEqual(session.decode(edited.pending_edit['forced_ids']), 'Hello' + text)
                     self.assertEqual(edited.token_edit['replacement_text'], text)
+
+    def test_fork_refuses_a_later_load_that_moved_a_word_boundary(self):
+        """Every ID still decodes alone to the characters it recorded; only the response changed.
+
+        A SentencePiece revision that respells an ID from the word-boundary
+        piece "▁world" to "world" leaves both vocabularies decoding it alone as
+        "world", so a token at a time the run looks intact. After "Hello" the
+        same ID reads " world" under one and "world" under the other, which is
+        the retained prefix silently changing under the fork.
+        """
+        from test_streaming import SP_HELLO, SP_SPACE_WORLD, SP_WORLD, SP_PIECES, sentencepiece_manager
+        recorded = ['Hello', 'world', '!']
+        bang = SP_PIECES.index('!')
+        revised_pieces = [piece if index != SP_SPACE_WORLD else 'world'
+                          for index, piece in enumerate(SP_PIECES)]
+
+        def uploaded():
+            episode = Episode(MAZE, CONFIG)
+            episode.model_id, episode.load_id = 'fake/model', 'session-1-load-1'
+            episode.replay_only = True
+            episode.turns = [dict(text='Hello world!', forced_prefix_tokens=0, literal_prefill_tokens=0,
+                                  finish_reason='stop', metrics=[
+                                      dict(token_id=token_id, text=text)
+                                      for token_id, text in zip([SP_HELLO, SP_SPACE_WORLD, bang], recorded)])]
+            return episode
+
+        intact, revised = sentencepiece_manager(), sentencepiece_manager(revised_pieces)
+        for manager in (intact, revised):
+            self.assertEqual([manager.tokenizer.decode([token_id])
+                              for token_id in (SP_HELLO, SP_SPACE_WORLD, bang)], recorded)
+        self.assertEqual(intact.tokenizer.decode([SP_HELLO, SP_SPACE_WORLD]), 'Hello world')
+        self.assertEqual(revised.tokenizer.decode([SP_HELLO, SP_SPACE_WORLD]), 'Helloworld')
+
+        with ModelService(lambda: intact).open_session() as session:
+            forked = fork_token_edit(uploaded(), 0, 2, 'world', session)
+        self.assertEqual(forked.pending_edit['forced_ids'], [SP_HELLO, SP_SPACE_WORLD, SP_WORLD])
+
+        # The moved ID is retained before the edit, and again past it, where the
+        # fork replays nothing: the response it belongs to is evidence either way.
+        for token_index in (2, 1):
+            with self.subTest(token_index=token_index):
+                with ModelService(lambda: revised).open_session() as session:
+                    with self.assertRaisesRegex(ValueError, 'tokenize differently'):
+                        fork_token_edit(uploaded(), 0, token_index, 'world', session)
 
     def test_edit_ui_callbacks_select_regenerate_archive_and_reject_stale_token(self):
         manager = Manager([('abc', [97, 98, 99, 0]), ('yz', [121, 122, 0])])
@@ -291,13 +340,20 @@ class MazeTests(unittest.TestCase):
                 fork_token_edit(replay, 0, index, "west", session)
         self.assertIn("cannot decode", str(caught.exception))
 
-        # An export predating recorded token text has nothing to verify against.
+        # The comparison reads the text of the response as a whole, which every
+        # export has always carried, so one predating per-token text is checked
+        # like any other rather than refused for want of evidence.
         for metric in replay.turns[0]["metrics"]:
             metric.pop("text")
         with revised.open_session() as session:
             with self.assertRaises(ValueError) as caught:
                 fork_token_edit(replay, 0, index, "west", session)
-        self.assertIn("predates", str(caught.exception))
+        self.assertIn("tokenize differently", str(caught.exception))
+        reloaded = Manager([])
+        reloaded.load_id = "test-load#4"
+        with reloaded.open_session() as session:
+            forked = fork_token_edit(replay, 0, index, "west", session)
+        self.assertEqual(forked.pending_edit["forced_ids"], ids[:index] + list(b"west"))
 
         # A restart gives the first load of the same repository the load ID the
         # previous session's first load carried, which proves nothing about it.
@@ -307,7 +363,7 @@ class MazeTests(unittest.TestCase):
         with restarted.open_session() as session:
             with self.assertRaises(ValueError) as caught:
                 fork_token_edit(replay, 0, index, "west", session)
-        self.assertIn("predates", str(caught.exception))
+        self.assertIn("tokenize differently", str(caught.exception))
 
     def test_fork_refuses_a_later_load_that_changed_an_earlier_response(self):
         """Earlier turns are rebuilt from their stored IDs, so they are verified too."""
@@ -331,9 +387,10 @@ class MazeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "stop tokens differ"):
                 fork_token_edit(replay, 1, index, "west", session)
 
-        # An earlier response's own tokens no longer decode to what it recorded.
+        # An earlier response's own tokens no longer decode to what it recorded,
+        # here written into the run the way a changed vocabulary would read.
         drifted = from_payload(json.loads(json.dumps(ep.payload())))
-        drifted.turns[0]["metrics"][0]["text"] = "¡"
+        drifted.turns[0]["text"] = "¡" + drifted.turns[0]["text"]
         reloaded = Manager([])
         reloaded.load_id = "test-load#2"
         with reloaded.open_session() as session:
@@ -412,9 +469,21 @@ class MazeTests(unittest.TestCase):
             forked = fork_token_edit(intact, 0, index, "ignored", session, candidate_id=120)
         self.assertEqual(forked.pending_edit["forced_ids"], ids[:index] + [120])
 
-    def test_fork_refuses_an_uploaded_byte_fragment_but_allows_the_session_that_made_it(self):
-        """A piece of a multi-byte character records the same text whatever ID carries it."""
-        move = call_text(MAZE.maze_id, "east")
+        # The session that offered that fragment names the load in memory now,
+        # which is the one place the evidence the run lacks is not needed.
+        ep.turns[0]["metrics"][index]["top_candidates"] = [{"token_id": 120, "text": "�"}]
+        with author.open_session() as session:
+            forked = fork_token_edit(ep, 0, index, "ignored", session, candidate_id=120)
+        self.assertEqual(forked.pending_edit["forced_ids"], ids[:index] + [120])
+
+    def test_fork_reads_an_uploaded_byte_fragment_in_the_characters_it_completes(self):
+        """A piece of a multi-byte character records the same text whatever ID carries it.
+
+        On its own it names no ID, so a token at a time there is nothing to
+        check. Read as part of the response it belongs to, the character its
+        neighbours complete says which bytes it carried.
+        """
+        move = "café\n" + call_text(MAZE.maze_id, "east")
         ids = list(move.encode()) + [0]
         ep = Episode(MAZE, CONFIG | {"interruption_text": "", "per_turn_tokens": 200, "token_budget": 1000})
         author = Manager([(move, ids)])
@@ -422,27 +491,55 @@ class MazeTests(unittest.TestCase):
         list(stream_episode(ep, author, single_step=True))
         index = move.index("east")
 
+        # The two halves of "é" record the replacement character, as the runtime
+        # writes them: neither identifies the ID it came from.
         replay = from_payload(json.loads(json.dumps(ep.payload())))
-        replay.turns[0]["metrics"][3]["text"] = "�"
+        halves = [position for position, byte in enumerate(ids) if byte > 127]
+        self.assertEqual(halves, [3, 4])
+        for position in halves:
+            replay.turns[0]["metrics"][position]["text"] = "�"
         reloaded = Manager([])
         reloaded.load_id = "test-load#2"
         with reloaded.open_session() as session:
-            with self.assertRaisesRegex(ValueError, "byte fragment"):
-                fork_token_edit(replay, 0, index, "west", session)
-
-        # A live episode of this session names the load in memory now, so the
-        # same fragment is editable where the run was produced.
-        ep.turns[0]["metrics"][3]["text"] = "�"
-        with author.open_session() as session:
-            forked = fork_token_edit(ep, 0, index, "west", session)
+            forked = fork_token_edit(replay, 0, index, "west", session)
         self.assertEqual(forked.pending_edit["forced_ids"], ids[:index] + list(b"west"))
 
-        # A fragment past the edited token is not replayed, so it is not checked.
+        # A later load that moved those bytes writes another character into the
+        # retained prefix, which the response it belongs to still catches.
+        swapped = {0xC3: 0xC4, 0xC4: 0xC3}
+        moved = Manager([])
+        moved.load_id = "test-load#3"
+        moved.tokenizer = SimpleNamespace(
+            encode=lambda s, **kw: list(s.encode()),
+            decode=lambda ids, **kw: bytes(swapped.get(i, i) for i in ids).decode())
+        self.assertEqual(moved.tokenizer.decode(ids[3:5]), "ĩ")
+        with moved.open_session() as session:
+            with self.assertRaisesRegex(ValueError, "tokenize differently"):
+                fork_token_edit(replay, 0, index, "west", session)
+
+        # The same holds past the edited token, where the fork replays nothing:
+        # a vocabulary that moved anywhere in the response is evidence enough.
         ahead = from_payload(json.loads(json.dumps(ep.payload())))
-        ahead.turns[0]["metrics"][3]["text"] = chr(ids[3])
-        ahead.turns[0]["metrics"][index + 1]["text"] = "�"
-        with reloaded.open_session() as session:
-            self.assertTrue(fork_token_edit(ahead, 0, index, "west", session).pending_edit)
+        with moved.open_session() as session:
+            with self.assertRaisesRegex(ValueError, "tokenize differently"):
+                fork_token_edit(ahead, 0, 1, "west", session)
+
+    def test_fork_reads_a_supplied_prefix_special_the_way_replay_forces_it(self):
+        """Supplied prefix tokens are replayed visibly, specials included, so the text keeps them.
+
+        Everywhere else a special is dropped before the text is decoded, which
+        is what makes the two positions of the same ID read differently.
+        """
+        manager = Manager([])
+        manager.load_id = "test-load#2"
+        ep = Episode(MAZE, CONFIG)
+        ep.model_id, ep.load_id = "test/model", "test-load"
+        ep.replay_only = True
+        ep.turns = [dict(text="a\x00b", forced_prefix_tokens=2, literal_prefill_tokens=2, finish_reason="stop",
+                         metrics=[{"token_id": token_id} for token_id in (97, 0, 98, 0)])]
+        with manager.open_session() as session:
+            forked = fork_token_edit(ep, 0, 2, "c", session)
+        self.assertEqual(forked.pending_edit["forced_ids"], [97, 0, 99])
 
     def test_replay_edit_leaves_a_newer_archive_of_the_same_run_alone(self):
         move = call_text(MAZE.maze_id, "east")

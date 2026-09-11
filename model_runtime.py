@@ -4664,7 +4664,7 @@ class ModelManager:
         kept = [int(value) for value in kept_ids]
         if not text:
             raise ValueError("The replacement text did not produce any tokens.")
-        hidden = self._hidden_token_ids()
+        hidden = self.hidden_token_ids()
         literal_prefill_tokens = max(
             0, min(int(literal_prefill_tokens), len(kept))
         )
@@ -4981,12 +4981,16 @@ class ModelManager:
                 values.update(int(value) for value in candidate)
         return values
 
-    def _hidden_token_ids(self) -> set[int]:
+    def hidden_token_ids(self) -> set[int]:
         """Special tokens to keep out of the visible text.
 
         Reasoning markers are deliberately kept: on models such as OLMo Think
         they are registered as special tokens, and dropping them would leave the
         interface with no way to find the reasoning block.
+
+        A recorded response text is a decode of every token but these, so a
+        caller comparing that text against a fresh decode of the same ids needs
+        the same set rather than a guess at it.
         """
 
         assert self.tokenizer is not None
@@ -5396,7 +5400,7 @@ class ModelManager:
                     )
 
                 rng = np.random.default_rng(int(seed))
-                decoder = IncrementalDecoder(tokenizer, self._hidden_token_ids())
+                decoder = IncrementalDecoder(tokenizer, self.hidden_token_ids())
                 literal_prefill_text = ""
                 literal_boundaries = {
                     boundary for span in literal_ranges for boundary in span
