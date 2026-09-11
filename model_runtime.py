@@ -22,6 +22,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 import settings
+import steering as steering_vectors
 from conversation import THINK_CLOSE, THINK_OPEN
 from token_metrics import (
     UNSCORED_BEYOND_LIMIT,
@@ -1203,6 +1204,25 @@ def memory_note(count: int | None) -> str:
     return "unknown" if count is None else format_memory(count)
 
 
+def weights_note(load_dtype_name: str | None, bits: int | None = None) -> str:
+    """How an estimate read the weights: ``4-bit weights``, ``full 16-bit weights``.
+
+    The same model estimates several-fold apart across these, so the figure
+    says little on its own: 13.6 GB is a refusal to a reader who chose four
+    bits and a fair reading to one who did not. ``bits`` is what the load
+    will actually pack the linear layers into rather than what was asked
+    for - a quantized choice is honoured on Apple Metal alone and cleared
+    before the check runs anywhere else - so a message built from this tells
+    a reader on a graphics card why their 4-bit choice did not shrink
+    anything.
+    """
+
+    if bits is not None:
+        return f"{bits}-bit weights"
+    stored = DTYPE_BYTES.get((load_dtype_name or "").lower())
+    return "full weights" if stored is None else f"full {stored * 8}-bit weights"
+
+
 def reserved_bytes(torch=None) -> int | None:
     """Bytes the accelerator's allocator holds from the driver, or ``None``.
 
@@ -1337,24 +1357,30 @@ def check_memory_for_load(
     available: int | None,
     headroom: int = MEMORY_HEADROOM_BYTES,
     pool: str = "this machine",
+    weights: str | None = None,
 ) -> None:
     """Refuse a load that would not leave ``headroom`` beside the weights.
 
     ``pool`` names where the figures come from in the message: the machine's
     own memory, or the GPU plus the machine when the weights may spread over
-    both.
+    both. ``weights`` names the precision the estimate was made at (see
+    :func:`weights_note`), without which the reader cannot tell a refusal
+    that a smaller precision would lift from one that nothing but a smaller
+    model will.
     """
 
     needed = estimated_bytes + headroom
+    size = f"about {format_memory(estimated_bytes)}"
+    size += f" for {weights}" if weights else " of memory"
     if total is not None and needed > total:
         raise InsufficientMemoryError(
-            f"{model_id} needs about {format_memory(estimated_bytes)} of memory plus "
+            f"{model_id} needs {size} plus "
             f"{format_memory(headroom)} of safety reserve, and {pool} has "
             f"{format_memory(total)} in total. Choose a smaller model."
         )
     if available is not None and needed > available:
         raise InsufficientMemoryError(
-            f"{model_id} needs about {format_memory(estimated_bytes)} of memory plus "
+            f"{model_id} needs {size} plus "
             f"{format_memory(headroom)} of safety reserve. ChatLab estimates "
             f"{format_memory(available)} available within its memory safety limits "
             "and stopped this load to reduce the risk of heavy paging. "
@@ -1483,13 +1509,17 @@ def fit_for(
     available: int | None,
     pool: str = "this machine",
     headroom: int = MEMORY_HEADROOM_BYTES,
+    weights: str = "weights",
 ) -> Fit:
     """The verdict a load of ``estimated`` bytes would get from this machine now.
 
     Deliberately a second reading of the same figures rather than a trial
     load: the check that refuses a load is the authority, and this exists to
     say beforehand what it would answer, so a reader picking a model is not
-    made to press the button to find out.
+    made to press the button to find out. ``weights`` names the precision
+    the estimate was made at, for the same reason the refusal names it: the
+    verdict on one model moves as the precision radio does, and a note that
+    left it out would look like the figure had changed by itself.
     """
 
     if estimated is None or (total is None and available is None):
@@ -1504,7 +1534,7 @@ def fit_for(
             else "This machine does not report its memory.",
         )
     needed = estimated + headroom
-    weights = f"About {format_memory(estimated)} of weights"
+    size = f"About {format_memory(estimated)} of {weights}"
     reserve = f"{format_memory(headroom)} of safety reserve"
     if total is not None and needed > total:
         return Fit(
@@ -1513,7 +1543,7 @@ def fit_for(
             total,
             available,
             pool,
-            f"{weights} plus {reserve} is more than the "
+            f"{size} plus {reserve} is more than the "
             f"{format_memory(total)} {pool} has.",
         )
     if available is not None and needed > available:
@@ -1523,7 +1553,7 @@ def fit_for(
             total,
             available,
             pool,
-            f"{weights} plus {reserve} needs more than the "
+            f"{size} plus {reserve} needs more than the "
             f"{format_memory(available)} ChatLab estimates free right now. "
             "Close something memory-heavy, or wait for memory pressure to fall.",
         )
@@ -1533,7 +1563,7 @@ def fit_for(
         total,
         available,
         pool,
-        f"{weights}, inside the {memory_note(available)} ChatLab estimates free.",
+        f"{size}, inside the {memory_note(available)} ChatLab estimates free.",
     )
 
 
@@ -1817,12 +1847,27 @@ def warm_device() -> None:
 
 
 def model_fit(
-    estimated: int | None, profile: DeviceProfile | None = None
+    estimated: int | None,
+    profile: DeviceProfile | None = None,
+    bits: int | None = None,
 ) -> Fit:
-    """Whether weights of ``estimated`` bytes would load on this machine now."""
+    """Whether weights of ``estimated`` bytes would load on this machine now.
+
+    ``bits`` is the width the estimate packed the linear layers into, passed
+    in rather than read from the precision radio here: the caller has already
+    decided whether this device honours the choice, and a verdict that
+    described a different precision from the one it measured would be worse
+    than one that named none.
+    """
 
     profile = profile if profile is not None else device_profile()
-    return fit_for(estimated, profile.total, profile.available, profile.pool)
+    return fit_for(
+        estimated,
+        profile.total,
+        profile.available,
+        profile.pool,
+        weights=weights_note(profile.dtype, bits),
+    )
 
 
 def mps_memory_fraction(
@@ -2039,6 +2084,9 @@ HIDDEN_SIZE_ALIASES = ("hidden_size", "n_embd", "d_model", "hidden_dim", "model_
 def _embedding_params_from(config: Mapping[str, Any]) -> int | None:
     """Parameters in the embedding and output matrices, from a config's fields, or ``None``."""
 
+    text_config = config.get("text_config")
+    if isinstance(text_config, Mapping):
+        return _embedding_params_from(text_config)
     vocab = config.get("vocab_size")
     hidden = next(
         (config[name] for name in HIDDEN_SIZE_ALIASES if isinstance(config.get(name), int)),
@@ -2066,6 +2114,9 @@ def _embedding_params(snapshot: Path | None) -> int | None:
         from transformers import AutoConfig
 
         loaded = AutoConfig.from_pretrained(snapshot, local_files_only=True)
+        get_text_config = getattr(loaded, "get_text_config", None)
+        if callable(get_text_config):
+            loaded = get_text_config()
         params = _embedding_params_from(
             {
                 "vocab_size": getattr(loaded, "vocab_size", None),
@@ -3649,6 +3700,51 @@ class LoadedModel(NamedTuple):
 ReadWeights = tuple[Any, Any, Any, str]
 
 
+@contextlib.contextmanager
+def _capture_loading_report() -> Iterator[None]:
+    """Keep Transformers' report when it raises an error referring to it.
+
+    Transformers normally sends this to its own stderr handler, which the
+    desktop UI cannot show and the app's file logger never receives. In
+    particular, quantization wraps an out-of-memory error as a conversion
+    failure, hiding it from our memory-error handling too.
+    """
+
+    thread_id = threading.get_ident()
+    reports = []
+
+    class ReportHandler(logging.Handler):
+        def emit(self, record):
+            if record.thread != thread_id:
+                return
+            message = record.getMessage()
+            if "LOAD REPORT" in message:
+                plain = re.sub(r"\x1b\[[0-9;]*m", "", message)
+                reports[:] = ["\n".join(line.rstrip() for line in plain.splitlines())]
+
+    source = logging.getLogger("transformers")
+    handler = ReportHandler(level=logging.WARNING)
+    source.addHandler(handler)
+    try:
+        yield
+    except RuntimeError as error:
+        if reports and "above report" in str(error):
+            report = reports[-1]
+            logger.warning("%s", report)
+            causes = list(dict.fromkeys(re.findall(
+                r"^((?:[\w.]+)?(?:Error|Exception): .+)$", report, re.MULTILINE
+            )))
+            # Prefer the memory failure even if an earlier conversion also
+            # failed: the caller must still recognize that memory ran out.
+            memory = next((cause for cause in causes if is_out_of_memory_error(RuntimeError(cause))), None)
+            detail = memory or "\n".join(causes[:3]) or report[:8000]
+            raise RuntimeError(f"Weight loading failed: {detail}") from error
+        raise
+    finally:
+        source.removeHandler(handler)
+        handler.close()
+
+
 def _read_text_model(
     local_path: Path, torch, backend: str, dtype, bits: int | None, precision: str
 ) -> ReadWeights:
@@ -4317,7 +4413,7 @@ class ModelManager:
         if allocated_bytes(backend, torch) is not None:
             progress.measure_bytes(estimated, lambda: allocated_bytes(backend, torch))
         try:
-            with progress.watch():
+            with progress.watch(), _capture_loading_report():
                 read = _read_pipeline if kind == IMAGE_KIND else _read_text_model
                 model, tokenizer, pipeline, device_name = read(
                     local_path, torch, backend, dtype, bits, precision
@@ -4575,9 +4671,15 @@ class ModelManager:
         if estimated is None:
             return None, None
         total, available, pool = memory_pool(backend, ceiling, kind)
+        weights = weights_note(load_dtype, bits)
         try:
             check_memory_for_load(
-                validate_model_id(model_id), estimated, total, available, pool=pool
+                validate_model_id(model_id),
+                estimated,
+                total,
+                available,
+                pool=pool,
+                weights=weights,
             )
         except InsufficientMemoryError:
             # The refusal is the load record. It is the outcome most worth
@@ -4586,7 +4688,7 @@ class ModelManager:
             logger.warning(
                 "Refused %s as %s on %s: %s estimated, %s estimated available of %s in %s",
                 model_id,
-                load_dtype,
+                weights,
                 backend,
                 memory_note(estimated),
                 memory_note(available),
@@ -5181,6 +5283,7 @@ class ModelManager:
         automatic_reasoning_close_tokens: int = 0,
         literal_text_ranges: Sequence[tuple[int, int]] = (),
         load_id: str | None = None,
+        steering: dict | None = None,
     ) -> Iterator[GenerationUpdate]:
         """Stream a reply to ``messages``, one batch of tokens at a time.
 
@@ -5208,6 +5311,10 @@ class ModelManager:
         is fed, so a load that finished after the caller looked is refused with
         :class:`ModelChanged` rather than replaying one model's token IDs
         through another.
+
+        ``steering`` is a portable activation-vector specification. Its hook
+        is held under the model lock across prefill and decoding, and removed
+        before the lock is released, including on cancellation.
         """
 
         # The application reserves the slot before it publishes its first
@@ -5229,7 +5336,7 @@ class ModelManager:
         self._run_device_bytes = None
         started = time.monotonic()
         try:
-            for update in self._generate(
+            with contextlib.closing(self._generate(
                 messages,
                 temperature=temperature,
                 top_p=top_p,
@@ -5244,9 +5351,11 @@ class ModelManager:
                 automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
                 literal_text_ranges=literal_text_ranges,
                 load_id=load_id,
-            ):
-                last = update
-                yield update
+                steering=steering,
+            )) as stream:
+                for update in stream:
+                    last = update
+                    yield update
         except (RuntimeError, MemoryError) as error:
             _reraise_out_of_memory(error)
         finally:
@@ -5315,10 +5424,11 @@ class ModelManager:
         automatic_reasoning_close_tokens: int = 0,
         literal_text_ranges: Sequence[tuple[int, int]] = (),
         load_id: str | None = None,
+        steering: dict | None = None,
     ) -> Iterator[GenerationUpdate]:
         import torch
 
-        with self._lock:
+        with self._lock, contextlib.ExitStack() as steering_scope:
             try:
                 if not self.loaded:
                     raise RuntimeError("Download and load a model before chatting.")
@@ -5326,6 +5436,10 @@ class ModelManager:
                     raise ModelChanged(
                         "The model has been reloaded since these tokens were produced."
                     )
+
+                # A stale branch must raise ModelChanged before vector/model
+                # compatibility is checked, so its handler restores the reply.
+                steering_scope.enter_context(steering_vectors.applied(self.model, self.model_id, steering))
 
                 assert self.model is not None
                 assert self.tokenizer is not None
@@ -5978,6 +6092,7 @@ class ModelManager:
         *,
         context_count: int = 0,
         load_id: str | None = None,
+        steering: dict | None = None,
     ) -> TokenInsight:
         """Explain the prediction of ``token_ids[index]`` layer by layer.
 
@@ -6000,13 +6115,18 @@ class ModelManager:
 
         import torch
 
-        with self._lock, torch.inference_mode():
+        with self._lock, torch.inference_mode(), contextlib.ExitStack() as steering_scope:
             if not self.loaded:
                 raise RuntimeError("Download and load a model before inspecting a token.")
             if load_id is not None and load_id != self.load_id:
                 raise ModelChanged(
                     "The model has been reloaded since these tokens were produced."
                 )
+            steering_scope.enter_context(steering_vectors.applied(self.model, self.model_id, steering))
+            if steering_vectors.active(steering):
+                # A cache computed without this vector cannot explain it.
+                # Steered inspections do not retain a cache for later clicks.
+                self._drop_inspect_cache()
             ids = [int(value) for value in token_ids]
             if not 1 <= index < len(ids):
                 raise ValueError(
@@ -6096,7 +6216,7 @@ class ModelManager:
             # covers the sequence through it. Kept for the next click; a
             # response or a scoring pass takes it back (see _drop_inspect_cache).
             produced = getattr(outputs, "past_key_values", None)
-            if produced is not None and self.load_id is not None:
+            if produced is not None and self.load_id is not None and not steering_vectors.active(steering):
                 self._inspect_cache = (self.load_id, ids[:index], produced)
             del outputs, past_key_values
             return TokenInsight(

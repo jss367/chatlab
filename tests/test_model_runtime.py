@@ -1845,6 +1845,88 @@ class LoadProgressTests(unittest.TestCase):
         self.assertEqual(seen, [progress])
 
 
+class LoadingReportTests(unittest.TestCase):
+    def test_conversion_memory_error_reaches_the_manager_and_log(self):
+        import logging
+
+        manager = model_runtime.ModelManager()
+        source = logging.getLogger("transformers.modeling_utils")
+
+        def fail(*args):
+            source.warning(
+                "Qwen LOAD REPORT\nweight | CONVERSION |\n"
+                "RuntimeError: MPS backend out of memory (MPS allocated: 8.93 GiB)\n"
+            )
+            raise RuntimeError("Conversion failed. Look at the above report!")
+
+        import torch
+
+        with (
+            mock.patch("model_runtime.detect_backend", return_value="mps"),
+            mock.patch.object(manager, "_unload_locked"),
+            mock.patch.object(manager, "_cap_mps_memory", return_value=None),
+            mock.patch.object(manager, "_check_memory", return_value=(None, None)),
+            mock.patch.object(manager, "_release_device_cache") as release,
+            mock.patch("model_runtime.allocated_bytes", return_value=None),
+            mock.patch("model_runtime.reserved_bytes", return_value=None),
+            mock.patch("model_runtime._read_text_model", side_effect=fail),
+            self.assertLogs("model_runtime", level="WARNING") as logs,
+            self.assertRaises(model_runtime.OutOfMemoryError) as caught,
+        ):
+            manager._load_locked("org/model", Path("/snap"), torch, precision="4-bit")
+
+        self.assertIn("did not fit in memory", str(caught.exception))
+        self.assertIn("MPS backend out of memory", str(caught.exception))
+        self.assertTrue(any("CONVERSION" in line for line in logs.output))
+        release.assert_called_once()
+        self.assertFalse(manager.loaded)
+
+    def test_conversion_cause_is_visible_without_terminal_formatting(self):
+        import logging
+
+        source = logging.getLogger("transformers.modeling_utils")
+        parent = logging.getLogger("transformers")
+        before = list(parent.handlers)
+        with self.assertRaisesRegex(RuntimeError, "ValueError: incompatible shape") as caught:
+            with model_runtime._capture_loading_report():
+                source.warning(
+                    "\x1b[1mTiny LOAD REPORT\x1b[0m\nCONVERSION\n"
+                    "ValueError: incompatible shape\n"
+                )
+                raise RuntimeError("See the above report!")
+        self.assertNotIn("\x1b", str(caught.exception))
+        self.assertEqual(parent.handlers, before)
+
+    def test_other_threads_and_previous_loads_do_not_supply_a_report(self):
+        import logging
+
+        source = logging.getLogger("transformers.modeling_utils")
+        original = RuntimeError("See the above report!")
+        with model_runtime._capture_loading_report():
+            source.warning("Earlier LOAD REPORT\nValueError: old failure")
+        with self.assertRaises(RuntimeError) as caught:
+            with model_runtime._capture_loading_report():
+                worker = threading.Thread(target=lambda: source.warning(
+                    "Other LOAD REPORT\nRuntimeError: out of memory"
+                ))
+                worker.start()
+                worker.join()
+                raise original
+        self.assertIs(caught.exception, original)
+
+    def test_unrelated_errors_are_preserved(self):
+        import logging
+
+        original = RuntimeError("Tokenizer failed")
+        with self.assertRaises(RuntimeError) as caught:
+            with model_runtime._capture_loading_report():
+                logging.getLogger("transformers.modeling_utils").warning(
+                    "Tiny LOAD REPORT\nUnexpected key: visual"
+                )
+                raise original
+        self.assertIs(caught.exception, original)
+
+
 class QuantizedLoadTests(unittest.TestCase):
     """What the loader asks transformers for, per device and precision."""
 
@@ -2134,6 +2216,27 @@ class MemoryGuardTests(unittest.TestCase):
         (snapshot / "config.json").write_text(json.dumps({"vocab_size": 100, "d_model": 8}))
         self.assertEqual(_embedding_params(snapshot), 1600)
 
+    def test_multimodal_text_embeddings_are_not_estimated_as_quantized(self):
+        from model_runtime import _embedding_params, estimate_snapshot_bytes
+
+        snapshot = self._snapshot({})
+        config = {
+            "model_type": "qwen3_5",
+            "text_config": {"vocab_size": 100, "hidden_size": 8, "tie_word_embeddings": False},
+        }
+        (snapshot / "config.json").write_text(json.dumps(config))
+        (snapshot / "model.safetensors").write_bytes(b"\0" * 4000)
+        # 1600 embedding/head parameters stay at two bytes; only the
+        # remaining 400 parameters cost 0.5625 bytes at four bits.
+        self.assertEqual(_embedding_params(snapshot), 1600)
+        self.assertEqual(estimate_snapshot_bytes(snapshot, "float16", bits=4), 3425)
+        # The raw config fallback must agree when the library cannot read it.
+        with mock.patch("transformers.AutoConfig.from_pretrained", side_effect=ValueError):
+            self.assertEqual(_embedding_params(snapshot), 1600)
+        config["text_config"]["tie_word_embeddings"] = True
+        (snapshot / "config.json").write_text(json.dumps(config))
+        self.assertEqual(_embedding_params(snapshot), 800)
+
     def test_a_model_larger_than_the_machine_is_refused(self):
         from model_runtime import InsufficientMemoryError, check_memory_for_load
 
@@ -2170,6 +2273,42 @@ class MemoryGuardTests(unittest.TestCase):
             check_memory_for_load("org/big", 30 * self.GB, 24 * self.GB, 24 * self.GB, pool="the GPU")
         self.assertIn("and the GPU has 24.0 GB in total", str(caught.exception))
 
+    def test_the_message_names_the_precision_the_estimate_was_made_at(self):
+        # The same figure is a refusal to a reader who chose four bits and a
+        # fair reading to one who did not, so the number alone leaves them
+        # unable to tell whether a smaller precision would lift the refusal.
+        from model_runtime import (
+            InsufficientMemoryError,
+            check_memory_for_load,
+            weights_note,
+        )
+
+        for bits, named in ((None, "for full 16-bit weights"), (4, "for 4-bit weights")):
+            with self.subTest(bits=bits):
+                for total, available in ((48, 20), (24, 24)):
+                    with self.assertRaises(InsufficientMemoryError) as caught:
+                        check_memory_for_load(
+                            "org/big",
+                            30 * self.GB,
+                            total * self.GB,
+                            available * self.GB,
+                            weights=weights_note("float16", bits),
+                        )
+                    self.assertIn(named, str(caught.exception))
+
+    def test_the_precision_note_is_the_width_the_weights_will_take(self):
+        from model_runtime import weights_note
+
+        self.assertEqual(weights_note("float16"), "full 16-bit weights")
+        self.assertEqual(weights_note("bfloat16"), "full 16-bit weights")
+        self.assertEqual(weights_note("float32"), "full 32-bit weights")
+        self.assertEqual(weights_note("float16", 8), "8-bit weights")
+        self.assertEqual(weights_note("float32", 4), "4-bit weights")
+        # A device not read yet, or a dtype nothing is known about, names no
+        # width rather than inventing one.
+        self.assertEqual(weights_note(None), "full weights")
+        self.assertEqual(weights_note("mystery"), "full weights")
+
     @staticmethod
     def _fake_torch(*figures, failing=False):
         class Cuda:
@@ -2198,7 +2337,7 @@ class MemoryGuardTests(unittest.TestCase):
         torch = self._fake_torch((1, 1), failing=True)
         self.assertEqual(cuda_memory(torch), (None, None))
 
-    def _check_with(self, snapshot, backend, host, gpu, ceiling=None):
+    def _check_with(self, snapshot, backend, host, gpu, ceiling=None, bits=None):
         import model_runtime
         from model_runtime import ModelManager
 
@@ -2207,7 +2346,7 @@ class MemoryGuardTests(unittest.TestCase):
         model_runtime.cuda_memory = lambda torch=None: gpu
         try:
             return ModelManager._check_memory(
-                "org/model", snapshot, "float16", backend, ceiling=ceiling
+                "org/model", snapshot, "float16", backend, ceiling=ceiling, bits=bits
             )
         finally:
             model_runtime.system_memory, model_runtime.cuda_memory = saved
@@ -2283,6 +2422,29 @@ class MemoryGuardTests(unittest.TestCase):
         message = str(refused.exception)
         self.assertIn("Metal on this machine", message)
         self.assertIn("24.0 GB", message)
+
+    def test_a_refusal_reports_the_precision_the_load_would_have_used(self):
+        # The bits are cleared before the check on anything but Metal, so
+        # what the card and the log name is what the load would really have
+        # done - which is how a reader on a graphics card learns their 4-bit
+        # choice did not shrink anything.
+        from model_runtime import InsufficientMemoryError
+
+        snapshot = self._sparse_snapshot("model.safetensors", 25 * self.GB)
+        with self.assertRaises(InsufficientMemoryError) as caught:
+            self._check_with(
+                snapshot, "cpu", host=(32 * self.GB, 20 * self.GB), gpu=(None, None)
+            )
+        self.assertIn("for full 16-bit weights", str(caught.exception))
+        # Quantized, the same checkpoint is a fraction of that, and it is the
+        # smaller figure the message has to be about.
+        with self.assertLogs("model_runtime", level="WARNING") as logged:
+            with self.assertRaises(InsufficientMemoryError) as caught:
+                self._check_with(
+                    snapshot, "mps", host=(8 * self.GB, 8 * self.GB), gpu=(None, None), bits=4
+                )
+        self.assertIn("for 4-bit weights", str(caught.exception))
+        self.assertIn("as 4-bit weights", "\n".join(logged.output))
 
     def test_a_refused_load_is_recorded(self):
         # The refusal is the outcome most worth explaining afterwards, and the
@@ -2676,7 +2838,8 @@ class OutOfMemoryTests(unittest.TestCase):
 
     def test_a_finished_generation_hands_its_cache_back(self):
         manager = self._manager()
-        manager._generate = lambda *a, **k: iter(["only frame"])
+        # The real stream is a generator, explicitly closed on every exit.
+        manager._generate = lambda *a, **k: (frame for frame in ["only frame"])
         self.assertEqual(
             list(manager.generate([], temperature=1, top_p=1, top_k=0, max_new_tokens=1, seed=0)),
             ["only frame"],
@@ -3137,6 +3300,35 @@ class FitTests(unittest.TestCase):
         fit = self.fit(10 * self.GB, None, None)
         self.assertEqual(fit.state, FIT_UNKNOWN)
         self.assertIn("does not report its memory", fit.note)
+
+    def test_the_verdict_names_the_precision_it_was_measured_at(self):
+        # The panel and the refusal have to agree about the precision as well
+        # as the figure: a note that left it out would look as though the
+        # estimate had changed by itself when the radio moved.
+        from model_runtime import fit_for, weights_note
+
+        for bits, named in ((None, "of full 16-bit weights"), (4, "of 4-bit weights")):
+            for estimated in (10, 30, 60):
+                with self.subTest(bits=bits, gigabytes=estimated):
+                    fit = fit_for(
+                        estimated * self.GB,
+                        48 * self.GB,
+                        20 * self.GB,
+                        weights=weights_note("float16", bits),
+                    )
+                    self.assertIn(named, fit.note)
+
+    def test_model_fit_takes_the_precision_from_the_device_and_the_bits(self):
+        from model_runtime import DeviceProfile, model_fit
+
+        profile = DeviceProfile(
+            backend="mps", dtype="float16", total=48 * self.GB, available=20 * self.GB
+        )
+        self.assertIn("of full 16-bit weights", model_fit(30 * self.GB, profile).note)
+        self.assertIn("of 4-bit weights", model_fit(30 * self.GB, profile, 4).note)
+        # Before torch is imported there is no dtype to name.
+        unread = DeviceProfile(total=48 * self.GB, available=20 * self.GB)
+        self.assertIn("of full weights", model_fit(30 * self.GB, unread).note)
 
     def test_a_verdict_agrees_with_the_refusal_it_predicts(self):
         from model_runtime import (

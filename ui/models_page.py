@@ -1145,6 +1145,21 @@ def weight_bits(precision: str | None, profile: DeviceProfile) -> int | None:
     return QUANTIZED_BITS.get(precision or "full")
 
 
+def pipeline_aware_bits(
+    precision: str | None, profile: DeviceProfile, kind: str | None
+) -> int | None:
+    """:func:`weight_bits`, except that an image pipeline is never quantized.
+
+    A pipeline is estimated whole whatever the radio says, because the Metal
+    quantizer is Transformers' own and ``_load_locked`` clears the choice for
+    one. A verdict that carried the bits anyway would put a quantized label
+    on a full-size figure, and moving the radio would mark the loaded
+    pipeline as being about to reload when nothing would change.
+    """
+
+    return weight_bits(precision, profile) if kind != IMAGE_KIND else None
+
+
 def cached_fit(
     entry: CachedModel, precision: str | None, profile: DeviceProfile
 ) -> Fit | None:
@@ -1163,9 +1178,9 @@ def cached_fit(
 
     if entry.status.missing_files or entry.status.unsupported:
         return None
-    reloading = weight_bits(precision, profile) != weight_bits(
-        runtime.MANAGER.precision, profile
-    )
+    kind = entry.status.kind
+    bits = pipeline_aware_bits(precision, profile, kind)
+    reloading = bits != pipeline_aware_bits(runtime.MANAGER.precision, profile, kind)
     if runtime.MANAGER.model_id == entry.model_id and not reloading:
         return None
     snapshot = snapshot_folder(entry.path) if entry.path is not None else None
@@ -1176,12 +1191,9 @@ def cached_fit(
     # caller chose it, because choosing it here would re-read the device and
     # discard the memory the impending unload gives back.
     estimated = estimate_snapshot_bytes(
-        snapshot,
-        profile.dtype or ASSUMED_DTYPE,
-        weight_bits(precision, profile),
-        entry.status.kind,
+        snapshot, profile.dtype or ASSUMED_DTYPE, bits, kind
     )
-    return model_fit(estimated, profile)
+    return model_fit(estimated, profile, bits)
 
 
 def replacement_profile(kind: str = TEXT_KIND) -> DeviceProfile:
@@ -1248,12 +1260,11 @@ def hub_fit(
 
     if not result.parameters:
         return model_fit(None, profile)
+    bits = pipeline_aware_bits(precision, profile, kind)
     estimated = estimate_parameter_bytes(
-        result.parameters,
-        profile.dtype or ASSUMED_DTYPE,
-        weight_bits(precision, profile) if kind != IMAGE_KIND else None,
+        result.parameters, profile.dtype or ASSUMED_DTYPE, bits
     )
-    return model_fit(estimated, profile)
+    return model_fit(estimated, profile, bits)
 
 
 def hub_fits(
@@ -1697,40 +1708,43 @@ def search_models(
 
     cleared = gr.update(choices=[], value=None)
     cleaned = (query or "").strip()
+    # A query that matches no starter searches the Hub instead of dead-ending,
+    # so the "Search Hugging Face" box does what it says in every view.
+    searched_hub = order != "Recommended"
     try:
-        results = (
-            recommended_models(cleaned, kind)
-            if order == "Recommended"
-            else search_hub_models(
-                cleaned, hf_token, kind=kind, order=order, limit=DISCOVERY_CANDIDATES
+        results = [] if searched_hub else recommended_models(cleaned, kind)
+        if searched_hub or (cleaned and not results):
+            searched_hub = True
+            results = search_hub_models(
+                cleaned, hf_token, kind=kind,
+                order="Popular" if order == "Recommended" else order,
+                limit=DISCOVERY_CANDIDATES,
             )
-        )
     except Exception as error:
-        return (
-            cleared,
-            failure_card(
-                "Search failed",
-                f"{html.escape(str(error))} Choose Recommended for offline starters, or retry.",
-            ),
-            {},
+        hint = (
+            "Clear the search to see offline starters, or retry."
+            if order == "Recommended"
+            else "Choose Recommended for offline starters, or retry."
         )
+        return cleared, failure_card("Search failed", f"{html.escape(str(error))} {hint}"), {}
     if not results:
         described = "text-to-image models" if kind == IMAGE_KIND else "language models"
         message = (
             f"No {described} matched `{html.escape(cleaned)}`."
             if cleaned else f"No {described} found in this browse window."
         )
-        if order == "Recommended":
-            message += " Choose Popular, Trending, or New to search the full Hub."
         return cleared, message, {}
     state = {result.model_id: result for result in results}
     radio, detail = refresh_search_results(None, state, precision, fits_only)
-    ordering = {
-        "Recommended": "Curated starters, available to browse offline.",
-        "Popular": "Most downloaded first.",
-        "Trending": "Trending on Hugging Face.",
-        "New": "Newest repositories first (not latest updates).",
-    }[order]
+    if order == "Recommended" and searched_hub:
+        ordering = "No starters matched; showing Hugging Face results, most downloaded first."
+    else:
+        ordering = {
+            "Recommended": "Curated starters, available to browse offline.",
+            "Popular": "Most downloaded first.",
+            "Trending": "Trending on Hugging Face.",
+            "New": "Newest repositories first (not latest updates).",
+        }[order]
     return radio, f"{ordering} {detail}", state
 
 
