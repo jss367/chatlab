@@ -532,12 +532,11 @@ def _stream_reply(
 
     turns = copy_turns(turns)
     used_seed = resolve_seed(seed, randomize_seed)
-    # Minted once for the whole stream, not once per frame: the strip is
-    # replaced by the opening frame and only appended to afterwards, so a token
-    # picked mid-stream is still on screen and its click must stay valid. What
-    # this number invalidates is every selection made against the response this
-    # one replaces.
-    generation = new_metrics_generation()
+    # Minted once when the reply is replaced, not once per frame, so selections
+    # made mid-stream stay valid. A branch defers this until replay succeeds;
+    # its original diagnostics must still work if the reader cancels first.
+    preserving_previous = previous_turns is not None
+    generation = None if preserving_previous else new_metrics_generation()
     request = model_messages(
         turns, system_prompt=system_prompt, include_reasoning=keep_reasoning
     )
@@ -627,24 +626,33 @@ def _stream_reply(
             None if reset_details else gr.skip(),
         )
 
-    # The opening frame empties everything the previous response left behind,
-    # the export included: a trace kept here would still be downloadable while
-    # a different response was streaming in above it. Clear the branch states
-    # with their visible details: an older turn can still be a valid branch
-    # target, but a choice the panel no longer shows must not remain armed.
+    # Clear diagnostics and branch selections when the new reply appears. For
+    # branches that is the first replay result; until then the old transcript
+    # and its diagnostics remain together on screen.
     applied_prefill = bool(assistant_prefill and not forced_ids)
     stream_note = branch_note or (
         "Assistant prefill applied." if applied_prefill else ""
     )
-    yield snapshot(
-        [],
-        f"{stream_note} Generating…".strip(),
-        reset_details=True,
-        prompt_panel=(strip_update([], scale_name), (generation, []), ""),
-        charts_panel=(charts.summary_tiles({}), charts.EMPTY_CHART),
-        trace={},
-        context_ids=(generation, [], runtime.MANAGER.load_id),
-    )
+    def previous_snapshot(status, busy):
+        values = list(idle_state(prompt_text, previous_turns, status, scale_name=scale_name))
+        values[CHAT_OUTPUT_NAMES.index("send")], values[CHAT_OUTPUT_NAMES.index("stop")] = send_stop_buttons(busy)
+        return tuple(values)
+
+    opening_status = f"{stream_note} Generating…".strip()
+    if preserving_previous:
+        # Keep diagnostics and their live generation stamp until replay succeeds.
+        # Stop only finalizes the transcript; it cannot restore discarded panels.
+        yield previous_snapshot(opening_status, busy=True)
+    else:
+        yield snapshot(
+            [],
+            opening_status,
+            reset_details=True,
+            prompt_panel=(strip_update([], scale_name), (generation, []), ""),
+            charts_panel=(charts.summary_tiles({}), charts.EMPTY_CHART),
+            trace={},
+            context_ids=(generation, [], runtime.MANAGER.load_id),
+        )
 
     started = time.monotonic()
     raw_text = ""
@@ -680,6 +688,8 @@ def _stream_reply(
         # this event and Gradio closes the outer generator.
         with contextlib.closing(stream):
             for update in stream:
+                if generation is None:
+                    generation = new_metrics_generation()
                 previous_turns = None
                 raw_text = update.text
                 prefilled = update.reasoning_prefilled
@@ -741,6 +751,8 @@ def _stream_reply(
                 yield snapshot(
                     metrics,
                     status,
+                    reset_details=first and preserving_previous,
+                    trace={} if first and preserving_previous else None,
                     prompt_panel=prompt_panel,
                     context_ids=context_ids,
                     charts_panel=(
@@ -769,6 +781,9 @@ def _stream_reply(
         # assistant turn would feed the failure back to the model next turn.
         # The traceback goes to the log so the cause is recoverable.
         logger.exception("Generation failed")
+        if previous_turns is not None:
+            yield previous_snapshot(failure_status("Generation failed", str(error)), busy=False)
+            return
         reasoning, answer, _ = split_response_text(
             raw_text,
             literal_prefill=literal_prefill,

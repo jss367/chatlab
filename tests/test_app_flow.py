@@ -3310,7 +3310,8 @@ class NextTokenTests(unittest.TestCase):
         frames = list(app.next_token(self.pick(initial), "draft", initial[TURNS], *SETTINGS))
         first = frames[-1]
         self.assertEqual([m["token_id"] for m in first[TURNS][-1]["tokens"]], [3, 2])
-        self.assertIsNone(frames[0][BRANCH_PICK])
+        self.assertEqual(frames[0][BRANCH_PICK], gr.skip())
+        self.assertIsNone(frames[1][BRANCH_PICK])
         for count in (3, 4, 5):
             previous = first
             first = self.step(previous)
@@ -3379,15 +3380,37 @@ class NextTokenTests(unittest.TestCase):
 
     def test_stopping_before_replay_preserves_the_original_reply(self):
         initial = self.reply()
+        original_inspection = app.inspect_token("prompt")(initial[METRICS], select(0))
+        self.assertNotEqual(original_inspection, (gr.skip(), gr.skip()))
         stream = app.next_token(None, "draft", initial[TURNS], *SETTINGS)
         opening = next(stream)
         self.assertEqual(opening[TURNS], initial[TURNS])
         self.assertEqual(opening[CHATBOT], initial[CHATBOT])
+        for output in (STRIP, METRICS, DETAIL, ALTS, PROMPT_STRIP, PROMPT_METRICS,
+                       PROMPT_NOTE, SUMMARY, SURPRISE, TRACE, CONTEXT_IDS,
+                       CHAT_METRICS, CHAT_CONTEXT_IDS, SELECTED_TOKEN, BRANCH_PICK):
+            self.assertEqual(opening[output], gr.skip())
         stream.close()
         messages, turns, *_ = app.stop_generation(opening[TURNS])
         self.assertEqual(turns, initial[TURNS])
         self.assertEqual(messages, initial[CHATBOT])
+        self.assertEqual(app.inspect_token("prompt")(initial[METRICS], select(0)), original_inspection)
         self.assertFalse(runtime.MANAGER.busy)
+
+    def test_first_replay_result_replaces_the_diagnostics_and_selection(self):
+        initial = self.reply()
+        stream = app.next_token(None, "draft", initial[TURNS], *SETTINGS)
+        next(stream)
+        replayed = next(stream)
+        stream.close()
+        self.assertNotEqual(replayed[METRICS], gr.skip())
+        self.assertNotEqual(replayed[PROMPT_METRICS], gr.skip())
+        self.assertNotEqual(replayed[CONTEXT_IDS], gr.skip())
+        self.assertNotEqual(replayed[SUMMARY], gr.skip())
+        self.assertEqual(replayed[TRACE], {})
+        self.assertIsNone(replayed[SELECTED_TOKEN])
+        self.assertIsNone(replayed[BRANCH_PICK])
+        self.assertEqual(app.inspect_token("prompt")(initial[METRICS], select(0)), (gr.skip(), gr.skip()))
 
     def test_failure_before_replay_preserves_later_turns_of_a_branch(self):
         initial = self.reply()
@@ -3404,6 +3427,8 @@ class NextTokenTests(unittest.TestCase):
         self.assertIn("Replay failed", frames[-1][STATUS])
         for frame in frames:
             self.assertEqual(frame[TURNS], later[TURNS])
+            self.assertEqual(frame[METRICS], gr.skip())
+            self.assertEqual(frame[TRACE], gr.skip())
         self.assertFalse(runtime.MANAGER.busy)
 
     def test_stopping_after_invisible_replay_keeps_the_replayed_tokens(self):
