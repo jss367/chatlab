@@ -10,7 +10,7 @@ from unittest import mock
 import httpx
 from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
 
-from model_runtime import CacheStatus
+from model_runtime import CacheStatus, cache_status, list_cached_models
 from ui import model_repository as repository, models_page
 
 
@@ -52,12 +52,46 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(result["download_bytes"], 17_000_000_200)
         self.config_download.assert_called_once_with(
             "org/model-4bit", "config.json", revision="a" * 40, token="secret", etag_timeout=10,
+            cache_dir=mock.ANY,
         )
         detail, precision = repository.repository_view("org/model-4bit", result, "secret")
         self.assertIn("Repository found", detail)
         self.assertIn("4-bit", detail)
         self.assertFalse(precision["visible"])
         self.assertNotIn("secret", str(states))
+
+    def test_config_inspection_leaves_the_model_cache_and_inventory_untouched(self):
+        from huggingface_hub import constants
+
+        for contents in ('{"model_type":"qwen3_5","quantization":{"bits":4}}', "invalid json"):
+            with self.subTest(contents=contents), tempfile.TemporaryDirectory() as default_cache:
+                download_caches = []
+
+                def download(repo_id, filename, *, revision, token, etag_timeout, cache_dir=None):
+                    # Reproduce the Hub's cache writes, including its fallback
+                    # to the user's model cache when no isolated cache is given.
+                    root = Path(cache_dir or constants.HF_HUB_CACHE)
+                    download_caches.append(root)
+                    model = root / ("models--" + repo_id.replace("/", "--"))
+                    blob = model / "blobs" / "config-blob"
+                    blob.parent.mkdir(parents=True)
+                    blob.write_text(contents)
+                    config = model / "snapshots" / revision / filename
+                    config.parent.mkdir(parents=True)
+                    config.symlink_to(blob)
+                    return str(config)
+
+                with mock.patch.object(constants, "HF_HUB_CACHE", default_cache), mock.patch(
+                    "huggingface_hub.HfApi.model_info", return_value=self.info()
+                ), mock.patch("huggingface_hub.hf_hub_download", side_effect=download):
+                    states = list(repository.check_model_repository("org/model", "secret"))
+                    self.assertEqual(states[-1]["status"], "found")
+                    self.assertFalse(cache_status("org/model").present)
+                    self.assertEqual(list_cached_models(), [])
+                    self.assertEqual(list(Path(default_cache).iterdir()), [])
+                self.assertEqual(len(download_caches), 1)
+                self.assertNotEqual(download_caches[0], Path(default_cache))
+                self.assertFalse(download_caches[0].exists())
 
     def test_unquantized_mlx_tags_or_names_do_not_hide_precision(self):
         for library, tags in (("mlx", []), ("transformers", ["mlx"])):

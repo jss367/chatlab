@@ -6,6 +6,7 @@ import hashlib
 import html
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import gradio as gr
 
@@ -72,10 +73,14 @@ def check_model_repository(model_id: str, hf_token: str | None):
     config = None
     if "config.json" in filenames:
         try:
-            config_path = hf_hub_download(
-                cleaned, "config.json", revision=info.sha, token=token, etag_timeout=10,
-            )
-            loaded = json.loads(Path(config_path).read_text())
+            # A config in the normal Hub cache would make this metadata check
+            # appear as an incomplete model download in the local inventory.
+            with TemporaryDirectory(prefix="chatlab-model-check-") as cache:
+                config_path = hf_hub_download(
+                    cleaned, "config.json", revision=info.sha, token=token,
+                    etag_timeout=10, cache_dir=cache,
+                )
+                loaded = json.loads(Path(config_path).read_text())
             if isinstance(loaded, dict):
                 config = loaded
         except (HfHubHTTPError, httpx.HTTPError, OSError, ValueError):
