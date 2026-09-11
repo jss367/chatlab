@@ -1897,6 +1897,23 @@ class PageLayoutTests(unittest.TestCase):
         self.assertIn("#inspector-resizer, #image-inspector-resizer", compact)
         self.assertIn("display: none", compact)
 
+    def test_a_saved_width_is_fitted_to_the_room_the_pane_has(self):
+        # A width chosen on a wide window has to be cut down when the window
+        # narrows, and the figure to cut it to is the row the pane sits in
+        # rather than the window itself: the Chat row gives up space to the
+        # conversations pane and the Images row does not. Watching the rows
+        # covers a page that was hidden while the window changed as well,
+        # since it learns its own size when the nav turns to it.
+        self.assertIn("new ResizeObserver", app.RESIZE_JS)
+        self.assertIn("rows.observe(pane.parentElement)", app.RESIZE_JS)
+        self.assertIn("window.addEventListener('resize'", app.RESIZE_JS)
+        # Where the panes become rows a width would mean a height, so the
+        # script stops fitting at the same width the stylesheet stops
+        # reading the property.
+        stacked = "(max-width: 850px)"
+        self.assertIn(f"@media {stacked}", app.CSS)
+        self.assertIn(f"matchMedia('{stacked}')", app.RESIZE_JS)
+
     def test_the_nav_names_are_on_screen_rather_than_a_hover_away(self):
         # Four pages is not a number worth hiding. Nothing clips the name
         # out of sight, and no tooltip stands in for it.

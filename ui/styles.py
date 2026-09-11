@@ -613,9 +613,14 @@ SHORTCUT_JS = """
 # The chosen width is kept in localStorage, per pane, so it survives a reload
 # and a restart. It is clamped on the way in as well as on the way out: a
 # width saved on a wide screen must not leave the workspace unusable on a
-# narrow one. Double-clicking the handle drops the saved width and gives the
-# pane the stylesheet's own. Arrow keys move a focused handle, so the pane
-# can be sized without a pointer.
+# narrow one. That clamp is coarse before the pane exists, because the window
+# is all there is to measure, so the width is fitted again whenever a pane's
+# row changes size, which covers the window being dragged narrower, the page
+# being opened for the first time, and the nav turning to it. Storage keeps
+# the width the reader asked for rather than the fitted one, so a window that
+# widens again gives the pane back what it had. Double-clicking the handle
+# drops the saved width and gives the pane the stylesheet's own. Arrow keys
+# move a focused handle, so the pane can be sized without a pointer.
 def pane_handle(pane: str) -> str:
     """The markup for the handle on a pane's seam; see RESIZE_JS.
 
@@ -642,6 +647,7 @@ RESIZE_JS = """
   // starts, used only while clamping a restored width against a window
   // whose panes are not on screen yet.
   const SIDE_PANES = 260;
+  const PANES = ['inspector-pane', 'image-inspector'];
 
   const clamp = (width, room) => {
     const most = Math.max(MIN_PANE, room - MIN_WORKSPACE);
@@ -671,16 +677,104 @@ RESIZE_JS = """
   };
 
   const paneOf = (handle) => document.getElementById(handle.dataset.pane);
-  const roomFor = (pane) => (pane.parentElement || document.body).clientWidth;
 
-  // Whatever the last session left, before either page is on screen.
-  for (const pane of ['inspector-pane', 'image-inspector']) {
-    const saved = recall('chatlab.' + pane + '-width');
-    if (saved === null) { continue; }
-    write('--' + pane + '-width', clamp(saved, window.innerWidth - SIDE_PANES));
-  }
+  // The room a pane and its workspace divide between them, which is their
+  // row less everything else the row is carrying: on the Chat page that is
+  // the conversations pane and the handle, and on the Images page it is the
+  // handle alone. The two rows reserve different amounts, so measuring what
+  // a row has left is the only way to keep the same promise on both pages,
+  // that the workspace beside a pane stays at least MIN_WORKSPACE wide.
+  const roomFor = (pane) => {
+    const row = pane.parentElement;
+    if (!row) { return document.body.clientWidth; }
+    let room = row.clientWidth;
+    for (const sibling of row.children) {
+      // The workspace is the one width to leave in, because it is the space
+      // the pane is being sized against. Each page names its own.
+      if (sibling === pane || sibling.id.endsWith('-workspace')) { continue; }
+      room -= sibling.getBoundingClientRect().width;
+    }
+    return room;
+  };
 
   let dragging = null;
+
+  // Under 850px the panes are rows one above the other, where a width would
+  // mean a height, so the stylesheet stops reading the property and there is
+  // nothing left to fit.
+  const stacked = () => window.matchMedia('(max-width: 850px)').matches;
+
+  // Give every pane the width the reader chose, cut down to the room it has
+  // now. The choice itself stays in storage untouched, so a window that
+  // narrows and then widens again hands the pane back the width it was
+  // given rather than the width it was squeezed to. A pane on a page the
+  // reader has never opened is not in the document, and one on a page the
+  // nav is hiding measures zero; in both cases the window is all there is
+  // to go on, which is what SIDE_PANES is for.
+  const fit = () => {
+    if (dragging || stacked()) { return; }
+    for (const name of PANES) {
+      const saved = recall('chatlab.' + name + '-width');
+      if (saved === null) { continue; }
+      const pane = document.getElementById(name);
+      const room = pane ? roomFor(pane) : 0;
+      write(
+        '--' + name + '-width',
+        clamp(saved, room > 0 ? room : window.innerWidth - SIDE_PANES)
+      );
+    }
+  };
+
+  // Fitting reads the layout, so a burst of events gets one fit on the next
+  // frame rather than one apiece.
+  let pending = 0;
+  const refit = () => {
+    if (pending) { return; }
+    pending = requestAnimationFrame(() => { pending = 0; fit(); });
+  };
+
+  // Whatever the last session left, before either page is on screen.
+  fit();
+
+  // A row changes size when the window does, when the page it belongs to
+  // stops being the hidden one, and when it is first built. Every one of
+  // those is a moment a stored width wants fitting again, and watching the
+  // rows hears about all three without listening to the whole page.
+  const rows = new ResizeObserver(refit);
+
+  // The Images page is built the first time the reader opens it, so its row
+  // can arrive long after this script ran. Watch the shell until both panes
+  // have turned up, then leave the rows to report their own sizes.
+  const arrived = new Set();
+  const collect = () => {
+    for (const name of PANES) {
+      if (arrived.has(name)) { continue; }
+      const pane = document.getElementById(name);
+      if (!pane || !pane.parentElement) { continue; }
+      arrived.add(name);
+      rows.observe(pane.parentElement);
+      refit();
+    }
+    return arrived.size === PANES.length;
+  };
+
+  if (!collect()) {
+    const watch = new MutationObserver(() => {
+      if (collect()) { watch.disconnect(); }
+    });
+    watch.observe(document.getElementById('shell') || document.body, {
+      childList: true, subtree: true,
+    });
+  }
+
+  window.addEventListener('resize', () => {
+    // Until the reader has dragged something there is nothing stored, and
+    // the stylesheet's own widths already suit whatever window they find.
+    if (PANES.every((name) => recall('chatlab.' + name + '-width') === null)) {
+      return;
+    }
+    refit();
+  });
 
   const move = (event) => {
     if (!dragging) { return; }
