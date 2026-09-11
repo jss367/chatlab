@@ -44,6 +44,7 @@ from ui.common import (
 )
 from ui.panel import (
     cleared_panel,
+    empty_metrics,
     event_index,
     transcript_pick,
 )
@@ -107,11 +108,14 @@ def restore_conversations():
     """
 
     forks = library.read()
+    # State defaults are built outside the browser session. Mint this stamp
+    # during restore so clicks on saved user messages match the live session.
+    metrics = empty_metrics()
     if forks is None:
-        return (gr.skip(),) * 4
+        return (*(gr.skip(),) * 4, metrics)
     turns = copy_turns(forks["branches"][forks["active"]])
     messages, _ = display_messages(turns)
-    return messages, turns, forks, conversation_list_update(forks, turns)
+    return messages, turns, forks, conversation_list_update(forks, turns), metrics
 
 
 def sampling_on_screen(values) -> dict:
