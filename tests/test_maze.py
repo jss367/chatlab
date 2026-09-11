@@ -476,6 +476,52 @@ class MazeTests(unittest.TestCase):
             forked = fork_token_edit(ep, 0, index, "ignored", session, candidate_id=120)
         self.assertEqual(forked.pending_edit["forced_ids"], ids[:index] + [120])
 
+    def test_fork_refuses_an_alternative_whose_spelling_depends_on_the_tokens_before_it(self):
+        """An alternative is recorded by decoding it alone, which drops a word boundary.
+
+        SentencePiece reads the word-boundary space off the first token of
+        whatever it decodes, so "▁world" and "world" both record "world" on
+        their own. After a retained "Hello" one of them reads " world" and the
+        other "world", so the recorded text cannot say which ID was offered and
+        an uploaded run has nothing else to check it against.
+        """
+        from test_streaming import sentencepiece_manager, SP_HELLO, SP_SPACE_WORLD, SP_WORLD
+
+        def episode_for(candidate_id, *, replay, load_id):
+            episode = Episode(MAZE, CONFIG)
+            episode.model_id, episode.load_id = 'fake/model', load_id
+            episode.replay_only = replay
+            episode.turns = [dict(text='Hello world', forced_prefix_tokens=0, literal_prefill_tokens=0,
+                                  finish_reason='stop', metrics=[
+                                      dict(token_id=SP_HELLO, text='Hello'),
+                                      dict(token_id=SP_SPACE_WORLD, text='world',
+                                           top_candidates=[dict(token_id=candidate_id, text='world')])])]
+            return episode
+
+        manager = sentencepiece_manager()
+        with ModelService(lambda: manager).open_session() as session:
+            self.assertEqual(session.decode([SP_SPACE_WORLD]), session.decode([SP_WORLD]))
+            self.assertEqual(session.decode([SP_HELLO, SP_SPACE_WORLD]), 'Hello world')
+            self.assertEqual(session.decode([SP_HELLO, SP_WORLD]), 'Helloworld')
+
+            # The boundary piece: its recorded text matches what the loaded
+            # model decodes it to alone, and still leaves the branch unpinned.
+            with self.assertRaisesRegex(ValueError, 'depends on the tokens before it'):
+                fork_token_edit(episode_for(SP_SPACE_WORLD, replay=True, load_id='session-1-load-1'),
+                                0, 1, 'ignored', session, candidate_id=SP_SPACE_WORLD)
+
+            # The session that offered the alternative names the load in memory
+            # now, which is the one place that evidence is not needed.
+            live = episode_for(SP_SPACE_WORLD, replay=False, load_id=manager.load_id)
+            forked = fork_token_edit(live, 0, 1, 'ignored', session, candidate_id=SP_SPACE_WORLD)
+            self.assertEqual(forked.pending_edit['forced_ids'], [SP_HELLO, SP_SPACE_WORLD])
+
+            # An alternative that reads after "Hello" the way it reads alone is
+            # pinned down by its recorded text, uploaded run or not.
+            forked = fork_token_edit(episode_for(SP_WORLD, replay=True, load_id='session-1-load-1'),
+                                     0, 1, 'ignored', session, candidate_id=SP_WORLD)
+            self.assertEqual(forked.pending_edit['forced_ids'], [SP_HELLO, SP_WORLD])
+
     def test_fork_reads_an_uploaded_byte_fragment_in_the_characters_it_completes(self):
         """A piece of a multi-byte character records the same text whatever ID carries it.
 

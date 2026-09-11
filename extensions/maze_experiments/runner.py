@@ -174,8 +174,8 @@ def forkable_without_evidence(episode, manager):
             and manager.load_id == episode.load_id)
 
 
-def visible_token_ids(turn, hidden_ids):
-    """The IDs this response's recorded text was decoded from.
+def visible_token_ids(metrics, literal_prefill_tokens, hidden_ids):
+    """The IDs a stretch of recorded metrics was decoded into text through.
 
     The runtime streams each response through IncrementalDecoder, which drops
     a hidden special rather than decoding it, so those IDs appear among the
@@ -183,9 +183,13 @@ def visible_token_ids(turn, hidden_ids):
     exception the runtime makes: replay forces those tokens visible, including
     special-token spellings.
     """
-    literal_prefill_tokens = turn.get("literal_prefill_tokens", turn["forced_prefix_tokens"])
-    return [metric["token_id"] for index, metric in enumerate(turn["metrics"])
+    return [metric["token_id"] for index, metric in enumerate(metrics)
             if index < literal_prefill_tokens or metric["token_id"] not in hidden_ids]
+
+
+def literal_prefill_of(turn):
+    """How many leading tokens of this response replay forces visible."""
+    return turn.get("literal_prefill_tokens", turn["forced_prefix_tokens"])
 
 
 def verify_recorded_text(episode, turn_index, manager):
@@ -220,7 +224,7 @@ def verify_recorded_text(episode, turn_index, manager):
     hidden = manager.hidden_token_ids
     for turn in episode.turns[:turn_index + 1]:
         try:
-            current = manager.decode(visible_token_ids(turn, hidden))
+            current = manager.decode(visible_token_ids(turn["metrics"], literal_prefill_of(turn), hidden))
         except (IndexError, KeyError, OverflowError, TypeError, ValueError) as exc:
             raise ValueError("The loaded model cannot decode this run's token IDs, so its tokenizer is not the "
                              f"one that produced the run ({exc}). This happens when the same model ID has been "
@@ -231,21 +235,36 @@ def verify_recorded_text(episode, turn_index, manager):
                              "re-downloaded at a different revision; load that snapshot to fork this run.")
 
 
-def verify_recorded_candidate(episode, candidate, manager):
-    """Refuse a fork onto an alternative the loaded model decodes differently.
+def verify_recorded_candidate(episode, candidate, kept, literal_prefill_tokens, manager):
+    """Refuse a fork onto an alternative the recorded run cannot pin down.
 
     The chosen alternative is the one ID the fork replays that the run never
     generated, so no response text stands behind it and it is the one ID that
     has to be checked on its own. A revised vocabulary can leave every recorded
     response decoding as it always did and still move this one, and the panel's
     offer of "'x' · token 120" would then put some other text into the response.
-    Recorded with nothing around it, its text also has to name an ID before the
-    comparison means anything, which is where the run itself can run out of
-    evidence and the session that offered the alternative is the only place
-    that does not need any.
+
+    Recorded with nothing around it, that text is weaker evidence than a
+    response's. It has to name an ID at all before any comparison means
+    something, which a byte fragment or a token carrying no characters does
+    not. It also has to survive the position the fork puts the ID in: build_metric
+    records an alternative by decoding it alone, and SentencePiece drops the
+    word-boundary space from the first token of whatever it decodes, so
+    "▁world" and "world" both record "world" while the branch after a retained
+    "Hello" reads "Hello world" under one and "Helloworld" under the other. So
+    the alternative is decoded where it will actually sit, after the retained
+    tokens, and its recorded text is treated as evidence only when what it adds
+    there is what it decodes to alone. Either way the session that offered the
+    alternative is the one place that needs no evidence, because its load
+    identifier names the load in memory now.
     """
+    hidden = manager.hidden_token_ids
+    visible_kept = visible_token_ids(kept, literal_prefill_tokens, hidden)
+    token_id = candidate["token_id"]
     try:
-        current = manager.decode([candidate["token_id"]])
+        current = manager.decode([token_id])
+        before = manager.decode(visible_kept)
+        after = manager.decode(visible_kept + [token_id])
     except (IndexError, KeyError, OverflowError, TypeError, ValueError) as exc:
         raise ValueError("The loaded model cannot decode the token ID of this alternative, so its tokenizer "
                          f"is not the one that offered it ({exc}). This happens when the same model ID has "
@@ -258,6 +277,17 @@ def verify_recorded_candidate(episode, candidate, manager):
             raise ValueError("This alternative recorded a byte fragment rather than text, so there is "
                              "nothing to confirm that the loaded tokenizer still maps it to the same bytes. "
                              "It can only be applied by the session that offered it.")
+        return
+    # after not starting with before is the retained text itself changing under
+    # the alternative, which says even more plainly that position matters here.
+    if not after.startswith(before) or after[len(before):] != current:
+        if not forkable_without_evidence(episode, manager):
+            raise ValueError("How this alternative is spelled depends on the tokens before it, and the run "
+                             "records only how it decodes on its own, so nothing here can confirm the loaded "
+                             "tokenizer still spells it after your retained tokens the way the model that "
+                             "offered it did. Type the text you want in Replacement text instead, which is "
+                             "checked in place against those tokens, or apply this alternative in the session "
+                             "that offered it.")
         return
     if current != recorded:
         raise ValueError("The loaded model decodes this alternative differently from the model that offered "
@@ -341,7 +371,7 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
         kept = metrics[:token_index]
         kept_ids = [m["token_id"] for m in kept]
         stop_ids = manager.stop_token_ids
-        literal_prefill_tokens = original.get("literal_prefill_tokens", original["forced_prefix_tokens"])
+        literal_prefill_tokens = literal_prefill_of(original)
         verify_recorded_text(episode, turn_index, manager)
         verify_recorded_stops(episode, turn_index, kept, literal_prefill_tokens, stop_ids)
         if candidate_id is None:
@@ -353,7 +383,7 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
                               if c["token_id"] == candidate_id), None)
             if candidate is None:
                 raise ValueError("Choose an alternative for the selected token.")
-            verify_recorded_candidate(episode, candidate, manager)
+            verify_recorded_candidate(episode, candidate, kept, literal_prefill_tokens, manager)
             replacement_ids = [candidate_id]
         if not replacement_ids:
             raise ValueError("Enter replacement text or choose a token alternative.")
