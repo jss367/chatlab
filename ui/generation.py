@@ -625,7 +625,9 @@ def _stream_reply(
     # a different response was streaming in above it. Clear the branch states
     # with their visible details: an older turn can still be a valid branch
     # target, but a choice the panel no longer shows must not remain armed.
-    applied_prefill = bool(assistant_prefill and not forced_ids)
+    # A branch at the first token has an empty replay prefix, but must still
+    # ignore the current prefill control just like every other branch.
+    applied_prefill = bool(assistant_prefill and not forced_ids and expected_load_id is None)
     stream_note = branch_note or (
         "Assistant prefill applied." if applied_prefill else ""
     )
@@ -1249,6 +1251,7 @@ def branch_from(
     prompt_text: str,
     turns: list[dict] | None,
     *settings,
+    resample: bool = False,
 ):
     """Replay the picked reply up to the picked token, swap it, and continue.
 
@@ -1257,6 +1260,9 @@ def branch_from(
     being replayed and the model load that produced them. What the branch
     replaces is that reply and everything after it, which is what makes the
     branch a different continuation rather than an edit in the middle.
+
+    With ``resample``, the pick is a token selection: only the tokens before
+    it are replayed, and the selected token is sampled again as well.
     """
 
     held = occupied()
@@ -1279,19 +1285,21 @@ def branch_from(
     metrics = turn_tokens(turns[position])
     at = int(pick["index"]) + 1
     kept = [int(metric["token_id"]) for metric in metrics[: at - 1]]
-    forced = (*kept, int(pick["token_id"]))
+    forced = tuple(kept) if resample else (*kept, int(pick["token_id"]))
     literal_prefill_tokens = literal_prefill_count(metrics, len(kept))
     automatic_reasoning_close_tokens = automatic_reasoning_close_count(
         metrics, len(kept)
     )
-    unchanged = pick["token_id"] == pick.get("original_id")
+    unchanged = not resample and pick["token_id"] == pick.get("original_id")
     if (
         unchanged
         and literal_prefill_tokens == len(kept)
         and metrics[len(kept)].get("literal_prefill")
     ):
         literal_prefill_tokens += 1
-    if unchanged:
+    if resample:
+        note = f"Regenerating from token {at}."
+    elif unchanged:
         note = f"Resampling from token {at} ({pick['text']!r})."
     else:
         note = f"Branched at token {at}: {pick['text']!r} instead of {pick['original']!r}."
