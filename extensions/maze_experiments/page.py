@@ -351,7 +351,11 @@ def _build_page(context):
     # Playback only redraws recorded responses, so every listener that
     # generates tokens or replaces the episode cancels it first: a surviving
     # frame would paint the previous episode over these same outputs.
-    playback = [autoplay.click(play_back, [episode, reveal, selection_session, pace], outputs, show_progress="hidden")]
+    # Playback sleeps for the whole sequence but only redraws one browser's own
+    # view, so it opts out of the app-wide single-slot limit meant for model
+    # generation. Otherwise one slow replay would stall every other session's.
+    playback = [autoplay.click(play_back, [episode, reveal, selection_session, pace], outputs,
+                               show_progress="hidden", concurrency_limit=None)]
     prepare.click(prepare_episode, [episode, reveal, selection_session, *controls], [episode, *outputs, download], concurrency_id="maze", show_progress="hidden", cancels=playback)
     run.click(play, [episode, reveal, selection_session], outputs, concurrency_id="maze", show_progress="hidden", cancels=playback)
     step.click(one_step, [episode, reveal, selection_session], outputs, concurrency_id="maze", show_progress="hidden", cancels=playback)
