@@ -2759,6 +2759,10 @@ assert.ok(rows.targets.has(first), 'a row that has just arrived is watched');
 kept.set('chatlab.image-inspector-width', '900');
 first.remove();
 mutated();
+assert.ok(
+  !rows.targets.has(first),
+  'the row of a page that has been taken away is let go at once'
+);
 window.innerWidth = 1000;
 fire('window', 'resize', {});
 paint();

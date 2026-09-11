@@ -756,9 +756,14 @@ RESIZE_JS = """
     for (const name of PANES) {
       const pane = document.getElementById(name);
       const row = pane && pane.parentElement;
-      if (!row || watched.get(name) === row) { continue; }
+      if (watched.get(name) === row) { continue; }
       const gone = watched.get(name);
-      if (gone) { rows.unobserve(gone); }
+      if (gone) { rows.unobserve(gone); watched.delete(name); }
+      // A page that has been taken away leaves nothing to watch, and the row
+      // it was in is let go now rather than when the page comes back: holding
+      // it would keep a whole transcript, or a drawn picture, in memory for
+      // as long as the reader stays on another page.
+      if (!row) { continue; }
       watched.set(name, row);
       rows.observe(row);
       refit();
