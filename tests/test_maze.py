@@ -109,7 +109,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values()}
+                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
                 metrics = views(ep, False, selections, session_id)[7]
                 selected = callbacks['select_token'].fn(ep, session_id, metrics, SimpleNamespace(index=1))
                 self.assertEqual(selected[3], 'b')
@@ -280,6 +280,61 @@ class MazeTests(unittest.TestCase):
             options = dict(goal_mode=mode, goal_hint='The destination is on an outer row.')
             self.assertEqual(MAZE.state(MAZE.start, **options), other.state(other.start, **options))
         self.assertNotEqual(MAZE.maze_id, other.maze_id)
+
+    def test_replay_stepping_and_playback_walk_recorded_responses(self):
+        move = call_text(MAZE.maze_id, 'east')
+        ids = list(move.encode()) + [0]
+        manager = Manager([(move, ids), (move, ids)])
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        list(stream_episode(ep, manager))
+        self.assertEqual(ep.phase, 'arrived')
+        for turn in ep.turns:
+            for position, metric in enumerate(turn['metrics']):
+                metric.update(unscored_metric(position=position, token_id=metric['token_id'],
+                                              token_text=chr(metric['token_id']), fallback_text='',
+                                              segment='response').to_dict())
+        replay = from_payload(json.loads(json.dumps(ep.payload())))
+        inspector = TokenInspector()
+        selections = inspector.selections()
+        inspector.selections = lambda: selections
+        session = selections.new_session()
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                forward, back = callbacks['step_forward'].fn, callbacks['step_back'].fn
+                selected = lambda frame: frame[8]['value']
+                # Stepping reads the episode, so repeated clicks advance even
+                # when the dropdown the browser sent has not caught up.
+                self.assertEqual(replay.viewing, -1)
+                self.assertEqual([selected(forward(replay, False, session)) for _ in range(3)], [0, 1, 1])
+                self.assertEqual([selected(back(replay, False, session)) for _ in range(3)], [0, -1, -1])
+                playback = callbacks['play_back']
+                with mock.patch('extensions.maze_experiments.page.time.sleep') as sleep:
+                    frames = list(playback.fn(replay, False, session, .4))
+                self.assertEqual(sleep.call_args_list, [mock.call(.4)] * 2)
+                self.assertEqual([selected(frame) for frame in frames], [-1, 0, 1])
+                self.assertTrue(all(len(frame) == len(playback.outputs) for frame in frames))
+                for frame, column in zip(frames, (0, 1, 2)):
+                    self.assertIn(f'Character at row 0, column {column}', frame[0])
+                with mock.patch('extensions.maze_experiments.page.time.sleep') as sleep:
+                    self.assertEqual([selected(frame) for frame in playback.fn(replay, False, session, .4)], [1])
+                sleep.assert_not_called()
+                with mock.patch.object(gr, 'Info') as info:
+                    self.assertIn('Replay', callbacks['stop_playback'].fn(replay))
+                info.assert_called_once()
+                replay.viewing = 9
+                self.assertEqual(selected(back(replay, False, session)), 0)
+                replay.busy = True
+                for call in (lambda: forward(replay, False, session), lambda: back(replay, False, session),
+                             lambda: list(playback.fn(replay, False, session, .4))):
+                    with self.assertRaisesRegex(gr.Error, 'Pause'):
+                        call()
+            finally:
+                demo.close()
 
     def test_goal_mode_validation_and_legacy_replay(self):
         for options in ({'goal_mode': 'unknown'}, {'goal_mode': 'hint'},
