@@ -2880,6 +2880,44 @@ assert.strictEqual(documentElement.style.props['--inspector-pane-width'], '294px
         )
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the script")
+    def test_a_click_on_a_handle_chooses_nothing(self):
+        # Clicking a handle is how it takes the focus the arrow keys need,
+        # and a reader who has chosen nothing has still chosen nothing. A
+        # click that pinned the width on screen would take the pane out of
+        # the stylesheet's hands, and one made while a narrow window was
+        # squeezing the pane would write that squeeze over the wider width
+        # the reader picked when there was room for it.
+        self.check(
+            """
+const chat = chatRow(1200);
+kept.set('chatlab.inspector-pane-width', '520');
+start();
+paint();
+
+const handle = chat.children[2];
+fire('document', 'pointerdown', {
+  target: handle, button: 0, buttons: 1, clientX: 800, pointerId: 7,
+  preventDefault: () => {},
+});
+fire('window', 'pointerup', { pointerId: 7 });
+assert.strictEqual(
+  kept.get('chatlab.inspector-pane-width'), '520', 'the choice is left alone'
+);
+
+// A drag that moves the pane is a choice, and is kept.
+fire('document', 'pointerdown', {
+  target: handle, button: 0, buttons: 1, clientX: 800, pointerId: 8,
+  preventDefault: () => {},
+});
+fire('window', 'pointermove', { buttons: 1, clientX: 700, pointerId: 8 });
+fire('window', 'pointerup', { pointerId: 8 });
+assert.strictEqual(kept.get('chatlab.inspector-pane-width'), String(pane().width));
+
+function pane() { return document.getElementById('inspector-pane'); }
+"""
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the script")
     def test_only_the_pointer_that_started_a_drag_can_move_or_end_it(self):
         # A second finger on a touch screen reports moves and a release of
         # its own. Neither belongs to the drag the first finger started.

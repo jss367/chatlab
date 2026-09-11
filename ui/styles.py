@@ -848,6 +848,7 @@ RESIZE_JS = """
     // The pane is on the right of its handle, so dragging left widens it.
     const room = roomFor(dragging.pane);
     const width = clamp(dragging.start + (dragging.origin - event.clientX), room);
+    if (width !== Math.round(dragging.start)) { dragging.moved = true; }
     write(dragging.property, width);
     announce(dragging.handle, width, room);
   };
@@ -859,7 +860,14 @@ RESIZE_JS = """
     }
     dragging.handle.classList.remove('dragging');
     document.body.classList.remove('pane-dragging');
-    store(dragging.key, Math.round(dragging.pane.getBoundingClientRect().width));
+    // Only a drag that moved the pane says anything about what the reader
+    // wants. A click that just puts the focus on the handle would otherwise
+    // pin the width the stylesheet happens to be giving the pane, and a
+    // click while a narrow window is squeezing it would write that squeezed
+    // width over the wider one the reader chose earlier.
+    if (dragging.moved) {
+      store(dragging.key, Math.round(dragging.pane.getBoundingClientRect().width));
+    }
     dragging = null;
   };
 
@@ -881,6 +889,7 @@ RESIZE_JS = """
       key: handle.dataset.store,
       origin: event.clientX,
       start: pane.getBoundingClientRect().width,
+      moved: false,
     };
     // The handle keeps the pointer for the whole drag, so a release out
     // beyond the edge of the window is still delivered here and still ends

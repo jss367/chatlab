@@ -19,6 +19,8 @@ from desktop_smoke import smoke_test_metal, smoke_test_pipelines
 from version import __version__
 
 
+logger = logging.getLogger(__name__)
+
 APP_NAME = "ChatLab"
 WINDOW_TITLE = "ChatLab"
 LOOPBACK_ADDRESS = "127.0.0.1"
@@ -52,10 +54,54 @@ def find_available_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def port_record() -> Path:
+    """Where the port the window was last served on is remembered."""
+
+    return app_support_directory() / "port"
+
+
+def remembered_port() -> int | None:
+    """The last port, if it is still free to bind.
+
+    Anything a browser keeps per origin - and the width of the pane beside
+    the transcript is kept that way - is kept per port too, because the port
+    is part of the origin. A window served on a fresh port every launch
+    would therefore forget those choices every launch, so the port is
+    remembered and asked for again. It is a preference for this machine
+    rather than a choice worth syncing, which is why it lives beside the
+    logs rather than in the settings file.
+    """
+
+    try:
+        port = int(port_record().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    if not 1024 <= port <= 65535:
+        return None
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind((LOOPBACK_ADDRESS, port))
+    except OSError:
+        # Something else has it, which is no reason not to open a window.
+        return None
+    return port
+
+
+def remember_port(port: int) -> None:
+    """Record the port for the next launch; failing to is not worth an error."""
+
+    try:
+        directory = app_support_directory()
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "port").write_text(str(port), encoding="utf-8")
+    except OSError:
+        logger.warning("Could not record the port for the next launch", exc_info=True)
+
+
 def start_local_server():
     """Start Gradio in the background and return its app and local URL."""
 
-    port = find_available_port()
+    port = remembered_port() or find_available_port()
     demo = build_app().queue(default_concurrency_limit=1)
     try:
         _, local_url, _ = demo.launch(
@@ -73,6 +119,7 @@ def start_local_server():
     except Exception:
         demo.close(verbose=False)
         raise
+    remember_port(port)
     return demo, local_url
 
 
