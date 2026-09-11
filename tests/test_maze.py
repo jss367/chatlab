@@ -226,7 +226,9 @@ class MazeTests(unittest.TestCase):
         move = call_text(MAZE.maze_id, "east")
         ids = list(move.encode()) + [0]
         ep = Episode(MAZE, CONFIG | {"interruption_text": "", "per_turn_tokens": 200, "token_budget": 1000})
-        list(stream_episode(ep, Manager([(move, ids)]), single_step=True))
+        author = Manager([(move, ids)])
+        author.generate = scored(author.generate)
+        list(stream_episode(ep, author, single_step=True))
         replay = from_payload(json.loads(json.dumps(ep.payload())))
         self.assertTrue(replay.replay_only)
 
@@ -254,6 +256,48 @@ class MazeTests(unittest.TestCase):
         self.assertEqual(forked.position, MAZE.start)
         self.assertTrue(replay.replay_only)
         self.assertEqual(json.loads(json.dumps(replay.payload())), json.loads(json.dumps(ep.payload())))
+
+    def test_fork_refuses_a_later_load_whose_tokenizer_decodes_differently(self):
+        """The same model ID re-downloaded at another revision must not replay stored IDs."""
+        move = call_text(MAZE.maze_id, "east")
+        ids = list(move.encode()) + [0]
+        ep = Episode(MAZE, CONFIG | {"interruption_text": "", "per_turn_tokens": 200, "token_budget": 1000})
+        author = Manager([(move, ids)])
+        author.generate = scored(author.generate)
+        list(stream_episode(ep, author, single_step=True))
+        replay = from_payload(json.loads(json.dumps(ep.payload())))
+        index = move.index("east")
+
+        # Same model ID, new load, a vocabulary that maps those IDs elsewhere.
+        revised = Manager([])
+        revised.load_id = "test-load#2"
+        revised.tokenizer = SimpleNamespace(
+            encode=lambda s, **kw: [(b + 1) % 128 for b in s.encode()],
+            decode=lambda ids, **kw: bytes((i + 1) % 128 for i in ids).decode())
+        with revised.open_session() as session:
+            with self.assertRaises(ValueError) as caught:
+                fork_token_edit(replay, 0, index, "west", session)
+        self.assertIn("tokenize differently", str(caught.exception))
+
+        # An ID beyond the new vocabulary raises rather than returning text.
+        vocabulary = list(range(64))
+        out_of_range = Manager([])
+        out_of_range.load_id = "test-load#3"
+        out_of_range.tokenizer = SimpleNamespace(
+            encode=lambda s, **kw: list(s.encode()),
+            decode=lambda ids, **kw: bytes(vocabulary[i] for i in ids).decode())
+        with out_of_range.open_session() as session:
+            with self.assertRaises(ValueError) as caught:
+                fork_token_edit(replay, 0, index, "west", session)
+        self.assertIn("cannot decode", str(caught.exception))
+
+        # An export predating recorded token text keeps the strict load rule.
+        for metric in replay.turns[0]["metrics"]:
+            metric.pop("text")
+        with revised.open_session() as session:
+            with self.assertRaises(ValueError) as caught:
+                fork_token_edit(replay, 0, index, "west", session)
+        self.assertIn("predates", str(caught.exception))
 
     def test_replay_edit_leaves_a_newer_archive_of_the_same_run_alone(self):
         move = call_text(MAZE.maze_id, "east")
