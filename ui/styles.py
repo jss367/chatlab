@@ -311,7 +311,7 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 #model-id-row > button {{ margin-bottom: 12px; min-height: 40px; }}
 #current-model-row {{ align-items: center; gap: 12px; }}
 #currently-loaded-model {{ flex: 1; min-width: 0; }}
-#models-page .model-access > button, #models-page .model-activity > button {{ border: 0; }}
+#models-page .model-access > button {{ border: 0; }}
 #models-page .model-activity {{
   padding: 16px 20px; border: 1px solid var(--border-color-primary); border-radius: 12px;
   background: var(--block-background-fill);

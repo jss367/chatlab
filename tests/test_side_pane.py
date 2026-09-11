@@ -92,6 +92,38 @@ def lay_out(root: str, model_id: str, files: dict[str, bytes]) -> Path:
 
 
 class ModelActionTests(unittest.TestCase):
+    def test_download_status_follows_worker_then_returns_to_local_files(self):
+        progress = DownloadProgress()
+        with (
+            mock.patch.dict(runtime.MANAGER.active_downloads, {"org/model": progress}),
+            mock.patch.object(models_page, "cache_status", return_value=CacheStatus()) as cached,
+        ):
+            detail, _, _, load = models_page.refresh_model_actions("org/model", None)
+            self.assertIn("**Downloading**", detail)
+            self.assertIn("Asking Hugging Face", detail)
+            self.assertFalse(load["visible"])
+            cached.assert_not_called()
+
+            with mock.patch.object(progress, "snapshot", return_value=model_runtime.DownloadSnapshot(
+                files_done=1, files_total=3, bytes_done=500_000_000, bytes_total=1_000_000_000,
+            )):
+                detail, *_ = models_page.refresh_model_actions("org/old-id", "org/model")
+            self.assertIn("50%", detail)
+            self.assertIn("500 MB of 1.0 GB", detail)
+
+            # Changing selection must not show another model's download.
+            detail, *_ = models_page.refresh_model_actions("org/other", None)
+            self.assertIn("Not downloaded", detail)
+
+            del runtime.MANAGER.active_downloads["org/model"]
+            for status, expected in (
+                (CacheStatus(cached_bytes=100), "**Downloaded**"),
+                (CacheStatus(cached_bytes=100, missing_files=(MODEL_WEIGHTS,)), "Download incomplete"),
+            ):
+                cached.return_value = status
+                detail, *_ = models_page.refresh_model_actions("org/model", None)
+                self.assertIn(expected, detail)
+
     def test_downloaded_selection_offers_local_loading(self):
         with mock.patch.object(models_page, "cache_status", return_value=CacheStatus(cached_bytes=100)) as status:
             detail, download_load, download, load = models_page.refresh_model_actions(
@@ -2940,6 +2972,10 @@ class PageLayoutTests(unittest.TestCase):
         token = self.labelled("Hugging Face token (optional)")
         for control in (radio, model_id, token):
             self.assertTrue(any(fn.targets == [(control._id, "change")] for fn in listeners))
+        self.assertTrue(any(
+            event == "tick" and isinstance(self.demo.blocks[block_id], gr.Timer)
+            for fn in listeners for block_id, event in fn.targets
+        ))
         for fn in listeners:
             self.assertEqual(fn.inputs[:2], [model_id, radio])
             self.assertIsInstance(fn.inputs[2], gr.State)
@@ -2959,6 +2995,21 @@ class PageLayoutTests(unittest.TestCase):
         # startup refresh the controls even when the radio's selected value
         # stays the same.
         self.assertEqual(len(chained), 9)
+
+    def test_model_progress_is_always_open_in_the_card_above_download_buttons(self):
+        status = self.by_id("model-status")
+        card = self.by_id("model-availability").parent
+        self.assertTrue(self.within(status, card))
+        parent = status.parent
+        while parent is not card:
+            self.assertNotIsInstance(parent, gr.Accordion)
+            parent = parent.parent
+        activity = status.parent
+        for name in ("download_model", "download_and_load_model", "load_cached_model"):
+            listener = self.listeners(name)[0]
+            button = self.demo.blocks[listener.targets[0][0]]
+            self.assertTrue(self.within(button, card))
+            self.assertLess(card.children.index(activity), card.children.index(button.parent))
 
     def test_explicit_repository_checks_make_one_request_after_leaving_the_id_field(self):
         model_id = self.labelled("Hugging Face model ID")

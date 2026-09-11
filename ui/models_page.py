@@ -431,6 +431,14 @@ def refresh_model_actions(
     """
 
     cleaned = chosen_model(model_id, selected)
+    active = runtime.MANAGER.active_downloads.get(cleaned)
+    if active is not None:
+        return (
+            "**Downloading** · " + download_detail(cleaned, active.snapshot(), None),
+            gr.update(visible=True),
+            gr.update(visible=True),
+            gr.update(visible=False, variant="secondary"),
+        )
     try:
         cached = cache_status(cleaned) if cleaned else CacheStatus()
     except ValueError as error:

@@ -1001,14 +1001,18 @@ def build_app() -> gr.Blocks:
                             model_availability = gr.Markdown(
                                 "Checking downloaded files…", elem_id="model-availability"
                             )
+                            with gr.Column(elem_classes=["model-activity"]):
+                                gr.Markdown("### Latest model action")
+                                model_status = gr.Markdown(
+                                    "No downloads or loads started in this tab.",
+                                    elem_id="model-status",
+                                )
                             with gr.Row():
                                 download_load_button = gr.Button(
                                     "Download and load", variant="primary", size="sm"
                                 )
                                 download_button = gr.Button("Download only", size="sm")
                                 cached_button = gr.Button("Load cached", size="sm")
-                        with gr.Accordion("Latest model action", open=True, elem_classes=["model-activity"]):
-                            model_status = gr.Markdown("No downloads or loads started in this tab.", elem_id="model-status")
 
                         with gr.Column(elem_id="model-search", elem_classes=["model-card"]):
                             gr.Markdown("## Discover models")
@@ -1425,8 +1429,10 @@ def build_app() -> gr.Blocks:
 
         # Include programmatic selections (search, default, and rescans).
         # The selected row takes precedence, just as it does for a load.
-        for control in action_inputs:
-            control.change(
+        # Downloads run in worker threads, so selections alone cannot keep
+        # the local-file status current while files arrive (or in another tab).
+        for event in (*(control.change for control in action_inputs), badge_timer.tick):
+            event(
                 refresh_model_actions, action_inputs, action_outputs,
                 show_progress="hidden", trigger_mode="always_last",
                 concurrency_id="model-actions",
