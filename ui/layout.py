@@ -353,15 +353,13 @@ def build_app() -> gr.Blocks:
                                 # the scale on the right. Neither is a
                                 # substitute for the other, which is why this
                                 # is a switch and not a replacement.
-                                token_view = gr.Checkbox(
-                                    value=False,
-                                    label="Token view",
-                                    info=(
-                                        "Show the conversation as the tokens it "
-                                        "is made of. Click to inspect; right-click "
-                                        "for alternatives or your own text. "
-                                        "Click your own message to edit it."
-                                    ),
+                                token_view = gr.Radio(
+                                    choices=["Rendered view", "Token view"],
+                                    value="Rendered view",
+                                    type="index",
+                                    label="Conversation view",
+                                    show_label=False,
+                                    container=False,
                                     elem_id="token-view",
                                 )
                                 chatbot = gr.Chatbot(
@@ -2018,7 +2016,7 @@ def build_app() -> gr.Blocks:
             new_button.click(
                 new_conversation,
                 [conversation_state, forks_state, color_scale, *sampling_controls],
-                fork_outputs,
+                [*fork_outputs, branch_text],
                 cancels=running,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
