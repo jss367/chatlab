@@ -200,6 +200,7 @@ from ui.generation import (
     idle_state,
     literal_prefill_count,
     literal_text_ranges,
+    next_token,
     regenerate_from,
     resolve_seed,
     retry_last,

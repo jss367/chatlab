@@ -44,7 +44,7 @@ def branch_from_menu(action, prompt_text, turns, *settings):
             index = data["index"]
             if not isinstance(index, int) or index < 0:
                 raise ValueError("Invalid candidate")
-        else:
+        elif kind != "regenerate":
             raise ValueError("Unknown action")
     except (ValueError, KeyError, TypeError):
         yield idle_state(prompt_text, turns, BRANCH_UNAVAILABLE)
@@ -52,6 +52,9 @@ def branch_from_menu(action, prompt_text, turns, *settings):
 
     if kind == "text":
         yield from branch_with_text(selection, replacement, prompt_text, turns, *settings)
+        return
+    if kind == "regenerate":
+        yield from branch_from(selection, prompt_text, turns, *settings, resample=True)
         return
     _, pick = choose_alternative(
         turns, (0, []), (0, []), selection,
@@ -134,6 +137,10 @@ TOKEN_MENU_JS = r"""
       bridge('token-menu-action', JSON.stringify({...action, selection: payload.selection, request: payload.request}));
       close();
     };
+    const regenerate = element('button', 'Regenerate from this token', 'menu-option');
+    regenerate.type = 'button';
+    regenerate.addEventListener('click', () => send({kind: 'regenerate'}));
+    menu.append(regenerate);
     const options = element('div', undefined, 'menu-options');
     payload.candidates.forEach((candidate, index) => {
       const button = element('button', undefined, 'menu-option');
@@ -164,7 +171,7 @@ TOKEN_MENU_JS = r"""
       }
     });
     form.append(label, input, submit); menu.append(form); fit();
-    (options.querySelector('button') || input).focus({preventScroll: true});
+    regenerate.focus({preventScroll: true});
   };
   document.addEventListener('contextmenu', (event) => {
     const token = event.target.closest('#token-strip .textspan.hl');

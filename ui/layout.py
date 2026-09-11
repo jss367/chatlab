@@ -10,6 +10,7 @@ import gradio as gr
 
 import charts
 import settings
+from thinking import THINKING_CHOICES
 from conversation import (
     MAIN_BRANCH,
     branch_choices,
@@ -81,6 +82,7 @@ from ui.generation import (
     clear_chat,
     edit_message,
     hide_clear_confirm,
+    next_token,
     retry_last,
     retry_message,
     stop_generation,
@@ -154,6 +156,7 @@ from ui.scoring import (
 from ui.settings_page import (
     hardware_card,
     refresh_hardware,
+    refresh_thinking_mode,
     remember_committed_seed,
     remember_prefill_limit,
     remember_settings,
@@ -350,15 +353,13 @@ def build_app() -> gr.Blocks:
                                 # the scale on the right. Neither is a
                                 # substitute for the other, which is why this
                                 # is a switch and not a replacement.
-                                token_view = gr.Checkbox(
-                                    value=False,
-                                    label="Token view",
-                                    info=(
-                                        "Show the conversation as the tokens it "
-                                        "is made of. Click to inspect; right-click "
-                                        "for alternatives or your own text. "
-                                        "Click your own message to edit it."
-                                    ),
+                                token_view = gr.Radio(
+                                    choices=["Rendered view", "Token view"],
+                                    value="Rendered view",
+                                    type="index",
+                                    label="Conversation view",
+                                    show_label=False,
+                                    container=False,
                                     elem_id="token-view",
                                 )
                                 chatbot = gr.Chatbot(
@@ -402,12 +403,13 @@ def build_app() -> gr.Blocks:
                                         visible=False,
                                         elem_id="stop-button",
                                     )
-                                    # The three give up their usual minimum
+                                    # These controls give up their usual minimum
                                     # width to stay on Send's row. Left to
                                     # wrap, the last of them takes a line of
                                     # its own and reads as the widest, most
                                     # important button under the box.
                                     retry_button = gr.Button("🔁 Retry", min_width=80)
+                                    next_token_button = gr.Button("Next token", min_width=90)
                                     undo_button = gr.Button("↩️ Undo last", min_width=90)
                                     # Named for what it takes: this empties
                                     # the conversation on screen and deletes
@@ -700,6 +702,10 @@ def build_app() -> gr.Blocks:
                         with gr.Accordion("Branch response", open=False, elem_classes=["inspector-section"]):
                             with gr.Row():
                                 branch_button = gr.Button("🌱 Branch from token", size="sm")
+                            gr.Markdown(
+                                "For one step, choose an alternative and press **Next token** "
+                                "below the message box. Keep pressing it to extend the reply."
+                            )
                             with gr.Row():
                                 branch_text = gr.Textbox(
                                     label="Or type your own replacement",
@@ -1123,6 +1129,17 @@ def build_app() -> gr.Blocks:
                                 "reasoning block first so this remains visible answer text."
                             ),
                         )
+                        thinking_mode = gr.Radio(
+                            choices=THINKING_CHOICES,
+                            value=saved.thinking_mode,
+                            label="Thinking mode",
+                            info=(
+                                "Applies to the next chat reply. Model default uses the model's "
+                                "normal behavior. Token branches keep the original reply's mode. "
+                                "An assistant prefill starts directly in the answer."
+                            ),
+                            visible=runtime.MANAGER.supports_thinking,
+                        )
                         keep_reasoning = gr.Checkbox(
                             value=saved.keep_reasoning,
                             label="Send previous reasoning back to the model",
@@ -1239,6 +1256,9 @@ def build_app() -> gr.Blocks:
         # The badge is refreshed on the way to the chat page as well, so a
         # load started a moment ago shows as one in progress rather than as
         # the "no model" state the page was left in.
+        nav.change(refresh_thinking_mode, None, thinking_mode, show_progress="hidden")
+        demo.load(refresh_thinking_mode, None, thinking_mode)
+        badge_timer.tick(refresh_thinking_mode, None, thinking_mode, show_progress="hidden")
         badge_outputs = [model_badge_view, default_model_button]
         nav.change(refresh_model_badge, None, badge_outputs)
         demo.load(refresh_model_badge, None, badge_outputs)
@@ -1452,6 +1472,7 @@ def build_app() -> gr.Blocks:
                 # memory sees, so the hardware panel is re-read after it
                 # rather than left showing what was true before.
                 .then(refresh_hardware, None, hardware_view)
+                .then(refresh_thinking_mode, None, thinking_mode)
             )
 
         # Download-only changes the cache without changing the loaded model.
@@ -1703,11 +1724,12 @@ def build_app() -> gr.Blocks:
         # Persistence runs separately; every request must snapshot the controls
         # the reader sees, even while remember_steering is still queued.
         steering_inputs = [steering_state, steering_enabled, steering_strength, steering_layer]
-        chat_inputs = [prompt, conversation_state, *settings_inputs, *steering_inputs]
+        chat_inputs = [prompt, conversation_state, *settings_inputs, *steering_inputs, thinking_mode]
 
         # Everything saved between sessions, in PERSISTED_SETTING_NAMES order.
-        persisted_inputs = [*settings_inputs, enter_sends, model_id, weight_precision]
+        persisted_inputs = [*settings_inputs, thinking_mode, enter_sends, model_id, weight_precision]
         for control in (
+            thinking_mode,
             system_prompt,
             keep_reasoning,
             assistant_prefill,
@@ -1856,6 +1878,7 @@ def build_app() -> gr.Blocks:
         start_response(send_button.click, chat, chat_inputs, chat_outputs)
         start_response(prompt.submit, chat, chat_inputs, chat_outputs)
         start_response(retry_button.click, retry_last, chat_inputs, chat_outputs)
+        start_response(next_token_button.click, next_token, [branch_pick, *chat_inputs], chat_outputs)
         start_response(chatbot.retry, retry_message, chat_inputs, chat_outputs)
         start_response(chatbot.edit, edit_message, chat_inputs, chat_outputs)
         start_response(
@@ -1985,7 +2008,7 @@ def build_app() -> gr.Blocks:
             navigate(
                 new_button.click, new_conversation,
                 [conversation_state, forks_state, color_scale, *sampling_controls],
-                fork_outputs,
+                [*fork_outputs, branch_text],
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
         )

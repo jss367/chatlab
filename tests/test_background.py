@@ -307,3 +307,19 @@ class BackgroundConversationTests(unittest.TestCase):
         self.call("poll")
         self.assertEqual(len(self.state[self.turns._id]), 2)
         self.assertEqual(self.state[self.turns._id][-1]["content"], "Hello world")
+
+    def test_next_token_resumes_a_background_response_one_token_at_a_time(self):
+        self.release.set()
+        values = {0: "hi", **dict(enumerate(SETTINGS, 2))}
+        values[8] = 1  # max_new_tokens in the existing chat input order
+        self.call("chat", values)
+        self.finish()
+        self.call("poll")
+        self.assertEqual(self.state[self.turns._id][-1]["generated_tokens"], 1)
+        self.call("next_token")
+        self.finish()
+        self.call("poll")
+        reply = self.state[self.turns._id][-1]
+        self.assertEqual(reply["generated_tokens"], 2)
+        self.assertTrue(reply["token_step_paused"])
+        self.assertFalse(self.manager.busy)

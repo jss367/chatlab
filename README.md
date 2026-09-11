@@ -37,7 +37,7 @@ drove.
 - A draggable seam between the transcript and the panel beside it, remembered between sessions
 - Every conversation kept between sessions in one JSON file, so a reload or a restart brings the pane back as it was
 - Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response, or a run of prompts, from anywhere on the Chat page
-- Right-click a token to choose an alternative or type a custom replacement and continue the response
+- Right-click a token to regenerate from it, choose an alternative, or type a custom replacement and continue the response
 - Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
 - Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
@@ -423,6 +423,8 @@ Any reply in the conversation can be branched, not only the newest one, because 
 
 The replayed tokens are still measured against the model's own distribution, so a token the model would never have chosen shows its real rank and surprise. **Maximum new tokens** counts the tokens sampled after the branch point, so a branch made late in a long response still has room to finish. The JSON export records how many tokens were replayed as `forced_prefix_tokens`.
 
+To explore one token at a time, choose an alternative and press **Next token** below the message box. This applies the selected token and samples just one additional token. Each subsequent click extends the latest reply by one token, without selecting its last token again. It uses the current sampling and steering settings and leaves **Maximum new tokens** unchanged. A reply that has reached its stop token cannot advance; choose an earlier alternative to start another branch. You can also use **Next token** on a reply paused with **Stop** or the token limit. Each step replays the reply's prefix through the model, so longer replies take longer to advance.
+
 ### Branching with your own text
 
 The alternatives table only offers what the model ranked highly. To put anything else at a token position, click the token, type the replacement in **Or type your own replacement**, and press **✏️ Branch with text**. The typed text is spliced in exactly as written where the clicked token was, and the model continues from there. Type the space yourself if the word needs one: the text is checked in place, after the tokens that are kept, so it reads the same whether the tokenizer keeps the word-boundary space inside the token (as BPE does) or drops it from the start of what it decodes (as SentencePiece does). It can be one word or a whole sentence. Text the tokenizer cannot reproduce exactly at that position is refused rather than approximated. The prompt and replayed response prefix together are capped at 8,192 tokens, or at the model's shorter positional limit; an oversized branch is refused without replacing the response on screen.
@@ -491,6 +493,17 @@ Attention weights need the model's eager attention kernel, which is switched on 
 ## Reasoning blocks
 
 Text the model wraps in `<think>` tags is pulled out of the reply and shown as a collapsible **Reasoning** section, so the answer stays readable while the trace stays available.
+
+For supported Qwen3 models, **Thinking mode** under *System prompt, reasoning,
+and prefill* offers **Model default**, **On**, and **Off**. This controls the
+model's native thinking mode for the next chat reply or retry, on both PyTorch
+and MLX. The control appears only when the loaded Qwen3 checkpoint's chat
+template supports switching; thinking-only and instruct-only variants do not
+get a switch. The choice is saved between sessions and recorded with each
+reply and in its JSON/CSV token trace. Token branches keep the original reply's
+mode so their replay uses the same template. An assistant prefill still starts
+directly in the answer, even with thinking enabled. Batch prompts and the local
+API continue to use the model's default mode.
 
 By default that reasoning is **not** sent back to the model on the next turn. Think models are trained to produce a fresh reasoning block each time, so replaying old ones spends context and tends to degrade the next answer. Enable **Send previous reasoning back to the model** under *System prompt, reasoning, and prefill* if you want the older behavior.
 

@@ -482,6 +482,7 @@ def new_conversation(
         f"Started {name}. Send a message to begin it.",
         *send_stop_buttons(False),
         *panel_reset([], scale_name),
+        "",  # Replacement text belongs to the previous conversation's token.
     )
 
 

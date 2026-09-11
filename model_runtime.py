@@ -26,6 +26,7 @@ import settings
 import steering as steering_vectors
 from conversation import THINK_CLOSE, THINK_OPEN
 from mlx_runtime import LensReading
+from thinking import THINKING_MODES, supports_thinking
 from token_metrics import (
     UNSCORED_BEYOND_LIMIT,
     UNSCORED_FIRST_TOKEN,
@@ -3325,6 +3326,9 @@ class GenerationUpdate:
     :attr:`ModelManager.load_id`.
     """
 
+    thinking_mode: str | None = None
+    """Requested template mode, or None when the loaded model cannot switch."""
+
 
 class IncrementalDecoder:
     """Decode a growing token stream without re-decoding it from the start.
@@ -5221,7 +5225,14 @@ class ModelManager:
             return None
         return mps_ceiling(torch)
 
-    def _prompt_token_ids(self, messages: list[dict], tools: list[dict] | None = None) -> tuple[list[int], bool]:
+    @property
+    def supports_thinking(self) -> bool:
+        return self.loaded and supports_thinking(self.model, self.tokenizer)
+
+    def _prompt_token_ids(
+        self, messages: list[dict], tools: list[dict] | None = None,
+        *, thinking_mode: str = "default",
+    ) -> tuple[list[int], bool]:
         """Token ids for a chat prompt, and whether it prefills ``<think>``.
 
         Reasoning templates such as OLMo Think end the generation prompt with
@@ -5238,6 +5249,10 @@ class ModelManager:
             raise ValueError("Tool use requires a model with a native chat/tool template.")
         if tokenizer.chat_template:
             tool_args = {"tools": tools} if tools is not None else {}
+            if thinking_mode not in THINKING_MODES:
+                raise ValueError("Thinking mode must be default, on, or off.")
+            if self.supports_thinking and thinking_mode != "default":
+                tool_args["enable_thinking"] = thinking_mode == "on"
             rendered = tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=False, **tool_args
             )
@@ -5434,6 +5449,7 @@ class ModelManager:
         *,
         max_new_tokens: int,
         load_id: str | None = None,
+        thinking_mode: str = "default",
     ) -> None:
         """Refuse an oversized generation before a stream mutates UI state.
 
@@ -5452,7 +5468,7 @@ class ModelManager:
                 raise ModelChanged(
                     "The model has been reloaded since these tokens were produced."
                 )
-            prompt_ids, _reasoning_prefilled = self._prompt_token_ids(messages)
+            prompt_ids, _reasoning_prefilled = self._prompt_token_ids(messages, thinking_mode=thinking_mode)
             self._validate_generation_prefix_length(
                 prompt_ids,
                 forced_ids,
@@ -5761,6 +5777,7 @@ class ModelManager:
         tools: list[dict] | None = None,
         forced_ids: Sequence[int] = (),
         answer_prefill: str = "",
+        thinking_mode: str = "default",
         literal_prefill_tokens: int = 0,
         automatic_reasoning_close_tokens: int = 0,
         literal_text_ranges: Sequence[tuple[int, int]] = (),
@@ -5793,6 +5810,10 @@ class ModelManager:
         is fed, so a load that finished after the caller looked is refused with
         :class:`ModelChanged` rather than replaying one model's token IDs
         through another.
+
+        ``thinking_mode`` is default/on/off for switchable Qwen3 templates.
+        Default leaves template arguments untouched. Other architectures ignore
+        a saved mode, and updates record None when switching is unsupported.
 
         ``steering`` is a portable activation-vector specification. Its hook
         is held under the model lock across prefill and decoding, and removed
@@ -5829,6 +5850,7 @@ class ModelManager:
                 tools=tools,
                 forced_ids=forced_ids,
                 answer_prefill=answer_prefill,
+                thinking_mode=thinking_mode,
                 literal_prefill_tokens=literal_prefill_tokens,
                 automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
                 literal_text_ranges=literal_text_ranges,
@@ -5902,6 +5924,7 @@ class ModelManager:
         tools: list[dict] | None = None,
         forced_ids: Sequence[int] = (),
         answer_prefill: str = "",
+        thinking_mode: str = "default",
         literal_prefill_tokens: int = 0,
         automatic_reasoning_close_tokens: int = 0,
         literal_text_ranges: Sequence[tuple[int, int]] = (),
@@ -5935,10 +5958,13 @@ class ModelManager:
                 producing_load_id = self.load_id
                 assert producing_load_id is not None
 
-                prompt_ids, reasoning_prefilled = (
-                    self._prompt_token_ids(messages, tools=tools) if tools is not None
-                    else self._prompt_token_ids(messages)
-                )
+                if thinking_mode not in THINKING_MODES:
+                    raise ValueError("Thinking mode must be default, on, or off.")
+                recorded_thinking = thinking_mode if self.supports_thinking else None
+                template_args = {"tools": tools} if tools is not None else {}
+                if recorded_thinking is not None:
+                    template_args["thinking_mode"] = recorded_thinking
+                prompt_ids, reasoning_prefilled = self._prompt_token_ids(messages, **template_args)
                 # Noted here rather than left to the first update, because a run
                 # that fails in the prefill below never publishes one and prefill
                 # is where a memory failure is most likely.
@@ -6109,6 +6135,7 @@ class ModelManager:
                         prompt_metrics=prompt_metrics,
                         prompt_note=prompt_note,
                         reasoning_prefilled=reasoning_prefilled,
+                        thinking_mode=recorded_thinking,
                         forced_prefix_tokens=len(forced),
                         literal_prefill_text=literal_prefill_text,
                         literal_text_spans=literal_text_spans,
@@ -6161,6 +6188,7 @@ class ModelManager:
                             prompt_metrics=prompt_metrics,
                             prompt_note=prompt_note,
                             reasoning_prefilled=reasoning_prefilled,
+                            thinking_mode=recorded_thinking,
                             forced_prefix_tokens=len(forced),
                             literal_prefill_text=literal_prefill_text,
                             literal_text_spans=literal_text_spans,
