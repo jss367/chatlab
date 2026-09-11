@@ -368,9 +368,12 @@ def _build_page(context):
     # mid-playback ends it rather than letting the next frame undo the toggle.
     reveal.input(lambda ep, show: board(ep, None if ep.busy else ep.viewing, show), [episode, reveal], maze_board,
                  queue=False, cancels=playback)
-    turn_picker.input(inspect, [episode, reveal, turn_picker, selection_session], outputs, show_progress="hidden")
+    turn_picker.input(inspect, [episode, reveal, turn_picker, selection_session], outputs, show_progress="hidden", cancels=playback)
+    # Each playback frame re-stamps the token strip, which clears a selection,
+    # so choosing a token also means "stop here and let me look at it".
     strip.select(select_token, [episode, selection_session, metrics_state],
-                 [detail, alternatives, edit_selection, replacement, candidate], queue=False, show_progress="hidden")
+                 [detail, alternatives, edit_selection, replacement, candidate], queue=False, show_progress="hidden",
+                 cancels=playback)
     edit_button.click(edit_token, [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate],
                       [episode, *outputs, edit_selection, download], concurrency_id="maze", show_progress="hidden", cancels=playback)
     save.click(export, episode, download, show_progress="hidden")
