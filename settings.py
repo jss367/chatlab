@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import image_runtime
+from thinking import THINKING_MODES
 from token_metrics import COLOR_SCALES, DEFAULT_COLOR_SCALE
 
 logger = logging.getLogger(__name__)
@@ -180,6 +181,7 @@ class Settings:
     model_id: str = DEFAULT_MODEL_ID
     system_prompt: str = ""
     assistant_prefill: str = ""
+    thinking_mode: str = "default"
     keep_reasoning: bool = False
     enter_sends: bool = True
     temperature: float = 0.8
@@ -245,6 +247,11 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
         assistant_prefill=_text(
             values.get("assistant_prefill", DEFAULTS.assistant_prefill),
             DEFAULTS.assistant_prefill,
+        ),
+        thinking_mode=(
+            values.get("thinking_mode")
+            if values.get("thinking_mode") in THINKING_MODES
+            else DEFAULTS.thinking_mode
         ),
         keep_reasoning=_flag(
             values.get("keep_reasoning", DEFAULTS.keep_reasoning),
