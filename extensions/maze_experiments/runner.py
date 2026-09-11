@@ -147,20 +147,6 @@ def interrupted_prefix(episode, manager):
     return list(ids if count == 0 else ids[:count])
 
 
-def identifies_its_token(text):
-    """Whether recorded text pins down the ID it came from.
-
-    A byte-level piece of a character decodes on its own to the replacement
-    character, and a token carrying no characters decodes to nothing. Either
-    way the recorded text is the same for any ID of that shape, so a later
-    vocabulary can move the ID to other bytes and still produce a decode that
-    looks identical. Text recorded as part of a response needs no such test,
-    because the characters its neighbours complete name the bytes it carried;
-    a token recorded on its own, with nothing around it, does.
-    """
-    return bool(text) and "�" not in text
-
-
 def forkable_without_evidence(episode, manager):
     """Whether this episode may be forked where the run records nothing to check.
 
@@ -235,64 +221,34 @@ def verify_recorded_text(episode, turn_index, manager):
                              "re-downloaded at a different revision; load that snapshot to fork this run.")
 
 
-def verify_recorded_candidate(episode, candidate, kept, literal_prefill_tokens, manager):
-    """Refuse a fork onto an alternative the recorded run cannot pin down.
+def verify_recorded_candidate(episode, manager):
+    """Refuse a recorded alternative on a run this session did not produce.
 
     The chosen alternative is the one ID the fork replays that the run never
-    generated, so no response text stands behind it and it is the one ID that
-    has to be checked on its own. A revised vocabulary can leave every recorded
-    response decoding as it always did and still move this one, and the panel's
-    offer of "'x' · token 120" would then put some other text into the response.
-
-    Recorded with nothing around it, that text is weaker evidence than a
-    response's. It has to name an ID at all before any comparison means
-    something, which a byte fragment or a token carrying no characters does
-    not. It also has to survive the position the fork puts the ID in: build_metric
-    records an alternative by decoding it alone, and SentencePiece drops the
-    word-boundary space from the first token of whatever it decodes, so
-    "▁world" and "world" both record "world" while the branch after a retained
-    "Hello" reads "Hello world" under one and "Helloworld" under the other. So
-    the alternative is decoded where it will actually sit, after the retained
-    tokens, and its recorded text is treated as evidence only when what it adds
-    there is what it decodes to alone. Either way the session that offered the
-    alternative is the one place that needs no evidence, because its load
+    generated, so no response text stands behind it, and nothing an export
+    records says how the model that offered it spelled that ID. build_metric
+    records an alternative by decoding it alone, and SentencePiece reads the
+    word-boundary space off the first token of whatever it decodes, so "▁world"
+    and "world" both record "world". A later vocabulary spelling that ID either
+    way reproduces the recording exactly, while the branch after a retained
+    "Hello" reads "Hello world" under one and "Helloworld" under the other. The
+    recording is the same in both directions, so no comparison against the
+    loaded vocabulary can establish which one offered the alternative, and the
+    session that offered it is the only place it can be applied: its load
     identifier names the load in memory now.
+
+    This costs nothing, because Replacement text expresses the same branch and
+    is checked more strictly. ModelManager.encode_replacement validates typed
+    text in place against the retained tokens, against exactly this ambiguity,
+    and picks whichever ID spells it correctly in that position under the
+    loaded vocabulary. Someone who wants the alternative "world" types "world"
+    and gets a correctly spelled branch.
     """
-    hidden = manager.hidden_token_ids
-    visible_kept = visible_token_ids(kept, literal_prefill_tokens, hidden)
-    token_id = candidate["token_id"]
-    try:
-        current = manager.decode([token_id])
-        before = manager.decode(visible_kept)
-        after = manager.decode(visible_kept + [token_id])
-    except (IndexError, KeyError, OverflowError, TypeError, ValueError) as exc:
-        raise ValueError("The loaded model cannot decode the token ID of this alternative, so its tokenizer "
-                         f"is not the one that offered it ({exc}). This happens when the same model ID has "
-                         "been re-downloaded at a different revision.") from exc
-    recorded = candidate.get("text")
-    if not identifies_its_token(current) or not identifies_its_token(recorded):
-        # An alternative that decodes to no characters was recorded under the
-        # vocabulary's own name for it, which names no particular ID either.
-        if not forkable_without_evidence(episode, manager):
-            raise ValueError("This alternative recorded a byte fragment rather than text, so there is "
-                             "nothing to confirm that the loaded tokenizer still maps it to the same bytes. "
-                             "It can only be applied by the session that offered it.")
-        return
-    # after not starting with before is the retained text itself changing under
-    # the alternative, which says even more plainly that position matters here.
-    if not after.startswith(before) or after[len(before):] != current:
-        if not forkable_without_evidence(episode, manager):
-            raise ValueError("How this alternative is spelled depends on the tokens before it, and the run "
-                             "records only how it decodes on its own, so nothing here can confirm the loaded "
-                             "tokenizer still spells it after your retained tokens the way the model that "
-                             "offered it did. Type the text you want in Replacement text instead, which is "
-                             "checked in place against those tokens, or apply this alternative in the session "
-                             "that offered it.")
-        return
-    if current != recorded:
-        raise ValueError("The loaded model decodes this alternative differently from the model that offered "
-                         "it, so it cannot be applied. This happens when the same model ID has been "
-                         "re-downloaded at a different revision; load that snapshot to fork this run.")
+    if not forkable_without_evidence(episode, manager):
+        raise ValueError("A recorded alternative can only be applied in the session that offered it. The run "
+                         "records how the alternative decodes on its own, which cannot say how the model that "
+                         "offered it spelled that token after your retained tokens. Type the text you want in "
+                         "Replacement text instead, which is checked in place against those tokens.")
 
 
 def stop_deciding_id(turn):
@@ -379,11 +335,13 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
                 kept_ids, replacement, literal_prefill_tokens=literal_prefill_tokens,
             )
         else:
-            candidate = next((c for c in metrics[token_index].get("top_candidates", [])
-                              if c["token_id"] == candidate_id), None)
-            if candidate is None:
+            # The alternative has to be one the run recorded for this token,
+            # which is a correctness check on the selection rather than a
+            # question about the tokenizer, so it holds whatever the provenance.
+            if not any(c["token_id"] == candidate_id
+                       for c in metrics[token_index].get("top_candidates", [])):
                 raise ValueError("Choose an alternative for the selected token.")
-            verify_recorded_candidate(episode, candidate, kept, literal_prefill_tokens, manager)
+            verify_recorded_candidate(episode, manager)
             replacement_ids = [candidate_id]
         if not replacement_ids:
             raise ValueError("Enter replacement text or choose a token alternative.")
