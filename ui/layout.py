@@ -1993,7 +1993,7 @@ def build_app() -> gr.Blocks:
             new_button.click(
                 new_conversation,
                 [conversation_state, forks_state, color_scale, *sampling_controls],
-                fork_outputs,
+                [*fork_outputs, branch_text],
                 cancels=running,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
