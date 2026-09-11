@@ -2876,6 +2876,34 @@ class PageLayoutTests(unittest.TestCase):
         # stays the same.
         self.assertEqual(len(chained), 9)
 
+    def test_explicit_repository_checks_make_one_request_after_leaving_the_id_field(self):
+        model_id = self.labelled("Hugging Face model ID")
+        (button,) = [
+            block for block in self.demo.blocks.values()
+            if isinstance(block, gr.Button) and block.value == "Check model"
+        ]
+        checks = self.listeners("check_model_repository")
+        info = mock.Mock(
+            tags=[], config={}, library_name="transformers", siblings=[],
+            private=False, gated=False,
+        )
+        for events, expected in (
+            ([(model_id._id, "blur"), (button._id, "click")], 1),
+            ([(model_id._id, "submit"), (model_id._id, "blur")], 1),
+            ([(model_id._id, "blur")], 0),
+        ):
+            with self.subTest(events=events), mock.patch(
+                "huggingface_hub.HfApi.model_info", return_value=info
+            ) as request:
+                # Dispatch the actual registered dependencies in browser event
+                # order: clicking Check first blurs the focused model ID field.
+                for event in events:
+                    for listener in checks:
+                        if event in listener.targets:
+                            states = list(listener.fn("org/model", ""))
+                            self.assertEqual(states[-1]["status"], "found")
+                self.assertEqual(request.call_count, expected)
+
     def test_every_load_reads_the_my_models_selection(self):
         # The ID box lags a row selection by a server round trip, so a button
         # clicked in that window would act on the box's previous contents -

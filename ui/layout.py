@@ -1327,7 +1327,9 @@ def build_app() -> gr.Blocks:
 
         # Slow network requests write ID-scoped state; rendering reads the field
         # again so a completed request cannot verify a newer, unchecked ID.
-        for event in (check_model_button.click, model_id.submit, model_id.blur):
+        # Keep checks explicit: clicking the button also blurs the textbox,
+        # which would otherwise enqueue a second request for the same ID.
+        for event in (check_model_button.click, model_id.submit):
             event(
                 check_model_repository, [model_id, hf_token], repository_result,
                 show_progress="hidden", concurrency_id="model-repository-check",
