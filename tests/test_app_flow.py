@@ -125,7 +125,9 @@ def painted(value):
     when the measurements go.
     """
 
-    return [span for span in strip_of(value) if span[1] is not None]
+    # An empty categorized span keeps plain restored messages clickable;
+    # it is only a renderer hint, never a measured token.
+    return [span for span in strip_of(value) if span[0] and span[1] is not None]
 
 
 def select(index):
@@ -213,6 +215,20 @@ class PanelSessionTests(unittest.TestCase):
         self.bound(0, app.clear_chat)()
         self.assertEqual(self.click(0, first), (gr.skip(),) * 5)
         self.assertSelected(1, second)
+
+    def test_restored_messages_are_editable_in_each_new_browser_session(self):
+        forks = new_forks()
+        forks["branches"][MAIN_BRANCH] = [make_turn("user", "Saved question")]
+        with mock.patch("library.read", return_value=forks):
+            first = self.bound(0, app.restore_conversations)()
+            second = self.bound(1, app.restore_conversations)()
+        for session, restored in enumerate((first, second)):
+            result = self.bound(session, open_token_editor)(
+                restored[1], restored[4],
+                gr.SelectData(None, {"index": 1, "value": ["Saved question", None]}),
+            )
+            self.assertTrue(result[0]["visible"])
+            self.assertEqual(result[1], "Saved question")
 
     def test_scored_epochs_are_isolated_but_rescoring_still_invalidates(self):
         scored = self.bound(0, score_known_passage)()
@@ -1321,6 +1337,20 @@ class TokenViewTests(unittest.TestCase):
     def test_cancel_clears_editor_without_conversation_outputs(self):
         self.assertEqual(close_token_editor(), (gr.update(visible=False), "", None))
 
+    def test_plain_transcript_uses_clickable_renderer_without_a_phantom_turn(self):
+        turns = [make_turn("user", "Saved question")]
+        value = app.transcript_value(turns, DEFAULT_COLOR_SCALE)
+        spans, _ = app.transcript_entries(turns, DEFAULT_COLOR_SCALE)
+        self.assertEqual(value[:-1], spans)
+        self.assertEqual(value[-1][0], "")
+        self.assertIsNotNone(value[-1][1])
+        self.assertEqual(painted(value), [])
+        result = open_token_editor(
+            turns, app.empty_metrics(),
+            gr.SelectData(None, {"index": len(value) - 1, "value": list(value[-1])}),
+        )
+        self.assertEqual(result, (gr.skip(),) * 3)
+
     def test_token_editor_is_wired_to_click_save_and_stop(self):
         demo = app.build_app()
         opener = next(fn for fn in demo.fns.values() if fn.fn is open_token_editor)
@@ -1328,6 +1358,8 @@ class TokenViewTests(unittest.TestCase):
         self.assertEqual(opener.outputs[0].elem_id, "token-editor")
         self.assertEqual(saver.outputs[3].elem_id, "token-strip")
         self.assertEqual(saver.outputs[-2].elem_id, "token-editor")
+        restore = next(fn for fn in demo.fns.values() if fn.fn is app.restore_conversations)
+        self.assertIs(restore.outputs[-1], opener.inputs[1])
 
     def test_a_reply_is_drawn_token_by_token_under_its_heading(self):
         final = self.respond()
@@ -3817,7 +3849,7 @@ class ConversationListWiringTests(unittest.TestCase):
         forks = self.named("remember_forks").inputs[1]
         self.assertEqual(restore.targets, [(self.demo._id, "load")])
         self.assertEqual(restore.inputs, [])
-        self.assertEqual(restore.outputs[1:], [state, forks, self.conversation_list()])
+        self.assertEqual(restore.outputs[1:4], [state, forks, self.conversation_list()])
 
     def test_everything_that_rewrites_the_conversation_in_one_step_runs_on_one_queue(self):
         # A redraw queued by a streaming frame must not run after a click on
@@ -4292,7 +4324,9 @@ class ConversationLibraryTests(unittest.TestCase):
         self.assertEqual(list(library.read(self.path)["branches"]), [MAIN_BRANCH, "Fork 1"])
 
     def test_nothing_saved_leaves_the_page_as_built(self):
-        self.assertEqual(app.restore_conversations(), (gr.skip(),) * 4)
+        restored = app.restore_conversations()
+        self.assertEqual(restored[:4], (gr.skip(),) * 4)
+        self.assertEqual(restored[4][1], [])
 
     def test_the_active_branch_is_put_back_on_screen(self):
         forks = {
@@ -4304,7 +4338,8 @@ class ConversationLibraryTests(unittest.TestCase):
         }
         library.write(forks, self.path)
 
-        messages, turns, restored, update = app.restore_conversations()
+        messages, turns, restored, update, metrics = app.restore_conversations()
+        self.assertEqual(metrics[1], [])
 
         self.assertEqual([turn["content"] for turn in turns], ["hi", "there"])
         self.assertTrue(turns[-1]["reasoning_closed"])

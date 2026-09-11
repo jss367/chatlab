@@ -2007,7 +2007,7 @@ def build_app() -> gr.Blocks:
             demo.load(
                 restore_conversations,
                 None,
-                [chatbot, conversation_state, forks_state, conversation_list],
+                [chatbot, conversation_state, forks_state, conversation_list, metrics_state],
                 cancels=running,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
