@@ -1177,7 +1177,15 @@ def refresh_my_models(
 
 
 def select_my_model(selected: str | None, precision: str | None = None):
-    """Put the chosen cached model in the ID box and describe it."""
+    """Put the chosen cached model in the ID box and describe it.
+
+    The profile is taken for the row's own kind, the same as
+    :func:`cached_fits` takes it for the list. Without that, an MLX
+    conversion on a Mac with a Metal ceiling would be judged here against
+    PyTorch's cap while the list and the button judge it against the
+    machine, so selecting a row that reads *fits* would describe it as tight
+    or unfit.
+    """
 
     if not selected:
         return gr.skip(), NO_CACHED_MODEL_SELECTED
@@ -1186,11 +1194,10 @@ def select_my_model(selected: str | None, precision: str | None = None):
     )
     if entry is None:
         return gr.skip(), f"`{selected}` is no longer in the cache. Press **Refresh**."
+    profile = replacement_profile(entry.status.kind or TEXT_KIND)
     return (
         gr.update(value=selected),
-        describe_cached_model(
-            entry, cached_fit(entry, precision, replacement_profile())
-        ),
+        describe_cached_model(entry, cached_fit(entry, precision, profile)),
     )
 
 

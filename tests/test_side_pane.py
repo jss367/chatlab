@@ -1,5 +1,6 @@
 """The Models page: My Models, Model search, and where the settings live."""
 
+import contextlib
 import json
 import os
 import subprocess
@@ -3100,11 +3101,14 @@ class MlxModelsPaneTests(unittest.TestCase):
 
         self.assertIn("2.0 GB of 4-bit weights", fit.note)
 
-    def test_an_mlx_model_is_judged_against_the_machine_not_the_metal_cap(self):
-        # 20 GB of packed weights on a 48 GB Mac with 30 GB free and a 16 GB
-        # PyTorch cap. Load lets the MLX conversion through, because mlx-lm
-        # is not under that cap, so the list has to say fits; the same bytes
-        # as a Transformers checkpoint are held to the cap and will not fit.
+    @contextlib.contextmanager
+    def capped_mac(self):
+        """20 GB of weights per entry, on a 48 GB Mac behind a 16 GB PyTorch cap.
+
+        30 GB of that machine is free, so the MLX conversion fits it and the
+        same bytes as a Transformers checkpoint do not fit the cap.
+        """
+
         GB = 1024**3
         root = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
@@ -3132,8 +3136,32 @@ class MlxModelsPaneTests(unittest.TestCase):
             with mock.patch.object(
                 model_runtime, "system_memory", lambda: (48 * GB, 30 * GB)
             ):
-                radio, _, _ = app.refresh_my_models(None, "Name")
+                yield
+
+    def test_an_mlx_model_is_judged_against_the_machine_not_the_metal_cap(self):
+        # Load lets the MLX conversion through, because mlx-lm is not under
+        # that cap, so the list has to say fits.
+        with self.capped_mac():
+            radio, _, _ = app.refresh_my_models(None, "Name")
 
         labels = dict((value, label) for label, value in radio["choices"])
         self.assertIn("· fits", labels[MLX.model_id])
         self.assertIn("· won't fit", labels[OLMO])
+
+    def test_selecting_an_mlx_row_repeats_the_verdict_the_list_gave_it(self):
+        # The details are recomputed from scratch on selection, so they have
+        # to take the pool for the row's own kind too. Judged against the
+        # PyTorch cap instead, a row the list calls a fit would describe
+        # itself as unfit the moment it was clicked.
+        with self.capped_mac():
+            radio, _, _ = app.refresh_my_models(None, "Name")
+            _, mlx_detail = app.select_my_model(MLX.model_id)
+            _, text_detail = app.select_my_model(OLMO)
+
+        labels = dict((value, label) for label, value in radio["choices"])
+        self.assertIn("· fits", labels[MLX.model_id])
+        self.assertIn("inside the 30.0 GB ChatLab estimates free", mlx_detail)
+        self.assertNotIn("Metal on this machine", mlx_detail)
+        # The Transformers checkpoint is still held to the cap, in both places.
+        self.assertIn("· won't fit", labels[OLMO])
+        self.assertIn("more than the 16.0 GB Metal on this machine has", text_detail)
