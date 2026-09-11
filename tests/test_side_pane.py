@@ -2902,6 +2902,30 @@ class PageLayoutTests(unittest.TestCase):
         # the badge every couple of seconds.
         self.assertEqual(ticks[0].show_progress, "hidden")
 
+    def test_no_timer_fades_the_text_it_repaints(self):
+        # Gradio dims every output of a running event to a fifth of its
+        # opacity and brings it back when the event lands, and
+        # show_progress="hidden" only takes away the spinner, not the fade.
+        # Which components are dimmed is show_progress_on, and it defaults to
+        # all of them, so a handler on a timer fades its outputs in and out on
+        # every tick - four times a second, on the conversation pane, which
+        # reads as the status line and the token inspector blinking. An empty
+        # list dims nothing, which is what a repaint nobody asked for should do.
+        timers = {
+            block._id
+            for block in self.demo.blocks.values()
+            if isinstance(block, gr.Timer)
+        }
+        ticks = [
+            fn
+            for fn in self.demo.fns.values()
+            if any(target in timers for target, event in fn.targets if event == "tick")
+        ]
+        self.assertTrue(ticks)
+        for fn in ticks:
+            with self.subTest(handler=getattr(fn.fn, "__name__", fn)):
+                self.assertEqual(fn.show_progress_on, [])
+
     def test_the_badge_buttons_send_the_nav_to_the_models_page(self):
         # One on Images: its badge says a model it can use is missing, and
         # offers the way to load one. The Chat page's badge has the switcher
