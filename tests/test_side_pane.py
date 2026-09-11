@@ -424,6 +424,20 @@ class ManagerRemoveTests(unittest.TestCase):
         self.assertFalse(self.manager._lock.locked())
         self.assertFalse(self.manager._downloads_lock.locked())
 
+    def test_a_removal_notes_the_change_to_the_cache(self):
+        # What another tab's switcher reads to learn that the model it is
+        # still offering has gone; see cache_revision.
+        self.manager.remove(OLMO, Path(self.root.name))
+
+        self.assertEqual(self.manager.cache_revision, 1)
+
+    def test_a_refused_removal_leaves_the_cache_revision_alone(self):
+        self.manager.model_id = OLMO
+        with self.assertRaises(model_runtime.ModelLoaded):
+            self.manager.remove(OLMO, Path(self.root.name))
+
+        self.assertEqual(self.manager.cache_revision, 0)
+
     def test_the_loaded_model_is_refused(self):
         self.manager.model_id = OLMO
         with self.assertRaises(model_runtime.ModelLoaded):
@@ -558,6 +572,169 @@ class LoadingIdTests(unittest.TestCase):
         self.assertIsNone(manager.loading_id)
         manager.release_load(second)
         self.assertIsNone(manager.loading_id, "releasing twice is harmless")
+
+    def test_an_exclusive_claim_is_refused_while_another_load_stands(self):
+        # For the callers whose promise is "one load at a time": reading
+        # loading_id and then claiming is two steps, and a streaming handler
+        # yields between them.
+        manager = ModelManager()
+
+        claimed, held = manager.claim_exclusive_load(" allenai/Olmo-3-7B-Think ")
+
+        self.assertIsNone(held)
+        checked_id, claim = claimed
+        self.assertEqual(checked_id, OLMO)
+        self.assertEqual(
+            manager.claim_exclusive_load("org/other"),
+            (None, model_runtime.LOADING),
+        )
+        self.assertEqual(
+            manager.claim_exclusive_load(OLMO),
+            (None, model_runtime.LOADING),
+            "not even the same one",
+        )
+        manager.release_load(claim)
+        self.assertIsNotNone(manager.claim_exclusive_load("org/other").claim)
+
+    def test_an_exclusive_claim_is_refused_while_a_load_reads_weights(self):
+        manager = ModelManager()
+        with manager._reading_weights(OLMO):
+            self.assertEqual(
+                manager.claim_exclusive_load("org/other"),
+                (None, model_runtime.LOADING),
+            )
+
+        self.assertIsNotNone(manager.claim_exclusive_load("org/other").claim)
+
+    def test_an_exclusive_claim_is_refused_while_a_reply_is_running(self):
+        # The other half of the switcher's promise. A load admitted beside a
+        # generation does not run beside it - it waits on the model lock and
+        # then unloads the model that was producing the tokens.
+        manager = ModelManager()
+        self.assertTrue(manager.reserve_generation())
+
+        self.assertEqual(
+            manager.claim_exclusive_load(OLMO), (None, model_runtime.GENERATING)
+        )
+
+        manager.release_generation()
+        self.assertIsNotNone(manager.claim_exclusive_load(OLMO).claim)
+
+    def test_a_generation_is_refused_while_a_load_is_claimed(self):
+        # The mirror image, and the reason the switcher can stop asking
+        # whether anything is generating: a reply that started after the
+        # load was claimed would wait out the load and answer from whatever
+        # it brought in.
+        manager = ModelManager()
+        _checked_id, claim = manager.claim_exclusive_load(OLMO).claim
+
+        self.assertFalse(manager.reserve_generation())
+
+        manager.release_load(claim)
+        self.assertTrue(manager.reserve_generation())
+        manager.release_generation()
+
+    def test_a_generation_is_refused_while_an_ordinary_load_is_claimed(self):
+        # Not only the exclusive ones: the Models page's buttons claim
+        # through reserve_load, and a reply must not slip past those either.
+        manager = ModelManager()
+        _checked_id, claim = manager.reserve_load(OLMO)
+
+        self.assertFalse(manager.reserve_generation())
+
+        manager.release_load(claim)
+        self.assertTrue(manager.reserve_generation())
+        manager.release_generation()
+
+    def test_a_generation_is_refused_while_a_load_reads_weights(self):
+        manager = ModelManager()
+        with manager._reading_weights(OLMO):
+            self.assertFalse(manager.reserve_generation())
+
+        self.assertTrue(manager.reserve_generation())
+        manager.release_generation()
+
+    def test_a_refused_claim_names_what_has_the_model(self):
+        # The refusal and the reason are decided in one step, because every
+        # caller that turns a refusal into words - the API, the batch, Score
+        # text, Inspect layers, the image page, an extension - would
+        # otherwise read a load that had ended in between and say the wrong
+        # one of "a reply is running" and "a model is loading".
+        manager = ModelManager()
+        _checked_id, claim = manager.reserve_load(OLMO)
+
+        self.assertEqual(manager.claim_generation(), model_runtime.LOADING)
+        self.assertEqual(manager.occupant, model_runtime.LOADING)
+
+        manager.release_load(claim)
+        self.assertIsNone(manager.claim_generation(), "the slot was free")
+        self.assertEqual(manager.occupant, model_runtime.GENERATING)
+        self.assertEqual(manager.claim_generation(), model_runtime.GENERATING)
+        manager.release_generation()
+        self.assertIsNone(manager.occupant)
+
+    def test_a_load_reading_weights_is_named_as_a_load(self):
+        manager = ModelManager()
+        with manager._reading_weights(OLMO):
+            self.assertEqual(manager.claim_generation(), model_runtime.LOADING)
+            self.assertEqual(manager.occupant, model_runtime.LOADING)
+
+    def test_a_refused_claim_does_not_take_the_slot(self):
+        # Naming the reason must not leave the slot taken on the way out: a
+        # non-blocking acquire that is never released wedges the chat page.
+        manager = ModelManager()
+        _checked_id, claim = manager.reserve_load(OLMO)
+
+        self.assertEqual(manager.claim_generation(), model_runtime.LOADING)
+
+        manager.release_load(claim)
+        self.assertFalse(manager.busy)
+        self.assertTrue(manager.reserve_generation())
+        manager.release_generation()
+
+    def test_a_refused_generation_does_not_take_the_slot(self):
+        # A non-blocking acquire that is never reached cannot be released,
+        # and a slot left taken would wedge the chat page for good.
+        manager = ModelManager()
+        _checked_id, claim = manager.reserve_load(OLMO)
+
+        self.assertFalse(manager.reserve_generation())
+
+        self.assertFalse(manager.busy)
+        manager.release_load(claim)
+
+    def test_only_one_of_a_crowd_of_loads_and_replies_is_admitted(self):
+        # Every path a reader can start work on the model by, raced against
+        # each other on real threads: one winner, whichever it is, and the
+        # rest told no. The two reservations answer under the same lock, so
+        # there is no interleaving in which both say yes.
+        manager = ModelManager()
+        start = threading.Barrier(8)
+        won: list[str] = []
+        lock = threading.Lock()
+
+        def switch():
+            start.wait()
+            claimed = manager.claim_exclusive_load("org/one").claim
+            if claimed is not None:
+                with lock:
+                    won.append("load")
+
+        def reply():
+            start.wait()
+            if manager.reserve_generation():
+                with lock:
+                    won.append("reply")
+
+        threads = [
+            threading.Thread(target=switch if turn % 2 else reply) for turn in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len(won), 1, f"admitted {won}")
 
     def test_a_load_does_not_clear_a_claim_it_did_not_take(self):
         # One load finishing used to leave the other looking idle while it
@@ -1602,6 +1779,531 @@ class ModelSearchPaneTests(unittest.TestCase):
         )
 
 
+class ModelSwitchTests(unittest.TestCase):
+    """The chat page's switcher: the downloaded models a load would take now."""
+
+    GB = 1024**3
+    CONFIG = ModelFitTests.CONFIG
+    cache = ModelFitTests.cache
+
+    def setUp(self):
+        self.manager = ModelManager()
+        roomy(self)
+        root = self.cache({OLMO: 15 * self.GB, "org/huge": 200 * self.GB, "org/small": self.GB})
+        self.extra = [PARTIAL, UNSUPPORTED, PIPELINE]
+        originals = (runtime.MANAGER, models_page.list_cached_models, models_page.cache_root)
+        runtime.MANAGER = self.manager
+        models_page.list_cached_models = lambda: list_cached_models(root) + list(self.extra)
+        models_page.cache_root = lambda: root
+        self.addCleanup(
+            lambda: setattr(runtime, "MANAGER", originals[0])
+            or setattr(models_page, "list_cached_models", originals[1])
+            or setattr(models_page, "cache_root", originals[2])
+        )
+
+    def load(self, model_id=OLMO):
+        self.manager.model = object()
+        self.manager.tokenizer = object()
+        self.manager.model_id = model_id
+        self.manager.device_name = "Apple Metal (MPS)"
+
+    def painted(self, precision=None):
+        """A draw of the switcher, without the stamp beside it."""
+
+        update, stamp = app.refresh_model_switch(precision)
+        self.assertEqual(stamp.revision, self.manager.cache_revision)
+        return update
+
+    def stamp(self, precision=None):
+        """The stamp a tab holds after a draw of the switcher."""
+
+        _update, stamp = app.refresh_model_switch(precision)
+        return stamp
+
+    def aged(self, stamp):
+        """The same stamp, with its fit reading dated past SWITCH_FIT_SECONDS.
+
+        Which is the tick on which the timer reads the machine's memory again
+        rather than skipping on the two attribute checks alone.
+        """
+
+        return stamp._replace(checked=stamp.checked - app.SWITCH_FIT_SECONDS - 1)
+
+    def test_only_whole_supported_text_models_that_fit_are_offered(self):
+        # The partial download, the CTranslate2 export, the image pipeline
+        # and the 200 GB model are all left out: a pick is a load, and each
+        # of those loads would be refused.
+        self.assertEqual(
+            sorted(app.switch_choices()),
+            [(OLMO, OLMO), ("org/small", "org/small")],
+        )
+
+    def test_an_mlx_conversion_is_offered_beside_the_transformers_models(self):
+        # It answers on the Chat page like any other language model, so the
+        # one control for choosing which model is answering has to offer it.
+        self.extra.append(MLX)
+
+        self.assertIn((MLX.model_id, MLX.model_id), app.switch_choices())
+
+    def test_an_mlx_model_without_mlx_lm_is_left_out_as_unsupported(self):
+        # Off Apple silicon the cache scan marks the repo unsupported, and
+        # that filter is what keeps it out - not the kind.
+        self.extra.append(
+            cached(MLX.model_id, status=CacheStatus(cached_bytes=2_300_000_000, kind=""))
+        )
+
+        self.assertNotIn((MLX.model_id, MLX.model_id), app.switch_choices())
+
+    def test_an_mlx_model_in_memory_is_chosen_and_left_alone_by_the_timer(self):
+        # The switcher's value is whatever is in memory unless it is an image
+        # pipeline, so an MLX model missing from the choices would be a value
+        # the dropdown does not offer - and every tick would call the
+        # switcher stale and repaint it under the reader.
+        self.extra.append(MLX)
+        self.load(MLX.model_id)
+        self.manager.kind = model_runtime.MLX_KIND
+
+        update = self.painted()
+        self.assertEqual(update["value"], MLX.model_id)
+        self.assertIn(MLX.model_id, [value for _, value in update["choices"]])
+        self.assertEqual(
+            app.refresh_stale_model_switch(MLX.model_id, self.stamp()),
+            (gr.skip(), gr.skip()),
+        )
+
+    def test_nothing_loaded_leaves_nothing_chosen(self):
+        update = self.painted()
+
+        self.assertIsNone(update["value"])
+        self.assertTrue(update["visible"])
+        self.assertEqual(sorted(value for _, value in update["choices"]), [OLMO, "org/small"])
+
+    def test_the_model_in_memory_is_the_one_chosen(self):
+        self.load()
+
+        self.assertEqual(self.painted()["value"], OLMO)
+
+    def test_a_load_under_way_is_named_as_the_choice(self):
+        # As the badge does: memory is emptied for the whole of a load, and a
+        # switcher showing nothing would invite a second load on top.
+        self.manager.reserve_load("org/small")
+
+        self.assertEqual(self.painted()["value"], "org/small")
+
+    def test_a_precision_the_machine_cannot_hold_leaves_the_model_out(self):
+        # 15 GB of half-precision weights against 18 GB free is tight whole
+        # and comfortable at four bits, so the radio decides what is offered.
+        roomy(self, total_gb=24, available_gb=18)
+
+        self.assertNotIn((OLMO, OLMO), app.switch_choices("full"))
+        self.assertIn((OLMO, OLMO), app.switch_choices("4-bit"))
+
+    def test_the_model_in_memory_stays_offered_whether_or_not_it_fits(self):
+        roomy(self, total_gb=24, available_gb=18)
+        self.load()
+
+        self.assertIn((OLMO, OLMO), app.switch_choices("full"))
+
+    def test_an_empty_cache_hides_the_switcher(self):
+        models_page.list_cached_models = lambda: [PARTIAL, PIPELINE]
+
+        self.assertFalse(self.painted()["visible"])
+
+    def test_the_timer_leaves_a_switcher_that_agrees_with_memory_alone(self):
+        # A repaint would close the list under a reader who just opened it,
+        # and costs a cache scan; nothing is redrawn until the answer changes.
+        idle = (gr.skip(), gr.skip())
+        stamp = self.stamp()
+        self.assertEqual(app.refresh_stale_model_switch(None, stamp), idle)
+        self.load()
+        self.assertEqual(app.refresh_stale_model_switch(OLMO, stamp), idle)
+
+    def test_an_image_model_in_memory_leaves_an_empty_switcher_alone(self):
+        # An image model is never a choice, so the switcher rightly shows
+        # nothing; a timer that compared it with the model ID would rescan
+        # the cache every two seconds for as long as the pipeline stayed.
+        self.manager.pipeline = object()
+        self.manager.kind = IMAGE_KIND
+        self.manager.model_id = "org/pipe"
+        self.manager.device_name = "Apple Metal (MPS)"
+
+        self.assertEqual(
+            app.refresh_stale_model_switch(None, self.stamp()),
+            (gr.skip(), gr.skip()),
+        )
+        self.assertIsNone(self.painted()["value"])
+
+    def test_the_timer_repaints_a_switcher_another_tab_made_stale(self):
+        stamp = self.stamp()
+        self.load()
+
+        update, drawn = app.refresh_stale_model_switch(None, stamp)
+
+        self.assertEqual(update["value"], OLMO)
+        self.assertIn((OLMO, OLMO), update["choices"])
+        self.assertEqual(drawn.revision, self.manager.cache_revision)
+
+    def test_the_timer_repaints_after_another_tab_changed_the_cache(self):
+        # A download or a removal in another tab leaves the model in memory
+        # alone, so the value on show is still right and only the list is
+        # wrong: without the revision this tab would skip for ever and never
+        # offer the new model, or go on offering the deleted one.
+        self.load()
+        stamp = self.stamp()
+        self.assertEqual(
+            app.refresh_stale_model_switch(OLMO, stamp), (gr.skip(), gr.skip())
+        )
+
+        self.manager.note_cache_change()
+        update, drawn = app.refresh_stale_model_switch(OLMO, stamp)
+
+        self.assertIn((OLMO, OLMO), update["choices"])
+        self.assertEqual(drawn.revision, self.manager.cache_revision)
+        self.assertEqual(
+            app.refresh_stale_model_switch(OLMO, drawn),
+            (gr.skip(), gr.skip()),
+            "and settles again once this tab has caught up",
+        )
+
+    def test_a_tab_that_has_not_drawn_the_switcher_yet_is_painted(self):
+        # The State starts empty, which no stamp ever equals.
+        update, stamp = app.refresh_stale_model_switch(None, None)
+
+        self.assertTrue(update["visible"])
+        self.assertEqual(stamp.revision, self.manager.cache_revision)
+
+    def test_picking_the_model_already_in_memory_does_nothing(self):
+        self.load()
+
+        self.assertEqual(list(app.switch_model(OLMO)), [(gr.skip(), gr.skip())])
+        self.assertEqual(list(app.switch_model(None)), [(gr.skip(), gr.skip())])
+
+    def test_a_pick_during_a_reply_is_refused_and_put_back(self):
+        self.load()
+        self.assertTrue(self.manager.reserve_generation())
+        self.addCleanup(self.manager.release_generation)
+        with mock.patch.object(models_page, "alarm") as alarm:
+            frames = list(app.switch_model("org/small"))
+
+        self.assertEqual(frames, [(gr.update(value=OLMO), gr.skip())])
+        alarm.assert_called_once()
+        self.assertIn(app.SWITCH_BUSY, alarm.call_args.args)
+
+    def test_a_pick_during_another_load_is_refused_and_put_back(self):
+        self.manager.reserve_load(OLMO)
+        with mock.patch.object(models_page, "alarm") as alarm:
+            frames = list(app.switch_model("org/small"))
+
+        self.assertEqual(frames, [(gr.update(value=OLMO), gr.skip())])
+        self.assertIn(app.SWITCH_LOADING, alarm.call_args.args)
+
+    def test_a_pick_refused_by_a_load_that_then_ends_still_names_the_load(self):
+        # The refusal and its reason are one answer. Asking what has the
+        # model a second time, after the reservation came back empty, races
+        # the load finishing: nothing holds it by then, so the reader is
+        # told a response is running and to press a Stop button that is not
+        # on the page, over a switch that no reply ever touched.
+        self.load()
+        _checked_id, claim = self.manager.reserve_load(OLMO)
+        real = self.manager.claim_exclusive_load
+
+        def then_the_load_ends(model_id):
+            answer = real(model_id)
+            self.manager.release_load(claim)
+            return answer
+
+        with mock.patch.object(
+            self.manager, "claim_exclusive_load", then_the_load_ends
+        ), mock.patch.object(models_page, "alarm") as alarm:
+            frames = list(app.switch_model("org/small"))
+
+        self.assertIsNone(self.manager.occupant, "the load ended in between")
+        self.assertEqual(frames, [(gr.update(value=OLMO), gr.skip())])
+        self.assertIn(app.SWITCH_LOADING, alarm.call_args.args)
+        self.assertNotIn(app.SWITCH_BUSY, alarm.call_args.args)
+
+    def test_a_load_refused_by_a_load_that_then_ends_still_names_the_load(self):
+        # The same race on the Models page's own card, which is worded from
+        # the same answer.
+        _checked_id, claim = self.manager.reserve_load(OLMO)
+        real = self.manager.claim_exclusive_load
+
+        def then_the_load_ends(model_id):
+            answer = real(model_id)
+            self.manager.release_load(claim)
+            return answer
+
+        with mock.patch.object(
+            self.manager, "claim_exclusive_load", then_the_load_ends
+        ):
+            frames = list(models_page.load_cached_model("org/small"))
+
+        self.assertIsNone(self.manager.occupant, "the load ended in between")
+        self.assertEqual(len(frames), 1, "refused before any other card")
+        self.assertIn(models_page.LOAD_WHILE_LOADING, frames[0])
+        self.assertNotIn(models_page.LOAD_WHILE_GENERATING, frames[0])
+
+    def test_a_pick_loads_from_the_cache_at_the_chosen_precision(self):
+        self.load()
+        cards = iter(["loading card", "ready card"])
+        with mock.patch.object(
+            models_page, "load_cached_model", side_effect=lambda *args: cards
+        ) as load:
+            frames = list(app.switch_model("org/small", "4-bit"))
+
+        # The claim it took is handed down rather than left to be taken
+        # again: load_cached_model claims the load itself for the Models
+        # page's buttons, and a second claim here would refuse this one.
+        load.assert_called_once_with("org/small", None, "4-bit", mock.ANY)
+        # The switcher itself is left to the rescan that follows; the cards
+        # go to the Models page, as Load cached's do.
+        self.assertEqual(frames, [(gr.skip(), "loading card"), (gr.skip(), "ready card")])
+        self.assertIsNone(self.manager.loading_id, "the claim is given back")
+
+    def test_a_pick_takes_the_load_before_it_yields_its_first_card(self):
+        # Two tabs picking at once must not both get through. The load claims
+        # nothing until stream_load, a cache scan and several cards later, and
+        # Gradio resumes a yielded handler only after the browser has the
+        # frame, so a check-then-load would leave a round-trip-wide window in
+        # which both picks find the manager idle and both fill memory in turn.
+        self.load()
+        during = {}
+
+        def cards(*args):
+            during["claimed"] = self.manager.loading_id
+            with mock.patch.object(models_page, "alarm") as alarm:
+                during["second"] = list(app.switch_model("org/small"))
+            during["told"] = alarm.call_args.args
+            yield "card"
+
+        with mock.patch.object(models_page, "load_cached_model", side_effect=cards):
+            frames = list(app.switch_model("org/small"))
+
+        self.assertEqual(during["claimed"], "org/small", "claimed before any card")
+        self.assertEqual(during["second"], [(gr.update(value=OLMO), gr.skip())])
+        self.assertIn(app.SWITCH_LOADING, during["told"])
+        self.assertEqual(frames, [(gr.skip(), "card")])
+        self.assertIsNone(self.manager.loading_id, "the claim is given back")
+
+    def test_a_pick_gives_the_load_back_when_the_cards_stop_early(self):
+        # "Not cached" and the other refusals return without loading; the
+        # claim must not outlive them, or the switcher jams for good.
+        self.load()
+
+        def refusal(*args):
+            yield "not cached card"
+
+        with mock.patch.object(models_page, "load_cached_model", side_effect=refusal):
+            list(app.switch_model("org/small"))
+
+        self.assertIsNone(self.manager.loading_id)
+
+    def test_a_pick_of_a_malformed_id_is_refused_with_a_card(self):
+        self.load()
+
+        frames = list(app.switch_model("nonsense"))
+
+        self.assertEqual(frames[0][0], gr.update(value=OLMO))
+        self.assertIn("Could not load cached model", frames[0][1])
+        self.assertIsNone(self.manager.loading_id)
+
+    def test_the_models_page_cannot_load_while_a_pick_holds_the_load(self):
+        # The claim the switcher takes has to turn away the other buttons,
+        # not only another pick: Load cached reaching stream_load beside it
+        # would fill memory twice over and leave whichever load finished
+        # last in it, which is not the one the reader chose.
+        self.load()
+        during = {}
+        real = models_page.load_cached_model
+
+        def cards(*_args):
+            during["frames"] = list(real("org/huge"))
+            yield "card"
+
+        with mock.patch.object(models_page, "load_cached_model", side_effect=cards):
+            list(app.switch_model("org/small"))
+
+        self.assertEqual(len(during["frames"]), 1, "refused before any other card")
+        self.assertIn("Cannot load now", during["frames"][0])
+        self.assertIn(models_page.LOAD_WHILE_LOADING, during["frames"][0])
+
+    def test_a_reply_cannot_start_while_a_pick_holds_the_load(self):
+        # The generation slot and the load claim used to be unrelated, so a
+        # reply starting after the switcher's busy check was admitted and
+        # then ran on whatever the switch had just loaded.
+        self.load()
+        during = {}
+
+        def cards(*_args):
+            during["reserved"] = self.manager.reserve_generation()
+            yield "card"
+
+        with mock.patch.object(models_page, "load_cached_model", side_effect=cards):
+            list(app.switch_model("org/small"))
+
+        self.assertFalse(during["reserved"], "a reply was admitted beside the load")
+        self.assertTrue(self.manager.reserve_generation(), "and can start after it")
+        self.manager.release_generation()
+
+    def test_a_model_being_redownloaded_is_not_offered(self):
+        # Redownload leaves the cache entry complete for the whole fetch, so
+        # nothing but active_downloads says the pick would be refused.
+        progress, reserved = self.manager.reserve_download("org/small")
+        self.assertTrue(reserved)
+
+        self.assertNotIn(("org/small", "org/small"), app.switch_choices())
+        self.assertIn((OLMO, OLMO), app.switch_choices())
+
+        self.manager.release_download("org/small", progress)
+        self.assertIn(("org/small", "org/small"), app.switch_choices())
+
+    def test_the_model_in_memory_stays_offered_while_it_is_redownloaded(self):
+        # It is what the switcher has to show as chosen, and picking it is a
+        # no-op; dropping it would blank the dropdown instead.
+        self.load("org/small")
+        self.manager.reserve_download("org/small")
+
+        self.assertIn(("org/small", "org/small"), app.switch_choices())
+        self.assertEqual(self.painted()["value"], "org/small")
+
+    def test_the_timer_repaints_when_a_download_starts(self):
+        # Filtering a download out is only worth anything if the tab that
+        # did not start it hears about it: the revision moves at both ends
+        # of a download, not only when it finishes.
+        self.load()
+        stamp = self.stamp()
+        self.assertEqual(
+            app.refresh_stale_model_switch(OLMO, stamp), (gr.skip(), gr.skip())
+        )
+
+        progress, _reserved = self.manager.reserve_download("org/small")
+        update, drawn = app.refresh_stale_model_switch(OLMO, stamp)
+
+        self.assertNotIn(("org/small", "org/small"), update["choices"])
+        self.assertEqual(drawn.revision, self.manager.cache_revision)
+
+        self.manager.release_download("org/small", progress)
+        update, _drawn = app.refresh_stale_model_switch(OLMO, drawn)
+
+        self.assertIn(("org/small", "org/small"), update["choices"])
+
+    def test_memory_taken_by_another_process_withdraws_a_model(self):
+        # Fit is the one input to the list that nothing in ChatLab moves.
+        # Another process taking several gigabytes leaves the model in memory
+        # and the cache exactly as they were, so the two attribute checks
+        # skip for ever and the dropdown goes on offering a load that would
+        # now be refused - and a refused load has already unloaded the model
+        # the reader was talking to.
+        self.load("org/small")
+        stamp = self.stamp()
+        self.assertIn(OLMO, stamp.offered)
+        roomy(self, total_gb=48, available_gb=6)
+
+        self.assertEqual(
+            app.refresh_stale_model_switch("org/small", stamp),
+            (gr.skip(), gr.skip()),
+            "not on every tick: this reading costs a cache scan",
+        )
+        update, drawn = app.refresh_stale_model_switch("org/small", self.aged(stamp))
+
+        self.assertNotIn((OLMO, OLMO), update["choices"])
+        self.assertNotIn(OLMO, drawn.offered)
+
+    def test_memory_given_back_puts_a_model_on_offer_again(self):
+        roomy(self, total_gb=48, available_gb=6)
+        self.load("org/small")
+        stamp = self.stamp()
+        self.assertNotIn(OLMO, stamp.offered)
+        roomy(self, total_gb=48, available_gb=40)
+
+        update, drawn = app.refresh_stale_model_switch("org/small", self.aged(stamp))
+
+        self.assertIn((OLMO, OLMO), update["choices"])
+        self.assertIn(OLMO, drawn.offered)
+
+    def test_a_re_read_that_says_the_same_thing_leaves_the_list_alone(self):
+        # The beat is how often the fit is read, not how often the dropdown
+        # is redrawn: a list that comes out the same is left exactly as it
+        # is, open or closed, and only its stamp moves on.
+        self.load()
+        stamp = self.aged(self.stamp())
+
+        update, drawn = app.refresh_stale_model_switch(OLMO, stamp)
+
+        self.assertEqual(update, gr.skip())
+        self.assertEqual(drawn.offered, stamp.offered)
+        self.assertGreater(drawn.checked, stamp.checked)
+        self.assertEqual(
+            app.refresh_stale_model_switch(OLMO, drawn),
+            (gr.skip(), gr.skip()),
+            "and the next tick is two attribute reads again",
+        )
+
+    def test_a_switch_that_comes_to_nothing_is_announced_to_the_reader(self):
+        # The load's cards go to the Models page, which is not the page the
+        # pick was made on. Without a toast the reader watching the chat page
+        # sees the badge fall back to "No model loaded" and nothing anywhere
+        # saying why.
+        self.load()
+        card = models_page.status_card(
+            "Not cached", "Nothing for `org/small` is in the cache.", "error"
+        )
+
+        with mock.patch.object(
+            models_page, "load_cached_model", side_effect=lambda *args: iter([card])
+        ):
+            with mock.patch.object(models_page, "alarm") as alarm:
+                frames = list(app.switch_model("org/small"))
+
+        self.assertEqual(frames, [(gr.skip(), card)])
+        alarm.assert_called_once_with(
+            "Not cached", "Nothing for `org/small` is in the cache."
+        )
+
+    def test_a_model_removed_between_the_draw_and_the_pick_says_so(self):
+        # The race the filter cannot close, end to end: the list is drawn,
+        # the model goes, and the pick lands on a cache without it.
+        self.load()
+
+        with mock.patch.object(models_page, "alarm") as alarm:
+            frames = list(app.switch_model("org/gone"))
+
+        self.assertIn("Not cached", frames[-1][1])
+        alarm.assert_called_once()
+        self.assertEqual(alarm.call_args.args[0], "Not cached")
+        self.assertIsNone(self.manager.loading_id, "the claim is still given back")
+
+    def test_a_failure_that_has_already_spoken_is_not_told_twice(self):
+        # failure_card raises its own toast, so the switcher covers only the
+        # endings that never wrote anything but a card.
+        self.load()
+
+        with mock.patch.object(gr, "Warning") as warning:
+            card = models_page.failure_card(
+                "Could not load cached model", "It did not fit."
+            )
+            with mock.patch.object(
+                models_page, "load_cached_model", side_effect=lambda *args: iter([card])
+            ):
+                list(app.switch_model("org/small"))
+
+        warning.assert_called_once()
+
+    def test_a_switch_that_works_says_nothing_extra(self):
+        self.load()
+        card = models_page.status_card(
+            "Model ready", "`org/small` is loaded on **CPU**.", "success"
+        )
+
+        with mock.patch.object(
+            models_page, "load_cached_model", side_effect=lambda *args: iter([card])
+        ):
+            with mock.patch.object(models_page, "alarm") as alarm:
+                list(app.switch_model("org/small"))
+
+        alarm.assert_not_called()
+
+
 class ModelBadgeTests(unittest.TestCase):
     """The chat page's badge: the model in memory, or the lack of one."""
 
@@ -1619,21 +2321,19 @@ class ModelBadgeTests(unittest.TestCase):
 
     def test_a_loaded_model_is_named_with_its_device(self):
         self.load()
-        badge, offer, button = app.refresh_model_badge()
+        badge, offer = app.refresh_model_badge()
 
         self.assertIn('data-state="ready"', badge)
         self.assertIn(OLMO, badge)
         self.assertIn("Apple Metal (MPS)", badge)
         # Nothing to go to the Models page for, and nothing to offer.
-        self.assertFalse(button["visible"])
         self.assertFalse(offer["visible"])
 
     def test_no_model_says_so_and_offers_the_way_to_the_models_page(self):
-        badge, offer, button = app.refresh_model_badge()
+        badge, offer = app.refresh_model_badge()
 
         self.assertIn('data-state="empty"', badge)
         self.assertIn(app.NO_MODEL_BADGE, badge)
-        self.assertTrue(button["visible"])
         self.assertTrue(offer["visible"])
 
     def test_downloads_leave_the_setup_links_available(self):
@@ -1641,9 +2341,8 @@ class ModelBadgeTests(unittest.TestCase):
         for model_id in (settings.DEFAULT_MODEL_ID, "org/something-else"):
             with self.subTest(model_id=model_id):
                 self.manager.active_downloads[model_id] = object()
-                _badge, offer, button = app.refresh_model_badge()
+                _badge, offer = app.refresh_model_badge()
                 self.assertTrue(offer["visible"])
-                self.assertTrue(button["visible"])
                 self.assertNotIn("interactive", offer)
 
     def test_a_download_alone_does_not_claim_a_model_is_coming(self):
@@ -1652,7 +2351,7 @@ class ModelBadgeTests(unittest.TestCase):
         # a model that never arrives and then fall back to "No model loaded".
         self.manager.active_downloads[settings.DEFAULT_MODEL_ID] = object()
 
-        badge, _offer, _button = app.refresh_model_badge()
+        badge, _offer = app.refresh_model_badge()
 
         self.assertIn('data-state="empty"', badge)
         self.assertIn(app.NO_MODEL_BADGE, badge)
@@ -1662,11 +2361,10 @@ class ModelBadgeTests(unittest.TestCase):
         # loading_id and reports the minutes in between as a load.
         self.manager.reserve_load(OLMO)
 
-        badge, offer, button = app.refresh_model_badge()
+        badge, offer = app.refresh_model_badge()
 
         self.assertIn('data-state="loading"', badge)
         self.assertIn(f"Loading {OLMO}", badge)
-        self.assertFalse(button["visible"])
         self.assertFalse(offer["visible"])
 
     def test_a_second_load_finishing_leaves_the_first_one_showing(self):
@@ -1677,11 +2375,10 @@ class ModelBadgeTests(unittest.TestCase):
         _second_id, second = self.manager.reserve_load("org/second")
         self.manager.release_load(second)
 
-        badge, offer, button = app.refresh_model_badge()
+        badge, offer = app.refresh_model_badge()
 
         self.assertIn('data-state="loading"', badge)
         self.assertIn(f"Loading {OLMO}", badge)
-        self.assertFalse(button["visible"])
         self.assertFalse(offer["visible"])
 
     def test_a_load_waiting_its_turn_leaves_the_answering_model_named(self):
@@ -1692,12 +2389,11 @@ class ModelBadgeTests(unittest.TestCase):
         self.load()
         self.manager.reserve_load("org/second")
 
-        badge, offer, button = app.refresh_model_badge()
+        badge, offer = app.refresh_model_badge()
 
         self.assertIn('data-state="ready"', badge)
         self.assertIn(OLMO, badge)
         self.assertNotIn("Loading", badge)
-        self.assertFalse(button["visible"])
 
     def test_a_load_that_has_emptied_memory_names_the_model_coming_in(self):
         # Once the queued load wins the lock it unloads first, and from then
@@ -1709,11 +2405,10 @@ class ModelBadgeTests(unittest.TestCase):
         self.manager.model_id = None
         self.manager.device_name = None
 
-        badge, offer, button = app.refresh_model_badge()
+        badge, offer = app.refresh_model_badge()
 
         self.assertIn('data-state="loading"', badge)
         self.assertIn("Loading org/second", badge)
-        self.assertFalse(button["visible"])
 
     def test_the_model_id_is_escaped(self):
         self.load()
@@ -1733,7 +2428,7 @@ class ModelBadgeTests(unittest.TestCase):
         # a second model on top of the one filling the machine.
         self.load_pipeline()
 
-        chat, offer, button = app.refresh_model_badge()
+        chat, offer = app.refresh_model_badge()
         images, image_button = app.refresh_image_badge()
 
         self.assertIn('data-state="ready"', images)
@@ -1745,7 +2440,6 @@ class ModelBadgeTests(unittest.TestCase):
         self.assertIn("image model, not used here", chat)
         # From the Chat page there is still a model to go and load.
         self.assertTrue(offer["visible"])
-        self.assertTrue(button["visible"])
 
     def test_a_text_model_is_the_wrong_kind_on_the_images_page(self):
         self.load()
@@ -2013,6 +2707,23 @@ class PageLayoutTests(unittest.TestCase):
             if getattr(fn.fn, "__name__", None) == name
         ]
 
+    def follows(self, listener, name) -> bool:
+        """Whether a handler called ``name`` runs, sooner or later, after ``listener``."""
+
+        after: dict = {}
+        for dependency in self.demo.config["dependencies"]:
+            after.setdefault(dependency["trigger_after"], []).append(dependency["id"])
+        pending, seen = [listener._id], set()
+        while pending:
+            for dependency_id in after.get(pending.pop(), []):
+                if dependency_id in seen:
+                    continue
+                seen.add(dependency_id)
+                if getattr(self.demo.fns[dependency_id].fn, "__name__", None) == name:
+                    return True
+                pending.append(dependency_id)
+        return False
+
     def cancelled_by(self, trigger) -> set:
         """Event indices cancelled by anything bound to ``trigger``.
 
@@ -2030,9 +2741,10 @@ class PageLayoutTests(unittest.TestCase):
     def test_the_badge_sits_above_the_chat_page_tabs(self):
         chat_page = self.by_id("chat-page")
         badge = self.by_id("model-badge")
-        button = self.by_id("load-model")
+        switch = self.by_id("model-switch")
         self.assertTrue(self.within(badge, chat_page))
-        self.assertTrue(self.within(button, chat_page))
+        self.assertTrue(self.within(switch, chat_page))
+        self.assertIsInstance(switch, gr.Dropdown)
         # Above the tabs, so Score text names the model as well as Chat.
         tabs = next(
             block for block in self.demo.blocks.values() if isinstance(block, gr.Tabs)
@@ -2044,10 +2756,10 @@ class PageLayoutTests(unittest.TestCase):
         # the page load draws the badge first, switching pages catches a load
         # that started while the chat page was out of sight, and the timer
         # catches one another tab started.
-        # The three that change memory, the download that only changes what
-        # is on disk, redownload and a confirmed removal, plus the page
-        # load, the nav and the timer.
-        self.assertEqual(len(self.listeners("refresh_model_badge")), 9)
+        # The four that change memory (the switcher included), the download
+        # that only changes what is on disk, redownload and a confirmed
+        # removal, plus the page load, the nav and the timer.
+        self.assertEqual(len(self.listeners("refresh_model_badge")), 10)
 
     def test_the_timer_also_un_sticks_the_scored_token_count(self):
         # A count asked for during a reply gives up and says so, and that
@@ -2103,8 +2815,9 @@ class PageLayoutTests(unittest.TestCase):
         self.assertEqual(ticks[0].show_progress, "hidden")
 
     def test_the_badge_buttons_send_the_nav_to_the_models_page(self):
-        # One on the Chat page and one on Images: each page's badge says a
-        # model it can use is missing, and each offers the way to load one.
+        # One on Images: its badge says a model it can use is missing, and
+        # offers the way to load one. The Chat page's badge has the switcher
+        # and the default-model button instead.
         panes = [
             self.by_id("nav"),
             self.by_id("conversation-pane"),
@@ -2113,7 +2826,7 @@ class PageLayoutTests(unittest.TestCase):
             self.by_id("models-page"),
             self.by_id("settings-page"),
         ]
-        buttons = {"load-model", "image-load-model"}
+        buttons = {"image-load-model"}
         found = set()
         for listener in self.listeners("go_to_models"):
             ((block_id, event),) = listener.targets
@@ -2134,9 +2847,9 @@ class PageLayoutTests(unittest.TestCase):
     def test_every_model_change_rescans_the_cache(self):
         # Download, download-and-load, load cached, unload, redownload,
         # confirmed removal, the refresh button, a new sort order, a new
-        # weight precision, and the page load each rescan. Selecting the
-        # default only navigates.
-        self.assertEqual(len(self.listeners("refresh_my_models")), 10)
+        # weight precision, the page load and a pick in the chat page's
+        # switcher each rescan. Selecting the default only navigates.
+        self.assertEqual(len(self.listeners("refresh_my_models")), 11)
 
     def test_model_actions_follow_selections_and_cache_refreshes(self):
         listeners = self.listeners("refresh_model_actions")
@@ -2157,9 +2870,10 @@ class PageLayoutTests(unittest.TestCase):
             if dependency["id"] in {fn._id for fn in listeners}
             and dependency["trigger_after"] in refresh_ids
         ]
-        # All six mutations, manual refresh, and startup refresh the controls
-        # even when the radio's selected value stays the same.
-        self.assertEqual(len(chained), 8)
+        # All seven mutations (the switcher included), manual refresh, and
+        # startup refresh the controls even when the radio's selected value
+        # stays the same.
+        self.assertEqual(len(chained), 9)
 
     def test_every_load_reads_the_my_models_selection(self):
         # The ID box lags a row selection by a server round trip, so a button
@@ -2361,12 +3075,56 @@ class PageLayoutTests(unittest.TestCase):
         for listener in listeners:
             self.assertEqual(
                 listener.outputs,
-                [
-                    self.by_id("model-badge"),
-                    self.by_id("default-model"),
-                    self.by_id("load-model"),
-                ],
+                [self.by_id("model-badge"), self.by_id("default-model")],
             )
+
+    def test_the_switcher_is_drawn_when_the_badge_is_and_after_every_rescan(self):
+        # Arriving, opening the page, and the timer - which asks first whether
+        # the switcher still names what is in memory, so an open list is not
+        # closed under the reader every couple of seconds.
+        switch = self.by_id("model-switch")
+        precision = self.labelled("Weight precision")
+        listeners = self.listeners("refresh_model_switch")
+        triggers = {listener.targets[0] for listener in listeners}
+        self.assertIn((self.by_id("nav")._id, "change"), triggers)
+        self.assertIn((self.demo._id, "load"), triggers)
+        # Every draw hands back the cache revision it read, kept per tab, so
+        # the timer can tell an idle list from one another tab left stale.
+        revision = listeners[0].outputs[1]
+        self.assertIsInstance(revision, gr.State)
+        for listener in listeners:
+            self.assertEqual(listener.inputs, [precision])
+            self.assertEqual(listener.outputs, [switch, revision])
+        # Every load, unload and download repaints it: the cache and memory
+        # are what it offers.
+        for name in ("load_cached_model", "download_and_load_model", "unload_model",
+                     "download_model", "switch_model"):
+            with self.subTest(handler=name):
+                action = self.listeners(name)[0]
+                self.assertTrue(self.follows(action, "refresh_model_switch"))
+
+        timers = [
+            block for block in self.demo.blocks.values() if isinstance(block, gr.Timer)
+        ]
+        ticks = self.listeners("refresh_stale_model_switch")
+        self.assertEqual(len(ticks), 1)
+        self.assertEqual(ticks[0].targets, [(timers[0]._id, "tick")])
+        self.assertEqual(ticks[0].inputs, [switch, revision, precision])
+        self.assertEqual(ticks[0].outputs, [switch, revision])
+        self.assertEqual(ticks[0].show_progress, "hidden")
+
+    def test_a_pick_in_the_switcher_loads_at_the_chosen_precision(self):
+        switch = self.by_id("model-switch")
+        listeners = self.listeners("switch_model")
+        self.assertEqual(len(listeners), 1)
+        self.assertEqual(listeners[0].targets, [(switch._id, "input")])
+        self.assertEqual(listeners[0].inputs, [switch, self.labelled("Weight precision")])
+        self.assertEqual(listeners[0].outputs, [switch, self.by_id("model-status")])
+        # And is followed by the same rescan as Load cached: the badge, the
+        # token count and the hardware panel all change with the model.
+        for name in ("refresh_my_models", "refresh_model_badge", "refresh_hardware"):
+            with self.subTest(handler=name):
+                self.assertTrue(self.follows(listeners[0], name))
 
     def test_the_images_badge_is_refreshed_on_the_same_three_occasions(self):
         # Arriving at the page, opening it, and the timer that tells a tab

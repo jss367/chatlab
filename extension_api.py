@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from model_runtime import LOADING
 from trace_export import write_private_text
 
 API_VERSION = 1
@@ -26,13 +27,28 @@ class ModelService:
         return self._provider().loaded
 
     def open_session(self):
-        """Reserve the shared model until close; fail rather than queue behind Chat."""
+        """Reserve the shared model until close; fail rather than queue behind Chat.
+
+        A load turns the session away as a running reply does, and says so in
+        its own words: there is no response to wait for while weights are
+        being read, and the model the extension checked for is on its way out.
+
+        The slot is claimed before memory is looked at, because a load empties
+        it before it reads the new weights: an extension asking in that window
+        would be told to load a model on the Models page, which is the page
+        already loading one. The claim is also what keeps the answer good -
+        no load can start while it is held, so the model the session pins
+        cannot be unloaded between the check and the first token.
+        """
         manager = self._provider()
-        if not manager.loaded:
-            raise ValueError("Load a model on the Models page before running an extension.")
-        if not manager.reserve_generation():
+        held = manager.claim_generation()
+        if held == LOADING:
+            raise ValueError("A model is loading. Wait for it to finish, then try again.")
+        if held is not None:
             raise ValueError("The model is busy in another view. Wait for that response to finish.")
         try:
+            if not manager.loaded:
+                raise ValueError("Load a model on the Models page before running an extension.")
             return GenerationSession(manager)
         except BaseException:
             manager.release_generation()

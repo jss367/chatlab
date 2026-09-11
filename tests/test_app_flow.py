@@ -5,6 +5,7 @@ import os
 import stat
 import unittest
 from dataclasses import replace
+from unittest import mock
 from pathlib import Path
 
 import gradio as gr
@@ -23,7 +24,7 @@ from conversation import (
     put_branch,
     put_branch_sampling,
 )
-from model_runtime import GenerationUpdate, ModelChanged, TokenInsight
+from model_runtime import GENERATING, GenerationUpdate, ModelChanged, TokenInsight
 from token_metrics import DEFAULT_COLOR_SCALE
 
 import library
@@ -391,9 +392,11 @@ class ChatFlowTests(unittest.TestCase):
 
             loaded = True
             busy = False
+            loading_id = None
+            occupant = GENERATING
 
-            def reserve_generation(self):
-                return False
+            def claim_generation(self):
+                return GENERATING
 
             def release_generation(self):  # pragma: no cover - never reached
                 raise AssertionError("released a slot it never held")
@@ -480,11 +483,13 @@ class ChatFlowTests(unittest.TestCase):
         class Exploding:
             loaded = True
             busy = False
+            loading_id = None
+            occupant = None
             model_id = "fake/model"
             load_id = "fake/model#1"
 
-            def reserve_generation(self):
-                return True
+            def claim_generation(self):
+                return None
 
             def release_generation(self):
                 pass
@@ -1373,6 +1378,100 @@ class BusyRefusalTests(unittest.TestCase):
     def test_an_edit_of_a_missing_message_is_refused(self):
         event = gr.EditData(None, {"index": 99, "previous_value": "gone", "value": "x"})
         self.assert_refused(app.edit_message(event, "", self.turns(), *SETTINGS))
+
+
+class LoadRefusalTests(unittest.TestCase):
+    """A load has the model too, and a reply must not be admitted beside one.
+
+    The generation slot and the load claim used to be unrelated things, so a
+    Send arriving while the chat page's switcher - or either of the Models
+    page's buttons - was loading was accepted. It did not run beside the
+    load: it waited on the model lock and then answered from whatever the
+    load had brought in, under a badge naming the model the reader had
+    asked the question of.
+    """
+
+    def setUp(self):
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
+        _checked_id, self.claim = runtime.MANAGER.claim_exclusive_load("org/other").claim
+        self.addCleanup(runtime.MANAGER.release_load, self.claim)
+
+    def turns(self):
+        return [make_turn("user", "old q"), make_turn("assistant", "old a")]
+
+    def assert_refused(self, stream):
+        frames = list(stream)
+        self.assertEqual(len(frames), 1)
+        (frame,) = frames
+        self.assertEqual(frame[STATUS], app.LOADING_STATUS)
+        # As for a running generation: the two outputs that would carry the
+        # stale snapshot are skipped rather than republished.
+        self.assertEqual(frame[TURNS], gr.skip())
+        self.assertEqual(frame[CHATBOT], gr.skip())
+
+    def test_sending_while_a_model_loads_is_refused(self):
+        self.assert_refused(app.chat("new question", self.turns(), *SETTINGS))
+
+    def test_retrying_while_a_model_loads_is_refused(self):
+        self.assert_refused(app.retry_last("", self.turns(), *SETTINGS))
+
+    def test_regenerating_while_a_model_loads_is_refused(self):
+        self.assert_refused(app.regenerate_from(0, "", self.turns(), *SETTINGS))
+
+    def test_editing_while_a_model_loads_is_refused(self):
+        event = gr.EditData(
+            None, {"index": 1, "previous_value": "old a", "value": "fixed"}
+        )
+        self.assert_refused(app.edit_message(event, "", self.turns(), *SETTINGS))
+
+    def test_the_refusal_does_not_point_at_a_stop_button(self):
+        # There is no Stop for a load, so the generating wording would send
+        # the reader looking for a button that is not on the page.
+        self.assertNotIn("Stop", app.LOADING_STATUS)
+        self.assertIn("Stop", app.BUSY_STATUS)
+
+    def test_a_reply_is_admitted_again_once_the_load_ends(self):
+        runtime.MANAGER.release_load(self.claim)
+
+        frames = list(app.chat("new question", self.turns(), *SETTINGS))
+
+        self.assertGreater(len(frames), 1, "still refusing after the load")
+        self.assertNotEqual(frames[-1][STATUS], app.LOADING_STATUS)
+
+    def test_a_load_that_has_emptied_memory_is_still_named_as_a_load(self):
+        # The claim stands for the whole load, but the weights come out
+        # before the new ones go in, so for most of it nothing is loaded.
+        # These handlers cannot claim ahead of that check - generate_reply()
+        # claims further down and a claim here would refuse its own reply -
+        # so they read what is in memory first and ask what has the model
+        # only when it is empty. Read the other way round, the whole of the
+        # load answered "Download and load a model first."
+        with mock.patch.object(
+            type(runtime.MANAGER), "loaded", property(lambda self: False)
+        ):
+            self.assert_refused(app.chat("new question", self.turns(), *SETTINGS))
+            self.assert_refused(app.retry_last("", self.turns(), *SETTINGS))
+            self.assert_refused(
+                app.regenerate_from(0, "", self.turns(), *SETTINGS)
+            )
+            event = gr.EditData(
+                None, {"index": 0, "previous_value": "old q", "value": "new q"}
+            )
+            self.assert_refused(app.edit_message(event, "", self.turns(), *SETTINGS))
+
+    def test_an_empty_machine_still_says_to_load_a_model(self):
+        # The other side of that order: with no load claimed, an empty
+        # memory is what it looks like and the advice is the right answer.
+        runtime.MANAGER.release_load(self.claim)
+
+        with mock.patch.object(
+            type(runtime.MANAGER), "loaded", property(lambda self: False)
+        ):
+            frames = list(app.chat("new question", self.turns(), *SETTINGS))
+
+        self.assertEqual(frames[-1][STATUS], app.NO_MODEL_STATUS)
 
 
 class BusyFlagTests(unittest.TestCase):
@@ -2275,13 +2374,13 @@ class BranchFromTokenTests(unittest.TestCase):
 
         final = self.respond()[-1]
         manager = runtime.MANAGER
-        real = manager.reserve_generation
+        real = manager.claim_generation
 
         def replace_strips_first():
             app.new_metrics_generation()
             return real()
 
-        manager.reserve_generation = replace_strips_first
+        manager.claim_generation = replace_strips_first
         encodings = []
         self.record_encodings(encodings)
         frames = self.branch_text(final, "Hello")
@@ -3842,6 +3941,67 @@ class LayerInspectionTests(unittest.TestCase):
             runtime.MANAGER.release_generation()
         self.assertEqual(status, app.INSPECT_BUSY)
         self.assertEqual(self.calls, [])
+
+    def test_a_load_is_named_rather_than_a_response(self):
+        # A load turns the pass away as a reply does, and the strip being
+        # inspected belongs to the weights on their way out. Telling the
+        # reader to wait for a response points at nothing on the page.
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        _checked_id, claim = runtime.MANAGER.claim_exclusive_load("org/other").claim
+        try:
+            *_rest, status = self.inspect(
+                target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+            )
+        finally:
+            runtime.MANAGER.release_load(claim)
+        self.assertEqual(status, app.INSPECT_LOADING)
+        self.assertNotIn("response", app.INSPECT_LOADING)
+        self.assertEqual(self.calls, [])
+
+    def test_a_load_that_has_emptied_memory_is_still_named_as_a_load(self):
+        # The claim comes before the loaded check now, so the phase of a load
+        # in which memory stands empty is still answered as a load rather
+        # than with advice to go and load a model.
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        _checked_id, claim = runtime.MANAGER.claim_exclusive_load("org/other").claim
+        self.addCleanup(runtime.MANAGER.release_load, claim)
+        with mock.patch.object(
+            type(runtime.MANAGER), "loaded", property(lambda self: False)
+        ):
+            *_rest, status = self.inspect(
+                target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+            )
+
+        self.assertEqual(status, app.INSPECT_LOADING)
+        self.assertEqual(self.calls, [])
+
+    def test_a_pass_refused_by_an_empty_machine_gives_the_slot_back(self):
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        with mock.patch.object(
+            type(runtime.MANAGER), "loaded", property(lambda self: False)
+        ):
+            *_rest, status = self.inspect(
+                target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0
+            )
+
+        self.assertEqual(status, "Download and load a model first.")
+        self.assertFalse(runtime.MANAGER.busy, "the refusal kept the slot")
+
+    def test_a_strip_from_another_load_gives_the_slot_back(self):
+        # Every early exit between the claim and the pass has to, not only
+        # the one about an empty machine.
+        final = self.finished()
+        target = app.remember_inspect_target("response")(final[METRICS], select(0))
+        context = (*final[CONTEXT_IDS][:2], "other/model#9")
+        *_rest, status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], context, 0
+        )
+
+        self.assertEqual(status, app.INSPECT_MODEL_CHANGED)
+        self.assertFalse(runtime.MANAGER.busy, "the refusal kept the slot")
 
     def test_the_pass_holds_the_generation_slot_and_gives_it_back(self):
         final = self.finished()

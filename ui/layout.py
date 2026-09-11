@@ -110,13 +110,16 @@ from ui.models_page import (
     refresh_image_badge,
     refresh_model_actions,
     refresh_model_badge,
+    refresh_model_switch,
     refresh_my_models,
     refresh_search_results,
+    refresh_stale_model_switch,
     remove_my_model,
     search_models,
     select_default_model,
     select_my_model,
     select_search_result,
+    switch_model,
     unload_model,
 )
 from ui.panel import (
@@ -270,12 +273,26 @@ def build_app() -> gr.Blocks:
                         )
 
                         # The badge sits above the tabs, so both Chat and Score text
-                        # say which model would answer. Beside it, while none is
-                        # loaded, are links to set up the default or choose another
-                        # model on the Models page.
+                        # say which model would answer. Beside it is the switcher,
+                        # a dropdown of the downloaded models that would load now,
+                        # and, while none is loaded, a link to set up the default
+                        # on the Models page.
                         with gr.Row(elem_id="model-bar"):
                             model_badge_view = gr.HTML(
                                 loaded_model_badge(), elem_id="model-badge"
+                            )
+                            # Painted empty and filled by demo.load, as My Models
+                            # is: the choices need the cache scanned and the
+                            # machine's memory read, which is not for build time.
+                            model_switch = gr.Dropdown(
+                                choices=[],
+                                value=None,
+                                label="Switch model",
+                                show_label=False,
+                                container=False,
+                                visible=False,
+                                interactive=True,
+                                elem_id="model-switch",
                             )
                             default_model_button = gr.Button(
                                 "Set up the default model",
@@ -284,12 +301,15 @@ def build_app() -> gr.Blocks:
                                 visible=not runtime.MANAGER.loaded,
                                 elem_id="default-model",
                             )
-                            load_model_button = gr.Button(
-                                "Choose another",
-                                size="sm",
-                                visible=not runtime.MANAGER.loaded,
-                                elem_id="load-model",
-                            )
+
+                        # What the switcher above was last drawn from, per tab:
+                        # the cache revision, the models it came to, and when
+                        # their fit was read. The timer needs all three to tell
+                        # a list that is merely idle from one that another
+                        # tab's download or removal, or a change in the
+                        # machine's free memory, has left out of date; see
+                        # refresh_stale_model_switch.
+                        switch_stamp = gr.State(None)
 
                         # Nothing to see: the timer is what makes the badge tell every
                         # open tab about a load or unload, not just the one that asked
@@ -1152,9 +1172,23 @@ def build_app() -> gr.Blocks:
         # The badge is refreshed on the way to the chat page as well, so a
         # load started a moment ago shows as one in progress rather than as
         # the "no model" state the page was left in.
-        badge_outputs = [model_badge_view, default_model_button, load_model_button]
+        badge_outputs = [model_badge_view, default_model_button]
         nav.change(refresh_model_badge, None, badge_outputs)
         demo.load(refresh_model_badge, None, badge_outputs)
+        # The switcher is drawn on the same two occasions. Its choices cost a
+        # cache scan and a memory reading, so the timer only redraws it once
+        # what it shows, what is on disk, or what would now fit has moved; see
+        # refresh_stale_model_switch. Every draw hands back the stamp it read,
+        # which is how the next tick knows the difference.
+        switch_outputs = [model_switch, switch_stamp]
+        nav.change(refresh_model_switch, weight_precision, switch_outputs)
+        demo.load(refresh_model_switch, weight_precision, switch_outputs)
+        badge_timer.tick(
+            refresh_stale_model_switch,
+            [model_switch, switch_stamp, weight_precision],
+            switch_outputs,
+            show_progress="hidden",
+        )
         # And on a timer, so a tab that did not start the load hears about it
         # too. demo.load stays: it draws the badge at once rather than leaving
         # the value baked in when the page was built there for a tick.
@@ -1176,11 +1210,6 @@ def build_app() -> gr.Blocks:
             score_budget_outputs,
             show_progress="hidden",
             concurrency_id=SCORE_BUDGET_QUEUE,
-        )
-        load_model_button.click(
-            go_to_models,
-            None,
-            [nav, conversation_pane, chat_page, images_page, models_page, settings_page],
         )
         image_load_button.click(
             go_to_models,
@@ -1306,6 +1335,14 @@ def build_app() -> gr.Blocks:
 
             event = event.then(refresh_my_models, models_inputs, models_outputs)
             event = refresh_actions(event)
+            # What is on disk is what the switcher offers, so it follows every
+            # rescan, download-only included.
+            event = event.then(
+                refresh_model_switch,
+                weight_precision,
+                switch_outputs,
+                show_progress="hidden",
+            )
             if not reloads:
                 return event
             return (
@@ -1344,6 +1381,19 @@ def build_app() -> gr.Blocks:
             )
         )
         rescan(unload_button.click(unload_model, outputs=model_status))
+        # A pick in the chat page's switcher is a load from the cache, and is
+        # followed by the same rescan as the button. Its status goes to the
+        # Models page's card, where the switcher's own repaint would
+        # otherwise drop the progress the load is reporting. That page is not
+        # the one the reader is on, so switch_model also toasts an ending the
+        # card alone would have kept to itself; see announce_switch_outcome.
+        rescan(
+            model_switch.input(
+                switch_model,
+                [model_switch, weight_precision],
+                [model_switch, model_status],
+            )
+        )
         # A manual refresh and a new sort order reorder a list; neither
         # changes what is on disk or in memory, which is all the badge and the
         # count ask about.
@@ -1456,7 +1506,7 @@ def build_app() -> gr.Blocks:
             refresh_search_results,
             [search_results, search_results_state, weight_precision, fits_only],
             [search_results, search_detail],
-        )
+        ).then(refresh_model_switch, weight_precision, switch_outputs)
         enter_sends.change(set_message_box_keys, enter_sends, prompt)
 
         # The sampling accordion wears its own values.

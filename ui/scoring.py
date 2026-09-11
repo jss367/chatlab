@@ -5,6 +5,7 @@ from __future__ import annotations
 import gradio as gr
 
 import charts
+from model_runtime import LOADING
 from token_metrics import (
     DEFAULT_COLOR_SCALE,
     summarize,
@@ -25,6 +26,15 @@ from ui.panel import (
 
 
 SCORE_BUSY = "Wait for the response to finish before scoring text."
+# A load has the model instead, and it is not a response: a reader watching
+# for one to finish would be watching the wrong thing.
+SCORE_LOADING = "Wait for the model to finish loading before scoring text."
+
+
+def score_busy(held: str | None) -> str:
+    """The refusal for whatever ``held`` says has the model."""
+
+    return SCORE_LOADING if held == LOADING else SCORE_BUSY
 
 
 def score_text(
@@ -47,10 +57,6 @@ def score_text(
 
     skip = gr.skip()
     refused = (skip,) * 7
-    if not runtime.MANAGER.loaded:
-        yield refused + ("Download and load a model first.", skip, skip, skip)
-        return
-
     # A generation holds the model lock across every one of its yields, so
     # without the slot this pass would simply wait on it: the button would sit
     # dead for the length of the response and then fire, with nothing on screen
@@ -59,10 +65,22 @@ def score_text(
     # minting a stamp over the strips this is about to replace, which would
     # leave the scored tokens on screen refusing every click. inspect_layers()
     # takes the slot for both reasons.
-    if not runtime.MANAGER.reserve_generation():
-        yield refused + (SCORE_BUSY, skip, skip, skip)
+    #
+    # Claimed before memory is looked at, not after. A load unloads the old
+    # weights before it reads the new ones, so for the whole of that phase
+    # there is no model loaded and the check below would send the reader to
+    # the Models page to load one - which is where the load they are waiting
+    # for already is. The claim is the question that cannot go stale: it is
+    # refused while a load is claimed, and while it is held no load can
+    # start, so "loaded" read under it stays true until the slot goes back.
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        yield refused + (score_busy(held), skip, skip, skip)
         return
     try:
+        if not runtime.MANAGER.loaded:
+            yield refused + ("Download and load a model first.", skip, skip, skip)
+            return
         try:
             result = runtime.MANAGER.score_text(
                 text, context=context or "", use_chat_template=bool(use_chat_template)
@@ -118,6 +136,34 @@ SCORE_COUNT_UNKNOWN = (
 )
 
 
+# The other thing that takes the model away from a count, and the wording
+# above is false for it: there is no response to wait out.
+SCORE_COUNT_LOADING = (
+    "The token count comes back when the model has finished loading."
+)
+
+
+# Both of the messages that give up. The recovery below is driven from the
+# badge's timer and recognizes either.
+SCORE_COUNT_UNAVAILABLE = (SCORE_COUNT_UNKNOWN, SCORE_COUNT_LOADING)
+
+
+def score_count_unavailable() -> str:
+    """Why the count could not be had, in the reader's terms.
+
+    A count is refused rather than claimed - it never takes the generation
+    slot - so this reads what has the model rather than being handed it. A
+    label, never a guard: the worst a stale read can do is name the other
+    true-enough reason, and the timer asks again a second later.
+    """
+
+    return (
+        SCORE_COUNT_LOADING
+        if runtime.MANAGER.occupant == LOADING
+        else SCORE_COUNT_UNKNOWN
+    )
+
+
 # Every listener that writes the count shares this queue, and so runs one at a
 # time and in the order the requests were sent.
 #
@@ -159,7 +205,7 @@ def score_token_count(context: str, text: str, use_chat_template: bool):
         text, context=context or "", use_chat_template=bool(use_chat_template)
     )
     if counted is None:
-        return SCORE_COUNT_UNKNOWN, load_id
+        return score_count_unavailable(), load_id
     count, limit = counted
     if count > limit:
         return (
@@ -199,7 +245,7 @@ def recover_score_budget(
     refuse before any encoding happens.
     """
 
-    if shown != SCORE_COUNT_UNKNOWN and counted_load == runtime.MANAGER.load_id:
+    if shown not in SCORE_COUNT_UNAVAILABLE and counted_load == runtime.MANAGER.load_id:
         return gr.skip(), gr.skip()
     recovered, load_id = score_token_count(context, text, use_chat_template)
     if recovered == shown and load_id == counted_load:
