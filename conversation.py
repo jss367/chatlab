@@ -156,9 +156,34 @@ def make_turn(role: str, content: str, reasoning: str = "") -> dict:
 
 
 def copy_turns(turns: list[dict] | None) -> list[dict]:
-    """Snapshot turns so a streaming update cannot mutate stored state."""
+    """Snapshot turns so a streaming update cannot mutate stored state.
 
-    return copy.deepcopy(turns or [])
+    Deep, because a turn carries nested values - a steering entry above all -
+    that a shallow copy would leave two copies sharing.
+
+    The measurements are the exception. The list itself is copied, so a turn
+    can gain or lose tokens without disturbing a copy of it, but the metrics
+    inside are shared rather than duplicated. Each is written once by
+    ``token_metrics.build_metric`` and never edited afterwards, and each holds
+    a dozen numbers plus its eight alternatives. Copying them here would mean
+    copying every measurement in the conversation on every streaming frame,
+    for a cost that grows with the square of the reply's length: about 1.6
+    seconds of copying across a 500-token reply, and twenty-five across a
+    2,000-token one.
+    """
+
+    copied: list[dict] = []
+    for turn in turns or []:
+        tokens = turn.get("tokens")
+        if tokens is None:
+            copied.append(copy.deepcopy(turn))
+            continue
+        entry = copy.deepcopy(
+            {key: value for key, value in turn.items() if key != "tokens"}
+        )
+        entry["tokens"] = list(tokens)
+        copied.append(entry)
+    return copied
 
 
 def display_messages(

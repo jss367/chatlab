@@ -12,6 +12,7 @@ from conversation import (
     branch_stamp,
     branch_title,
     copy_forks,
+    copy_turns,
     describe_branch,
     display_messages,
     drop_branch,
@@ -229,6 +230,49 @@ class ModelMessagesTests(unittest.TestCase):
         messages = model_messages(turns, include_reasoning=True)
         self.assertEqual([m["role"] for m in messages], ["user", "assistant"])
         self.assertIn("Thinking…", messages[1]["content"])
+
+
+class CopyTurnsTests(unittest.TestCase):
+    """What a snapshot of the turns duplicates, and what it deliberately shares."""
+
+    def reply(self):
+        return {
+            "role": "assistant",
+            "content": "hi",
+            "reasoning": "",
+            "steering": {"layer": 4, "scale": 0.5},
+            "tokens": [{"token_id": 1, "top_candidates": [{"token_id": 2}]}],
+            "load_id": "load-1",
+        }
+
+    def test_a_nested_value_is_copied(self):
+        turns = [self.reply()]
+        copied = copy_turns(turns)
+        copied[0]["steering"]["layer"] = 999
+        self.assertEqual(turns[0]["steering"]["layer"], 4)
+
+    def test_the_measurements_are_shared_rather_than_duplicated(self):
+        # Copying them would mean copying every measurement in the
+        # conversation on every streaming frame, at a cost that grows with the
+        # square of the reply's length. Nothing edits a metric after
+        # build_metric writes it, so the copies can share them.
+        turns = [self.reply()]
+        copied = copy_turns(turns)
+        self.assertIs(copied[0]["tokens"][0], turns[0]["tokens"][0])
+
+    def test_the_list_of_measurements_is_still_its_own(self):
+        # Shared metrics, but not a shared list: a turn that gains or loses
+        # tokens must not change one that was copied from it.
+        turns = [self.reply()]
+        copied = copy_turns(turns)
+        copied[0]["tokens"].append({"token_id": 9})
+        self.assertEqual(len(turns[0]["tokens"]), 1)
+
+    def test_a_turn_with_no_measurements_is_unchanged(self):
+        turns = [make_turn("user", "hi")]
+        copied = copy_turns(turns)
+        self.assertEqual(copied, turns)
+        self.assertIsNot(copied[0], turns[0])
 
 
 class ForkTests(unittest.TestCase):
