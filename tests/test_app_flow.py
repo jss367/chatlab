@@ -10,6 +10,8 @@ from pathlib import Path
 
 import gradio as gr
 import numpy as np
+from gradio.state_holder import SessionState
+from gradio.utils import get_function_with_locals
 
 import app
 from ui import runtime
@@ -156,6 +158,90 @@ def score_known_passage(context="Hello", text=" world"):
         return list(app.score_text(context, text, False, DEFAULT_COLOR_SCALE))[-1]
     finally:
         runtime.MANAGER.tokenizer = original
+
+
+class PanelSessionTests(unittest.TestCase):
+    """Use Gradio's actual per-call/per-yield context, with two browser sessions."""
+
+    def setUp(self):
+        original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", original)
+        self.demo = app.build_app()
+        self.sessions = [SessionState(self.demo), SessionState(self.demo)]
+
+    def bound(self, session, fn):
+        return get_function_with_locals(
+            fn, self.demo, None, True,
+            gr.Request(session_hash=str(session)), self.sessions[session],
+        )
+
+    def respond(self, session):
+        return list(self.bound(session, app.chat)("hi", [], *SETTINGS))
+
+    def click(self, session, frame):
+        return self.bound(session, app.select_transcript_token)(
+            frame[TURNS], frame[METRICS], token_span(frame[TURNS], 1)
+        )
+
+    def assertSelected(self, session, frame):
+        detail, _, selection, _, _ = self.click(session, frame)
+        self.assertIn("Token 2", detail)
+        self.assertEqual(selection["source"], "turn")
+        self.assertEqual((selection["turn"], selection["index"]), (1, 1))
+
+    def test_another_session_cannot_disable_transcript_or_prompt_clicks(self):
+        first = self.respond(0)
+        second = self.respond(1)
+        self.assertSelected(0, first[-1])
+        self.assertSelected(1, second[-1])
+        detail, _ = self.bound(0, app.inspect_token("prompt"))(
+            first[1][PROMPT_METRICS], select(0)
+        )
+        self.assertNotEqual(detail, gr.skip())
+        self.bound(1, app.clear_chat)()
+        self.assertSelected(0, first[-1])
+
+    def test_a_reset_in_the_same_session_still_drops_a_queued_click(self):
+        first = self.respond(0)[-1]
+        second = self.respond(1)[-1]
+        self.bound(0, app.clear_chat)()
+        self.assertEqual(self.click(0, first), (gr.skip(),) * 5)
+        self.assertSelected(1, second)
+
+    def test_scored_epochs_are_isolated_but_rescoring_still_invalidates(self):
+        scored = self.bound(0, score_known_passage)()
+        self.bound(1, score_known_passage)()
+        self.respond(1)
+        target = self.bound(0, app.remember_inspect_target("score"))(scored[2], select(0))
+        self.assertIsNotNone(target)
+        detail, _ = self.bound(0, app.inspect_token("score"))(scored[2], select(0))
+        self.assertIn("Token 1", detail)
+        self.bound(0, score_known_passage)()
+        self.assertIsNone(self.bound(0, app.remember_inspect_target("score"))(scored[2], select(0)))
+
+    def test_hidden_streams_never_build_or_publish_token_spans(self):
+        with mock.patch("ui.generation.transcript_update", side_effect=AssertionError("hidden repaint")):
+            frames = self.respond(0)
+        self.assertTrue(all(frame[STRIP] == gr.skip() for frame in frames))
+        self.assertTrue(frames[-1][TURNS][-1]["tokens"])
+        _, shown = self.bound(0, app.show_token_view)(True, frames[-1][TURNS], DEFAULT_COLOR_SCALE)
+        self.assertEqual(shown["value"], app.transcript_value(frames[-1][TURNS], DEFAULT_COLOR_SCALE))
+
+    def test_toggling_during_streaming_controls_subsequent_frames(self):
+        stream = self.bound(0, app.chat)("hi", [], *SETTINGS)
+        try:
+            opening = next(stream)
+            self.assertEqual(opening[STRIP], gr.skip())
+            self.bound(0, app.show_token_view)(True, opening[TURNS], DEFAULT_COLOR_SCALE)
+            visible = next(stream)
+            self.assertEqual(strip_of(visible[STRIP]), app.transcript_value(visible[TURNS], DEFAULT_COLOR_SCALE))
+            self.bound(0, app.show_token_view)(False, visible[TURNS], DEFAULT_COLOR_SCALE)
+            self.assertTrue(all(frame[STRIP] == gr.skip() for frame in stream))
+        finally:
+            stream.close()
+        # A different browser still starts with the toggle off.
+        self.assertTrue(all(frame[STRIP] == gr.skip() for frame in self.respond(1)))
 
 
 class ChatFlowTests(unittest.TestCase):

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import html
 import threading
+from dataclasses import dataclass
+from weakref import WeakKeyDictionary
 
 import gradio as gr
+from gradio.context import LocalContext
 
 from conversation import (
     turn_tokens,
@@ -133,11 +136,12 @@ def transcript_update(turns: list[dict] | None, scale_name: str):
 def show_token_view(on, turns: list[dict] | None, scale_name: str):
     """Swap the chatbot for the conversation's token view, or back.
 
-    The view being switched to is drawn on the way in. The one that was
-    hidden has been kept up to date all along - every handler publishes both -
-    but drawing it here costs one list and removes the question.
+    The token view is rebuilt from the conversation on the way in. Hidden
+    streams skip that rendering work; once shown, each subsequent frame reads
+    this session's live toggle and resumes painting the tokens as they arrive.
     """
 
+    _session_panel().token_view = bool(on)
     if not on:
         return gr.update(visible=True), gr.update(visible=False)
     scale = resolve_scale(scale_name)
@@ -220,26 +224,52 @@ def selected_metric(
 # replaces the strip mints a new one, which is what makes the older selections
 # detectable.
 #
-# The counter is process-wide rather than per session, so on a shared server
-# one user's generation also drops another's in-flight click. That costs the
-# second user one repeated click and never shows either of them a wrong number,
-# and the only per-session store Gradio offers is the one that cannot carry
-# this.
+# The live values belong to Gradio's server-side session configuration, which
+# is stable across requests and is not part of the snapshotted event inputs.
+# Gradio installs it in LocalContext around every handler call and every next()
+# of a streaming handler. Weak keys let the records go when Gradio expires a
+# session, without another session's activity invalidating its selections.
 _metrics_lock = threading.Lock()
 
 
+@dataclass
+class _PanelSession:
+    generation: int = 0
+    score_generation: int = 0
+    token_view: bool = False
+
+
+_panel_sessions = WeakKeyDictionary()
+_direct_panel = _PanelSession()
 _metrics_generation = 0
-_score_metrics_generation = 0
+
+
+def _session_panel() -> _PanelSession:
+    config = LocalContext.blocks_config.get(None)
+    if config is None:
+        # Plain Python callers have no browser session. Keep their existing
+        # shared view, while real Gradio events always use their session key.
+        return _direct_panel
+    with _metrics_lock:
+        return _panel_sessions.setdefault(config, _PanelSession())
+
+
+def transcript_visible() -> bool:
+    """Read the live toggle on each frame, including changes made mid-stream."""
+
+    return LocalContext.blocks_config.get(None) is None or _session_panel().token_view
 
 
 def new_metrics_generation(*, scored: bool = False) -> int:
     """Stamp a new token strip, invalidating selections made against the old one."""
 
-    global _metrics_generation, _score_metrics_generation
+    global _metrics_generation
+    session = _session_panel()
     with _metrics_lock:
         _metrics_generation += 1
+        session.generation = _metrics_generation
         if scored:
-            _score_metrics_generation = _metrics_generation
+            session.score_generation = _metrics_generation
         return _metrics_generation
 
 
@@ -251,13 +281,14 @@ def current_metrics_generation() -> int:
     would keep comparing against the value it saw at import time.
     """
 
-    return _metrics_generation
+    return _session_panel().generation
 
 
 def current_strip_generation(source: str) -> int:
     """Scored passages survive chat changes, but another scoring replaces them."""
 
-    return _score_metrics_generation if source == "score" else _metrics_generation
+    session = _session_panel()
+    return session.score_generation if source == "score" else session.generation
 
 
 def stamped(metrics: list[dict], generation: int | None = None):

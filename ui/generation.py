@@ -61,6 +61,7 @@ from ui.panel import (
     prompt_note_text,
     strip_update,
     transcript_update,
+    transcript_visible,
 )
 
 logger = logging.getLogger(__name__)
@@ -590,7 +591,7 @@ def _stream_reply(
             prompt_text,
             messages,
             copy_turns(turns),
-            transcript_update(turns, scale_name),
+            transcript_update(turns, scale_name) if transcript_visible() else gr.skip(),
             (generation, metrics),
             status,
             used_seed,
