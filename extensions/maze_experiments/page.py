@@ -82,7 +82,10 @@ def board(ep, index=None, reveal=False, animate=False):
         parts.append(f'<circle cx="{x}" cy="{y}" r="23" stroke="#f59e0b" stroke-width="3" fill="none"/>')
     x, y = center(position)
     motion = ""
-    if animate and accepted and accepted[-1]["source"] == "model":
+    # Only the displayed response's own move animates. A response that was
+    # rejected or made no call leaves the character where it was, and replaying
+    # an earlier turn's hop would show movement that this response never made.
+    if animate and accepted and accepted[-1]["source"] == "model" and accepted[-1].get("turn") == index:
         px, py = center(accepted[-1]["before"])
         motion = f'<animateTransform attributeName="transform" type="translate" from="{px} {py}" to="{x} {y}" dur="0.3s" fill="freeze"/>'
     parts.append(f'<g transform="translate({x} {y})">{motion}<circle r="17" fill="#4f46e5" stroke="white" stroke-width="3"/><circle cx="-5" cy="-2" r="2.5" fill="white"/><circle cx="5" cy="-2" r="2.5" fill="white"/><path d="M -5 6 Q 0 10 5 6" stroke="white" fill="none" stroke-width="2"/></g></svg>')

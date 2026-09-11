@@ -13,7 +13,7 @@ from model_runtime import ModelManager
 from extension_api import ModelService
 from extension_api import TokenInspector
 from token_metrics import unscored_metric
-from extensions.maze_experiments.page import build_page, export_run, views
+from extensions.maze_experiments.page import board, build_page, export_run, views
 import gradio as gr
 
 CONFIG = dict(supplied_moves=0, interrupt_after=0, interruption_text="Distracted", prefix_tokens=2,
@@ -280,6 +280,20 @@ class MazeTests(unittest.TestCase):
             options = dict(goal_mode=mode, goal_hint='The destination is on an outer row.')
             self.assertEqual(MAZE.state(MAZE.start, **options), other.state(other.start, **options))
         self.assertNotEqual(MAZE.maze_id, other.maze_id)
+
+    def test_only_the_displayed_response_animates_its_own_move(self):
+        moves = [call_text(MAZE.maze_id, step) for step in ('east', 'north', 'east')]
+        manager = Manager([(text, list(text.encode()) + [0]) for text in moves])
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        list(stream_episode(ep, manager))
+        self.assertEqual(ep.phase, 'arrived')
+        self.assertEqual([e['accepted'] for e in ep.events], [True, False, True])
+        # Response 2 was rejected, so the character stayed put and nothing moves.
+        self.assertNotIn('animateTransform', board(ep, 1, animate=True))
+        self.assertIn('Character at row 0, column 1', board(ep, 1, animate=True))
+        for index in (0, 2):
+            self.assertIn('animateTransform', board(ep, index, animate=True))
+            self.assertNotIn('animateTransform', board(ep, index))
 
     def test_replay_stepping_and_playback_walk_recorded_responses(self):
         move = call_text(MAZE.maze_id, 'east')
