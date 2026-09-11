@@ -20,11 +20,12 @@ def open_token_editor(turns, metrics_state, event: gr.SelectData):
     found = transcript_pick(turns, event)
     if found is None or turns[found[0]]["role"] != "user":
         return (gr.skip(),) * 3
-    spans, _ = transcript_entries(turns, DEFAULT_COLOR_SCALE)
+    spans, span_map = transcript_entries(turns, DEFAULT_COLOR_SCALE)
+    span_index = event_index(event)
     clicked = event.value
     if isinstance(clicked, (list, tuple)):
         clicked = clicked[0] if clicked else None
-    if clicked != spans[event_index(event)][0]:
+    if clicked != spans[span_index][0]:
         return (gr.skip(),) * 3
     position, _ = found
     _, index_map = display_messages(turns)
@@ -33,6 +34,11 @@ def open_token_editor(turns, metrics_state, event: gr.SelectData):
     except ValueError:
         # Imported user turns can contain reasoning alone. There is no
         # message text to edit, so leave any existing draft untouched.
+        return (gr.skip(),) * 3
+    # Content, when present, is the last span of its turn. Check its position
+    # rather than its text: headings or reasoning may have identical text.
+    content_span = max(i for i, (turn_index, _) in enumerate(span_map) if turn_index == position)
+    if span_index != content_span:
         return (gr.skip(),) * 3
     target = {
         "index": index,

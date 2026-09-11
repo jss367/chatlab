@@ -1235,6 +1235,24 @@ class TokenViewTests(unittest.TestCase):
         self.assertEqual(turns[0]["content"], "")
         self.assertEqual(turns[0]["reasoning"], "Imported reasoning")
 
+    def test_only_user_content_opens_editor_even_when_other_spans_match(self):
+        for content, reasoning in (("\n\nYOU\n", ""), ("Same text\n", "Same text")):
+            turns = turns_from_entries([
+                {"role": "user", "content": content, "reasoning": reasoning},
+            ])
+            spans, _ = app.transcript_entries(turns, DEFAULT_COLOR_SCALE)
+            for index, span in enumerate(spans):
+                with self.subTest(content=content, index=index):
+                    result = open_token_editor(
+                        turns, app.empty_metrics(),
+                        gr.SelectData(None, {"index": index, "value": list(span)}),
+                    )
+                    if index == len(spans) - 1:
+                        self.assertTrue(result[0]["visible"])
+                        self.assertEqual(result[1], content)
+                    else:
+                        self.assertEqual(result, (gr.skip(),) * 3)
+
     def test_stale_edit_cannot_replace_a_new_conversation(self):
         final = self.respond()
         _, _, target = self.open_editor(final)
