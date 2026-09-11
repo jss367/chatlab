@@ -124,6 +124,50 @@ class ModelActionTests(unittest.TestCase):
                 detail, *_ = models_page.refresh_model_actions("org/model", None)
                 self.assertIn(expected, detail)
 
+    def test_the_timers_refresh_scans_the_cache_only_when_something_moved(self):
+        progress = DownloadProgress()
+        with (
+            mock.patch.object(runtime.MANAGER, "active_downloads", {}) as downloads,
+            mock.patch.object(models_page, "cache_status", return_value=CacheStatus()) as cached,
+        ):
+            # An unstamped tab is painted; an idle one that already matches
+            # the cache's revision is not, and never reaches the disk.
+            detail, *_, stamp = models_page.refresh_stale_model_actions(
+                "org/model", None, None, None, None
+            )
+            self.assertIn("Not downloaded", detail)
+            self.assertEqual(cached.call_count, 1)
+
+            for _ in range(3):
+                painted = models_page.refresh_stale_model_actions(
+                    "org/model", None, None, None, stamp
+                )
+                self.assertTrue(all(models_page.gr.skip() == value for value in painted[:4]))
+                self.assertEqual(painted[-1], stamp)
+            self.assertEqual(cached.call_count, 1)
+
+            # A download in flight repaints every tick, without a scan.
+            downloads["org/model"] = progress
+            runtime.MANAGER.note_cache_change()
+            for _ in range(3):
+                detail, *_, stamp = models_page.refresh_stale_model_actions(
+                    "org/model", None, None, None, stamp
+                )
+                self.assertIn("**Downloading**", detail)
+            self.assertEqual(cached.call_count, 1)
+
+            # Finishing moves the revision, which buys exactly one scan.
+            del downloads["org/model"]
+            runtime.MANAGER.note_cache_change()
+            cached.return_value = CacheStatus(cached_bytes=100)
+            detail, *_, stamp = models_page.refresh_stale_model_actions(
+                "org/model", None, None, None, stamp
+            )
+            self.assertIn("**Downloaded**", detail)
+            self.assertEqual(cached.call_count, 2)
+            models_page.refresh_stale_model_actions("org/model", None, None, None, stamp)
+            self.assertEqual(cached.call_count, 2)
+
     def test_downloaded_selection_offers_local_loading(self):
         with mock.patch.object(models_page, "cache_status", return_value=CacheStatus(cached_bytes=100)) as status:
             detail, download_load, download, load = models_page.refresh_model_actions(
@@ -2978,10 +3022,6 @@ class PageLayoutTests(unittest.TestCase):
         token = self.labelled("Hugging Face token (optional)")
         for control in (radio, model_id, token):
             self.assertTrue(any(fn.targets == [(control._id, "change")] for fn in listeners))
-        self.assertTrue(any(
-            event == "tick" and isinstance(self.demo.blocks[block_id], gr.Timer)
-            for fn in listeners for block_id, event in fn.targets
-        ))
         for fn in listeners:
             self.assertEqual(fn.inputs[:2], [model_id, radio])
             self.assertIsInstance(fn.inputs[2], gr.State)
@@ -3001,6 +3041,28 @@ class PageLayoutTests(unittest.TestCase):
         # startup refresh the controls even when the radio's selected value
         # stays the same.
         self.assertEqual(len(chained), 9)
+
+    def test_the_timer_refreshes_the_actions_through_the_gated_handler(self):
+        # The timer ticks in every open session for the life of the app, so
+        # it goes through the stamped refresh rather than the scanning one.
+        (fn,) = self.listeners("refresh_stale_model_actions")
+        ((block_id, event),) = fn.targets
+        self.assertEqual(event, "tick")
+        self.assertIsInstance(self.demo.blocks[block_id], gr.Timer)
+        self.assertEqual(fn.inputs[:2], [
+            self.labelled("Hugging Face model ID"), self.labelled("Downloaded models")
+        ])
+        self.assertIsInstance(fn.inputs[-1], gr.State)
+        self.assertIs(fn.inputs[-1], fn.outputs[-1])
+        self.assertEqual(fn.outputs[0], self.by_id("model-availability"))
+        self.assertEqual(
+            [button.value for button in fn.outputs[1:-1]],
+            ["Download and load", "Download only", "Load cached"],
+        )
+        self.assertFalse(any(
+            event == "tick" for other in self.listeners("refresh_model_actions")
+            for _, event in other.targets
+        ))
 
     def test_model_progress_is_always_open_in_the_card_above_download_buttons(self):
         status = self.by_id("model-status")
