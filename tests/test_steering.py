@@ -44,6 +44,7 @@ def branch_selection(turns, index=0, position=1):
         "source": "turn",
         "turn": position,
         "index": index,
+        "at_generation": turns[position].get("metrics_generation"),
         "at_token_id": int(metric["token_id"]),
     }
 

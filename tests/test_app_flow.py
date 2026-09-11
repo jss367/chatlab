@@ -769,7 +769,7 @@ class TokenSelectionTests(unittest.TestCase):
         return list(app.chat("hi", list(turns), *SETTINGS))
 
     def assertDropped(self, payload):
-        self.assertEqual(app.inspect_token(payload, select(0)), (gr.skip(), gr.skip()))
+        self.assertEqual(app.inspect_token("prompt")(payload, select(0)), (gr.skip(), gr.skip()))
 
     def initial_metrics_state(self):
         """The value a fresh session starts inspect_token()'s input with."""
@@ -778,14 +778,14 @@ class TokenSelectionTests(unittest.TestCase):
         listener = next(
             fn
             for fn in demo.fns.values()
-            if getattr(fn.fn, "__name__", None) == "inspect_token"
+            if getattr(fn.fn, "__name__", None) == "inspect"
         )
         (state_block,) = listener.inputs
         return state_block.value
 
     def test_a_selection_against_the_strip_on_screen_is_published(self):
         payload = self.respond()[-1][METRICS]
-        detail, alternatives = app.inspect_token(payload, select(0))
+        detail, alternatives = app.inspect_token("prompt")(payload, select(0))
         self.assertIn("Token 1", detail)
         self.assertTrue(alternatives)
 
@@ -809,7 +809,7 @@ class TokenSelectionTests(unittest.TestCase):
         # Later frames only append to the strip, so a token picked while the
         # response is still arriving is still on screen when it finishes.
         frames = self.respond()
-        detail, _alternatives = app.inspect_token(frames[1][METRICS], select(0))
+        detail, _alternatives = app.inspect_token("prompt")(frames[1][METRICS], select(0))
         self.assertIn("Token 1", detail)
 
     def test_clear_drops_earlier_selections(self):
@@ -840,17 +840,17 @@ class TokenSelectionTests(unittest.TestCase):
         # Nothing replaced the strip, so the panel beside it is still true.
         payload = self.respond()[-1][METRICS]
         list(app.chat("   ", [], *SETTINGS))
-        detail, _alternatives = app.inspect_token(payload, select(0))
+        detail, _alternatives = app.inspect_token("prompt")(payload, select(0))
         self.assertIn("Token 1", detail)
 
     def test_an_out_of_range_index_still_reports_the_token_as_gone(self):
         payload = self.respond()[-1][METRICS]
-        detail, alternatives = app.inspect_token(payload, select(99))
+        detail, alternatives = app.inspect_token("prompt")(payload, select(99))
         self.assertIn("no longer available", detail)
         self.assertEqual(alternatives, [])
 
     def test_an_empty_strip_asks_for_a_selection(self):
-        detail, alternatives = app.inspect_token(app.empty_metrics(), select(0))
+        detail, alternatives = app.inspect_token("prompt")(app.empty_metrics(), select(0))
         self.assertEqual(detail, app.NO_TOKEN_SELECTED)
         self.assertEqual(alternatives, [])
 
@@ -923,7 +923,7 @@ class AnalysisPanelTests(unittest.TestCase):
         frames = self.respond()
         prompt_payload = self.prompt_payload(frames)
         self.assertEqual(prompt_payload[0], frames[-1][METRICS][0])
-        detail, _alternatives = app.inspect_token(prompt_payload, select(0))
+        detail, _alternatives = app.inspect_token("prompt")(prompt_payload, select(0))
         self.assertIn("Prompt token", detail)
 
     def test_the_finished_response_is_exportable(self):
@@ -1109,6 +1109,78 @@ class TokenViewTests(unittest.TestCase):
         # and only the branch needs the weights back.
         self.assertIn("Token 2", detail)
         self.assertEqual(selection["turn"], 1)
+
+    def test_a_retried_reply_does_not_inherit_the_old_selection(self):
+        """The reply, not the token ID, is what a selection is checked against.
+
+        Two samples of one prompt share their opening tokens far more often
+        than not, so a token ID alone would let a click made against the reply
+        Retry replaced branch the new one at a token the reader never saw.
+        """
+
+        final = self.respond()
+        selected = click_token(final, 1)
+        retried = list(app.retry_last("", final[TURNS], *SETTINGS))[-1]
+
+        # Same conversation shape, same token IDs, different reply.
+        self.assertEqual(
+            [m["token_id"] for m in retried[TURNS][1]["tokens"]],
+            [m["token_id"] for m in final[TURNS][1]["tokens"]],
+        )
+        self.assertNotEqual(
+            retried[TURNS][1]["metrics_generation"],
+            final[TURNS][1]["metrics_generation"],
+        )
+        self.assertIsNone(app.selected_metric(retried[TURNS], selected))
+        frames = list(app.branch_from(selected, "", retried[TURNS], *SETTINGS))
+        self.assertEqual(frames[0][STATUS], app.BRANCH_UNAVAILABLE)
+
+    def test_an_older_reply_keeps_its_own_stamp(self):
+        # The stamp compared is the turn's own, so a reply that is no longer
+        # the newest stays selectable for as long as it is on screen.
+        first = self.respond()
+        second = self.respond("again", first[TURNS])
+        selected = click_token(second, 1, turn=1)
+        self.assertIsNotNone(app.selected_metric(second[TURNS], selected))
+
+    def test_scoring_disarms_the_branch_it_hid(self):
+        # Score text resets the detail panel, and a branch the reader can no
+        # longer see must not stay waiting on the button.
+        final = self.respond()
+        detail, _rows, selection, _target, _pick = app.select_transcript_token(
+            final[TURNS], token_span(final[TURNS], 1)
+        )
+        self.assertIsNotNone(selection)
+        scored = list(app.score_text("", "hi", False, DEFAULT_COLOR_SCALE))[-1]
+        self.assertEqual(scored[9], app.NO_TOKEN_SELECTED)
+        self.assertIsNone(scored[11])
+        self.assertIsNone(scored[12])
+
+    def test_the_scored_strip_keeps_its_own_measurements(self):
+        """The inspector's state moves on to the next reply; the strip's does not.
+
+        The scored passage stays drawn while a reply is generated beside it,
+        so repainting it from the inspector's state would paint scored spans
+        with the reply's tokens.
+        """
+
+        scored = list(app.score_text("", "hi", False, DEFAULT_COLOR_SCALE))[-1]
+        score_state = scored[2]
+        self.assertEqual(score_state, scored[1])
+        final = self.respond()
+
+        # The inspector now describes the reply; the strip's state still
+        # describes the passage.
+        self.assertNotEqual(final[METRICS][0], score_state[0])
+        strip, score_strip, _prompt, _caption = app.recolor(
+            final[TURNS], score_state, app.empty_metrics(), "Surprise"
+        )
+        self.assertEqual(
+            len(score_strip["value"]), len(metrics_of(score_state))
+        )
+        self.assertEqual(
+            strip["value"], app.transcript_value(final[TURNS], "Surprise")
+        )
 
     def test_scored_text_has_a_strip_of_its_own(self):
         # The Score text tab has no conversation to paint, and the
@@ -2025,7 +2097,7 @@ class BranchFromTokenTests(unittest.TestCase):
 
         selected = click_token(final, strip_index, turn)
         detail, pick = app.choose_alternative(
-            final[TURNS], final[METRICS], selected, cell(row)
+            final[TURNS], final[METRICS], app.empty_metrics(), selected, cell(row)
         )
         return detail, pick
 
@@ -2118,6 +2190,7 @@ class BranchFromTokenTests(unittest.TestCase):
                 "source": "turn",
                 "turn": 1,
                 "index": 1,
+                "at_generation": final[TURNS][1]["metrics_generation"],
                 "at_token_id": metrics_of(final[METRICS])[1]["token_id"],
             },
         )
@@ -2128,7 +2201,7 @@ class BranchFromTokenTests(unittest.TestCase):
         # a row click pair with the response token remembered earlier.
         frames = self.respond()
         prompt_payload = frames[1][PROMPT_METRICS]
-        self.assertIsNone(app.remember_strip_selection(prompt_payload, select(0)))
+        self.assertIsNone(app.remember_strip_selection("prompt")(prompt_payload, select(0))[0])
 
     def test_choosing_an_alternative_readies_a_branch(self):
         final = self.respond()[-1]
@@ -2151,9 +2224,9 @@ class BranchFromTokenTests(unittest.TestCase):
         # Scored text draws the same strip and table, but there is no reply to
         # replace; the selection says which view it came from.
         final = self.respond()[-1]
-        selected = app.remember_strip_selection(final[METRICS], select(1))
+        selected = app.remember_strip_selection("score")(final[METRICS], select(1))[0]
         detail, pick = app.choose_alternative(
-            final[TURNS], final[METRICS], selected, cell(1)
+            final[TURNS], final[METRICS], app.empty_metrics(), selected, cell(1)
         )
         self.assertIn(app.BRANCH_UNAVAILABLE, detail)
         self.assertIsNone(pick)
@@ -2161,7 +2234,7 @@ class BranchFromTokenTests(unittest.TestCase):
     def test_a_row_without_a_remembered_token_does_nothing(self):
         final = self.respond()[-1]
         detail, pick = app.choose_alternative(
-            final[TURNS], final[METRICS], None, cell(0)
+            final[TURNS], final[METRICS], app.empty_metrics(), None, cell(0)
         )
         self.assertEqual(detail, gr.skip())
         self.assertIsNone(pick)
@@ -2230,6 +2303,7 @@ class BranchFromTokenTests(unittest.TestCase):
             "source": "turn",
             "turn": 1,
             "index": 1,
+            "at_generation": original[TURNS][1]["metrics_generation"],
             "at_token_id": original_metrics[1]["token_id"],
             "position": 2,
             "token_id": THINK_EOS,
@@ -2323,6 +2397,7 @@ class BranchFromTokenTests(unittest.TestCase):
             "source": "turn",
             "turn": 1,
             "index": 0,
+            "at_generation": turns[1]["metrics_generation"],
             "at_token_id": turns[1]["tokens"][0]["token_id"],
         }
         self.assertEqual(app.branch_target(turns, selection)[0], 1)
@@ -4000,7 +4075,7 @@ class LayerInspectionTests(unittest.TestCase):
 
     def test_scored_text_publishes_its_context_ids(self):
         result = list(app.score_text("", "Hello", False, DEFAULT_COLOR_SCALE))[-1]
-        stamp, ids, load = result[10]
+        stamp, ids, load = result[13]
         self.assertEqual(stamp, result[1][0])
         self.assertEqual(ids, [])
         self.assertEqual(load, runtime.MANAGER.load_id)

@@ -200,6 +200,10 @@ def build_app() -> gr.Blocks:
         conversation_state = gr.State([])
         metrics_state = gr.State(empty_metrics())
         prompt_metrics_state = gr.State(empty_metrics())
+        # What the Score text tab's strip is showing. The inspector's own
+        # state moves on to the next reply; this one is rewritten only by
+        # another scoring pass, so it still describes the passage drawn there.
+        score_metrics_state = gr.State(empty_metrics())
         trace_state = gr.State({})
         # Branching from a token: the token last clicked - which turn, and
         # which of its tokens - and the alternative picked for it. Both name a
@@ -1943,6 +1947,7 @@ def build_app() -> gr.Blocks:
             [
                 score_strip,
                 metrics_state,
+                score_metrics_state,
                 prompt_strip,
                 prompt_metrics_state,
                 prompt_note,
@@ -1951,6 +1956,8 @@ def build_app() -> gr.Blocks:
                 score_status,
                 token_detail,
                 alternatives,
+                selected_token,
+                branch_pick,
                 context_ids_state,
             ],
         )
@@ -2007,7 +2014,7 @@ def build_app() -> gr.Blocks:
         # painted from the measurements they were handed.
         color_scale.change(
             recolor,
-            [conversation_state, metrics_state, prompt_metrics_state, color_scale],
+            [conversation_state, score_metrics_state, prompt_metrics_state, color_scale],
             [token_strip, score_strip, prompt_strip, scale_caption],
         )
         # Which view of the conversation is on screen. The token view is
@@ -2033,26 +2040,31 @@ def build_app() -> gr.Blocks:
             remember_transcript_message, conversation_state, selected_message
         )
 
-        for strip, strip_metrics, where in (
-            (score_strip, metrics_state, "response"),
-            (prompt_strip, prompt_metrics_state, "prompt"),
+        for strip, strip_metrics, source, where in (
+            (score_strip, score_metrics_state, "score", "response"),
+            (prompt_strip, prompt_metrics_state, "prompt", "prompt"),
         ):
             strip.select(
-                inspect_token,
+                inspect_token(source),
                 inputs=strip_metrics,
                 outputs=[token_detail, alternatives],
             )
             # A second listener keeps the clicked position for the
             # alternatives table, and a third the position the layer
             # inspector would explain. Neither strip is part of a
-            # conversation, so a row chosen in either is told it has nothing
-            # to branch rather than pairing with whatever was clicked in the
-            # chat.
-            strip.select(remember_strip_selection, strip_metrics, selected_token)
+            # conversation, so clicking one disarms whatever branch the
+            # conversation had armed, and a row chosen in either is told it
+            # has nothing to branch rather than pairing with the token last
+            # clicked in the chat.
+            strip.select(
+                remember_strip_selection(source),
+                strip_metrics,
+                [selected_token, branch_pick],
+            )
             strip.select(remember_inspect_target(where), strip_metrics, inspect_target)
         alternatives.select(
             choose_alternative,
-            [conversation_state, metrics_state, selected_token],
+            [conversation_state, score_metrics_state, prompt_metrics_state, selected_token],
             [token_detail, branch_pick],
         )
         inspection_outputs = [lens_panel, attention_panel, insight_state, inspect_status]

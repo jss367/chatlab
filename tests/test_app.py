@@ -33,7 +33,7 @@ class InspectTokenTests(unittest.TestCase):
     def inspect(self, metric: dict):
         # The state pairs the metrics with the stamp of the strip they were
         # drawn for, and inspect_token() drops a click that misses it.
-        return app.inspect_token(app.stamped([metric]), Selection(0))
+        return app.inspect_token("prompt")(app.stamped([metric]), Selection(0))
 
     def test_the_opening_token_is_explained_as_unpredicted(self):
         detail, rows = self.inspect(
@@ -112,7 +112,7 @@ class ScoreStatusTests(unittest.TestCase):
         runtime.MANAGER = StubManager(seam_verified, chat_template_missing)
         try:
             frames = list(app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE))
-            return frames[-1][7]
+            return frames[-1][8]
         finally:
             runtime.MANAGER = original
 
@@ -179,7 +179,7 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
         finally:
             self.manager.release_generation()
 
-        self.assertEqual(result[7], app.SCORE_BUSY)
+        self.assertEqual(result[8], app.SCORE_BUSY)
 
     def test_a_refusal_touches_nothing_but_the_status(self):
         # The strips still describe the response that is streaming, and the
@@ -193,7 +193,7 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
 
         self.assertEqual(panel._metrics_generation, before, "no stamp was minted")
         for index, value in enumerate(result):
-            if index != 7:
+            if index != 8:
                 self.assertEqual(value, gr.skip(), f"output {index}")
 
     def test_the_slot_is_given_back_after_a_successful_pass(self):
@@ -209,7 +209,7 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
 
         result = self.score()
 
-        self.assertIn("no room", result[7])
+        self.assertIn("no room", result[8])
         self.assertTrue(
             self.manager.reserve_generation(), "a failure kept the slot"
         )

@@ -171,6 +171,15 @@ def selected_metric(
     trusted: the conversation can be edited, undone, switched or replaced
     between the click and whatever the click is used for, and the turn that
     now sits at that index may be a different one entirely.
+
+    What identifies the reply is the stamp it was drawn under, not its text.
+    Retry puts a different reply at the same index, and two samples of one
+    prompt share their opening tokens far more often than not, so a token ID
+    alone would accept a click made against the reply that was replaced and
+    branch the new one at a token the reader never saw. The stamp is the
+    reply's own, minted when it was generated, so an older reply keeps the
+    one it was clicked under and stays selectable for as long as it is on
+    screen.
     """
 
     if not selection or selection.get("source") != "turn":
@@ -182,9 +191,12 @@ def selected_metric(
         return None
     if turn["role"] != "assistant":
         return None
+    if turn.get("metrics_generation") != selection.get("at_generation"):
+        # A different reply sits where the click landed - retried, regenerated,
+        # or brought out of another fork.
+        return None
     if int(metric["token_id"]) != int(selection.get("at_token_id", -1)):
-        # The turns have moved under the click - edited, undone, switched for
-        # another fork - and a different token now sits where it landed.
+        # The same reply, but its tokens have moved under the click.
         return None
     return metric
 
@@ -277,22 +289,27 @@ def cleared_panel(turns: list[dict] | None, scale_name: str):
     )
 
 
-def inspect_token(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
-    generation, metrics = metrics_state
-    if generation != _metrics_generation:
-        # The strip this click was made against is gone. Whatever replaced it
-        # already reset the detail panel, so leave that reset alone instead of
-        # repainting it with a token the user can no longer see.
-        return gr.skip(), gr.skip()
+def inspect_token(source: str):
+    """A select listener that describes the token clicked in a strip.
 
-    if not metrics:
-        return NO_TOKEN_SELECTED, []
+    ``source`` decides whether the panel's stamp has to match; see
+    STRIP_SOURCES. A click that does not count is skipped rather than
+    answered: whatever replaced the strip already reset the detail panel, so
+    repainting it with a token the reader can no longer see would undo that.
+    """
 
-    try:
-        metric = metrics[event_index(event)]
-    except (IndexError, TypeError, ValueError):
-        return "That token is no longer available. Generate another response.", []
-    return describe_token(metric)
+    def inspect(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
+        generation, metrics = metrics_state
+        if STRIP_SOURCES.get(source, True) and generation != _metrics_generation:
+            return gr.skip(), gr.skip()
+        if not metrics:
+            return NO_TOKEN_SELECTED, []
+        metric = strip_metric(source, metrics_state, event_index(event))
+        if metric is None:
+            return "That token is no longer available. Generate another response.", []
+        return describe_token(metric)
+
+    return inspect
 
 
 def event_index(event: gr.SelectData) -> int:
@@ -381,48 +398,78 @@ BRANCH_MODEL_CHANGED = (
 )
 
 
-def remember_strip_selection(
-    metrics_state: tuple[int, list[dict]], event: gr.SelectData
-):
-    """Keep a prompt or scored-text click, for the alternatives table.
+# The two strips outside the conversation, and whether a click on one has to
+# match the panel's current stamp to count.
+#
+# The prompt strip is replaced by every generation, in the same frame as its
+# measurements, so a click queued against the strip that was replaced must be
+# dropped - that is what the stamp is for. Nothing replaces the scored strip
+# but another scoring pass, which rewrites its measurements in the same frame,
+# so a click on it always refers to what is drawn there and the stamp would
+# only refuse it for something that happened elsewhere on the page.
+STRIP_SOURCES = {"prompt": True, "score": False}
+
+
+def remember_strip_selection(source: str):
+    """A select listener that keeps a prompt or scored-text click.
 
     These tokens have alternatives worth reading and no conversation to
-    continue, so the selection records where the click landed and marks it as
-    coming from a strip rather than from a turn. ``choose_alternative`` then
-    describes the row that was clicked and says why it cannot be branched,
-    rather than appearing to do nothing at all.
+    continue, so the selection records where the click landed and which strip
+    it came from. ``choose_alternative`` then describes the row that was
+    clicked and says why it cannot be branched, rather than appearing to do
+    nothing at all.
     """
 
+    def remember(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
+        # The second value disarms the branch either way. A click outside the
+        # conversation replaces the detail panel, and a branch the reader can
+        # no longer see must not stay waiting on the button.
+        metric = strip_metric(source, metrics_state, event_index(event))
+        if metric is None or not metric.get("scored", True):
+            return None, None
+        generation, _metrics = metrics_state
+        return (
+            {"source": source, "generation": generation, "index": event_index(event)},
+            None,
+        )
+
+    return remember
+
+
+def strip_metric(
+    source: str, metrics_state: tuple[int, list[dict]], index
+) -> dict | None:
+    """One token of a strip, if that strip's clicks still count."""
+
     generation, metrics = metrics_state
-    if generation != _metrics_generation:
+    if STRIP_SOURCES.get(source, True) and generation != _metrics_generation:
         return None
     try:
-        metric = metrics[event_index(event)]
-    except (IndexError, TypeError, ValueError):
+        return metrics[int(index)]
+    except (IndexError, KeyError, TypeError, ValueError):
         return None
-    if not metric.get("scored", True):
-        return None
-    return {"source": "strip", "generation": generation, "index": event_index(event)}
 
 
 def selection_metric(
     turns: list[dict] | None,
-    metrics_state: tuple[int, list[dict]],
+    score_state: tuple[int, list[dict]],
+    prompt_state: tuple[int, list[dict]],
     selection: dict | None,
 ) -> dict | None:
-    """The token a selection points at, from a turn or from a strip."""
+    """The token a selection points at, from a turn or from either strip."""
 
     if not selection:
         return None
-    if selection.get("source") == "turn":
+    source = selection.get("source")
+    if source == "turn":
         return selected_metric(turns, selection)
-    generation, metrics = metrics_state
-    if generation != _metrics_generation or selection.get("generation") != generation:
+    if source not in STRIP_SOURCES:
         return None
-    try:
-        return metrics[int(selection["index"])]
-    except (IndexError, KeyError, TypeError, ValueError):
+    state = score_state if source == "score" else prompt_state
+    generation, _metrics = state
+    if selection.get("generation") != generation:
         return None
+    return strip_metric(source, state, selection.get("index"))
 
 
 def branch_target(
@@ -496,6 +543,7 @@ def select_transcript_token(turns: list[dict] | None, event: gr.SelectData):
         "source": "turn",
         "turn": position,
         "index": token_index,
+        "at_generation": turn.get("metrics_generation"),
         "at_token_id": int(metric["token_id"]),
     }
     if turn.get("load_id") != runtime.MANAGER.load_id:
@@ -514,13 +562,14 @@ def select_transcript_token(turns: list[dict] | None, event: gr.SelectData):
 
 def choose_alternative(
     turns: list[dict] | None,
-    metrics_state: tuple[int, list[dict]],
+    score_state: tuple[int, list[dict]],
+    prompt_state: tuple[int, list[dict]],
     selected_token: dict | None,
     event: gr.SelectData,
 ):
     """Pair a row of the alternatives table with the token it belongs to."""
 
-    metric = selection_metric(turns, metrics_state, selected_token)
+    metric = selection_metric(turns, score_state, prompt_state, selected_token)
     if metric is None:
         return gr.skip(), None
     try:
@@ -537,6 +586,7 @@ def choose_alternative(
         "source": "turn",
         "turn": position,
         "index": int(selected_token["index"]),
+        "at_generation": selected_token.get("at_generation"),
         "at_token_id": int(metric["token_id"]),
         "position": int(metric["position"]),
         "token_id": int(candidate["token_id"]),
@@ -547,15 +597,17 @@ def choose_alternative(
     return f"{summary}\n\n{branch_ready_text(pick)}", pick
 
 
-def recolor(turns, response_state, prompt_state, scale_name: str):
+def recolor(turns, score_state, prompt_state, scale_name: str):
     """Repaint everything painted by tokens when another scale is picked.
 
     The conversation is repainted from the turns, since that is what it is
     drawn from; the Score text tab's strip and the prompt strip are repainted
-    from the measurements they were given.
+    from the measurements they were given. Each is repainted from what it is
+    actually showing rather than from the inspector's own state, which by then
+    may describe a reply generated since the passage was scored.
     """
 
-    _generation, metrics = response_state
+    _generation, metrics = score_state
     _prompt_generation, prompt_metrics = prompt_state
     scale = resolve_scale(scale_name)
     return (
