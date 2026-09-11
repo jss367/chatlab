@@ -392,18 +392,25 @@ def _replace(target: Path, text: str) -> bool:
     return True
 
 
-def write(forks: dict | None, path: Path | None = None) -> Path | None:
+def write(forks: dict | None, path: Path | None = None, *, preserve_active: bool = False) -> Path | None:
     """Merge the pane into the file on disk and return the path; ``None`` if it could not be.
 
     What is on disk is read first and merged with ``forks`` as :func:`merge`
     describes, so a save from one page keeps what another page saved since
     this one loaded. A file that cannot be read is replaced, as it always
     was; :func:`read` has said why in the log.
+
+    Background jobs use ``preserve_active`` to save their source transcript
+    without changing which conversation the reader selected most recently.
     """
 
     target = path or library_path()
     with _WRITE_LOCK:
-        if not _replace(target, dump(merge(forks, read(target)))):
+        existing = read(target)
+        merged = merge(forks, existing)
+        if preserve_active and existing and existing["active"] in merged["branches"]:
+            merged["active"] = existing["active"]
+        if not _replace(target, dump(merged)):
             return None
     return target
 

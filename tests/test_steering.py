@@ -465,7 +465,7 @@ class ConversationTests(unittest.TestCase):
         )]
         self.assertEqual(len(listeners), 8)  # Send and Enter each call chat.
         for listener in listeners:
-            inputs = listener.inputs
+            inputs = [item for item in listener.inputs if item.label is not None]
             if getattr(listener.fn, "__name__", "") != "save_conversation":
                 self.assertEqual(inputs[-1].label, "Thinking mode")
                 inputs = inputs[:-1]

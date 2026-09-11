@@ -28,6 +28,7 @@ from token_metrics import (
 )
 from trace_export import write_trace_export
 from ui import runtime
+from ui.background import ConversationEvents, ConversationJob
 from ui.token_edit import close_token_editor, open_token_editor, save_token_edit
 from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from extensions.registry import load_enabled
@@ -48,7 +49,6 @@ from ui.conversations import (
     delete_fork,
     fork_conversation,
     new_conversation,
-    refresh_conversation_list,
     remember_branch_sampling,
     remember_forks,
     remember_message,
@@ -1869,75 +1869,70 @@ def build_app() -> gr.Blocks:
             branch_pick,
         ]
 
-        running = [
-            menu_action.input(branch_from_menu, [menu_action, *chat_inputs], chat_outputs),
-            send_button.click(chat, chat_inputs, chat_outputs),
-            prompt.submit(chat, chat_inputs, chat_outputs),
-            retry_button.click(retry_last, chat_inputs, chat_outputs),
-            next_token_button.click(next_token, [branch_pick, *chat_inputs], chat_outputs),
-            chatbot.retry(retry_message, chat_inputs, chat_outputs),
-            chatbot.edit(edit_message, chat_inputs, chat_outputs),
-            token_edit_save.click(
-                save_token_edit,
-                [token_edit_target, token_edit_text, *chat_inputs],
-                [*chat_outputs, token_editor, token_edit_target],
-            ),
-            branch_button.click(
-                branch_from,
-                [branch_pick, *chat_inputs],
-                chat_outputs,
-            ),
-            branch_text_button.click(
-                branch_with_text,
-                [selected_token, branch_text, *chat_inputs],
-                chat_outputs,
-            ),
-        ]
+        background_state = gr.State(ConversationJob())
+        conversation_events = ConversationEvents(
+            background_state, conversation_state, forks_state, conversation_list,
+            color_scale, [*chat_outputs, token_editor, token_edit_target],
+            CONVERSATION_PANE_QUEUE,
+        )
+        response_timer = gr.Timer(0.25)
+        response_timer.tick(
+            conversation_events.poll,
+            [background_state, conversation_state, forks_state, color_scale],
+            [*chat_outputs, token_editor, token_edit_target, forks_state, conversation_list],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+            show_progress="hidden",
+        )
 
-        stop_button.click(
-            stop_generation,
+        start_response = partial(conversation_events.bind, generation=True)
+        navigate = partial(conversation_events.bind, navigation=True)
+        start_response(menu_action.input, branch_from_menu, [menu_action, *chat_inputs], chat_outputs)
+        start_response(send_button.click, chat, chat_inputs, chat_outputs)
+        start_response(prompt.submit, chat, chat_inputs, chat_outputs)
+        start_response(retry_button.click, retry_last, chat_inputs, chat_outputs)
+        start_response(next_token_button.click, next_token, [branch_pick, *chat_inputs], chat_outputs)
+        start_response(chatbot.retry, retry_message, chat_inputs, chat_outputs)
+        start_response(chatbot.edit, edit_message, chat_inputs, chat_outputs)
+        start_response(
+            token_edit_save.click, save_token_edit,
+            [token_edit_target, token_edit_text, *chat_inputs],
+            [*chat_outputs, token_editor, token_edit_target],
+        )
+        start_response(
+            branch_button.click, branch_from, [branch_pick, *chat_inputs], chat_outputs,
+        )
+        start_response(
+            branch_text_button.click, branch_with_text,
+            [selected_token, branch_text, *chat_inputs], chat_outputs,
+        )
+
+        conversation_events.bind(
+            stop_button.click, stop_generation,
             inputs=[conversation_state, color_scale],
-            concurrency_id=CONVERSATION_PANE_QUEUE,
             outputs=[
-                chatbot,
-                conversation_state,
-                token_strip,
-                send_button,
-                stop_button,
-                generation_status,
+                chatbot, conversation_state, token_strip, send_button,
+                stop_button, generation_status,
             ],
-            cancels=running,
+            stop=True,
         )
 
-        # Undo, Clear and Load all replace or truncate the conversation, so
-        # each has to stop the generator first: a surviving generate_reply
-        # would write its own snapshot of the in-progress turns back into the
-        # chatbot and the state, resurrecting what was just removed. Send,
-        # Retry and Edit are exempt because they *are* the generation - they
-        # re-enter generate_reply, and they are what everything else cancels.
-        # They cannot be made to cancel each other either: Gradio captures a
-        # listener's inputs when the request is queued, so the survivor would
-        # rebuild the conversation from a snapshot taken before the cancelled
-        # run wrote anything. A shared concurrency group has the same flaw - it
-        # only delays the stale handler. Each of them refuses outright instead
-        # while runtime.MANAGER.busy (see busy_state).
-        undo_button.click(
-            undo_last,
+        # Mutations of a running conversation ask the reader to Stop first.
+        # Navigation and changes to other conversations leave its job alone.
+        conversation_events.bind(
+            undo_button.click, undo_last,
             [conversation_state, color_scale],
             undo_outputs,
-            cancels=running,
             concurrency_id=CONVERSATION_PANE_QUEUE,
         )
-        chatbot.undo(
-            undo_message,
+        conversation_events.bind(
+            chatbot.undo, undo_message,
             [conversation_state, color_scale],
             undo_outputs,
-            cancels=running,
             concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         # Clear asks before it takes anything, so the button that opens the
-        # question does nothing else - it neither clears nor cancels. The
-        # confirm button is the one that does both.
+        # question leaves the conversations and background job alone. The
+        # confirm button clears them once generation is stopped.
         clear_button.click(
             ask_clear_chat,
             [conversation_state, forks_state],
@@ -1953,8 +1948,9 @@ def build_app() -> gr.Blocks:
         for control in (new_button, fork_button, delete_fork_button):
             control.click(hide_clear_confirm, None, clear_confirm)
         conversation_list.input(hide_clear_confirm, None, clear_confirm)
-        brings_its_sampling(confirm_clear_button.click(
-            clear_chat,
+        brings_its_sampling(conversation_events.bind(
+            confirm_clear_button.click, clear_chat,
+            clear=True,
             inputs=[color_scale, forks_state],
             concurrency_id=CONVERSATION_PANE_QUEUE,
             outputs=[
@@ -1979,12 +1975,9 @@ def build_app() -> gr.Blocks:
                 conversation_list,
                 clear_confirm,
             ],
-            cancels=running,
         ))
 
-        # Forking, switching, starting afresh and deleting all replace the
-        # conversation, so they cancel a running generation for the same
-        # reason Undo does.
+        # Navigation takes a snapshot of the view; the job keeps its source.
         fork_outputs = [
             prompt,
             chatbot,
@@ -2010,8 +2003,8 @@ def build_app() -> gr.Blocks:
         chatbot.select(remember_message, conversation_state, selected_message)
 
         brings_its_sampling(
-            fork_button.click(
-                fork_conversation,
+            navigate(
+                fork_button.click, fork_conversation,
                 [
                     conversation_state,
                     forks_state,
@@ -2020,16 +2013,14 @@ def build_app() -> gr.Blocks:
                     *sampling_controls,
                 ],
                 fork_outputs,
-                cancels=running,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
         )
         brings_its_sampling(
-            new_button.click(
-                new_conversation,
+            navigate(
+                new_button.click, new_conversation,
                 [conversation_state, forks_state, color_scale, *sampling_controls],
                 [*fork_outputs, branch_text],
-                cancels=running,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
         )
@@ -2037,36 +2028,34 @@ def build_app() -> gr.Blocks:
         # above and the listener below, and a .change listener would switch a
         # second time on each.
         brings_its_sampling(
-            conversation_list.input(
-                switch_fork,
+            navigate(
+                conversation_list.input, switch_fork,
                 [conversation_list, conversation_state, forks_state, color_scale],
                 fork_outputs,
-                cancels=running,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
         )
         brings_its_sampling(
-            delete_fork_button.click(
-                delete_fork,
+            conversation_events.bind(
+                delete_fork_button.click, delete_fork,
                 [conversation_state, forks_state, color_scale],
                 fork_outputs,
-                cancels=running,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
         )
-        # Every other path that changes the conversation - a streaming reply
-        # above all - lands here, and the list's model tag and token count
+        # Every other path that changes the conversation lands here, and
+        # the list's model tag, running indicator and token count
         # follow it. Hide the loading overlay so each streaming frame updates
         # the labels without making the whole list blink.
         conversation_state.change(
-            refresh_conversation_list,
-            [conversation_state, forks_state],
+            conversation_events.refresh_conversation_list,
+            [conversation_state, forks_state, background_state],
             [conversation_list, forks_state],
             concurrency_id=CONVERSATION_PANE_QUEUE,
             show_progress="hidden",
         )
         # And the forks' change, which the listener above fires in turn, is
-        # where the file is written - once per change, whichever path made it.
+        # where ordinary view changes are saved. Workers also save independently.
         forks_state.change(
             remember_forks,
             [conversation_state, forks_state],
@@ -2075,16 +2064,12 @@ def build_app() -> gr.Blocks:
         )
         # The saved conversations come back first, so the listeners above
         # have something to describe. A page with nothing saved is left as
-        # it was built. Like every other path that replaces the conversation,
-        # this cancels a generation still running - the one a reload
-        # interrupted, whose frames would otherwise land on the restored
-        # transcript.
+        # it was built. Background workers persist to their source independently.
         brings_its_sampling(
-            demo.load(
-                restore_conversations,
+            conversation_events.bind(
+                demo.load, restore_conversations,
                 None,
                 [chatbot, conversation_state, forks_state, conversation_list, metrics_state],
-                cancels=running,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
         )
@@ -2094,8 +2079,8 @@ def build_app() -> gr.Blocks:
             [conversation_state, system_prompt, *steering_inputs],
             [saved_file, generation_status],
         )
-        load_upload.upload(
-            load_with_steering,
+        conversation_events.bind(
+            load_upload.upload, load_with_steering,
             [load_upload, conversation_state, color_scale, forks_state],
             [
                 chatbot,
@@ -2119,7 +2104,6 @@ def build_app() -> gr.Blocks:
                 forks_state,
                 *steering_outputs,
             ],
-            cancels=running,
             concurrency_id=CONVERSATION_PANE_QUEUE,
         )
 
