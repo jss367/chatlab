@@ -40,6 +40,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import settings
 from model_runtime import (
     LOADING,
+    MLX_KIND,
     TEXT_KIND,
     InsufficientMemoryError,
     ModelChanged,
@@ -529,8 +530,8 @@ def build_router() -> APIRouter:
     def models() -> JSONResponse:
         """Every model on disk ChatLab could answer with, the loaded one marked.
 
-        Text models alone. This is the OpenAI-compatible list and every route
-        beside it completes a chat, so an image pipeline here would be
+        Text models alone, MLX ones included. This is the OpenAI-compatible
+        list and every route beside it completes a chat, so an image pipeline here would be
         offered for something it cannot do - and marked loaded while
         ``loaded_model()`` reported nothing, since that asks for a text
         model. The Images page is where a pipeline is used.
@@ -542,7 +543,7 @@ def build_router() -> APIRouter:
         in_memory = runtime.MANAGER.loaded_model()
         data = []
         for entry in list_cached_models():
-            if not entry.status.complete or entry.status.kind != TEXT_KIND:
+            if not entry.status.complete or entry.status.kind not in (TEXT_KIND, MLX_KIND):
                 continue
             organization, _, _name = entry.model_id.partition("/")
             data.append(
