@@ -155,7 +155,9 @@ from ui.settings_page import (
 from ui.styles import (
     CSS,
     THEME,
+    RESIZE_JS,
     SHORTCUT_JS,
+    pane_handle,
     message_box_settings,
     set_message_box_keys,
 )
@@ -572,6 +574,16 @@ def build_app() -> gr.Blocks:
                                     elem_id="batch-files",
                                 )
 
+                    # The seam between the transcript and the readings is a
+                    # handle: drag it to give either pane the other's room.
+                    # See RESIZE_JS.
+                    gr.HTML(
+                        pane_handle("inspector-pane"),
+                        elem_id="inspector-resizer",
+                        container=False,
+                        padding=False,
+                    )
+
                     with gr.Column(scale=2, min_width=300, elem_id="inspector-pane"):
                         gr.Markdown("## Under the hood", elem_id="inspector-heading")
                         color_scale = gr.Dropdown(
@@ -783,6 +795,14 @@ def build_app() -> gr.Blocks:
                                     "trajectory and the guidance trace."
                                 ),
                             )
+
+                    # The Images page carries the same handle on its own seam.
+                    gr.HTML(
+                        pane_handle("image-inspector"),
+                        elem_id="image-inspector-resizer",
+                        container=False,
+                        padding=False,
+                    )
 
                     with gr.Column(scale=2, min_width=300, elem_id="image-inspector"):
                         # Which run the readouts belong to, the step being
@@ -1345,6 +1365,9 @@ def build_app() -> gr.Blocks:
         )
         # Escape stops a running generation, from anywhere on the page.
         demo.load(None, None, None, js=SHORTCUT_JS)
+        # The two readings panes are dragged wider or narrower by the handle
+        # on their seam, and remember the width they were left at.
+        demo.load(None, None, None, js=RESIZE_JS)
 
         # Selecting a default is navigation only. The Models page owns the
         # explicit download and load actions, including their errors.

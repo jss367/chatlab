@@ -34,6 +34,7 @@ drove.
 - Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
+- A draggable seam between the transcript and the panel beside it, remembered between sessions
 - Every conversation kept between sessions in one JSON file, so a reload or a restart brings the pane back as it was
 - Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response, or a run of prompts, from anywhere on the Chat page
 - Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
@@ -166,6 +167,8 @@ the Settings page is the direct way to bound it.
 ## The pages
 
 A pane at the far left switches between four pages, each tile an icon above the page's name. **Chat** is the conversation, with the conversations pane beside it and the token panel to its right. **Images** is the same shape with a picture where the transcript goes. **Models** is everything about which model is running. **Settings**, at the bottom of the pane, is how every reply is prompted and measured.
+
+The seam between a transcript and the panel beside it is a handle: drag it to give either one the other's room, or use the arrow keys once it has focus. Double-click it to go back to the width it started at. Each page remembers its own width between sessions. In a window under 850px wide the panel sits under the transcript instead, and the handle goes away with the seam it sat on.
 
 One model is in memory at a time whichever kind it is, because the two share the device and, on Apple silicon, the machine's memory. So loading an image model unloads a text one and the other way round, and each page's badge says whether what is in memory is a model it can use: a model of the other kind is named and greyed rather than reported as nothing loaded, which would send you off to load a second one on top of it.
 
