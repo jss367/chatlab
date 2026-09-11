@@ -416,7 +416,10 @@ def chosen_model(model_id: str, selected: str | None) -> str:
     return (selected or model_id or "").strip()
 
 
-def refresh_model_actions(model_id: str, selected: str | None, repository: dict | None = None):
+def refresh_model_actions(
+    model_id: str, selected: str | None, repository: dict | None = None,
+    hf_token: str | None = None,
+):
     """Show the actions appropriate to the chosen model's local files.
 
     A downloaded model is also named by kind, because this panel is where a
@@ -459,7 +462,7 @@ def refresh_model_actions(model_id: str, selected: str | None, repository: dict 
     else:
         detail = "**Not downloaded** · No local files for this model." if cleaned else "Enter a model ID or select a model."
     download = not (cached.complete or cached.unsupported)
-    checked = matching_repository(cleaned, repository)
+    checked = matching_repository(cleaned, repository, hf_token)
     can_download = checked.get("status") not in {"invalid", "missing", "checking", "restricted"}
     can_load = can_download and not checked.get("unsupported", False)
     return (

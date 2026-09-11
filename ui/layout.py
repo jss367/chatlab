@@ -1311,7 +1311,7 @@ def build_app() -> gr.Blocks:
         # rather than displacing it.
         models_inputs = [my_models, sort_models, weight_precision, model_id]
         models_outputs = [my_models, my_model_detail, my_models_summary]
-        action_inputs = [model_id, my_models, repository_result]
+        action_inputs = [model_id, my_models, repository_result, hf_token]
         action_outputs = [
             model_availability, download_load_button, download_button, cached_button
         ]
@@ -1325,8 +1325,8 @@ def build_app() -> gr.Blocks:
                 concurrency_id="model-actions",
             )
 
-        # Slow network requests write ID-scoped state; rendering reads the field
-        # again so a completed request cannot verify a newer, unchecked ID.
+        # Slow network requests scope state to the ID and credentials; rendering
+        # reads both again so an old request cannot verify a newer selection.
         # Keep checks explicit: clicking the button also blurs the textbox,
         # which would otherwise enqueue a second request for the same ID.
         for event in (check_model_button.click, model_id.submit):
@@ -1335,9 +1335,9 @@ def build_app() -> gr.Blocks:
                 show_progress="hidden", concurrency_id="model-repository-check",
                 trigger_mode="always_last",
             )
-        for control in (model_id, repository_result):
+        for control in (model_id, repository_result, hf_token):
             control.change(
-                repository_view, [model_id, repository_result],
+                repository_view, [model_id, repository_result, hf_token],
                 [repository_detail, weight_precision], show_progress="hidden",
                 concurrency_id="model-repository-view", trigger_mode="always_last",
             )

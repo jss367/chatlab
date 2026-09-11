@@ -2855,11 +2855,13 @@ class PageLayoutTests(unittest.TestCase):
         listeners = self.listeners("refresh_model_actions")
         radio = self.labelled("Downloaded models")
         model_id = self.labelled("Hugging Face model ID")
-        for control in (radio, model_id):
+        token = self.labelled("Hugging Face token (optional)")
+        for control in (radio, model_id, token):
             self.assertTrue(any(fn.targets == [(control._id, "change")] for fn in listeners))
         for fn in listeners:
             self.assertEqual(fn.inputs[:2], [model_id, radio])
             self.assertIsInstance(fn.inputs[2], gr.State)
+            self.assertEqual(fn.inputs[3:], [token])
             self.assertEqual(fn.outputs[0], self.by_id("model-availability"))
             self.assertEqual(
                 [button.value for button in fn.outputs[1:]],

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
+import json
+from pathlib import Path
 
 import gradio as gr
 
@@ -13,15 +16,22 @@ from model_runtime import format_bytes, validate_model_id
 UNCHECKED = "**Repository not checked** · Choose **Check model** to verify this ID on Hugging Face."
 
 
-def check_model_repository(model_id: str, hf_token: str | None):
-    """Yield ID-scoped results so a slow check cannot verify a different selection."""
+def token_scope(hf_token: str | None) -> str:
+    """Identify the request credentials without retaining the token in results."""
 
-    from huggingface_hub import HfApi
+    return hashlib.sha256((hf_token or "").strip().encode()).hexdigest()
+
+
+def check_model_repository(model_id: str, hf_token: str | None):
+    """Scope results to the ID and credentials used for the request."""
+
+    from huggingface_hub import HfApi, hf_hub_download
     from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
     import httpx
 
     cleaned = (model_id or "").strip()
-    result = {"model_id": cleaned}
+    token = (hf_token or "").strip() or None
+    result = {"model_id": cleaned, "token_scope": token_scope(token)}
     try:
         validate_model_id(cleaned)
     except ValueError:
@@ -30,7 +40,7 @@ def check_model_repository(model_id: str, hf_token: str | None):
     yield {**result, "status": "checking", "detail": "Checking Hugging Face…"}
     try:
         info = HfApi().model_info(
-            cleaned, token=(hf_token or "").strip() or None,
+            cleaned, token=token,
             files_metadata=True, timeout=10,
         )
     except GatedRepoError:
@@ -53,22 +63,34 @@ def check_model_repository(model_id: str, hf_token: str | None):
         yield {**result, "status": "error", "detail": "Could not reach Hugging Face. Try Check model again; downloaded models can still load from disk."}
         return
 
-    tags = set(info.tags or [])
-    config = info.config or {}
-    is_mlx = info.library_name == "mlx" or "mlx" in tags
-    bits = mlx_runtime.bits_from_name(cleaned) if is_mlx else None
-    quant = mlx_runtime.mlx_quantization(config)
-    if quant:
-        is_mlx, bits = True, quant["bits"]
     files = info.siblings or []
     sizes = [file.size for file in files]
     total = sum(sizes) if sizes and all(size is not None for size in sizes) else None
     filenames = [file.rfilename for file in files]
+    # model_info exposes only a subset of config.json, omitting quantization.
+    # Inspect the small config at the same revision, never the model weights.
+    config = None
+    if "config.json" in filenames:
+        try:
+            config_path = hf_hub_download(
+                cleaned, "config.json", revision=info.sha, token=token, etag_timeout=10,
+            )
+            loaded = json.loads(Path(config_path).read_text())
+            if isinstance(loaded, dict):
+                config = loaded
+        except (HfHubHTTPError, httpx.HTTPError, OSError, ValueError):
+            # Repository existence was already confirmed. A failed config
+            # lookup must not turn it into a missing or inaccessible repo.
+            pass
+    quant = mlx_runtime.mlx_quantization(config)
+    is_mlx = bool(quant and config is not None and "model_type" in config)
+    bits = quant["bits"] if is_mlx else None
+    mlx_tagged = info.library_name == "mlx" or "mlx" in (info.tags or [])
     unsupported = bool(filenames) and all(
         not name.endswith((".safetensors", ".bin")) for name in filenames
     )
     if is_mlx:
-        format_name = f"MLX · {bits}-bit weights" if bits else "MLX"
+        format_name = f"MLX · {bits}-bit weights"
         supported = mlx_runtime.mlx_supports(config.get("model_type"))
         compatibility = (
             "Text chat architecture supported by the installed MLX runtime. Loading has not been tested."
@@ -78,8 +100,10 @@ def check_model_repository(model_id: str, hf_token: str | None):
         format_name = "Image model"
         compatibility = "Use the Images page after loading."
     else:
-        format_name = "Transformers" if info.library_name == "transformers" else "Format not confirmed"
+        format_name = "Transformers" if info.library_name == "transformers" or (mlx_tagged and config is not None) else "Format not confirmed"
         compatibility = "Repository existence is confirmed; loading compatibility has not been tested."
+    if config is None and "config.json" in filenames:
+        compatibility += " Configuration could not be verified; weight precision remains adjustable."
     if unsupported:
         compatibility = "No supported weight files found. ChatLab cannot load GGUF-only or other exported formats."
     yield {
@@ -90,16 +114,19 @@ def check_model_repository(model_id: str, hf_token: str | None):
     }
 
 
-def matching_repository(model_id: str, result: dict | None) -> dict:
-    if result and result.get("model_id") == (model_id or "").strip():
+def matching_repository(model_id: str, result: dict | None, hf_token: str | None = None) -> dict:
+    if (
+        result and result.get("model_id") == (model_id or "").strip()
+        and result.get("token_scope") == token_scope(hf_token)
+    ):
         return result
     return {}
 
 
-def repository_view(model_id: str, result: dict | None):
-    """Render only the current field's result; never borrow another ID's success."""
+def repository_view(model_id: str, result: dict | None, hf_token: str | None = None):
+    """Render results only for the current model ID and credentials."""
 
-    result = matching_repository(model_id, result)
+    result = matching_repository(model_id, result, hf_token)
     precision = gr.update(visible=not result.get("mlx", False))
     if not result:
         return UNCHECKED, precision

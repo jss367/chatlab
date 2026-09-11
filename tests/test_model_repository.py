@@ -1,6 +1,9 @@
 """Repository checks distinguish existence, access, and local availability."""
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -12,16 +15,31 @@ from ui import model_repository as repository, models_page
 
 
 class RepositoryTests(unittest.TestCase):
-    def check(self, info=None, error=None, model_id="org/model", token=""):
-        with mock.patch("huggingface_hub.HfApi.model_info", return_value=info, side_effect=error) as call:
-            states = list(repository.check_model_repository(model_id, token))
+    def check(self, info=None, error=None, model_id="org/model", token="", config=None, config_error=None):
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "huggingface_hub.HfApi.model_info", return_value=info, side_effect=error
+        ) as call:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps(config if config is not None else {
+                "model_type": "qwen3_5", "quantization": {"bits": 4, "group_size": 64},
+            }))
+            with mock.patch(
+                "huggingface_hub.hf_hub_download", return_value=str(config_path),
+                side_effect=config_error,
+            ) as download:
+                states = list(repository.check_model_repository(model_id, token))
+            self.config_download = download
         return states, call
 
     def info(self, **kwargs):
         return SimpleNamespace(**{
             "tags": ["mlx"], "config": {"model_type": "qwen3_5"},
             "library_name": "mlx", "private": False, "gated": False,
-            "siblings": [SimpleNamespace(rfilename="model.safetensors", size=17_000_000_000)],
+            "sha": "a" * 40,
+            "siblings": [
+                SimpleNamespace(rfilename="model.safetensors", size=17_000_000_000),
+                SimpleNamespace(rfilename="config.json", size=200),
+            ],
             **kwargs,
         })
 
@@ -31,15 +49,75 @@ class RepositoryTests(unittest.TestCase):
         call.assert_called_once_with("org/model-4bit", token="secret", files_metadata=True, timeout=10)
         self.assertEqual(states[0]["status"], "checking")
         result = states[-1]
-        self.assertEqual(result["download_bytes"], 17_000_000_000)
-        detail, precision = repository.repository_view("org/model-4bit", result)
+        self.assertEqual(result["download_bytes"], 17_000_000_200)
+        self.config_download.assert_called_once_with(
+            "org/model-4bit", "config.json", revision="a" * 40, token="secret", etag_timeout=10,
+        )
+        detail, precision = repository.repository_view("org/model-4bit", result, "secret")
         self.assertIn("Repository found", detail)
         self.assertIn("4-bit", detail)
         self.assertFalse(precision["visible"])
         self.assertNotIn("secret", str(states))
 
+    def test_unquantized_mlx_tags_or_names_do_not_hide_precision(self):
+        for library, tags in (("mlx", []), ("transformers", ["mlx"])):
+            with self.subTest(library=library):
+                states, _ = self.check(
+                    self.info(library_name=library, tags=tags), model_id="org/model-4bit",
+                    config={"model_type": "qwen3_5", "torch_dtype": "bfloat16"},
+                )
+                detail, precision = repository.repository_view("org/model-4bit", states[-1])
+                self.assertTrue(precision["visible"])
+                self.assertEqual(states[-1]["format"], "Transformers")
+                self.assertIsNone(states[-1]["bits"])
+                self.assertNotIn("Precision is fixed", detail)
+
+    def test_config_detects_quantized_mlx_without_tags_or_a_bit_width_in_the_name(self):
+        states, _ = self.check(self.info(tags=[], library_name="transformers"), config={
+            "model_type": "qwen3_5", "quantization_config": {"bits": 8, "group_size": 64},
+        })
+        detail, precision = repository.repository_view("org/model", states[-1])
+        self.assertIn("MLX · 8-bit weights", detail)
+        self.assertFalse(precision["visible"])
+
+    def test_failed_config_lookup_keeps_repository_found_without_fixed_precision(self):
+        request = httpx.Request("GET", "https://huggingface.co/org/model/resolve/main/config.json")
+        for error in (
+            httpx.ConnectError("offline"),
+            GatedRepoError("gated", response=httpx.Response(403, request=request)),
+        ):
+            with self.subTest(error=type(error).__name__):
+                states, _ = self.check(self.info(), config_error=error)
+                self.assertEqual(states[-1]["status"], "found")
+                detail, precision = repository.repository_view("org/model", states[-1])
+                self.assertTrue(precision["visible"])
+                self.assertIn("Configuration could not be verified", detail)
+
+    def test_a_late_old_token_response_cannot_restore_the_result_for_the_same_id(self):
+        request = httpx.Request("GET", "https://huggingface.co/api/models/org/model")
+        missing = RepositoryNotFoundError("hidden", response=httpx.Response(404, request=request))
+        for error in (None, missing):
+            with self.subTest(error=error):
+                old_states, _ = self.check(self.info(), token="old-token", error=error)
+                old = old_states[-1]
+                # The old request finishes after the user has changed credentials.
+                detail, precision = repository.repository_view("org/model", old, "new-token")
+                self.assertEqual(detail, repository.UNCHECKED)
+                self.assertTrue(precision["visible"])
+                with mock.patch.object(models_page, "cache_status", return_value=CacheStatus()):
+                    _, load, download, _ = models_page.refresh_model_actions(
+                        "org/model", None, old, "new-token"
+                    )
+                self.assertTrue(load["interactive"])
+                self.assertTrue(download["interactive"])
+        states, _ = self.check(self.info(), token="new-token")
+        detail, precision = repository.repository_view("org/model", states[-1], " new-token ")
+        self.assertIn("Repository found", detail)
+        self.assertFalse(precision["visible"])
+        self.assertNotIn("new-token", str(states))
+
     def test_a_late_response_cannot_verify_or_disable_an_edited_id(self):
-        old = {"model_id": "org/old", "status": "missing", "detail": "Repository not found"}
+        old = {"model_id": "org/old", "token_scope": repository.token_scope(None), "status": "missing", "detail": "Repository not found"}
         detail, precision = repository.repository_view("org/new", old)
         self.assertEqual(detail, repository.UNCHECKED)
         self.assertTrue(precision["visible"])
@@ -70,14 +148,14 @@ class RepositoryTests(unittest.TestCase):
                 models_page, "cache_status", return_value=CacheStatus(cached_bytes=100)
             ):
                 _, _, _, cached = models_page.refresh_model_actions(
-                    "org/model", None, {"model_id": "org/model", "status": status}
+                    "org/model", None, {"model_id": "org/model", "token_scope": repository.token_scope(None), "status": status}
                 )
                 self.assertTrue(cached["visible"])
 
     def test_missing_repository_disables_download_until_rechecked_or_edited(self):
         with mock.patch.object(models_page, "cache_status", return_value=CacheStatus()):
             _, load, download, _ = models_page.refresh_model_actions(
-                "org/model", None, {"model_id": "org/model", "status": "missing"}
+                "org/model", None, {"model_id": "org/model", "token_scope": repository.token_scope(None), "status": "missing"}
             )
         self.assertFalse(load["interactive"])
         self.assertFalse(download["interactive"])
