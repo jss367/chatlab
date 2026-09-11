@@ -3377,6 +3377,46 @@ class NextTokenTests(unittest.TestCase):
         self.assertEqual(len(stepped[TURNS][-1]["tokens"]), 9)
         self.assertFalse(runtime.MANAGER.busy)
 
+    def test_stopping_before_replay_preserves_the_original_reply(self):
+        initial = self.reply()
+        stream = app.next_token(None, "draft", initial[TURNS], *SETTINGS)
+        opening = next(stream)
+        self.assertEqual(opening[TURNS], initial[TURNS])
+        self.assertEqual(opening[CHATBOT], initial[CHATBOT])
+        stream.close()
+        messages, turns, *_ = app.stop_generation(opening[TURNS])
+        self.assertEqual(turns, initial[TURNS])
+        self.assertEqual(messages, initial[CHATBOT])
+        self.assertFalse(runtime.MANAGER.busy)
+
+    def test_failure_before_replay_preserves_later_turns_of_a_branch(self):
+        initial = self.reply()
+        pick = self.pick(initial)
+        later = list(app.chat("again", initial[TURNS], *SETTINGS))[-1]
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("Replay failed")
+            yield
+
+        with mock.patch.object(runtime.MANAGER, "generate", side_effect=fail):
+            with self.assertLogs("ui.generation", level="ERROR"):
+                frames = list(app.next_token(pick, "draft", later[TURNS], *SETTINGS))
+        self.assertIn("Replay failed", frames[-1][STATUS])
+        for frame in frames:
+            self.assertEqual(frame[TURNS], later[TURNS])
+        self.assertFalse(runtime.MANAGER.busy)
+
+    def test_stopping_after_invisible_replay_keeps_the_replayed_tokens(self):
+        initial = self.reply()
+        stream = app.next_token(self.pick(initial, token_id=0), "draft", initial[TURNS], *SETTINGS)
+        next(stream)
+        replayed = next(stream)
+        stream.close()
+        _, turns, *_ = app.stop_generation(replayed[TURNS])
+        self.assertEqual([m["token_id"] for m in turns[-1]["tokens"]], [0])
+        self.assertTrue(turns[-1]["token_step_paused"])
+        self.assertFalse(runtime.MANAGER.busy)
+
     def test_invisible_reasoning_tokens_survive_until_visible_text(self):
         initial = self.reply()
         runtime.MANAGER.model.script = [1]

@@ -526,6 +526,7 @@ def _stream_reply(
     branch_note: str = "",
     expected_load_id: str | None = None,
     single_step: bool = False,
+    previous_turns: list[dict] | None = None,
 ):
     """The body of generate_reply(), run with the generation slot held."""
 
@@ -587,7 +588,10 @@ def _stream_reply(
         inspector rebuilds the model's input from.
         """
 
-        messages, _ = display_messages(turns)
+        # Until replay produces a result, cancellation and failures must leave
+        # the original conversation available to Stop and autosave.
+        visible_turns = previous_turns if previous_turns is not None else turns
+        messages, _ = display_messages(visible_turns)
         prompt_strip, prompt_metrics, prompt_note = prompt_panel or (
             gr.skip(),
             gr.skip(),
@@ -597,8 +601,8 @@ def _stream_reply(
         return (
             prompt_text,
             messages,
-            copy_turns(turns),
-            transcript_update(turns, scale_name) if transcript_visible() else gr.skip(),
+            copy_turns(visible_turns),
+            transcript_update(visible_turns, scale_name) if transcript_visible() else gr.skip(),
             (generation, metrics),
             status,
             used_seed,
@@ -676,6 +680,7 @@ def _stream_reply(
         # this event and Gradio closes the outer generator.
         with contextlib.closing(stream):
             for update in stream:
+                previous_turns = None
                 raw_text = update.text
                 prefilled = update.reasoning_prefilled
                 forced_prefix_tokens = update.forced_prefix_tokens
@@ -702,6 +707,8 @@ def _stream_reply(
                 pending["load_id"] = update.load_id
                 pending["metrics_generation"] = generation
                 pending["ends_on_stop_token"] = update.ends_on_stop_token
+                if single_step:
+                    pending["token_step_paused"] = bool(metrics and not update.ends_on_stop_token)
                 pending["generated_tokens"] = len(metrics)
                 status = generation_progress(len(metrics), started, used_seed)
                 if stream_note:
@@ -1237,6 +1244,7 @@ def _branch_with_text(
             ),
             branch_note=note,
             expected_load_id=expected_load,
+            previous_turns=turns,
         )
     except ModelChanged:
         # ``turns`` is still the whole conversation, old response included.
@@ -1350,6 +1358,7 @@ def _branch_from(pick, prompt_text, turns, *settings, single_step=False):
             branch_note=note,
             expected_load_id=expected_load,
             single_step=single_step,
+            previous_turns=turns,
         )
     except ModelChanged:
         # ``turns`` is still the whole conversation, old response included.
