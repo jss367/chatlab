@@ -147,27 +147,34 @@ def interrupted_prefix(episode, manager):
     return list(ids if count == 0 else ids[:count])
 
 
-def verify_recorded_tokens(episode, recorded, kept_ids, manager):
+def verify_recorded_tokens(episode, turn_index, kept, manager):
     """Refuse a fork whose stored IDs no longer decode to the text they recorded.
 
     The same repository ID can be re-downloaded at a revision whose tokenizer or
     vocabulary changed, so a matching model_id is not on its own evidence that
-    replaying stored IDs reproduces the original prefix. Every metric records
-    the text its own ID decoded to at generation time, so the loaded tokenizer
-    can be checked against the run itself, with no fingerprint that existing
-    exports never carried.
+    replaying stored IDs reproduces the original run. Every metric records the
+    text its own ID decoded to at generation time, so the loaded tokenizer can
+    be checked against the run itself, with no fingerprint that existing exports
+    never carried.
+
+    The check covers every ID the fork replays: the kept prefix of the edited
+    response and the whole of each earlier response, which is rebuilt from its
+    stored IDs too. A load identifier is not evidence of anything here, because
+    load_count restarts at zero in each process, so the first load of a
+    repository in one session and its first load in the next both answer to the
+    same name.
     """
-    if manager.load_id is not None and manager.load_id == episode.load_id:
-        return  # The very load that produced the run: its tokenizer is the one.
-    if any(metric.get("text") is None for metric in recorded):
-        # Exports predating per-token text carry nothing to check against, so
-        # they keep the older, stricter rule: only the original load may fork.
-        if manager.load_id != episode.load_id:
+    replayed = [metric for turn in episode.turns[:turn_index] for metric in turn["metrics"]] + list(kept)
+    if any(metric.get("text") is None for metric in replayed):
+        # Exports predating per-token text carry nothing to check against. Only
+        # a live episode of this session, whose load identifier this process
+        # assigned and so can trust, may be forked without that evidence.
+        if episode.replay_only or manager.load_id is None or manager.load_id != episode.load_id:
             raise ValueError("This run predates the recorded token text needed to confirm that the loaded "
-                             "tokenizer is the one that produced it. Fork it from that load.")
+                             "tokenizer is the one that produced it, so it can no longer be forked.")
         return
     try:
-        current = [manager.decode([token_id]) for token_id in kept_ids]
+        current = [manager.decode([metric["token_id"]]) for metric in replayed]
     except (IndexError, KeyError, OverflowError, TypeError, ValueError) as exc:
         raise ValueError("The loaded model cannot decode this run's token IDs, so its tokenizer is not the "
                          f"one that produced the run ({exc}). This happens when the same model ID has been "
@@ -175,11 +182,45 @@ def verify_recorded_tokens(episode, recorded, kept_ids, manager):
     # A character split across several tokens decodes to replacement characters
     # token by token, and an empty decode was recorded from a fallback name, so
     # neither carries a value worth comparing.
-    if any(now != then["text"] for now, then in zip(current, recorded)
+    if any(now != then["text"] for now, then in zip(current, replayed)
            if then["text"] and "�" not in then["text"]):
         raise ValueError("The loaded weights tokenize differently from the ones that produced this run, so "
                          "its tokens cannot be replayed. This happens when the same model ID has been "
                          "re-downloaded at a different revision; load that snapshot to fork this run.")
+
+
+def stop_deciding_id(turn):
+    """The token whose membership in the stop set decides this turn's outcome.
+
+    finish_turn reads the last sampled token, and for an edited response whose
+    replacement ended it with nothing sampled afterwards, the last token of the
+    response.
+    """
+    sampled = turn["metrics"][turn["forced_prefix_tokens"]:]
+    if sampled:
+        return sampled[-1]["token_id"]
+    if turn.get("token_edit") and turn["metrics"]:
+        return turn["metrics"][-1]["token_id"]
+    return None
+
+
+def verify_recorded_stops(episode, turn_index, stop_ids):
+    """Refuse a fork whose earlier responses no longer end the way they recorded.
+
+    Each earlier response is replayed through finish_turn against the stop set
+    of the load in memory now. An ID that decodes to the same text can still
+    have stopped being configured as a stop token, and then a response that
+    ended naturally is read as a length failure: its tool call is never parsed,
+    so its messages, event and maze position never reach the forked episode and
+    regeneration starts from the wrong state.
+    """
+    for turn in episode.turns[:turn_index]:
+        last = stop_deciding_id(turn)
+        if (last is not None and last in stop_ids) != (turn.get("finish_reason") == "stop"):
+            raise ValueError("The loaded model's stop tokens differ from the ones that produced this run, so "
+                             "its earlier responses cannot be reconstructed. This happens when the same model "
+                             "ID has been re-downloaded at a different revision; load that snapshot to fork "
+                             "this run.")
 
 
 def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, candidate_id=None):
@@ -196,7 +237,8 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
         # The fork replays stored token IDs, so the tokenizer has to match. The
         # model ID is the cheap gate; a later load of the same ID is allowed,
         # which is what lets an uploaded run be forked at all, but only after
-        # verify_recorded_tokens confirms that load tokenizes the run the same.
+        # the run's own recorded text and stop outcomes confirm that this load
+        # tokenizes it the same way.
         if episode.model_id and manager.model_id != episode.model_id:
             raise ValueError(f"This run was generated by {episode.model_id}. "
                              "Load that model before editing its tokens.")
@@ -208,7 +250,9 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
                 or not original["forced_prefix_tokens"] <= token_index < len(metrics)):
             raise ValueError("Select a model-generated token to edit.")
         kept_ids = [m["token_id"] for m in metrics[:token_index]]
-        verify_recorded_tokens(episode, metrics[:token_index], kept_ids, manager)
+        stop_ids = manager.stop_token_ids
+        verify_recorded_tokens(episode, turn_index, metrics[:token_index], manager)
+        verify_recorded_stops(episode, turn_index, stop_ids)
         literal_prefill_tokens = original.get("literal_prefill_tokens", original["forced_prefix_tokens"])
         if candidate_id is None:
             replacement_ids = manager.encode_replacement(
@@ -221,7 +265,6 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
             replacement_ids = [candidate_id]
         if not replacement_ids:
             raise ValueError("Enter replacement text or choose a token alternative.")
-        stop_ids = manager.stop_token_ids
         if any(t in stop_ids for t in replacement_ids[:-1]):
             raise ValueError("A stop token can only appear at the end of the replacement.")
         result = Episode(episode.maze, episode.config)

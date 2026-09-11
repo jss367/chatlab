@@ -291,13 +291,61 @@ class MazeTests(unittest.TestCase):
                 fork_token_edit(replay, 0, index, "west", session)
         self.assertIn("cannot decode", str(caught.exception))
 
-        # An export predating recorded token text keeps the strict load rule.
+        # An export predating recorded token text has nothing to verify against.
         for metric in replay.turns[0]["metrics"]:
             metric.pop("text")
         with revised.open_session() as session:
             with self.assertRaises(ValueError) as caught:
                 fork_token_edit(replay, 0, index, "west", session)
         self.assertIn("predates", str(caught.exception))
+
+        # A restart gives the first load of the same repository the load ID the
+        # previous session's first load carried, which proves nothing about it.
+        restarted = Manager([])
+        restarted.load_id = replay.load_id
+        restarted.tokenizer = revised.tokenizer
+        with restarted.open_session() as session:
+            with self.assertRaises(ValueError) as caught:
+                fork_token_edit(replay, 0, index, "west", session)
+        self.assertIn("predates", str(caught.exception))
+
+    def test_fork_refuses_a_later_load_that_changed_an_earlier_response(self):
+        """Earlier turns are rebuilt from their stored IDs, so they are verified too."""
+        move = call_text(MAZE.maze_id, "east")
+        ids = list(move.encode()) + [0]
+        author = Manager([(move, ids), (move, ids)])
+        author.generate = scored(author.generate)
+        ep = Episode(MAZE, CONFIG | {"interruption_text": "", "per_turn_tokens": 200, "token_budget": 1000})
+        list(stream_episode(ep, author))
+        self.assertEqual([turn["finish_reason"] for turn in ep.turns], ["stop", "stop"])
+        index = move.index("east")
+
+        # Every stored ID still decodes the same, but the ID the first response
+        # ended on is no longer configured as a stop token, so replaying that
+        # response would read it as a length failure and skip its movement.
+        replay = from_payload(json.loads(json.dumps(ep.payload())))
+        restopped = Manager([])
+        restopped.load_id = "test-load#2"
+        restopped._stop_token_ids = lambda: {1}
+        with restopped.open_session() as session:
+            with self.assertRaisesRegex(ValueError, "stop tokens differ"):
+                fork_token_edit(replay, 1, index, "west", session)
+
+        # An earlier response's own tokens no longer decode to what it recorded.
+        drifted = from_payload(json.loads(json.dumps(ep.payload())))
+        drifted.turns[0]["metrics"][0]["text"] = "¡"
+        reloaded = Manager([])
+        reloaded.load_id = "test-load#2"
+        with reloaded.open_session() as session:
+            with self.assertRaisesRegex(ValueError, "tokenize differently"):
+                fork_token_edit(drifted, 1, index, "west", session)
+
+        # Unchanged, the same later load forks the second response as before.
+        intact = from_payload(json.loads(json.dumps(ep.payload())))
+        with reloaded.open_session() as session:
+            forked = fork_token_edit(intact, 1, index, "west", session)
+        self.assertEqual(forked.position, (0, 1))
+        self.assertEqual(len(forked.turns), 1)
 
     def test_replay_edit_leaves_a_newer_archive_of_the_same_run_alone(self):
         move = call_text(MAZE.maze_id, "east")
