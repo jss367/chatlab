@@ -24,7 +24,7 @@ class Episode:
     config: dict
     run_id: str = field(default_factory=lambda: uuid4().hex)
     phase: str = "ready"
-    detail: str = "Ready. Run the episode or generate one response at a time."
+    detail: str = "Ready. Play the episode or use Next to generate one response."
     messages: list = field(default_factory=list)
     events: list = field(default_factory=list)
     turns: list = field(default_factory=list)
@@ -49,6 +49,14 @@ class Episode:
     replay_only: bool = False
     token_edit: dict | None = None
     pending_edit: dict | None = None
+    # The response the viewer last drew. Previous, Next and playback move
+    # relative to it, so a rapid second click cannot resend a stale index.
+    viewing: int = -1
+    # Which playback run owns the view. Starting one supersedes the last, so
+    # two runs in the same session cannot repaint each other's frames.
+    playback_token: int = 0
+    playing: bool = False
+    reveal_route: bool = False
     created_at: float = field(default_factory=time.time)
 
     def __deepcopy__(self, memo):
@@ -147,19 +155,199 @@ def interrupted_prefix(episode, manager):
     return list(ids if count == 0 else ids[:count])
 
 
+def forkable_without_evidence(episode, manager):
+    """Whether this episode may be forked where the run records nothing to check.
+
+    Only a live episode of this session qualifies: its load identifier was
+    assigned by this process, so it names the load in memory now. An uploaded
+    replay never qualifies, because load_count restarts at zero in each
+    process, and the first load of a repository in one session answers to the
+    same name as the first load in the next.
+    """
+    return (not episode.replay_only and manager.load_id is not None
+            and manager.load_id == episode.load_id)
+
+
+def visible_token_ids(metrics, literal_prefill_tokens, hidden_ids):
+    """The IDs a stretch of recorded metrics was decoded into text through.
+
+    The runtime streams each response through IncrementalDecoder, which drops
+    a hidden special rather than decoding it, so those IDs appear among the
+    turn's metrics and never in its text. Reader-supplied prefill is the
+    exception the runtime makes: replay forces those tokens visible, including
+    special-token spellings.
+    """
+    return [metric["token_id"] for index, metric in enumerate(metrics)
+            if index < literal_prefill_tokens or metric["token_id"] not in hidden_ids]
+
+
+def literal_prefill_of(turn):
+    """How many leading tokens of this response replay forces visible."""
+    return turn.get("literal_prefill_tokens", turn["forced_prefix_tokens"])
+
+
+def verify_recorded_text(episode, turn_index, manager):
+    """Refuse a fork whose stored IDs no longer decode to the text they recorded.
+
+    The same repository ID can be re-downloaded at a revision whose tokenizer or
+    vocabulary changed, so a matching model_id is not on its own evidence that
+    replaying stored IDs reproduces the original run. Every response records the
+    text its own IDs decoded to at generation time, so the loaded tokenizer can
+    be checked against the run itself, with no fingerprint that existing exports
+    never carried.
+
+    Each response is compared as a whole rather than a token at a time, because
+    decoding is not piecewise. A revision that moves an ID from the word-boundary
+    piece "▁world" to "world" leaves it decoding alone to "world" either way,
+    while the sequence after "Hello" reads "Hello world" under one vocabulary and
+    "Helloworld" under the other. Decoding the response as a whole also puts a
+    byte-level piece among the neighbours that complete its character, so a
+    fragment that names no ID by itself is still pinned down by the text it
+    makes with them.
+
+    Every earlier response is verified in full, because the fork rebuilds each of
+    them from its stored IDs. The edited response is verified in full too, past
+    the edited token as well as before it: boundary semantics only mean anything
+    in context, so a vocabulary that has moved anywhere in that response is
+    evidence the tokenizer is not the one that produced the run.
+
+    A load identifier is not evidence of anything here, because load_count
+    restarts at zero in each process, so the first load of a repository in one
+    session and its first load in the next both answer to the same name.
+    """
+    hidden = manager.hidden_token_ids
+    for turn in episode.turns[:turn_index + 1]:
+        try:
+            current = manager.decode(visible_token_ids(turn["metrics"], literal_prefill_of(turn), hidden))
+        except (IndexError, KeyError, OverflowError, TypeError, ValueError) as exc:
+            raise ValueError("The loaded model cannot decode this run's token IDs, so its tokenizer is not the "
+                             f"one that produced the run ({exc}). This happens when the same model ID has been "
+                             "re-downloaded at a different revision.") from exc
+        if current != turn["text"]:
+            raise ValueError("The loaded weights tokenize differently from the ones that produced this run, so "
+                             "its tokens cannot be replayed. This happens when the same model ID has been "
+                             "re-downloaded at a different revision; load that snapshot to fork this run.")
+
+
+def verify_recorded_candidate(episode, manager):
+    """Refuse a recorded alternative on a run this session did not produce.
+
+    The chosen alternative is the one ID the fork replays that the run never
+    generated, so no response text stands behind it, and nothing an export
+    records says how the model that offered it spelled that ID. build_metric
+    records an alternative by decoding it alone, and SentencePiece reads the
+    word-boundary space off the first token of whatever it decodes, so "▁world"
+    and "world" both record "world". A later vocabulary spelling that ID either
+    way reproduces the recording exactly, while the branch after a retained
+    "Hello" reads "Hello world" under one and "Helloworld" under the other. The
+    recording is the same in both directions, so no comparison against the
+    loaded vocabulary can establish which one offered the alternative, and the
+    session that offered it is the only place it can be applied: its load
+    identifier names the load in memory now.
+
+    This costs nothing, because Replacement text expresses the same branch and
+    is checked more strictly. ModelManager.encode_replacement validates typed
+    text in place against the retained tokens, against exactly this ambiguity,
+    and picks whichever ID spells it correctly in that position under the
+    loaded vocabulary. Someone who wants the alternative "world" types "world"
+    and gets a correctly spelled branch.
+    """
+    if not forkable_without_evidence(episode, manager):
+        raise ValueError("A recorded alternative can only be applied in the session that offered it. The run "
+                         "records how the alternative decodes on its own, which cannot say how the model that "
+                         "offered it spelled that token after your retained tokens. Type the text you want in "
+                         "Replacement text instead, which is checked in place against those tokens.")
+
+
+def verify_visible_candidate(candidate_id, manager, stop_ids):
+    """Refuse an alternative the loaded model never shows in a response.
+
+    The replacement reaches the runtime as forced_ids past the literal prefill,
+    where IncrementalDecoder.push drops a hidden special instead of decoding it.
+    Choosing one would leave the response text exactly as it was while the token
+    still entered the model's context, so the branch the panel advertised never
+    appears and the edit reads as a no-op that quietly changed the run.
+
+    A hidden stop token is the exception, because the runtime cuts a forced
+    sequence at its first stop token past the literal prefill: the response ends
+    there, which is a visible outcome even though the token itself never shows.
+
+    This holds whatever the run's provenance, so it is asked before the
+    provenance question: a hidden alternative is no more usable in the session
+    that offered it than on an uploaded run.
+    """
+    if candidate_id in manager.hidden_token_ids and candidate_id not in stop_ids:
+        raise ValueError("The loaded model does not show that token in a response, so choosing it would leave "
+                         "the text unchanged while still feeding the token to the model. Type the branch you "
+                         "want in Replacement text instead.")
+
+
+def stop_deciding_id(turn):
+    """The token whose membership in the stop set decides this turn's outcome.
+
+    finish_turn reads the last sampled token, and for an edited response whose
+    replacement ended it with nothing sampled afterwards, the last token of the
+    response.
+    """
+    sampled = turn["metrics"][turn["forced_prefix_tokens"]:]
+    if sampled:
+        return sampled[-1]["token_id"]
+    if turn.get("token_edit") and turn["metrics"]:
+        return turn["metrics"][-1]["token_id"]
+    return None
+
+
+def verify_recorded_stops(episode, turn_index, kept, literal_prefill_tokens, stop_ids):
+    """Refuse a fork whose replayed tokens no longer behave as they did under the stop set.
+
+    Each earlier response is replayed through finish_turn against the stop set
+    of the load in memory now. An ID that decodes to the same text can still
+    have stopped being configured as a stop token, and then a response that
+    ended naturally is read as a length failure: its tool call is never parsed,
+    so its messages, event and maze position never reach the forked episode and
+    regeneration starts from the wrong state.
+
+    The retained prefix of the edited response is checked too. It reaches the
+    runtime as forced_ids, which cuts the forced sequence at the first stop
+    token past the literal prefill, so an ID this load newly treats as a stop
+    token ends the response inside the prefix and the selected token is never
+    reached. kept stops before the edited token, so the response's own closing
+    stop token is not part of it and any stop ID found there is one this load
+    added.
+    """
+    for turn in episode.turns[:turn_index]:
+        last = stop_deciding_id(turn)
+        if (last is not None and last in stop_ids) != (turn.get("finish_reason") == "stop"):
+            raise ValueError("The loaded model's stop tokens differ from the ones that produced this run, so "
+                             "its earlier responses cannot be reconstructed. This happens when the same model "
+                             "ID has been re-downloaded at a different revision; load that snapshot to fork "
+                             "this run.")
+    if any(metric["token_id"] in stop_ids for metric in kept[literal_prefill_tokens:]):
+        raise ValueError("The loaded model treats one of the tokens kept before your edit as a stop token, "
+                         "so it would end this response inside the retained prefix and never reach the token "
+                         "you selected. This happens when the same model ID has been re-downloaded at a "
+                         "different revision; load that snapshot to fork this run.")
+
+
 def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, candidate_id=None):
     """Fork before one response; replay exact earlier IDs plus a replacement.
 
     token_index addresses the full response metric list, including any supplied
-    prefix. Only generated tokens are editable. The original remains untouched.
+    prefix. Only generated tokens are editable. The original remains untouched,
+    including a run uploaded for replay: forking it rebuilds the maze, history
+    and counters into a new live episode rather than reopening the saved one.
     """
     with episode.lock:
         if episode.busy:
             raise ValueError("Pause or stop the episode before editing tokens.")
-        if episode.replay_only:
-            raise ValueError("Saved runs are read-only. Edit tokens in a live episode.")
-        if manager.load_id != episode.load_id or manager.model_id != episode.model_id:
-            raise ValueError("The model changed. Start a new episode before editing tokens.")
+        # The fork replays stored token IDs, so the tokenizer has to match. The
+        # model ID is the cheap gate; a later load of the same ID is allowed,
+        # which is what lets an uploaded run be forked at all, but only after
+        # the run's own recorded text and stop outcomes confirm that this load
+        # tokenizes it the same way.
+        if episode.model_id and manager.model_id != episode.model_id:
+            raise ValueError(f"This run was generated by {episode.model_id}. "
+                             "Load that model before editing its tokens.")
         if not isinstance(turn_index, int) or not 0 <= turn_index < len(episode.turns):
             raise ValueError("Select a response and token to edit.")
         original = episode.turns[turn_index]
@@ -167,24 +355,34 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
         if (not isinstance(token_index, int)
                 or not original["forced_prefix_tokens"] <= token_index < len(metrics)):
             raise ValueError("Select a model-generated token to edit.")
-        kept_ids = [m["token_id"] for m in metrics[:token_index]]
-        literal_prefill_tokens = original.get("literal_prefill_tokens", original["forced_prefix_tokens"])
+        kept = metrics[:token_index]
+        kept_ids = [m["token_id"] for m in kept]
+        stop_ids = manager.stop_token_ids
+        literal_prefill_tokens = literal_prefill_of(original)
+        verify_recorded_text(episode, turn_index, manager)
+        verify_recorded_stops(episode, turn_index, kept, literal_prefill_tokens, stop_ids)
         if candidate_id is None:
             replacement_ids = manager.encode_replacement(
                 kept_ids, replacement, literal_prefill_tokens=literal_prefill_tokens,
             )
         else:
-            candidates = {c["token_id"] for c in metrics[token_index].get("top_candidates", [])}
-            if candidate_id not in candidates:
+            # The alternative has to be one the run recorded for this token,
+            # which is a correctness check on the selection rather than a
+            # question about the tokenizer, so it holds whatever the provenance.
+            if not any(c["token_id"] == candidate_id
+                       for c in metrics[token_index].get("top_candidates", [])):
                 raise ValueError("Choose an alternative for the selected token.")
+            verify_visible_candidate(candidate_id, manager, stop_ids)
+            verify_recorded_candidate(episode, manager)
             replacement_ids = [candidate_id]
         if not replacement_ids:
             raise ValueError("Enter replacement text or choose a token alternative.")
-        stop_ids = manager.stop_token_ids
         if any(t in stop_ids for t in replacement_ids[:-1]):
             raise ValueError("A stop token can only appear at the end of the replacement.")
         result = Episode(episode.maze, episode.config)
-        result.model_id, result.load_id = episode.model_id, episode.load_id
+        # The fork continues under the weights in memory now, not the ones that
+        # produced the original; token_edit keeps the original stamp.
+        result.model_id, result.load_id = manager.model_id, manager.load_id
         result.manual_intervention = True
         # Rebuild history and recovery counters through the same simulator path
         # used during generation, excluding the edited response and its future.
@@ -203,7 +401,8 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
                                  token_index=token_index, original_token_id=metrics[token_index]["token_id"],
                                  replacement_ids=replacement_ids,
                                  replacement_text=replacement if candidate_id is None else manager.decode(replacement_ids),
-                                 created_at=time.time())
+                                 parent_model_id=episode.model_id, parent_load_id=episode.load_id,
+                                 parent_replay=episode.replay_only, created_at=time.time())
         result.pending_edit = dict(forced_ids=prefix,
                                    literal_prefill_tokens=literal_prefill_tokens,
                                    interruption_here=bool(episode.interrupted and episode.intervention_turn == turn_index))
@@ -279,7 +478,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
         if episode.busy:
             raise ValueError("This episode is already generating. Pause it before changing the run.")
         if episode.phase in TERMINAL or episode.replay_only:
-            raise ValueError("Start a new episode to run again. This episode is finished or is a saved replay.")
+            raise ValueError("Start a new episode to run again. This episode is finished or is a saved replay. Use Play or Next to inspect its recorded responses.")
         manager = models.open_session()
         episode.busy = True
         episode.pause_requested = episode.stop_requested = False

@@ -8,6 +8,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+from typing import NamedTuple
 
 import gradio as gr
 import pandas as pd
@@ -19,6 +20,8 @@ from model_runtime import (
     DISCOVERY_CANDIDATES,
     FITS,
     IMAGE_KIND,
+    LOADING,
+    MLX_KIND,
     MODEL_WEIGHTS,
     QUANTIZED_BITS,
     SEARCH_IMAGE_PIPELINE_TAGS,
@@ -46,12 +49,16 @@ from model_runtime import (
     format_bytes,
     format_count,
     list_cached_models,
+    mlx_available,
+    mlx_bits_from_id,
+    mlx_snapshot_bits,
     model_fit,
     search_hub_models,
     snapshot_folder,
     sort_cached_models,
 )
 from ui import runtime
+from ui.model_repository import matching_repository
 from ui.common import (
     DEFAULT_MODEL_DOWNLOAD,
     DOWNLOAD_POLL_SECONDS,
@@ -59,6 +66,8 @@ from ui.common import (
     LOAD_POLL_SECONDS,
     MODELS_PAGE,
     RATE_WINDOW_SECONDS,
+    Card,
+    alarm,
     describe_duration,
     failure_card,
     progress_bar,
@@ -408,7 +417,10 @@ def chosen_model(model_id: str, selected: str | None) -> str:
     return (selected or model_id or "").strip()
 
 
-def refresh_model_actions(model_id: str, selected: str | None):
+def refresh_model_actions(
+    model_id: str, selected: str | None, repository: dict | None = None,
+    hf_token: str | None = None,
+):
     """Show the actions appropriate to the chosen model's local files.
 
     A downloaded model is also named by kind, because this panel is where a
@@ -449,12 +461,19 @@ def refresh_model_actions(model_id: str, selected: str | None):
     elif cached.present:
         detail = "**Download incomplete** · Download and load will fetch the remaining files."
     else:
-        detail = "**Not downloaded** · Download the model to use it." if cleaned else "Enter a model ID or select a model."
+        detail = "**Not downloaded** · No local files for this model." if cleaned else "Enter a model ID or select a model."
     download = not (cached.complete or cached.unsupported)
+    checked = matching_repository(cleaned, repository, hf_token)
+    can_download = (
+        checked.get("status") not in {"invalid", "missing", "checking", "restricted"}
+        and not checked.get("access_restricted", False)
+    )
+    architecture_available = not checked.get("architecture_unavailable", False)
+    can_load = can_download and not checked.get("unsupported", False) and architecture_available
     return (
         detail,
-        gr.update(visible=download),
-        gr.update(visible=download),
+        gr.update(visible=download, interactive=can_load),
+        gr.update(visible=download, interactive=can_download),
         gr.update(visible=cached.complete, variant="primary" if cached.complete else "secondary"),
     )
 
@@ -484,10 +503,48 @@ def download_model(model_id: str, hf_token: str, selected: str | None = None):
     )
 
 
+LOAD_WHILE_GENERATING = (
+    "The model is answering a message. Press Stop, or wait for the reply to "
+    "finish, before loading another model."
+)
+LOAD_WHILE_LOADING = "Another load is already under way. Wait for it to finish."
+
+
+def occupied_reason(held: str | None, loading: str, generating: str) -> str:
+    """Which of the two refusals fits, for whatever ``held`` says has the model.
+
+    ``held`` is what the refused reservation answered with, passed down
+    rather than read again here. Asking a second time is what this used to
+    do and it was wrong: a load that finishes between the refusal and the
+    read leaves nothing holding the model, and the reader is told a response
+    is running and to press a Stop button that is not on the page. See
+    :meth:`ModelManager.claim_exclusive_load`.
+
+    The same two the generation side names, so a load and a reply cannot
+    describe the manager differently.
+    """
+
+    return loading if held == LOADING else generating
+
+
+def refused_load_card(held: str | None, extra: str = "") -> str:
+    """The card a load gets when a reply or another load already has the model."""
+
+    reason = occupied_reason(held, LOAD_WHILE_LOADING, LOAD_WHILE_GENERATING)
+    return status_card("Cannot load now", f"{reason}{extra}", "error")
+
+
 def download_and_load_model(
     model_id: str, hf_token: str, selected: str | None = None, precision: str = "full"
 ):
-    """Download and load the model explicitly selected on the Models page."""
+    """Download and load the model explicitly selected on the Models page.
+
+    The load is claimed after the download rather than before it: the files
+    can take an hour to arrive, and a claim standing for all of it would
+    refuse every reply on the chat page for the duration. The claim covers
+    what it has to - the load itself, which is where two loads would collide
+    and where a reply would find the model swapped underneath it.
+    """
 
     model_id = chosen_model(model_id, selected)
     started = time.monotonic()
@@ -499,18 +556,31 @@ def download_and_load_model(
     yield status_card(*describe_cache(model_id, before), "working")
     try:
         path = yield from stream_download(model_id, hf_token)
-        fetched = describe_fetched(
-            before, cache_status(model_id), time.monotonic() - started
-        )
-        yield status_card(
-            "Loading model",
-            f"{fetched} Moving `{model_id.strip()}` onto the best available device…",
-            "working",
-        )
-        # Read after the download rather than before it: what the repo turns
-        # out to hold is only knowable once its files are here.
-        fetched_status = cache_status(model_id)
-        device = yield from stream_load(model_id, path, precision, fetched_status.kind)
+        claimed, held = runtime.MANAGER.claim_exclusive_load(model_id)
+        if claimed is None:
+            yield refused_load_card(
+                held,
+                f" `{model_id.strip()}` is on disk; use **Load cached** to "
+                "finish the job.",
+            )
+            return
+        try:
+            fetched = describe_fetched(
+                before, cache_status(model_id), time.monotonic() - started
+            )
+            yield status_card(
+                "Loading model",
+                f"{fetched} Moving `{model_id.strip()}` onto the best available device…",
+                "working",
+            )
+            # Read after the download rather than before it: what the repo turns
+            # out to hold is only knowable once its files are here.
+            fetched_status = cache_status(model_id)
+            device = yield from stream_load(
+                model_id, path, precision, fetched_status.kind
+            )
+        finally:
+            runtime.MANAGER.release_load(claimed[1])
     except Exception as error:
         yield failure_card("Model setup failed", html.escape(str(error)))
         return
@@ -543,11 +613,50 @@ def incomplete_snapshot_detail(model_id: str, error: Exception) -> str:
 
 
 def load_cached_model(
-    model_id: str, selected: str | None = None, precision: str = "full"
+    model_id: str,
+    selected: str | None = None,
+    precision: str = "full",
+    claim: int | None = None,
 ):
-    """Load the selected model from local files, preserving any load error."""
+    """Load the selected model from local files, preserving any load error.
+
+    The load is claimed here, before the first card, and given back in a
+    ``finally``. It is claimed exclusively: a load refuses while a reply is
+    streaming or another load is under way rather than queuing behind it,
+    because a queued load's first act on winning the model lock is to unload
+    the model the reader is looking at, and a second load only fills the
+    machine's memory twice over to leave whichever finished last in it.
+    Claiming and checking have to be one step - Gradio does not resume a
+    streaming handler until the browser has its frame, so a check before the
+    first card and a claim after it are a round trip apart.
+
+    ``claim`` is for a caller that already holds the exclusive reservation
+    and is passing it down - :func:`switch_model`, which has to refuse in the
+    switcher's own way before it yields anything. Its claim is not released
+    here; the caller that took it releases it.
+    """
 
     cleaned = chosen_model(model_id, selected)
+    if claim is not None:
+        yield from _load_cached_model(cleaned, precision)
+        return
+    try:
+        claimed, held = runtime.MANAGER.claim_exclusive_load(cleaned)
+    except ValueError as error:
+        yield failure_card("Could not load cached model", html.escape(str(error)))
+        return
+    if claimed is None:
+        yield refused_load_card(held)
+        return
+    try:
+        yield from _load_cached_model(cleaned, precision)
+    finally:
+        runtime.MANAGER.release_load(claimed[1])
+
+
+def _load_cached_model(cleaned: str, precision: str):
+    """The cards of a cached load, with the load already claimed."""
+
     active = runtime.MANAGER.active_downloads.get(cleaned)
     if active is not None:
         snap = active.snapshot()
@@ -726,11 +835,17 @@ def _setup_links(snapshot, kind: str):
 
 
 def refresh_model_badge():
-    """Refresh the Chat page's badge and setup links from the same reading."""
+    """Refresh the Chat page's badge and its setup link from the same reading."""
 
     snapshot = model_snapshot()
-    links = _setup_links(snapshot, TEXT_KIND)
-    return loaded_model_badge(snapshot, kind=TEXT_KIND), links, links
+    return loaded_model_badge(snapshot, kind=TEXT_KIND), _setup_links(snapshot, TEXT_KIND)
+
+
+def refresh_current_model():
+    """The Models page names either kind of loaded model without a page mismatch."""
+
+    snapshot = model_snapshot()
+    return loaded_model_badge(snapshot, kind=snapshot[3])
 
 
 def refresh_image_badge():
@@ -741,6 +856,291 @@ def refresh_image_badge():
         loaded_model_badge(snapshot, kind=IMAGE_KIND),
         _setup_links(snapshot, IMAGE_KIND),
     )
+
+
+# The chat page's model switcher: a dropdown beside the badge that swaps the
+# model in memory for another one already on disk, without a trip to the
+# Models page. It offers only the cached text models a load would take right
+# now, so picking one never ends in the refusal the Models page exists to
+# explain; anything else - a download, a model that will not fit, a new
+# precision - is still that page's business.
+SWITCH_BUSY = (
+    "The model is still answering. Press Stop, or wait for the reply to "
+    "finish, before switching."
+)
+SWITCH_LOADING = "Another load is already under way. Wait for it to finish."
+
+
+def switch_value() -> str | None:
+    """The ID the switcher should show: the model in memory, else the one coming in.
+
+    Named the way the badge names them: a load that has emptied memory is
+    the only thing left to name, and a switcher showing nothing for the
+    minutes the weights are on their way in would invite a second load on
+    top of the first.
+    """
+
+    return runtime.MANAGER.model_id or runtime.MANAGER.loading_id
+
+
+# The kinds the switcher offers: everything that answers on the Chat page.
+# An MLX conversion is a language model that generates, scores and inspects
+# like any other - ``where_to_use`` sends it to Chat, and the API's own
+# ``/v1/models`` lists it beside the Transformers ones - so leaving it out
+# would hide half an Apple silicon reader's models from the one control whose
+# whole job is choosing which of them they are talking to. It also has to be
+# in for the switcher to stay still: ``expected_switch_value`` names whatever
+# is in memory unless it is an image pipeline, so an MLX model loaded from the
+# Models page would be the value of a dropdown that does not offer it, and
+# every tick would read the switcher as stale and repaint it. A machine
+# without mlx-lm never reaches the question - the cache scan marks those repos
+# unsupported, and unsupported is filtered out below.
+SWITCH_KINDS = (TEXT_KIND, MLX_KIND)
+
+
+def switch_choices(precision: str | None = None) -> list[tuple[str, str]]:
+    """The cached text models the Chat page can switch to, as (label, ID) pairs.
+
+    Whole and supported text models - :data:`SWITCH_KINDS`, so MLX
+    conversions among them - that fit at ``precision``, plus the one in
+    memory, in the list's default order. A model the load would refuse -
+    tight or too large, or being downloaded right now - is left out rather
+    than offered and then declined: the refusal names figures and a remedy,
+    and a dropdown has no room for either. A model whose size could not be
+    judged stays in, as the load will try it all the same.
+
+    A **Redownload** is the case the download check is for. An interrupted
+    download leaves files missing and is filtered out by that alone, but a
+    redownload of a model already complete on disk leaves the cache entry
+    looking whole for the whole of the fetch, so nothing but
+    ``active_downloads`` says that picking it would be refused. The chat
+    page's timer hears about a download starting because
+    :meth:`ModelManager.note_cache_change` counts it.
+
+    The fit verdict is the one thing here that a reading taken now can stop
+    being true of a pick made later: free memory moves with whatever else the
+    machine is running. Offering everything and letting the load explain
+    itself is the tempting simplification, and it is the wrong one, because
+    :meth:`ModelManager._load_locked` unloads before it checks - a refused
+    switch would cost the reader the model they were talking to and leave
+    them with nothing loaded. So the list is filtered, and the list is dated:
+    :data:`SWITCH_FIT_SECONDS` is how often an idle switcher re-reads this.
+    """
+
+    models = sort_cached_models(list_cached_models(), DEFAULT_MODEL_SORT)
+    fits = cached_fits(models, precision)
+    current = switch_value()
+    downloading = runtime.MANAGER.downloading_ids()
+    choices = []
+    for entry in models:
+        if entry.status.kind not in SWITCH_KINDS:
+            continue
+        if entry.status.missing_files or entry.status.unsupported:
+            continue
+        # The model in memory stays on the list whatever is happening to its
+        # files, as it does for a fit it would fail: it is what the switcher
+        # has to show as chosen, and picking it is a no-op anyway.
+        if entry.model_id in downloading and entry.model_id != current:
+            continue
+        fit = fits.get(entry.model_id)
+        if fit is not None and fit.known and fit.state != FITS and entry.model_id != current:
+            continue
+        choices.append((entry.model_id, entry.model_id))
+    return choices
+
+
+def expected_switch_value() -> str | None:
+    """What the switcher shows once it agrees with memory, read without a scan.
+
+    An image model is never among the choices, so the switcher shows nothing
+    while one is loaded; the badge is what names it. Reading the kind here
+    rather than looking the ID up in the cache is what lets the timer's
+    check stay a few attribute reads.
+    """
+
+    if runtime.MANAGER.image_loaded:
+        return None
+    return switch_value()
+
+
+# How long an idle switcher goes before it re-reads whether what it offers
+# still fits. The model in memory and the cache revision are attribute reads
+# and are checked on every tick; fit is neither, and is also the one input to
+# the list that nothing in ChatLab moves. Another process taking or giving
+# back several gigabytes changes every verdict without touching the cache or
+# the model in memory, and until the list is re-read it can offer a model the
+# load would now refuse - which costs the reader the model they were talking
+# to, because a load unloads before it checks (see
+# ``ModelManager._load_locked``) - or go on hiding one that has become
+# loadable again. Fifteen seconds is long enough that the scan and the memory
+# reading are rare beside the two-second tick, and short enough that neither
+# mistake stands for long.
+SWITCH_FIT_SECONDS = 15.0
+
+
+class SwitchStamp(NamedTuple):
+    """What a tab's switcher was drawn from, so a later tick can date it.
+
+    ``revision`` is the cache revision the choices were read at, ``offered``
+    the model IDs they came to, and ``checked`` the moment the fit behind
+    them was last read.
+    """
+
+    revision: int
+    offered: tuple[str, ...]
+    checked: float
+
+
+def refresh_model_switch(precision: str | None = None):
+    """Repaint the switcher: the loadable models, with the current one chosen.
+
+    Hidden when there is nothing to offer, which is when the setup link
+    beside it is the way forward.
+
+    Returns the update and the stamp the choices were drawn at, which is what
+    :func:`refresh_stale_model_switch` dates the list against on each tick.
+    The revision is read before the scan, not after: a download that finishes
+    while the scan is running is then seen as a change still to come rather
+    than as one this list already has.
+    """
+
+    revision = runtime.MANAGER.cache_revision
+    choices = switch_choices(precision)
+    current = switch_value()
+    ids = [value for _, value in choices]
+    return (
+        gr.update(
+            choices=choices,
+            value=current if current in ids else None,
+            visible=bool(choices),
+        ),
+        SwitchStamp(revision, tuple(ids), time.monotonic()),
+    )
+
+
+def refresh_stale_model_switch(
+    shown: str | None, stamp: SwitchStamp | None, precision: str | None = None
+):
+    """The timer's refresh: repaint only when the switcher has fallen behind.
+
+    The badge's timer reads a few attributes; this one would scan the cache
+    and read the machine's memory, and a repaint every couple of seconds
+    would also close the list under a reader who has just opened it. So
+    nothing is redrawn while the switcher is still right, which is nearly
+    always.
+
+    Three things can make it wrong. Two are an attribute read and are asked
+    on every tick: the model in memory changed, so the wrong one is selected,
+    and what a cache scan would find changed, so a model this tab has never
+    heard of is missing from the list, or a deleted one is still in it, or one
+    whose files are being rewritten is still offered.
+
+    The third is fit, which no attribute records: the verdict behind every
+    choice is a reading of the machine's free memory, and another process is
+    free to move it. That one is re-read on its own slower beat
+    (:data:`SWITCH_FIT_SECONDS`) because reading it is the expensive half of
+    a repaint, and the re-read only redraws the dropdown when the models on
+    offer actually changed - a list that came out the same is left exactly as
+    it is, open or closed, and only its stamp moves on.
+
+    ``stamp`` is what the tab last painted from; a tab that has not painted
+    yet passes ``None`` and is repainted.
+    """
+
+    if stamp is None:
+        return refresh_model_switch(precision)
+    if (
+        (shown or None) != expected_switch_value()
+        or stamp.revision != runtime.MANAGER.cache_revision
+    ):
+        return refresh_model_switch(precision)
+    if time.monotonic() - stamp.checked < SWITCH_FIT_SECONDS:
+        return gr.skip(), gr.skip()
+    update, fresh = refresh_model_switch(precision)
+    if fresh.offered == stamp.offered:
+        return gr.skip(), fresh
+    return update, fresh
+
+
+def switch_model(selected: str | None, precision: str = "full"):
+    """Load the model picked in the switcher, at the Models page's precision.
+
+    Yields the switcher's own update and the Models page's status card, so
+    the load shows there exactly as **Load cached** would show it, and the
+    badge beside the switcher names the load as it goes. A pick during a
+    reply is refused and the switcher put back: the load would only queue
+    behind the generation, and its first act on winning the lock would be
+    to unload the model still producing the tokens.
+
+    Both refusals are one reservation, not a pair of checks. A second load
+    and a reply starting in the same instant are the same hazard read from
+    two sides: the load itself claims nothing until ``stream_load``, several
+    cards and a cache scan later, Gradio gives a picked-up-and-put-down
+    handler no exclusivity across those yields, and a generation slot taken
+    after this handler looked at it is a reply that will run on whatever
+    this load brings in. ``claim_exclusive_load`` answers both questions
+    under one lock and leaves a claim behind that turns away the next asker,
+    whichever of the two it is; it names which of the two refused this one
+    in the same breath, so the toast cannot go out over a load that has
+    since ended. The claim stands for the whole of the load, the early
+    refusals included, and is given back in the ``finally``.
+
+    A load that is accepted and then comes to nothing is announced where the
+    reader is rather than left on the Models page's card; see
+    :func:`announce_switch_outcome`.
+    """
+
+    current = switch_value()
+    if not selected or selected == current:
+        yield gr.skip(), gr.skip()
+        return
+    try:
+        claimed, held = runtime.MANAGER.claim_exclusive_load(selected)
+    except ValueError as error:
+        yield gr.update(value=current), failure_card(
+            "Could not load cached model", html.escape(str(error))
+        )
+        return
+    if claimed is None:
+        alarm(
+            "Cannot switch models now",
+            occupied_reason(held, SWITCH_LOADING, SWITCH_BUSY),
+        )
+        yield gr.update(value=current), gr.skip()
+        return
+    _checked_id, claim = claimed
+    last = None
+    try:
+        for card in load_cached_model(selected, None, precision, claim):
+            last = card
+            yield gr.skip(), card
+    finally:
+        runtime.MANAGER.release_load(claim)
+    announce_switch_outcome(last)
+
+
+def announce_switch_outcome(card: str | None) -> None:
+    """Say, where the reader is, why an accepted switch did not happen.
+
+    The load's cards go to the Models page's status area, because that is
+    where a load reports its progress and the switcher's own repaint would
+    otherwise drop it mid-load. But the reader who picked from the switcher
+    is on the Chat page and can see none of it, so a switch that is accepted
+    and then comes to nothing - the model removed, gone partial, or a
+    redownload begun between the list being drawn and the pick - would show
+    only as the badge falling back to "No model loaded", with no explanation
+    anywhere the reader is looking.
+
+    A toast is what the rest of the app raises for a failure a reader may not
+    have their eyes on, and :func:`failure_card` already raises one for every
+    failure it writes; those are marked as announced and left alone rather
+    than told twice. What is left is the outcomes that only ever wrote a
+    card, and the last card is the one that says how the load ended.
+    """
+
+    if not isinstance(card, Card) or card.announced or card.tone == "success":
+        return
+    alarm(card.title, card.detail)
 
 
 def go_to_models():
@@ -788,7 +1188,14 @@ NO_CACHED_MODEL_SELECTED = "Select a model to see its details and put it in the 
 # The search is scoped to one kind at a time, because the hub files them
 # under different libraries: a Transformers query and a diffusers one are
 # different searches, not one search with a wider net.
-SEARCH_KINDS = (("Text models", TEXT_KIND), ("Image models", IMAGE_KIND))
+SEARCH_KINDS = (
+    ("Text models", TEXT_KIND),
+    ("Image models", IMAGE_KIND),
+    # Offered where the backend exists, which is Apple silicon with mlx-lm
+    # installed: elsewhere the search would find models that then land in
+    # the cache as unsupported.
+    *((("MLX models", MLX_KIND),) if mlx_available() else ()),
+)
 
 SEARCH_HINTS = {
     TEXT_KIND: (
@@ -799,6 +1206,11 @@ SEARCH_HINTS = {
     IMAGE_KIND: (
         "Browse image starters, or choose Popular, Trending, or New for more text-to-image models. "
         "Click a column heading to sort. Selecting a row puts its ID in the model ID box; "
+        "**Download and load** fetches it."
+    ),
+    MLX_KIND: (
+        "Browse language models quantized for MLX, which run on Apple silicon at the precision "
+        "they were converted to. Selecting a result puts its ID in the model ID box; "
         "**Download and load** fetches it."
     ),
 }
@@ -817,19 +1229,22 @@ def format_timestamp(stamp: float | None) -> str:
 
 UNSUPPORTED_REASON = (
     "not a model ChatLab loads: its files are all here, but it is not one of "
-    "the two kinds. ChatLab loads a Transformers causal language model, which "
+    "the kinds. ChatLab loads a Transformers causal language model, which "
     "has a `model.safetensors` or `pytorch_model.bin` at the top of the repo, "
-    "and a diffusers pipeline that draws from a prompt, which has a "
-    "`model_index.json`, a tokenizer and a text encoder. A CTranslate2 or "
-    "ONNX export is neither; so is a diffusers pipeline that wants a picture, "
-    "a video frame or a sound alongside the prompt, because the Images page "
-    "has only a prompt to give it."
+    "a diffusers pipeline that draws from a prompt, which has a "
+    "`model_index.json`, a tokenizer and a text encoder, and on Apple silicon "
+    "a language model quantized for MLX. A CTranslate2 or ONNX export is "
+    "none of these, and neither is a GGUF file; so is a diffusers pipeline "
+    "that wants a picture, a video frame or a sound alongside the prompt, "
+    "because the Images page has only a prompt to give it. An MLX model on a "
+    "machine without Apple silicon and the mlx-lm package is unsupported for "
+    "the same reason: nothing here runs it."
 )
 
 
 # What each kind of model is, in the fewest words that distinguish them, for
 # the list and the cards.
-KIND_NAMES = {TEXT_KIND: "text model", IMAGE_KIND: "image model"}
+KIND_NAMES = {TEXT_KIND: "text model", IMAGE_KIND: "image model", MLX_KIND: "MLX text model"}
 
 
 def where_to_use(kind: str) -> str:
@@ -881,6 +1296,42 @@ def weight_bits(precision: str | None, profile: DeviceProfile) -> int | None:
     return QUANTIZED_BITS.get(precision or "full")
 
 
+def requested_bits(
+    precision: str | None, profile: DeviceProfile, kind: str | None
+) -> int | None:
+    """:func:`weight_bits`, except where the radio has no say over the width.
+
+    A pipeline is estimated whole whatever the radio says, because the Metal
+    quantizer is Transformers' own and ``_load_locked`` clears the choice for
+    one. An MLX repo was packed when it was converted and loads at that
+    width, so the radio has nothing to add there either. A verdict that
+    carried the bits anyway would put a quantized label on a figure not
+    measured at one, and moving the radio would mark the loaded model as
+    being about to reload when nothing would change.
+    """
+
+    if kind in (IMAGE_KIND, MLX_KIND):
+        return None
+    return weight_bits(precision, profile)
+
+
+def packed_bits(
+    snapshot: Path | None, kind: str | None, requested: int | None
+) -> int | None:
+    """The width a load of ``snapshot`` will really pack its linear layers into.
+
+    ``requested`` for anything but MLX, where the radio decides as far as
+    the device allows. An MLX repo answers for itself, out of the config
+    ``mlx_lm.convert`` wrote: that is the width the estimate is of and the
+    width the verdict has to name, because saying "full 16-bit weights"
+    over a 4-bit conversion's figure would misread it by four times.
+    """
+
+    if kind != MLX_KIND or snapshot is None:
+        return requested
+    return mlx_snapshot_bits(snapshot)
+
+
 def cached_fit(
     entry: CachedModel, precision: str | None, profile: DeviceProfile
 ) -> Fit | None:
@@ -899,25 +1350,27 @@ def cached_fit(
 
     if entry.status.missing_files or entry.status.unsupported:
         return None
-    reloading = weight_bits(precision, profile) != weight_bits(
-        runtime.MANAGER.precision, profile
-    )
+    kind = entry.status.kind
+    # What the radio asks of this kind, which for a pipeline and an MLX repo
+    # is nothing: moving it asks nothing new of either, so neither is marked
+    # as about to reload.
+    requested = requested_bits(precision, profile, kind)
+    reloading = requested != requested_bits(runtime.MANAGER.precision, profile, kind)
     if runtime.MANAGER.model_id == entry.model_id and not reloading:
         return None
     snapshot = snapshot_folder(entry.path) if entry.path is not None else None
     if snapshot is None:
         return None
     # The size depends on the kind too: a pipeline has no checkpoint at its
-    # root to measure. The pool is already the one for this kind - the
-    # caller chose it, because choosing it here would re-read the device and
+    # root to measure, and an MLX repo is measured as the packed file it
+    # already is. The pool is already the one for this kind - the caller
+    # chose it, because choosing it here would re-read the device and
     # discard the memory the impending unload gives back.
+    bits = packed_bits(snapshot, kind, requested)
     estimated = estimate_snapshot_bytes(
-        snapshot,
-        profile.dtype or ASSUMED_DTYPE,
-        weight_bits(precision, profile),
-        entry.status.kind,
+        snapshot, profile.dtype or ASSUMED_DTYPE, bits, kind
     )
-    return model_fit(estimated, profile)
+    return model_fit(estimated, profile, bits)
 
 
 def replacement_profile(kind: str = TEXT_KIND) -> DeviceProfile:
@@ -980,16 +1433,26 @@ def hub_fit(
     The Metal quantizer is Transformers' own and ``_load_locked`` clears the
     choice for a pipeline, so honouring it here would shrink the estimate
     for a load that will not shrink and advertise a fit the load refuses.
+    An MLX repo is judged at the width its name claims, again whatever the
+    radio says, because that is the width it was converted to.
     """
 
     if not result.parameters:
         return model_fit(None, profile)
+    if kind == MLX_KIND:
+        # Packed already, at whatever width the converter chose; the radio
+        # has no say. The width is read off the repository's name, which is
+        # how mlx-community spells it, and a name that does not say is
+        # judged whole rather than at a width it may not have. It is the
+        # width the verdict names too, so a 4-bit conversion is not
+        # described as full weights.
+        bits = mlx_bits_from_id(result.model_id)
+    else:
+        bits = requested_bits(precision, profile, kind)
     estimated = estimate_parameter_bytes(
-        result.parameters,
-        profile.dtype or ASSUMED_DTYPE,
-        weight_bits(precision, profile) if kind != IMAGE_KIND else None,
+        result.parameters, profile.dtype or ASSUMED_DTYPE, bits
     )
-    return model_fit(estimated, profile)
+    return model_fit(estimated, profile, bits)
 
 
 def hub_fits(
@@ -1015,10 +1478,12 @@ def cached_model_label(entry: CachedModel, fit: Fit | None = None) -> str:
 
     label = f"{entry.model_id} · {format_bytes(entry.size_bytes)}"
     if entry.status.kind == IMAGE_KIND:
-        # Only the image models are flagged. Text models are the majority and
-        # the default, so labelling both kinds would put a word on every row
-        # to distinguish the exception.
+        # Only the exceptions are flagged. Text models are the majority and
+        # the default, so labelling every kind would put a word on every row
+        # to distinguish the exceptions.
         label += " · image"
+    elif entry.status.kind == MLX_KIND:
+        label += " · MLX"
     verdict = fit_word(fit)
     if verdict:
         label += f" · {verdict}"
@@ -1111,7 +1576,15 @@ def refresh_my_models(
 
 
 def select_my_model(selected: str | None, precision: str | None = None):
-    """Put the chosen cached model in the ID box and describe it."""
+    """Put the chosen cached model in the ID box and describe it.
+
+    The profile is taken for the row's own kind, the same as
+    :func:`cached_fits` takes it for the list. Without that, an MLX
+    conversion on a Mac with a Metal ceiling would be judged here against
+    PyTorch's cap while the list and the button judge it against the
+    machine, so selecting a row that reads *fits* would describe it as tight
+    or unfit.
+    """
 
     if not selected:
         return gr.skip(), NO_CACHED_MODEL_SELECTED
@@ -1120,11 +1593,10 @@ def select_my_model(selected: str | None, precision: str | None = None):
     )
     if entry is None:
         return gr.skip(), f"`{selected}` is no longer in the cache. Press **Refresh**."
+    profile = replacement_profile(entry.status.kind or TEXT_KIND)
     return (
         gr.update(value=selected),
-        describe_cached_model(
-            entry, cached_fit(entry, precision, replacement_profile())
-        ),
+        describe_cached_model(entry, cached_fit(entry, precision, profile)),
     )
 
 
@@ -1433,10 +1905,15 @@ def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
     else:
         facts.append(("Memory", "Unknown — there is not enough information to estimate a fit."))
     if result.download_bytes:
+        precision_note = (
+            "The weights are quantized already, so the precision choice does not apply."
+            if result.kind == MLX_KIND
+            else "Choosing 4-bit or 8-bit reduces loaded memory, not this download."
+        )
         facts.append((
             "Full download",
             f"About {format_bytes(result.download_bytes)} for all repository files "
-            "(catalog estimate). Choosing 4-bit or 8-bit reduces loaded memory, not this download.",
+            f"(catalog estimate). {precision_note}",
         ))
     else:
         facts.append(("Full download", "Size unavailable; see the files on Hugging Face."))
@@ -1536,41 +2013,50 @@ def search_models(
 
     cleared = search_table([])
     cleaned = (query or "").strip()
+    # A query that matches no starter searches the Hub instead of dead-ending,
+    # so the "Search Hugging Face" box does what it says in every view.
+    searched_hub = order != "Recommended"
     try:
-        results = (
-            recommended_models(cleaned, kind)
-            if order == "Recommended"
-            else search_hub_models(
-                cleaned, hf_token, kind=kind, order=order, limit=DISCOVERY_CANDIDATES
+        results = [] if searched_hub else recommended_models(cleaned, kind)
+        if searched_hub or (cleaned and not results):
+            searched_hub = True
+            results = search_hub_models(
+                cleaned, hf_token, kind=kind,
+                order="Popular" if order == "Recommended" else order,
+                limit=DISCOVERY_CANDIDATES,
             )
-        )
     except Exception as error:
+        hint = (
+            "Clear the search to see offline starters, or retry."
+            if order == "Recommended"
+            else "Choose Recommended for offline starters, or retry."
+        )
         return (
             cleared,
-            failure_card(
-                "Search failed",
-                f"{html.escape(str(error))} Choose Recommended for offline starters, or retry.",
-            ),
+            failure_card("Search failed", f"{html.escape(str(error))} {hint}"),
             {},
             None,
         )
     if not results:
-        described = "text-to-image models" if kind == IMAGE_KIND else "language models"
+        described = {IMAGE_KIND: "text-to-image models", MLX_KIND: "MLX models"}.get(
+            kind, "language models"
+        )
         message = (
             f"No {described} matched `{html.escape(cleaned)}`."
             if cleaned else f"No {described} found in this browse window."
         )
-        if order == "Recommended":
-            message += " Choose Popular, Trending, or New to search the full Hub."
         return cleared, message, {}, None
     state = {result.model_id: result for result in results}
     table, detail, _ = refresh_search_results(None, state, precision, fits_only)
-    ordering = {
-        "Recommended": "Curated starters, available to browse offline.",
-        "Popular": "Most downloaded first.",
-        "Trending": "Trending on Hugging Face.",
-        "New": "Newest repositories first (not latest updates).",
-    }[order]
+    if order == "Recommended" and searched_hub:
+        ordering = "No starters matched; showing Hugging Face results, most downloaded first."
+    else:
+        ordering = {
+            "Recommended": "Curated starters, available to browse offline.",
+            "Popular": "Most downloaded first.",
+            "Trending": "Trending on Hugging Face.",
+            "New": "Newest repositories first (not latest updates).",
+        }[order]
     return table, f"{ordering} {detail}", state, None
 
 
@@ -1608,14 +2094,14 @@ def results_kind(results: dict) -> str:
     one the results themselves carry.
     """
 
-    return (
-        IMAGE_KIND
-        if any(
-            getattr(result, "pipeline_tag", None) in SEARCH_IMAGE_PIPELINE_TAGS
-            for result in results.values()
-        )
-        else TEXT_KIND
-    )
+    if any(
+        getattr(result, "pipeline_tag", None) in SEARCH_IMAGE_PIPELINE_TAGS
+        for result in results.values()
+    ):
+        return IMAGE_KIND
+    if any(getattr(result, "kind", None) == MLX_KIND for result in results.values()):
+        return MLX_KIND
+    return TEXT_KIND
 
 
 def refresh_search_results(

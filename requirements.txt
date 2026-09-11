@@ -14,6 +14,13 @@ gradio>=5.20,<6
 huggingface-hub>=1.1
 # Fetches the Metal kernels the 8-bit and 4-bit weight precisions run on.
 kernels>=0.16
+# Inspect chat templates for native thinking controls.
+jinja2>=3.1
+# Runs the MLX-quantized checkpoints mlx-community publishes, on Apple
+# silicon alone, which is the only place mlx installs. 0.28 is the release
+# this was written and tested against; the model loader, the prompt cache
+# and its trim are what ChatLab calls, and all three predate it.
+mlx-lm>=0.28; sys_platform == "darwin" and platform_machine == "arm64"
 numpy>=1.26
 # Pillow arrives with gradio, and the image runtime writes the trajectory
 # frames and the attention maps through it directly. 10.1 is the release

@@ -54,11 +54,17 @@ def build_trace(
 def trace_to_json(trace: dict) -> str:
     """Serialize a trace without escaping token text or conversation content."""
 
+    from steering import expand
+
+    sampling = dict(trace.get("sampling") or {})
+    if sampling.get("steering") is not None:
+        sampling["steering"] = expand(sampling["steering"])
+        trace = dict(trace, sampling=sampling)
     return json.dumps(trace, ensure_ascii=False, indent=2) + "\n"
 
 
 METADATA_COLUMNS = ["schema_version", "generated_at", "model_id"]
-SAMPLING_COLUMNS = ["temperature", "top_p", "top_k", "max_new_tokens", "seed"]
+SAMPLING_COLUMNS = ["temperature", "top_p", "top_k", "max_new_tokens", "seed", "thinking_mode"]
 CANDIDATE_FIELDS = ("token_id", "text", "probability")
 
 

@@ -12,7 +12,7 @@ and so the next request can deliberately include or drop it.
 A generated assistant turn also records where it came from, so the list of
 conversations can say which model answered and how big the exchange was:
 
-    {"model": str, "prompt_tokens": int, "generated_tokens": int}
+    {"model": str, "prompt_tokens": int, "generated_tokens": int, "thinking_mode": str}
 
 ``prompt_tokens`` is every token the model was given for that reply - the
 system prompt, the transcript so far and the template around them - and
@@ -20,13 +20,30 @@ system prompt, the transcript so far and the template around them - and
 that was typed, rewritten by hand, loaded from an older file, or never
 finished measuring may carry none of these, and the list says so rather than
 guessing.
+
+A reply also carries the measurements behind every token it is made of, which
+is what lets the conversation itself be painted by rank or surprise and
+branched at any token in it rather than only in the newest reply:
+
+    {"tokens": [metric, ...], "load_id": str, "metrics_generation": int}
+
+``tokens`` is what ``token_metrics.build_metric`` produced for that reply,
+``load_id`` names the model load that produced it, and
+``metrics_generation`` is the stamp the token panel was drawn with while the
+reply was the live one (see ``ui.panel``). These three are memory only:
+:func:`turn_entries` leaves them out, so the saved file stays the size it
+was. It is rewritten on every streaming frame, and a few hundred numbers per
+token would make that a multi-megabyte write per token.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Iterable
 from datetime import datetime, timezone
+
+from steering import compact as compact_steering, export_assets, import_assets
 
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
@@ -40,7 +57,18 @@ CHAT_PREFIX = "Chat"
 TITLE_LIMIT = 40
 
 # The per-turn provenance fields, and the type each must have in a saved file.
-TURN_ORIGIN_FIELDS = {"model": str, "prompt_tokens": int, "generated_tokens": int}
+TURN_ORIGIN_FIELDS = {
+    "model": str,
+    "prompt_tokens": int,
+    "generated_tokens": int,
+    "thinking_mode": str,
+}
+
+# What a reply carries of its own measurements. These never reach the file;
+# see the module docstring for why.
+TURN_MEASUREMENT_FIELDS = (
+    "tokens", "load_id", "metrics_generation", "ends_on_stop_token",
+)
 
 # The sampling a conversation can carry of its own, and the type each must
 # have in a saved file. The settings module owns what the values may be; this
@@ -135,9 +163,34 @@ def make_turn(role: str, content: str, reasoning: str = "") -> dict:
 
 
 def copy_turns(turns: list[dict] | None) -> list[dict]:
-    """Snapshot turns so a streaming update cannot mutate stored state."""
+    """Snapshot turns so a streaming update cannot mutate stored state.
 
-    return [dict(turn) for turn in (turns or [])]
+    Deep, because a turn carries nested values - a steering entry above all -
+    that a shallow copy would leave two copies sharing.
+
+    The measurements are the exception. The list itself is copied, so a turn
+    can gain or lose tokens without disturbing a copy of it, but the metrics
+    inside are shared rather than duplicated. Each is written once by
+    ``token_metrics.build_metric`` and never edited afterwards, and each holds
+    a dozen numbers plus its eight alternatives. Copying them here would mean
+    copying every measurement in the conversation on every streaming frame,
+    for a cost that grows with the square of the reply's length: about 1.6
+    seconds of copying across a 500-token reply, and twenty-five across a
+    2,000-token one.
+    """
+
+    copied: list[dict] = []
+    for turn in turns or []:
+        tokens = turn.get("tokens")
+        if tokens is None:
+            copied.append(copy.deepcopy(turn))
+            continue
+        entry = copy.deepcopy(
+            {key: value for key, value in turn.items() if key != "tokens"}
+        )
+        entry["tokens"] = list(tokens)
+        copied.append(entry)
+    return copied
 
 
 def display_messages(
@@ -167,6 +220,10 @@ def display_messages(
             )
             index_map.append((position, "reasoning"))
         if content or not reasoning:
+            if not content and turn.get("token_step_paused"):
+                content = "Paused before visible text."
+                if turn_tokens(turn):
+                    content += " Press Next token to continue."
             messages.append({"role": turn["role"], "content": content})
             index_map.append((position, "content"))
 
@@ -227,12 +284,13 @@ def model_messages(
         if include_reasoning and reasoning:
             content = f"{THINK_OPEN}\n{reasoning}\n{THINK_CLOSE}\n{content}".strip()
         if not content:
-            if turn["role"] == "assistant" and reasoning:
-                # A Think model stopped mid-answer leaves an assistant turn with
-                # reasoning but no text. The visible conversation still shows a
-                # reply, so dropping the turn here would hand the model two user
-                # messages in a row and break templates that require alternating
-                # roles. Keep the slot, empty, since the reasoning is not replayed.
+            if turn["role"] == "assistant" and (
+                reasoning or turn.get("token_step_paused")
+            ):
+                # A reasoning-only reply or an invisible token step still owns
+                # an assistant slot in the visible conversation. Keep it empty
+                # so a subsequent Send preserves alternating roles, without
+                # replaying hidden tokens or the display-only pause notice.
                 messages.append({"role": "assistant", "content": ""})
             continue
         messages.append({"role": turn["role"], "content": content})
@@ -291,7 +349,7 @@ def copy_forks(forks: dict | None) -> dict:
         }
         or {MAIN_BRANCH: []},
         "sampling": {
-            name: dict(values)
+            name: copy.deepcopy(values)
             for name, values in (forks.get("sampling") or {}).items()
         },
         "sampling_updated": dict(forks.get("sampling_updated") or {}),
@@ -337,7 +395,7 @@ def branch_sampling(forks: dict | None, name: str) -> dict:
     """What branch ``name`` carries of its own sampling; empty where it carries none."""
 
     held = (forks or {}).get("sampling") or {}
-    return dict(held.get(name) or {})
+    return copy.deepcopy(held.get(name) or {})
 
 
 def put_branch_sampling(forks: dict, name: str, values: dict) -> bool:
@@ -365,7 +423,7 @@ def put_branch_sampling(forks: dict, name: str, values: dict) -> bool:
     } | dict(values)
     if held == kept:
         return False
-    sampling[name] = kept
+    sampling[name] = copy.deepcopy(kept)
     forks.setdefault("sampling_updated", {})[name] = branch_stamp()
     return True
 
@@ -413,6 +471,13 @@ def fork_at(
     return turns[: position + 1], None
 
 
+def turn_tokens(turn: dict | None) -> list[dict]:
+    """The per-token measurements a reply carries, or nothing."""
+
+    tokens = (turn or {}).get("tokens")
+    return tokens if isinstance(tokens, list) else []
+
+
 def forget_measurements(turns: list[dict] | None, position: int) -> list[dict]:
     """The turns after the reply at ``position`` was rewritten by hand.
 
@@ -423,6 +488,14 @@ def forget_measurements(turns: list[dict] | None, position: int) -> list[dict]:
     exists. ``model`` stays throughout: rewording an answer does not change
     who gave it. The list then falls back to the last reply measured before
     the edit, the newest size that is still true.
+
+    The per-token measurements go from the edited reply and from every reply
+    after it. Each of those was produced from a transcript the edit has
+    replaced, so their ranks and probabilities no longer describe anything on
+    screen, and replaying their tokens onto the edited conversation would
+    force a reply the model never gave that prompt. ``generated_tokens``
+    survives where the text does because a count of tokens is still a true
+    count; a distribution over a prompt that is gone is not.
     """
 
     turns = copy_turns(turns)
@@ -431,8 +504,11 @@ def forget_measurements(turns: list[dict] | None, position: int) -> list[dict]:
         if turn["role"] != "assistant":
             continue
         turn.pop("prompt_tokens", None)
+        for field in TURN_MEASUREMENT_FIELDS:
+            turn.pop(field, None)
         if index == position:
             turn.pop("generated_tokens", None)
+            turn.pop("token_step_paused", None)
     return turns
 
 
@@ -562,11 +638,17 @@ def turn_entries(turns: list[dict] | None) -> list[dict]:
             "content": turn.get("content") or "",
             "reasoning": turn.get("reasoning") or "",
         }
+        # This is transcript structure, not a measurement: an invisible step
+        # still owns an assistant slot after the token metrics are discarded.
+        if turn["role"] == "assistant" and turn.get("token_step_paused") is True:
+            entry["token_step_paused"] = True
         for key, kind in TURN_ORIGIN_FIELDS.items():
             value = turn.get(key)
             # bool is an int to isinstance(), and a True here would be a bug.
             if isinstance(value, kind) and not isinstance(value, bool):
                 entry[key] = value
+        if turn.get("steering") is not None:
+            entry["steering"] = compact_steering(turn["steering"])
         entries.append(entry)
     return entries
 
@@ -589,6 +671,11 @@ def turns_from_entries(raw_turns) -> list[dict]:
         if not isinstance(content, str) or not isinstance(reasoning, str):
             raise ValueError("Turn content and reasoning must be strings.")
         turn = make_turn(role, content, reasoning)
+        if "token_step_paused" in entry:
+            if not isinstance(entry["token_step_paused"], bool):
+                raise ValueError("Turn token_step_paused must be a bool.")
+            if role == "assistant" and entry["token_step_paused"]:
+                turn["token_step_paused"] = True
         for key, kind in TURN_ORIGIN_FIELDS.items():
             if key not in entry:
                 continue
@@ -598,16 +685,23 @@ def turns_from_entries(raw_turns) -> list[dict]:
             if kind is int and value < 0:
                 raise ValueError(f"Turn {key} cannot be negative.")
             turn[key] = value
+        if entry.get("steering") is not None:
+            turn["steering"] = compact_steering(entry["steering"])
         turns.append(turn)
     return turns
 
 
-def to_json(turns: list[dict] | None, *, system_prompt: str = "") -> str:
+def to_json(turns: list[dict] | None, *, system_prompt: str = "", steering: dict | None = None) -> str:
     payload = {
         "format": SAVE_FORMAT,
         "system_prompt": system_prompt or "",
         "turns": turn_entries(turns),
     }
+    if steering is not None:
+        payload["steering"] = compact_steering(steering)
+    assets = export_assets([payload.get("steering"), *(turn.get("steering") for turn in payload["turns"])])
+    if assets:
+        payload["steering_vectors"] = assets
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
@@ -620,7 +714,12 @@ def from_json(payload: str) -> tuple[list[dict], str]:
     if not isinstance(data, dict) or data.get("format") != SAVE_FORMAT:
         raise ValueError(f"Expected a {SAVE_FORMAT} file saved by this app.")
 
-    turns = turns_from_entries(data.get("turns"))
+    raw_turns = data.get("turns")
+    values = [data.get("steering")]
+    if isinstance(raw_turns, list):
+        values.extend(turn.get("steering") for turn in raw_turns if isinstance(turn, dict))
+    import_assets(values, data.get("steering_vectors"))
+    turns = turns_from_entries(raw_turns)
 
     system_prompt = data.get("system_prompt", "")
     if not isinstance(system_prompt, str):

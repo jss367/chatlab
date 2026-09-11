@@ -53,6 +53,11 @@ TEXT_MODEL_LOADED = (
 
 EMPTY_PROMPT = "Type a prompt to draw."
 
+BAD_DRAW_SETTINGS = (
+    "The size, steps and guidance all have to be numbers. Pick a **Size** "
+    "from the list and check the sliders, then draw again."
+)
+
 NO_TRAJECTORY = (
     '<div class="viz-empty">The trajectory appears one frame per step while a '
     "picture is being drawn.</div>"
@@ -329,57 +334,95 @@ def draw(
     if not cleaned:
         yield _idle(EMPTY_PROMPT)
         return
-    if not runtime.MANAGER.image_loaded:
-        yield _idle(TEXT_MODEL_LOADED if runtime.MANAGER.loaded else NO_IMAGE_MODEL)
-        return
 
     chosen = resolve_seed(seed, randomize_seed)
-    request = ImageRequest(
-        prompt=cleaned,
-        negative_prompt=(negative_prompt or "").strip(),
-        steps=int(steps),
-        guidance_scale=float(guidance),
-        seed=chosen,
-        width=int(size),
-        height=int(size),
-        record_attention=bool(record_attention),
-    )
-    readings: list = []
-    outcome: dict = {}
+    # Built before anything is reserved, because building it can fail. A Size
+    # dropdown cleared to nothing, or a payload that puts a word where one of
+    # these three numbers goes, raises out of int() or float(); raised after
+    # the reservation, that leaves the slot and the cancel token held by a run
+    # that never started, which nothing can hand back - Stop only stops a run
+    # that is drawing, and there is none - so every later draw and every later
+    # load is refused as busy until the app is restarted.
+    #
+    # This is the line between what may go ahead of the claim and what may
+    # not: these conversions read nothing but what the browser sent, so
+    # moving them up costs the ordering below nothing. What the claim exists
+    # to make trustworthy - whether a pipeline is in memory - stays under it.
+    try:
+        request = ImageRequest(
+            prompt=cleaned,
+            negative_prompt=(negative_prompt or "").strip(),
+            steps=int(steps),
+            guidance_scale=float(guidance),
+            seed=chosen,
+            width=int(size),
+            height=int(size),
+            record_attention=bool(record_attention),
+        )
+    except (TypeError, ValueError):
+        yield _idle(BAD_DRAW_SETTINGS, seed=chosen)
+        return
 
-    # Reserved before the first frame is published, not after. Gradio does
-    # not resume a streaming handler until the browser has been sent that
-    # frame, so a run reserved afterwards leaves a network round trip in
-    # which the page shows a Stop button over nothing, Stop reports that
-    # nothing is drawing, and a load arriving in between replaces the
-    # pipeline this handler checked. The Chat page reserves before its own
-    # first frame for the same reason.
+    # Reserved before the pipeline is looked for, not after it. A load empties
+    # memory before it reads the new weights, so for the whole of that phase
+    # there is no pipeline and the check below would tell the reader to load
+    # an image model while one was on its way in. start_image_run() answers
+    # that in one step and names a load apart from a run, and holding what it
+    # takes is what keeps the pipeline found below from being unloaded before
+    # the first step is drawn.
     try:
         cancel = runtime.MANAGER.start_image_run()
     except ModelBusy as error:
         yield _idle(_failure(error), seed=chosen)
         return
 
-    def work() -> None:
-        try:
-            outcome["run"] = runtime.MANAGER.generate_image(
-                request, on_step=readings.append, cancel=cancel
-            )
-        except BaseException as error:  # noqa: BLE001 - reported on the page
-            outcome["error"] = error
-
-    # Started before the first frame as well, so the reservation is never
-    # held by a run that has not begun. The run gives the slot back itself
-    # when it ends; this handler must not, because the pipeline is on that
-    # thread and would still be drawing after the generator was closed.
-    worker = threading.Thread(target=work, name="chatlab-draw", daemon=True)
-    started = time.monotonic()
+    readings: list = []
+    outcome: dict = {}
+    # True for as long as this handler is the only thing that can give the
+    # reservation back, which is until the worker below is running. Every way
+    # out of the block under it - the refusal, a raise, Gradio closing the
+    # generator at the yield - passes through the finally, so a claim cannot
+    # be left behind by a path nobody thought of.
+    holding = True
     try:
+        if not runtime.MANAGER.image_loaded:
+            # Given back before the frame goes out rather than after it: the
+            # reader's next move is the load this refusal asks for, and the
+            # browser has a round trip to acknowledge a frame in. The finally
+            # below sees it has already gone and leaves it alone.
+            runtime.MANAGER.finish_image_run()
+            holding = False
+            yield _idle(TEXT_MODEL_LOADED if runtime.MANAGER.loaded else NO_IMAGE_MODEL)
+            return
+
+        # The reservation above stands from before the first frame is
+        # published, not from after it. Gradio does not resume a streaming
+        # handler until the browser has been sent that frame, so a run
+        # reserved afterwards leaves a network round trip in which the page
+        # shows a Stop button over nothing, Stop reports that nothing is
+        # drawing, and a load arriving in between replaces the pipeline this
+        # handler checked. The Chat page reserves before its own first frame
+        # for the same reason.
+        def work() -> None:
+            try:
+                outcome["run"] = runtime.MANAGER.generate_image(
+                    request, on_step=readings.append, cancel=cancel
+                )
+            except BaseException as error:  # noqa: BLE001 - reported on the page
+                outcome["error"] = error
+
+        # Started before the first frame as well, so the reservation is never
+        # held by a run that has not begun. The run gives the slot back itself
+        # when it ends; this handler must not, because the pipeline is on that
+        # thread and would still be drawing after the generator was closed.
+        worker = threading.Thread(target=work, name="chatlab-draw", daemon=True)
+        started = time.monotonic()
         worker.start()
-    except BaseException:
-        # work() never ran, so nothing else will give the slot back.
-        runtime.MANAGER.finish_image_run()
-        raise
+        holding = False
+    finally:
+        if holding:
+            # No run took the slot, so nothing else will give it back.
+            runtime.MANAGER.finish_image_run()
     try:
         yield from _drawing(worker, readings, outcome, request, started, chosen)
     except GeneratorExit:

@@ -723,6 +723,44 @@ class ForcedPrefixTests(unittest.TestCase):
         self.assertEqual(updates[0].forced_prefix_tokens, 3)
         self.assertEqual(updates[-1].text, "Hello<eos> world!")
 
+    def test_recorded_text_is_a_decode_of_the_visible_ids_alone(self):
+        """A recorded response can be checked against a fresh decode of its ids.
+
+        Forking a saved run compares a whole recorded response against a decode
+        of the ids it stored, so the runtime has to record exactly that: the
+        hidden specials among those ids left out, and reader-supplied prefill
+        kept in even where it spells one.
+        """
+        pieces = ["▁Hello", "▁world", "world", "▁", "!", "<pad>", "<eos>"]
+        pad, eos = pieces.index("<pad>"), pieces.index("<eos>")
+        manager = loaded_manager([0, 0, pad, 4, eos], pieces, eos)
+        manager.tokenizer = SentencePieceTokenizer(pieces, eos)
+        manager.tokenizer.all_special_ids = [pad, eos]
+
+        # The reader kept "<pad> world" and the model sampled a hidden special,
+        # "!", and its end-of-text token.
+        final = self.updates(manager, [pad, 1], literal_prefill_tokens=2)[-1]
+
+        stored = [metric["token_id"] for metric in final.metrics]
+        self.assertEqual(stored, [pad, 1, pad, 4, eos])
+        self.assertEqual(manager.hidden_token_ids(), {pad, eos})
+        visible = [
+            token_id
+            for index, token_id in enumerate(stored)
+            if index < 2 or token_id not in manager.hidden_token_ids()
+        ]
+        self.assertEqual(
+            final.text,
+            manager.tokenizer.decode(
+                visible, skip_special_tokens=False, clean_up_tokenization_spaces=False
+            ),
+        )
+        self.assertEqual(final.text, "<pad> world!")
+        # Both halves of the rule carry weight: decoding every stored id brings
+        # the hidden specials back, and skipping them drops the prefill too.
+        self.assertEqual(manager.tokenizer.decode(stored), "<pad> world<pad>!<eos>")
+        self.assertEqual(manager.tokenizer.decode(stored, skip_special_tokens=True), "world!")
+
     def test_a_branch_inside_a_multi_token_character_uses_a_stable_literal_prefix(self):
         pieces = [
             b"prompt",
@@ -1291,7 +1329,7 @@ class HiddenTokenTests(unittest.TestCase):
         tokenizer.eos_token_id = 2
         manager = ModelManager()
         manager.tokenizer = tokenizer
-        self.assertEqual(manager._hidden_token_ids(), {2})
+        self.assertEqual(manager.hidden_token_ids(), {2})
 
 
 if __name__ == "__main__":

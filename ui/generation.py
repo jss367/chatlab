@@ -9,6 +9,8 @@ import time
 
 import gradio as gr
 
+from steering import SteeringError, compact as compact_steering, from_controls as steering_from_controls
+
 import charts
 from conversation import (
     MAIN_BRANCH,
@@ -24,9 +26,11 @@ from conversation import (
     model_messages,
     new_forks,
     split_reasoning,
+    turn_tokens,
     user_index_at_or_before,
 )
 from model_runtime import (
+    LOADING,
     ModelChanged,
 )
 from token_metrics import (
@@ -38,7 +42,6 @@ from ui import runtime
 from ui.common import (
     CHART_EVERY,
     NO_TOKEN_SELECTED,
-    RESPONSE_STRIP_LABEL,
     SEED_LIMIT,
     failure_status,
     finalize_partial,
@@ -50,15 +53,15 @@ from ui.conversations import (
 from ui.panel import (
     BRANCH_HINT,
     BRANCH_MODEL_CHANGED,
-    BRANCH_REASONING_CLOSE,
     BRANCH_TEXT_EMPTY,
     BRANCH_TEXT_HINT,
-    current_metrics_generation,
-    cleared_strips,
+    branch_target,
+    cleared_panel,
     new_metrics_generation,
     prompt_note_text,
     strip_update,
-    strip_value,
+    transcript_update,
+    transcript_visible,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,8 +88,11 @@ CHAT_OUTPUT_NAMES = (
     "summary",
     "surprise",
     "trace",
-    "branch_source",
     "context_ids",
+    "chat_metrics",
+    "chat_context_ids",
+    "selected_token",
+    "branch_pick",
 )
 
 
@@ -188,34 +194,31 @@ def split_response_text(
 
 def stop_generation(
     turns: list[dict] | None,
-    metrics_state: tuple[int, list[dict]] = (0, []),
-    context_state: tuple[int, list[int], str | None] = (0, [], None),
+    scale_name: str = DEFAULT_COLOR_SCALE,
 ):
     """Finish the turn that the cancelled generator left behind.
 
     Gradio closes ``generate_reply`` at its last yield, so nothing else ever
     finalizes that turn. A kept partial response is still a response: the
-    tokens on screen are the ones it is made of, so it can be branched from.
-    ``context_state`` carries the producing load captured while the model lock
-    was held; a waiting load may finish after cancellation but before this
-    handler runs, so consulting the manager here would mislabel the old IDs.
+    tokens it carries are the ones it is made of, and it carries the load that
+    produced them, so it can be branched from like any other reply.
+
+    The token view is redrawn because this is what decides the stopped turn's
+    fate: a reply with nothing in it is dropped here, and the cancelled
+    generator's last frame is still on screen showing it.
     """
 
     turns = copy_turns(turns)
     kept = finalize_partial(turns)
     messages, _ = display_messages(turns)
-    generation, metrics = metrics_state
-    context_generation, _context_ids, producing_load_id = context_state
     return (
         messages,
         turns,
+        transcript_update(turns, scale_name),
         *send_stop_buttons(False),
         "Stopped. The partial response was kept."
         if kept
         else "Stopped before the model produced anything.",
-        (generation, producing_load_id)
-        if kept and metrics and context_generation == generation
-        else None,
     )
 
 
@@ -263,14 +266,16 @@ def idle_state(
     The token panel is normally left alone as well: paths such as "Enter a
     message first." must not wipe the diagnostics of the response already on
     screen. ``clear_tokens`` is for the one case where those diagnostics stop
-    describing the visible text - an edited assistant reply. Both strips go
-    together there: they carry one shared stamp, so re-stamping the response
-    strip alone would silently stop the prompt strip's clicks from publishing.
+    describing the visible text - an edited assistant reply. The prompt strip
+    goes with the response metrics there: they carry one shared stamp, so
+    re-stamping one alone would silently stop the other's clicks from
+    publishing. The conversation's own token view is redrawn rather than
+    emptied, since the edit is already in ``turns``.
     """
 
     messages, _ = display_messages(turns)
     panels = (
-        cleared_strips(scale_name)
+        cleared_panel(turns, scale_name)
         if clear_tokens
         else (gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip())
     )
@@ -293,14 +298,74 @@ def idle_state(
         charts.EMPTY_CHART if clear_tokens else gr.skip(),
         {} if clear_tokens else gr.skip(),
         gr.skip(),
+        metrics,
         gr.skip(),
+        None if clear_tokens else gr.skip(),
+        None if clear_tokens else gr.skip(),
     )
 
 
 BUSY_STATUS = "A response is already generating. Press Stop first."
+# A load has the model instead. There is no Stop to press for one, so the
+# message cannot be the one above; telling a reader to press a button that
+# is not there is worse than saying nothing.
+LOADING_STATUS = "A model is loading. Wait for it to finish."
 
 
-def busy_state():
+def occupied() -> str | None:
+    """What else has the model - a reply streaming, or a load - or ``None``.
+
+    The early exit the handlers below take, and the answer is what the
+    refusal is worded from. Never the guard - the guard is the reservation
+    each of them goes on to make, which settles the same question in one step
+    with the claim. See :meth:`ModelManager.claim_generation`.
+    """
+
+    return runtime.MANAGER.occupant
+
+
+def busy_status(held: str | None = None) -> str:
+    """Which refusal to show, for whatever ``held`` says has the model.
+
+    ``held`` is what the refused claim or :func:`occupied` answered, passed
+    down rather than read again here: a load that ends in between would leave
+    this saying "press Stop" over a model nobody is holding.
+    """
+
+    return LOADING_STATUS if (held or runtime.MANAGER.occupant) == LOADING else BUSY_STATUS
+
+
+NO_MODEL_STATUS = "Download and load a model first."
+
+
+def no_model_state(prompt_text: str, turns: list[dict]):
+    """What to show when memory is empty: the load that emptied it, or the advice.
+
+    The occupancy read comes *after* the emptiness rather than before it, and
+    the order is the point. A load unloads the old weights before it reads
+    the new ones, so memory stands empty for the whole of that phase, and the
+    advice below would send a reader to the Models page to start the load
+    they are already waiting for. occupied() at the top of each handler is
+    the early exit for a load that was under way when the click arrived; this
+    is the one that started since.
+
+    Claiming instead of asking - what the Score, Inspect, batch, API and
+    extension paths do, since a claim cannot go stale - is not open to these
+    handlers: generate_reply() claims further down, and a claim taken here
+    would refuse its own generation. What is left is an instant-wide window
+    in which a load finishing between the two reads leaves this saying "load
+    a model" just after one finished loading, and the next Send works. That
+    is the harmless way round; the other order is wrong for the minutes a
+    load takes.
+    """
+
+    held = occupied()
+    if held:
+        return busy_state(held)
+    return idle_state(prompt_text, turns, NO_MODEL_STATUS)
+
+
+def busy_state(held: str | None = None):
     """Refuse to start a generation while one is running, touching nothing else.
 
     Gradio reads a listener's inputs when the request is queued, so a Retry or
@@ -319,11 +384,15 @@ def busy_state():
     and never arrives at all if inference stalls. Skipping leaves the busy
     pair the running generation already published in place, and that
     generation restores the idle pair itself on whichever path it exits.
+
+    A load blocks a reply for the same reason and is refused the same way,
+    with its own wording; ``held`` is which of the two the caller was turned
+    away by. See :func:`busy_status`.
     """
 
     return (
         (gr.skip(),) * 5
-        + (BUSY_STATUS,)
+        + (busy_status(held),)
         + (gr.skip(),) * (len(CHAT_OUTPUT_NAMES) - 6)
     )
 
@@ -342,6 +411,11 @@ def generate_reply(
     randomize_seed: bool,
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
+    steering: dict | None = None,
+    steering_enabled: bool | None = None,
+    steering_strength: float | None = None,
+    steering_layer: int | None = None,
+    thinking_mode: str = "default",
     *,
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
@@ -349,6 +423,8 @@ def generate_reply(
     literal_text_ranges: tuple[tuple[int, int], ...] = (),
     branch_note: str = "",
     expected_load_id: str | None = None,
+    single_step: bool = False,
+    branch_thinking_mode: str | None = None,
 ):
     """Stream one assistant reply for ``turns``, which must end with a user turn.
 
@@ -370,6 +446,10 @@ def generate_reply(
     stop token typed into a branch must still end it even though reasoning
     markers earlier in the same replacement remain visible prose.
 
+    ``thinking_mode`` selects the model's native template mode for a new reply.
+    Token branches supply ``branch_thinking_mode`` from the original reply so
+    a changed control cannot change the prompt underneath the replayed tokens.
+
     ``automatic_reasoning_close_tokens`` preserves the provenance of the
     template close at the start of an assistant prefill, so later branches
     cannot mistake those control tokens for replaceable answer text.
@@ -386,8 +466,9 @@ def generate_reply(
     slot itself and calls _stream_reply() directly.
     """
 
-    if not runtime.MANAGER.reserve_generation():
-        yield busy_state()
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        yield busy_state(held)
         return
 
     try:
@@ -405,12 +486,19 @@ def generate_reply(
             randomize_seed,
             analyze_prompt,
             scale_name,
+            steering,
+            steering_enabled,
+            steering_strength,
+            steering_layer,
+            thinking_mode,
             forced_ids=forced_ids,
             literal_prefill_tokens=literal_prefill_tokens,
             automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
             literal_text_ranges=literal_text_ranges,
             branch_note=branch_note,
             expected_load_id=expected_load_id,
+            single_step=single_step,
+            branch_thinking_mode=branch_thinking_mode,
         )
     finally:
         # Every exit runs this: a finished stream, a failure, and - the one
@@ -434,6 +522,11 @@ def _stream_reply(
     randomize_seed: bool,
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
+    steering: dict | None = None,
+    steering_enabled: bool | None = None,
+    steering_strength: float | None = None,
+    steering_layer: int | None = None,
+    thinking_mode: str = "default",
     *,
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
@@ -441,22 +534,27 @@ def _stream_reply(
     literal_text_ranges: tuple[tuple[int, int], ...] = (),
     branch_note: str = "",
     expected_load_id: str | None = None,
+    single_step: bool = False,
+    previous_turns: list[dict] | None = None,
+    branch_thinking_mode: str | None = None,
 ):
     """The body of generate_reply(), run with the generation slot held."""
 
     turns = copy_turns(turns)
     used_seed = resolve_seed(seed, randomize_seed)
-    # Minted once for the whole stream, not once per frame: the strip is
-    # replaced by the opening frame and only appended to afterwards, so a token
-    # picked mid-stream is still on screen and its click must stay valid. What
-    # this number invalidates is every selection made against the response this
-    # one replaces.
-    generation = new_metrics_generation()
+    # Minted once when the reply is replaced, not once per frame, so selections
+    # made mid-stream stay valid. A branch defers this until replay succeeds;
+    # its original diagnostics must still work if the reader cancels first.
+    preserving_previous = previous_turns is not None
+    generation = None if preserving_previous else new_metrics_generation()
     request = model_messages(
         turns, system_prompt=system_prompt, include_reasoning=keep_reasoning
     )
 
+    steering = compact_steering(steering_from_controls(steering, steering_enabled, steering_strength, steering_layer))
     pending = make_turn("assistant", "", "")
+    if steering is not None:
+        pending["steering"] = steering
     pending["reasoning_closed"] = True
     # Where this reply came from, for the conversation list. The model is
     # stamped from the first update rather than read off runtime.MANAGER here: the
@@ -468,7 +566,6 @@ def _stream_reply(
     turns.append(pending)
 
     def snapshot(
-        highlight,
         metrics,
         status,
         busy=True,
@@ -476,15 +573,19 @@ def _stream_reply(
         prompt_panel=None,
         charts_panel=None,
         trace=None,
-        branch_source=gr.skip(),
         context_ids=gr.skip(),
     ):
         """One frame of the stream.
 
-        ``reset_details`` belongs to the first frame only. That frame empties
-        the strip, so a token selected in the previous response is gone and its
-        probabilities must go with it. Later frames only append to the strip, so
-        a token picked mid-stream stays valid and its details are left alone.
+        The conversation's token view is drawn from ``turns``, which the loop
+        has already written this frame's tokens into, so the reply paints
+        itself as it arrives beneath the ones before it.
+
+        ``reset_details`` belongs to the first frame only. That frame replaces
+        the reply being answered into, so a token selected in the response it
+        overwrites is gone and its probabilities must go with it. Later frames
+        only append tokens, so a token picked mid-stream stays valid and its
+        details are left alone.
 
         ``prompt_panel`` and ``charts_panel`` are skipped on most frames. The
         prompt tokens are all measured before the first one is generated, so
@@ -496,7 +597,10 @@ def _stream_reply(
         inspector rebuilds the model's input from.
         """
 
-        messages, _ = display_messages(turns)
+        # Until replay produces a result, cancellation and failures must leave
+        # the original conversation available to Stop and autosave.
+        visible_turns = previous_turns if previous_turns is not None else turns
+        messages, _ = display_messages(visible_turns)
         prompt_strip, prompt_metrics, prompt_note = prompt_panel or (
             gr.skip(),
             gr.skip(),
@@ -506,8 +610,8 @@ def _stream_reply(
         return (
             prompt_text,
             messages,
-            copy_turns(turns),
-            highlight,
+            copy_turns(visible_turns),
+            transcript_update(visible_turns, scale_name) if transcript_visible() else gr.skip(),
             (generation, metrics),
             status,
             used_seed,
@@ -525,44 +629,54 @@ def _stream_reply(
             summary_panel,
             surprise_panel,
             gr.skip() if trace is None else trace,
-            branch_source,
             context_ids,
+            (generation, metrics),
+            context_ids,
+            None if reset_details else gr.skip(),
+            None if reset_details else gr.skip(),
         )
 
-    # The opening frame empties everything the previous response left behind,
-    # the export included: a trace kept here would still be downloadable while
-    # a different response was streaming in above it. The branch source goes
-    # too: nothing is branchable until this response has finished or been
-    # stopped, and the stamp would refuse it anyway.
-    applied_prefill = bool(assistant_prefill and not forced_ids)
+    # Clear diagnostics and branch selections when the new reply appears. For
+    # branches that is the first replay result; until then the old transcript
+    # and its diagnostics remain together on screen.
+    # A branch at the first token has an empty replay prefix, but must still
+    # ignore the current prefill control just like every other branch.
+    applied_prefill = bool(assistant_prefill and not forced_ids and expected_load_id is None)
     stream_note = branch_note or (
         "Assistant prefill applied." if applied_prefill else ""
     )
-    yield snapshot(
-        strip_update([], scale_name, RESPONSE_STRIP_LABEL),
-        [],
-        f"{stream_note} Generating…".strip(),
-        reset_details=True,
-        prompt_panel=(strip_update([], scale_name), (generation, []), ""),
-        charts_panel=(charts.summary_tiles({}), charts.EMPTY_CHART),
-        trace={},
-        branch_source=None,
-        context_ids=(generation, [], runtime.MANAGER.load_id),
-    )
+    def previous_snapshot(status, busy):
+        values = list(idle_state(prompt_text, previous_turns, status, scale_name=scale_name))
+        values[CHAT_OUTPUT_NAMES.index("send")], values[CHAT_OUTPUT_NAMES.index("stop")] = send_stop_buttons(busy)
+        return tuple(values)
+
+    opening_status = f"{stream_note} Generating…".strip()
+    if preserving_previous:
+        # Keep diagnostics and their live generation stamp until replay succeeds.
+        # Stop only finalizes the transcript; it cannot restore discarded panels.
+        yield previous_snapshot(opening_status, busy=True)
+    else:
+        yield snapshot(
+            [],
+            opening_status,
+            reset_details=True,
+            prompt_panel=(strip_update([], scale_name), (generation, []), ""),
+            charts_panel=(charts.summary_tiles({}), charts.EMPTY_CHART),
+            trace={},
+            context_ids=(generation, [], runtime.MANAGER.load_id),
+        )
 
     started = time.monotonic()
     raw_text = ""
     # Reasoning templates end the prompt with the opening <think> marker, so the
     # generated text never carries one. Only the runtime can tell us that.
     prefilled = False
-    highlight: list[tuple[str, str]] = []
     metrics: list[dict] = []
     status = "The model produced no tokens."
     first = True
     forced_prefix_tokens = 0
     literal_prefill = ""
     literal_spans: tuple[tuple[int, int], ...] = ()
-    producing_load_id: str | None = None
 
     stream = runtime.MANAGER.generate(
         request,
@@ -574,10 +688,14 @@ def _stream_reply(
         analyze_prompt=bool(analyze_prompt),
         forced_ids=tuple(int(value) for value in forced_ids),
         answer_prefill=assistant_prefill if applied_prefill else "",
+        thinking_mode=(
+            branch_thinking_mode if branch_thinking_mode is not None else thinking_mode
+        ),
         literal_prefill_tokens=literal_prefill_tokens,
         automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
         literal_text_ranges=literal_text_ranges,
         load_id=expected_load_id,
+        **({"steering": steering} if steering is not None else {}),
     )
 
     try:
@@ -585,8 +703,10 @@ def _stream_reply(
         # this event and Gradio closes the outer generator.
         with contextlib.closing(stream):
             for update in stream:
+                if generation is None:
+                    generation = new_metrics_generation()
+                previous_turns = None
                 raw_text = update.text
-                producing_load_id = update.load_id
                 prefilled = update.reasoning_prefilled
                 forced_prefix_tokens = update.forced_prefix_tokens
                 if update.literal_prefill_text:
@@ -600,11 +720,22 @@ def _stream_reply(
                     streaming=True,
                     reasoning_prefilled=prefilled,
                 )
+                if update.thinking_mode is not None:
+                    pending["thinking_mode"] = update.thinking_mode
                 pending["reasoning"] = reasoning
                 pending["content"] = answer
                 pending["reasoning_closed"] = closed
-                highlight = strip_value(update.metrics, scale_name)
                 metrics = list(update.metrics)
+                # The reply carries its own measurements from here on, which
+                # is what paints it in the conversation and what a branch
+                # taken later replays. They are replaced rather than appended
+                # to, so the copy the previous frame published stays as it was.
+                pending["tokens"] = metrics
+                pending["load_id"] = update.load_id
+                pending["metrics_generation"] = generation
+                pending["ends_on_stop_token"] = update.ends_on_stop_token
+                if single_step:
+                    pending["token_step_paused"] = bool(metrics and not update.ends_on_stop_token)
                 pending["generated_tokens"] = len(metrics)
                 status = generation_progress(len(metrics), started, used_seed)
                 if stream_note:
@@ -632,11 +763,13 @@ def _stream_reply(
                         generation,
                         [int(v) for v in update.prompt_ids],
                         update.load_id,
+                        *([steering] if steering is not None else []),
                     )
                 yield snapshot(
-                    highlight,
                     metrics,
                     status,
+                    reset_details=first and preserving_previous,
+                    trace={} if first and preserving_previous else None,
                     prompt_panel=prompt_panel,
                     context_ids=context_ids,
                     charts_panel=(
@@ -657,10 +790,17 @@ def _stream_reply(
         # correction. generate_reply() releases the slot on the way out.
         raise
     except Exception as error:
+        # A refused steering request has not replaced the previous response.
+        # Let the caller restore its original transcript on retry/branch.
+        if first and isinstance(error, SteeringError):
+            raise
         # The diagnostic only goes to the status line. Storing it as the
         # assistant turn would feed the failure back to the model next turn.
         # The traceback goes to the log so the cause is recoverable.
         logger.exception("Generation failed")
+        if previous_turns is not None:
+            yield previous_snapshot(failure_status("Generation failed", str(error)), busy=False)
+            return
         reasoning, answer, _ = split_response_text(
             raw_text,
             literal_prefill=literal_prefill,
@@ -674,11 +814,9 @@ def _stream_reply(
         # opening frame emptied stays empty. What did arrive is still on
         # screen, though, and can be branched from like a stopped response.
         yield snapshot(
-            highlight,
             metrics,
             failure_status("Generation failed", str(error)),
             busy=False,
-            branch_source=(generation, producing_load_id) if kept and metrics else None,
         )
         return
 
@@ -690,19 +828,16 @@ def _stream_reply(
     )
     pending["reasoning"] = reasoning
     pending["content"] = answer
-    # A generation can succeed and still leave nothing renderable behind: the
-    # first sampled token is a hidden EOS, the model emits only whitespace,
-    # which split_reasoning() strips away, or it opens and closes a reasoning
-    # block without writing in it. Publishing that turn would draw a blank
-    # bubble in display_messages() that model_messages() skips, so the visible
-    # conversation and the model's would disagree - the UI would show a reply
-    # the model never sees. finalize_partial() is what the failure and
-    # cancellation paths already use for exactly this, so success uses it too:
-    # it closes the reasoning block when the turn is worth keeping and drops
-    # the turn when it holds neither answer nor reasoning. Dropping it leaves
-    # the user turn without a reply, which is the honest shape - no assistant
-    # bubble is drawn, so both transcripts agree that no reply exists.
-    kept = finalize_partial(turns)
+    # Finished replies with no visible text are dropped, as on cancellation.
+    # A single step can contain only whitespace or a reasoning marker; keep
+    # those measured tokens so the next click can advance past them. The chat
+    # displays a pause notice while model_messages() keeps an empty assistant slot.
+    if single_step and metrics and not pending.get("ends_on_stop_token"):
+        pending["token_step_paused"] = True
+        pending["reasoning_closed"] = True
+        kept = True
+    else:
+        kept = finalize_partial(turns)
     sampling = {
         "temperature": float(temperature),
         "top_p": float(top_p),
@@ -710,6 +845,10 @@ def _stream_reply(
         "max_new_tokens": int(max_new_tokens),
         "seed": used_seed,
     }
+    if pending.get("thinking_mode") is not None:
+        sampling["thinking_mode"] = pending["thinking_mode"]
+    if steering is not None:
+        sampling["steering"] = steering
     if forced_prefix_tokens:
         # The first tokens of a branched response were replayed, not sampled,
         # or came from an assistant prefill. A reader of the export needs to
@@ -731,7 +870,6 @@ def _stream_reply(
     if trace:
         status = f"{status} Exports are ready."
     yield snapshot(
-        highlight,
         metrics,
         status,
         busy=False,
@@ -740,7 +878,6 @@ def _stream_reply(
             charts.surprise_chart(metrics),
         ),
         trace=trace,
-        branch_source=(generation, producing_load_id) if kept and metrics else None,
     )
 
 
@@ -758,12 +895,18 @@ def chat(
     randomize_seed: bool,
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
+    steering: dict | None = None,
+    steering_enabled: bool | None = None,
+    steering_strength: float | None = None,
+    steering_layer: int | None = None,
+    thinking_mode: str = "default",
 ):
-    if runtime.MANAGER.busy:
+    held = occupied()
+    if held:
         # Before anything else, including the checks below: every other exit
         # from this function writes the conversation back, and while another
         # generation is streaming that write is a stale overwrite.
-        yield busy_state()
+        yield busy_state(held)
         return
 
     turns = copy_turns(turns)
@@ -772,25 +915,33 @@ def chat(
         yield idle_state(prompt_text, turns, "Enter a message first.")
         return
     if not runtime.MANAGER.loaded:
-        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        yield no_model_state(prompt_text, turns)
         return
 
     turns.append(make_turn("user", message))
-    yield from generate_reply(
-        turns,
-        "",
-        system_prompt,
-        keep_reasoning,
-        assistant_prefill,
-        temperature,
-        top_p,
-        top_k,
-        max_new_tokens,
-        seed,
-        randomize_seed,
-        analyze_prompt,
-        scale_name,
-    )
+    try:
+        yield from generate_reply(
+            turns,
+            "",
+            system_prompt,
+            keep_reasoning,
+            assistant_prefill,
+            temperature,
+            top_p,
+            top_k,
+            max_new_tokens,
+            seed,
+            randomize_seed,
+            analyze_prompt,
+            scale_name,
+            steering,
+            steering_enabled,
+            steering_strength,
+            steering_layer,
+            thinking_mode,
+        )
+    except SteeringError as error:
+        yield idle_state("", turns, failure_status("Steering failed", str(error)), clear_tokens=True, scale_name=scale_name)
 
 
 def regenerate_from(
@@ -808,13 +959,21 @@ def regenerate_from(
     randomize_seed: bool,
     analyze_prompt: bool = True,
     scale_name: str = DEFAULT_COLOR_SCALE,
+    steering: dict | None = None,
+    steering_enabled: bool | None = None,
+    steering_strength: float | None = None,
+    steering_layer: int | None = None,
+    thinking_mode: str = "default",
+    *,
+    restore_turns: list[dict] | None = None,
 ):
     """Throw away everything after the user turn at ``position`` and reply again."""
 
-    if runtime.MANAGER.busy:
+    held = occupied()
+    if held:
         # Covers Retry and the chatbot's own retry button, which reach a
         # generation only through here.
-        yield busy_state()
+        yield busy_state(held)
         return
 
     turns = copy_turns(turns)
@@ -822,24 +981,35 @@ def regenerate_from(
         yield idle_state(prompt_text, turns, "There is nothing to retry.")
         return
     if not runtime.MANAGER.loaded:
-        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        yield no_model_state(prompt_text, turns)
         return
 
-    yield from generate_reply(
-        turns[: position + 1],
-        prompt_text,
-        system_prompt,
-        keep_reasoning,
-        assistant_prefill,
-        temperature,
-        top_p,
-        top_k,
-        max_new_tokens,
-        seed,
-        randomize_seed,
-        analyze_prompt,
-        scale_name,
-    )
+    try:
+        yield from generate_reply(
+            turns[: position + 1],
+            prompt_text,
+            system_prompt,
+            keep_reasoning,
+            assistant_prefill,
+            temperature,
+            top_p,
+            top_k,
+            max_new_tokens,
+            seed,
+            randomize_seed,
+            analyze_prompt,
+            scale_name,
+            steering,
+            steering_enabled,
+            steering_strength,
+            steering_layer,
+            thinking_mode,
+        )
+    except SteeringError as error:
+        yield idle_state(
+            prompt_text, restore_turns if restore_turns is not None else turns,
+            failure_status("Steering failed", str(error)), clear_tokens=True, scale_name=scale_name,
+        )
 
 
 def retry_last(prompt_text, turns, *settings):
@@ -855,13 +1025,14 @@ def retry_message(event: gr.RetryData, prompt_text, turns, *settings):
 
 
 def edit_message(event: gr.EditData, prompt_text, turns, *settings):
-    # The color scale is the last of the settings a generation is given, and
-    # this handler needs it for the one path that clears the strips itself.
-    scale_name = settings[-1] if settings else DEFAULT_COLOR_SCALE
-    if runtime.MANAGER.busy:
+    # Steering follows the eleven display/generation settings. This path
+    # clears strips itself and needs the color scale, not the vector snapshot.
+    scale_name = settings[10] if len(settings) > 10 else DEFAULT_COLOR_SCALE
+    held = occupied()
+    if held:
         # Not just the branch that regenerates: editing an assistant turn
         # rewrites the conversation on its own, from the same stale snapshot.
-        yield busy_state()
+        yield busy_state(held)
         return
 
     turns = copy_turns(turns)
@@ -896,8 +1067,9 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
         # and whichever frame landed second would erase the other's work. The
         # slot is held across the yield, because releasing before the frame
         # reaches the browser reopens exactly that window.
-        if not runtime.MANAGER.reserve_generation():
-            yield busy_state()
+        held = runtime.MANAGER.claim_generation()
+        if held:
+            yield busy_state(held)
             return
         try:
             turns[position] = edited_turn
@@ -927,12 +1099,13 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
         # regenerate_from() would refuse too, but only after the truncation
         # below had already thrown away every later turn for a reply that is
         # never generated.
-        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        yield no_model_state(prompt_text, turns)
         return
 
+    original_turns = copy_turns(turns)
     turns = turns[: position + 1]
     turns[position]["content"] = edited
-    yield from regenerate_from(position, prompt_text, turns, *settings)
+    yield from regenerate_from(position, prompt_text, turns, *settings, restore_turns=original_turns)
 
 
 def literal_prefill_count(metrics: list[dict], kept: int) -> int:
@@ -980,14 +1153,12 @@ def automatic_reasoning_close_count(metrics: list[dict], kept: int) -> int:
 
 def branch_with_text(
     selected_token: dict | None,
-    branch_source: tuple[int, str | None] | None,
-    metrics_state: tuple[int, list[dict]],
     replacement: str,
     prompt_text: str,
     turns: list[dict] | None,
     *settings,
 ):
-    """Replay the last response up to the clicked token, put typed text in its
+    """Replay the clicked reply up to the clicked token, put typed text in its
     place, and let the model continue.
 
     The text is not limited to the model's own alternatives, so it is
@@ -1003,19 +1174,18 @@ def branch_with_text(
     generation, and this handler would resume afterwards with the
     conversation it was handed at click time and replay that stale response
     onto the newer one. With the slot owned first, nothing can generate while
-    the encoding waits, and the stamp check below reads a strip that no
-    generation can replace under it.
+    the encoding waits, and the turn the selection names cannot change under
+    it.
     """
 
-    if not runtime.MANAGER.reserve_generation():
-        yield busy_state()
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        yield busy_state(held)
         return
 
     try:
         yield from _branch_with_text(
             selected_token,
-            branch_source,
-            metrics_state,
             replacement,
             prompt_text,
             turns,
@@ -1029,8 +1199,6 @@ def branch_with_text(
 
 def _branch_with_text(
     selected_token: dict | None,
-    branch_source: tuple[int, str | None] | None,
-    metrics_state: tuple[int, list[dict]],
     replacement: str,
     prompt_text: str,
     turns: list[dict] | None,
@@ -1039,45 +1207,30 @@ def _branch_with_text(
     """The body of branch_with_text(), run with the generation slot held."""
 
     turns = copy_turns(turns)
-    generation, metrics = metrics_state
-    if (
-        not selected_token
-        or selected_token.get("generation") != generation
-        or generation != current_metrics_generation()
-        or branch_source != (generation, runtime.MANAGER.load_id)
-    ):
+    if not selected_token:
         yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
-        return
-    if not replacement:
-        yield idle_state(prompt_text, turns, BRANCH_TEXT_EMPTY)
-        return
-
-    position = last_user_index(turns)
-    if position is None or turns[-1]["role"] != "assistant":
-        yield idle_state(prompt_text, turns, "There is no response to branch from.")
         return
     if not runtime.MANAGER.loaded:
         yield idle_state(prompt_text, turns, "Download and load a model first.")
         return
+    found = branch_target(turns, selected_token)
+    if isinstance(found, str):
+        yield idle_state(prompt_text, turns, found)
+        return
+    position, metric = found
+    if not replacement:
+        yield idle_state(prompt_text, turns, BRANCH_TEXT_EMPTY)
+        return
 
-    try:
-        metric = metrics[int(selected_token["index"])]
-    except (IndexError, TypeError, ValueError):
-        yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
-        return
-    if metric.get("automatic_reasoning_close"):
-        yield idle_state(prompt_text, turns, BRANCH_REASONING_CLOSE)
-        return
-    at = int(metric["position"])
+    metrics = turn_tokens(turns[position])
+    at = int(selected_token["index"]) + 1
     kept = [int(m["token_id"]) for m in metrics[: at - 1]]
-    if len(kept) != at - 1:
-        yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
-        return
-    # The stamp check above is the fast path. The load it compared against can
-    # still change before the runtime takes the model lock, so the same load is
+    # The turn's own load is the one its tokens were produced by, and
+    # branch_target() has just agreed it is the one in memory. It can still
+    # change before the runtime takes the model lock, so the same load is
     # handed down and compared again under that lock, for the encoding and for
     # the replay alike; a mismatch there is ModelChanged.
-    _generation, expected_load = branch_source
+    expected_load = turns[position].get("load_id")
     literal_prefill_tokens = literal_prefill_count(metrics, len(kept))
     automatic_reasoning_close_tokens = automatic_reasoning_close_count(
         metrics, len(kept)
@@ -1089,7 +1242,10 @@ def _branch_with_text(
             literal_prefill_tokens=literal_prefill_tokens,
             load_id=expected_load,
         )
-        branch_turns = turns[: position + 1]
+        # Everything from the branched reply on is replaced, so the request is
+        # built from the turns before it - which end with the message it was
+        # an answer to.
+        branch_turns = turns[:position]
         runtime.MANAGER.validate_generation_prefix(
             model_messages(
                 branch_turns,
@@ -1099,6 +1255,7 @@ def _branch_with_text(
             (*kept, *replacement_ids),
             max_new_tokens=int(settings[6]),
             load_id=expected_load,
+            thinking_mode=turns[position].get("thinking_mode", "default"),
         )
     except ModelChanged:
         yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
@@ -1126,89 +1283,117 @@ def _branch_with_text(
             ),
             branch_note=note,
             expected_load_id=expected_load,
+            previous_turns=turns,
+            branch_thinking_mode=turns[position].get("thinking_mode", "default"),
         )
     except ModelChanged:
         # ``turns`` is still the whole conversation, old response included.
         yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+    except SteeringError as error:
+        yield idle_state(prompt_text, turns, failure_status("Could not branch", str(error)), clear_tokens=True)
 
 
 def branch_from(
     pick: dict | None,
-    branch_source: tuple[int, str | None] | None,
-    metrics_state: tuple[int, list[dict]],
     prompt_text: str,
     turns: list[dict] | None,
     *settings,
+    single_step: bool = False,
+    resample: bool = False,
 ):
-    """Replay the last response up to the picked token, swap it, and continue.
+    """Replay the picked reply up to the picked token, swap it, and continue.
 
-    The response being branched is always the last turn: every path that
-    changes the conversation under the strip re-stamps it, and the stamps
-    checked here have to agree with the live one, so a pick that survives the
-    checks was made against the reply on screen.
+    Any reply in the conversation can be branched, not only the newest one:
+    the pick names the turn it was made in, and that turn carries the tokens
+    being replayed and the model load that produced them. What the branch
+    replaces is that reply and everything after it, which is what makes the
+    branch a different continuation rather than an edit in the middle.
+
+    With ``resample``, the pick is a token selection: only the tokens before
+    it are replayed, and the selected token is sampled again as well.
     """
 
-    if runtime.MANAGER.busy:
-        yield busy_state()
-        return
-
-    turns = copy_turns(turns)
-    generation, metrics = metrics_state
-    if (
-        not pick
-        or pick.get("generation") != generation
-        or generation != current_metrics_generation()
-        or branch_source != (generation, runtime.MANAGER.load_id)
-    ):
-        yield idle_state(prompt_text, turns, BRANCH_HINT)
-        return
-
-    position = last_user_index(turns)
-    if position is None or turns[-1]["role"] != "assistant":
-        yield idle_state(prompt_text, turns, "There is no response to branch from.")
-        return
-    if not runtime.MANAGER.loaded:
-        yield idle_state(prompt_text, turns, "Download and load a model first.")
+    # Validation tokenizes the prompt under the model lock. Own the generation
+    # slot first so a competing Send cannot replace the conversation meanwhile.
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        yield busy_state(held)
         return
 
     try:
-        at = int(pick["position"])
-        selected_metric = metrics[at - 1]
-        if at < 1:
-            raise IndexError
-    except (IndexError, TypeError, ValueError):
+        yield from _branch_from(pick, prompt_text, turns, *settings, single_step=single_step, resample=resample)
+    finally:
+        runtime.MANAGER.release_generation()
+
+
+def _branch_from(pick, prompt_text, turns, *settings, single_step=False, resample=False):
+    """Validate and replay a token branch with the generation slot held."""
+
+    turns = copy_turns(turns)
+    if not pick:
         yield idle_state(prompt_text, turns, BRANCH_HINT)
         return
-    if selected_metric.get("automatic_reasoning_close"):
-        yield idle_state(prompt_text, turns, BRANCH_REASONING_CLOSE)
+    if not runtime.MANAGER.loaded:
+        yield idle_state(prompt_text, turns, NO_MODEL_STATUS)
         return
+    found = branch_target(turns, pick)
+    if isinstance(found, str):
+        yield idle_state(prompt_text, turns, found)
+        return
+    position, _metric = found
+    metrics = turn_tokens(turns[position])
+    at = int(pick["index"]) + 1
     kept = [int(metric["token_id"]) for metric in metrics[: at - 1]]
-    if len(kept) != at - 1:
-        yield idle_state(prompt_text, turns, BRANCH_HINT)
-        return
-    forced = (*kept, int(pick["token_id"]))
+    forced = tuple(kept) if resample else (*kept, int(pick["token_id"]))
     literal_prefill_tokens = literal_prefill_count(metrics, len(kept))
     automatic_reasoning_close_tokens = automatic_reasoning_close_count(
         metrics, len(kept)
     )
-    unchanged = pick["token_id"] == pick.get("original_id")
+    unchanged = not resample and pick["token_id"] == pick.get("original_id")
     if (
         unchanged
         and literal_prefill_tokens == len(kept)
         and metrics[len(kept)].get("literal_prefill")
     ):
         literal_prefill_tokens += 1
-    if unchanged:
+    if resample:
+        note = f"Regenerating from token {at}."
+    elif unchanged:
         note = f"Resampling from token {at} ({pick['text']!r})."
     else:
         note = f"Branched at token {at}: {pick['text']!r} instead of {pick['original']!r}."
+    if single_step:
+        settings = (*settings[:6], 1, *settings[7:])
+        note = (
+            f"Keeping through token {at}; generating one next token."
+            if unchanged else f"{note} Generating one next token."
+        )
 
-    # As in branch_with_text(): the stamp check above is the fast path, and the
+    # As in branch_with_text(): the check above is the fast path, and the
     # runtime compares the same load again under the model lock.
-    _generation, expected_load = branch_source
+    expected_load = turns[position].get("load_id")
     try:
-        yield from generate_reply(
-            turns[: position + 1],
+        runtime.MANAGER.validate_generation_prefix(
+            model_messages(
+                turns[:position],
+                system_prompt=settings[0],
+                include_reasoning=settings[1],
+            ),
+            forced,
+            max_new_tokens=int(settings[6]),
+            load_id=expected_load,
+            thinking_mode=turns[position].get("thinking_mode", "default"),
+        )
+    except ModelChanged:
+        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+        return
+    except (ValueError, RuntimeError) as error:
+        yield idle_state(prompt_text, turns, f"🌱 {error}")
+        return
+
+    try:
+        yield from _stream_reply(
+            turns[:position],
             prompt_text,
             *settings,
             forced_ids=forced,
@@ -1219,10 +1404,53 @@ def branch_from(
             ),
             branch_note=note,
             expected_load_id=expected_load,
+            single_step=single_step,
+            previous_turns=turns,
+            branch_thinking_mode=turns[position].get("thinking_mode", "default"),
         )
     except ModelChanged:
         # ``turns`` is still the whole conversation, old response included.
         yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+    except SteeringError as error:
+        yield idle_state(prompt_text, turns, failure_status("Could not branch", str(error)), clear_tokens=True)
+
+
+def next_token(pick, prompt_text, turns, *settings):
+    """Branch from a chosen alternative, or extend the latest reply, by one token."""
+
+    held = occupied()
+    if held:
+        yield busy_state(held)
+        return
+    turns = copy_turns(turns)
+    if not runtime.MANAGER.loaded:
+        yield no_model_state(prompt_text, turns)
+        return
+    if not pick:
+        turn = turns[-1] if turns else {}
+        metrics = turn_tokens(turn)
+        if turn.get("role") != "assistant" or not metrics:
+            yield idle_state(prompt_text, turns, "Generate a reply and choose a token alternative first.")
+            return
+        if turn.get("load_id") != runtime.MANAGER.load_id:
+            yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+            return
+        if turn.get("ends_on_stop_token"):
+            yield idle_state(prompt_text, turns, "This reply has ended. Choose an earlier token alternative to branch from.")
+            return
+        metric = metrics[-1]
+        pick = {
+            "source": "turn",
+            "turn": len(turns) - 1,
+            "index": len(metrics) - 1,
+            "at_generation": turn.get("metrics_generation"),
+            "at_token_id": metric["token_id"],
+            "token_id": metric["token_id"],
+            "original_id": metric["token_id"],
+            "text": metric["text"],
+            "original": metric["text"],
+        }
+    yield from branch_from(pick, prompt_text, turns, *settings, single_step=True)
 
 
 def undo_from(
@@ -1252,19 +1480,19 @@ def undo_from(
             gr.skip(),
             messages,
             turns,
-            gr.skip(),
+            transcript_update(turns, scale_name),
             gr.skip(),
             "There is nothing to undo.",
             gr.skip(),
             gr.skip(),
             *send_stop_buttons(False),
-            *(gr.skip(),) * 6,
+            *(gr.skip(),) * 8,
         )
 
     remaining = turns[:position]
     messages, _ = display_messages(remaining)
-    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
-        scale_name
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_panel(
+        remaining, scale_name
     )
     # The selected-token details describe the response being removed, so they
     # go with it, exactly as Clear resets them. So do the prompt tokens, the
@@ -1285,6 +1513,8 @@ def undo_from(
         charts.summary_tiles({}),
         charts.EMPTY_CHART,
         {},
+        None,
+        None,
     )
 
 
@@ -1361,8 +1591,8 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE, forks: dict | None = None)
     the one that was cleared.
     """
 
-    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
-        scale_name
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_panel(
+        [], scale_name
     )
     known = copy_forks(forks)
     forks = new_forks()
@@ -1386,6 +1616,8 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE, forks: dict | None = None)
         charts.summary_tiles({}),
         charts.EMPTY_CHART,
         {},
+        None,
+        None,
         forks,
         conversation_list_update(forks, []),
         gr.update(visible=False),

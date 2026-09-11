@@ -21,8 +21,12 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
+import mlx_runtime
 import settings
+import steering as steering_vectors
 from conversation import THINK_CLOSE, THINK_OPEN
+from mlx_runtime import LensReading
+from thinking import THINKING_MODES, supports_thinking
 from token_metrics import (
     UNSCORED_BEYOND_LIMIT,
     UNSCORED_FIRST_TOKEN,
@@ -167,6 +171,20 @@ WEIGHT_FORMATS = (
 # part company at the loader and at the page that drives them.
 TEXT_KIND = "text"
 IMAGE_KIND = "image"
+# A text model quantized for MLX: safetensors under Transformers' names, but
+# packed the way mlx-lm packs them, so it runs through :mod:`mlx_runtime`
+# rather than through AutoModelForCausalLM. It answers with tokens like a
+# text model and is driven from the Chat page like one.
+MLX_KIND = "mlx"
+
+# What has the model, when something does. One generation and one load are
+# refused for each other as well as for themselves, so a refusal that only
+# says "busy" is wrong half the time: a reader told to wait for a response
+# that is not running, or to press a Stop button that is not there, looks for
+# something that is not on the page. Every refusal a reader sees is worded
+# from one of these; see ModelManager.claim_generation.
+GENERATING = "generating"
+LOADING = "loading"
 
 # A diffusers pipeline announces itself with this file, which also names
 # every component folder it is made of.
@@ -268,6 +286,45 @@ def is_transformers_config(path: Path) -> bool:
     )
 
 
+def is_mlx_snapshot(snapshot: Path) -> bool:
+    """Whether the root ``config.json`` says the weights are quantized for MLX.
+
+    An unquantized MLX conversion is a Transformers checkpoint under another
+    name - same config, same tensors - and loads as one. Only the quantized
+    ones need mlx-lm, and they say so in their config; see
+    :func:`mlx_runtime.mlx_quantization`.
+    """
+
+    return mlx_runtime.read_mlx_config(snapshot) is not None
+
+
+def mlx_available() -> bool:
+    """Whether the MLX backend can run here; see :func:`mlx_runtime.mlx_available`."""
+
+    return mlx_runtime.mlx_available()
+
+
+def mlx_bits_from_id(model_id: str) -> int | None:
+    """The bit width an MLX repository's name claims; see :func:`mlx_runtime.bits_from_name`."""
+
+    return mlx_runtime.bits_from_name(model_id)
+
+
+def mlx_snapshot_bits(snapshot: Path) -> int | None:
+    """The width an MLX repo on disk was converted to, or ``None`` for none.
+
+    Read from the repo's own config rather than guessed from its name, which
+    is what :func:`mlx_bits_from_id` has to settle for on a search result.
+    This is the width such a load really packs its linear layers into, so it
+    is what the estimate, the refusal and the fit verdict name: the precision
+    radio has no say over an MLX repo, and a message that reported the radio
+    would tell a reader their 4-bit model needed full 16-bit weights.
+    """
+
+    block = mlx_runtime.mlx_quantization(mlx_runtime.read_mlx_config(snapshot))
+    return None if block is None else block["bits"]
+
+
 # File endings that hold model weights in some framework or other. A file
 # with one of these where a Transformers checkpoint would not put it is the
 # positive evidence that a snapshot is a repo of another kind.
@@ -358,6 +415,12 @@ def judge_snapshot(snapshot: Path | None) -> tuple[tuple[str, ...], str]:
     has_checkpoint = any(
         (snapshot / name).is_file() for pair in WEIGHT_FORMATS for name in pair
     )
+    if has_checkpoint and is_mlx_snapshot(snapshot):
+        # Whole files that Transformers cannot read: the weights are packed
+        # for mlx-lm. Loadable where mlx is installed, which is Apple
+        # silicon; anywhere else the verdict is the one a CTranslate2 export
+        # gets, since nothing is missing and nothing here runs it.
+        return missing_files(snapshot), MLX_KIND if mlx_available() else ""
     if not has_checkpoint and foreign_weights(
         snapshot, transformers_config=is_transformers_config(snapshot / "config.json")
     ):
@@ -1203,6 +1266,28 @@ def memory_note(count: int | None) -> str:
     return "unknown" if count is None else format_memory(count)
 
 
+def weights_note(load_dtype_name: str | None, bits: int | None = None) -> str:
+    """How an estimate read the weights: ``4-bit weights``, ``full 16-bit weights``.
+
+    The same model estimates several-fold apart across these, so the figure
+    says little on its own: 13.6 GB is a refusal to a reader who chose four
+    bits and a fair reading to one who did not. ``bits`` is what the load
+    will actually pack the linear layers into rather than what was asked
+    for - a quantized choice is honoured on Apple Metal alone and cleared
+    before the check runs anywhere else - so a message built from this tells
+    a reader on a graphics card why their 4-bit choice did not shrink
+    anything. An MLX repo is the other way round: it was packed when it was
+    converted and loads at that width whatever the radio says, so its
+    callers pass the width from the repo itself (see
+    :func:`mlx_snapshot_bits`) rather than the choice.
+    """
+
+    if bits is not None:
+        return f"{bits}-bit weights"
+    stored = DTYPE_BYTES.get((load_dtype_name or "").lower())
+    return "full weights" if stored is None else f"full {stored * 8}-bit weights"
+
+
 def reserved_bytes(torch=None) -> int | None:
     """Bytes the accelerator's allocator holds from the driver, or ``None``.
 
@@ -1219,7 +1304,11 @@ def reserved_bytes(torch=None) -> int | None:
             devices = range(int(torch.cuda.device_count()))
             return sum(int(torch.cuda.memory_reserved(index)) for index in devices)
         if torch.backends.mps.is_available():
-            return int(torch.mps.driver_allocated_memory())
+            # MLX draws on the same Metal device through its own allocator,
+            # so what it holds is part of the same figure.
+            return _sum_known(
+                int(torch.mps.driver_allocated_memory()), mlx_runtime.active_bytes()
+            )
     except (RuntimeError, AttributeError, ValueError, TypeError):
         return None
     return None
@@ -1289,7 +1378,11 @@ def allocated_bytes(backend: str, torch=None, device_only: bool = False) -> int 
             devices = range(int(torch.cuda.device_count()))
             return sum(int(torch.cuda.memory_allocated(index)) for index in devices)
         if backend == "mps":
-            return int(torch.mps.current_allocated_memory())
+            # Plus MLX's live buffers: an MLX load is measured against the
+            # same estimate a Metal load is, and its weights land here.
+            return _sum_known(
+                int(torch.mps.current_allocated_memory()), mlx_runtime.active_bytes()
+            )
     except (RuntimeError, AttributeError, ValueError, TypeError):
         return None
     return None
@@ -1337,24 +1430,30 @@ def check_memory_for_load(
     available: int | None,
     headroom: int = MEMORY_HEADROOM_BYTES,
     pool: str = "this machine",
+    weights: str | None = None,
 ) -> None:
     """Refuse a load that would not leave ``headroom`` beside the weights.
 
     ``pool`` names where the figures come from in the message: the machine's
     own memory, or the GPU plus the machine when the weights may spread over
-    both.
+    both. ``weights`` names the precision the estimate was made at (see
+    :func:`weights_note`), without which the reader cannot tell a refusal
+    that a smaller precision would lift from one that nothing but a smaller
+    model will.
     """
 
     needed = estimated_bytes + headroom
+    size = f"about {format_memory(estimated_bytes)}"
+    size += f" for {weights}" if weights else " of memory"
     if total is not None and needed > total:
         raise InsufficientMemoryError(
-            f"{model_id} needs about {format_memory(estimated_bytes)} of memory plus "
+            f"{model_id} needs {size} plus "
             f"{format_memory(headroom)} of safety reserve, and {pool} has "
             f"{format_memory(total)} in total. Choose a smaller model."
         )
     if available is not None and needed > available:
         raise InsufficientMemoryError(
-            f"{model_id} needs about {format_memory(estimated_bytes)} of memory plus "
+            f"{model_id} needs {size} plus "
             f"{format_memory(headroom)} of safety reserve. ChatLab estimates "
             f"{format_memory(available)} available within its memory safety limits "
             "and stopped this load to reduce the risk of heavy paging. "
@@ -1483,13 +1582,17 @@ def fit_for(
     available: int | None,
     pool: str = "this machine",
     headroom: int = MEMORY_HEADROOM_BYTES,
+    weights: str = "weights",
 ) -> Fit:
     """The verdict a load of ``estimated`` bytes would get from this machine now.
 
     Deliberately a second reading of the same figures rather than a trial
     load: the check that refuses a load is the authority, and this exists to
     say beforehand what it would answer, so a reader picking a model is not
-    made to press the button to find out.
+    made to press the button to find out. ``weights`` names the precision
+    the estimate was made at, for the same reason the refusal names it: the
+    verdict on one model moves as the precision radio does, and a note that
+    left it out would look like the figure had changed by itself.
     """
 
     if estimated is None or (total is None and available is None):
@@ -1504,7 +1607,7 @@ def fit_for(
             else "This machine does not report its memory.",
         )
     needed = estimated + headroom
-    weights = f"About {format_memory(estimated)} of weights"
+    size = f"About {format_memory(estimated)} of {weights}"
     reserve = f"{format_memory(headroom)} of safety reserve"
     if total is not None and needed > total:
         return Fit(
@@ -1513,7 +1616,7 @@ def fit_for(
             total,
             available,
             pool,
-            f"{weights} plus {reserve} is more than the "
+            f"{size} plus {reserve} is more than the "
             f"{format_memory(total)} {pool} has.",
         )
     if available is not None and needed > available:
@@ -1523,7 +1626,7 @@ def fit_for(
             total,
             available,
             pool,
-            f"{weights} plus {reserve} needs more than the "
+            f"{size} plus {reserve} needs more than the "
             f"{format_memory(available)} ChatLab estimates free right now. "
             "Close something memory-heavy, or wait for memory pressure to fall.",
         )
@@ -1533,7 +1636,7 @@ def fit_for(
         total,
         available,
         pool,
-        f"{weights}, inside the {memory_note(available)} ChatLab estimates free.",
+        f"{size}, inside the {memory_note(available)} ChatLab estimates free.",
     )
 
 
@@ -1563,6 +1666,10 @@ def estimate_snapshot_bytes(
     weight_bytes = snapshot_weight_bytes(snapshot)
     if weight_bytes is None:
         return None
+    if kind == MLX_KIND:
+        # Already packed: the file is read onto the device as it is, at the
+        # precision the repo was converted to, whatever the radio says.
+        return weight_bytes
     _architecture, checkpoint_dtype = _read_config(snapshot)
     if bits is None:
         return estimate_loaded_bytes(weight_bytes, checkpoint_dtype, load_dtype_name)
@@ -1644,10 +1751,17 @@ class DeviceProfile:
     def for_kind(self, kind: str, reclaimed: int | None = None) -> DeviceProfile:
         """The reading a load of this kind would get, with the unload counted in.
 
-        Only an image pipeline on CUDA reads differently, and only because it
-        is staged in host memory before it is moved onto the card, so it has
-        to fit both pools rather than their sum; see :func:`memory_pool`.
-        Everything else is :meth:`reclaimed` on the reading it already is.
+        Two kinds read differently. An image pipeline on CUDA is staged in
+        host memory before it is moved onto the card, so it has to fit both
+        pools rather than their sum; see :func:`memory_pool`. An MLX
+        conversion under a Metal ceiling is not held to it: the ceiling is
+        PyTorch's allocator cap, and mlx-lm allocates through Metal on its
+        own, so ``_load_locked`` judges an MLX load against the machine alone
+        and this has to say the same. Judged against the capped figures, a
+        conversion that fits the Mac but not PyTorch's half of it would be
+        listed as tight or unfit - and hidden by **Fits this computer** -
+        while the button loads it. Everything else is :meth:`reclaimed` on
+        the reading it already is.
 
         The unload is counted into each pool *before* they are collapsed to
         the tighter one, which is why this does both rather than leaving the
@@ -1662,6 +1776,15 @@ class DeviceProfile:
         is a subprocess.
         """
 
+        if kind == MLX_KIND and self.ceiling is not None:
+            # The same call the load check makes, ceiling and all: the
+            # capped figures cannot be uncapped from here, and the machine
+            # is what MLX has to fit. Reading it is the subprocess the
+            # docstring mentions, paid once per list rather than per model.
+            total, available, pool = memory_pool(self.backend, None, kind)
+            return replace(
+                self, total=total, available=available, ceiling=None, pool=pool
+            ).reclaimed(reclaimed)
         if kind != IMAGE_KIND or self.backend != "cuda":
             return self.reclaimed(reclaimed)
         card_total, card_free = cuda_device_memory()
@@ -1817,12 +1940,27 @@ def warm_device() -> None:
 
 
 def model_fit(
-    estimated: int | None, profile: DeviceProfile | None = None
+    estimated: int | None,
+    profile: DeviceProfile | None = None,
+    bits: int | None = None,
 ) -> Fit:
-    """Whether weights of ``estimated`` bytes would load on this machine now."""
+    """Whether weights of ``estimated`` bytes would load on this machine now.
+
+    ``bits`` is the width the estimate packed the linear layers into, passed
+    in rather than read from the precision radio here: the caller has already
+    decided whether this device honours the choice, and a verdict that
+    described a different precision from the one it measured would be worse
+    than one that named none.
+    """
 
     profile = profile if profile is not None else device_profile()
-    return fit_for(estimated, profile.total, profile.available, profile.pool)
+    return fit_for(
+        estimated,
+        profile.total,
+        profile.available,
+        profile.pool,
+        weights=weights_note(profile.dtype, bits),
+    )
 
 
 def mps_memory_fraction(
@@ -2023,6 +2161,11 @@ def _read_config(snapshot: Path | None) -> tuple[str | None, str | None]:
         architectures[0] if isinstance(architectures, list) and architectures else None
     )
     dtype = config.get("dtype") or config.get("torch_dtype")
+    quantization = mlx_runtime.mlx_quantization(config)
+    if quantization is not None:
+        # The dtype a converted repo carries is the one it was converted
+        # from; what is on disk, and what loads, is the packed weight.
+        dtype = f"{quantization['bits']}-bit MLX"
     return (
         architecture if isinstance(architecture, str) else None,
         dtype if isinstance(dtype, str) else None,
@@ -2039,6 +2182,9 @@ HIDDEN_SIZE_ALIASES = ("hidden_size", "n_embd", "d_model", "hidden_dim", "model_
 def _embedding_params_from(config: Mapping[str, Any]) -> int | None:
     """Parameters in the embedding and output matrices, from a config's fields, or ``None``."""
 
+    text_config = config.get("text_config")
+    if isinstance(text_config, Mapping):
+        return _embedding_params_from(text_config)
     vocab = config.get("vocab_size")
     hidden = next(
         (config[name] for name in HIDDEN_SIZE_ALIASES if isinstance(config.get(name), int)),
@@ -2066,6 +2212,9 @@ def _embedding_params(snapshot: Path | None) -> int | None:
         from transformers import AutoConfig
 
         loaded = AutoConfig.from_pretrained(snapshot, local_files_only=True)
+        get_text_config = getattr(loaded, "get_text_config", None)
+        if callable(get_text_config):
+            loaded = get_text_config()
         params = _embedding_params_from(
             {
                 "vocab_size": getattr(loaded, "vocab_size", None),
@@ -2298,14 +2447,19 @@ HUB_SORTS = {"Popular": "downloads", "Trending": "trending_score", "New": "creat
 # results. Asking the hub for "text-generation" alone hid every one of them.
 SEARCH_PIPELINE_TAGS = ("text-generation", "any-to-any", "image-text-to-text")
 
+# The tag every mlx-community conversion carries, whichever library the hub
+# files it under: some are "mlx", some "transformers" with this beside it.
+MLX_TAG = "mlx"
+
 # Repository tags that mark weights laid out for another runtime whatever
 # else the repository holds. An MLX conversion carries the same pipeline tag
 # and the same "transformers" library as the model it came from and keeps its
 # weights in safetensors files, so nothing else about it says otherwise, but
 # the numbers inside are quantized MLX's way and AutoModelForCausalLM cannot
 # read them - lmstudio-community publishes four of gemma-4-E4B-it alone, so
-# leaving them in would bury the model they came from.
-SEARCH_FOREIGN_TAGS = frozenset({"mlx"})
+# leaving them in would bury the model they came from. They have a search of
+# their own under MLX_KIND, where the tag is what is asked for.
+SEARCH_FOREIGN_TAGS = frozenset({MLX_TAG})
 
 # Tags for the weight formats in FOREIGN_SUFFIXES, which mark a repository as
 # foreign only where it ships nothing Transformers can read: a repository with
@@ -2393,12 +2547,15 @@ class HubModel:
     license: str | None = None
     summary: str | None = None
     download_bytes: int | None = None
+    # Which kind the search that found it was scoped to, so the list that
+    # holds it can be judged and described as that kind.
+    kind: str = TEXT_KIND
 
 
 # The library each kind of model has to be published under, which is the one
 # filter the hub itself applies. Everything else about whether a result is
 # loadable is decided here, result by result; see search_hub_models.
-HUB_LIBRARIES = {TEXT_KIND: "transformers", IMAGE_KIND: "diffusers"}
+HUB_LIBRARIES = {TEXT_KIND: "transformers", IMAGE_KIND: "diffusers", MLX_KIND: "mlx"}
 
 # The pipeline tags an image model is found under. A diffusers repository
 # that writes a picture from a prompt is tagged for exactly that, so unlike
@@ -2450,6 +2607,11 @@ def search_hub_models(
     if order not in HUB_SORTS:
         raise ValueError(f"Unknown model order: {order}")
     images = kind == IMAGE_KIND
+    mlx = kind == MLX_KIND
+    if mlx and not mlx_available():
+        raise RuntimeError(
+            "MLX models run on Apple silicon with the mlx-lm package installed."
+        )
     token = hf_token.strip() if hf_token and hf_token.strip() else None
     # No limit: the generator pages through the results, and the loop below
     # stops it once the list is full or SEARCH_SCAN_LIMIT have been read.
@@ -2472,7 +2634,7 @@ def search_hub_models(
     )
     # Only a text search needs the auto map, and reading it reaches torch,
     # so an image search does not pay for it.
-    model_types = {} if images else causal_lm_model_types()
+    model_types = {} if images or mlx else causal_lm_model_types()
     wanted_tags = SEARCH_IMAGE_PIPELINE_TAGS if images else SEARCH_PIPELINE_TAGS
     results = []
     for scanned, info in enumerate(found, start=1):
@@ -2481,11 +2643,21 @@ def search_hub_models(
         if getattr(info, "pipeline_tag", None) not in wanted_tags:
             continue
         tags = getattr(info, "tags", None) or []
-        if foreign_to_transformers(tags):
+        config = getattr(info, "config", None)
+        if mlx:
+            # The library filter has already asked for MLX repos; what is
+            # left to check is that mlx-lm has the architecture. The hub's
+            # copy of the config drops the quantization block, so whether
+            # the weights are packed is learnt from the files once they are
+            # down (see judge_snapshot); an unpacked conversion loads as a
+            # Transformers checkpoint, which is no worse.
+            if MLX_TAG not in tags or not mlx_runtime.mlx_supports(
+                (config or {}).get("model_type") if isinstance(config, Mapping) else None
+            ):
+                continue
+        elif foreign_to_transformers(tags):
             continue
-        if not images and not loads_as_a_causal_lm(
-            getattr(info, "config", None), model_types
-        ):
+        elif not images and not loads_as_a_causal_lm(config, model_types):
             continue
         safetensors = getattr(info, "safetensors", None)
         parameters = getattr(safetensors, "total", None) if safetensors else None
@@ -2502,6 +2674,7 @@ def search_hub_models(
                 gated=getattr(info, "gated", False) or False,
                 last_modified=modified.date().isoformat() if modified else None,
                 license=licenses[0] if licenses else None,
+                kind=kind,
             )
         )
         if len(results) == limit:
@@ -2557,7 +2730,11 @@ def model_position_limit(model) -> int | None:
     blocking a model that would have run.
     """
 
+    # An mlx-lm model keeps the same fields on ``args``, a dataclass built
+    # from the same config.json.
     config = getattr(model, "config", None)
+    if config is None:
+        config = getattr(model, "args", None)
     if config is None:
         return None
 
@@ -3149,6 +3326,9 @@ class GenerationUpdate:
     :attr:`ModelManager.load_id`.
     """
 
+    thinking_mode: str | None = None
+    """Requested template mode, or None when the loaded model cannot switch."""
+
 
 class IncrementalDecoder:
     """Decode a growing token stream without re-decoding it from the start.
@@ -3649,6 +3829,51 @@ class LoadedModel(NamedTuple):
 ReadWeights = tuple[Any, Any, Any, str]
 
 
+@contextlib.contextmanager
+def _capture_loading_report() -> Iterator[None]:
+    """Keep Transformers' report when it raises an error referring to it.
+
+    Transformers normally sends this to its own stderr handler, which the
+    desktop UI cannot show and the app's file logger never receives. In
+    particular, quantization wraps an out-of-memory error as a conversion
+    failure, hiding it from our memory-error handling too.
+    """
+
+    thread_id = threading.get_ident()
+    reports = []
+
+    class ReportHandler(logging.Handler):
+        def emit(self, record):
+            if record.thread != thread_id:
+                return
+            message = record.getMessage()
+            if "LOAD REPORT" in message:
+                plain = re.sub(r"\x1b\[[0-9;]*m", "", message)
+                reports[:] = ["\n".join(line.rstrip() for line in plain.splitlines())]
+
+    source = logging.getLogger("transformers")
+    handler = ReportHandler(level=logging.WARNING)
+    source.addHandler(handler)
+    try:
+        yield
+    except RuntimeError as error:
+        if reports and "above report" in str(error):
+            report = reports[-1]
+            logger.warning("%s", report)
+            causes = list(dict.fromkeys(re.findall(
+                r"^((?:[\w.]+)?(?:Error|Exception): .+)$", report, re.MULTILINE
+            )))
+            # Prefer the memory failure even if an earlier conversion also
+            # failed: the caller must still recognize that memory ran out.
+            memory = next((cause for cause in causes if is_out_of_memory_error(RuntimeError(cause))), None)
+            detail = memory or "\n".join(causes[:3]) or report[:8000]
+            raise RuntimeError(f"Weight loading failed: {detail}") from error
+        raise
+    finally:
+        source.removeHandler(handler)
+        handler.close()
+
+
 def _read_text_model(
     local_path: Path, torch, backend: str, dtype, bits: int | None, precision: str
 ) -> ReadWeights:
@@ -3729,6 +3954,40 @@ def _read_text_model(
     return model, tokenizer, None, device_name
 
 
+def _read_mlx_model(
+    local_path: Path, torch, backend: str, dtype, bits: int | None, precision: str
+) -> ReadWeights:
+    """Read one MLX-quantized checkpoint out of ``local_path`` onto Metal.
+
+    Same signature as the two readers above so the load need not tell them
+    apart; ``torch``, ``dtype`` and ``bits`` go unused, because the weights
+    are read as the repo packed them and the radio was cleared before this
+    was called. ``precision`` is that packing, for the device's name.
+    """
+
+    del torch, dtype, bits
+    if backend != "mps":
+        raise RuntimeError(
+            "MLX models run on Apple silicon. Choose a Transformers checkpoint here."
+        )
+    model, tokenizer, _config = mlx_runtime.read_mlx_model(local_path)
+    return model, tokenizer, None, f"Apple Metal (MLX), {precision} weights"
+
+
+def _reader(kind: str):
+    """The function that brings a checkpoint of ``kind`` in.
+
+    Looked up when a load runs rather than kept in a table at import, so a
+    stand-in for one reader (a test's, or a future hook's) is the one called.
+    """
+
+    if kind == MLX_KIND:
+        return _read_mlx_model
+    if kind == IMAGE_KIND:
+        return _read_pipeline
+    return _read_text_model
+
+
 # The first diffusers release whose DiffusionPipeline takes a local folder
 # with local_files_only and returns a pipeline with callback_on_step_end.
 # Older releases run everything else in the app, so requirements.txt keeps no
@@ -3784,6 +4043,215 @@ def _read_pipeline(
     return None, None, pipeline, device_name
 
 
+class TorchLogits:
+    """One forward pass's logits, read a row at a time as float32 numpy."""
+
+    def __init__(self, logits) -> None:
+        self.logits = logits
+
+    def row(self, index: int) -> np.ndarray:
+        return self.logits[index].detach().float().cpu().numpy()
+
+
+class TorchEngine:
+    """Run a Transformers causal LM for :class:`ModelManager`.
+
+    The manager asks the same questions of every backend - feed these
+    tokens after that cache, cut the cache back, read every layer's
+    prediction for one token - and this answers them for a PyTorch model,
+    as :class:`mlx_runtime.MlxEngine` does for an MLX one. Built on demand
+    around whatever is in :attr:`ModelManager.model`, so it holds no state
+    of its own.
+    """
+
+    backend = "torch"
+
+    def __init__(self, model) -> None:
+        self.model = model
+
+    def eos_token_ids(self) -> set[int]:
+        values: set[int] = set()
+        generation_config = getattr(self.model, "generation_config", None)
+        candidate = getattr(generation_config, "eos_token_id", None)
+        if isinstance(candidate, int):
+            values.add(candidate)
+        elif candidate:
+            values.update(int(value) for value in candidate)
+        return values
+
+    def _device(self):
+        return next(self.model.parameters()).device
+
+    def forward(self, token_ids: Sequence[int], cache, cached: int) -> tuple[TorchLogits, Any]:
+        """Feed ``token_ids`` after the ``cached`` tokens already in ``cache``."""
+
+        import torch
+
+        device = self._device()
+        outputs = self.model(
+            input_ids=torch.tensor([list(token_ids)], dtype=torch.long, device=device),
+            attention_mask=torch.ones(
+                (1, cached + len(token_ids)), dtype=torch.long, device=device
+            ),
+            past_key_values=cache,
+            use_cache=True,
+        )
+        return TorchLogits(outputs.logits[0]), outputs.past_key_values
+
+    @staticmethod
+    def can_crop(cache, held: int) -> bool:
+        return _cache_can_crop(cache, held)
+
+    @staticmethod
+    def crop(cache, remove: int) -> None:
+        # A negative count removes that many tokens from the end. A
+        # positive one is the older "length to keep" form, which
+        # Transformers 5.x warns about and 5.18 drops.
+        cache.crop(-remove)
+
+    @contextlib.contextmanager
+    def eager_attention(self):
+        """Run the model with attention that reports its weights.
+
+        Fused kernels (SDPA, flash) never materialize the attention matrix, so
+        a model loaded with one of them returns no weights. Eager attention is
+        slower, so it is switched on for a single inspection step and switched
+        back afterwards.
+        """
+
+        model = self.model
+        switch = getattr(model, "set_attn_implementation", None)
+        current = getattr(getattr(model, "config", None), "_attn_implementation", None)
+        if switch is None or current in (None, "eager"):
+            yield
+            return
+        switch("eager")
+        try:
+            yield
+        finally:
+            switch(current)
+
+    def final_norm(self):
+        """The norm the LM head reads through, or ``None`` when none is found.
+
+        Looked up on the base model first, then one level down in the
+        containers some architectures wrap their decoder stack in.
+        """
+
+        import torch
+
+        base = getattr(self.model, "base_model", self.model)
+        owners = [base] + [getattr(base, name, None) for name in FINAL_NORM_CONTAINERS]
+        for owner in owners:
+            for name in FINAL_NORM_ATTRIBUTES:
+                module = getattr(owner, name, None)
+                if isinstance(module, torch.nn.Module):
+                    return module
+        return None
+
+    def read_head(self, vector):
+        """Turn a normed residual vector into logits the way the model does.
+
+        Some causal-LM heads post-process the unembedding: Gemma 2 and 3
+        soft-cap logits with ``tanh``, Granite divides by ``logits_scaling``,
+        Cohere multiplies by ``logit_scale``. An intermediate reading that
+        skipped them would describe a distribution the model never emits, so
+        they are applied here. :meth:`inspect_step` checks the result against
+        the model's own output for the final layer, which catches a transform
+        this list does not know about.
+        """
+
+        import torch
+
+        model = self.model
+        logits = model.get_output_embeddings()(vector)
+        config = getattr(model, "config", None)
+        scale = getattr(config, "logit_scale", None)
+        if scale:
+            logits = logits * scale
+        scaling = getattr(config, "logits_scaling", None)
+        if scaling:
+            logits = logits / scaling
+        softcap = getattr(config, "final_logit_softcapping", None)
+        if softcap:
+            logits = torch.tanh(logits / softcap) * softcap
+        return logits
+
+    def inspect_step(self, token_id: int, cache, cached: int) -> LensReading:
+        """Feed one token with the hidden states and attention switched on.
+
+        The last hidden state is what the model's own head reads, so its
+        row is the real output; the earlier ones are read through the
+        final norm as though the stack had ended there. Without the norm
+        those readings would be off by a rescaling the head never sees,
+        so a model whose norm cannot be found shows its output alone
+        rather than intermediate rows that look right and are not. The
+        same goes for a head that post-processes its logits in a way
+        :meth:`read_head` does not replicate: reading the final hidden
+        state (already normed) through it must reproduce the model's
+        output, or the intermediate rows are not trustworthy either.
+        """
+
+        import torch
+
+        device = self._device()
+        with self.eager_attention():
+            outputs = self.model(
+                input_ids=torch.tensor([[int(token_id)]], dtype=torch.long, device=device),
+                attention_mask=torch.ones((1, cached + 1), dtype=torch.long, device=device),
+                past_key_values=cache,
+                use_cache=True,
+                output_hidden_states=True,
+                output_attentions=True,
+            )
+
+        def to_numpy(tensor) -> np.ndarray:
+            return tensor.detach().float().cpu().numpy()
+
+        hidden_states = tuple(outputs.hidden_states or ())
+        final_logits = outputs.logits[0, -1]
+        reading = LensReading(
+            final_logits=to_numpy(final_logits),
+            layer_count=len(hidden_states),
+            cache=getattr(outputs, "past_key_values", None),
+        )
+        norm = self.final_norm()
+        readable = norm is not None and bool(hidden_states)
+        if readable:
+            replayed = self.read_head(hidden_states[-1][0, -1]).detach().float()
+            readable = torch.allclose(
+                replayed, final_logits.detach().float(), rtol=1e-2, atol=1e-2
+            )
+        if readable:
+            for state in hidden_states[:-1]:
+                vector = norm(state[0, -1].unsqueeze(0)).squeeze(0)
+                reading.layer_logits.append(to_numpy(self.read_head(vector)))
+
+        weights = tuple(outputs.attentions or ())
+        if weights and all(layer is not None for layer in weights):
+            reading.attention = [
+                layer[0, :, -1, :].detach().float().mean(dim=0).cpu().tolist()
+                for layer in weights
+            ]
+        del outputs
+        return reading
+
+
+class ExclusiveLoad(NamedTuple):
+    """What :meth:`ModelManager.claim_exclusive_load` answers with.
+
+    Exactly one side is filled in. ``claim`` is what :meth:`reserve_load`
+    returns - the checked ID and the claim number that gives it back - and
+    ``held`` is ``None`` beside it. A refusal is the other way round: no
+    claim, and :data:`LOADING` or :data:`GENERATING` naming what has the
+    model, decided in the same step as the refusal so that a load ending an
+    instant later cannot change the answer on screen.
+    """
+
+    claim: tuple[str, int] | None
+    held: str | None
+
+
 class ModelManager:
     """Own the single in-memory model used by the local application."""
 
@@ -3795,6 +4263,12 @@ class ModelManager:
         # everything that generates text asks :attr:`loaded`, and a pipeline
         # answering that question yes would be fed tokens.
         self.pipeline = None
+        # How the model in memory is run: an :class:`mlx_runtime.MlxEngine`
+        # for an MLX checkpoint, and ``None`` for a Transformers model, which
+        # :meth:`_engine` wraps in a :class:`TorchEngine` on demand. Left
+        # unset for a Transformers model so that anything that puts a model
+        # in ``model`` by hand - the tests do - is run the way it always was.
+        self.engine = None
         self.kind: str | None = None
         self.model_id: str | None = None
         self.local_path: Path | None = None
@@ -3833,6 +4307,18 @@ class ModelManager:
         # claimed in need not be the order they win the lock in, and the
         # badge on the chat page names the load that is really reading.
         self._active_load: str | None = None
+        # Counts the changes this process has made to what a scan of the
+        # Hugging Face cache would find: a download that started or finished,
+        # a model deleted. A download that is running counts because a model
+        # whose folder is being written cannot be loaded, so it is not
+        # something to offer. Read by anything drawn from such a scan and too
+        # dear to redo on a timer - the chat page's model switcher - so a tab
+        # that did not make the change can tell "nothing has moved" from
+        # "rescan" in an attribute read. A change made outside ChatLab does
+        # not move it, which is the bargain My Models already makes with its
+        # Refresh button.
+        self.cache_revision = 0
+        self._cache_revision_lock = threading.Lock()
         # Downloads under way right now, by model ID, so a second request for
         # the same model can follow the first instead of racing it for the
         # same files.
@@ -3931,6 +4417,65 @@ class ModelManager:
 
         return self._generating.locked()
 
+    def _occupant_locked(self) -> str | None:
+        """What has the model, answered with :attr:`_claims_lock` already held.
+
+        The one place the question is decided, so the property that only
+        labels and the two claims that refuse cannot name different things.
+        Both can be true at once - :meth:`reserve_load` does not exclude a
+        reply already streaming - and the load wins, because it is what the
+        reply is about to lose the model to, and because a load is the one a
+        reader can only wait out rather than stop.
+        """
+
+        if self._load_claims or self._active_load is not None:
+            return LOADING
+        if self._generating.locked():
+            return GENERATING
+        return None
+
+    @property
+    def occupant(self) -> str | None:
+        """What has the model right now: :data:`LOADING`, :data:`GENERATING`, or nothing.
+
+        The same question :meth:`claim_generation` settles, asked without
+        taking anything, so it is only ever an early exit or a label - a
+        caller about to generate takes the slot and reads the answer the
+        claim gives back, and a caller about to load reads the one
+        :meth:`claim_exclusive_load` gives back.
+        """
+
+        with self._claims_lock:
+            return self._occupant_locked()
+
+    def claim_generation(self) -> str | None:
+        """Claim the right to run a generation, or name what has the model.
+
+        ``None`` when the slot is now the caller's. Otherwise
+        :data:`LOADING` or :data:`GENERATING`, decided in the same step as
+        the refusal, which is the point of returning it here rather than
+        leaving each caller to read :attr:`occupant` afterwards: by then the
+        load can have finished and the refusal on screen would name the
+        wrong thing. Every refusal a reader sees is worded from this, and
+        "wait for the response to finish" is a lie when no response is
+        running.
+
+        Everything :meth:`reserve_generation` says about reserving applies
+        here; that method is this one with the reason thrown away.
+        :meth:`claim_exclusive_load` is the same bargain on the load side.
+        """
+
+        with self._claims_lock:
+            held = self._occupant_locked()
+            if held is not None:
+                return held
+            # Cannot fail: every acquire of the slot is made under this lock
+            # and nothing holds it, so no other thread can be between the
+            # two lines. Releasing happens outside the lock, but that only
+            # ever frees the slot.
+            self._generating.acquire(blocking=False)
+            return None
+
     def reserve_generation(self) -> bool:
         """Claim the right to run a generation, or report that it is taken.
 
@@ -3945,9 +4490,21 @@ class ModelManager:
         same thing: those two steps are separated by a yield, and Gradio does
         not resume a streaming handler until the browser has been sent the
         frame, so the window between them is a network round trip wide.
+
+        A claimed load refuses this too, and under the same lock the load was
+        claimed with, so the two decisions cannot both say yes. A generation
+        admitted while a load is under way does not run on the model the
+        reader was looking at: it waits on the model lock behind the load and
+        then answers from whatever the load brought in. Refusing it is the
+        only answer that keeps the reply and the badge agreeing. The
+        :meth:`claim_exclusive_load` side of the same rule is what stops a
+        load starting while a reply is streaming.
+
+        A caller that has to tell the reader why it refused wants
+        :meth:`claim_generation`, which is this with the reason kept.
         """
 
-        return self._generating.acquire(blocking=False)
+        return self.claim_generation() is None
 
     def release_generation(self) -> None:
         """Give the generation slot back. Pairs with a successful reservation."""
@@ -3975,8 +4532,7 @@ class ModelManager:
         checked_id = validate_model_id(model_id)
         progress = progress or DownloadProgress()
         try:
-            with self._downloads_lock:
-                self.active_downloads.setdefault(checked_id, progress)
+            self._list_download(checked_id, progress)
             from huggingface_hub import snapshot_download
 
             path = snapshot_download(
@@ -3985,8 +4541,42 @@ class ModelManager:
                 tqdm_class=progress.bar_class(),
             )
         finally:
+            # The end of the download is noted by release_download, which
+            # covers both halves of what changed: the files that landed, and
+            # the model becoming loadable again now that nothing is writing
+            # its folder.
             self.release_download(checked_id, progress)
         return Path(path)
+
+    def note_cache_change(self) -> None:
+        """Record that what a scan of the cache would find has changed.
+
+        A download that started or ended, a model deleted: anything that
+        changes which models a reader can be offered. See
+        :attr:`cache_revision`.
+        """
+
+        with self._cache_revision_lock:
+            self.cache_revision += 1
+
+    def _list_download(
+        self, checked_id: str, progress: DownloadProgress
+    ) -> DownloadProgress | None:
+        """List ``progress`` as ``checked_id``'s download unless one already is.
+
+        Returns the download that was already listed, or ``None`` when this
+        call is the one that listed ``progress`` - which is also when the
+        cache revision moves: a model being written is a model that cannot be
+        loaded, so the lists drawn from a cache scan have to hear about it.
+        """
+
+        with self._downloads_lock:
+            running = self.active_downloads.get(checked_id)
+            if running is not None:
+                return running
+            self.active_downloads[checked_id] = progress
+        self.note_cache_change()
+        return None
 
     def reserve_download(self, model_id: str) -> tuple[DownloadProgress, bool]:
         """Claim ``model_id`` for a new download, or point at the one running.
@@ -4005,21 +4595,34 @@ class ModelManager:
         """
 
         checked_id = validate_model_id(model_id)
+        progress = DownloadProgress()
+        running = self._list_download(checked_id, progress)
+        if running is not None:
+            return running, False
+        return progress, True
+
+    def downloading_ids(self) -> frozenset[str]:
+        """Every model being downloaded right now, read as one step.
+
+        For a caller filtering a list: iterating :attr:`active_downloads`
+        itself would race a download starting or ending, which in CPython is
+        a "dictionary changed size during iteration" in the middle of
+        drawing a page.
+        """
+
         with self._downloads_lock:
-            running = self.active_downloads.get(checked_id)
-            if running is not None:
-                return running, False
-            progress = DownloadProgress()
-            self.active_downloads[checked_id] = progress
-            return progress, True
+            return frozenset(self.active_downloads)
 
     def release_download(self, model_id: str, progress: DownloadProgress) -> None:
         """Remove ``progress`` only when it still owns ``model_id``'s entry."""
 
         checked_id = validate_model_id(model_id)
         with self._downloads_lock:
-            if self.active_downloads.get(checked_id) is progress:
+            removed = self.active_downloads.get(checked_id) is progress
+            if removed:
                 del self.active_downloads[checked_id]
+        if removed:
+            self.note_cache_change()
 
     @property
     def loading_id(self) -> str | None:
@@ -4069,6 +4672,47 @@ class ModelManager:
             self._next_claim += 1
             self._load_claims[self._next_claim] = checked_id
             return checked_id, self._next_claim
+
+    def claim_exclusive_load(self, model_id: str) -> ExclusiveLoad:
+        """Claim a load of ``model_id``, or name what has the model instead.
+
+        An :class:`ExclusiveLoad` holding what :meth:`reserve_load` returns,
+        or, when another load is claimed or a generation is running and the
+        caller must refuse rather than queue, holding :data:`LOADING` or
+        :data:`GENERATING` instead. Why the reason comes back from here is
+        what :meth:`claim_generation` says: a caller that refused and then
+        read :attr:`occupant` to find out why has asked twice, and a load
+        that ended in between answers the second question with the other
+        reason - so a load turned away by a load would tell the reader a
+        response was running and to press a Stop button that is not on the
+        page. This is the gate every load a reader asks for goes
+        through, so "no other load is claimed" really means no other load:
+        once this returns a claim, the ordinary :meth:`reserve_load` that the
+        load itself makes is the only one that can appear, and the next
+        reader to reach this gate sees that claim and is turned away.
+
+        Refusing rather than queuing is the point. Reading :attr:`loading_id`
+        or :attr:`busy` and then loading is two steps, and a handler that
+        yields between them - as a streaming one must, to show its first card
+        - leaves a window a whole browser round trip wide for a second load
+        to be claimed. Both halves of the question are answered here under
+        :attr:`_claims_lock`, and :meth:`reserve_generation` answers the
+        mirror image under the same lock, so a load and a reply can never
+        both be admitted: one of them sees the other.
+
+        The claim stands from here, so the caller owns it and must give it
+        back with :meth:`release_load` in a ``finally``; the load it goes on
+        to start takes its own claim and releases that one itself.
+        """
+
+        checked_id = validate_model_id(model_id)
+        with self._claims_lock:
+            held = self._occupant_locked()
+            if held is not None:
+                return ExclusiveLoad(None, held)
+            self._next_claim += 1
+            self._load_claims[self._next_claim] = checked_id
+            return ExclusiveLoad((checked_id, self._next_claim), None)
 
     def release_load(self, claim: int) -> None:
         """Give back one claim, leaving any other load's standing."""
@@ -4193,11 +4837,33 @@ class ModelManager:
             )
             bits = None
         precision = precision if bits is not None else "full"
+        if kind == MLX_KIND:
+            # The repo was quantized when it was converted, and that is the
+            # precision it loads at; the radio has nothing to add. Named
+            # from the config so the badge says what is really running.
+            precision = mlx_runtime.precision_label(mlx_runtime.read_mlx_config(local_path))
+            # The config's width, not the radio's: the estimate below reads
+            # the packed file as it stands and the MLX reader takes no bits
+            # at all, so this rides along only to let the refusal, the log
+            # and the fit panel name the width the weights really are. Zero
+            # it out and a 4-bit conversion would be refused for wanting
+            # "full 16-bit weights".
+            bits = mlx_snapshot_bits(local_path)
+            logger.info(
+                "Loading %s at the %s precision it was converted to: MLX weights "
+                "are packed already",
+                model_id,
+                precision,
+            )
         # The cap goes on before the check rather than before the load, so
         # the check can refuse a model that fits the machine but not the
         # allocator's half of it. Otherwise a 25 GB checkpoint on an idle
-        # 48 GB Mac passes, is read off disk, and only then fails.
-        ceiling = self._cap_mps_memory(torch) if backend == "mps" else None
+        # 48 GB Mac passes, is read off disk, and only then fails. MLX has
+        # its own allocator, which the PyTorch cap says nothing about, so
+        # an MLX load is judged against the machine alone.
+        ceiling = (
+            self._cap_mps_memory(torch) if backend == "mps" and kind != MLX_KIND else None
+        )
         estimated, available = self._check_memory(
             model_id,
             local_path,
@@ -4212,8 +4878,8 @@ class ModelManager:
         if allocated_bytes(backend, torch) is not None:
             progress.measure_bytes(estimated, lambda: allocated_bytes(backend, torch))
         try:
-            with progress.watch():
-                read = _read_pipeline if kind == IMAGE_KIND else _read_text_model
+            with progress.watch(), _capture_loading_report():
+                read = _reader(kind)
                 model, tokenizer, pipeline, device_name = read(
                     local_path, torch, backend, dtype, bits, precision
                 )
@@ -4248,6 +4914,11 @@ class ModelManager:
         self.tokenizer = tokenizer
         self.pipeline = pipeline
         self.kind = kind
+        self.engine = (
+            mlx_runtime.MlxEngine.from_snapshot(model, local_path)
+            if kind == MLX_KIND
+            else None
+        )
         self.model_id = model_id
         self.local_path = local_path
         self.device_name = device_name
@@ -4324,7 +4995,9 @@ class ModelManager:
             with self._downloads_lock:
                 if checked_id in self.active_downloads:
                     raise ModelDownloading(f"{checked_id} is being downloaded.")
-                return remove_cached_model(checked_id, cache_dir)
+                freed = remove_cached_model(checked_id, cache_dir)
+                self.note_cache_change()
+                return freed
         finally:
             self._lock.release()
 
@@ -4335,6 +5008,7 @@ class ModelManager:
         self.model = None
         self.tokenizer = None
         self.pipeline = None
+        self.engine = None
         self.kind = None
         self.model_id = None
         self.local_path = None
@@ -4366,6 +5040,7 @@ class ModelManager:
         and rebuilt from nothing. Called under the model lock.
         """
 
+        engine = self._engine()
         kept = self._inspect_cache
         self._inspect_cache = None
         if kept is not None:
@@ -4375,7 +5050,7 @@ class ModelManager:
                 load_id != self.load_id
                 or cache is None
                 or ids[:shared] != needed[:shared]
-                or (len(ids) > len(needed) and not _cache_can_crop(cache, len(ids)))
+                or (len(ids) > len(needed) and not engine.can_crop(cache, len(ids)))
             ):
                 kept = None
 
@@ -4385,10 +5060,7 @@ class ModelManager:
         else:
             _, ids, cache = kept
             if len(ids) > len(needed):
-                # A negative count removes that many tokens from the end. A
-                # positive one is the older "length to keep" form, which
-                # Transformers 5.x warns about and 5.18 drops.
-                cache.crop(-(len(ids) - len(needed)))
+                engine.crop(cache, len(ids) - len(needed))
                 ids = ids[: len(needed)]
 
         if len(ids) == len(needed):
@@ -4415,6 +5087,32 @@ class ModelManager:
             torch.cuda.empty_cache()
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
+        mlx_runtime.clear_cache()
+
+    def _engine(self):
+        """What runs the model in memory; see :attr:`engine`."""
+
+        return self.engine if self.engine is not None else TorchEngine(self.model)
+
+    def _steering(self, steering: dict | None):
+        """Install a steering vector for one run; see :mod:`steering`.
+
+        Steering adds its vector through a ``torch.nn.Module`` forward hook on
+        a decoder block, which only the Transformers backend has: an mlx-lm
+        model is not a torch module, so the hook has nowhere to go. Refuse
+        here, naming the backend, rather than letting the block search fail
+        with an architecture complaint the reader cannot act on. An inactive
+        vector - none imported, the switch off, or a strength of zero - runs
+        on either backend, because nothing is added.
+        """
+
+        engine = self._engine()
+        if getattr(engine, "backend", "torch") != "torch" and steering_vectors.active(steering):
+            raise steering_vectors.SteeringError(
+                "Steering is not supported for MLX models. Load the model's "
+                "unquantized Transformers version to steer it, or turn steering off."
+            )
+        return steering_vectors.applied(self.model, self.model_id, steering)
 
     @staticmethod
     def _check_memory(
@@ -4459,6 +5157,13 @@ class ModelManager:
         in, and a pipeline's has to be read out of the weights themselves
         (see :func:`pipeline_loaded_bytes`) because its components keep no
         dtype in their configs and need not agree about it either.
+
+        ``bits`` is the width the weights will really be packed into, which
+        the caller has already resolved: cleared where the device will not
+        honour the radio, and for an MLX repo taken from the conversion's
+        own config. The estimate of a packed MLX file ignores it - the file
+        is already that size - but the refusal and the log line name it, so
+        a 4-bit conversion is never turned away for wanting full weights.
         """
 
         # Through main's two helpers rather than branching here: both now
@@ -4468,9 +5173,15 @@ class ModelManager:
         if estimated is None:
             return None, None
         total, available, pool = memory_pool(backend, ceiling, kind)
+        weights = weights_note(load_dtype, bits)
         try:
             check_memory_for_load(
-                validate_model_id(model_id), estimated, total, available, pool=pool
+                validate_model_id(model_id),
+                estimated,
+                total,
+                available,
+                pool=pool,
+                weights=weights,
             )
         except InsufficientMemoryError:
             # The refusal is the load record. It is the outcome most worth
@@ -4479,7 +5190,7 @@ class ModelManager:
             logger.warning(
                 "Refused %s as %s on %s: %s estimated, %s estimated available of %s in %s",
                 model_id,
-                load_dtype,
+                weights,
                 backend,
                 memory_note(estimated),
                 memory_note(available),
@@ -4514,7 +5225,14 @@ class ModelManager:
             return None
         return mps_ceiling(torch)
 
-    def _prompt_token_ids(self, messages: list[dict], tools: list[dict] | None = None) -> tuple[list[int], bool]:
+    @property
+    def supports_thinking(self) -> bool:
+        return self.loaded and supports_thinking(self.model, self.tokenizer)
+
+    def _prompt_token_ids(
+        self, messages: list[dict], tools: list[dict] | None = None,
+        *, thinking_mode: str = "default",
+    ) -> tuple[list[int], bool]:
         """Token ids for a chat prompt, and whether it prefills ``<think>``.
 
         Reasoning templates such as OLMo Think end the generation prompt with
@@ -4531,6 +5249,10 @@ class ModelManager:
             raise ValueError("Tool use requires a model with a native chat/tool template.")
         if tokenizer.chat_template:
             tool_args = {"tools": tools} if tools is not None else {}
+            if thinking_mode not in THINKING_MODES:
+                raise ValueError("Thinking mode must be default, on, or off.")
+            if self.supports_thinking and thinking_mode != "default":
+                tool_args["enable_thinking"] = thinking_mode == "on"
             rendered = tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=False, **tool_args
             )
@@ -4613,7 +5335,7 @@ class ModelManager:
         kept = [int(value) for value in kept_ids]
         if not text:
             raise ValueError("The replacement text did not produce any tokens.")
-        hidden = self._hidden_token_ids()
+        hidden = self.hidden_token_ids()
         literal_prefill_tokens = max(
             0, min(int(literal_prefill_tokens), len(kept))
         )
@@ -4727,6 +5449,7 @@ class ModelManager:
         *,
         max_new_tokens: int,
         load_id: str | None = None,
+        thinking_mode: str = "default",
     ) -> None:
         """Refuse an oversized generation before a stream mutates UI state.
 
@@ -4745,7 +5468,7 @@ class ModelManager:
                 raise ModelChanged(
                     "The model has been reloaded since these tokens were produced."
                 )
-            prompt_ids, _reasoning_prefilled = self._prompt_token_ids(messages)
+            prompt_ids, _reasoning_prefilled = self._prompt_token_ids(messages, thinking_mode=thinking_mode)
             self._validate_generation_prefix_length(
                 prompt_ids,
                 forced_ids,
@@ -4919,23 +5642,24 @@ class ModelManager:
     def _stop_token_ids(self) -> set[int]:
         assert self.model is not None
         assert self.tokenizer is not None
-        values: set[int] = set()
-        for candidate in (
-            self.tokenizer.eos_token_id,
-            getattr(self.model.generation_config, "eos_token_id", None),
-        ):
-            if isinstance(candidate, int):
-                values.add(candidate)
-            elif candidate:
-                values.update(int(value) for value in candidate)
+        values: set[int] = set(self._engine().eos_token_ids())
+        candidate = self.tokenizer.eos_token_id
+        if isinstance(candidate, int):
+            values.add(candidate)
+        elif candidate:
+            values.update(int(value) for value in candidate)
         return values
 
-    def _hidden_token_ids(self) -> set[int]:
+    def hidden_token_ids(self) -> set[int]:
         """Special tokens to keep out of the visible text.
 
         Reasoning markers are deliberately kept: on models such as OLMo Think
         they are registered as special tokens, and dropping them would leave the
         interface with no way to find the reasoning block.
+
+        A recorded response text is a decode of every token but these, so a
+        caller comparing that text against a fresh decode of the same ids needs
+        the same set rather than a guess at it.
         """
 
         assert self.tokenizer is not None
@@ -4984,30 +5708,17 @@ class ModelManager:
         reports the sampling probability and shift it would have had.
         """
 
-        import torch
-
         assert self.model is not None
-        model = self.model
-        device = next(model.parameters()).device
+        engine = self._engine()
         metrics: list[dict] = []
         carry: np.ndarray | None = None
         total = len(token_ids)
 
         for start in range(0, total, PREFILL_CHUNK_SIZE):
             end = min(start + PREFILL_CHUNK_SIZE, total)
-            chunk = torch.tensor(
-                [token_ids[start:end]], dtype=torch.long, device=device
+            logits, past_key_values = engine.forward(
+                token_ids[start:end], past_key_values, cached + start
             )
-            outputs = model(
-                input_ids=chunk,
-                attention_mask=torch.ones(
-                    (1, cached + end), dtype=torch.long, device=device
-                ),
-                past_key_values=past_key_values,
-                use_cache=True,
-            )
-            past_key_values = outputs.past_key_values
-            logits = outputs.logits[0]
 
             for index in range(max(start, collect_from), end):
                 token_id = token_ids[index]
@@ -5030,9 +5741,7 @@ class ModelManager:
                 log_probs = (
                     carry
                     if index == start
-                    else normalize_log_probabilities(
-                        logits[index - start - 1].detach().float().cpu().numpy()
-                    )
+                    else normalize_log_probabilities(logits.row(index - start - 1))
                 )
                 assert log_probs is not None
                 sampled = (
@@ -5050,10 +5759,8 @@ class ModelManager:
                     )
                 )
 
-            carry = normalize_log_probabilities(
-                logits[end - start - 1].detach().float().cpu().numpy()
-            )
-            del outputs, logits
+            carry = normalize_log_probabilities(logits.row(end - start - 1))
+            del logits
 
         return metrics, past_key_values, carry
 
@@ -5070,10 +5777,12 @@ class ModelManager:
         tools: list[dict] | None = None,
         forced_ids: Sequence[int] = (),
         answer_prefill: str = "",
+        thinking_mode: str = "default",
         literal_prefill_tokens: int = 0,
         automatic_reasoning_close_tokens: int = 0,
         literal_text_ranges: Sequence[tuple[int, int]] = (),
         load_id: str | None = None,
+        steering: dict | None = None,
     ) -> Iterator[GenerationUpdate]:
         """Stream a reply to ``messages``, one batch of tokens at a time.
 
@@ -5101,6 +5810,14 @@ class ModelManager:
         is fed, so a load that finished after the caller looked is refused with
         :class:`ModelChanged` rather than replaying one model's token IDs
         through another.
+
+        ``thinking_mode`` is default/on/off for switchable Qwen3 templates.
+        Default leaves template arguments untouched. Other architectures ignore
+        a saved mode, and updates record None when switching is unsupported.
+
+        ``steering`` is a portable activation-vector specification. Its hook
+        is held under the model lock across prefill and decoding, and removed
+        before the lock is released, including on cancellation.
         """
 
         # The application reserves the slot before it publishes its first
@@ -5122,7 +5839,7 @@ class ModelManager:
         self._run_device_bytes = None
         started = time.monotonic()
         try:
-            for update in self._generate(
+            with contextlib.closing(self._generate(
                 messages,
                 temperature=temperature,
                 top_p=top_p,
@@ -5133,13 +5850,16 @@ class ModelManager:
                 tools=tools,
                 forced_ids=forced_ids,
                 answer_prefill=answer_prefill,
+                thinking_mode=thinking_mode,
                 literal_prefill_tokens=literal_prefill_tokens,
                 automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
                 literal_text_ranges=literal_text_ranges,
                 load_id=load_id,
-            ):
-                last = update
-                yield update
+                steering=steering,
+            )) as stream:
+                for update in stream:
+                    last = update
+                    yield update
         except (RuntimeError, MemoryError) as error:
             _reraise_out_of_memory(error)
         finally:
@@ -5204,14 +5924,14 @@ class ModelManager:
         tools: list[dict] | None = None,
         forced_ids: Sequence[int] = (),
         answer_prefill: str = "",
+        thinking_mode: str = "default",
         literal_prefill_tokens: int = 0,
         automatic_reasoning_close_tokens: int = 0,
         literal_text_ranges: Sequence[tuple[int, int]] = (),
         load_id: str | None = None,
+        steering: dict | None = None,
     ) -> Iterator[GenerationUpdate]:
-        import torch
-
-        with self._lock:
+        with self._lock, contextlib.ExitStack() as steering_scope:
             try:
                 if not self.loaded:
                     raise RuntimeError("Download and load a model before chatting.")
@@ -5220,9 +5940,13 @@ class ModelManager:
                         "The model has been reloaded since these tokens were produced."
                     )
 
+                # A stale branch must raise ModelChanged before vector/model
+                # compatibility is checked, so its handler restores the reply.
+                steering_scope.enter_context(self._steering(steering))
+
                 assert self.model is not None
                 assert self.tokenizer is not None
-                model = self.model
+                engine = self._engine()
                 tokenizer = self.tokenizer
                 # A response is where memory runs short, so what the last
                 # inspection kept is given back before the prompt is fed.
@@ -5233,12 +5957,14 @@ class ModelManager:
                 model_id = self.model_id
                 producing_load_id = self.load_id
                 assert producing_load_id is not None
-                device = next(model.parameters()).device
 
-                prompt_ids, reasoning_prefilled = (
-                    self._prompt_token_ids(messages, tools=tools) if tools is not None
-                    else self._prompt_token_ids(messages)
-                )
+                if thinking_mode not in THINKING_MODES:
+                    raise ValueError("Thinking mode must be default, on, or off.")
+                recorded_thinking = thinking_mode if self.supports_thinking else None
+                template_args = {"tools": tools} if tools is not None else {}
+                if recorded_thinking is not None:
+                    template_args["thinking_mode"] = recorded_thinking
+                prompt_ids, reasoning_prefilled = self._prompt_token_ids(messages, **template_args)
                 # Noted here rather than left to the first update, because a run
                 # that fails in the prefill below never publishes one and prefill
                 # is where a memory failure is most likely.
@@ -5345,7 +6071,7 @@ class ModelManager:
                     )
 
                 rng = np.random.default_rng(int(seed))
-                decoder = IncrementalDecoder(tokenizer, self._hidden_token_ids())
+                decoder = IncrementalDecoder(tokenizer, self.hidden_token_ids())
                 literal_prefill_text = ""
                 literal_boundaries = {
                     boundary for span in literal_ranges for boundary in span
@@ -5409,6 +6135,7 @@ class ModelManager:
                         prompt_metrics=prompt_metrics,
                         prompt_note=prompt_note,
                         reasoning_prefilled=reasoning_prefilled,
+                        thinking_mode=recorded_thinking,
                         forced_prefix_tokens=len(forced),
                         literal_prefill_text=literal_prefill_text,
                         literal_text_spans=literal_text_spans,
@@ -5461,6 +6188,7 @@ class ModelManager:
                             prompt_metrics=prompt_metrics,
                             prompt_note=prompt_note,
                             reasoning_prefilled=reasoning_prefilled,
+                            thinking_mode=recorded_thinking,
                             forced_prefix_tokens=len(forced),
                             literal_prefill_text=literal_prefill_text,
                             literal_text_spans=literal_text_spans,
@@ -5472,20 +6200,13 @@ class ModelManager:
                     if stopping:
                         break
 
-                    outputs = model(
-                        input_ids=torch.tensor(
-                            [[token_id]], dtype=torch.long, device=device
-                        ),
-                        attention_mask=torch.ones(
-                            (1, len(prompt_ids) + position), dtype=torch.long, device=device
-                        ),
-                        past_key_values=past_key_values,
-                        use_cache=True,
+                    # Everything fed so far - the prompt, the replayed prefix
+                    # and the tokens sampled before this one - is in the
+                    # cache; this token goes in after them.
+                    logits, past_key_values = engine.forward(
+                        [token_id], past_key_values, len(prompt_ids) + position - 1
                     )
-                    past_key_values = outputs.past_key_values
-                    raw_log_probs = normalize_log_probabilities(
-                        outputs.logits[0, -1].detach().float().cpu().numpy()
-                    )
+                    raw_log_probs = normalize_log_probabilities(logits.row(-1))
 
             finally:
                 # Read while the lock is still held. A load queued behind
@@ -5509,9 +6230,17 @@ class ModelManager:
         The caller must release with :meth:`finish_image_run` in a
         ``finally``. :meth:`generate_image` picks up a run started this way
         rather than starting a second one.
+
+        A load holds this off as well as a generation, and the refusal says
+        which: an image page told to wait for a run to finish while a model
+        is loading sends the reader looking for a Stop button nothing is
+        under.
         """
 
-        if not self.reserve_generation():
+        held = self.claim_generation()
+        if held == LOADING:
+            raise ModelBusy("A model is loading. Wait for it to finish.")
+        if held is not None:
             raise ModelBusy("The model is busy. Wait for the current run to finish.")
         cancel = threading.Event()
         self._image_cancel = cancel
@@ -5648,11 +6377,17 @@ class ModelManager:
         cost grows with what has been pasted - runs outside it, against the
         tokenizer object already in hand. Holding the lock across it was the
         real hazard: a generation claims its slot before it goes for the
-        lock, so between the :attr:`busy` check below and the acquire there
-        is a window in which a keystroke could take the lock and then keep a
-        reply waiting for as long as tokenizing a large paste took. That
-        window still exists and always will, but what it now costs is three
-        attribute reads.
+        lock, so between the :attr:`occupant` check below and the acquire
+        there is a window in which a keystroke could take the lock and then
+        keep a reply waiting for as long as tokenizing a large paste took.
+        That window still exists and always will, but what it now costs is
+        three attribute reads.
+
+        That check asks :attr:`occupant` rather than :attr:`busy` so that a
+        claimed load gives up the count as a running reply does. A load takes
+        its claim minutes before it takes the lock, and a count produced in
+        between describes weights that are on their way out; giving up says
+        so, in the words ``score_count_unavailable`` has for a load.
 
         Encoding outside the lock means a load can land mid-count, so the
         load is read again afterwards and a count from the wrong weights is
@@ -5666,7 +6401,7 @@ class ModelManager:
         half-typed passage is not yet worth complaining about.
         """
 
-        if not self.loaded or self.busy:
+        if not self.loaded or self.occupant is not None:
             return None
         if not self._lock.acquire(blocking=False):
             return None
@@ -5779,78 +6514,13 @@ class ModelManager:
                 context_ids=tuple(context_ids),
             )
 
-    @contextlib.contextmanager
-    def _eager_attention(self):
-        """Run the model with attention that reports its weights.
-
-        Fused kernels (SDPA, flash) never materialize the attention matrix, so
-        a model loaded with one of them returns no weights. Eager attention is
-        slower, so it is switched on for a single inspection step and switched
-        back afterwards.
-        """
-
-        model = self.model
-        switch = getattr(model, "set_attn_implementation", None)
-        current = getattr(getattr(model, "config", None), "_attn_implementation", None)
-        if switch is None or current in (None, "eager"):
-            yield
-            return
-        switch("eager")
-        try:
-            yield
-        finally:
-            switch(current)
-
     def _final_norm(self):
-        """The norm the LM head reads through, or ``None`` when none is found.
+        """The norm the LM head reads through; see :meth:`TorchEngine.final_norm`."""
 
-        Looked up on the base model first, then one level down in the
-        containers some architectures wrap their decoder stack in.
-        """
+        return self._engine().final_norm()
 
-        import torch
-
-        base = getattr(self.model, "base_model", self.model)
-        owners = [base] + [getattr(base, name, None) for name in FINAL_NORM_CONTAINERS]
-        for owner in owners:
-            for name in FINAL_NORM_ATTRIBUTES:
-                module = getattr(owner, name, None)
-                if isinstance(module, torch.nn.Module):
-                    return module
-        return None
-
-    def _read_head(self, vector):
-        """Turn a normed residual vector into logits the way the model does.
-
-        Some causal-LM heads post-process the unembedding: Gemma 2 and 3
-        soft-cap logits with ``tanh``, Granite divides by ``logits_scaling``,
-        Cohere multiplies by ``logit_scale``. An intermediate reading that
-        skipped them would describe a distribution the model never emits, so
-        they are applied here. :meth:`inspect` checks the result against the
-        model's own output for the final layer, which catches a transform
-        this list does not know about.
-        """
-
-        import torch
-
-        model = self.model
-        logits = model.get_output_embeddings()(vector)
-        config = getattr(model, "config", None)
-        scale = getattr(config, "logit_scale", None)
-        if scale:
-            logits = logits * scale
-        scaling = getattr(config, "logits_scaling", None)
-        if scaling:
-            logits = logits / scaling
-        softcap = getattr(config, "final_logit_softcapping", None)
-        if softcap:
-            logits = torch.tanh(logits / softcap) * softcap
-        return logits
-
-    def _lens_row(self, layer: int, logits, token_id: int) -> dict:
-        log_probs = normalize_log_probabilities(
-            logits.detach().float().cpu().numpy()
-        )
+    def _lens_row(self, layer: int, logits: np.ndarray, token_id: int) -> dict:
+        log_probs = normalize_log_probabilities(np.asarray(logits, dtype=np.float32))
         token_log_prob = float(log_probs[token_id])
         top_id = int(np.argmax(log_probs))
         return {
@@ -5871,6 +6541,7 @@ class ModelManager:
         *,
         context_count: int = 0,
         load_id: str | None = None,
+        steering: dict | None = None,
     ) -> TokenInsight:
         """Explain the prediction of ``token_ids[index]`` layer by layer.
 
@@ -5893,13 +6564,18 @@ class ModelManager:
 
         import torch
 
-        with self._lock, torch.inference_mode():
+        with self._lock, torch.inference_mode(), contextlib.ExitStack() as steering_scope:
             if not self.loaded:
                 raise RuntimeError("Download and load a model before inspecting a token.")
             if load_id is not None and load_id != self.load_id:
                 raise ModelChanged(
                     "The model has been reloaded since these tokens were produced."
                 )
+            steering_scope.enter_context(self._steering(steering))
+            if steering_vectors.active(steering):
+                # A cache computed without this vector cannot explain it.
+                # Steered inspections do not retain a cache for later clicks.
+                self._drop_inspect_cache()
             ids = [int(value) for value in token_ids]
             if not 1 <= index < len(ids):
                 raise ValueError(
@@ -5907,54 +6583,25 @@ class ModelManager:
                 )
 
             assert self.model is not None
-            model = self.model
-            device = next(model.parameters()).device
+            engine = self._engine()
             token_id = ids[index]
 
             # Everything before the predicting token, from the last click's
             # cache where the sequence allows it.
             past_key_values = self._inspect_cache_for(ids[: index - 1])
+            # The backend reads every layer's prediction, and withholds the
+            # intermediate ones when they cannot be trusted; see
+            # TorchEngine.inspect_step and MlxEngine.inspect_step.
+            reading = engine.inspect_step(ids[index - 1], past_key_values, index - 1)
 
-            with self._eager_attention():
-                outputs = model(
-                    input_ids=torch.tensor(
-                        [[ids[index - 1]]], dtype=torch.long, device=device
-                    ),
-                    attention_mask=torch.ones((1, index), dtype=torch.long, device=device),
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                    output_hidden_states=True,
-                    output_attentions=True,
-                )
-
-            hidden_states = tuple(outputs.hidden_states or ())
-            final_logits = outputs.logits[0, -1]
-            norm = self._final_norm()
-            layers: list[dict] = []
-            # The last hidden state is what the model's own head reads, so its
-            # row is the real output; the earlier ones are read through the
-            # final norm as though the stack had ended there. Without the norm
-            # those readings would be off by a rescaling the head never sees,
-            # so a model whose norm cannot be found shows its output alone
-            # rather than intermediate rows that look right and are not. The
-            # same goes for a head that post-processes its logits in a way
-            # _read_head() does not replicate: reading the final hidden state
-            # (already normed) through it must reproduce the model's output,
-            # or the intermediate rows are not trustworthy either.
-            readable = norm is not None and bool(hidden_states)
-            if readable:
-                replayed = self._read_head(hidden_states[-1][0, -1]).detach().float()
-                readable = torch.allclose(
-                    replayed, final_logits.detach().float(), rtol=1e-2, atol=1e-2
-                )
-            if readable:
-                for layer, state in enumerate(hidden_states[:-1]):
-                    vector = norm(state[0, -1].unsqueeze(0)).squeeze(0)
-                    layers.append(
-                        self._lens_row(layer, self._read_head(vector), token_id)
-                    )
+            layers: list[dict] = [
+                self._lens_row(layer, logits, token_id)
+                for layer, logits in enumerate(reading.layer_logits)
+            ]
             layers.append(
-                self._lens_row(max(len(hidden_states) - 1, 0), final_logits, token_id)
+                self._lens_row(
+                    max(reading.layer_count - 1, 0), reading.final_logits, token_id
+                )
             )
 
             decided_at: int | None = None
@@ -5964,16 +6611,13 @@ class ModelManager:
                 decided_at = row["layer"]
 
             attention: list[list[float]] = []
-            weights = tuple(outputs.attentions or ())
-            if weights and all(layer is not None for layer in weights):
-                for layer in weights:
-                    row = layer[0, :, -1, :].detach().float().mean(dim=0).cpu().tolist()
-                    # A sliding-window layer keeps only its most recent keys,
-                    # so a short row describes the end of the sequence. Align
-                    # it on the right; the keys the layer could not see get a
-                    # weight of zero, which is what it gave them.
-                    row = row[-index:]
-                    attention.append([0.0] * (index - len(row)) + row)
+            for row in reading.attention:
+                # A sliding-window layer keeps only its most recent keys,
+                # so a short row describes the end of the sequence. Align
+                # it on the right; the keys the layer could not see get a
+                # weight of zero, which is what it gave them.
+                row = [float(value) for value in row][-index:]
+                attention.append([0.0] * (index - len(row)) + row)
 
             tokens = [
                 {
@@ -5988,10 +6632,13 @@ class ModelManager:
             # The step above appended the predicting token, so the cache now
             # covers the sequence through it. Kept for the next click; a
             # response or a scoring pass takes it back (see _drop_inspect_cache).
-            produced = getattr(outputs, "past_key_values", None)
-            if produced is not None and self.load_id is not None:
-                self._inspect_cache = (self.load_id, ids[:index], produced)
-            del outputs, past_key_values
+            if (
+                reading.cache is not None
+                and self.load_id is not None
+                and not steering_vectors.active(steering)
+            ):
+                self._inspect_cache = (self.load_id, ids[:index], reading.cache)
+            del reading, past_key_values
             return TokenInsight(
                 index=index,
                 token_id=token_id,

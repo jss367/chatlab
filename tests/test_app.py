@@ -12,10 +12,13 @@ import app
 from ui import models_page, panel, runtime
 import settings
 from model_runtime import (
+    GENERATING,
+    LOADING,
     MODEL_WEIGHTS,
     PROMPT_SCORE_LIMIT,
     CacheStatus,
     DownloadProgress,
+    ExclusiveLoad,
     ModelManager,
     ScoredText,
 )
@@ -33,7 +36,7 @@ class InspectTokenTests(unittest.TestCase):
     def inspect(self, metric: dict):
         # The state pairs the metrics with the stamp of the strip they were
         # drawn for, and inspect_token() drops a click that misses it.
-        return app.inspect_token(app.stamped([metric]), Selection(0))
+        return app.inspect_token("prompt")(app.stamped([metric]), Selection(0))
 
     def test_the_opening_token_is_explained_as_unpredicted(self):
         detail, rows = self.inspect(
@@ -78,9 +81,23 @@ class StubManager:
         # Lock, taken without blocking, so a caller that loses reports instead
         # of queueing.
         self._generating = threading.Lock()
+        # And a load claimed but not finished, which refuses the slot first
+        # as the real manager does, with the old weights still in memory.
+        self.loading = False
+
+    @property
+    def occupant(self) -> str | None:
+        if self.loading:
+            return LOADING
+        return GENERATING if self._generating.locked() else None
+
+    def claim_generation(self) -> str | None:
+        if self.loading:
+            return LOADING
+        return None if self._generating.acquire(blocking=False) else GENERATING
 
     def reserve_generation(self) -> bool:
-        return self._generating.acquire(blocking=False)
+        return self.claim_generation() is None
 
     def release_generation(self) -> None:
         self._generating.release()
@@ -112,7 +129,7 @@ class ScoreStatusTests(unittest.TestCase):
         runtime.MANAGER = StubManager(seam_verified, chat_template_missing)
         try:
             frames = list(app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE))
-            return frames[-1][7]
+            return frames[-1][8]
         finally:
             runtime.MANAGER = original
 
@@ -179,7 +196,44 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
         finally:
             self.manager.release_generation()
 
-        self.assertEqual(result[7], app.SCORE_BUSY)
+        self.assertEqual(result[8], app.SCORE_BUSY)
+
+    def test_a_load_is_named_rather_than_a_response(self):
+        # A load turns the pass away as a reply does, and the reader has no
+        # response to wait for: the wording has to say which it is.
+        self.manager.loading = True
+
+        result = self.score()
+
+        self.assertEqual(result[8], app.SCORE_LOADING)
+        self.assertEqual(len(result), 15)
+        self.assertTrue(all(value == gr.skip() for value in result[9:]))
+        self.assertNotIn("response", app.SCORE_LOADING)
+
+    def test_an_emptied_memory_during_a_load_still_names_the_load(self):
+        # The longer half of a load: the old weights are unloaded before the
+        # new ones are read, so nothing is loaded for the whole of that
+        # phase. Looking at that before claiming sent the reader to the
+        # Models page to start the load they were already waiting for.
+        self.manager.loading = True
+        self.manager.loaded = False
+
+        result = self.score()
+
+        self.assertEqual(result[8], app.SCORE_LOADING)
+
+    def test_an_empty_memory_is_reported_and_the_slot_given_back(self):
+        # The claim now comes first, so the one refusal that is really about
+        # an empty machine has to hand it back.
+        self.manager.loaded = False
+
+        result = self.score()
+
+        self.assertEqual(result[8], "Download and load a model first.")
+        self.assertTrue(
+            self.manager.reserve_generation(), "the refusal kept the slot"
+        )
+        self.manager.release_generation()
 
     def test_a_refusal_touches_nothing_but_the_status(self):
         # The strips still describe the response that is streaming, and the
@@ -193,7 +247,7 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
 
         self.assertEqual(panel._metrics_generation, before, "no stamp was minted")
         for index, value in enumerate(result):
-            if index != 7:
+            if index != 8:
                 self.assertEqual(value, gr.skip(), f"output {index}")
 
     def test_the_slot_is_given_back_after_a_successful_pass(self):
@@ -209,7 +263,7 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
 
         result = self.score()
 
-        self.assertIn("no room", result[7])
+        self.assertIn("no room", result[8])
         self.assertTrue(
             self.manager.reserve_generation(), "a failure kept the slot"
         )
@@ -300,6 +354,20 @@ class FakeDownloads(ModelManager):
             with self._downloads_lock:
                 if self.active_downloads.get(model_id) is progress:
                     del self.active_downloads[model_id]
+
+
+class LendsTheLoad:
+    """A stand-in manager that hands out the exclusive load without argument.
+
+    load_cached_model() claims the load before its first card, so a double
+    that only answers the cache questions is no longer enough.
+    """
+
+    def claim_exclusive_load(self, model_id):
+        return ExclusiveLoad((model_id, 1), None)
+
+    def release_load(self, claim):
+        pass
 
 
 class DownloadCardTests(unittest.TestCase):
@@ -517,7 +585,7 @@ class DownloadCardTests(unittest.TestCase):
         rebuild = progress.bar_class()(desc="Reconstructing", total=16_000_000_000, unit="B")
         rebuild.update(4_000_000_000)
 
-        class Manager:
+        class Manager(LendsTheLoad):
             active_downloads = {"org/model": progress}
 
         runtime.MANAGER = Manager()
@@ -530,7 +598,7 @@ class DownloadCardTests(unittest.TestCase):
         self.assertIn("Download and load", frames[0])
 
     def test_load_cached_on_a_partial_snapshot_says_how_to_finish_it(self):
-        class Manager:
+        class Manager(LendsTheLoad):
             active_downloads = {}
 
             def find_cached(self, model_id):
@@ -554,6 +622,103 @@ class DownloadCardTests(unittest.TestCase):
         self.assertIn("model-00003-of-00003.safetensors", frames[-1])
         self.assertIn("Download and load", frames[-1])
         self.assertNotIn("local_files_only", frames[-1])
+
+    def test_load_cached_claims_the_load_before_its_first_card(self):
+        # The claim and the check have to be one step. Gradio does not resume
+        # a streaming handler until the browser has its frame, so a load that
+        # claimed nothing until stream_load - a cache scan and several cards
+        # later - left a round-trip-wide window for a second one.
+        manager = ModelManager()
+        runtime.MANAGER = manager
+
+        stream = app.load_cached_model("org/model")
+        first = next(stream)
+
+        self.assertIn("Finding cached model", first)
+        self.assertEqual(manager.loading_id, "org/model")
+        stream.close()
+        self.assertIsNone(manager.loading_id, "GeneratorExit gives the claim back")
+
+    def test_load_cached_is_refused_while_another_load_stands(self):
+        manager = ModelManager()
+        runtime.MANAGER = manager
+        manager.reserve_load("org/other")
+
+        frames = list(app.load_cached_model("org/model"))
+
+        self.assertEqual(len(frames), 1, "refused before it looked at the cache")
+        self.assertIn("Cannot load now", frames[0])
+        self.assertIn(models_page.LOAD_WHILE_LOADING, frames[0])
+
+    def test_load_cached_is_refused_while_a_reply_is_running(self):
+        # A load admitted here would not run beside the reply; it would wait
+        # on the model lock and then unload the model producing the tokens.
+        manager = ModelManager()
+        runtime.MANAGER = manager
+        self.assertTrue(manager.reserve_generation())
+        self.addCleanup(manager.release_generation)
+
+        frames = list(app.load_cached_model("org/model"))
+
+        self.assertEqual(len(frames), 1)
+        self.assertIn(models_page.LOAD_WHILE_GENERATING, frames[0])
+
+    def test_load_cached_gives_the_claim_back_when_it_refuses(self):
+        manager = ModelManager()
+        runtime.MANAGER = manager
+
+        list(app.load_cached_model("not a model id"))
+        self.assertIsNone(manager.loading_id, "a malformed ID claims nothing")
+
+        with mock.patch.object(
+            models_page, "cache_status", side_effect=OSError("unreadable")
+        ):
+            frames = list(app.load_cached_model("org/model"))
+
+        self.assertIn("Could not load cached model", frames[-1])
+        self.assertIsNone(manager.loading_id)
+
+    def test_download_and_load_claims_the_load_only_once_the_files_are_here(self):
+        # A claim taken before the download would refuse every reply on the
+        # chat page for the length of the fetch, which can be an hour.
+        claimed = []
+
+        class Manager(FakeDownloads):
+            def fetch(self, model_id, token, progress):
+                claimed.append(runtime.MANAGER.loading_id)
+                return Path("/cache/snap")
+
+            def load(self, model_id, local_path, progress=None, precision="full", kind="text"):
+                return "cpu"
+
+        runtime.MANAGER = Manager()
+        with mock.patch.object(
+            models_page, "cache_status", return_value=CacheStatus(cached_bytes=1)
+        ):
+            frames = list(app.download_and_load_model("org/model", ""))
+
+        self.assertEqual(claimed, [None], "nothing claimed while the bytes arrive")
+        self.assertIn("Model ready", frames[-1])
+        self.assertIsNone(runtime.MANAGER.loading_id, "the claim is given back")
+
+    def test_download_and_load_stops_short_when_something_else_has_the_model(self):
+        class Manager(FakeDownloads):
+            def fetch(self, model_id, token, progress):
+                # A reply starts while the download is running.
+                self.reserve_generation()
+                return Path("/cache/snap")
+
+            def load(self, model_id, local_path, progress=None, precision="full", kind="text"):
+                raise AssertionError("loaded on top of a running reply")
+
+        runtime.MANAGER = Manager()
+        self.addCleanup(runtime.MANAGER.release_generation)
+
+        frames = list(app.download_and_load_model("org/model", ""))
+
+        self.assertIn("Cannot load now", frames[-1])
+        self.assertIn(models_page.LOAD_WHILE_GENERATING, frames[-1])
+        self.assertIn("Load cached", frames[-1])
 
 
 class DownloadManager(FakeDownloads):
@@ -1068,6 +1233,7 @@ class ScoreBudgetTests(unittest.TestCase):
 
     class Counting:
         loaded = True
+        occupant = None
 
         def __init__(self, answer, load_id="stub/model#1"):
             self.answer = answer
@@ -1121,6 +1287,15 @@ class ScoreBudgetTests(unittest.TestCase):
         # none: the whole point of the line is that it matches the check.
         self.assertEqual(self.budget(self.Counting(None)), app.SCORE_COUNT_UNKNOWN)
 
+    def test_a_count_lost_to_a_load_names_the_load(self):
+        # The model lock is held by the load, not by a response, and the box
+        # is read by someone who can see there is no response running.
+        loading = self.Counting(None)
+        loading.occupant = LOADING
+
+        self.assertEqual(self.budget(loading), app.SCORE_COUNT_LOADING)
+        self.assertNotIn("response", app.SCORE_COUNT_LOADING)
+
     def test_the_count_is_asked_for_exactly_what_would_be_scored(self):
         counting = self.Counting((10, 4096))
 
@@ -1140,6 +1315,7 @@ class ScoreBudgetRecoveryTests(unittest.TestCase):
 
     class Counting:
         loaded = True
+        occupant = None
 
         def __init__(self, answer, load_id="stub/model#1"):
             self.answer = answer
@@ -1164,6 +1340,17 @@ class ScoreBudgetRecoveryTests(unittest.TestCase):
         counting = self.Counting((12, 4096))
 
         recovered, load_id = self.recover(counting, app.SCORE_COUNT_UNKNOWN)
+
+        self.assertEqual(recovered, "12 of 4,096 tokens.")
+        self.assertEqual(load_id, "stub/model#1")
+        self.assertEqual(counting.asked, 1)
+
+    def test_a_count_stuck_behind_a_load_is_recomputed_too(self):
+        # The timer un-sticks both messages, so the one a load leaves has to
+        # be recognized as well - it is just as permanent otherwise.
+        counting = self.Counting((12, 4096))
+
+        recovered, load_id = self.recover(counting, app.SCORE_COUNT_LOADING)
 
         self.assertEqual(recovered, "12 of 4,096 tokens.")
         self.assertEqual(load_id, "stub/model#1")

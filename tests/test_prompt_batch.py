@@ -767,6 +767,46 @@ class RunPromptsTests(unittest.TestCase):
 
         self.assertEqual(frames[-1][STATUS], app.BATCH_BUSY)
 
+    def test_a_batch_refused_by_a_load_says_so_rather_than_naming_a_reply(self):
+        # The model being replaced is still in memory, so the batch passes
+        # its loaded check and is turned away by the claim. Nothing is
+        # generating, so "wait for the response to finish" names a response
+        # that does not exist.
+        _checked_id, claim = runtime.MANAGER.claim_exclusive_load("org/other").claim
+        self.addCleanup(runtime.MANAGER.release_load, claim)
+
+        frames = self.run_batch("say hello")
+
+        self.assertEqual(frames[-1][STATUS], app.BATCH_LOADING)
+        self.assertNotIn("response", app.BATCH_LOADING)
+
+    def test_a_batch_started_while_the_weights_are_being_read_names_the_load(self):
+        # The rest of that load: _load_locked() unloads the old weights
+        # before it reads the new ones, so memory stands empty for minutes.
+        # Checking that before claiming answered the whole of it with "load a
+        # model first" - addressed to a reader watching a model load.
+        _checked_id, claim = runtime.MANAGER.claim_exclusive_load("org/other").claim
+        self.addCleanup(runtime.MANAGER.release_load, claim)
+        with mock.patch.object(type(runtime.MANAGER), "loaded", property(lambda self: False)):
+            frames = self.run_batch("say hello")
+
+        self.assertEqual(frames[-1][STATUS], app.BATCH_LOADING)
+
+    def test_a_batch_with_nothing_loaded_gives_the_slot_back(self):
+        with mock.patch.object(type(runtime.MANAGER), "loaded", property(lambda self: False)):
+            frames = self.run_batch("say hello")
+
+        self.assertEqual(frames[-1][STATUS], app.BATCH_NO_MODEL)
+        self.assertTrue(runtime.MANAGER.reserve_generation(), "the refusal kept the slot")
+        runtime.MANAGER.release_generation()
+
+    def test_an_empty_box_gives_the_slot_back(self):
+        frames = self.run_batch("   \n\n  ")
+
+        self.assertEqual(frames[-1][STATUS], app.BATCH_NO_PROMPTS)
+        self.assertTrue(runtime.MANAGER.reserve_generation(), "the refusal kept the slot")
+        runtime.MANAGER.release_generation()
+
     def test_the_generation_slot_comes_back_when_the_run_is_cancelled(self):
         # Gradio closes the generator where it stood. A slot left reserved
         # there would refuse every reply for the rest of the session.

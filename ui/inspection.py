@@ -9,6 +9,7 @@ import gradio as gr
 
 import charts
 from model_runtime import (
+    LOADING,
     ModelChanged,
 )
 from ui import runtime
@@ -18,7 +19,7 @@ from ui.common import (
     failure_status,
 )
 from ui.panel import (
-    current_metrics_generation,
+    current_strip_generation,
     event_index,
 )
 
@@ -27,6 +28,11 @@ INSPECT_HINT = "Click a token above, then press **Inspect layers**."
 
 
 INSPECT_BUSY = "Wait for the response to finish before inspecting a token."
+
+
+# A load has the model instead, and the strip being inspected belongs to the
+# weights on their way out: there is no response to wait for.
+INSPECT_LOADING = "Wait for the model to finish loading before inspecting a token."
 
 
 INSPECT_GONE = "That token is no longer on screen. Click one and try again."
@@ -57,7 +63,7 @@ def remember_inspect_target(strip: str):
 
     def remember(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
         generation, metrics = metrics_state
-        if generation != current_metrics_generation():
+        if generation != current_strip_generation(strip):
             return None
         try:
             index = event_index(event)
@@ -75,6 +81,10 @@ def inspect_layers(
     prompt_metrics_state: tuple[int, list[dict]],
     context_state: tuple[int, list[int]],
     layer,
+    score_metrics_state: tuple[int, list[dict]] | None = None,
+    score_context_state: tuple | None = None,
+    chat_metrics_state: tuple[int, list[dict]] | None = None,
+    chat_context_state: tuple | None = None,
 ):
     """Run the logit lens and attention readout for the clicked token.
 
@@ -88,64 +98,87 @@ def inspect_layers(
     but until the readout is on screen, so Send, Retry and Branch cannot
     slip in between the two and have the readout land on top of their
     reset. Paths that replace the strips without taking the slot - Clear,
-    Undo, Load, a fork switch, Score text - are caught by the stamp instead:
-    it is checked before the frame goes out and again once it has arrived,
-    and a readout for a token that is gone is taken back down.
+    Undo, Load, a fork switch - are caught by the stamp instead. Scored tokens
+    and chat replies retain independent metrics, context and stamps, so a
+    scoring pass cannot take away the latest reply's inspection target.
+    The relevant stamp is checked before the frame goes out and again
+    once it has arrived, so a readout for a token that is gone is taken down.
     """
 
     skip = gr.skip()
     refused = (skip, skip, skip, skip)
-    if not target or target.get("generation") != current_metrics_generation():
+    if not target or target.get("generation") != current_strip_generation(target["strip"]):
         yield (*refused, INSPECT_HINT)
         return
+    if target["strip"] == "score":
+        if score_metrics_state is None or score_context_state is None:
+            yield (*refused, INSPECT_GONE)
+            return
+        metrics_state = score_metrics_state
+        context_state = score_context_state
+    elif target["strip"] == "response" and chat_metrics_state is not None:
+        metrics_state = chat_metrics_state
+        context_state = chat_context_state
     generation, metrics = metrics_state
     _prompt_generation, prompt_metrics = prompt_metrics_state
-    context_generation, context_ids, load_id = context_state
+    context_generation, context_ids, load_id = context_state[:3]
+    steering = context_state[3] if len(context_state) > 3 else None
     if generation != target["generation"] or context_generation != generation:
         yield (*refused, INSPECT_GONE)
         return
-    if not runtime.MANAGER.loaded:
-        yield (*refused, "Download and load a model first.")
-        return
-    # Loading a model leaves the strips on screen, and their token ids mean
-    # nothing to a different tokenizer, so the ids carry the load that
-    # produced them and only that load may explain them. The load, not the
-    # model ID: re-downloading the same ID can bring in a newer snapshot.
-    # This is the early exit; the check that counts is the one inspect()
-    # makes under the model lock, since a load can land between here and it.
-    if load_id != runtime.MANAGER.load_id:
-        yield (*refused, INSPECT_MODEL_CHANGED)
-        return
-
-    context_ids = [int(value) for value in context_ids]
-    position = int(target["index"])
-    if target["strip"] == "prompt":
-        if (
-            position >= len(prompt_metrics)
-            or position >= len(context_ids)
-            or int(prompt_metrics[position]["token_id"]) != context_ids[position]
-        ):
-            yield (*refused, INSPECT_GONE)
-            return
-        index = position
-    else:
-        if position >= len(metrics):
-            yield (*refused, INSPECT_GONE)
-            return
-        index = len(context_ids) + position
-    if index == 0:
-        yield (*refused, INSPECT_FIRST)
-        return
-    sequence = context_ids + [int(metric["token_id"]) for metric in metrics]
-
-    if not runtime.MANAGER.reserve_generation():
-        yield (*refused, INSPECT_BUSY)
+    # Claimed before memory is looked at, not after it. A load empties memory
+    # before it reads the new weights, so the check below finds nothing
+    # loaded for the whole of that phase and would send the reader off to
+    # load a model while one was already loading. The claim is also what
+    # makes the load check after it worth making: while the slot is held no
+    # load can start, so the weights the token ids came from cannot be
+    # swapped out between that check and the pass that reads them. What it
+    # guards here is list arithmetic, and the slot goes back on each refusal.
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        yield (*refused, INSPECT_LOADING if held == LOADING else INSPECT_BUSY)
         return
     try:
+        if not runtime.MANAGER.loaded:
+            yield (*refused, "Download and load a model first.")
+            return
+        # Loading a model leaves the strips on screen, and their token ids
+        # mean nothing to a different tokenizer, so the ids carry the load
+        # that produced them and only that load may explain them. The load,
+        # not the model ID: re-downloading the same ID can bring in a newer
+        # snapshot. inspect() compares it again under the model lock, which
+        # is where it is finally decided; read under the claim, this one can
+        # no longer be overtaken by a load starting behind it.
+        if load_id != runtime.MANAGER.load_id:
+            yield (*refused, INSPECT_MODEL_CHANGED)
+            return
+
+        context_ids = [int(value) for value in context_ids]
+        position = int(target["index"])
+        if target["strip"] == "prompt":
+            if (
+                position >= len(prompt_metrics)
+                or position >= len(context_ids)
+                or int(prompt_metrics[position]["token_id"]) != context_ids[position]
+            ):
+                yield (*refused, INSPECT_GONE)
+                return
+            index = position
+        else:
+            if position >= len(metrics):
+                yield (*refused, INSPECT_GONE)
+                return
+            index = len(context_ids) + position
+        if index == 0:
+            yield (*refused, INSPECT_FIRST)
+            return
+        sequence = context_ids + [int(metric["token_id"]) for metric in metrics]
+
         started = time.monotonic()
         try:
             insight = runtime.MANAGER.inspect(
-                sequence, index, context_count=len(context_ids), load_id=load_id
+                sequence, index, context_count=len(context_ids), load_id=load_id,
+                **({"steering": steering} if steering is not None else {}),
             ).to_dict()
         except ModelChanged:
             yield (*refused, INSPECT_MODEL_CHANGED)
@@ -156,7 +189,7 @@ def inspect_layers(
                 failure_status("Could not inspect that token", str(error)),
             )
             return
-        if target["generation"] != current_metrics_generation():
+        if target["generation"] != current_strip_generation(target["strip"]):
             yield (*refused, INSPECT_GONE)
             return
 
@@ -183,7 +216,7 @@ def inspect_layers(
         # Resumed once the browser has the frame above. If the strips were
         # replaced while it was in flight, their reset was applied first and
         # the readout now sits on top of it, so take it back down.
-        if target["generation"] != current_metrics_generation():
+        if target["generation"] != current_strip_generation(target["strip"]):
             yield (charts.EMPTY_LENS, charts.EMPTY_ATTENTION, skip, None, INSPECT_GONE)
     finally:
         runtime.MANAGER.release_generation()
