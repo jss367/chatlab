@@ -118,6 +118,51 @@ class RefusalTests(ImagePageTestCase):
         self.assertEqual(frame[ROW["status"]], images_page.NO_IMAGE_MODEL)
         self.assertFalse(self.manager.busy, "the refusal kept the slot")
 
+    def test_a_cleared_size_is_refused_rather_than_stranding_the_run(self):
+        # The Size dropdown can be cleared, and int(None) raises. Built after
+        # the reservation, that left the slot and the cancel token held by a
+        # run that never started - and nothing could give them back, because
+        # Stop only stops a run that is drawing. Every later draw and every
+        # later load was then refused as busy for the life of the process.
+        self.load_pipeline()
+
+        (frame,) = self.frames(size=None)
+
+        self.assertEqual(frame[ROW["status"]], images_page.BAD_DRAW_SETTINGS)
+        self.assertEqual(self.manager.pipeline.unet.calls, 0)
+        self.assertFalse(self.manager.busy, "the refusal kept the slot")
+        self.assertFalse(
+            self.manager.stop_image_run(), "the refusal kept the cancel token"
+        )
+        self.assertTrue(
+            self.manager.reserve_generation(), "nothing could be drawn afterwards"
+        )
+        self.manager.release_generation()
+
+    def test_a_nonnumeric_setting_is_refused_rather_than_stranding_the_run(self):
+        # Same again for a payload that puts a word where one of the three
+        # numbers goes, which a browser that ignores the sliders can send.
+        for name in ("steps", "guidance", "size"):
+            with self.subTest(setting=name):
+                self.load_pipeline()
+
+                (frame,) = self.frames(**{name: "lots"})
+
+                self.assertEqual(frame[ROW["status"]], images_page.BAD_DRAW_SETTINGS)
+                self.assertFalse(self.manager.busy, "the refusal kept the slot")
+                load = self.manager.claim_exclusive_load("org/pipe")
+                self.assertIsNone(load.held, "a load was refused afterwards")
+                self.manager.release_load(load.claim[1])
+
+    def test_a_refused_draw_still_reports_the_seed_it_picked(self):
+        # The seed is resolved before the request is built, so a refusal can
+        # still say which one a rerun would have to repeat.
+        self.load_pipeline()
+
+        (frame,) = self.frames(size=None, seed=11)
+
+        self.assertEqual(frame[ROW["seed"]], 11)
+
     def test_a_text_model_in_memory_is_named_as_the_wrong_kind(self):
         # A page that just said "no model loaded" would send a reader off to
         # load a second model on top of the one filling the machine.

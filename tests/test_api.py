@@ -401,6 +401,56 @@ class RefusalTests(ApiTestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertFalse(self.manager.busy, "the refusal kept the slot")
 
+    def test_a_body_that_fails_unexpectedly_gives_the_slot_back(self):
+        # Every check in there means to raise ApiError, and only ApiError was
+        # caught. But real code runs inside them - settings.sanitize, the
+        # token detail - and anything else it raised would carry the claim
+        # out of the handler with it. Nothing could then give the slot back:
+        # there is no generation to stop, so every later request and every
+        # later load would be refused as busy for the life of the process.
+        for name, path, body in (
+            (
+                "sampling_from",
+                "/v1/chat/completions",
+                {"messages": [{"role": "user", "content": "hi"}]},
+            ),
+            ("token_detail", "/v1/chatlab/score", {"text": "hi"}),
+        ):
+            with self.subTest(path=path):
+                self.explode(name)
+
+                with self.assertRaises(RuntimeError):
+                    self.post(path, **body)
+
+                self.assertFalse(self.manager.busy, "the failure kept the slot")
+                self.assertTrue(
+                    self.manager.reserve_generation(), "nothing could follow it"
+                )
+                self.manager.release_generation()
+
+    def test_a_generation_that_never_reaches_its_thread_gives_the_slot_back(self):
+        # Frames owns the slot from the moment its thread is running, and
+        # gives it back when the generator is done with the model. Until then
+        # the handler owns it, so a thread that will not start - the one
+        # failure there is between the claim and the hand-over - must not
+        # leave it held by a generation that never happened.
+        self.explode("Frames")
+
+        with self.assertRaises(RuntimeError):
+            self.post(messages=[{"role": "user", "content": "hi"}])
+
+        self.assertFalse(self.manager.busy, "the failure kept the slot")
+
+    def explode(self, name):
+        """Make ``api.<name>`` raise something the routes do not expect."""
+
+        def boom(*arguments, **keywords):
+            raise RuntimeError("boom")
+
+        original = getattr(api, name)
+        setattr(api, name, boom)
+        self.addCleanup(setattr, api, name, original)
+
     def test_a_request_naming_another_model_gives_the_slot_back(self):
         response = self.post(
             model="org/other", messages=[{"role": "user", "content": "hi"}]

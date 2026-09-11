@@ -627,46 +627,58 @@ def build_router() -> APIRouter:
         held = runtime.MANAGER.claim_generation()
         if held:
             return error_response(occupied_error(held))
+        # True until Frames has the run and the slot with it. Every way out
+        # of the block below - a refusal, a malformed body that raises
+        # something other than an ApiError, a thread that will not start -
+        # passes through the finally, so a claim cannot be stranded by a path
+        # nobody thought of. A stranded claim is not recoverable: there is no
+        # generation to stop, so every later request and every later load is
+        # refused as busy for the life of the process.
+        handed_on = False
         try:
-            model_id, load_id = loaded_model(body.get("model"))
-            # Read with the load, not after the generation: by then the model
-            # lock is free and a queued load can have replaced both. A load
-            # that lands in between makes the runtime refuse this request
-            # against its load ID, so these can only describe the weights
-            # that answered.
-            device = runtime.MANAGER.device_name
-            precision = runtime.MANAGER.precision
-            turns, prefill = conversation_from(body)
-            sampling = sampling_from(body)
-            measured, wants = token_detail(body)
-            streaming = _flag(body, "stream")
-            prompt_logprobs = _flag(body, "prompt_logprobs")
-        except ApiError as error:
-            runtime.MANAGER.release_generation()
-            return error_response(error)
+            try:
+                model_id, load_id = loaded_model(body.get("model"))
+                # Read with the load, not after the generation: by then the
+                # model lock is free and a queued load can have replaced both.
+                # A load that lands in between makes the runtime refuse this
+                # request against its load ID, so these can only describe the
+                # weights that answered.
+                device = runtime.MANAGER.device_name
+                precision = runtime.MANAGER.precision
+                turns, prefill = conversation_from(body)
+                sampling = sampling_from(body)
+                measured, wants = token_detail(body)
+                streaming = _flag(body, "stream")
+                prompt_logprobs = _flag(body, "prompt_logprobs")
+            except ApiError as error:
+                return error_response(error)
 
-        request_id = f"chatcmpl-{uuid4().hex}"
-        created = int(time.time())
-        # The load the request was checked against. A load from the Models
-        # page can take the model lock between that check and the first
-        # token, and without this the answer would come from the new weights
-        # while the response named the old ones; the runtime compares it
-        # under the lock and refuses instead.
-        stream = runtime.MANAGER.generate(
-            turns,
-            temperature=sampling["temperature"],
-            top_p=sampling["top_p"],
-            top_k=sampling["top_k"],
-            max_new_tokens=sampling["max_new_tokens"],
-            seed=sampling["seed"],
-            analyze_prompt=prompt_logprobs,
-            answer_prefill=prefill,
-            load_id=load_id,
-        )
-        # One thread owns the generator from here on; see Frames. It also
-        # gives the generation slot back when the model is done with, so
-        # nothing below releases it.
-        produced = Frames(stream)
+            request_id = f"chatcmpl-{uuid4().hex}"
+            created = int(time.time())
+            # The load the request was checked against. A load from the Models
+            # page can take the model lock between that check and the first
+            # token, and without this the answer would come from the new
+            # weights while the response named the old ones; the runtime
+            # compares it under the lock and refuses instead.
+            stream = runtime.MANAGER.generate(
+                turns,
+                temperature=sampling["temperature"],
+                top_p=sampling["top_p"],
+                top_k=sampling["top_k"],
+                max_new_tokens=sampling["max_new_tokens"],
+                seed=sampling["seed"],
+                analyze_prompt=prompt_logprobs,
+                answer_prefill=prefill,
+                load_id=load_id,
+            )
+            # One thread owns the generator from here on; see Frames. It also
+            # gives the generation slot back when the model is done with, so
+            # nothing below releases it.
+            produced = Frames(stream)
+            handed_on = True
+        finally:
+            if not handed_on:
+                runtime.MANAGER.release_generation()
         try:
             first = produced.first()
         except ApiError as error:
@@ -725,40 +737,47 @@ def build_router() -> APIRouter:
         held = runtime.MANAGER.claim_generation()
         if held:
             return error_response(occupied_error(held))
+        # Nothing here hands the slot on to a worker, so one finally covers
+        # the whole of it: the refusals, the score itself, and a malformed
+        # body that raises something other than an ApiError on its way
+        # through the checks. A claim left behind by any of them would refuse
+        # every later request and every later load, with no generation to
+        # stop and give it back.
         try:
-            model_id, load_id = loaded_model(body.get("model"))
-            # Read with the load, as a completion does: the same model ID can
-            # be loaded at several precisions, and asking afterwards may
-            # describe a load that has since replaced this one.
-            device = runtime.MANAGER.device_name
-            precision = runtime.MANAGER.precision
-            text = body.get("text")
-            if not isinstance(text, str):
-                raise ApiError(400, "text must be a string.")
-            context = body.get("context")
-            if context is None:
-                context = ""
-            # Checked after the default rather than through it: `or ""` would
-            # turn a 0 or a [] into an empty context and measure the text
-            # against nothing at all, rather than saying what was wrong.
-            if not isinstance(context, str):
-                raise ApiError(400, "context must be a string.")
-            use_template = _flag(body, "use_chat_template")
-            _measured, wants = token_detail(body)
-        except ApiError as error:
-            runtime.MANAGER.release_generation()
-            return error_response(error)
-        try:
-            scored = runtime.MANAGER.score_text(
-                text,
-                context=context,
-                use_chat_template=use_template,
-                load_id=load_id,
-            )
-        except ValueError as error:
-            return error_response(ApiError(400, str(error)))
-        except Exception as error:
-            return error_response(refusal(error))
+            try:
+                model_id, load_id = loaded_model(body.get("model"))
+                # Read with the load, as a completion does: the same model ID
+                # can be loaded at several precisions, and asking afterwards
+                # may describe a load that has since replaced this one.
+                device = runtime.MANAGER.device_name
+                precision = runtime.MANAGER.precision
+                text = body.get("text")
+                if not isinstance(text, str):
+                    raise ApiError(400, "text must be a string.")
+                context = body.get("context")
+                if context is None:
+                    context = ""
+                # Checked after the default rather than through it: `or ""`
+                # would turn a 0 or a [] into an empty context and measure the
+                # text against nothing at all, rather than saying what was
+                # wrong.
+                if not isinstance(context, str):
+                    raise ApiError(400, "context must be a string.")
+                use_template = _flag(body, "use_chat_template")
+                _measured, wants = token_detail(body)
+            except ApiError as error:
+                return error_response(error)
+            try:
+                scored = runtime.MANAGER.score_text(
+                    text,
+                    context=context,
+                    use_chat_template=use_template,
+                    load_id=load_id,
+                )
+            except ValueError as error:
+                return error_response(ApiError(400, str(error)))
+            except Exception as error:
+                return error_response(refusal(error))
         finally:
             runtime.MANAGER.release_generation()
         return JSONResponse(
