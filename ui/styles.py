@@ -280,7 +280,7 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 #settings-page .hardware-panel li strong {{
   color: var(--body-text-color); font-weight: 600;
 }}
-#hardware-footer {{ align-items: center; gap: 12px; flex-wrap: nowrap; }}
+#hardware-footer {{ align-items: center; gap: 12px; }}
 #hardware-footer > button {{ align-self: flex-start; }}
 #settings-hero p {{ max-width: 78ch; }}
 #conversations-heading h2, #inspector-heading h2 {{
