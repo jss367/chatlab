@@ -120,6 +120,10 @@ def refresh_hardware():
     return hardware_card()
 
 
+def refresh_thinking_mode():
+    return gr.update(visible=runtime.MANAGER.supports_thinking)
+
+
 def sampling_label(temperature, top_p, top_k, max_new_tokens) -> str:
     """The sampling accordion's own summary of what it holds."""
 
@@ -151,6 +155,7 @@ PERSISTED_SETTING_NAMES = (
     "randomize_seed",
     "analyze_prompt",
     "color_scale",
+    "thinking_mode",
     "enter_sends",
     "model_id",
     "weight_precision",

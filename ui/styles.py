@@ -474,10 +474,36 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 #token-strip .textspan.hl, #score-strip .textspan.hl, #prompt-strip .textspan.hl,
 #token-strip .category-label, #score-strip .category-label,
 #prompt-strip .category-label {{ color: #0b0b0b; }}
-/* The toggle above the conversation is a control, not a heading: it sits on
-   one line and keeps its explanation to the tooltip-sized line Gradio draws. */
-#token-view {{ flex: none; }}
-#token-view label {{ font-size: 13px; }}
+/* A compact, two-option switch at the upper right of the conversation. */
+#token-view {{
+  flex: none; width: fit-content; min-width: 0; padding: 0;
+  align-self: flex-end; margin-top: -6px; overflow: visible !important;
+}}
+#token-view .wrap:has(> label) {{
+  display: flex; flex-wrap: nowrap; gap: 2px; padding: 3px;
+  border: 1px solid var(--border-color-primary); border-radius: 8px;
+  background: var(--background-fill-secondary);
+}}
+#token-view label {{
+  position: relative; margin: 0; padding: 5px 10px;
+  border: 0; border-radius: 5px; box-shadow: none;
+  background: transparent; font-size: 13px; white-space: nowrap;
+  cursor: pointer; transition: background 120ms ease, box-shadow 120ms ease;
+}}
+#token-view label span {{ color: var(--body-text-color); }}
+#token-view label:hover {{ background: var(--button-secondary-background-fill); }}
+#token-view label.selected {{
+  background: var(--button-secondary-background-fill);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 12%);
+}}
+#token-view label.selected span {{ color: var(--body-text-color); font-weight: 600; }}
+/* Keep the native radios focusable for keyboard and screen-reader users. */
+#token-view input[type="radio"] {{
+  position: absolute; width: 1px; height: 1px; opacity: 0;
+}}
+#token-view label:has(input:focus-visible) {{
+  outline: 2px solid var(--color-accent); outline-offset: 2px;
+}}
 .footer-note {{ color: var(--body-text-color-subdued); font-size: 0.9rem; }}
 .scale-caption {{ color: var(--body-text-color-subdued); font-size: 0.85rem; }}
 
