@@ -1542,6 +1542,36 @@ class DownloadProgressTests(unittest.TestCase):
         self.assertEqual(seen["active"]["org/model"].snapshot().files_done, 1)
         self.assertEqual(manager.active_downloads, {}, "cleared when the download ends")
 
+    def test_a_finished_download_notes_the_change_to_the_cache(self):
+        # What a tab that did not run the download reads to learn that its
+        # list of cached models is out of date; see cache_revision.
+        from unittest import mock
+
+        manager = ModelManager()
+        before = manager.cache_revision
+
+        with mock.patch(
+            "huggingface_hub.snapshot_download",
+            lambda **kwargs: "/cache/snapshots/abc",
+        ):
+            manager.download("org/model")
+
+        self.assertEqual(manager.cache_revision, before + 1)
+
+    def test_a_download_that_failed_leaves_the_cache_revision_alone(self):
+        from unittest import mock
+
+        manager = ModelManager()
+
+        def failing(**kwargs):
+            raise OSError("offline")
+
+        with mock.patch("huggingface_hub.snapshot_download", failing):
+            with self.assertRaises(OSError):
+                manager.download("org/model")
+
+        self.assertEqual(manager.cache_revision, 0)
+
     def test_the_registration_is_cleared_when_the_download_fails(self):
         from unittest import mock
 

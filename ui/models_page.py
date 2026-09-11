@@ -813,31 +813,51 @@ def refresh_model_switch(precision: str | None = None):
 
     Hidden when there is nothing to offer, which is when the setup link
     beside it is the way forward.
+
+    Returns the update and the cache revision the choices were read at, which
+    is what :func:`refresh_stale_model_switch` compares against on each tick.
+    The revision is read before the scan, not after: a download that finishes
+    while the scan is running is then seen as a change still to come rather
+    than as one this list already has.
     """
 
+    revision = runtime.MANAGER.cache_revision
     choices = switch_choices(precision)
     current = switch_value()
     ids = {value for _, value in choices}
-    return gr.update(
-        choices=choices,
-        value=current if current in ids else None,
-        visible=bool(choices),
+    return (
+        gr.update(
+            choices=choices,
+            value=current if current in ids else None,
+            visible=bool(choices),
+        ),
+        revision,
     )
 
 
-def refresh_stale_model_switch(shown: str | None, precision: str | None = None):
-    """The timer's refresh: repaint only when the switcher disagrees with memory.
+def refresh_stale_model_switch(
+    shown: str | None, revision: int | None, precision: str | None = None
+):
+    """The timer's refresh: repaint only when the switcher has fallen behind.
 
     The badge's timer reads a few attributes; this one would scan the cache
     and read the machine's memory, and a repaint every couple of seconds
     would also close the list under a reader who has just opened it. So
-    nothing is redrawn while the switcher still shows what memory says it
-    should, which is nearly always. A load or unload in another tab is what
-    changes the answer, and that is caught here on its next tick.
+    nothing is redrawn while the switcher is still right, which is nearly
+    always. Two things can make it wrong, and both are an attribute read:
+    the model in memory changed, so the wrong one is selected, and the cache
+    changed, so a model this tab has never heard of is missing from the list
+    or a deleted one is still in it. Either is caught on the next tick.
+
+    ``revision`` is the cache revision the tab last painted at; a tab that
+    has not painted yet passes ``None`` and is repainted.
     """
 
-    if (shown or None) == expected_switch_value():
-        return gr.skip()
+    if (
+        (shown or None) == expected_switch_value()
+        and revision == runtime.MANAGER.cache_revision
+    ):
+        return gr.skip(), gr.skip()
     return refresh_model_switch(precision)
 
 
@@ -850,6 +870,15 @@ def switch_model(selected: str | None, precision: str = "full"):
     reply is refused and the switcher put back: the load would only queue
     behind the generation, and its first act on winning the lock would be
     to unload the model still producing the tokens.
+
+    A second load is refused by taking the load for this one rather than by
+    asking whether anyone else has it. The load itself claims nothing until
+    ``stream_load``, several cards and a cache scan later, and Gradio gives
+    a picked-up-and-put-down handler no exclusivity across those yields; two
+    tabs picking at once would both look, both find the manager idle, and
+    both go on to fill the machine's memory in turn. The claim taken here
+    stands for the whole of the load, the early refusals included, and is
+    given back in the ``finally``.
     """
 
     current = switch_value()
@@ -860,12 +889,23 @@ def switch_model(selected: str | None, precision: str = "full"):
         alarm("Cannot switch models now", SWITCH_BUSY)
         yield gr.update(value=current), gr.skip()
         return
-    if runtime.MANAGER.loading_id:
+    try:
+        claimed = runtime.MANAGER.reserve_exclusive_load(selected)
+    except ValueError as error:
+        yield gr.update(value=current), failure_card(
+            "Could not load cached model", html.escape(str(error))
+        )
+        return
+    if claimed is None:
         alarm("Cannot switch models now", SWITCH_LOADING)
         yield gr.update(value=current), gr.skip()
         return
-    for card in load_cached_model(selected, None, precision):
-        yield gr.skip(), card
+    _checked_id, claim = claimed
+    try:
+        for card in load_cached_model(selected, None, precision):
+            yield gr.skip(), card
+    finally:
+        runtime.MANAGER.release_load(claim)
 
 
 def go_to_models():

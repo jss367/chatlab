@@ -3833,6 +3833,15 @@ class ModelManager:
         # claimed in need not be the order they win the lock in, and the
         # badge on the chat page names the load that is really reading.
         self._active_load: str | None = None
+        # Counts the changes this process has made to the Hugging Face cache:
+        # a download that finished, a model deleted. Read by anything drawn
+        # from a scan of the cache and too dear to redo on a timer - the chat
+        # page's model switcher - so a tab that did not make the change can
+        # tell "nothing has moved" from "rescan" in an attribute read. A
+        # change made outside ChatLab does not move it, which is the bargain
+        # My Models already makes with its Refresh button.
+        self.cache_revision = 0
+        self._cache_revision_lock = threading.Lock()
         # Downloads under way right now, by model ID, so a second request for
         # the same model can follow the first instead of racing it for the
         # same files.
@@ -3986,7 +3995,17 @@ class ModelManager:
             )
         finally:
             self.release_download(checked_id, progress)
+        # Noted even when every file was already cached: the alternative is
+        # comparing the folder before and after, which costs the scan this
+        # counter exists to spare. One repaint too many is the cheaper error.
+        self.note_cache_change()
         return Path(path)
+
+    def note_cache_change(self) -> None:
+        """Record that what is on disk has changed; see :attr:`cache_revision`."""
+
+        with self._cache_revision_lock:
+            self.cache_revision += 1
 
     def reserve_download(self, model_id: str) -> tuple[DownloadProgress, bool]:
         """Claim ``model_id`` for a new download, or point at the one running.
@@ -4066,6 +4085,31 @@ class ModelManager:
 
         checked_id = validate_model_id(model_id)
         with self._claims_lock:
+            self._next_claim += 1
+            self._load_claims[self._next_claim] = checked_id
+            return checked_id, self._next_claim
+
+    def reserve_exclusive_load(self, model_id: str) -> tuple[str, int] | None:
+        """Claim a load of ``model_id`` only if no other load is claimed.
+
+        Returns what :meth:`reserve_load` returns, or ``None`` when a load is
+        already under way and the caller must refuse rather than queue. For
+        callers whose promise is "one load at a time": reading
+        :attr:`loading_id` and then loading is two steps, and a handler that
+        yields between them - as a streaming one must, to show its first card
+        - leaves a window a whole browser round trip wide for a second load
+        to be claimed. This closes it, the way :meth:`reserve_generation`
+        closes the same window for a reply.
+
+        The claim stands from here, so the caller owns it and must give it
+        back with :meth:`release_load` in a ``finally``; the load it goes on
+        to start takes its own claim and releases that one itself.
+        """
+
+        checked_id = validate_model_id(model_id)
+        with self._claims_lock:
+            if self._load_claims or self._active_load is not None:
+                return None
             self._next_claim += 1
             self._load_claims[self._next_claim] = checked_id
             return checked_id, self._next_claim
@@ -4324,7 +4368,9 @@ class ModelManager:
             with self._downloads_lock:
                 if checked_id in self.active_downloads:
                     raise ModelDownloading(f"{checked_id} is being downloaded.")
-                return remove_cached_model(checked_id, cache_dir)
+                freed = remove_cached_model(checked_id, cache_dir)
+                self.note_cache_change()
+                return freed
         finally:
             self._lock.release()
 

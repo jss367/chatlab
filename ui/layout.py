@@ -296,6 +296,13 @@ def build_app() -> gr.Blocks:
                                 elem_id="default-model",
                             )
 
+                        # The cache revision the switcher above was last drawn
+                        # at, per tab. The timer needs it to tell a list that
+                        # is merely idle from one that another tab's download
+                        # or removal has left out of date; see
+                        # refresh_stale_model_switch.
+                        switch_revision = gr.State(None)
+
                         # Nothing to see: the timer is what makes the badge tell every
                         # open tab about a load or unload, not just the one that asked
                         # for it. See BADGE_REFRESH_SECONDS.
@@ -1121,13 +1128,16 @@ def build_app() -> gr.Blocks:
         demo.load(refresh_model_badge, None, badge_outputs)
         # The switcher is drawn on the same two occasions. Its choices cost a
         # cache scan and a memory reading, so the timer only redraws it once
-        # it has stopped naming what is in memory; see refresh_stale_model_switch.
-        nav.change(refresh_model_switch, weight_precision, model_switch)
-        demo.load(refresh_model_switch, weight_precision, model_switch)
+        # what it shows or what is on disk has moved; see
+        # refresh_stale_model_switch. Every draw hands back the cache revision
+        # it read, which is how the next tick knows the difference.
+        switch_outputs = [model_switch, switch_revision]
+        nav.change(refresh_model_switch, weight_precision, switch_outputs)
+        demo.load(refresh_model_switch, weight_precision, switch_outputs)
         badge_timer.tick(
             refresh_stale_model_switch,
-            [model_switch, weight_precision],
-            model_switch,
+            [model_switch, switch_revision, weight_precision],
+            switch_outputs,
             show_progress="hidden",
         )
         # And on a timer, so a tab that did not start the load hears about it
@@ -1279,7 +1289,10 @@ def build_app() -> gr.Blocks:
             # What is on disk is what the switcher offers, so it follows every
             # rescan, download-only included.
             event = event.then(
-                refresh_model_switch, weight_precision, model_switch, show_progress="hidden"
+                refresh_model_switch,
+                weight_precision,
+                switch_outputs,
+                show_progress="hidden",
             )
             if not reloads:
                 return event
@@ -1439,7 +1452,7 @@ def build_app() -> gr.Blocks:
             refresh_search_results,
             [search_results, search_results_state, weight_precision, fits_only],
             [search_results, search_detail],
-        ).then(refresh_model_switch, weight_precision, model_switch)
+        ).then(refresh_model_switch, weight_precision, switch_outputs)
         enter_sends.change(set_message_box_keys, enter_sends, prompt)
 
         # The sampling accordion wears its own values.
