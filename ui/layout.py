@@ -217,6 +217,7 @@ def build_app() -> gr.Blocks:
         # Layer inspection: the prompt ids behind the strips, the strip
         # position last clicked, and the last readout for re-rendering.
         context_ids_state = gr.State((*empty_metrics(), None))
+        score_context_ids_state = gr.State((0, [], None))
         steering_state = gr.State(None)
         inspect_target = gr.State(None)
         insight_state = gr.State(None)
@@ -1680,6 +1681,8 @@ def build_app() -> gr.Blocks:
             surprise_panel,
             trace_state,
             context_ids_state,
+            selected_token,
+            branch_pick,
         ]
         undo_outputs = [
             prompt,
@@ -1698,6 +1701,8 @@ def build_app() -> gr.Blocks:
             summary_panel,
             surprise_panel,
             trace_state,
+            selected_token,
+            branch_pick,
         ]
 
         running = [
@@ -1797,6 +1802,8 @@ def build_app() -> gr.Blocks:
                 summary_panel,
                 surprise_panel,
                 trace_state,
+                selected_token,
+                branch_pick,
                 forks_state,
                 conversation_list,
                 clear_confirm,
@@ -1826,6 +1833,8 @@ def build_app() -> gr.Blocks:
             summary_panel,
             surprise_panel,
             trace_state,
+            selected_token,
+            branch_pick,
         ]
         chatbot.select(remember_message, conversation_state, selected_message)
 
@@ -1934,6 +1943,8 @@ def build_app() -> gr.Blocks:
                 summary_panel,
                 surprise_panel,
                 trace_state,
+                selected_token,
+                branch_pick,
                 forks_state,
                 *steering_outputs,
             ],
@@ -1959,6 +1970,7 @@ def build_app() -> gr.Blocks:
                 selected_token,
                 branch_pick,
                 context_ids_state,
+                score_context_ids_state,
             ],
         )
         # A batch reads its prompts from the box and everything else from the
@@ -2041,7 +2053,7 @@ def build_app() -> gr.Blocks:
         )
 
         for strip, strip_metrics, source, where in (
-            (score_strip, score_metrics_state, "score", "response"),
+            (score_strip, score_metrics_state, "score", "score"),
             (prompt_strip, prompt_metrics_state, "prompt", "prompt"),
         ):
             strip.select(
@@ -2076,6 +2088,8 @@ def build_app() -> gr.Blocks:
                 prompt_metrics_state,
                 context_ids_state,
                 attention_layer,
+                score_metrics_state,
+                score_context_ids_state,
             ],
             [lens_panel, attention_panel, attention_layer, insight_state, inspect_status],
         )

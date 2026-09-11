@@ -31,7 +31,7 @@ from token_metrics import DEFAULT_COLOR_SCALE
 import library
 import settings
 import settings_sandbox
-from test_streaming import ChatTemplateTokenizer, SentencePieceTokenizer, loaded_manager
+from test_streaming import ChatTemplateTokenizer, FakeTokenizer, SentencePieceTokenizer, loaded_manager
 
 
 def setUpModule():
@@ -81,12 +81,14 @@ SETTINGS = tuple(FIXED.values())
     SURPRISE,
     TRACE,
     CONTEXT_IDS,
+    SELECTED_TOKEN,
+    BRANCH_PICK,
 ) = range(len(app.CHAT_OUTPUT_NAMES))
 CHAT_OUTPUTS = len(app.CHAT_OUTPUT_NAMES)
 
 # The panels every conversation-replacing handler resets after its own rows:
 # the prompt strip and its state and note, the two charts, and the export.
-PANEL_OUTPUTS = 6
+PANEL_OUTPUTS = 8
 UNDO_OUTPUTS = 10 + PANEL_OUTPUTS
 # Clear also resets the forks and their picker, and closes the
 # confirmation panel that sent it.
@@ -138,6 +140,21 @@ def click_token(frame, token_index, turn=-1):
         turns, frame[METRICS], token_span(turns, token_index, turn)
     )
     return selection
+
+
+def score_known_passage(context="Hello", text=" world"):
+    """Score real vocabulary tokens; the chat fixture normally encodes prompts as [0]."""
+
+    class PassageTokenizer(FakeTokenizer):
+        def __call__(self, text, **kwargs):
+            return super().__call__(text, **dict(kwargs, add_special_tokens=False))
+
+    original = runtime.MANAGER.tokenizer
+    runtime.MANAGER.tokenizer = PassageTokenizer(THINK_PIECES, THINK_EOS)
+    try:
+        return list(app.score_text(context, text, False, DEFAULT_COLOR_SCALE))[-1]
+    finally:
+        runtime.MANAGER.tokenizer = original
 
 
 class ChatFlowTests(unittest.TestCase):
@@ -337,6 +354,50 @@ class ChatFlowTests(unittest.TestCase):
         frames = self.last(app.retry_last("", turns, *SETTINGS))
         self.assertEqual(frames[0][DETAIL], app.NO_TOKEN_SELECTED)
         self.assertEqual(strip_of(frames[0][ALTS]), [])
+
+    def test_a_new_reply_disarms_an_older_turn_only_in_its_reset_frame(self):
+        first = self.last(app.chat("hi", [], *SETTINGS))[-1]
+        selection = click_token(first, 1)
+        _detail, pick = app.choose_alternative(
+            first[TURNS], app.empty_metrics(), app.empty_metrics(), selection, select(0)
+        )
+        self.assertIsNotNone(pick)
+        frames = self.last(app.chat("again", first[TURNS], *SETTINGS))
+        self.assertIsNotNone(app.selected_metric(frames[-1][TURNS], selection))
+        self.assertIsNone(frames[0][SELECTED_TOKEN])
+        self.assertIsNone(frames[0][BRANCH_PICK])
+        for frame in frames[1:]:
+            self.assertEqual(frame[SELECTED_TOKEN], gr.skip())
+            self.assertEqual(frame[BRANCH_PICK], gr.skip())
+        refused = self.last(app.branch_from(
+            frames[0][BRANCH_PICK], "", frames[-1][TURNS], *SETTINGS
+        ))[-1]
+        self.assertEqual(refused[TURNS], frames[-1][TURNS])
+
+    def test_every_conversation_reset_publishes_the_branch_states(self):
+        demo = app.build_app()
+        chat = next(fn for fn in demo.fns.values() if fn.fn is app.chat)
+        selection, pick = chat.outputs[-2:]
+        resets = {
+            "chat", "retry_last", "retry_message", "edit_message", "branch_from",
+            "branch_with_text", "undo_last", "undo_message", "clear_chat",
+            "fork_conversation", "new_conversation", "switch_fork", "delete_fork",
+            "load_with_steering", "score_text",
+        }
+        for fn in demo.fns.values():
+            if getattr(fn.fn, "__name__", None) in resets:
+                self.assertIn(selection, fn.outputs, fn.fn.__name__)
+                self.assertIn(pick, fn.outputs, fn.fn.__name__)
+
+    def test_undo_disarms_a_selection_even_when_its_older_turn_survives(self):
+        first = self.last(app.chat("hi", [], *SETTINGS))[-1]
+        second = self.last(app.chat("again", first[TURNS], *SETTINGS))[-1]
+        selection = click_token(second, 1, turn=1)
+        undone = app.undo_last(second[TURNS])
+        self.assertIsNotNone(app.selected_metric(undone[2], selection))
+        self.assertEqual(undone[-2:], (None, None))
+        no_change = app.undo_last([])
+        self.assertEqual(no_change[-2:], (gr.skip(), gr.skip()))
 
     def test_streaming_skip_does_not_delete_the_rendered_table_data(self):
         # The browser retains the table value by reference. Gradio's client
@@ -2084,7 +2145,9 @@ class IdleRefusalButtonTests(unittest.TestCase):
     FORK_SUMMARY,
     FORK_SURPRISE,
     FORK_TRACE,
-) = range(18)
+    FORK_SELECTED_TOKEN,
+    FORK_BRANCH_PICK,
+) = range(20)
 
 
 def contents(turns):
@@ -2250,9 +2313,10 @@ class BranchFromTokenTests(unittest.TestCase):
         # Scored text draws the same strip and table, but there is no reply to
         # replace; the selection says which view it came from.
         final = self.respond()[-1]
-        selected = app.remember_strip_selection("score")(final[METRICS], select(1))[0]
+        scored = score_known_passage()
+        selected = app.remember_strip_selection("score")(scored[2], select(0))[0]
         detail, pick = app.choose_alternative(
-            final[TURNS], final[METRICS], app.empty_metrics(), selected, cell(1)
+            final[TURNS], scored[2], app.empty_metrics(), selected, cell(1)
         )
         self.assertIn(app.BRANCH_UNAVAILABLE, detail)
         self.assertIsNone(pick)
@@ -3048,7 +3112,7 @@ class ForkTests(unittest.TestCase):
 
     def test_forking_copies_the_conversation_into_a_new_fork(self):
         result = app.fork_conversation(self.turns(), new_forks(), None)
-        self.assertEqual(len(result), 18)
+        self.assertEqual(len(result), 20)
         self.assertEqual(contents(result[FORK_TURNS]), contents(self.turns()))
         self.assertEqual(result[FORK_STATE]["active"], "Fork 1")
         self.assertEqual(
@@ -3198,7 +3262,7 @@ class ForkTests(unittest.TestCase):
 
     def test_starting_a_new_chat_puts_the_current_one_away(self):
         result = app.new_conversation(self.turns(), new_forks())
-        self.assertEqual(len(result), 18)
+        self.assertEqual(len(result), 20)
         self.assertEqual(result[FORK_TURNS], [])
         self.assertEqual(result[FORK_CHATBOT], [])
         self.assertEqual(result[FORK_STATE]["active"], "Chat 1")
@@ -4105,6 +4169,89 @@ class LayerInspectionTests(unittest.TestCase):
         self.assertEqual(stamp, result[1][0])
         self.assertEqual(ids, [])
         self.assertEqual(load, runtime.MANAGER.load_id)
+
+    def test_scored_layers_use_the_scored_sequence_after_chatting(self):
+        scored = score_known_passage()
+        final = self.finished()
+        target = app.remember_inspect_target("score")(scored[2], select(0))
+        self.assertIsNotNone(target)
+        *_, insight, status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS],
+            0, scored[2], scored[14],
+        )
+        expected = scored[14][1] + [m["token_id"] for m in scored[2][1]]
+        context_count = len(scored[14][1])
+        self.assertEqual(self.calls, [(expected, context_count, context_count)])
+        self.assertEqual(insight["token_id"], scored[2][1][0]["token_id"])
+        self.assertIn("Token 1", status)
+
+    def test_rescoring_rejects_queued_score_clicks_and_inspection(self):
+        scored = score_known_passage()
+        target = app.remember_inspect_target("score")(scored[2], select(0))
+        score_known_passage(" world", "Hello")
+        self.assertIsNone(app.remember_inspect_target("score")(scored[2], select(0)))
+        self.assertEqual(app.inspect_token("score")(scored[2], select(0)), (gr.skip(), gr.skip()))
+        *_, status = self.inspect(
+            target, scored[1], scored[4], scored[13], 0, scored[2], scored[14]
+        )
+        self.assertEqual(status, app.INSPECT_HINT)
+        self.assertEqual(self.calls, [])
+
+    def test_scored_inspection_still_checks_the_model_load(self):
+        scored = score_known_passage()
+        final = self.finished()
+        target = app.remember_inspect_target("score")(scored[2], select(0))
+        stale_context = (*scored[14][:2], "previous-load")
+        *_, status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS],
+            0, scored[2], stale_context,
+        )
+        self.assertEqual(status, app.INSPECT_MODEL_CHANGED)
+        self.assertEqual(self.calls, [])
+
+    def test_scored_inspection_checks_its_stamp_before_and_after_delivery(self):
+        from ui.panel import new_metrics_generation
+
+        original_inspect = runtime.MANAGER.inspect
+        for before_delivery in (True, False):
+            with self.subTest(before_delivery=before_delivery):
+                scored = score_known_passage()
+                target = app.remember_inspect_target("score")(scored[2], select(0))
+
+                def replace_scored_passage(*args, **kwargs):
+                    result = original_inspect(*args, **kwargs)
+                    new_metrics_generation(scored=True)
+                    return result
+
+                runtime.MANAGER.inspect = (
+                    replace_scored_passage if before_delivery else original_inspect
+                )
+                stream = app.inspect_layers(
+                    target, scored[1], scored[4], scored[13], 0, scored[2], scored[14]
+                )
+                try:
+                    frame = next(stream)
+                    if before_delivery:
+                        self.assertEqual(frame[-1], app.INSPECT_GONE)
+                        self.assertEqual(frame[0], gr.skip())
+                    else:
+                        self.assertIsInstance(frame[3], dict)
+                        new_metrics_generation(scored=True)
+                        frame = next(stream)
+                        self.assertEqual(frame[-1], app.INSPECT_GONE)
+                        self.assertIsNone(frame[3])
+                finally:
+                    stream.close()
+                    runtime.MANAGER.inspect = original_inspect
+
+    def test_score_context_is_wired_separately_from_chat_context(self):
+        demo = app.build_app()
+        score = next(fn for fn in demo.fns.values() if fn.fn is app.score_text)
+        chat = next(fn for fn in demo.fns.values() if fn.fn is app.chat)
+        inspect = next(fn for fn in demo.fns.values() if fn.fn is app.inspect_layers)
+        self.assertEqual(inspect.inputs[3], chat.outputs[CONTEXT_IDS])
+        self.assertEqual(inspect.inputs[-2:], [score.outputs[2], score.outputs[14]])
+        self.assertNotIn(score.outputs[14], chat.outputs)
 
     def test_a_response_token_is_inspected_in_its_full_sequence(self):
         final = self.finished()

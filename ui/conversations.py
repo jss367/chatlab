@@ -265,10 +265,12 @@ def panel_reset(turns: list[dict] | None, scale_name: str):
         charts.summary_tiles({}),
         charts.EMPTY_CHART,
         {},
+        None,
+        None,
     )
 
 
-PANEL_KEPT = (gr.skip(),) * 10
+PANEL_KEPT = (gr.skip(),) * 12
 
 
 def fork_refused(turns: list[dict], forks: dict, status: str):
@@ -525,7 +527,7 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE, *
             gr.skip(),
             gr.skip(),
             *send_stop_buttons(False),
-            *(gr.skip(),) * 6,
+            *(gr.skip(),) * 8,
             *((gr.skip(),) if include_steering else ()),
         )
 
@@ -567,5 +569,7 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE, *
         charts.summary_tiles({}),
         charts.EMPTY_CHART,
         {},
+        None,
+        None,
         *((steering,) if include_steering else ()),
     )

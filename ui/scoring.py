@@ -51,7 +51,7 @@ def score_text(
     # own state and note, and the two charts.
     refused = (skip,) * 8
     if not runtime.MANAGER.loaded:
-        yield refused + ("Download and load a model first.", skip, skip, skip, skip, skip)
+        yield refused + ("Download and load a model first.",) + (skip,) * 6
         return
 
     # A generation holds the model lock across every one of its yields, so
@@ -63,7 +63,7 @@ def score_text(
     # leave the scored tokens on screen refusing every click. inspect_layers()
     # takes the slot for both reasons.
     if not runtime.MANAGER.reserve_generation():
-        yield refused + (SCORE_BUSY, skip, skip, skip, skip, skip)
+        yield refused + (SCORE_BUSY,) + (skip,) * 6
         return
     try:
         try:
@@ -73,12 +73,7 @@ def score_text(
         except Exception as error:
             yield refused + (
                 failure_status("Could not score that text", str(error)),
-                skip,
-                skip,
-                skip,
-                skip,
-                skip,
-            )
+            ) + (skip,) * 6
             return
 
         summary = summarize(result.metrics)
@@ -95,8 +90,11 @@ def score_text(
             status = f"{status} {SEAM_CAVEAT}"
         # Both strips are replaced, so they take one shared stamp - and that
         # stamp is what drops a click made against the response they overwrite.
-        generation = new_metrics_generation()
+        generation = new_metrics_generation(scored=True)
         scored = stamped(result.metrics, generation)
+        context_state = (
+            generation, [int(value) for value in result.context_ids], runtime.MANAGER.load_id
+        )
         yield (
             strip_update(result.metrics, scale_name, "Scored tokens — click one"),
             # Twice: to the inspector, which now describes this passage, and to
@@ -120,7 +118,8 @@ def score_text(
             # on the button.
             None,
             None,
-            (generation, [int(value) for value in result.context_ids], runtime.MANAGER.load_id),
+            context_state,
+            context_state,
         )
         # Resumed once the browser has the frame above, so nothing between the
         # mint and the strips arriving can hold the slot.

@@ -87,6 +87,8 @@ CHAT_OUTPUT_NAMES = (
     "surprise",
     "trace",
     "context_ids",
+    "selected_token",
+    "branch_pick",
 )
 
 
@@ -292,6 +294,8 @@ def idle_state(
         charts.EMPTY_CHART if clear_tokens else gr.skip(),
         {} if clear_tokens else gr.skip(),
         gr.skip(),
+        None if clear_tokens else gr.skip(),
+        None if clear_tokens else gr.skip(),
     )
 
 
@@ -542,13 +546,15 @@ def _stream_reply(
             surprise_panel,
             gr.skip() if trace is None else trace,
             context_ids,
+            None if reset_details else gr.skip(),
+            None if reset_details else gr.skip(),
         )
 
     # The opening frame empties everything the previous response left behind,
     # the export included: a trace kept here would still be downloadable while
-    # a different response was streaming in above it. The branch source goes
-    # too: nothing is branchable until this response has finished or been
-    # stopped, and the stamp would refuse it anyway.
+    # a different response was streaming in above it. Clear the branch states
+    # with their visible details: an older turn can still be a valid branch
+    # target, but a choice the panel no longer shows must not remain armed.
     applied_prefill = bool(assistant_prefill and not forced_ids)
     stream_note = branch_note or (
         "Assistant prefill applied." if applied_prefill else ""
@@ -1271,7 +1277,7 @@ def undo_from(
             gr.skip(),
             gr.skip(),
             *send_stop_buttons(False),
-            *(gr.skip(),) * 6,
+            *(gr.skip(),) * 8,
         )
 
     remaining = turns[:position]
@@ -1298,6 +1304,8 @@ def undo_from(
         charts.summary_tiles({}),
         charts.EMPTY_CHART,
         {},
+        None,
+        None,
     )
 
 
@@ -1399,6 +1407,8 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE, forks: dict | None = None)
         charts.summary_tiles({}),
         charts.EMPTY_CHART,
         {},
+        None,
+        None,
         forks,
         conversation_list_update(forks, []),
         gr.update(visible=False),

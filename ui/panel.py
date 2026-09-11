@@ -229,14 +229,17 @@ _metrics_lock = threading.Lock()
 
 
 _metrics_generation = 0
+_score_metrics_generation = 0
 
 
-def new_metrics_generation() -> int:
+def new_metrics_generation(*, scored: bool = False) -> int:
     """Stamp a new token strip, invalidating selections made against the old one."""
 
-    global _metrics_generation
+    global _metrics_generation, _score_metrics_generation
     with _metrics_lock:
         _metrics_generation += 1
+        if scored:
+            _score_metrics_generation = _metrics_generation
         return _metrics_generation
 
 
@@ -249,6 +252,12 @@ def current_metrics_generation() -> int:
     """
 
     return _metrics_generation
+
+
+def current_strip_generation(source: str) -> int:
+    """Scored passages survive chat changes, but another scoring replaces them."""
+
+    return _score_metrics_generation if source == "score" else _metrics_generation
 
 
 def stamped(metrics: list[dict], generation: int | None = None):
@@ -292,15 +301,15 @@ def cleared_panel(turns: list[dict] | None, scale_name: str):
 def inspect_token(source: str):
     """A select listener that describes the token clicked in a strip.
 
-    ``source`` decides whether the panel's stamp has to match; see
-    STRIP_SOURCES. A click that does not count is skipped rather than
+    ``source`` decides which live strip stamp has to match. A click that
+    does not count is skipped rather than
     answered: whatever replaced the strip already reset the detail panel, so
     repainting it with a token the reader can no longer see would undo that.
     """
 
     def inspect(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
         generation, metrics = metrics_state
-        if STRIP_SOURCES.get(source, True) and generation != _metrics_generation:
+        if generation != current_strip_generation(source):
             return gr.skip(), gr.skip()
         if not metrics:
             return NO_TOKEN_SELECTED, []
@@ -398,16 +407,9 @@ BRANCH_MODEL_CHANGED = (
 )
 
 
-# The two strips outside the conversation, and whether a click on one has to
-# match the panel's current stamp to count.
-#
-# The prompt strip is replaced by every generation, in the same frame as its
-# measurements, so a click queued against the strip that was replaced must be
-# dropped - that is what the stamp is for. Nothing replaces the scored strip
-# but another scoring pass, which rewrites its measurements in the same frame,
-# so a click on it always refers to what is drawn there and the stamp would
-# only refuse it for something that happened elsewhere on the page.
-STRIP_SOURCES = {"prompt": True, "score": False}
+# Each strip checks the live stamp for the source that replaces it. A queued
+# scored click survives a chat reply, but cannot overwrite a newer scoring.
+STRIP_SOURCES = {"prompt", "score"}
 
 
 def remember_strip_selection(source: str):
@@ -442,7 +444,7 @@ def strip_metric(
     """One token of a strip, if that strip's clicks still count."""
 
     generation, metrics = metrics_state
-    if STRIP_SOURCES.get(source, True) and generation != _metrics_generation:
+    if generation != current_strip_generation(source):
         return None
     try:
         return metrics[int(index)]
