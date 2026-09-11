@@ -897,6 +897,10 @@ RESIZE_JS = """
     // pointer with nothing held down, and to a page that has kept the
     // cursor and the ban on selecting text that a drag puts on it.
     handle.setPointerCapture(event.pointerId);
+    // Cancelling the press above takes the focus the browser would have
+    // given the handle with it, and the focus is what the arrow keys need,
+    // so the handle asks for it itself.
+    if (handle.focus) { handle.focus(); }
     handle.classList.add('dragging');
     document.body.classList.add('pane-dragging');
   });
@@ -934,8 +938,11 @@ RESIZE_JS = """
     // A pane already wider than a drag would allow - which the stylesheet's
     // own default can be in a narrow window - would otherwise be pulled in
     // by the key asking for it to be pushed out. A key that cannot move the
-    // pane the way it points does nothing at all.
-    if (Math.sign(width - now) === -Math.sign(step)) {
+    // pane the way it points does nothing at all, and that includes storing
+    // the width it did not move: a pane squeezed by a narrow window is at
+    // its maximum already, and writing that down would lose the wider width
+    // the reader chose when there was room for it.
+    if (width === now || Math.sign(width - now) === -Math.sign(step)) {
       announce(handle, now, room);
       return;
     }

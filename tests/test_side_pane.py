@@ -2880,6 +2880,40 @@ assert.strictEqual(documentElement.style.props['--inspector-pane-width'], '294px
         )
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the script")
+    def test_a_key_that_moves_nothing_keeps_the_width_the_reader_chose(self):
+        # A pane squeezed by a narrow window is already at its maximum, so
+        # the key asking for it to be wider moves nothing. Writing that
+        # squeezed width down as the reader's choice would lose the wider
+        # one they picked when there was room for it.
+        self.check(
+            """
+const chat = chatRow(1000);
+kept.set('chatlab.inspector-pane-width', '520');
+start();
+paint();
+
+// The row of 1000 keeps 260 for the conversations pane and 6 for the
+// handle, so the 520 the reader chose is cut to 374 while the window is
+// this narrow. The choice itself is untouched.
+const handle = chat.children[2];
+assert.strictEqual(documentElement.style.props['--inspector-pane-width'], '374px');
+assert.strictEqual(kept.get('chatlab.inspector-pane-width'), '520');
+
+// The stand-in page does not lay itself out, so the pane is told what the
+// width just written would have made it.
+document.getElementById('inspector-pane').width = 374;
+
+fire('document', 'keydown', {
+  target: handle, key: 'ArrowLeft', preventDefault: () => {},
+});
+assert.strictEqual(
+  kept.get('chatlab.inspector-pane-width'), '520',
+  'a key with nowhere to go leaves the choice alone'
+);
+"""
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the script")
     def test_a_click_on_a_handle_chooses_nothing(self):
         # Clicking a handle is how it takes the focus the arrow keys need,
         # and a reader who has chosen nothing has still chosen nothing. A
