@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import time
 from pathlib import Path
 
 import gradio as gr
@@ -81,7 +82,10 @@ def board(ep, index=None, reveal=False, animate=False):
         parts.append(f'<circle cx="{x}" cy="{y}" r="23" stroke="#f59e0b" stroke-width="3" fill="none"/>')
     x, y = center(position)
     motion = ""
-    if animate and accepted and accepted[-1]["source"] == "model":
+    # Only the displayed response's own move animates. A response that was
+    # rejected or made no call leaves the character where it was, and replaying
+    # an earlier turn's hop would show movement that this response never made.
+    if animate and accepted and accepted[-1]["source"] == "model" and accepted[-1].get("turn") == index:
         px, py = center(accepted[-1]["before"])
         motion = f'<animateTransform attributeName="transform" type="translate" from="{px} {py}" to="{x} {y}" dur="0.3s" fill="freeze"/>'
     parts.append(f'<g transform="translate({x} {y})">{motion}<circle r="17" fill="#4f46e5" stroke="white" stroke-width="3"/><circle cx="-5" cy="-2" r="2.5" fill="white"/><circle cx="5" cy="-2" r="2.5" fill="white"/><path d="M -5 6 Q 0 10 5 6" stroke="white" fill="none" stroke-width="2"/></g></svg>')
@@ -114,6 +118,7 @@ def timeline(ep):
 def views(ep, reveal, selections, session_id, index=None, animate=False):
     if index is None:
         index = len(ep.turns) - 1
+    ep.viewing = index
     t = ep.turns[index] if 0 <= index < len(ep.turns) else {}
     metrics = t.get("metrics", [])
     forced = t.get("forced_prefix_tokens", 0)
@@ -197,6 +202,13 @@ def _build_page(context):
                 edit_button = gr.Button("Replace token and regenerate", elem_id="maze-edit-token")
             with gr.Accordion("Path and replay", open=True):
                 turn_picker = gr.Dropdown(choices=[("Initial / supplied history", -1)], value=-1, label="Inspect response", interactive=True)
+                with gr.Row():
+                    back = gr.Button("◀ Previous", size="sm", elem_id="maze-previous")
+                    forward = gr.Button("Next ▶", size="sm", elem_id="maze-next")
+                    autoplay = gr.Button("Play from here", size="sm", elem_id="maze-autoplay")
+                    halt = gr.Button("Stop playback", size="sm", elem_id="maze-halt-playback")
+                pace = gr.Slider(.1, 4, value=1., step=.1, label="Playback seconds per response",
+                                 info="Playback walks the responses from the one selected above to the last. It only redraws this view and never generates tokens.")
                 events = gr.Dataframe(value=timeline(initial), headers=["Source", "Position (row, column)", "Direction", "Result"], interactive=False, wrap=True)
                 with gr.Row():
                     save = gr.Button("Export run JSON", size="sm")
@@ -255,6 +267,41 @@ def _build_page(context):
             raise gr.Error("Pause the episode before selecting a response to replay.")
         return views(ep, show, selections, session_id, int(i if i is not None else -1))
 
+    def viewing(ep):
+        # Read from the episode rather than the dropdown: Gradio captures a
+        # listener's inputs when the click is queued, so a second click sent
+        # before the first reply arrives would carry the same stale response.
+        return max(-1, min(ep.viewing, len(ep.turns) - 1))
+
+    def step_back(ep, show, session_id):
+        if ep.busy:
+            raise gr.Error("Pause the episode before stepping through responses.")
+        return views(ep, show, selections, session_id, max(-1, viewing(ep) - 1), animate=True)
+
+    def step_forward(ep, show, session_id):
+        if ep.busy:
+            raise gr.Error("Pause the episode before stepping through responses.")
+        return views(ep, show, selections, session_id, min(len(ep.turns) - 1, viewing(ep) + 1), animate=True)
+
+    def play_back(ep, show, session_id, seconds):
+        """Walk the recorded responses. Cancelled by Stop playback and by anything that replaces the episode."""
+        if ep.busy:
+            raise gr.Error("Pause the episode before playing it back.")
+        with ep.lock:
+            ep.playback_token += 1
+            token = ep.playback_token
+        start = viewing(ep)
+        for index in range(start, len(ep.turns)):
+            if index > start:
+                time.sleep(max(.1, float(seconds)))
+            if ep.playback_token != token:
+                return  # A later Play from here owns the view now.
+            yield views(ep, show, selections, session_id, index, animate=True)
+
+    def stop_playback(ep):
+        gr.Info("Playback stopped. Previous and Next step through the responses by hand.")
+        return status(ep)
+
     def export(ep):
         return export_run(ep, runs_dir(context))
 
@@ -306,23 +353,46 @@ def _build_page(context):
         for frame in play(new, show, session_id, single=True):
             yield (new, *frame, None, None)
 
-    prepare.click(prepare_episode, [episode, reveal, selection_session, *controls], [episode, *outputs, download], concurrency_id="maze", show_progress="hidden")
-    run.click(play, [episode, reveal, selection_session], outputs, concurrency_id="maze", show_progress="hidden")
-    step.click(one_step, [episode, reveal, selection_session], outputs, concurrency_id="maze", show_progress="hidden")
+    # Playback only redraws recorded responses, so every listener that
+    # generates tokens or replaces the episode cancels it first: a surviving
+    # frame would paint the previous episode over these same outputs.
+    # Playback sleeps for the whole sequence but only redraws one browser's own
+    # view, so it opts out of the app-wide single-slot limit meant for model
+    # generation. Otherwise one slow replay would stall every other session's.
+    playback = [autoplay.click(play_back, [episode, reveal, selection_session, pace], outputs,
+                               show_progress="hidden", concurrency_limit=None)]
+    prepare.click(prepare_episode, [episode, reveal, selection_session, *controls], [episode, *outputs, download], concurrency_id="maze", show_progress="hidden", cancels=playback)
+    run.click(play, [episode, reveal, selection_session], outputs, concurrency_id="maze", show_progress="hidden", cancels=playback)
+    step.click(one_step, [episode, reveal, selection_session], outputs, concurrency_id="maze", show_progress="hidden", cancels=playback)
+    # One queue for every listener that moves the viewed response: Gradio limits
+    # concurrency per listener, so separate queues would let a Previous and a
+    # Next click read ep.viewing together or land out of order.
+    back.click(step_back, [episode, reveal, selection_session], outputs, show_progress="hidden",
+               concurrency_id="maze-view", cancels=playback)
+    forward.click(step_forward, [episode, reveal, selection_session], outputs, show_progress="hidden",
+                  concurrency_id="maze-view", cancels=playback)
+    halt.click(stop_playback, episode, state_text, queue=False, cancels=playback)
     pause.click(lambda ep: command(ep, "pause"), episode, state_text, queue=False)
     stop.click(lambda ep: command(ep, "stop"), episode, state_text, queue=False)
     interrupt.click(lambda ep: command(ep, "interrupt"), episode, state_text, queue=False)
     passage.input(lambda name: "" if name == "None" else PASSAGES.get(name, ""), passage, text, queue=False)
     goal_mode.input(lambda mode: (gr.update(visible=mode == "hint"), 0 if mode != "coordinates" else gr.skip()),
                     goal_mode, [goal_hint, supplied], queue=False)
-    reveal.input(lambda ep, show, i: board(ep, None if ep.busy else int(i if i is not None else -1), show), [episode, reveal, turn_picker], maze_board, queue=False)
-    turn_picker.input(inspect, [episode, reveal, turn_picker, selection_session], outputs, show_progress="hidden")
+    # Playback holds the overlay setting it started with, so toggling the route
+    # mid-playback ends it rather than letting the next frame undo the toggle.
+    reveal.input(lambda ep, show: board(ep, None if ep.busy else ep.viewing, show), [episode, reveal], maze_board,
+                 queue=False, cancels=playback)
+    turn_picker.input(inspect, [episode, reveal, turn_picker, selection_session], outputs, show_progress="hidden",
+                      concurrency_id="maze-view", cancels=playback)
+    # Each playback frame re-stamps the token strip, which clears a selection,
+    # so choosing a token also means "stop here and let me look at it".
     strip.select(select_token, [episode, selection_session, metrics_state],
-                 [detail, alternatives, edit_selection, replacement, candidate], queue=False, show_progress="hidden")
+                 [detail, alternatives, edit_selection, replacement, candidate], queue=False, show_progress="hidden",
+                 cancels=playback)
     edit_button.click(edit_token, [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate],
-                      [episode, *outputs, edit_selection, download], concurrency_id="maze", show_progress="hidden")
+                      [episode, *outputs, edit_selection, download], concurrency_id="maze", show_progress="hidden", cancels=playback)
     save.click(export, episode, download, show_progress="hidden")
-    upload.upload(load, [upload, episode, reveal, selection_session], [episode, *outputs], show_progress="hidden")
+    upload.upload(load, [upload, episode, reveal, selection_session], [episode, *outputs], show_progress="hidden", cancels=playback)
     context.navigation.open_models(models)
 
 
