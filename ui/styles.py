@@ -727,8 +727,13 @@ RESIZE_JS = """
   // a layout that has not happened, so those are left alone.
   const announce = (handle, width, room) => {
     if (!handle || room <= 0) { return; }
-    handle.setAttribute('aria-valuemin', String(MIN_PANE));
-    handle.setAttribute('aria-valuemax', String(widest(room)));
+    // In a window narrow enough for the stylesheet's smaller default but
+    // still too wide to stack, that default can be more than a drag would
+    // allow, and a position outside the range it is given tells a listener
+    // nothing. The range is the one the pane is really in: what a drag
+    // allows, or where the pane already sits, whichever is further out.
+    handle.setAttribute('aria-valuemin', String(Math.min(MIN_PANE, width)));
+    handle.setAttribute('aria-valuemax', String(Math.max(widest(room), width)));
     handle.setAttribute('aria-valuenow', String(width));
     // The number on its own is read out with no unit, and some readers turn
     // it into a percentage of the range instead, which tells a listener even
@@ -829,8 +834,14 @@ RESIZE_JS = """
     refit();
   });
 
+  // A second finger on a touch screen reports its own moves and its own
+  // release, and neither has anything to do with the drag the first one
+  // started.
+  const elsewhere = (event) =>
+    event && event.pointerId !== undefined && event.pointerId !== dragging.pointer;
+
   const move = (event) => {
-    if (!dragging) { return; }
+    if (!dragging || elsewhere(event)) { return; }
     // A pointer back over the window with no button held was let go
     // somewhere the page never heard about, and the drag ended with it.
     if (!event.buttons) { finish(); return; }
@@ -841,8 +852,8 @@ RESIZE_JS = """
     announce(dragging.handle, width, room);
   };
 
-  const finish = () => {
-    if (!dragging) { return; }
+  const finish = (event) => {
+    if (!dragging || elsewhere(event)) { return; }
     if (dragging.handle.hasPointerCapture(dragging.pointer)) {
       dragging.handle.releasePointerCapture(dragging.pointer);
     }
@@ -905,7 +916,16 @@ RESIZE_JS = """
     if (!pane) { return; }
     event.preventDefault();
     const room = roomFor(pane);
-    const width = clamp(pane.getBoundingClientRect().width + step, room);
+    const now = Math.round(pane.getBoundingClientRect().width);
+    const width = clamp(now + step, room);
+    // A pane already wider than a drag would allow - which the stylesheet's
+    // own default can be in a narrow window - would otherwise be pulled in
+    // by the key asking for it to be pushed out. A key that cannot move the
+    // pane the way it points does nothing at all.
+    if (Math.sign(width - now) === -Math.sign(step)) {
+      announce(handle, now, room);
+      return;
+    }
     write(handle.dataset.property, width);
     store(handle.dataset.store, width);
     announce(handle, width, room);

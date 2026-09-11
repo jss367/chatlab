@@ -2843,6 +2843,78 @@ assert.strictEqual(documentElement.style.props['--inspector-pane-width'], '354px
         )
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the script")
+    def test_a_pane_wider_than_a_drag_allows_is_reported_where_it_is(self):
+        # Between the width that stacks the panes and the width that gives
+        # them their full share, the stylesheet's smaller default can be
+        # more than a drag would leave the workspace. The separator says
+        # where the pane is rather than where it would be allowed, and the
+        # key asking for it to be pushed out does not pull it in.
+        self.check(
+            """
+// The row keeps 260 for the conversations pane and 6 for the handle, so a
+// drag would allow 294 of the 654 left, and the pane is already at 314.
+const chat = chatRow(920);
+start();
+paint();
+
+const handle = chat.children[2];
+assert.strictEqual(handle.getAttribute('aria-valuenow'), '314');
+assert.strictEqual(handle.getAttribute('aria-valuemax'), '314', 'the range holds it');
+assert.strictEqual(handle.getAttribute('aria-valuetext'), '314 pixels');
+
+// ArrowLeft asks for a wider pane. There is no room to widen it, so it
+// stays where it is rather than being cut to what a drag would allow.
+fire('document', 'keydown', {
+  target: handle, key: 'ArrowLeft', preventDefault: () => {},
+});
+assert.strictEqual(documentElement.style.props['--inspector-pane-width'], undefined);
+assert.strictEqual(kept.get('chatlab.inspector-pane-width'), undefined);
+assert.strictEqual(handle.getAttribute('aria-valuenow'), '314');
+
+// ArrowRight asks for a narrower one, which there is room for.
+fire('document', 'keydown', {
+  target: handle, key: 'ArrowRight', preventDefault: () => {},
+});
+assert.strictEqual(documentElement.style.props['--inspector-pane-width'], '294px');
+"""
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the script")
+    def test_only_the_pointer_that_started_a_drag_can_move_or_end_it(self):
+        # A second finger on a touch screen reports moves and a release of
+        # its own. Neither belongs to the drag the first finger started.
+        self.check(
+            """
+const chat = chatRow(1200);
+start();
+paint();
+
+const handle = chat.children[2];
+fire('document', 'pointerdown', {
+  target: handle, button: 0, buttons: 1, clientX: 800, pointerId: 7,
+  preventDefault: () => {},
+});
+fire('window', 'pointermove', { buttons: 1, clientX: 760, pointerId: 7 });
+assert.strictEqual(documentElement.style.props['--inspector-pane-width'], '354px');
+
+// A second finger moves and then lifts.
+fire('window', 'pointermove', { buttons: 1, clientX: 300, pointerId: 9 });
+assert.strictEqual(
+  documentElement.style.props['--inspector-pane-width'], '354px',
+  'the pane does not jump to a pointer that is not dragging it'
+);
+fire('window', 'pointerup', { pointerId: 9 });
+assert.ok(body.classList.contains('pane-dragging'), 'the drag is still going');
+assert.ok(handle.hasPointerCapture(7), 'and the first pointer is still held');
+
+// The finger that started the drag lifts, and it ends.
+fire('window', 'pointerup', { pointerId: 7 });
+assert.ok(!body.classList.contains('pane-dragging'));
+assert.ok(!handle.hasPointerCapture(7));
+"""
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the script")
     def test_the_separator_carries_the_position_it_has_put_the_pane_in(self):
         # Focusing a separator is meant to tell a screen reader how the room
         # has been divided, and nothing else on the page can say. So every
