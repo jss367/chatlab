@@ -467,7 +467,8 @@ def refresh_model_actions(
         checked.get("status") not in {"invalid", "missing", "checking", "restricted"}
         and not checked.get("access_restricted", False)
     )
-    can_load = can_download and not checked.get("unsupported", False)
+    architecture_available = not checked.get("architecture_unavailable", False)
+    can_load = can_download and not checked.get("unsupported", False) and architecture_available
     return (
         detail,
         gr.update(visible=download, interactive=can_load),

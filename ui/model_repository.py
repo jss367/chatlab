@@ -15,6 +15,7 @@ from model_runtime import cache_folder, format_bytes, mlx_snapshot_bits, snapsho
 
 
 UNCHECKED = "**Repository not checked** · Choose **Check model** to verify this ID on Hugging Face."
+CONFIG_PROBE_MAX_BYTES = 1024 * 1024
 
 
 def token_scope(hf_token: str | None) -> str:
@@ -72,7 +73,14 @@ def check_model_repository(model_id: str, hf_token: str | None):
     # Inspect the small config at the same revision, never the model weights.
     config = None
     access_restricted = False
-    if "config.json" in filenames:
+    config_size = next((file.size for file in files if file.rfilename == "config.json"), None)
+    config_note = "Configuration could not be verified."
+    probe_config = isinstance(config_size, int) and 0 <= config_size <= CONFIG_PROBE_MAX_BYTES
+    if config_size is None:
+        config_note = "Configuration was not checked because its download size is unknown."
+    elif not probe_config:
+        config_note = "Configuration was not checked because it exceeds the 1 MiB preview limit."
+    if probe_config:
         try:
             # A config in the normal Hub cache would make this metadata check
             # appear as an incomplete model download in the local inventory.
@@ -81,7 +89,12 @@ def check_model_repository(model_id: str, hf_token: str | None):
                     cleaned, "config.json", revision=info.sha, token=token,
                     etag_timeout=10, cache_dir=cache,
                 )
-                loaded = json.loads(Path(config_path).read_text())
+                with Path(config_path).open("rb") as config_file:
+                    content = config_file.read(CONFIG_PROBE_MAX_BYTES + 1)
+                if len(content) > CONFIG_PROBE_MAX_BYTES:
+                    config_note = "Configuration was not checked because it exceeds the 1 MiB preview limit."
+                    raise ValueError("Configuration exceeds the preview limit")
+                loaded = json.loads(content)
             if isinstance(loaded, dict):
                 config = loaded
         except GatedRepoError:
@@ -99,12 +112,14 @@ def check_model_repository(model_id: str, hf_token: str | None):
     unsupported = bool(filenames) and all(
         not name.endswith((".safetensors", ".bin")) for name in filenames
     )
+    architecture_unavailable = False
     if is_mlx:
         format_name = f"MLX · {bits}-bit weights"
         supported = mlx_runtime.mlx_supports(config.get("model_type"))
+        architecture_unavailable = not supported
         compatibility = (
             "Text chat architecture supported by the installed MLX runtime. Loading has not been tested."
-            if supported else "MLX architecture support could not be confirmed in this installation."
+            if supported else "This MLX architecture is unavailable in the installed runtime. You can download the files, but ChatLab cannot load them in this installation."
         )
     elif info.library_name == "diffusers":
         format_name = "Image model"
@@ -113,13 +128,14 @@ def check_model_repository(model_id: str, hf_token: str | None):
         format_name = "Transformers" if info.library_name == "transformers" or (mlx_tagged and config is not None) else "Format not confirmed"
         compatibility = "Repository existence is confirmed; loading compatibility has not been tested."
     if config is None and "config.json" in filenames:
-        compatibility += " Configuration could not be verified."
+        compatibility += " " + config_note
     if unsupported:
-        compatibility = "No supported weight files found. ChatLab cannot load GGUF-only or other exported formats."
+        compatibility += " No supported weight files found. ChatLab cannot load GGUF-only or other exported formats."
     yield {
         **result, "status": "found", "format": format_name, "mlx": is_mlx,
         "bits": bits, "download_bytes": total, "gated": bool(info.gated),
         "private": bool(info.private), "unsupported": unsupported,
+        "architecture_unavailable": architecture_unavailable,
         "access_restricted": access_restricted, "config_verified": config is not None,
         "compatibility": compatibility,
     }

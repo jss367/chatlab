@@ -106,6 +106,58 @@ class RepositoryTests(unittest.TestCase):
                 self.assertIsNone(states[-1]["bits"])
                 self.assertNotIn("Precision is fixed", detail)
 
+    def test_unavailable_mlx_architecture_disables_loading_but_keeps_download_only(self):
+        for supported in (False, True):
+            with self.subTest(supported=supported), mock.patch(
+                "mlx_runtime.mlx_supports", return_value=supported
+            ):
+                states, _ = self.check(self.info())
+                result = states[-1]
+                self.assertEqual(result["architecture_unavailable"], not supported)
+                self.assertFalse(result["unsupported"])
+                detail, _ = repository.repository_view("org/model", result)
+                self.assertEqual("architecture is unavailable" in detail, not supported)
+                self.assertNotIn("No supported weight files", detail)
+                for status in (CacheStatus(), CacheStatus(cached_bytes=100)):
+                    with mock.patch.object(models_page, "cache_status", return_value=status):
+                        _, load, download, cached = models_page.refresh_model_actions("org/model", None, result)
+                    self.assertEqual(load["interactive"], supported)
+                    # The cached revision can differ from the checked remote
+                    # revision; remote support cannot disable local loading.
+                    self.assertTrue(cached.get("interactive", True))
+                    self.assertEqual(cached["visible"], status.complete)
+                    self.assertTrue(download["interactive"])
+
+    def test_configuration_probe_skips_unknown_and_oversized_downloads(self):
+        for size, wording in (
+            (None, "download size is unknown"),
+            (repository.CONFIG_PROBE_MAX_BYTES + 1, "exceeds the 1 MiB preview limit"),
+        ):
+            with self.subTest(size=size):
+                info = self.info()
+                info.siblings[-1].size = size
+                states, _ = self.check(info)
+                self.config_download.assert_not_called()
+                result = states[-1]
+                self.assertEqual(result["status"], "found")
+                self.assertFalse(result["config_verified"])
+                self.assertFalse(result["access_restricted"])
+                detail, precision = repository.repository_view("org/model", result)
+                self.assertIn(wording, detail)
+                self.assertTrue(precision["visible"])
+
+    def test_configuration_probe_accepts_the_size_boundary_and_bounds_the_file_read(self):
+        info = self.info()
+        info.siblings[-1].size = repository.CONFIG_PROBE_MAX_BYTES
+        states, _ = self.check(info)
+        self.assertTrue(states[-1]["config_verified"])
+        self.config_download.assert_called_once()
+        # A file larger than its pinned metadata claimed still cannot cause
+        # an unbounded read or be treated as verified configuration.
+        states, _ = self.check(info, config={"padding": "x" * (repository.CONFIG_PROBE_MAX_BYTES + 1)})
+        self.assertFalse(states[-1]["config_verified"])
+        self.assertIn("exceeds the 1 MiB preview limit", states[-1]["compatibility"])
+
     def test_config_detects_quantized_mlx_without_tags_or_a_bit_width_in_the_name(self):
         states, _ = self.check(self.info(tags=[], library_name="transformers"), config={
             "model_type": "qwen3_5", "quantization_config": {"bits": 8, "group_size": 64},
@@ -141,7 +193,8 @@ class RepositoryTests(unittest.TestCase):
                     self.assertEqual(cached["visible"], cached_status.complete)
 
     def test_gated_repository_with_configuration_access_allows_download(self):
-        states, _ = self.check(self.info(gated="auto"))
+        with mock.patch("mlx_runtime.mlx_supports", return_value=True):
+            states, _ = self.check(self.info(gated="auto"))
         detail, _ = repository.repository_view("org/model", states[-1])
         self.assertIn("Access to the configuration was verified", detail)
         self.assertNotIn("Access required", detail)
