@@ -24,9 +24,12 @@ guessing.
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Iterable
 from datetime import datetime, timezone
+
+from steering import compact as compact_steering, export_assets, import_assets
 
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
@@ -137,7 +140,7 @@ def make_turn(role: str, content: str, reasoning: str = "") -> dict:
 def copy_turns(turns: list[dict] | None) -> list[dict]:
     """Snapshot turns so a streaming update cannot mutate stored state."""
 
-    return [dict(turn) for turn in (turns or [])]
+    return copy.deepcopy(turns or [])
 
 
 def display_messages(
@@ -291,7 +294,7 @@ def copy_forks(forks: dict | None) -> dict:
         }
         or {MAIN_BRANCH: []},
         "sampling": {
-            name: dict(values)
+            name: copy.deepcopy(values)
             for name, values in (forks.get("sampling") or {}).items()
         },
         "sampling_updated": dict(forks.get("sampling_updated") or {}),
@@ -337,7 +340,7 @@ def branch_sampling(forks: dict | None, name: str) -> dict:
     """What branch ``name`` carries of its own sampling; empty where it carries none."""
 
     held = (forks or {}).get("sampling") or {}
-    return dict(held.get(name) or {})
+    return copy.deepcopy(held.get(name) or {})
 
 
 def put_branch_sampling(forks: dict, name: str, values: dict) -> bool:
@@ -365,7 +368,7 @@ def put_branch_sampling(forks: dict, name: str, values: dict) -> bool:
     } | dict(values)
     if held == kept:
         return False
-    sampling[name] = kept
+    sampling[name] = copy.deepcopy(kept)
     forks.setdefault("sampling_updated", {})[name] = branch_stamp()
     return True
 
@@ -567,6 +570,8 @@ def turn_entries(turns: list[dict] | None) -> list[dict]:
             # bool is an int to isinstance(), and a True here would be a bug.
             if isinstance(value, kind) and not isinstance(value, bool):
                 entry[key] = value
+        if turn.get("steering") is not None:
+            entry["steering"] = compact_steering(turn["steering"])
         entries.append(entry)
     return entries
 
@@ -598,16 +603,23 @@ def turns_from_entries(raw_turns) -> list[dict]:
             if kind is int and value < 0:
                 raise ValueError(f"Turn {key} cannot be negative.")
             turn[key] = value
+        if entry.get("steering") is not None:
+            turn["steering"] = compact_steering(entry["steering"])
         turns.append(turn)
     return turns
 
 
-def to_json(turns: list[dict] | None, *, system_prompt: str = "") -> str:
+def to_json(turns: list[dict] | None, *, system_prompt: str = "", steering: dict | None = None) -> str:
     payload = {
         "format": SAVE_FORMAT,
         "system_prompt": system_prompt or "",
         "turns": turn_entries(turns),
     }
+    if steering is not None:
+        payload["steering"] = compact_steering(steering)
+    assets = export_assets([payload.get("steering"), *(turn.get("steering") for turn in payload["turns"])])
+    if assets:
+        payload["steering_vectors"] = assets
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
@@ -620,7 +632,12 @@ def from_json(payload: str) -> tuple[list[dict], str]:
     if not isinstance(data, dict) or data.get("format") != SAVE_FORMAT:
         raise ValueError(f"Expected a {SAVE_FORMAT} file saved by this app.")
 
-    turns = turns_from_entries(data.get("turns"))
+    raw_turns = data.get("turns")
+    values = [data.get("steering")]
+    if isinstance(raw_turns, list):
+        values.extend(turn.get("steering") for turn in raw_turns if isinstance(turn, dict))
+    import_assets(values, data.get("steering_vectors"))
+    turns = turns_from_entries(raw_turns)
 
     system_prompt = data.get("system_prompt", "")
     if not isinstance(system_prompt, str):

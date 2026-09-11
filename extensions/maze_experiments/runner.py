@@ -49,6 +49,12 @@ class Episode:
     replay_only: bool = False
     token_edit: dict | None = None
     pending_edit: dict | None = None
+    # The response the viewer last drew. Previous, Next and playback move
+    # relative to it, so a rapid second click cannot resend a stale index.
+    viewing: int = -1
+    # Which playback run owns the view. Starting one supersedes the last, so
+    # two runs in the same session cannot repaint each other's frames.
+    playback_token: int = 0
     created_at: float = field(default_factory=time.time)
 
     def __deepcopy__(self, memo):
@@ -446,7 +452,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
         if episode.busy:
             raise ValueError("This episode is already generating. Pause it before changing the run.")
         if episode.phase in TERMINAL or episode.replay_only:
-            raise ValueError("Start a new episode to run again. This episode is finished or is a saved replay.")
+            raise ValueError("Start a new episode to run again. This episode is finished or is a saved replay. Play it back or step through it under Path and replay.")
         manager = models.open_session()
         episode.busy = True
         episode.pause_requested = episode.stop_requested = False

@@ -40,6 +40,19 @@ for package in (
     binaries += package_binaries
     hiddenimports += package_imports
 
+# MLX is an Apple silicon dependency: the Metal library and the compiled core
+# ship as package data, and mlx-lm resolves each architecture's module by the
+# model_type in a downloaded config, so every one of them has to be present.
+if sys.platform == "darwin":
+    for package in ("mlx", "mlx_lm"):
+        try:
+            package_datas, package_binaries, package_imports = collect_all(package)
+        except Exception:  # noqa: BLE001 - a bundle without mlx still runs Transformers
+            continue
+        datas += package_datas
+        binaries += package_binaries
+        hiddenimports += package_imports
+
 hiddenimports += collect_submodules("transformers.models", on_error="warn once")
 hiddenimports += collect_submodules("transformers.quantizers", on_error="warn once")
 # DiffusionPipeline builds itself from the class names in model_index.json, so

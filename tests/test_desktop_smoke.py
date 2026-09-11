@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import transformers
 
-from desktop_smoke import smoke_test_metal, smoke_test_pipelines
+from desktop_smoke import smoke_test_metal, smoke_test_mlx, smoke_test_pipelines
 
 
 @unittest.skipUnless(hasattr(transformers, "MetalConfig"), "Metal requires transformers>=5.3")
@@ -44,6 +44,29 @@ class DesktopMetalSmokeTests(unittest.TestCase):
             self.assertRaisesRegex(RuntimeError, "missing compatible kernels or its metadata"),
         ):
             smoke_test_metal()
+
+
+class DesktopMlxSmokeTests(unittest.TestCase):
+    """The same runner has to catch a bundle built without mlx-lm's models."""
+
+    def test_the_runner_runs_a_model_or_says_why_it_cannot(self):
+        output = StringIO()
+        with redirect_stdout(output):
+            smoke_test_mlx()
+
+        self.assertRegex(
+            output.getvalue(), "MLX load, forward pass and lens checks passed|SKIP: MLX models"
+        )
+
+    def test_the_runner_skips_without_mlx(self):
+        output = StringIO()
+        with (
+            patch("mlx_runtime.mlx_available", return_value=False),
+            redirect_stdout(output),
+        ):
+            smoke_test_mlx()
+
+        self.assertIn("SKIP: MLX models", output.getvalue())
 
 
 class DesktopPipelineSmokeTests(unittest.TestCase):

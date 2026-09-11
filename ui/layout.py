@@ -45,7 +45,6 @@ from token_metrics import (
 from ui.conversations import (
     delete_fork,
     fork_conversation,
-    load_conversation,
     new_conversation,
     refresh_conversation_list,
     remember_branch_sampling,
@@ -55,6 +54,10 @@ from ui.conversations import (
     sampling_updates,
     save_conversation,
     switch_fork,
+)
+from ui.steering import (
+    EMPTY_STATUS, import_vector, load_with_steering, remember_steering,
+    remove_vector, steering_updates,
 )
 from ui.images_page import (
     NO_ATTENTION,
@@ -152,7 +155,9 @@ from ui.settings_page import (
 from ui.styles import (
     CSS,
     THEME,
+    RESIZE_JS,
     SHORTCUT_JS,
+    pane_handle,
     message_box_settings,
     set_message_box_keys,
 )
@@ -206,6 +211,7 @@ def build_app() -> gr.Blocks:
         # Layer inspection: the prompt ids behind the strips, the strip
         # position last clicked, and the last readout for re-rendering.
         context_ids_state = gr.State((*empty_metrics(), None))
+        steering_state = gr.State(None)
         inspect_target = gr.State(None)
         insight_state = gr.State(None)
         # The prompts the last file gave, as it gave them. A prompt with a
@@ -400,6 +406,29 @@ def build_app() -> gr.Blocks:
                                                 label="🎲 New seed each response",
                                                 info="Turn off to lock the seed and reproduce a response exactly.",
                                             )
+                                    with gr.Accordion("Steering vector", open=False):
+                                        gr.Markdown(
+                                            "Add a vector to a model layer during this conversation. "
+                                            "Import JSON with `model_id`, `layer` (starting at 0), "
+                                            "and `vector` (a list of numbers). Use a vector made for "
+                                            "the same model checkpoint."
+                                        )
+                                        with gr.Row():
+                                            steering_upload = gr.UploadButton(
+                                                "Import vector", file_types=[".json"], type="filepath"
+                                            )
+                                            steering_remove = gr.Button("Remove vector")
+                                        steering_enabled = gr.Checkbox(value=False, label="Enable steering", interactive=False)
+                                        steering_strength = gr.Slider(
+                                            -100, 100, value=1, step=0.05, label="Steering strength", interactive=False,
+                                            info="0 disables the addition; negative values reverse its direction.",
+                                        )
+                                        steering_layer = gr.Number(
+                                            value=0, precision=0, minimum=0, label="Target layer (starting at 0)", interactive=False,
+                                        )
+                                        steering_status = gr.Textbox(
+                                            value=EMPTY_STATUS, label="Vector status", interactive=False,
+                                        )
                                     with gr.Row():
                                         save_button = gr.Button("💾 Save conversation")
                                         load_upload = gr.UploadButton(
@@ -544,6 +573,16 @@ def build_app() -> gr.Blocks:
                                     interactive=False,
                                     elem_id="batch-files",
                                 )
+
+                    # The seam between the transcript and the readings is a
+                    # handle: drag it to give either pane the other's room.
+                    # See RESIZE_JS.
+                    gr.HTML(
+                        pane_handle("inspector-pane"),
+                        elem_id="inspector-resizer",
+                        container=False,
+                        padding=False,
+                    )
 
                     with gr.Column(scale=2, min_width=300, elem_id="inspector-pane"):
                         gr.Markdown("## Under the hood", elem_id="inspector-heading")
@@ -756,6 +795,14 @@ def build_app() -> gr.Blocks:
                                     "trajectory and the guidance trace."
                                 ),
                             )
+
+                    # The Images page carries the same handle on its own seam.
+                    gr.HTML(
+                        pane_handle("image-inspector"),
+                        elem_id="image-inspector-resizer",
+                        container=False,
+                        padding=False,
+                    )
 
                     with gr.Column(scale=2, min_width=300, elem_id="image-inspector"):
                         # Which run the readouts belong to, the step being
@@ -1318,6 +1365,9 @@ def build_app() -> gr.Blocks:
         )
         # Escape stops a running generation, from anywhere on the page.
         demo.load(None, None, None, js=SHORTCUT_JS)
+        # The two readings panes are dragged wider or narrower by the handle
+        # on their seam, and remember the width they were left at.
+        demo.load(None, None, None, js=RESIZE_JS)
 
         # Selecting a default is navigation only. The Models page owns the
         # explicit download and load actions, including their errors.
@@ -1447,6 +1497,26 @@ def build_app() -> gr.Blocks:
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
 
+        steering_outputs = [
+            steering_state, steering_enabled, steering_strength, steering_layer, steering_status,
+        ]
+        steering_upload.upload(
+            import_vector, [steering_upload, forks_state], [forks_state, *steering_outputs],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+        )
+        steering_remove.click(
+            remove_vector, forks_state, [forks_state, *steering_outputs],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+        )
+        for control in (steering_enabled, steering_strength, steering_layer):
+            control.input(
+                remember_steering,
+                [forks_state, steering_state, steering_enabled, steering_strength, steering_layer],
+                [forks_state, steering_state, steering_status],
+                trigger_mode="always_last", show_progress="hidden",
+                concurrency_id=CONVERSATION_PANE_QUEUE,
+            )
+
         def brings_its_sampling(event):
             """Put the newly active conversation's sampling onto the controls.
 
@@ -1466,6 +1536,9 @@ def build_app() -> gr.Blocks:
                 sampling_controls,
                 sampling_accordion,
                 concurrency_id=SAMPLING_LABEL_QUEUE,
+            ).then(
+                steering_updates, forks_state, steering_outputs,
+                concurrency_id=CONVERSATION_PANE_QUEUE,
             )
 
         settings_inputs = [
@@ -1481,7 +1554,10 @@ def build_app() -> gr.Blocks:
             analyze_prompt,
             color_scale,
         ]
-        chat_inputs = [prompt, conversation_state, *settings_inputs]
+        # Persistence runs separately; every request must snapshot the controls
+        # the reader sees, even while remember_steering is still queued.
+        steering_inputs = [steering_state, steering_enabled, steering_strength, steering_layer]
+        chat_inputs = [prompt, conversation_state, *settings_inputs, *steering_inputs]
 
         # Everything saved between sessions, in PERSISTED_SETTING_NAMES order.
         persisted_inputs = [*settings_inputs, enter_sends, model_id, weight_precision]
@@ -1819,12 +1895,12 @@ def build_app() -> gr.Blocks:
 
         save_button.click(
             save_conversation,
-            [conversation_state, system_prompt],
+            [conversation_state, system_prompt, *steering_inputs],
             [saved_file, generation_status],
         )
         load_upload.upload(
-            load_conversation,
-            [load_upload, conversation_state, color_scale],
+            load_with_steering,
+            [load_upload, conversation_state, color_scale, forks_state],
             [
                 chatbot,
                 conversation_state,
@@ -1842,6 +1918,8 @@ def build_app() -> gr.Blocks:
                 summary_panel,
                 surprise_panel,
                 trace_state,
+                forks_state,
+                *steering_outputs,
             ],
             cancels=running,
             concurrency_id=CONVERSATION_PANE_QUEUE,

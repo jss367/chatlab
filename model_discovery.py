@@ -1,11 +1,11 @@
-"""Small offline starter catalog, with metadata checked against HF on 2026-09-09.
+"""Small offline starter catalog, with metadata checked against HF on 2026-09-09 (MLX entries 2026-09-10).
 
 Download estimates cover the entire snapshot: ChatLab currently downloads all
 repository files, including alternate formats. Keep these separate from loaded
 weight sizes. Model IDs link to the source cards in the UI.
 """
 
-from model_runtime import HubModel, TEXT_KIND, IMAGE_KIND
+from model_runtime import HubModel, TEXT_KIND, IMAGE_KIND, MLX_KIND
 
 
 DISCOVERY_ORDERS = ("Recommended", "Popular", "Trending", "New")
@@ -47,6 +47,41 @@ STARTER_MODELS = {
             license="sai-nc-community",
             summary="Quick image experiments — start with 1 step, guidance 0, and 512 × 512 pixels.",
             download_bytes=12_957_331_338,
+        ),
+    ),
+    # Quantized for MLX and run through mlx-lm on Apple silicon. Each is the
+    # 4-bit conversion of a model in the text list or close to one, so the
+    # two lists can be compared like for like.
+    MLX_KIND: (
+        HubModel(
+            model_id="mlx-community/Qwen3-0.6B-4bit",
+            parameters=596_049_920,
+            pipeline_tag="text-generation",
+            library="mlx",
+            license="apache-2.0",
+            summary="Smallest MLX starter — a thinking model packed to 4 bits, a few hundred MB.",
+            download_bytes=351_386_061,
+            kind=MLX_KIND,
+        ),
+        HubModel(
+            model_id="mlx-community/Qwen3-4B-4bit",
+            parameters=4_022_468_096,
+            pipeline_tag="text-generation",
+            library="mlx",
+            license="apache-2.0",
+            summary="Mid-sized MLX reasoning — 4B parameters in about 2.3 GB.",
+            download_bytes=2_278_972_183,
+            kind=MLX_KIND,
+        ),
+        HubModel(
+            model_id="mlx-community/Olmo-3-7B-Think-4bit",
+            parameters=7_298_011_136,
+            pipeline_tag="text-generation",
+            library="mlx",
+            license="apache-2.0",
+            summary="ChatLab’s default model at 4 bits for MLX — about 4 GB instead of 15.",
+            download_bytes=4_115_716_535,
+            kind=MLX_KIND,
         ),
     ),
 }
