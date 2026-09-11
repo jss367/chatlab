@@ -18,6 +18,7 @@ from model_runtime import (
     PROMPT_SCORE_LIMIT,
     CacheStatus,
     DownloadProgress,
+    ExclusiveLoad,
     ModelManager,
     ScoredText,
 )
@@ -335,8 +336,8 @@ class LendsTheLoad:
     that only answers the cache questions is no longer enough.
     """
 
-    def reserve_exclusive_load(self, model_id):
-        return model_id, 1
+    def claim_exclusive_load(self, model_id):
+        return ExclusiveLoad((model_id, 1), None)
 
     def release_load(self, claim):
         pass

@@ -1394,7 +1394,7 @@ class LoadRefusalTests(unittest.TestCase):
         self.original = runtime.MANAGER
         runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
         self.addCleanup(setattr, runtime, "MANAGER", self.original)
-        _checked_id, self.claim = runtime.MANAGER.reserve_exclusive_load("org/other")
+        _checked_id, self.claim = runtime.MANAGER.claim_exclusive_load("org/other").claim
         self.addCleanup(runtime.MANAGER.release_load, self.claim)
 
     def turns(self):
@@ -3914,7 +3914,7 @@ class LayerInspectionTests(unittest.TestCase):
         # reader to wait for a response points at nothing on the page.
         final = self.finished()
         target = app.remember_inspect_target("response")(final[METRICS], select(0))
-        _checked_id, claim = runtime.MANAGER.reserve_exclusive_load("org/other")
+        _checked_id, claim = runtime.MANAGER.claim_exclusive_load("org/other").claim
         try:
             *_rest, status = self.inspect(
                 target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS], 0

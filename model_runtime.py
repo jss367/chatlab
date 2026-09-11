@@ -4233,6 +4233,21 @@ class TorchEngine:
         return reading
 
 
+class ExclusiveLoad(NamedTuple):
+    """What :meth:`ModelManager.claim_exclusive_load` answers with.
+
+    Exactly one side is filled in. ``claim`` is what :meth:`reserve_load`
+    returns - the checked ID and the claim number that gives it back - and
+    ``held`` is ``None`` beside it. A refusal is the other way round: no
+    claim, and :data:`LOADING` or :data:`GENERATING` naming what has the
+    model, decided in the same step as the refusal so that a load ending an
+    instant later cannot change the answer on screen.
+    """
+
+    claim: tuple[str, int] | None
+    held: str | None
+
+
 class ModelManager:
     """Own the single in-memory model used by the local application."""
 
@@ -4398,6 +4413,23 @@ class ModelManager:
 
         return self._generating.locked()
 
+    def _occupant_locked(self) -> str | None:
+        """What has the model, answered with :attr:`_claims_lock` already held.
+
+        The one place the question is decided, so the property that only
+        labels and the two claims that refuse cannot name different things.
+        Both can be true at once - :meth:`reserve_load` does not exclude a
+        reply already streaming - and the load wins, because it is what the
+        reply is about to lose the model to, and because a load is the one a
+        reader can only wait out rather than stop.
+        """
+
+        if self._load_claims or self._active_load is not None:
+            return LOADING
+        if self._generating.locked():
+            return GENERATING
+        return None
+
     @property
     def occupant(self) -> str | None:
         """What has the model right now: :data:`LOADING`, :data:`GENERATING`, or nothing.
@@ -4405,16 +4437,12 @@ class ModelManager:
         The same question :meth:`claim_generation` settles, asked without
         taking anything, so it is only ever an early exit or a label - a
         caller about to generate takes the slot and reads the answer the
-        claim gives back. Loads come first because that is the order the
-        claim decides in, so the two cannot disagree about which to name.
+        claim gives back, and a caller about to load reads the one
+        :meth:`claim_exclusive_load` gives back.
         """
 
         with self._claims_lock:
-            if self._load_claims or self._active_load is not None:
-                return LOADING
-            if self._generating.locked():
-                return GENERATING
-            return None
+            return self._occupant_locked()
 
     def claim_generation(self) -> str | None:
         """Claim the right to run a generation, or name what has the model.
@@ -4430,14 +4458,19 @@ class ModelManager:
 
         Everything :meth:`reserve_generation` says about reserving applies
         here; that method is this one with the reason thrown away.
+        :meth:`claim_exclusive_load` is the same bargain on the load side.
         """
 
         with self._claims_lock:
-            if self._load_claims or self._active_load is not None:
-                return LOADING
-            if self._generating.acquire(blocking=False):
-                return None
-            return GENERATING
+            held = self._occupant_locked()
+            if held is not None:
+                return held
+            # Cannot fail: every acquire of the slot is made under this lock
+            # and nothing holds it, so no other thread can be between the
+            # two lines. Releasing happens outside the lock, but that only
+            # ever frees the slot.
+            self._generating.acquire(blocking=False)
+            return None
 
     def reserve_generation(self) -> bool:
         """Claim the right to run a generation, or report that it is taken.
@@ -4460,7 +4493,7 @@ class ModelManager:
         reader was looking at: it waits on the model lock behind the load and
         then answers from whatever the load brought in. Refusing it is the
         only answer that keeps the reply and the badge agreeing. The
-        :meth:`reserve_exclusive_load` side of the same rule is what stops a
+        :meth:`claim_exclusive_load` side of the same rule is what stops a
         load starting while a reply is streaming.
 
         A caller that has to tell the reader why it refused wants
@@ -4636,12 +4669,19 @@ class ModelManager:
             self._load_claims[self._next_claim] = checked_id
             return checked_id, self._next_claim
 
-    def reserve_exclusive_load(self, model_id: str) -> tuple[str, int] | None:
-        """Claim a load of ``model_id`` only if nothing else has the model.
+    def claim_exclusive_load(self, model_id: str) -> ExclusiveLoad:
+        """Claim a load of ``model_id``, or name what has the model instead.
 
-        Returns what :meth:`reserve_load` returns, or ``None`` when another
-        load is claimed or a generation is running and the caller must refuse
-        rather than queue. This is the gate every load a reader asks for goes
+        An :class:`ExclusiveLoad` holding what :meth:`reserve_load` returns,
+        or, when another load is claimed or a generation is running and the
+        caller must refuse rather than queue, holding :data:`LOADING` or
+        :data:`GENERATING` instead. Why the reason comes back from here is
+        what :meth:`claim_generation` says: a caller that refused and then
+        read :attr:`occupant` to find out why has asked twice, and a load
+        that ended in between answers the second question with the other
+        reason - so a load turned away by a load would tell the reader a
+        response was running and to press a Stop button that is not on the
+        page. This is the gate every load a reader asks for goes
         through, so "no other load is claimed" really means no other load:
         once this returns a claim, the ordinary :meth:`reserve_load` that the
         load itself makes is the only one that can appear, and the next
@@ -4663,13 +4703,12 @@ class ModelManager:
 
         checked_id = validate_model_id(model_id)
         with self._claims_lock:
-            if self._load_claims or self._active_load is not None:
-                return None
-            if self._generating.locked():
-                return None
+            held = self._occupant_locked()
+            if held is not None:
+                return ExclusiveLoad(None, held)
             self._next_claim += 1
             self._load_claims[self._next_claim] = checked_id
-            return checked_id, self._next_claim
+            return ExclusiveLoad((checked_id, self._next_claim), None)
 
     def release_load(self, claim: int) -> None:
         """Give back one claim, leaving any other load's standing."""

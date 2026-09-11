@@ -772,7 +772,7 @@ class RunPromptsTests(unittest.TestCase):
         # its loaded check and is turned away by the claim. Nothing is
         # generating, so "wait for the response to finish" names a response
         # that does not exist.
-        _checked_id, claim = runtime.MANAGER.reserve_exclusive_load("org/other")
+        _checked_id, claim = runtime.MANAGER.claim_exclusive_load("org/other").claim
         self.addCleanup(runtime.MANAGER.release_load, claim)
 
         frames = self.run_batch("say hello")

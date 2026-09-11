@@ -1822,7 +1822,7 @@ class ManagerImageRunTests(unittest.TestCase):
         # passes its loaded check and the claim turns it away. There is no
         # run to wait for, and no Stop button over one.
         manager = self.loaded()
-        _checked_id, claim = manager.reserve_exclusive_load("org/other")
+        _checked_id, claim = manager.claim_exclusive_load("org/other").claim
         self.addCleanup(manager.release_load, claim)
 
         with self.assertRaises(ModelBusy) as caught:

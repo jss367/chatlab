@@ -578,20 +578,32 @@ class LoadingIdTests(unittest.TestCase):
         # yields between them.
         manager = ModelManager()
 
-        checked_id, claim = manager.reserve_exclusive_load(" allenai/Olmo-3-7B-Think ")
+        claimed, held = manager.claim_exclusive_load(" allenai/Olmo-3-7B-Think ")
 
+        self.assertIsNone(held)
+        checked_id, claim = claimed
         self.assertEqual(checked_id, OLMO)
-        self.assertIsNone(manager.reserve_exclusive_load("org/other"))
-        self.assertIsNone(manager.reserve_exclusive_load(OLMO), "not even the same one")
+        self.assertEqual(
+            manager.claim_exclusive_load("org/other"),
+            (None, model_runtime.LOADING),
+        )
+        self.assertEqual(
+            manager.claim_exclusive_load(OLMO),
+            (None, model_runtime.LOADING),
+            "not even the same one",
+        )
         manager.release_load(claim)
-        self.assertIsNotNone(manager.reserve_exclusive_load("org/other"))
+        self.assertIsNotNone(manager.claim_exclusive_load("org/other").claim)
 
     def test_an_exclusive_claim_is_refused_while_a_load_reads_weights(self):
         manager = ModelManager()
         with manager._reading_weights(OLMO):
-            self.assertIsNone(manager.reserve_exclusive_load("org/other"))
+            self.assertEqual(
+                manager.claim_exclusive_load("org/other"),
+                (None, model_runtime.LOADING),
+            )
 
-        self.assertIsNotNone(manager.reserve_exclusive_load("org/other"))
+        self.assertIsNotNone(manager.claim_exclusive_load("org/other").claim)
 
     def test_an_exclusive_claim_is_refused_while_a_reply_is_running(self):
         # The other half of the switcher's promise. A load admitted beside a
@@ -600,10 +612,12 @@ class LoadingIdTests(unittest.TestCase):
         manager = ModelManager()
         self.assertTrue(manager.reserve_generation())
 
-        self.assertIsNone(manager.reserve_exclusive_load(OLMO))
+        self.assertEqual(
+            manager.claim_exclusive_load(OLMO), (None, model_runtime.GENERATING)
+        )
 
         manager.release_generation()
-        self.assertIsNotNone(manager.reserve_exclusive_load(OLMO))
+        self.assertIsNotNone(manager.claim_exclusive_load(OLMO).claim)
 
     def test_a_generation_is_refused_while_a_load_is_claimed(self):
         # The mirror image, and the reason the switcher can stop asking
@@ -611,7 +625,7 @@ class LoadingIdTests(unittest.TestCase):
         # load was claimed would wait out the load and answer from whatever
         # it brought in.
         manager = ModelManager()
-        _checked_id, claim = manager.reserve_exclusive_load(OLMO)
+        _checked_id, claim = manager.claim_exclusive_load(OLMO).claim
 
         self.assertFalse(manager.reserve_generation())
 
@@ -700,7 +714,7 @@ class LoadingIdTests(unittest.TestCase):
 
         def switch():
             start.wait()
-            claimed = manager.reserve_exclusive_load("org/one")
+            claimed = manager.claim_exclusive_load("org/one").claim
             if claimed is not None:
                 with lock:
                     won.append("load")
@@ -1981,6 +1995,52 @@ class ModelSwitchTests(unittest.TestCase):
 
         self.assertEqual(frames, [(gr.update(value=OLMO), gr.skip())])
         self.assertIn(app.SWITCH_LOADING, alarm.call_args.args)
+
+    def test_a_pick_refused_by_a_load_that_then_ends_still_names_the_load(self):
+        # The refusal and its reason are one answer. Asking what has the
+        # model a second time, after the reservation came back empty, races
+        # the load finishing: nothing holds it by then, so the reader is
+        # told a response is running and to press a Stop button that is not
+        # on the page, over a switch that no reply ever touched.
+        self.load()
+        _checked_id, claim = self.manager.reserve_load(OLMO)
+        real = self.manager.claim_exclusive_load
+
+        def then_the_load_ends(model_id):
+            answer = real(model_id)
+            self.manager.release_load(claim)
+            return answer
+
+        with mock.patch.object(
+            self.manager, "claim_exclusive_load", then_the_load_ends
+        ), mock.patch.object(models_page, "alarm") as alarm:
+            frames = list(app.switch_model("org/small"))
+
+        self.assertIsNone(self.manager.occupant, "the load ended in between")
+        self.assertEqual(frames, [(gr.update(value=OLMO), gr.skip())])
+        self.assertIn(app.SWITCH_LOADING, alarm.call_args.args)
+        self.assertNotIn(app.SWITCH_BUSY, alarm.call_args.args)
+
+    def test_a_load_refused_by_a_load_that_then_ends_still_names_the_load(self):
+        # The same race on the Models page's own card, which is worded from
+        # the same answer.
+        _checked_id, claim = self.manager.reserve_load(OLMO)
+        real = self.manager.claim_exclusive_load
+
+        def then_the_load_ends(model_id):
+            answer = real(model_id)
+            self.manager.release_load(claim)
+            return answer
+
+        with mock.patch.object(
+            self.manager, "claim_exclusive_load", then_the_load_ends
+        ):
+            frames = list(models_page.load_cached_model("org/small"))
+
+        self.assertIsNone(self.manager.occupant, "the load ended in between")
+        self.assertEqual(len(frames), 1, "refused before any other card")
+        self.assertIn(models_page.LOAD_WHILE_LOADING, frames[0])
+        self.assertNotIn(models_page.LOAD_WHILE_GENERATING, frames[0])
 
     def test_a_pick_loads_from_the_cache_at_the_chosen_precision(self):
         self.load()

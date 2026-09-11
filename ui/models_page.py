@@ -498,26 +498,27 @@ LOAD_WHILE_GENERATING = (
 LOAD_WHILE_LOADING = "Another load is already under way. Wait for it to finish."
 
 
-def occupied_reason(loading: str, generating: str) -> str:
-    """Which of the two refusals fits, for a reservation that came back empty.
+def occupied_reason(held: str | None, loading: str, generating: str) -> str:
+    """Which of the two refusals fits, for whatever ``held`` says has the model.
 
-    Read afterwards and only to choose wording: whichever of the two was true
-    at the instant the reservation was refused, one of them was, and by now
-    either may have ended. The refusal itself stands on the reservation, not
-    on this.
+    ``held`` is what the refused reservation answered with, passed down
+    rather than read again here. Asking a second time is what this used to
+    do and it was wrong: a load that finishes between the refusal and the
+    read leaves nothing holding the model, and the reader is told a response
+    is running and to press a Stop button that is not on the page. See
+    :meth:`ModelManager.claim_exclusive_load`.
 
-    The same two the generation side names, read from the same place, so a
-    load and a reply cannot describe the manager differently; see
-    :attr:`ModelManager.occupant`.
+    The same two the generation side names, so a load and a reply cannot
+    describe the manager differently.
     """
 
-    return loading if runtime.MANAGER.occupant == LOADING else generating
+    return loading if held == LOADING else generating
 
 
-def refused_load_card(extra: str = "") -> str:
+def refused_load_card(held: str | None, extra: str = "") -> str:
     """The card a load gets when a reply or another load already has the model."""
 
-    reason = occupied_reason(LOAD_WHILE_LOADING, LOAD_WHILE_GENERATING)
+    reason = occupied_reason(held, LOAD_WHILE_LOADING, LOAD_WHILE_GENERATING)
     return status_card("Cannot load now", f"{reason}{extra}", "error")
 
 
@@ -543,11 +544,12 @@ def download_and_load_model(
     yield status_card(*describe_cache(model_id, before), "working")
     try:
         path = yield from stream_download(model_id, hf_token)
-        claimed = runtime.MANAGER.reserve_exclusive_load(model_id)
+        claimed, held = runtime.MANAGER.claim_exclusive_load(model_id)
         if claimed is None:
             yield refused_load_card(
+                held,
                 f" `{model_id.strip()}` is on disk; use **Load cached** to "
-                "finish the job."
+                "finish the job.",
             )
             return
         try:
@@ -627,12 +629,12 @@ def load_cached_model(
         yield from _load_cached_model(cleaned, precision)
         return
     try:
-        claimed = runtime.MANAGER.reserve_exclusive_load(cleaned)
+        claimed, held = runtime.MANAGER.claim_exclusive_load(cleaned)
     except ValueError as error:
         yield failure_card("Could not load cached model", html.escape(str(error)))
         return
     if claimed is None:
-        yield refused_load_card()
+        yield refused_load_card(held)
         return
     try:
         yield from _load_cached_model(cleaned, precision)
@@ -1057,10 +1059,12 @@ def switch_model(selected: str | None, precision: str = "full"):
     cards and a cache scan later, Gradio gives a picked-up-and-put-down
     handler no exclusivity across those yields, and a generation slot taken
     after this handler looked at it is a reply that will run on whatever
-    this load brings in. ``reserve_exclusive_load`` answers both questions
+    this load brings in. ``claim_exclusive_load`` answers both questions
     under one lock and leaves a claim behind that turns away the next asker,
-    whichever of the two it is. The claim stands for the whole of the load,
-    the early refusals included, and is given back in the ``finally``.
+    whichever of the two it is; it names which of the two refused this one
+    in the same breath, so the toast cannot go out over a load that has
+    since ended. The claim stands for the whole of the load, the early
+    refusals included, and is given back in the ``finally``.
 
     A load that is accepted and then comes to nothing is announced where the
     reader is rather than left on the Models page's card; see
@@ -1072,7 +1076,7 @@ def switch_model(selected: str | None, precision: str = "full"):
         yield gr.skip(), gr.skip()
         return
     try:
-        claimed = runtime.MANAGER.reserve_exclusive_load(selected)
+        claimed, held = runtime.MANAGER.claim_exclusive_load(selected)
     except ValueError as error:
         yield gr.update(value=current), failure_card(
             "Could not load cached model", html.escape(str(error))
@@ -1081,7 +1085,7 @@ def switch_model(selected: str | None, precision: str = "full"):
     if claimed is None:
         alarm(
             "Cannot switch models now",
-            occupied_reason(SWITCH_LOADING, SWITCH_BUSY),
+            occupied_reason(held, SWITCH_LOADING, SWITCH_BUSY),
         )
         yield gr.update(value=current), gr.skip()
         return
