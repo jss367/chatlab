@@ -306,6 +306,7 @@ def fork_conversation(
     selected: dict | None,
     scale_name: str = DEFAULT_COLOR_SCALE,
     *sampling,
+    preserve_source: bool = False,
 ):
     """Copy the conversation into a new fork and switch to it.
 
@@ -314,14 +315,18 @@ def fork_conversation(
     the response it describes is still the last one on screen; a truncated
     copy loses it, the response having gone with the cut.
 
-    Forking cancels a running generation, as Undo, Clear and Load do, so the
-    turn that generator left behind is closed out here before it is copied.
+    The fork receives a finished snapshot of any partial reply. The background
+    job adapter keeps the original conversation's live response separate.
     """
 
     forks = copy_forks(forks)
     turns = copy_turns(turns)
-    finalize_partial(turns)
+    if not preserve_source:
+        finalize_partial(turns)
     put_branch(forks, forks["active"], turns)
+    # A fork is a static snapshot even when the original keeps generating.
+    turns = copy_turns(turns)
+    finalize_partial(turns)
     found = selected_turn(turns, selected)
     forked, box_text = fork_at(turns, found)
     name = library.claim_name(forks, FORK_PREFIX)
@@ -375,6 +380,8 @@ def switch_fork(
     turns: list[dict] | None,
     forks: dict | None,
     scale_name: str = DEFAULT_COLOR_SCALE,
+    *,
+    preserve_source: bool = False,
 ):
     """Put the conversation on screen away and bring another fork out."""
 
@@ -385,7 +392,8 @@ def switch_fork(
         return fork_refused(turns, forks, f"Already on {name}.")
 
     turns = copy_turns(turns)
-    finalize_partial(turns)
+    if not preserve_source:
+        finalize_partial(turns)
     put_branch(forks, forks["active"], turns)
     forks["active"] = name
     target = copy_turns(forks["branches"][name])
@@ -440,20 +448,21 @@ def new_conversation(
     forks: dict | None,
     scale_name: str = DEFAULT_COLOR_SCALE,
     *sampling,
+    preserve_source: bool = False,
 ):
     """Put the conversation on screen away and start an empty one.
 
     Unlike Fork, nothing is copied: the new chat begins with no turns, so the
     next message is measured against the system prompt alone. The message box
     is left as it is, since whatever is typed there is likely meant for the
-    new chat. Starting one cancels a running generation, as every branch
-    change does, so the turn that generator left behind is closed out before
-    it is put away.
+    new chat. This handler closes its snapshot before putting it away; the
+    background job adapter preserves any response still running in the source.
     """
 
     forks = copy_forks(forks)
     turns = copy_turns(turns)
-    finalize_partial(turns)
+    if not preserve_source:
+        finalize_partial(turns)
     put_branch(forks, forks["active"], turns)
     # The names in the file count too, so a chat another page started since
     # this one loaded is not given a twin the merge would take for it.

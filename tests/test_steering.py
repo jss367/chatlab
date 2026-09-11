@@ -465,7 +465,8 @@ class ConversationTests(unittest.TestCase):
         )]
         self.assertEqual(len(listeners), 8)  # Send and Enter each call chat.
         for listener in listeners:
-            self.assertEqual([item.label for item in listener.inputs[-3:]], [
+            controls = [item for item in listener.inputs if item.label is not None]
+            self.assertEqual([item.label for item in controls[-3:]], [
                 "Enable steering", "Steering strength", "Target layer (starting at 0)",
             ])
 

@@ -298,7 +298,9 @@ average beside a moved frame would be quietly wrong.
 
 ## Working with a conversation
 
-- **Stop** cancels the running generation and keeps whatever was produced so far.
+- Switching conversations, starting a new chat, or forking a conversation keeps the original response generating in the background. Its entry shows **Generating…**, and its response is saved as it progresses. Return to that conversation to see its latest text and token measurements.
+- **Stop** names the running conversation and works even while you are viewing another chat. It stops at the next generation update and keeps whatever was produced so far.
+- One response generates at a time. You can browse and draft messages elsewhere while it runs; wait for it to finish or press **Stop** before sending another message. Stop a running response before editing, undoing, loading into, or deleting its conversation, or clearing all conversations.
 - **Retry** regenerates the last reply. Because **🎲 New seed each response** is on by default, a retry actually explores a different sample; turn it off to lock the seed and reproduce a response exactly. The seed field always shows the seed that produced the response on screen.
 - Hovering a message in the transcript gives per-message retry, edit, and undo. Editing one of your messages truncates the conversation there and generates a new reply; editing a reply just corrects it in place. **↩️ Undo last** removes the last exchange and puts your message back in the input box.
 - **💾 Save conversation** writes a JSON file containing every turn, its reasoning block, and the system prompt, along with the model and token counts behind each reply. **📂 Load conversation** restores it.

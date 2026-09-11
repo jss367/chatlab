@@ -302,6 +302,15 @@ def current_metrics_generation() -> int:
     return _session_panel().generation
 
 
+def restore_chat_metrics_generation(generation: int) -> None:
+    """Make a conversation's cached measurements inspectable when shown again."""
+
+    session = _session_panel()
+    with _metrics_lock:
+        session.generation = generation
+        session.chat_generation = generation
+
+
 def current_strip_generation(source: str) -> int:
     """Date each source independently; only the ambient prompt uses the panel epoch."""
 
