@@ -37,7 +37,6 @@ from ui.common import (
     PAGES,
     RESPONSE_STRIP_LABEL,
     show_page,
-    status_card,
 )
 from token_metrics import (
     PROMPT_ATTENTION_SCALE,
@@ -93,6 +92,7 @@ from ui.inspection import (
     reset_inspection,
 )
 from model_discovery import DISCOVERY_ORDERS
+from ui.model_repository import UNCHECKED, check_model_repository, repository_view
 from ui.models_page import (
     BADGE_REFRESH_SECONDS,
     SEARCH_HINT,
@@ -109,6 +109,7 @@ from ui.models_page import (
     refresh_after_device,
     refresh_image_badge,
     refresh_model_actions,
+    refresh_current_model,
     refresh_model_badge,
     refresh_model_switch,
     refresh_my_models,
@@ -890,18 +891,29 @@ def build_app() -> gr.Blocks:
                 with gr.Row(elem_id="models-columns"):
                     with gr.Column(min_width=360, elem_id="model-controls"):
                         with gr.Column(elem_classes=["model-card"]):
-                            gr.Markdown("## Model")
-                            model_id = gr.Textbox(
-                                value=settings.model_id_at_startup(saved),
-                                label="Hugging Face model ID",
-                                placeholder="organization/model-name",
-                                info="The default OLMo 3 7B model is about 15 GB in full precision.",
-                            )
-                            hf_token = gr.Textbox(
-                                label="Hugging Face token (optional)",
-                                type="password",
-                                placeholder="Only needed for gated or private models",
-                            )
+                            gr.Markdown("## Currently loaded")
+                            with gr.Row(elem_id="current-model-row"):
+                                current_model = gr.HTML(refresh_current_model(), elem_id="currently-loaded-model", container=False, padding=False)
+                                unload_button = gr.Button("Unload", size="sm", scale=0, min_width=80)
+                        with gr.Column(elem_classes=["model-card"]):
+                            gr.Markdown("## Choose a model")
+                            with gr.Row(elem_id="model-id-row"):
+                                model_id = gr.Textbox(
+                                    value=settings.model_id_at_startup(saved),
+                                    label="Hugging Face model ID",
+                                    placeholder="organization/model-name",
+                                    info="Paste an ID or select a model below.",
+                                    scale=4,
+                                )
+                                check_model_button = gr.Button("Check model", size="sm", scale=1, min_width=100)
+                            repository_result = gr.State(None)
+                            repository_detail = gr.Markdown(UNCHECKED, elem_id="model-repository")
+                            with gr.Accordion("Access token", open=False, elem_classes=["model-access"]):
+                                hf_token = gr.Textbox(
+                                    label="Hugging Face token (optional)",
+                                    type="password",
+                                    placeholder="Only needed for gated or private models",
+                                )
                             weight_precision = gr.Radio(
                                 choices=[
                                     ("Full (16-bit)", "full"),
@@ -911,11 +923,9 @@ def build_app() -> gr.Blocks:
                                 value=saved.weight_precision,
                                 label="Weight precision",
                                 info=(
-                                    "On Apple Metal, 8-bit and 4-bit weights take about a "
-                                    "half and a quarter of the memory of full weights, at a "
-                                    "small cost in accuracy; the first quantized load fetches "
-                                    "the Metal kernels from the Hub. Other devices load full "
-                                    "weights whatever is chosen. Applies to the next load."
+                                    "Lower precision saves memory with some loss of accuracy. "
+                                    "Applies to the next Transformers load on Apple Metal; "
+                                    "MLX checkpoints use their existing precision."
                                 ),
                             )
                             model_availability = gr.Markdown(
@@ -927,14 +937,8 @@ def build_app() -> gr.Blocks:
                                 )
                                 download_button = gr.Button("Download only", size="sm")
                                 cached_button = gr.Button("Load cached", size="sm")
-                                unload_button = gr.Button("Unload", size="sm")
-                            model_status = gr.Markdown(
-                                status_card(
-                                    "No model loaded",
-                                    "Choose a model under My Models, or enter a Hugging Face model ID to download one. Files are kept in your normal Hugging Face cache.",
-                                ),
-                                elem_id="model-status",
-                            )
+                        with gr.Accordion("Latest model action", open=True, elem_classes=["model-activity"]):
+                            model_status = gr.Markdown("No downloads or loads started in this tab.", elem_id="model-status")
 
                         with gr.Column(elem_id="model-search", elem_classes=["model-card"]):
                             gr.Markdown("## Discover models")
@@ -1307,7 +1311,7 @@ def build_app() -> gr.Blocks:
         # rather than displacing it.
         models_inputs = [my_models, sort_models, weight_precision, model_id]
         models_outputs = [my_models, my_model_detail, my_models_summary]
-        action_inputs = [model_id, my_models]
+        action_inputs = [model_id, my_models, repository_result]
         action_outputs = [
             model_availability, download_load_button, download_button, cached_button
         ]
@@ -1320,6 +1324,24 @@ def build_app() -> gr.Blocks:
                 show_progress="hidden", trigger_mode="always_last",
                 concurrency_id="model-actions",
             )
+
+        # Slow network requests write ID-scoped state; rendering reads the field
+        # again so a completed request cannot verify a newer, unchecked ID.
+        for event in (check_model_button.click, model_id.submit, model_id.blur):
+            event(
+                check_model_repository, [model_id, hf_token], repository_result,
+                show_progress="hidden", concurrency_id="model-repository-check",
+                trigger_mode="always_last",
+            )
+        for control in (model_id, repository_result):
+            control.change(
+                repository_view, [model_id, repository_result],
+                [repository_detail, weight_precision], show_progress="hidden",
+                concurrency_id="model-repository-view", trigger_mode="always_last",
+            )
+        hf_token.input(lambda: None, None, repository_result, show_progress="hidden")
+        for event in (demo.load, nav.change, badge_timer.tick):
+            event(refresh_current_model, None, current_model, show_progress="hidden")
 
         def refresh_actions(event):
             return event.then(
@@ -1335,6 +1357,7 @@ def build_app() -> gr.Blocks:
 
             event = event.then(refresh_my_models, models_inputs, models_outputs)
             event = refresh_actions(event)
+            event = event.then(refresh_current_model, None, current_model, show_progress="hidden")
             # What is on disk is what the switcher offers, so it follows every
             # rescan, download-only included.
             event = event.then(

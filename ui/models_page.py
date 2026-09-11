@@ -57,6 +57,7 @@ from model_runtime import (
     sort_cached_models,
 )
 from ui import runtime
+from ui.model_repository import matching_repository
 from ui.common import (
     DEFAULT_MODEL_DOWNLOAD,
     DOWNLOAD_POLL_SECONDS,
@@ -415,7 +416,7 @@ def chosen_model(model_id: str, selected: str | None) -> str:
     return (selected or model_id or "").strip()
 
 
-def refresh_model_actions(model_id: str, selected: str | None):
+def refresh_model_actions(model_id: str, selected: str | None, repository: dict | None = None):
     """Show the actions appropriate to the chosen model's local files.
 
     A downloaded model is also named by kind, because this panel is where a
@@ -456,12 +457,15 @@ def refresh_model_actions(model_id: str, selected: str | None):
     elif cached.present:
         detail = "**Download incomplete** · Download and load will fetch the remaining files."
     else:
-        detail = "**Not downloaded** · Download the model to use it." if cleaned else "Enter a model ID or select a model."
+        detail = "**Not downloaded** · No local files for this model." if cleaned else "Enter a model ID or select a model."
     download = not (cached.complete or cached.unsupported)
+    checked = matching_repository(cleaned, repository)
+    can_download = checked.get("status") not in {"invalid", "missing", "checking", "restricted"}
+    can_load = can_download and not checked.get("unsupported", False)
     return (
         detail,
-        gr.update(visible=download),
-        gr.update(visible=download),
+        gr.update(visible=download, interactive=can_load),
+        gr.update(visible=download, interactive=can_download),
         gr.update(visible=cached.complete, variant="primary" if cached.complete else "secondary"),
     )
 
@@ -827,6 +831,13 @@ def refresh_model_badge():
 
     snapshot = model_snapshot()
     return loaded_model_badge(snapshot, kind=TEXT_KIND), _setup_links(snapshot, TEXT_KIND)
+
+
+def refresh_current_model():
+    """The Models page names either kind of loaded model without a page mismatch."""
+
+    snapshot = model_snapshot()
+    return loaded_model_badge(snapshot, kind=snapshot[3])
 
 
 def refresh_image_badge():

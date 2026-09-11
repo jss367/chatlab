@@ -2858,7 +2858,8 @@ class PageLayoutTests(unittest.TestCase):
         for control in (radio, model_id):
             self.assertTrue(any(fn.targets == [(control._id, "change")] for fn in listeners))
         for fn in listeners:
-            self.assertEqual(fn.inputs, [model_id, radio])
+            self.assertEqual(fn.inputs[:2], [model_id, radio])
+            self.assertIsInstance(fn.inputs[2], gr.State)
             self.assertEqual(fn.outputs[0], self.by_id("model-availability"))
             self.assertEqual(
                 [button.value for button in fn.outputs[1:]],
