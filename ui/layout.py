@@ -81,6 +81,7 @@ from ui.generation import (
     clear_chat,
     edit_message,
     hide_clear_confirm,
+    next_token,
     retry_last,
     retry_message,
     stop_generation,
@@ -384,12 +385,13 @@ def build_app() -> gr.Blocks:
                                         visible=False,
                                         elem_id="stop-button",
                                     )
-                                    # The three give up their usual minimum
+                                    # These controls give up their usual minimum
                                     # width to stay on Send's row. Left to
                                     # wrap, the last of them takes a line of
                                     # its own and reads as the widest, most
                                     # important button under the box.
                                     retry_button = gr.Button("🔁 Retry", min_width=80)
+                                    next_token_button = gr.Button("Next token", min_width=90)
                                     undo_button = gr.Button("↩️ Undo last", min_width=90)
                                     # Named for what it takes: this empties
                                     # the conversation on screen and deletes
@@ -682,6 +684,10 @@ def build_app() -> gr.Blocks:
                         with gr.Accordion("Branch response", open=False, elem_classes=["inspector-section"]):
                             with gr.Row():
                                 branch_button = gr.Button("🌱 Branch from token", size="sm")
+                            gr.Markdown(
+                                "For one step, choose an alternative and press **Next token** "
+                                "below the message box. Keep pressing it to extend the reply."
+                            )
                             with gr.Row():
                                 branch_text = gr.Textbox(
                                     label="Or type your own replacement",
@@ -1789,6 +1795,7 @@ def build_app() -> gr.Blocks:
             send_button.click(chat, chat_inputs, chat_outputs),
             prompt.submit(chat, chat_inputs, chat_outputs),
             retry_button.click(retry_last, chat_inputs, chat_outputs),
+            next_token_button.click(next_token, [branch_pick, *chat_inputs], chat_outputs),
             chatbot.retry(retry_message, chat_inputs, chat_outputs),
             chatbot.edit(edit_message, chat_inputs, chat_outputs),
             branch_button.click(

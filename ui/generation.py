@@ -422,6 +422,7 @@ def generate_reply(
     literal_text_ranges: tuple[tuple[int, int], ...] = (),
     branch_note: str = "",
     expected_load_id: str | None = None,
+    single_step: bool = False,
 ):
     """Stream one assistant reply for ``turns``, which must end with a user turn.
 
@@ -489,6 +490,7 @@ def generate_reply(
             literal_text_ranges=literal_text_ranges,
             branch_note=branch_note,
             expected_load_id=expected_load_id,
+            single_step=single_step,
         )
     finally:
         # Every exit runs this: a finished stream, a failure, and - the one
@@ -523,6 +525,7 @@ def _stream_reply(
     literal_text_ranges: tuple[tuple[int, int], ...] = (),
     branch_note: str = "",
     expected_load_id: str | None = None,
+    single_step: bool = False,
 ):
     """The body of generate_reply(), run with the generation slot held."""
 
@@ -698,6 +701,7 @@ def _stream_reply(
                 pending["tokens"] = metrics
                 pending["load_id"] = update.load_id
                 pending["metrics_generation"] = generation
+                pending["ends_on_stop_token"] = update.ends_on_stop_token
                 pending["generated_tokens"] = len(metrics)
                 status = generation_progress(len(metrics), started, used_seed)
                 if stream_note:
@@ -785,19 +789,16 @@ def _stream_reply(
     )
     pending["reasoning"] = reasoning
     pending["content"] = answer
-    # A generation can succeed and still leave nothing renderable behind: the
-    # first sampled token is a hidden EOS, the model emits only whitespace,
-    # which split_reasoning() strips away, or it opens and closes a reasoning
-    # block without writing in it. Publishing that turn would draw a blank
-    # bubble in display_messages() that model_messages() skips, so the visible
-    # conversation and the model's would disagree - the UI would show a reply
-    # the model never sees. finalize_partial() is what the failure and
-    # cancellation paths already use for exactly this, so success uses it too:
-    # it closes the reasoning block when the turn is worth keeping and drops
-    # the turn when it holds neither answer nor reasoning. Dropping it leaves
-    # the user turn without a reply, which is the honest shape - no assistant
-    # bubble is drawn, so both transcripts agree that no reply exists.
-    kept = finalize_partial(turns)
+    # Finished replies with no visible text are dropped, as on cancellation.
+    # A single step can contain only whitespace or a reasoning marker; keep
+    # those measured tokens so the next click can advance past them. The chat
+    # displays a pause notice while model_messages() skips the empty text.
+    if single_step and metrics and not pending.get("ends_on_stop_token"):
+        pending["token_step_paused"] = True
+        pending["reasoning_closed"] = True
+        kept = True
+    else:
+        kept = finalize_partial(turns)
     sampling = {
         "temperature": float(temperature),
         "top_p": float(top_p),
@@ -1249,6 +1250,7 @@ def branch_from(
     prompt_text: str,
     turns: list[dict] | None,
     *settings,
+    single_step: bool = False,
 ):
     """Replay the picked reply up to the picked token, swap it, and continue.
 
@@ -1295,6 +1297,12 @@ def branch_from(
         note = f"Resampling from token {at} ({pick['text']!r})."
     else:
         note = f"Branched at token {at}: {pick['text']!r} instead of {pick['original']!r}."
+    if single_step:
+        settings = (*settings[:6], 1, *settings[7:])
+        note = (
+            f"Keeping through token {at}; generating one next token."
+            if unchanged else f"{note} Generating one next token."
+        )
 
     # As in branch_with_text(): the check above is the fast path, and the
     # runtime compares the same load again under the model lock.
@@ -1312,12 +1320,51 @@ def branch_from(
             ),
             branch_note=note,
             expected_load_id=expected_load,
+            single_step=single_step,
         )
     except ModelChanged:
         # ``turns`` is still the whole conversation, old response included.
         yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
     except SteeringError as error:
         yield idle_state(prompt_text, turns, failure_status("Could not branch", str(error)), clear_tokens=True)
+
+
+def next_token(pick, prompt_text, turns, *settings):
+    """Branch from a chosen alternative, or extend the latest reply, by one token."""
+
+    held = occupied()
+    if held:
+        yield busy_state(held)
+        return
+    turns = copy_turns(turns)
+    if not runtime.MANAGER.loaded:
+        yield no_model_state(prompt_text, turns)
+        return
+    if not pick:
+        turn = turns[-1] if turns else {}
+        metrics = turn_tokens(turn)
+        if turn.get("role") != "assistant" or not metrics:
+            yield idle_state(prompt_text, turns, "Generate a reply and choose a token alternative first.")
+            return
+        if turn.get("load_id") != runtime.MANAGER.load_id:
+            yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+            return
+        if turn.get("ends_on_stop_token"):
+            yield idle_state(prompt_text, turns, "This reply has ended. Choose an earlier token alternative to branch from.")
+            return
+        metric = metrics[-1]
+        pick = {
+            "source": "turn",
+            "turn": len(turns) - 1,
+            "index": len(metrics) - 1,
+            "at_generation": turn.get("metrics_generation"),
+            "at_token_id": metric["token_id"],
+            "token_id": metric["token_id"],
+            "original_id": metric["token_id"],
+            "text": metric["text"],
+            "original": metric["text"],
+        }
+    yield from branch_from(pick, prompt_text, turns, *settings, single_step=True)
 
 
 def undo_from(

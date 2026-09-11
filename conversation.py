@@ -61,7 +61,9 @@ TURN_ORIGIN_FIELDS = {"model": str, "prompt_tokens": int, "generated_tokens": in
 
 # What a reply carries of its own measurements. These never reach the file;
 # see the module docstring for why.
-TURN_MEASUREMENT_FIELDS = ("tokens", "load_id", "metrics_generation")
+TURN_MEASUREMENT_FIELDS = (
+    "tokens", "load_id", "metrics_generation", "ends_on_stop_token", "token_step_paused",
+)
 
 # The sampling a conversation can carry of its own, and the type each must
 # have in a saved file. The settings module owns what the values may be; this
@@ -213,6 +215,8 @@ def display_messages(
             )
             index_map.append((position, "reasoning"))
         if content or not reasoning:
+            if not content and turn.get("token_step_paused"):
+                content = "Paused before visible text. Press Next token to continue."
             messages.append({"role": turn["role"], "content": content})
             index_map.append((position, "content"))
 

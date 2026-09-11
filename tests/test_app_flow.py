@@ -489,7 +489,7 @@ class ChatFlowTests(unittest.TestCase):
         selection, pick = chat.outputs[-2:]
         resets = {
             "chat", "retry_last", "retry_message", "edit_message", "branch_from",
-            "branch_with_text", "undo_last", "undo_message", "clear_chat",
+            "branch_with_text", "next_token", "undo_last", "undo_message", "clear_chat",
             "fork_conversation", "new_conversation", "switch_fork", "delete_fork",
             "load_with_steering", "score_text",
         }
@@ -3283,6 +3283,101 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertEqual(len(listener.outputs), CHAT_OUTPUTS)
 
 
+class NextTokenTests(unittest.TestCase):
+    def setUp(self):
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
+
+    def reply(self):
+        return list(app.chat("hi", [], *SETTINGS))[-1]
+
+    def step(self, frame, pick=None):
+        return list(app.next_token(pick, "draft", frame[TURNS], *SETTINGS))[-1]
+
+    def pick(self, frame, index=0, token_id=3):
+        selected = click_token(frame, index)
+        _, pick = app.choose_alternative(
+            frame[TURNS], frame[METRICS], app.empty_metrics(), selected, cell(0)
+        )
+        return dict(pick, token_id=token_id, text=THINK_PIECES[token_id])
+
+    def test_branch_then_repeated_clicks_append_exactly_one_token(self):
+        initial = self.reply()
+        frames = list(app.next_token(self.pick(initial), "draft", initial[TURNS], *SETTINGS))
+        first = frames[-1]
+        self.assertEqual([m["token_id"] for m in first[TURNS][-1]["tokens"]], [3, 2])
+        self.assertIsNone(frames[0][BRANCH_PICK])
+        for count in (3, 4, 5):
+            previous = first
+            first = self.step(previous)
+            tokens = first[TURNS][-1]["tokens"]
+            self.assertEqual(len(tokens), count)
+            self.assertEqual(
+                [m["token_id"] for m in tokens[:-1]],
+                [m["token_id"] for m in previous[TURNS][-1]["tokens"]],
+            )
+            self.assertEqual(len(first[TURNS]), 2)
+            self.assertEqual(first[PROMPT], "draft")
+            self.assertEqual(first[TRACE]["sampling"]["max_new_tokens"], 1)
+            self.assertEqual(first[TRACE]["sampling"]["forced_prefix_tokens"], count - 1)
+        self.assertEqual(FIXED["max_new_tokens"], 8)
+
+    def test_a_completed_reply_cannot_advance_but_can_be_branched(self):
+        runtime.MANAGER.model.script = [2, THINK_EOS]
+        initial = self.reply()
+        with mock.patch.object(runtime.MANAGER, "generate") as generate:
+            refused = self.step(initial)
+        generate.assert_not_called()
+        self.assertEqual(refused[TURNS], initial[TURNS])
+        self.assertIn("has ended", refused[STATUS])
+        runtime.MANAGER.model.script = [2]
+        branched = self.step(initial, self.pick(initial))
+        self.assertEqual(len(branched[TURNS][-1]["tokens"]), 2)
+
+    def test_sampling_a_stop_token_ends_stepping(self):
+        initial = self.reply()
+        runtime.MANAGER.model.script = [THINK_EOS]
+        last = self.step(initial)
+        self.assertTrue(last[TURNS][-1]["ends_on_stop_token"])
+        self.assertEqual(len(last[TURNS][-1]["tokens"]), 9)
+        self.assertIn("has ended", self.step(last)[STATUS])
+
+    def test_invisible_reasoning_tokens_survive_until_visible_text(self):
+        initial = self.reply()
+        runtime.MANAGER.model.script = [1]
+        paused = self.step(initial, self.pick(initial, token_id=0))
+        self.assertEqual([m["token_id"] for m in paused[TURNS][-1]["tokens"]], [0, 1])
+        self.assertIn("Paused before visible text", paused[CHATBOT][-1]["content"])
+        self.assertEqual(model_messages(paused[TURNS]), [{"role": "user", "content": "hi"}])
+        runtime.MANAGER.model.script = [2]
+        resumed = self.step(paused)
+        self.assertEqual(resumed[TURNS][-1]["content"], "Hello")
+        self.assertEqual(len(resumed[TURNS][-1]["tokens"]), 3)
+
+    def test_reloaded_model_and_edited_reply_are_refused(self):
+        initial = self.reply()
+        runtime.MANAGER.load_count += 1
+        self.assertEqual(self.step(initial)[STATUS], app.BRANCH_MODEL_CHANGED)
+        edited = forget_measurements(initial[TURNS], 1)
+        refused = list(app.next_token(None, "draft", edited, *SETTINGS))[-1]
+        self.assertEqual(refused[TURNS], edited)
+        self.assertIn("choose a token alternative", refused[STATUS])
+
+    def test_busy_click_does_not_publish_stale_turns(self):
+        runtime.MANAGER.claim_generation()
+        self.addCleanup(runtime.MANAGER.release_generation)
+        refused = list(app.next_token(None, "draft", [], *SETTINGS))[-1]
+        self.assertEqual(refused[TURNS], gr.skip())
+        self.assertEqual(refused[STATUS], app.BUSY_STATUS)
+
+    def test_button_is_wired_as_a_cancellable_generation(self):
+        demo = app.build_app()
+        listener = next(fn for fn in demo.fns.values() if fn.fn is app.next_token)
+        self.assertEqual(len(listener.inputs), 1 + 2 + len(SETTINGS) + 4)
+        self.assertEqual(len(listener.outputs), CHAT_OUTPUTS)
+
+
 class ForkTests(unittest.TestCase):
     """Copy the transcript into a second fork and move between them."""
 
@@ -4255,6 +4350,7 @@ class CancelWiringTests(unittest.TestCase):
                 "load_with_steering",
                 "branch_from",
                 "branch_with_text",
+                "next_token",
                 "fork_conversation",
                 "switch_fork",
                 "delete_fork",
