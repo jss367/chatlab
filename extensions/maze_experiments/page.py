@@ -287,10 +287,15 @@ def _build_page(context):
         """Walk the recorded responses. Cancelled by Stop playback and by anything that replaces the episode."""
         if ep.busy:
             raise gr.Error("Pause the episode before playing it back.")
+        with ep.lock:
+            ep.playback_token += 1
+            token = ep.playback_token
         start = viewing(ep)
         for index in range(start, len(ep.turns)):
             if index > start:
                 time.sleep(max(.1, float(seconds)))
+            if ep.playback_token != token:
+                return  # A later Play from here owns the view now.
             yield views(ep, show, selections, session_id, index, animate=True)
 
     def stop_playback(ep):

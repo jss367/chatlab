@@ -52,6 +52,9 @@ class Episode:
     # The response the viewer last drew. Previous, Next and playback move
     # relative to it, so a rapid second click cannot resend a stale index.
     viewing: int = -1
+    # Which playback run owns the view. Starting one supersedes the last, so
+    # two runs in the same session cannot repaint each other's frames.
+    playback_token: int = 0
     created_at: float = field(default_factory=time.time)
 
     def __deepcopy__(self, memo):

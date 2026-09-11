@@ -337,6 +337,17 @@ class MazeTests(unittest.TestCase):
                 with mock.patch('extensions.maze_experiments.page.time.sleep') as sleep:
                     self.assertEqual([selected(frame) for frame in playback.fn(replay, False, session, .4)], [1])
                 sleep.assert_not_called()
+                # Starting playback again supersedes the run already going, so
+                # the older one cannot repaint a response the newer passed.
+                replay.viewing = -1
+                superseded = playback.fn(replay, False, session, .4)
+                self.assertEqual(selected(next(superseded)), -1)
+                replay.viewing = -1
+                current = playback.fn(replay, False, session, .4)
+                self.assertEqual(selected(next(current)), -1)
+                with mock.patch('extensions.maze_experiments.page.time.sleep'):
+                    self.assertEqual(list(superseded), [])
+                    self.assertEqual([selected(frame) for frame in current], [0, 1])
                 with mock.patch.object(gr, 'Info') as info:
                     self.assertIn('Replay', callbacks['stop_playback'].fn(replay))
                 info.assert_called_once()
