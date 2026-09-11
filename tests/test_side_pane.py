@@ -1355,9 +1355,15 @@ class ModelFitTests(unittest.TestCase):
     def test_the_verdicts_are_the_words_the_stylesheet_looks_for(self):
         # The CSS tints options by their label text, the only hook Gradio's
         # Radio gives a stylesheet, so the words and the selectors have to
-        # stay spelled the same.
-        for verdict in ("· won't fit", "· tight"):
+        # stay spelled the same. "unsupported" is greyed by the same rule as
+        # "won't fit": both mean the row will not load.
+        for verdict in ("· won't fit", "· tight", "· unsupported"):
             self.assertIn(f'[data-testid*="{verdict}"]', app.CSS)
+
+    def test_a_row_that_fits_is_left_untinted(self):
+        # Most of the list fits, so tinting it would leave nothing to stand
+        # out; only the rows that need a second look are coloured.
+        self.assertNotIn('[data-testid*="· fits"]', app.CSS)
 
     def test_a_reload_at_another_precision_is_judged_again(self):
         # Load cached on the model in memory is how a new precision is
@@ -3208,6 +3214,18 @@ class PageLayoutTests(unittest.TestCase):
         ((block_id, _),) = ask.targets
 
         self.assertEqual(self.demo.blocks[block_id].value, "🗑️ Clear all")
+
+    def test_clear_stands_under_the_list_of_what_it_takes(self):
+        # Under the message box it sat among Retry, Undo and Send, all of
+        # which act on the one conversation on screen, and read as another
+        # of them. It takes every conversation, so it belongs under the list
+        # of them, beside New, Fork and Delete.
+        (ask,) = self.listeners("ask_clear_chat")
+        ((block_id, _),) = ask.targets
+        pane = self.by_id("conversation-pane")
+
+        self.assertTrue(self.within(self.demo.blocks[block_id], pane))
+        self.assertTrue(self.within(self.by_id("clear-confirm"), pane))
 
     def test_the_offer_sits_beside_the_badge_that_says_it_is_needed(self):
         # The badge names the missing model; the offer is what to do about

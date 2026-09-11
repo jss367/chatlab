@@ -16,6 +16,7 @@ import settings
 import settings_sandbox
 from extension_api import ModelService, NavigationService, TokenInspector
 from model_runtime import GENERATING, LOADING
+from extensions.maze_experiments.maze import default_instruction
 from extensions.registry import ExtensionSpec, LoadedExtension, load_enabled
 from ui.extensions_page import save_extensions
 
@@ -323,26 +324,32 @@ class ExtensionSettingsTests(unittest.TestCase):
         try:
             mode = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'maze-goal-mode')
             hint = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'maze-goal-hint')
+            wording = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'maze-instruction')
             select = next(fn for fn in demo.fns.values() if fn.targets == [(mode._id, 'input')])
             prepare = next(fn for fn in demo.fns.values() if getattr(fn.fn, '__name__', '') == 'prepare_episode')
             values = [b.value for b in prepare.inputs]
             original = values[0]
             supplied = select.outputs[1]
             for choice in ('hidden', 'hint', 'coordinates'):
-                updates = select.fn(choice)
+                updates = select.fn(choice, values[prepare.inputs.index(wording)])
                 self.assertEqual(updates[0]['visible'], choice == 'hint')
                 self.assertEqual(updates[1], gr.skip() if choice == 'coordinates' else 0)
+                self.assertEqual(updates[2], default_instruction(choice))
                 self.assertEqual(original.config['goal_mode'], 'coordinates')
                 values[prepare.inputs.index(mode)] = choice
                 values[prepare.inputs.index(hint)] = 'The goal lies near an edge.'
                 values[prepare.inputs.index(supplied)] = 0
+                values[prepare.inputs.index(wording)] = updates[2]
                 result = prepare.fn(*values)
                 new = result[0]
                 self.assertEqual(new.config['goal_mode'], choice)
+                self.assertEqual(new.config['instruction'], default_instruction(choice))
                 self.assertEqual(new.supplied_moves, 0)
                 self.assertEqual('destination' in new.model_state(), choice == 'coordinates')
                 label = {'hidden': 'Hidden location', 'hint': 'Hint only', 'coordinates': 'Exact coordinates'}[choice]
                 self.assertIn(f'**Goal information:** {label}', result[2])
+            # Wording you typed yourself survives a change of goal mode.
+            self.assertEqual(select.fn('hidden', 'Walk to the star.')[2], gr.skip())
             values[prepare.inputs.index(mode)] = 'hint'
             values[prepare.inputs.index(hint)] = ' '
             with self.assertRaises(gr.Error):

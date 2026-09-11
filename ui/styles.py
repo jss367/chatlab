@@ -454,8 +454,13 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 .dark .model-list label[data-testid*="· incomplete"] span {{ color: #fbbf24; }}
 /* The fit verdicts are read off the same label. A model that cannot fit is
    greyed rather than reddened: it is not an error, and the reader may be
-   looking at it to find that out. */
-.model-list label[data-testid*="· won't fit"]:not(.selected) span {{
+   looking at it to find that out. A model in a format ChatLab cannot load
+   is greyed for the same reason and by the same rule: both words mean the
+   row will not load, so both rows look alike. Rows that fit are left plain,
+   as they are most of the list and tinting them would leave nothing to
+   stand out. */
+.model-list label[data-testid*="· won't fit"]:not(.selected) span,
+.model-list label[data-testid*="· unsupported"]:not(.selected) span {{
   color: var(--body-text-color-subdued);
 }}
 .model-list label[data-testid*="· tight"] span {{ color: #b45309; }}
@@ -466,11 +471,14 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
   background: rgba(217, 119, 6, 0.09);
 }}
 /* Clear deletes every conversation, so it asks first, in the same amber
-   panel the model removal uses. */
+   panel the model removal uses. It stands in the conversations pane, which
+   is narrow, so the question is set smaller than body text and the two
+   answers stack. */
 .clear-confirm {{
   border: 1px solid #d97706; border-radius: 8px; padding: 0.4rem 0.6rem;
-  background: rgba(217, 119, 6, 0.09);
+  background: rgba(217, 119, 6, 0.09); gap: 0.4rem;
 }}
+#clear-confirm p {{ font-size: 0.8rem; margin: 0; }}
 .model-detail {{ font-size: 0.85rem; }}
 .model-detail p, .model-detail ul, .model-detail li {{ margin: 0.15rem 0; }}
 .model-detail code {{ word-break: break-all; }}

@@ -286,6 +286,25 @@ def build_app() -> gr.Blocks:
                     new_button = gr.Button("➕ New", size="sm", min_width=60)
                     fork_button = gr.Button("🌿 Fork", size="sm", min_width=60)
                     delete_fork_button = gr.Button("🗑️ Delete", size="sm", min_width=60)
+                # Named for what it takes: this empties the conversation on
+                # screen and deletes every other one with it. It stands under
+                # the list of everything it would take rather than under one
+                # conversation's message box, where it read as a control of
+                # that conversation alone. A fourth button would not fit the
+                # row above, so it takes the pane's width on its own line.
+                clear_button = gr.Button("🗑️ Clear all", size="sm")
+                with gr.Column(
+                    visible=False,
+                    elem_id="clear-confirm",
+                    elem_classes=["clear-confirm"],
+                ) as clear_confirm:
+                    clear_question = gr.Markdown("")
+                    # The pane is too narrow for the two answers to share a
+                    # row, so they stack.
+                    confirm_clear_button = gr.Button(
+                        "Clear everything", variant="stop", size="sm"
+                    )
+                    cancel_clear_button = gr.Button("Cancel", size="sm")
 
             # The three pages share the rest of the width; one is visible at a
             # time, chosen by the nav.
@@ -412,23 +431,6 @@ def build_app() -> gr.Blocks:
                                     retry_button = gr.Button("🔁 Retry", min_width=80)
                                     next_token_button = gr.Button("Next token", min_width=90)
                                     undo_button = gr.Button("↩️ Undo last", min_width=90)
-                                    # Named for what it takes: this empties
-                                    # the conversation on screen and deletes
-                                    # every other one with it.
-                                    clear_button = gr.Button("🗑️ Clear all", min_width=90)
-                                with gr.Column(
-                                    visible=False,
-                                    elem_id="clear-confirm",
-                                    elem_classes=["clear-confirm"],
-                                ) as clear_confirm:
-                                    clear_question = gr.Markdown("")
-                                    with gr.Row():
-                                        confirm_clear_button = gr.Button(
-                                            "Clear everything", variant="stop", size="sm"
-                                        )
-                                        cancel_clear_button = gr.Button(
-                                            "Cancel", size="sm"
-                                        )
 
                                 generation_status = gr.Markdown("Ready.", elem_id="generation-status")
                                 with gr.Accordion("Conversation tools", open=False, elem_id="conversation-tools"):

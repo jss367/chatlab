@@ -19,21 +19,26 @@ INSTRUCTION = (
 GOAL_MODES = {"coordinates": "Exact coordinates", "hidden": "Hidden location", "hint": "Hint only"}
 
 
-def goal_instruction(mode, hint=""):
+HIDDEN_INSTRUCTION = (
+    "There is a destination somewhere in an open cell of this maze. Its location is hidden. "
+    "Explore using legal moves until you find it. Use the move tool to change position. "
+    "The simulator's map and position are authoritative. "
+    "The task ends when the simulator reports arrival at the destination."
+)
+HINT_INSTRUCTION = HIDDEN_INSTRUCTION + " Use the goal_hint in the state as a clue to the destination."
+
+
+def default_instruction(mode):
+    """The instruction a goal mode sends when the scenario supplies no wording of its own."""
     if mode not in GOAL_MODES:
         raise ValueError("Choose exact coordinates, hidden location, or hint only for goal information.")
-    if mode == "coordinates":
-        return INSTRUCTION
-    instruction = (
-        "There is a destination somewhere in an open cell of this maze. Its location is hidden. "
-        "Explore using legal moves until you find it. Use the move tool to change position. "
-        "The simulator's map and position are authoritative. "
-        "The task ends when the simulator reports arrival at the destination."
-    )
-    if mode == "hint":
-        if not isinstance(hint, str) or not hint.strip():
-            raise ValueError("Enter a goal hint for hint-only mode.")
-        instruction += " Use the goal_hint in the state as a clue to the destination."
+    return {"coordinates": INSTRUCTION, "hidden": HIDDEN_INSTRUCTION, "hint": HINT_INSTRUCTION}[mode]
+
+
+def goal_instruction(mode, hint=""):
+    instruction = default_instruction(mode)
+    if mode == "hint" and (not isinstance(hint, str) or not hint.strip()):
+        raise ValueError("Enter a goal hint for hint-only mode.")
     return instruction
 
 
@@ -231,14 +236,18 @@ def apply_call(maze, position, args, *, goal_mode="coordinates"):
             "error": None, "arrived": after == maze.goal, "progress": distances[after] < distances[position]}
 
 
-def initial_history(maze, supplied_moves=3, *, goal_mode="coordinates", goal_hint=""):
-    instruction = goal_instruction(goal_mode, goal_hint)
+def initial_history(maze, supplied_moves=3, *, goal_mode="coordinates", goal_hint="", system=SYSTEM, instruction=None):
+    # The goal mode is validated whatever the wording, because it also decides
+    # what every simulator reply discloses. Supplied wording only replaces text.
+    default = goal_instruction(goal_mode, goal_hint)
+    instruction = default if instruction is None else instruction
     route = maze.route()
     if not 0 <= supplied_moves < len(route) - 1:
         raise ValueError("Supplied moves must leave at least one move before the destination.")
     position = maze.start
-    messages = [{"role": "system", "content": SYSTEM},
-                {"role": "user", "content": instruction + "\n" + json.dumps(maze.state(position, goal_mode=goal_mode, goal_hint=goal_hint), separators=(",", ":"))}]
+    state = json.dumps(maze.state(position, goal_mode=goal_mode, goal_hint=goal_hint), separators=(",", ":"))
+    messages = [{"role": "system", "content": system},
+                {"role": "user", "content": "\n".join(filter(None, [instruction, state]))}]
     events = []
     for after in route[1:supplied_moves + 1]:
         direction = next(d for d, q in maze.neighbors(position).items() if q == after)
