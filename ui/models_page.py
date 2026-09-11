@@ -48,6 +48,7 @@ from model_runtime import (
     list_cached_models,
     mlx_available,
     mlx_bits_from_id,
+    mlx_snapshot_bits,
     model_fit,
     search_hub_models,
     snapshot_folder,
@@ -896,6 +897,42 @@ def weight_bits(precision: str | None, profile: DeviceProfile) -> int | None:
     return QUANTIZED_BITS.get(precision or "full")
 
 
+def requested_bits(
+    precision: str | None, profile: DeviceProfile, kind: str | None
+) -> int | None:
+    """:func:`weight_bits`, except where the radio has no say over the width.
+
+    A pipeline is estimated whole whatever the radio says, because the Metal
+    quantizer is Transformers' own and ``_load_locked`` clears the choice for
+    one. An MLX repo was packed when it was converted and loads at that
+    width, so the radio has nothing to add there either. A verdict that
+    carried the bits anyway would put a quantized label on a figure not
+    measured at one, and moving the radio would mark the loaded model as
+    being about to reload when nothing would change.
+    """
+
+    if kind in (IMAGE_KIND, MLX_KIND):
+        return None
+    return weight_bits(precision, profile)
+
+
+def packed_bits(
+    snapshot: Path | None, kind: str | None, requested: int | None
+) -> int | None:
+    """The width a load of ``snapshot`` will really pack its linear layers into.
+
+    ``requested`` for anything but MLX, where the radio decides as far as
+    the device allows. An MLX repo answers for itself, out of the config
+    ``mlx_lm.convert`` wrote: that is the width the estimate is of and the
+    width the verdict has to name, because saying "full 16-bit weights"
+    over a 4-bit conversion's figure would misread it by four times.
+    """
+
+    if kind != MLX_KIND or snapshot is None:
+        return requested
+    return mlx_snapshot_bits(snapshot)
+
+
 def cached_fit(
     entry: CachedModel, precision: str | None, profile: DeviceProfile
 ) -> Fit | None:
@@ -914,27 +951,27 @@ def cached_fit(
 
     if entry.status.missing_files or entry.status.unsupported:
         return None
-    # An MLX repo loads at the width it was packed to, so moving the radio
-    # asks nothing new of it.
-    reloading = entry.status.kind != MLX_KIND and weight_bits(
-        precision, profile
-    ) != weight_bits(runtime.MANAGER.precision, profile)
+    kind = entry.status.kind
+    # What the radio asks of this kind, which for a pipeline and an MLX repo
+    # is nothing: moving it asks nothing new of either, so neither is marked
+    # as about to reload.
+    requested = requested_bits(precision, profile, kind)
+    reloading = requested != requested_bits(runtime.MANAGER.precision, profile, kind)
     if runtime.MANAGER.model_id == entry.model_id and not reloading:
         return None
     snapshot = snapshot_folder(entry.path) if entry.path is not None else None
     if snapshot is None:
         return None
     # The size depends on the kind too: a pipeline has no checkpoint at its
-    # root to measure. The pool is already the one for this kind - the
-    # caller chose it, because choosing it here would re-read the device and
+    # root to measure, and an MLX repo is measured as the packed file it
+    # already is. The pool is already the one for this kind - the caller
+    # chose it, because choosing it here would re-read the device and
     # discard the memory the impending unload gives back.
+    bits = packed_bits(snapshot, kind, requested)
     estimated = estimate_snapshot_bytes(
-        snapshot,
-        profile.dtype or ASSUMED_DTYPE,
-        weight_bits(precision, profile),
-        entry.status.kind,
+        snapshot, profile.dtype or ASSUMED_DTYPE, bits, kind
     )
-    return model_fit(estimated, profile)
+    return model_fit(estimated, profile, bits)
 
 
 def replacement_profile(kind: str = TEXT_KIND) -> DeviceProfile:
@@ -997,6 +1034,8 @@ def hub_fit(
     The Metal quantizer is Transformers' own and ``_load_locked`` clears the
     choice for a pipeline, so honouring it here would shrink the estimate
     for a load that will not shrink and advertise a fit the load refuses.
+    An MLX repo is judged at the width its name claims, again whatever the
+    radio says, because that is the width it was converted to.
     """
 
     if not result.parameters:
@@ -1005,16 +1044,16 @@ def hub_fit(
         # Packed already, at whatever width the converter chose; the radio
         # has no say. The width is read off the repository's name, which is
         # how mlx-community spells it, and a name that does not say is
-        # judged whole rather than at a width it may not have.
+        # judged whole rather than at a width it may not have. It is the
+        # width the verdict names too, so a 4-bit conversion is not
+        # described as full weights.
         bits = mlx_bits_from_id(result.model_id)
-    elif kind == IMAGE_KIND:
-        bits = None
     else:
-        bits = weight_bits(precision, profile)
+        bits = requested_bits(precision, profile, kind)
     estimated = estimate_parameter_bytes(
         result.parameters, profile.dtype or ASSUMED_DTYPE, bits
     )
-    return model_fit(estimated, profile)
+    return model_fit(estimated, profile, bits)
 
 
 def hub_fits(

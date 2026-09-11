@@ -856,6 +856,32 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertIn("· fits", label)
         self.assertLess(label.index("· image"), label.index("· fits"))
 
+    def test_an_image_pipeline_is_judged_at_the_precision_it_is_measured_at(self):
+        # A pipeline is sized whole whatever the radio says - the Metal
+        # quantizer is Transformers' own and the load clears the choice for
+        # one - so carrying the bits into the verdict would put a quantized
+        # label on a full-size figure.
+        profile = model_runtime.DeviceProfile(
+            backend="mps",
+            dtype="float16",
+            total=48 * 1024**3,
+            available=40 * 1024**3,
+        )
+        measured = []
+
+        def estimate(snapshot, dtype, bits, kind):
+            measured.append((kind, bits))
+            return 5 * 1024**3
+
+        with mock.patch.object(models_page, "estimate_snapshot_bytes", estimate):
+            with mock.patch.object(models_page, "snapshot_folder", lambda path: path):
+                pipeline = models_page.cached_fit(PIPELINE, "4-bit", profile)
+                text = models_page.cached_fit(cached("org/text"), "4-bit", profile)
+
+        self.assertEqual(measured, [(IMAGE_KIND, None), (TEXT_KIND, 4)])
+        self.assertIn("of full 16-bit weights", pipeline.note)
+        self.assertIn("of 4-bit weights", text.note)
+
     def test_a_text_model_is_not_flagged_with_a_kind_in_the_list(self):
         # Text models are the majority and the default: a word on every row
         # to distinguish the exception would put one on every row.
@@ -1055,8 +1081,26 @@ class ModelFitTests(unittest.TestCase):
         _box, detail = app.select_my_model(OLMO, "full")
 
         self.assertIn("Memory", detail)
-        self.assertIn("15.0 GB of weights", detail)
+        self.assertIn("15.0 GB of full 16-bit weights", detail)
         self.assertIn("40.0 GB", detail)
+
+    def test_the_verdict_names_the_precision_it_was_measured_at(self):
+        # The figure moves several-fold with the radio, so a note that left
+        # the precision out would look as though it had changed by itself.
+        _box, detail = app.select_my_model(OLMO, "4-bit")
+
+        self.assertIn("of 4-bit weights", detail)
+        self.assertNotIn("15.0 GB", detail)
+
+    def test_a_precision_this_device_ignores_is_not_claimed_in_the_verdict(self):
+        # A quantized choice is honoured on Apple Metal alone, and the load
+        # clears it everywhere else. Naming what the load will really do is
+        # how a reader on a graphics card learns their choice changed nothing.
+        roomy(self, backend="cuda", dtype="bfloat16")
+
+        _box, detail = app.select_my_model(OLMO, "4-bit")
+
+        self.assertIn("15.0 GB of full 16-bit weights", detail)
 
     def test_a_replacement_is_judged_after_the_loaded_model_is_given_back(self):
         # A load unloads first and only then checks whether the next model
@@ -3019,6 +3063,42 @@ class MlxModelsPaneTests(unittest.TestCase):
 
         self.assertEqual(packed.estimated, estimate_parameter_bytes(7_000_000_000, "float16", 4))
         self.assertEqual(whole.estimated, estimate_parameter_bytes(7_000_000_000, "float16", None))
+        # And the note names the width the figure was measured at, which for
+        # the packed one is the name's and not the radio's.
+        self.assertIn("of 4-bit weights", packed.note)
+        self.assertIn("of full 16-bit weights", whole.note)
+
+    def test_a_cached_mlx_verdict_names_the_width_it_was_converted_to(self):
+        # The radio is at full and the repo is at four bits. The figure is
+        # of the packed file already on disk, so calling it full 16-bit
+        # weights would misread it by four times.
+        GB = 1024**3
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        config = json.dumps(
+            {
+                "model_type": "qwen3",
+                "architectures": ["Qwen3ForCausalLM"],
+                "quantization": {"group_size": 64, "bits": 4},
+            }
+        )
+        folder = lay_out(
+            root, MLX.model_id, {"config.json": config.encode(), "model.safetensors": b""}
+        )
+        with (folder / "blobs" / "blob1").open("r+b") as weights:
+            weights.truncate(2 * GB)
+        entry = cached(
+            MLX.model_id,
+            status=CacheStatus(cached_bytes=2 * GB, kind=model_runtime.MLX_KIND),
+            path=folder,
+        )
+        profile = model_runtime.DeviceProfile(
+            backend="mps", dtype="float16", total=48 * GB, available=40 * GB
+        )
+
+        fit = models_page.cached_fit(entry, "full", profile)
+
+        self.assertIn("2.0 GB of 4-bit weights", fit.note)
 
     def test_an_mlx_model_is_judged_against_the_machine_not_the_metal_cap(self):
         # 20 GB of packed weights on a 48 GB Mac with 30 GB free and a 16 GB

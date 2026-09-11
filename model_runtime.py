@@ -300,6 +300,21 @@ def mlx_bits_from_id(model_id: str) -> int | None:
     return mlx_runtime.bits_from_name(model_id)
 
 
+def mlx_snapshot_bits(snapshot: Path) -> int | None:
+    """The width an MLX repo on disk was converted to, or ``None`` for none.
+
+    Read from the repo's own config rather than guessed from its name, which
+    is what :func:`mlx_bits_from_id` has to settle for on a search result.
+    This is the width such a load really packs its linear layers into, so it
+    is what the estimate, the refusal and the fit verdict name: the precision
+    radio has no say over an MLX repo, and a message that reported the radio
+    would tell a reader their 4-bit model needed full 16-bit weights.
+    """
+
+    block = mlx_runtime.mlx_quantization(mlx_runtime.read_mlx_config(snapshot))
+    return None if block is None else block["bits"]
+
+
 # File endings that hold model weights in some framework or other. A file
 # with one of these where a Transformers checkpoint would not put it is the
 # positive evidence that a snapshot is a repo of another kind.
@@ -1241,6 +1256,28 @@ def memory_note(count: int | None) -> str:
     return "unknown" if count is None else format_memory(count)
 
 
+def weights_note(load_dtype_name: str | None, bits: int | None = None) -> str:
+    """How an estimate read the weights: ``4-bit weights``, ``full 16-bit weights``.
+
+    The same model estimates several-fold apart across these, so the figure
+    says little on its own: 13.6 GB is a refusal to a reader who chose four
+    bits and a fair reading to one who did not. ``bits`` is what the load
+    will actually pack the linear layers into rather than what was asked
+    for - a quantized choice is honoured on Apple Metal alone and cleared
+    before the check runs anywhere else - so a message built from this tells
+    a reader on a graphics card why their 4-bit choice did not shrink
+    anything. An MLX repo is the other way round: it was packed when it was
+    converted and loads at that width whatever the radio says, so its
+    callers pass the width from the repo itself (see
+    :func:`mlx_snapshot_bits`) rather than the choice.
+    """
+
+    if bits is not None:
+        return f"{bits}-bit weights"
+    stored = DTYPE_BYTES.get((load_dtype_name or "").lower())
+    return "full weights" if stored is None else f"full {stored * 8}-bit weights"
+
+
 def reserved_bytes(torch=None) -> int | None:
     """Bytes the accelerator's allocator holds from the driver, or ``None``.
 
@@ -1383,24 +1420,30 @@ def check_memory_for_load(
     available: int | None,
     headroom: int = MEMORY_HEADROOM_BYTES,
     pool: str = "this machine",
+    weights: str | None = None,
 ) -> None:
     """Refuse a load that would not leave ``headroom`` beside the weights.
 
     ``pool`` names where the figures come from in the message: the machine's
     own memory, or the GPU plus the machine when the weights may spread over
-    both.
+    both. ``weights`` names the precision the estimate was made at (see
+    :func:`weights_note`), without which the reader cannot tell a refusal
+    that a smaller precision would lift from one that nothing but a smaller
+    model will.
     """
 
     needed = estimated_bytes + headroom
+    size = f"about {format_memory(estimated_bytes)}"
+    size += f" for {weights}" if weights else " of memory"
     if total is not None and needed > total:
         raise InsufficientMemoryError(
-            f"{model_id} needs about {format_memory(estimated_bytes)} of memory plus "
+            f"{model_id} needs {size} plus "
             f"{format_memory(headroom)} of safety reserve, and {pool} has "
             f"{format_memory(total)} in total. Choose a smaller model."
         )
     if available is not None and needed > available:
         raise InsufficientMemoryError(
-            f"{model_id} needs about {format_memory(estimated_bytes)} of memory plus "
+            f"{model_id} needs {size} plus "
             f"{format_memory(headroom)} of safety reserve. ChatLab estimates "
             f"{format_memory(available)} available within its memory safety limits "
             "and stopped this load to reduce the risk of heavy paging. "
@@ -1529,13 +1572,17 @@ def fit_for(
     available: int | None,
     pool: str = "this machine",
     headroom: int = MEMORY_HEADROOM_BYTES,
+    weights: str = "weights",
 ) -> Fit:
     """The verdict a load of ``estimated`` bytes would get from this machine now.
 
     Deliberately a second reading of the same figures rather than a trial
     load: the check that refuses a load is the authority, and this exists to
     say beforehand what it would answer, so a reader picking a model is not
-    made to press the button to find out.
+    made to press the button to find out. ``weights`` names the precision
+    the estimate was made at, for the same reason the refusal names it: the
+    verdict on one model moves as the precision radio does, and a note that
+    left it out would look like the figure had changed by itself.
     """
 
     if estimated is None or (total is None and available is None):
@@ -1550,7 +1597,7 @@ def fit_for(
             else "This machine does not report its memory.",
         )
     needed = estimated + headroom
-    weights = f"About {format_memory(estimated)} of weights"
+    size = f"About {format_memory(estimated)} of {weights}"
     reserve = f"{format_memory(headroom)} of safety reserve"
     if total is not None and needed > total:
         return Fit(
@@ -1559,7 +1606,7 @@ def fit_for(
             total,
             available,
             pool,
-            f"{weights} plus {reserve} is more than the "
+            f"{size} plus {reserve} is more than the "
             f"{format_memory(total)} {pool} has.",
         )
     if available is not None and needed > available:
@@ -1569,7 +1616,7 @@ def fit_for(
             total,
             available,
             pool,
-            f"{weights} plus {reserve} needs more than the "
+            f"{size} plus {reserve} needs more than the "
             f"{format_memory(available)} ChatLab estimates free right now. "
             "Close something memory-heavy, or wait for memory pressure to fall.",
         )
@@ -1579,7 +1626,7 @@ def fit_for(
         total,
         available,
         pool,
-        f"{weights}, inside the {memory_note(available)} ChatLab estimates free.",
+        f"{size}, inside the {memory_note(available)} ChatLab estimates free.",
     )
 
 
@@ -1883,12 +1930,27 @@ def warm_device() -> None:
 
 
 def model_fit(
-    estimated: int | None, profile: DeviceProfile | None = None
+    estimated: int | None,
+    profile: DeviceProfile | None = None,
+    bits: int | None = None,
 ) -> Fit:
-    """Whether weights of ``estimated`` bytes would load on this machine now."""
+    """Whether weights of ``estimated`` bytes would load on this machine now.
+
+    ``bits`` is the width the estimate packed the linear layers into, passed
+    in rather than read from the precision radio here: the caller has already
+    decided whether this device honours the choice, and a verdict that
+    described a different precision from the one it measured would be worse
+    than one that named none.
+    """
 
     profile = profile if profile is not None else device_profile()
-    return fit_for(estimated, profile.total, profile.available, profile.pool)
+    return fit_for(
+        estimated,
+        profile.total,
+        profile.available,
+        profile.pool,
+        weights=weights_note(profile.dtype, bits),
+    )
 
 
 def mps_memory_fraction(
@@ -4582,7 +4644,13 @@ class ModelManager:
             # precision it loads at; the radio has nothing to add. Named
             # from the config so the badge says what is really running.
             precision = mlx_runtime.precision_label(mlx_runtime.read_mlx_config(local_path))
-            bits = None
+            # The config's width, not the radio's: the estimate below reads
+            # the packed file as it stands and the MLX reader takes no bits
+            # at all, so this rides along only to let the refusal, the log
+            # and the fit panel name the width the weights really are. Zero
+            # it out and a 4-bit conversion would be refused for wanting
+            # "full 16-bit weights".
+            bits = mlx_snapshot_bits(local_path)
             logger.info(
                 "Loading %s at the %s precision it was converted to: MLX weights "
                 "are packed already",
@@ -4889,6 +4957,13 @@ class ModelManager:
         in, and a pipeline's has to be read out of the weights themselves
         (see :func:`pipeline_loaded_bytes`) because its components keep no
         dtype in their configs and need not agree about it either.
+
+        ``bits`` is the width the weights will really be packed into, which
+        the caller has already resolved: cleared where the device will not
+        honour the radio, and for an MLX repo taken from the conversion's
+        own config. The estimate of a packed MLX file ignores it - the file
+        is already that size - but the refusal and the log line name it, so
+        a 4-bit conversion is never turned away for wanting full weights.
         """
 
         # Through main's two helpers rather than branching here: both now
@@ -4898,9 +4973,15 @@ class ModelManager:
         if estimated is None:
             return None, None
         total, available, pool = memory_pool(backend, ceiling, kind)
+        weights = weights_note(load_dtype, bits)
         try:
             check_memory_for_load(
-                validate_model_id(model_id), estimated, total, available, pool=pool
+                validate_model_id(model_id),
+                estimated,
+                total,
+                available,
+                pool=pool,
+                weights=weights,
             )
         except InsufficientMemoryError:
             # The refusal is the load record. It is the outcome most worth
@@ -4909,7 +4990,7 @@ class ModelManager:
             logger.warning(
                 "Refused %s as %s on %s: %s estimated, %s estimated available of %s in %s",
                 model_id,
-                load_dtype,
+                weights,
                 backend,
                 memory_note(estimated),
                 memory_note(available),
