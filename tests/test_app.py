@@ -36,7 +36,7 @@ class InspectTokenTests(unittest.TestCase):
     def inspect(self, metric: dict):
         # The state pairs the metrics with the stamp of the strip they were
         # drawn for, and inspect_token() drops a click that misses it.
-        return app.inspect_token(app.stamped([metric]), Selection(0))
+        return app.inspect_token("prompt")(app.stamped([metric]), Selection(0))
 
     def test_the_opening_token_is_explained_as_unpredicted(self):
         detail, rows = self.inspect(
@@ -129,7 +129,7 @@ class ScoreStatusTests(unittest.TestCase):
         runtime.MANAGER = StubManager(seam_verified, chat_template_missing)
         try:
             frames = list(app.score_text("foo", "bar", False, app.DEFAULT_COLOR_SCALE))
-            return frames[-1][7]
+            return frames[-1][8]
         finally:
             runtime.MANAGER = original
 
@@ -196,7 +196,7 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
         finally:
             self.manager.release_generation()
 
-        self.assertEqual(result[7], app.SCORE_BUSY)
+        self.assertEqual(result[8], app.SCORE_BUSY)
 
     def test_a_load_is_named_rather_than_a_response(self):
         # A load turns the pass away as a reply does, and the reader has no
@@ -205,7 +205,9 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
 
         result = self.score()
 
-        self.assertEqual(result[7], app.SCORE_LOADING)
+        self.assertEqual(result[8], app.SCORE_LOADING)
+        self.assertEqual(len(result), 15)
+        self.assertTrue(all(value == gr.skip() for value in result[9:]))
         self.assertNotIn("response", app.SCORE_LOADING)
 
     def test_an_emptied_memory_during_a_load_still_names_the_load(self):
@@ -218,7 +220,7 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
 
         result = self.score()
 
-        self.assertEqual(result[7], app.SCORE_LOADING)
+        self.assertEqual(result[8], app.SCORE_LOADING)
 
     def test_an_empty_memory_is_reported_and_the_slot_given_back(self):
         # The claim now comes first, so the one refusal that is really about
@@ -227,7 +229,7 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
 
         result = self.score()
 
-        self.assertEqual(result[7], "Download and load a model first.")
+        self.assertEqual(result[8], "Download and load a model first.")
         self.assertTrue(
             self.manager.reserve_generation(), "the refusal kept the slot"
         )
@@ -245,7 +247,7 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
 
         self.assertEqual(panel._metrics_generation, before, "no stamp was minted")
         for index, value in enumerate(result):
-            if index != 7:
+            if index != 8:
                 self.assertEqual(value, gr.skip(), f"output {index}")
 
     def test_the_slot_is_given_back_after_a_successful_pass(self):
@@ -261,7 +263,7 @@ class ScoreWhileGeneratingTests(unittest.TestCase):
 
         result = self.score()
 
-        self.assertIn("no room", result[7])
+        self.assertIn("no room", result[8])
         self.assertTrue(
             self.manager.reserve_generation(), "a failure kept the slot"
         )

@@ -36,6 +36,33 @@ def vector(**changes):
     ))
 
 
+def branch_selection(turns, index=0, position=1):
+    """Name one token of the reply at ``position``, as the token view does."""
+
+    metric = conversation.turn_tokens(turns[position])[index]
+    return {
+        "source": "turn",
+        "turn": position,
+        "index": index,
+        "at_generation": turns[position].get("metrics_generation"),
+        "at_token_id": int(metric["token_id"]),
+    }
+
+
+def branch_pick(turns, index=0, position=1):
+    """A resample of that token: the same selection, plus the row chosen."""
+
+    metric = conversation.turn_tokens(turns[position])[index]
+    return dict(
+        branch_selection(turns, index, position),
+        position=index + 1,
+        token_id=int(metric["token_id"]),
+        original_id=int(metric["token_id"]),
+        text=metric["text"],
+        original=metric["text"],
+    )
+
+
 def manager(architecture="llama"):
     torch.manual_seed(42)
     if architecture == "gpt2":
@@ -213,7 +240,7 @@ class RuntimeTests(unittest.TestCase):
 class ConversationTests(unittest.TestCase):
     def test_incompatible_steering_preserves_response_on_retry_edit_and_branches(self):
         import gradio as gr
-        from test_app_flow import FIXED, TURNS, METRICS, BRANCH_SOURCE, STATUS
+        from test_app_flow import FIXED, TURNS, STATUS
         from ui.generation import chat, retry_last, edit_message, branch_from, branch_with_text
 
         for route in ("retry", "edit", "branch", "typed_branch"):
@@ -223,7 +250,6 @@ class ConversationTests(unittest.TestCase):
                     settings = dict(FIXED, assistant_prefill="Hello")
                     with mock.patch.object(runtime, "MANAGER", held):
                         before = list(chat("Hello", [], **settings, steering=vector()))[-1]
-                        generation, metrics = before[METRICS]
                         current = (*settings.values(), steering.compact(invalid), True, 1, invalid["layer"])
                         if route == "retry":
                             stream = retry_last("", before[TURNS], *current)
@@ -231,11 +257,9 @@ class ConversationTests(unittest.TestCase):
                             event = gr.EditData(None, dict(index=0, previous_value="Hello", value="Changed question"))
                             stream = edit_message(event, "", before[TURNS], *current)
                         elif route == "branch":
-                            metric = metrics[0]
-                            pick = dict(generation=generation, position=1, token_id=metric["token_id"], original_id=metric["token_id"], text=metric["text"], original=metric["text"])
-                            stream = branch_from(pick, before[BRANCH_SOURCE], before[METRICS], "", before[TURNS], *current)
+                            stream = branch_from(branch_pick(before[TURNS]), "", before[TURNS], *current)
                         else:
-                            stream = branch_with_text(dict(generation=generation, index=0), before[BRANCH_SOURCE], before[METRICS], "Hello", "", before[TURNS], *current)
+                            stream = branch_with_text(branch_selection(before[TURNS]), "Hello", "", before[TURNS], *current)
                         result = list(stream)[-1]
                         self.assertEqual(result[TURNS], before[TURNS])
                         self.assertTrue("Steering failed" in result[STATUS] or "Could not branch" in result[STATUS])
@@ -298,7 +322,7 @@ class ConversationTests(unittest.TestCase):
                 asyncio.run(run_pane_action(action))
 
     def test_model_reload_during_steered_branch_restores_original_response(self):
-        from test_app_flow import FIXED, TURNS, METRICS, BRANCH_SOURCE, STATUS
+        from test_app_flow import FIXED, TURNS, STATUS
         from ui.generation import chat, branch_from, branch_with_text, BRANCH_MODEL_CHANGED
 
         for route in ("branch", "typed_branch"):
@@ -307,14 +331,11 @@ class ConversationTests(unittest.TestCase):
                 settings = dict(FIXED, assistant_prefill="Hello")
                 with mock.patch.object(runtime, "MANAGER", held):
                     before = list(chat("Hello", [], **settings, steering=vector()))[-1]
-                    generation, metrics = before[METRICS]
                     current = (*settings.values(), steering.compact(vector()), True, 1, 0)
                     if route == "branch":
-                        metric = metrics[0]
-                        pick = dict(generation=generation, position=1, token_id=metric["token_id"], original_id=metric["token_id"], text=metric["text"], original=metric["text"])
-                        stream = branch_from(pick, before[BRANCH_SOURCE], before[METRICS], "", before[TURNS], *current)
+                        stream = branch_from(branch_pick(before[TURNS]), "", before[TURNS], *current)
                     else:
-                        stream = branch_with_text(dict(generation=generation, index=0), before[BRANCH_SOURCE], before[METRICS], "Hello", "", before[TURNS], *current)
+                        stream = branch_with_text(branch_selection(before[TURNS]), "Hello", "", before[TURNS], *current)
                     generate = held.generate
 
                     def reloaded_before_generation(*args, **kwargs):
@@ -404,7 +425,7 @@ class ConversationTests(unittest.TestCase):
             steering.normalize(dict(reference, vector_id="../../not-a-vector"))
 
     def test_generation_paths_use_visible_controls_before_persistence_catches_up(self):
-        from test_app_flow import FIXED, TURNS, TRACE, METRICS, BRANCH_SOURCE
+        from test_app_flow import FIXED, TURNS, TRACE
         from ui.generation import chat, retry_last, branch_from, branch_with_text
 
         for route in ("send", "retry", "branch", "typed_branch"):
@@ -419,22 +440,15 @@ class ConversationTests(unittest.TestCase):
                         # samples EOS immediately with steering turned off.
                         settings = dict(FIXED, assistant_prefill="Hello")
                         before = list(chat("Hello", [], **settings, steering=stale))[-1]
-                        generation, metrics = before[METRICS]
                         current = (*settings.values(), stale, *overrides)
                         if route == "send":
                             stream = chat("Hello", [], *current)
                         elif route == "retry":
                             stream = retry_last("", before[TURNS], *current)
                         elif route == "branch":
-                            metric = metrics[0]
-                            pick = dict(
-                                generation=generation, position=1, token_id=metric["token_id"],
-                                original_id=metric["token_id"], text=metric["text"], original=metric["text"],
-                            )
-                            stream = branch_from(pick, before[BRANCH_SOURCE], before[METRICS], "", before[TURNS], *current)
+                            stream = branch_from(branch_pick(before[TURNS]), "", before[TURNS], *current)
                         else:
-                            selected = dict(generation=generation, index=0)
-                            stream = branch_with_text(selected, before[BRANCH_SOURCE], before[METRICS], "Hello", "", before[TURNS], *current)
+                            stream = branch_with_text(branch_selection(before[TURNS]), "Hello", "", before[TURNS], *current)
                         with mock.patch.object(held, "generate", wraps=held.generate) as generate:
                             result = list(stream)[-1]
                         self.assertEqual(steering.expand(generate.call_args.kwargs["steering"]), expected)

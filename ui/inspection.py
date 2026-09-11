@@ -19,7 +19,7 @@ from ui.common import (
     failure_status,
 )
 from ui.panel import (
-    current_metrics_generation,
+    current_strip_generation,
     event_index,
 )
 
@@ -63,7 +63,7 @@ def remember_inspect_target(strip: str):
 
     def remember(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
         generation, metrics = metrics_state
-        if generation != current_metrics_generation():
+        if generation != current_strip_generation(strip):
             return None
         try:
             index = event_index(event)
@@ -81,6 +81,10 @@ def inspect_layers(
     prompt_metrics_state: tuple[int, list[dict]],
     context_state: tuple[int, list[int]],
     layer,
+    score_metrics_state: tuple[int, list[dict]] | None = None,
+    score_context_state: tuple | None = None,
+    chat_metrics_state: tuple[int, list[dict]] | None = None,
+    chat_context_state: tuple | None = None,
 ):
     """Run the logit lens and attention readout for the clicked token.
 
@@ -94,16 +98,27 @@ def inspect_layers(
     but until the readout is on screen, so Send, Retry and Branch cannot
     slip in between the two and have the readout land on top of their
     reset. Paths that replace the strips without taking the slot - Clear,
-    Undo, Load, a fork switch, Score text - are caught by the stamp instead:
-    it is checked before the frame goes out and again once it has arrived,
-    and a readout for a token that is gone is taken back down.
+    Undo, Load, a fork switch - are caught by the stamp instead. Scored tokens
+    and chat replies retain independent metrics, context and stamps, so a
+    scoring pass cannot take away the latest reply's inspection target.
+    The relevant stamp is checked before the frame goes out and again
+    once it has arrived, so a readout for a token that is gone is taken down.
     """
 
     skip = gr.skip()
     refused = (skip, skip, skip, skip)
-    if not target or target.get("generation") != current_metrics_generation():
+    if not target or target.get("generation") != current_strip_generation(target["strip"]):
         yield (*refused, INSPECT_HINT)
         return
+    if target["strip"] == "score":
+        if score_metrics_state is None or score_context_state is None:
+            yield (*refused, INSPECT_GONE)
+            return
+        metrics_state = score_metrics_state
+        context_state = score_context_state
+    elif target["strip"] == "response" and chat_metrics_state is not None:
+        metrics_state = chat_metrics_state
+        context_state = chat_context_state
     generation, metrics = metrics_state
     _prompt_generation, prompt_metrics = prompt_metrics_state
     context_generation, context_ids, load_id = context_state[:3]
@@ -174,7 +189,7 @@ def inspect_layers(
                 failure_status("Could not inspect that token", str(error)),
             )
             return
-        if target["generation"] != current_metrics_generation():
+        if target["generation"] != current_strip_generation(target["strip"]):
             yield (*refused, INSPECT_GONE)
             return
 
@@ -201,7 +216,7 @@ def inspect_layers(
         # Resumed once the browser has the frame above. If the strips were
         # replaced while it was in flight, their reset was applied first and
         # the readout now sits on top of it, so take it back down.
-        if target["generation"] != current_metrics_generation():
+        if target["generation"] != current_strip_generation(target["strip"]):
             yield (charts.EMPTY_LENS, charts.EMPTY_ATTENTION, skip, None, INSPECT_GONE)
     finally:
         runtime.MANAGER.release_generation()

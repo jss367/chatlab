@@ -10,6 +10,8 @@ from pathlib import Path
 
 import gradio as gr
 import numpy as np
+from gradio.state_holder import SessionState
+from gradio.utils import get_function_with_locals
 
 import app
 from ui import runtime
@@ -18,7 +20,9 @@ from conversation import (
     MAIN_BRANCH,
     branch_sampling,
     display_messages,
+    forget_measurements,
     make_turn,
+    turn_entries,
     model_messages,
     new_forks,
     put_branch,
@@ -30,7 +34,7 @@ from token_metrics import DEFAULT_COLOR_SCALE
 import library
 import settings
 import settings_sandbox
-from test_streaming import ChatTemplateTokenizer, SentencePieceTokenizer, loaded_manager
+from test_streaming import ChatTemplateTokenizer, FakeTokenizer, SentencePieceTokenizer, loaded_manager
 
 
 def setUpModule():
@@ -79,14 +83,17 @@ SETTINGS = tuple(FIXED.values())
     SUMMARY,
     SURPRISE,
     TRACE,
-    BRANCH_SOURCE,
     CONTEXT_IDS,
+    CHAT_METRICS,
+    CHAT_CONTEXT_IDS,
+    SELECTED_TOKEN,
+    BRANCH_PICK,
 ) = range(len(app.CHAT_OUTPUT_NAMES))
 CHAT_OUTPUTS = len(app.CHAT_OUTPUT_NAMES)
 
 # The panels every conversation-replacing handler resets after its own rows:
 # the prompt strip and its state and note, the two charts, and the export.
-PANEL_OUTPUTS = 6
+PANEL_OUTPUTS = 8
 UNDO_OUTPUTS = 10 + PANEL_OUTPUTS
 # Clear also resets the forks and their picker, and closes the
 # confirmation panel that sent it.
@@ -107,8 +114,156 @@ def strip_of(value):
     return value["value"] if isinstance(value, dict) else value
 
 
+def painted(value):
+    """The measured tokens in a token-view value: the spans that carry a color.
+
+    The rest are the conversation's plain text - role headings, typed
+    messages, replies with no measurements behind them - which stay on screen
+    when the measurements go.
+    """
+
+    return [span for span in strip_of(value) if span[1] is not None]
+
+
 def select(index):
     return gr.SelectData(None, {"index": index, "value": "x"})
+
+
+def token_span(turns, token_index, turn=-1):
+    """A click on one token of one reply in the conversation's token view."""
+
+    _spans, index = app.transcript_entries(turns, DEFAULT_COLOR_SCALE)
+    position = turn if turn >= 0 else len(turns) + turn
+    return select(index.index((position, token_index)))
+
+
+def click_token(frame, token_index, turn=-1):
+    """The selection a click on a reply's token publishes."""
+
+    turns = frame[TURNS]
+    _detail, _rows, selection, _target, _pick = app.select_transcript_token(
+        turns, frame[METRICS], token_span(turns, token_index, turn)
+    )
+    return selection
+
+
+def score_known_passage(context="Hello", text=" world"):
+    """Score real vocabulary tokens; the chat fixture normally encodes prompts as [0]."""
+
+    class PassageTokenizer(FakeTokenizer):
+        def __call__(self, text, **kwargs):
+            return super().__call__(text, **dict(kwargs, add_special_tokens=False))
+
+    original = runtime.MANAGER.tokenizer
+    runtime.MANAGER.tokenizer = PassageTokenizer(THINK_PIECES, THINK_EOS)
+    try:
+        return list(app.score_text(context, text, False, DEFAULT_COLOR_SCALE))[-1]
+    finally:
+        runtime.MANAGER.tokenizer = original
+
+
+class PanelSessionTests(unittest.TestCase):
+    """Use Gradio's actual per-call/per-yield context, with two browser sessions."""
+
+    def setUp(self):
+        original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", original)
+        self.demo = app.build_app()
+        self.sessions = [SessionState(self.demo), SessionState(self.demo)]
+
+    def bound(self, session, fn):
+        return get_function_with_locals(
+            fn, self.demo, None, True,
+            gr.Request(session_hash=str(session)), self.sessions[session],
+        )
+
+    def respond(self, session):
+        return list(self.bound(session, app.chat)("hi", [], *SETTINGS))
+
+    def click(self, session, frame):
+        return self.bound(session, app.select_transcript_token)(
+            frame[TURNS], frame[METRICS], token_span(frame[TURNS], 1)
+        )
+
+    def assertSelected(self, session, frame):
+        detail, _, selection, _, _ = self.click(session, frame)
+        self.assertIn("Token 2", detail)
+        self.assertEqual(selection["source"], "turn")
+        self.assertEqual((selection["turn"], selection["index"]), (1, 1))
+
+    def test_another_session_cannot_disable_transcript_or_prompt_clicks(self):
+        first = self.respond(0)
+        second = self.respond(1)
+        self.assertSelected(0, first[-1])
+        self.assertSelected(1, second[-1])
+        detail, _ = self.bound(0, app.inspect_token("prompt"))(
+            first[1][PROMPT_METRICS], select(0)
+        )
+        self.assertNotEqual(detail, gr.skip())
+        self.bound(1, app.clear_chat)()
+        self.assertSelected(0, first[-1])
+
+    def test_a_reset_in_the_same_session_still_drops_a_queued_click(self):
+        first = self.respond(0)[-1]
+        second = self.respond(1)[-1]
+        self.bound(0, app.clear_chat)()
+        self.assertEqual(self.click(0, first), (gr.skip(),) * 5)
+        self.assertSelected(1, second)
+
+    def test_scored_epochs_are_isolated_but_rescoring_still_invalidates(self):
+        scored = self.bound(0, score_known_passage)()
+        self.bound(1, score_known_passage)()
+        self.respond(1)
+        target = self.bound(0, app.remember_inspect_target("score"))(scored[2], select(0))
+        self.assertIsNotNone(target)
+        detail, _ = self.bound(0, app.inspect_token("score"))(scored[2], select(0))
+        self.assertIn("Token 1", detail)
+        self.bound(0, score_known_passage)()
+        self.assertIsNone(self.bound(0, app.remember_inspect_target("score"))(scored[2], select(0)))
+
+    def test_hidden_streams_never_build_or_publish_token_spans(self):
+        with mock.patch("ui.generation.transcript_update", side_effect=AssertionError("hidden repaint")):
+            frames = self.respond(0)
+        self.assertTrue(all(frame[STRIP] == gr.skip() for frame in frames))
+        self.assertTrue(frames[-1][TURNS][-1]["tokens"])
+        _, shown = self.bound(0, app.show_token_view)(True, frames[-1][TURNS], DEFAULT_COLOR_SCALE)
+        self.assertEqual(shown["value"], app.transcript_value(frames[-1][TURNS], DEFAULT_COLOR_SCALE))
+
+    def test_toggling_during_streaming_controls_subsequent_frames(self):
+        stream = self.bound(0, app.chat)("hi", [], *SETTINGS)
+        try:
+            opening = next(stream)
+            self.assertEqual(opening[STRIP], gr.skip())
+            self.bound(0, app.show_token_view)(True, opening[TURNS], DEFAULT_COLOR_SCALE)
+            visible = next(stream)
+            self.assertEqual(strip_of(visible[STRIP]), app.transcript_value(visible[TURNS], DEFAULT_COLOR_SCALE))
+            self.bound(0, app.show_token_view)(False, visible[TURNS], DEFAULT_COLOR_SCALE)
+            self.assertTrue(all(frame[STRIP] == gr.skip() for frame in stream))
+        finally:
+            stream.close()
+        # A different browser still starts with the toggle off.
+        self.assertTrue(all(frame[STRIP] == gr.skip() for frame in self.respond(1)))
+
+    def test_a_queued_toggle_reads_the_published_final_or_cleared_conversation(self):
+        with mock.patch("model_runtime.STREAM_BATCH_TOKENS", 1):
+            frames = self.respond(0)
+        queued_turns = frames[1][TURNS]
+        final_turns = frames[-1][TURNS]
+        self.assertNotEqual(queued_turns, final_turns)
+        chat = next(fn for fn in self.demo.fns.values() if fn.fn is app.chat)
+        toggle = next(
+            fn.fn for fn in self.demo.fns.values()
+            if getattr(fn.fn, "func", None) is app.show_token_view
+        )
+        # This is the SessionState that Gradio's postprocessor writes and
+        # restore_session_state retrieves for the next request from this tab.
+        self.demo.state_holder.session_data["0"] = self.sessions[0]
+        for published in (final_turns, []):
+            with self.subTest(cleared=not published):
+                self.sessions[0][chat.outputs[TURNS]._id] = published
+                _, shown = self.bound(0, toggle)(True, queued_turns, DEFAULT_COLOR_SCALE)
+                self.assertEqual(shown["value"], app.transcript_value(published, DEFAULT_COLOR_SCALE))
 
 
 class ChatFlowTests(unittest.TestCase):
@@ -245,7 +400,10 @@ class ChatFlowTests(unittest.TestCase):
             None, {"index": 1, "previous_value": "stale", "value": "fixed"}
         )
         final = self.last(app.edit_message(event, "", turns, *SETTINGS))[-1]
-        self.assertEqual(strip_of(final[STRIP]), [])
+        # The reply is still in the token view; what goes is its coloring,
+        # since the ranks and probabilities described text the edit replaced.
+        self.assertEqual(painted(final[STRIP]), [])
+        self.assertIn(("fixed", None), strip_of(final[STRIP]))
         self.assertEqual(metrics_of(final[METRICS]), [])
         self.assertEqual(final[DETAIL], app.NO_TOKEN_SELECTED)
         self.assertEqual(final[ALTS], [])
@@ -286,14 +444,15 @@ class ChatFlowTests(unittest.TestCase):
         )
 
     def test_a_new_response_resets_the_selected_token_details(self):
-        # The first frame empties the strip, so the token the user had selected
-        # in the previous response no longer exists and its probabilities must
-        # not stay on screen beside a strip that no longer contains it.
+        # The first frame draws the reply being answered into with no tokens in
+        # it yet, so the token the user had selected in the response it
+        # replaces no longer exists and its probabilities must not stay on
+        # screen beside it.
         frames = self.last(app.chat("hi", [], *SETTINGS))
-        self.assertEqual(strip_of(frames[0][STRIP]), [])
+        self.assertEqual(painted(frames[0][STRIP]), [])
         self.assertEqual(frames[0][DETAIL], app.NO_TOKEN_SELECTED)
         self.assertEqual(strip_of(frames[0][ALTS]), [])
-        # Later frames only append to the strip, so a token picked mid-stream
+        # Later frames only append tokens, so a token picked mid-stream
         # stays valid and its details are left alone.
         for frame in frames[1:]:
             self.assertEqual(frame[DETAIL], gr.skip())
@@ -304,6 +463,50 @@ class ChatFlowTests(unittest.TestCase):
         frames = self.last(app.retry_last("", turns, *SETTINGS))
         self.assertEqual(frames[0][DETAIL], app.NO_TOKEN_SELECTED)
         self.assertEqual(strip_of(frames[0][ALTS]), [])
+
+    def test_a_new_reply_disarms_an_older_turn_only_in_its_reset_frame(self):
+        first = self.last(app.chat("hi", [], *SETTINGS))[-1]
+        selection = click_token(first, 1)
+        _detail, pick = app.choose_alternative(
+            first[TURNS], app.empty_metrics(), app.empty_metrics(), selection, select(0)
+        )
+        self.assertIsNotNone(pick)
+        frames = self.last(app.chat("again", first[TURNS], *SETTINGS))
+        self.assertIsNotNone(app.selected_metric(frames[-1][TURNS], selection))
+        self.assertIsNone(frames[0][SELECTED_TOKEN])
+        self.assertIsNone(frames[0][BRANCH_PICK])
+        for frame in frames[1:]:
+            self.assertEqual(frame[SELECTED_TOKEN], gr.skip())
+            self.assertEqual(frame[BRANCH_PICK], gr.skip())
+        refused = self.last(app.branch_from(
+            frames[0][BRANCH_PICK], "", frames[-1][TURNS], *SETTINGS
+        ))[-1]
+        self.assertEqual(refused[TURNS], frames[-1][TURNS])
+
+    def test_every_conversation_reset_publishes_the_branch_states(self):
+        demo = app.build_app()
+        chat = next(fn for fn in demo.fns.values() if fn.fn is app.chat)
+        selection, pick = chat.outputs[-2:]
+        resets = {
+            "chat", "retry_last", "retry_message", "edit_message", "branch_from",
+            "branch_with_text", "undo_last", "undo_message", "clear_chat",
+            "fork_conversation", "new_conversation", "switch_fork", "delete_fork",
+            "load_with_steering", "score_text",
+        }
+        for fn in demo.fns.values():
+            if getattr(fn.fn, "__name__", None) in resets:
+                self.assertIn(selection, fn.outputs, fn.fn.__name__)
+                self.assertIn(pick, fn.outputs, fn.fn.__name__)
+
+    def test_undo_disarms_a_selection_even_when_its_older_turn_survives(self):
+        first = self.last(app.chat("hi", [], *SETTINGS))[-1]
+        second = self.last(app.chat("again", first[TURNS], *SETTINGS))[-1]
+        selection = click_token(second, 1, turn=1)
+        undone = app.undo_last(second[TURNS])
+        self.assertIsNotNone(app.selected_metric(undone[2], selection))
+        self.assertEqual(undone[-2:], (None, None))
+        no_change = app.undo_last([])
+        self.assertEqual(no_change[-2:], (gr.skip(), gr.skip()))
 
     def test_streaming_skip_does_not_delete_the_rendered_table_data(self):
         # The browser retains the table value by reference. Gradio's client
@@ -740,7 +943,7 @@ class TokenSelectionTests(unittest.TestCase):
         return list(app.chat("hi", list(turns), *SETTINGS))
 
     def assertDropped(self, payload):
-        self.assertEqual(app.inspect_token(payload, select(0)), (gr.skip(), gr.skip()))
+        self.assertEqual(app.inspect_token("prompt")(payload, select(0)), (gr.skip(), gr.skip()))
 
     def initial_metrics_state(self):
         """The value a fresh session starts inspect_token()'s input with."""
@@ -749,14 +952,14 @@ class TokenSelectionTests(unittest.TestCase):
         listener = next(
             fn
             for fn in demo.fns.values()
-            if getattr(fn.fn, "__name__", None) == "inspect_token"
+            if getattr(fn.fn, "__name__", None) == "inspect"
         )
         (state_block,) = listener.inputs
         return state_block.value
 
     def test_a_selection_against_the_strip_on_screen_is_published(self):
         payload = self.respond()[-1][METRICS]
-        detail, alternatives = app.inspect_token(payload, select(0))
+        detail, alternatives = app.inspect_token("prompt")(payload, select(0))
         self.assertIn("Token 1", detail)
         self.assertTrue(alternatives)
 
@@ -780,7 +983,7 @@ class TokenSelectionTests(unittest.TestCase):
         # Later frames only append to the strip, so a token picked while the
         # response is still arriving is still on screen when it finishes.
         frames = self.respond()
-        detail, _alternatives = app.inspect_token(frames[1][METRICS], select(0))
+        detail, _alternatives = app.inspect_token("prompt")(frames[1][METRICS], select(0))
         self.assertIn("Token 1", detail)
 
     def test_clear_drops_earlier_selections(self):
@@ -811,17 +1014,17 @@ class TokenSelectionTests(unittest.TestCase):
         # Nothing replaced the strip, so the panel beside it is still true.
         payload = self.respond()[-1][METRICS]
         list(app.chat("   ", [], *SETTINGS))
-        detail, _alternatives = app.inspect_token(payload, select(0))
+        detail, _alternatives = app.inspect_token("prompt")(payload, select(0))
         self.assertIn("Token 1", detail)
 
     def test_an_out_of_range_index_still_reports_the_token_as_gone(self):
         payload = self.respond()[-1][METRICS]
-        detail, alternatives = app.inspect_token(payload, select(99))
+        detail, alternatives = app.inspect_token("prompt")(payload, select(99))
         self.assertIn("no longer available", detail)
         self.assertEqual(alternatives, [])
 
     def test_an_empty_strip_asks_for_a_selection(self):
-        detail, alternatives = app.inspect_token(app.empty_metrics(), select(0))
+        detail, alternatives = app.inspect_token("prompt")(app.empty_metrics(), select(0))
         self.assertEqual(detail, app.NO_TOKEN_SELECTED)
         self.assertEqual(alternatives, [])
 
@@ -894,7 +1097,7 @@ class AnalysisPanelTests(unittest.TestCase):
         frames = self.respond()
         prompt_payload = self.prompt_payload(frames)
         self.assertEqual(prompt_payload[0], frames[-1][METRICS][0])
-        detail, _alternatives = app.inspect_token(prompt_payload, select(0))
+        detail, _alternatives = app.inspect_token("prompt")(prompt_payload, select(0))
         self.assertIn("Prompt token", detail)
 
     def test_the_finished_response_is_exportable(self):
@@ -958,12 +1161,273 @@ class AnalysisPanelTests(unittest.TestCase):
 
     def test_the_color_scale_repaints_both_strips(self):
         frames = self.respond()
-        strip, prompt_strip, caption = app.recolor(
-            frames[-1][METRICS], self.prompt_payload(frames), "Surprise"
+        strip, score_strip, prompt_strip, caption = app.recolor(
+            frames[-1][TURNS],
+            frames[-1][METRICS],
+            self.prompt_payload(frames),
+            "Surprise",
         )
-        self.assertEqual(len(strip["value"]), 3)
+        # Two headings, the message, and one span per response token.
+        self.assertEqual(len(strip["value"]), 6)
+        self.assertEqual(len(score_strip["value"]), 3)
         self.assertTrue(prompt_strip["value"])
         self.assertTrue(caption)
+
+
+class TokenViewTests(unittest.TestCase):
+    """The conversation drawn as the tokens it is made of."""
+
+    def setUp(self):
+        self.original = runtime.MANAGER
+        runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
+
+    def respond(self, message="hi", turns=()):
+        return list(app.chat(message, list(turns), *SETTINGS))[-1]
+
+    def test_a_reply_is_drawn_token_by_token_under_its_heading(self):
+        final = self.respond()
+        spans, index = app.transcript_entries(final[TURNS], DEFAULT_COLOR_SCALE)
+        texts = [text for text, _label in spans]
+        self.assertEqual(texts[:2], ["\n\nYOU\n", "hi"])
+        self.assertEqual(texts[2], "\n\nASSISTANT\n")
+        tokens = final[TURNS][1]["tokens"]
+        self.assertEqual(texts[3:], [m["display_text"] for m in tokens])
+        # The headings and the message belong to a turn but to no token.
+        self.assertEqual(index[:3], [(0, None), (0, None), (1, None)])
+        self.assertEqual(index[3:], [(1, position) for position in range(len(tokens))])
+
+    def test_an_empty_conversation_says_so(self):
+        # An empty HighlightedText draws its color scale as a bare gradient
+        # bar, which reads as a broken chart rather than an empty chat.
+        self.assertEqual(
+            app.transcript_value([], DEFAULT_COLOR_SCALE), app.EMPTY_TRANSCRIPT
+        )
+        # The placeholder belongs to no turn, so clicking it does nothing.
+        self.assertIsNone(app.transcript_pick([], select(0)))
+
+    def test_a_message_with_no_measurements_is_drawn_as_plain_text(self):
+        turns = [make_turn("user", "one"), make_turn("assistant", "typed")]
+        spans, _index = app.transcript_entries(turns, DEFAULT_COLOR_SCALE)
+        self.assertEqual([label for _text, label in spans], [None] * 4)
+        self.assertIn(("typed", None), spans)
+
+    def test_reasoning_without_measurements_is_drawn_before_the_answer(self):
+        turns = [make_turn("assistant", "answer", "thinking")]
+        spans, _index = app.transcript_entries(turns, DEFAULT_COLOR_SCALE)
+        self.assertEqual(
+            [text for text, _label in spans], ["\n\nASSISTANT\n", "thinking\n", "answer"]
+        )
+
+    def test_the_scale_decides_the_colors(self):
+        final = self.respond()
+        by_rank = app.transcript_value(final[TURNS], "Raw rank")
+        by_surprise = app.transcript_value(final[TURNS], "Surprise")
+        self.assertEqual(
+            [text for text, _label in by_rank], [text for text, _label in by_surprise]
+        )
+        self.assertIn(
+            app.COLOR_SCALES["Surprise"].labels[0],
+            [label for _text, label in by_surprise],
+        )
+
+    def test_clicking_a_token_publishes_it(self):
+        final = self.respond()
+        turns = final[TURNS]
+        detail, rows, selection, target, pick = app.select_transcript_token(
+            turns, final[METRICS], token_span(turns, 1)
+        )
+        self.assertIn("Token 2", detail)
+        self.assertTrue(rows)
+        self.assertEqual(selection["turn"], 1)
+        self.assertEqual(selection["index"], 1)
+        # The reply on screen is the one the panel describes, so its layers
+        # can be read.
+        self.assertEqual(target, {"generation": final[METRICS][0], "strip": "response", "index": 1})
+        self.assertIsNone(pick)
+
+    def test_a_click_overtaken_by_a_conversation_change_is_dropped(self):
+        """A click queued just before Retry, Undo, Clear or a switch.
+
+        Gradio resolves a listener's inputs when it gets round to the event,
+        so the handler is handed the conversation as it was. Answering would
+        land a token from the replaced reply on top of the reset frame that
+        removed it, and every later streaming frame skips those outputs, so it
+        would stay there.
+        """
+
+        final = self.respond()
+        turns, stamp = final[TURNS], final[METRICS]
+        app.new_metrics_generation()  # what the reset frame mints
+
+        published = app.select_transcript_token(turns, stamp, token_span(turns, 1))
+        self.assertEqual(published, (gr.skip(),) * 5)
+
+    def test_a_click_made_against_the_panel_on_screen_is_published(self):
+        final = self.respond()
+        turns = final[TURNS]
+        detail, _rows, selection, _target, _pick = app.select_transcript_token(
+            turns, final[METRICS], token_span(turns, 1)
+        )
+        self.assertIn("Token 2", detail)
+        self.assertIsNotNone(selection)
+
+    def test_clicking_a_heading_empties_the_panel(self):
+        final = self.respond()
+        turns = final[TURNS]
+        spans, index = app.transcript_entries(turns, DEFAULT_COLOR_SCALE)
+        detail, rows, selection, target, pick = app.select_transcript_token(
+            turns, final[METRICS], select(index.index((0, None)))
+        )
+        self.assertEqual(detail, app.NO_TOKEN_SELECTED)
+        self.assertEqual(rows, [])
+        self.assertIsNone(selection)
+        self.assertIsNone(target)
+        self.assertIsNone(pick)
+
+    def test_an_earlier_reply_offers_no_layer_readout(self):
+        # The inspector rebuilds the model's input from the prompt ids
+        # published with the reply on screen, and an earlier reply's prompt is
+        # not on screen to rebuild from.
+        first = self.respond()
+        second = self.respond("again", first[TURNS])
+        turns = second[TURNS]
+        _detail, _rows, selection, target, _pick = app.select_transcript_token(
+            turns, second[METRICS], token_span(turns, 1, turn=1)
+        )
+        self.assertEqual(selection["turn"], 1)
+        self.assertIsNone(target)
+
+    def test_a_reply_from_another_load_says_so_when_clicked(self):
+        final = self.respond()
+        runtime.MANAGER.load_count += 1
+        detail, _rows, selection, _target, _pick = app.select_transcript_token(
+            final[TURNS], final[METRICS], token_span(final[TURNS], 1)
+        )
+        self.assertIn(app.BRANCH_MODEL_CHANGED, detail)
+        # Still published: the numbers describe what the model did produce,
+        # and only the branch needs the weights back.
+        self.assertIn("Token 2", detail)
+        self.assertEqual(selection["turn"], 1)
+
+    def test_a_retried_reply_does_not_inherit_the_old_selection(self):
+        """The reply, not the token ID, is what a selection is checked against.
+
+        Two samples of one prompt share their opening tokens far more often
+        than not, so a token ID alone would let a click made against the reply
+        Retry replaced branch the new one at a token the reader never saw.
+        """
+
+        final = self.respond()
+        selected = click_token(final, 1)
+        retried = list(app.retry_last("", final[TURNS], *SETTINGS))[-1]
+
+        # Same conversation shape, same token IDs, different reply.
+        self.assertEqual(
+            [m["token_id"] for m in retried[TURNS][1]["tokens"]],
+            [m["token_id"] for m in final[TURNS][1]["tokens"]],
+        )
+        self.assertNotEqual(
+            retried[TURNS][1]["metrics_generation"],
+            final[TURNS][1]["metrics_generation"],
+        )
+        self.assertIsNone(app.selected_metric(retried[TURNS], selected))
+        frames = list(app.branch_from(selected, "", retried[TURNS], *SETTINGS))
+        self.assertEqual(frames[0][STATUS], app.BRANCH_UNAVAILABLE)
+
+    def test_an_older_reply_keeps_its_own_stamp(self):
+        # The stamp compared is the turn's own, so a reply that is no longer
+        # the newest stays selectable for as long as it is on screen.
+        first = self.respond()
+        second = self.respond("again", first[TURNS])
+        selected = click_token(second, 1, turn=1)
+        self.assertIsNotNone(app.selected_metric(second[TURNS], selected))
+
+    def test_scoring_disarms_the_branch_it_hid(self):
+        # Score text resets the detail panel, and a branch the reader can no
+        # longer see must not stay waiting on the button.
+        final = self.respond()
+        detail, _rows, selection, _target, _pick = app.select_transcript_token(
+            final[TURNS], final[METRICS], token_span(final[TURNS], 1)
+        )
+        self.assertIsNotNone(selection)
+        scored = list(app.score_text("", "hi", False, DEFAULT_COLOR_SCALE))[-1]
+        self.assertEqual(scored[9], app.NO_TOKEN_SELECTED)
+        self.assertIsNone(scored[11])
+        self.assertIsNone(scored[12])
+
+    def test_the_scored_strip_keeps_its_own_measurements(self):
+        """The inspector's state moves on to the next reply; the strip's does not.
+
+        The scored passage stays drawn while a reply is generated beside it,
+        so repainting it from the inspector's state would paint scored spans
+        with the reply's tokens.
+        """
+
+        scored = list(app.score_text("", "hi", False, DEFAULT_COLOR_SCALE))[-1]
+        score_state = scored[2]
+        self.assertEqual(score_state, scored[1])
+        final = self.respond()
+
+        # The inspector now describes the reply; the strip's state still
+        # describes the passage.
+        self.assertNotEqual(final[METRICS][0], score_state[0])
+        strip, score_strip, _prompt, _caption = app.recolor(
+            final[TURNS], score_state, app.empty_metrics(), "Surprise"
+        )
+        self.assertEqual(
+            len(score_strip["value"]), len(metrics_of(score_state))
+        )
+        self.assertEqual(
+            strip["value"], app.transcript_value(final[TURNS], "Surprise")
+        )
+
+    def test_scored_text_has_a_strip_of_its_own(self):
+        # The Score text tab has no conversation to paint, and the
+        # conversation must not be overwritten by a passage scored beside it.
+        demo = app.build_app()
+        listener = next(
+            fn
+            for fn in demo.fns.values()
+            if getattr(fn.fn, "__name__", None) == "score_text"
+        )
+        self.assertEqual(listener.outputs[0].elem_id, "score-strip")
+
+    def test_the_toggle_swaps_the_two_views(self):
+        final = self.respond()
+        chatbot, strip = app.show_token_view(True, final[TURNS], DEFAULT_COLOR_SCALE)
+        self.assertEqual(chatbot, gr.update(visible=False))
+        self.assertFalse(strip["visible"] is False)
+        self.assertEqual(
+            strip["value"], app.transcript_value(final[TURNS], DEFAULT_COLOR_SCALE)
+        )
+        chatbot, strip = app.show_token_view(False, final[TURNS], DEFAULT_COLOR_SCALE)
+        self.assertEqual(chatbot, gr.update(visible=True))
+        self.assertEqual(strip, gr.update(visible=False))
+
+    def test_a_click_in_the_token_view_is_a_fork_point(self):
+        # Fork works from a chatbot message, so a click here is translated
+        # into the message it would have come from.
+        final = self.respond()
+        turns = final[TURNS]
+        selected = app.remember_transcript_message(turns, token_span(turns, 1))
+        messages, _index = display_messages(turns)
+        self.assertEqual(messages[selected["index"]]["content"], selected["content"])
+        self.assertEqual(app.selected_turn(turns, selected)[0], 1)
+
+    def test_the_measurements_never_reach_the_saved_file(self):
+        # They are the reason the file could not hold them: it is rewritten on
+        # every streaming frame.
+        final = self.respond()
+        self.assertTrue(final[TURNS][1]["tokens"])
+        entries = turn_entries(final[TURNS])
+        self.assertEqual(
+            [sorted(entry) for entry in entries],
+            [
+                ["content", "reasoning", "role"],
+                sorted(["content", "reasoning", "role", "model", "prompt_tokens", "generated_tokens"]),
+            ],
+        )
 
 
 class CancellationTests(unittest.TestCase):
@@ -1005,8 +1469,8 @@ class CancellationTests(unittest.TestCase):
         stream.close()
 
         self.assertFalse(frame[TURNS][1]["reasoning_closed"])
-        messages, turns, _send, _stop, status, _source = app.stop_generation(
-            frame[TURNS], frame[METRICS], frame[CONTEXT_IDS]
+        messages, turns, _strip, _send, _stop, status = app.stop_generation(
+            frame[TURNS]
         )
         self.assertTrue(turns[1]["reasoning_closed"])
         thoughts = [m for m in messages if m.get("metadata", {}).get("title")]
@@ -1015,7 +1479,7 @@ class CancellationTests(unittest.TestCase):
 
     def test_stopping_before_any_token_drops_the_empty_turn(self):
         turns = [make_turn("user", "hi"), make_turn("assistant", "")]
-        messages, remaining, _send, _stop, status, _source = app.stop_generation(
+        messages, remaining, _strip, _send, _stop, status = app.stop_generation(
             turns
         )
         self.assertEqual([turn["role"] for turn in remaining], ["user"])
@@ -1051,7 +1515,7 @@ class UndoTests(unittest.TestCase):
             stop,
             *_panels,
         ) = app.undo_last(turns)
-        self.assertEqual(strip_of(strip), [])
+        self.assertEqual(painted(strip), [])
         self.assertEqual(metrics_of(metrics), [])
         self.assertEqual(detail, app.NO_TOKEN_SELECTED)
         self.assertEqual(alts, [])
@@ -1059,10 +1523,16 @@ class UndoTests(unittest.TestCase):
         self.assertEqual((send, stop), app.send_stop_buttons(False))
 
     def test_undo_with_nothing_to_remove_keeps_the_token_panel(self):
-        result = app.undo_last([make_turn("assistant", "orphan")])
+        turns = [make_turn("assistant", "orphan")]
+        result = app.undo_last(turns)
         self.assertEqual(result[5], "There is nothing to undo.")
-        for index in (3, 4, 6, 7):
+        for index in (4, 6, 7):
             self.assertEqual(result[index], gr.skip())
+        # The token view is redrawn rather than skipped: this path finalizes
+        # the turn a cancelled generator left behind, which can drop it.
+        self.assertEqual(
+            strip_of(result[3]), app.transcript_value(turns, DEFAULT_COLOR_SCALE)
+        )
         # The cancel fires on the click, so even this path must undo the swap.
         self.assertEqual(result[8:10], app.send_stop_buttons(False))
 
@@ -1157,7 +1627,12 @@ class SaveLoadTests(unittest.TestCase):
         self.assertEqual(restored, turns)
         self.assertEqual(system_prompt, "Be terse.")
         self.assertEqual(len(messages), 3)
-        self.assertEqual(strip_of(strip), [])
+        # A saved file holds the text and the counts, not the measurements, so
+        # the loaded conversation comes back as plain text in the token view.
+        self.assertEqual(painted(strip), [])
+        self.assertEqual(
+            strip_of(strip), app.transcript_value(restored, DEFAULT_COLOR_SCALE)
+        )
         self.assertIn("Loaded 2 messages", load_status)
         # The previous conversation's selected token goes with it.
         self.assertEqual(detail, app.NO_TOKEN_SELECTED)
@@ -1877,7 +2352,9 @@ class IdleRefusalButtonTests(unittest.TestCase):
     FORK_SUMMARY,
     FORK_SURPRISE,
     FORK_TRACE,
-) = range(18)
+    FORK_SELECTED_TOKEN,
+    FORK_BRANCH_PICK,
+) = range(20)
 
 
 def contents(turns):
@@ -1911,24 +2388,72 @@ class BranchFromTokenTests(unittest.TestCase):
     def respond(self):
         return list(app.chat("hi", [], *SETTINGS))
 
-    def pick_alternative(self, final, strip_index=1, row=1):
+    def pick_alternative(self, final, strip_index=1, row=1, turn=-1):
         """Click a response token, then a row of its alternatives."""
 
-        selected = app.remember_selection(final[METRICS], select(strip_index))
+        selected = click_token(final, strip_index, turn)
         detail, pick = app.choose_alternative(
-            final[METRICS], selected, final[BRANCH_SOURCE], cell(row)
+            final[TURNS], final[METRICS], app.empty_metrics(), selected, cell(row)
         )
         return detail, pick
 
-    def test_a_finished_response_is_branchable(self):
-        frames = self.respond()
-        self.assertIsNone(frames[0][BRANCH_SOURCE])
-        for frame in frames[1:-1]:
-            self.assertEqual(frame[BRANCH_SOURCE], gr.skip())
+    def test_an_earlier_reply_can_be_branched(self):
+        """The new capability: not only the newest reply carries its tokens.
+
+        The branch replaces the reply it was taken from and everything after
+        it, which is what makes it a different continuation of the
+        conversation rather than an edit buried in the middle of one.
+        """
+
+        first = self.respond()[-1]
+        second = list(app.chat("again", first[TURNS], *SETTINGS))[-1]
+        self.assertEqual(len(second[TURNS]), 4)
+
+        _detail, pick = self.pick_alternative(second, turn=1)
+        self.assertEqual(pick["turn"], 1)
+        last = list(app.branch_from(pick, "", second[TURNS], *SETTINGS))[-1]
+
+        self.assertEqual([turn["role"] for turn in last[TURNS]], ["user", "assistant"])
+        self.assertEqual(last[TURNS][0]["content"], "hi")
+        self.assertIn("Branched at token 2", last[STATUS])
+        replayed = metrics_of(last[METRICS])
+        kept = second[TURNS][1]["tokens"]
+        self.assertEqual(replayed[0]["token_id"], kept[0]["token_id"])
+        self.assertEqual(replayed[1]["token_id"], pick["token_id"])
+
+    def test_an_earlier_reply_can_be_branched_with_typed_text(self):
+        first = self.respond()[-1]
+        second = list(app.chat("again", first[TURNS], *SETTINGS))[-1]
+        selected = click_token(second, 1, turn=1)
+        last = list(
+            app.branch_with_text(selected, "Hello", "", second[TURNS], *SETTINGS)
+        )[-1]
+        self.assertEqual([turn["role"] for turn in last[TURNS]], ["user", "assistant"])
+        self.assertEqual(metrics_of(last[METRICS])[1]["token_id"], 2)  # "Hello"
+
+    def test_a_reply_from_an_earlier_load_cannot_be_branched(self):
+        first = self.respond()[-1]
+        runtime.MANAGER.load_count += 1
+        second = list(app.chat("again", first[TURNS], *SETTINGS))[-1]
+
+        # The newest reply belongs to the load in memory; the one before it
+        # does not, even though both are on screen and both carry tokens.
+        self.assertEqual(app.branch_target(second[TURNS], click_token(second, 1))[0], 3)
         self.assertEqual(
-            frames[-1][BRANCH_SOURCE],
-            (frames[-1][METRICS][0], runtime.MANAGER.load_id),
+            app.branch_target(second[TURNS], click_token(second, 1, turn=1)),
+            app.BRANCH_MODEL_CHANGED,
         )
+
+    def test_a_finished_response_carries_its_own_tokens(self):
+        frames = self.respond()
+        self.assertEqual(frames[0][TURNS][-1].get("tokens"), None)
+        reply = frames[-1][TURNS][-1]
+        self.assertEqual(
+            [metric["token_id"] for metric in reply["tokens"]],
+            [metric["token_id"] for metric in metrics_of(frames[-1][METRICS])],
+        )
+        self.assertEqual(reply["load_id"], runtime.MANAGER.load_id)
+        self.assertEqual(reply["metrics_generation"], frames[-1][METRICS][0])
 
     def test_a_load_finishing_before_the_final_snapshot_cannot_claim_the_tokens(self):
         manager = runtime.MANAGER
@@ -1939,28 +2464,40 @@ class BranchFromTokenTests(unittest.TestCase):
             yield from real_generate(*args, **kwargs)
             # A load waiting on the model lock can finish as soon as the
             # runtime generator exits, before _stream_reply builds its final
-            # branchable snapshot.
+            # snapshot.
             manager.load_count += 1
 
         manager.generate = load_after_generation
         final = self.respond()[-1]
 
         self.assertNotEqual(manager.load_id, producing_load_id)
-        self.assertEqual(
-            final[BRANCH_SOURCE], (final[METRICS][0], producing_load_id)
-        )
+        # The reply is tagged with the load that produced it, so the branch is
+        # refused rather than replayed against different weights.
+        self.assertEqual(final[TURNS][-1]["load_id"], producing_load_id)
+        selected = click_token(final, 1)
+        self.assertEqual(app.branch_target(final[TURNS], selected), app.BRANCH_MODEL_CHANGED)
 
     def test_a_response_token_is_remembered_for_the_table(self):
         final = self.respond()[-1]
-        selected = app.remember_selection(final[METRICS], select(1))
-        self.assertEqual(selected, {"generation": final[METRICS][0], "index": 1})
+        selected = click_token(final, 1)
+        self.assertEqual(
+            selected,
+            {
+                "source": "turn",
+                "turn": 1,
+                "index": 1,
+                "at_generation": final[TURNS][1]["metrics_generation"],
+                "at_token_id": metrics_of(final[METRICS])[1]["token_id"],
+            },
+        )
 
-    def test_a_prompt_token_clears_the_remembered_position(self):
-        # Otherwise a click in the prompt token's table would pair its row with
-        # the response token remembered earlier.
+    def test_an_unscored_prompt_token_is_not_remembered(self):
+        # The first prompt token has no prediction behind it, so there are no
+        # alternatives for a table row to pair with. Remembering it would let
+        # a row click pair with the response token remembered earlier.
         frames = self.respond()
         prompt_payload = frames[1][PROMPT_METRICS]
-        self.assertIsNone(app.remember_selection(prompt_payload, select(0)))
+        self.assertIsNone(app.remember_strip_selection("prompt")(prompt_payload, select(0))[0])
 
     def test_choosing_an_alternative_readies_a_branch(self):
         final = self.respond()[-1]
@@ -1981,17 +2518,20 @@ class BranchFromTokenTests(unittest.TestCase):
 
     def test_a_strip_without_a_conversation_cannot_be_branched(self):
         # Scored text draws the same strip and table, but there is no reply to
-        # replace; the branch source stamp is what says so.
+        # replace; the selection says which view it came from.
         final = self.respond()[-1]
-        selected = app.remember_selection(final[METRICS], select(1))
-        detail, pick = app.choose_alternative(final[METRICS], selected, None, cell(1))
+        scored = score_known_passage()
+        selected = app.remember_strip_selection("score")(scored[2], select(0))[0]
+        detail, pick = app.choose_alternative(
+            final[TURNS], scored[2], app.empty_metrics(), selected, cell(1)
+        )
         self.assertIn(app.BRANCH_UNAVAILABLE, detail)
         self.assertIsNone(pick)
 
     def test_a_row_without_a_remembered_token_does_nothing(self):
         final = self.respond()[-1]
         detail, pick = app.choose_alternative(
-            final[METRICS], None, final[BRANCH_SOURCE], cell(0)
+            final[TURNS], final[METRICS], app.empty_metrics(), None, cell(0)
         )
         self.assertEqual(detail, gr.skip())
         self.assertIsNone(pick)
@@ -2001,7 +2541,8 @@ class BranchFromTokenTests(unittest.TestCase):
         _detail, pick = self.pick_alternative(final)
         frames = list(
             app.branch_from(
-                pick, final[BRANCH_SOURCE], final[METRICS], "", final[TURNS], *SETTINGS
+                pick,
+                "", final[TURNS], *SETTINGS
             )
         )
         for frame in frames:
@@ -2017,9 +2558,8 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertIn("Branched at token 2", frames[0][STATUS])
         self.assertIn("Branched at token 2", last[STATUS])
         self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 2)
-        self.assertEqual(
-            last[BRANCH_SOURCE], (last[METRICS][0], runtime.MANAGER.load_id)
-        )
+        # The branch is itself a reply, so it can be branched again.
+        self.assertEqual(last[TURNS][-1]["load_id"], runtime.MANAGER.load_id)
 
     def test_branching_preserves_literal_assistant_prefill_tags(self):
         runtime.MANAGER = loaded_manager(
@@ -2032,8 +2572,6 @@ class BranchFromTokenTests(unittest.TestCase):
         branched = list(
             app.branch_from(
                 pick,
-                original[BRANCH_SOURCE],
-                original[METRICS],
                 "",
                 original[TURNS],
                 *settings.values(),
@@ -2059,7 +2597,11 @@ class BranchFromTokenTests(unittest.TestCase):
         original = list(app.chat("hi", [], *settings.values()))[-1]
         original_metrics = metrics_of(original[METRICS])
         pick = {
-            "generation": original[METRICS][0],
+            "source": "turn",
+            "turn": 1,
+            "index": 1,
+            "at_generation": original[TURNS][1]["metrics_generation"],
+            "at_token_id": original_metrics[1]["token_id"],
             "position": 2,
             "token_id": THINK_EOS,
             "original_id": original_metrics[1]["token_id"],
@@ -2070,8 +2612,6 @@ class BranchFromTokenTests(unittest.TestCase):
         branched = list(
             app.branch_from(
                 pick,
-                original[BRANCH_SOURCE],
-                original[METRICS],
                 "",
                 original[TURNS],
                 *settings.values(),
@@ -2090,7 +2630,8 @@ class BranchFromTokenTests(unittest.TestCase):
         _detail, pick = self.pick_alternative(second)
         last = list(
             app.branch_from(
-                pick, second[BRANCH_SOURCE], second[METRICS], "", second[TURNS], *SETTINGS
+                pick,
+                "", second[TURNS], *SETTINGS
             )
         )[-1]
         self.assertEqual(
@@ -2099,24 +2640,25 @@ class BranchFromTokenTests(unittest.TestCase):
         )
         self.assertEqual(len(last[TURNS]), 4)
 
-    def test_a_pick_made_against_a_replaced_strip_is_refused(self):
+    def test_a_pick_whose_token_has_moved_is_refused(self):
+        # The pick names a turn and a token within it, and is checked against
+        # the conversation it is used with rather than trusted. Rewriting the
+        # reply by hand takes its measurements away, so the token the pick
+        # names is no longer there.
         final = self.respond()[-1]
         _detail, pick = self.pick_alternative(final)
-        fresh = self.respond()[-1]
-        frames = list(
-            app.branch_from(
-                pick, fresh[BRANCH_SOURCE], fresh[METRICS], "", fresh[TURNS], *SETTINGS
-            )
-        )
+        edited = forget_measurements(final[TURNS], 1)
+        frames = list(app.branch_from(pick, "", edited, *SETTINGS))
         self.assertEqual(len(frames), 1)
-        self.assertEqual(frames[0][STATUS], app.BRANCH_HINT)
-        self.assertEqual(frames[0][TURNS], fresh[TURNS])
+        self.assertEqual(frames[0][STATUS], app.BRANCH_UNAVAILABLE)
+        self.assertEqual(frames[0][TURNS], edited)
 
     def test_branching_with_nothing_picked_explains_the_steps(self):
         final = self.respond()[-1]
         frames = list(
             app.branch_from(
-                None, final[BRANCH_SOURCE], final[METRICS], "", final[TURNS], *SETTINGS
+                None,
+                "", final[TURNS], *SETTINGS
             )
         )
         self.assertEqual(frames[0][STATUS], app.BRANCH_HINT)
@@ -2128,7 +2670,8 @@ class BranchFromTokenTests(unittest.TestCase):
         try:
             frames = list(
                 app.branch_from(
-                    pick, final[BRANCH_SOURCE], final[METRICS], "", final[TURNS], *SETTINGS
+                pick,
+                "", final[TURNS], *SETTINGS
                 )
             )
         finally:
@@ -2142,25 +2685,35 @@ class BranchFromTokenTests(unittest.TestCase):
         next(stream)
         frame = next(stream)
         stream.close()
-        producing_load_id = frame[CONTEXT_IDS][2]
+        producing_load_id = frame[TURNS][-1]["load_id"]
+        _messages, turns, *_rest = app.stop_generation(frame[TURNS])
+
+        # The partial reply keeps the tokens it did produce and the load that
+        # produced them, so it can be branched like a finished one.
+        selection = {
+            "source": "turn",
+            "turn": 1,
+            "index": 0,
+            "at_generation": turns[1]["metrics_generation"],
+            "at_token_id": turns[1]["tokens"][0]["token_id"],
+        }
+        self.assertEqual(app.branch_target(turns, selection)[0], 1)
         runtime.MANAGER.load_count += 1
-        *_rest, source = app.stop_generation(
-            frame[TURNS], frame[METRICS], frame[CONTEXT_IDS]
+        self.assertNotEqual(runtime.MANAGER.load_id, producing_load_id)
+        self.assertEqual(
+            app.branch_target(turns, selection), app.BRANCH_MODEL_CHANGED
         )
-        self.assertEqual(source, (frame[METRICS][0], producing_load_id))
 
     def test_stopping_before_any_token_leaves_nothing_to_branch(self):
         turns = [make_turn("user", "hi"), make_turn("assistant", "")]
-        *_rest, source = app.stop_generation(turns, app.empty_metrics())
-        self.assertIsNone(source)
+        _messages, remaining, *_rest = app.stop_generation(turns)
+        self.assertEqual([turn["role"] for turn in remaining], ["user"])
 
     def branch_text(self, final, text, strip_index=1):
-        selected = app.remember_selection(final[METRICS], select(strip_index))
+        selected = click_token(final, strip_index)
         return list(
             app.branch_with_text(
                 selected,
-                final[BRANCH_SOURCE],
-                final[METRICS],
                 text,
                 "",
                 final[TURNS],
@@ -2183,9 +2736,7 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertIn("'Hello'", last[STATUS])
         self.assertEqual(last[TRACE]["sampling"]["forced_prefix_tokens"], 2)
         self.assertTrue(last[TURNS][-1]["content"].startswith("HelloHello"))
-        self.assertEqual(
-            last[BRANCH_SOURCE], (last[METRICS][0], runtime.MANAGER.load_id)
-        )
+        self.assertEqual(last[TURNS][-1]["load_id"], runtime.MANAGER.load_id)
 
     def test_typed_text_may_span_several_tokens(self):
         final = self.respond()[-1]
@@ -2232,31 +2783,36 @@ class BranchFromTokenTests(unittest.TestCase):
         final = self.respond()[-1]
         frames = list(
             app.branch_with_text(
-                None, final[BRANCH_SOURCE], final[METRICS], "Hello", "", final[TURNS], *SETTINGS
+                None,
+                "Hello", "", final[TURNS], *SETTINGS
             )
         )
         self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
 
-    def test_typed_text_against_a_replaced_strip_is_refused(self):
+    def test_typed_text_against_a_moved_token_is_refused(self):
+        # As for a picked alternative: the click names a turn and a token, and
+        # is checked against the conversation it is used with. Rewriting the
+        # reply by hand takes its measurements away.
         final = self.respond()[-1]
-        selected = app.remember_selection(final[METRICS], select(1))
-        fresh = self.respond()[-1]
+        selected = click_token(final, 1)
+        edited = forget_measurements(final[TURNS], 1)
         frames = list(
-            app.branch_with_text(
-                selected, fresh[BRANCH_SOURCE], fresh[METRICS], "Hello", "", fresh[TURNS], *SETTINGS
-            )
+            app.branch_with_text(selected, "Hello", "", edited, *SETTINGS)
         )
         self.assertEqual(len(frames), 1)
-        self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
+        self.assertEqual(frames[0][STATUS], app.BRANCH_UNAVAILABLE)
 
     def test_typed_text_from_an_earlier_model_load_is_refused(self):
         final = self.respond()[-1]
-        # Loading leaves the old response strip on screen, but its token IDs
+        # Loading leaves the conversation on screen, but a reply's token IDs
         # belong to the tokenizer that produced it, even for a same-ID reload.
+        selected = click_token(final, 1)
         runtime.MANAGER.load_count += 1
-        frames = self.branch_text(final, "Hello")
+        frames = list(
+            app.branch_with_text(selected, "Hello", "", final[TURNS], *SETTINGS)
+        )
         self.assertEqual(len(frames), 1)
-        self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
+        self.assertEqual(frames[0][STATUS], app.BRANCH_MODEL_CHANGED)
         self.assertEqual(frames[0][TURNS], final[TURNS])
 
     def reload_before(self, method_name):
@@ -2362,42 +2918,36 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertTrue(frames[-1][TURNS][-1]["content"].startswith("Hello"))
         self.assertFalse(runtime.MANAGER.busy, "the slot must not leak")
 
-    def test_typed_text_against_a_strip_replaced_as_the_slot_is_taken_is_refused(
-        self,
-    ):
-        """A generation finishing between the click and the reservation.
+    def test_a_refused_typed_branch_encodes_nothing(self):
+        """The selection is checked before the model lock is touched.
 
-        Its final frame re-stamped the strip. The stamps are compared only once
-        the slot is owned, so the comparison reads the strip the replacement
-        would actually land on.
+        encode_replacement() waits on that lock, so a branch that is going to
+        be refused must be refused first: queueing behind a running
+        generation and then refusing costs the reader the wait and the
+        runtime the work.
         """
 
         final = self.respond()[-1]
-        manager = runtime.MANAGER
-        real = manager.claim_generation
-
-        def replace_strips_first():
-            app.new_metrics_generation()
-            return real()
-
-        manager.claim_generation = replace_strips_first
+        selected = click_token(final, 1)
+        edited = forget_measurements(final[TURNS], 1)
         encodings = []
         self.record_encodings(encodings)
-        frames = self.branch_text(final, "Hello")
+        frames = list(
+            app.branch_with_text(selected, "Hello", "", edited, *SETTINGS)
+        )
         self.assertEqual(len(frames), 1)
-        self.assertEqual(frames[0][STATUS], app.BRANCH_TEXT_HINT)
-        self.assertEqual(frames[0][TURNS], final[TURNS])
+        self.assertEqual(frames[0][STATUS], app.BRANCH_UNAVAILABLE)
         self.assertEqual(encodings, [])
-        self.assertFalse(manager.busy, "a refusal must give the slot back")
+        self.assertFalse(
+            runtime.MANAGER.busy, "a refusal must give the slot back"
+        )
 
     def test_a_cancelled_typed_branch_releases_the_slot(self):
         final = self.respond()[-1]
-        selected = app.remember_selection(final[METRICS], select(1))
+        selected = click_token(final, 1)
         stream = app.branch_with_text(
-            selected,
-            final[BRANCH_SOURCE],
-            final[METRICS],
-            "Hello",
+                selected,
+                "Hello",
             "",
             final[TURNS],
             *SETTINGS,
@@ -2416,7 +2966,8 @@ class BranchFromTokenTests(unittest.TestCase):
         self.reload_before("generate")
         frames = list(
             app.branch_from(
-                pick, final[BRANCH_SOURCE], final[METRICS], "", final[TURNS], *SETTINGS
+                pick,
+                "", final[TURNS], *SETTINGS
             )
         )
         self.assertEqual(len(frames), 2)
@@ -2428,12 +2979,10 @@ class BranchFromTokenTests(unittest.TestCase):
         )
         settings = dict(FIXED, assistant_prefill="<think>Hello</think>")
         original = list(app.chat("hi", [], *settings.values()))[-1]
-        selected = app.remember_selection(original[METRICS], select(3))
+        selected = click_token(original, 3)
         branched = list(
             app.branch_with_text(
                 selected,
-                original[BRANCH_SOURCE],
-                original[METRICS],
                 "Hello",
                 "",
                 original[TURNS],
@@ -2470,13 +3019,11 @@ class BranchFromTokenTests(unittest.TestCase):
 
     def test_typed_branch_refuses_the_automatic_reasoning_close(self):
         original, settings = self.reasoning_prefill_response()
-        selected = app.remember_selection(original[METRICS], select(0))
+        selected = click_token(original, 0)
 
         frames = list(
             app.branch_with_text(
                 selected,
-                original[BRANCH_SOURCE],
-                original[METRICS],
                 "Replacement",
                 "",
                 original[TURNS],
@@ -2494,15 +3041,13 @@ class BranchFromTokenTests(unittest.TestCase):
         metrics = metrics_of(original[METRICS])
         self.assertTrue(all(m.get("automatic_reasoning_close") for m in metrics[:3]))
         self.assertNotIn("automatic_reasoning_close", metrics[3])
-        selected = app.remember_selection(original[METRICS], select(3))
+        selected = click_token(original, 3)
         runtime.MANAGER.model.script = [0, 0, 0, 0, 6, 7]
         runtime.MANAGER.model.step = 0
 
         branched = list(
             app.branch_with_text(
                 selected,
-                original[BRANCH_SOURCE],
-                original[METRICS],
                 "Replacement",
                 "",
                 original[TURNS],
@@ -2724,7 +3269,7 @@ class BranchFromTokenTests(unittest.TestCase):
             for fn in demo.fns.values()
             if getattr(fn.fn, "__name__", None) == "branch_with_text"
         )
-        self.assertEqual(len(listener.inputs), 4 + 2 + len(SETTINGS) + 4)
+        self.assertEqual(len(listener.inputs), 2 + 2 + len(SETTINGS) + 4)
         self.assertEqual(len(listener.outputs), CHAT_OUTPUTS)
 
     def test_the_branch_button_is_wired_as_a_generation(self):
@@ -2734,7 +3279,7 @@ class BranchFromTokenTests(unittest.TestCase):
             for fn in demo.fns.values()
             if getattr(fn.fn, "__name__", None) == "branch_from"
         )
-        self.assertEqual(len(listener.inputs), 3 + 2 + len(SETTINGS) + 4)
+        self.assertEqual(len(listener.inputs), 1 + 2 + len(SETTINGS) + 4)
         self.assertEqual(len(listener.outputs), CHAT_OUTPUTS)
 
 
@@ -2774,7 +3319,7 @@ class ForkTests(unittest.TestCase):
 
     def test_forking_copies_the_conversation_into_a_new_fork(self):
         result = app.fork_conversation(self.turns(), new_forks(), None)
-        self.assertEqual(len(result), 18)
+        self.assertEqual(len(result), 20)
         self.assertEqual(contents(result[FORK_TURNS]), contents(self.turns()))
         self.assertEqual(result[FORK_STATE]["active"], "Fork 1")
         self.assertEqual(
@@ -2808,7 +3353,12 @@ class ForkTests(unittest.TestCase):
     def test_a_truncated_fork_empties_the_token_panel(self):
         selected = {"index": 1, "content": "first"}
         result = app.fork_conversation(self.turns(), new_forks(), selected)
-        self.assertEqual(strip_of(result[FORK_STRIP]), [])
+        # The fork's own turns are drawn in the token view; the measurements
+        # of the reply that was cut away are what goes.
+        self.assertEqual(
+            strip_of(result[FORK_STRIP]),
+            app.transcript_value(result[FORK_TURNS], DEFAULT_COLOR_SCALE),
+        )
         self.assertEqual(metrics_of(result[FORK_METRICS]), [])
         self.assertEqual(result[FORK_DETAIL], app.NO_TOKEN_SELECTED)
         self.assertEqual(result[FORK_TRACE], {})
@@ -2854,7 +3404,11 @@ class ForkTests(unittest.TestCase):
         )
         self.assertEqual(result[FORK_PICKER]["value"], MAIN_BRANCH)
         self.assertIn("Switched to Main", result[FORK_STATUS])
-        self.assertEqual(strip_of(result[FORK_STRIP]), [])
+        # The token view follows the conversation switched to.
+        self.assertEqual(
+            strip_of(result[FORK_STRIP]),
+            app.transcript_value(result[FORK_TURNS], DEFAULT_COLOR_SCALE),
+        )
 
     def test_switching_to_the_fork_already_on_screen_changes_nothing(self):
         result = app.switch_fork(MAIN_BRANCH, self.turns(), new_forks())
@@ -2915,7 +3469,7 @@ class ForkTests(unittest.TestCase):
 
     def test_starting_a_new_chat_puts_the_current_one_away(self):
         result = app.new_conversation(self.turns(), new_forks())
-        self.assertEqual(len(result), 18)
+        self.assertEqual(len(result), 20)
         self.assertEqual(result[FORK_TURNS], [])
         self.assertEqual(result[FORK_CHATBOT], [])
         self.assertEqual(result[FORK_STATE]["active"], "Chat 1")
@@ -2931,7 +3485,7 @@ class ForkTests(unittest.TestCase):
         self.assertEqual((result[FORK_SEND], result[FORK_STOP]), app.send_stop_buttons(False))
         # The token panel described a reply that is no longer on screen.
         self.assertEqual(result[FORK_DETAIL], app.NO_TOKEN_SELECTED)
-        self.assertEqual(strip_of(result[FORK_STRIP]), [])
+        self.assertEqual(strip_of(result[FORK_STRIP]), app.EMPTY_TRANSCRIPT)
 
     def test_new_chats_and_forks_are_numbered_separately(self):
         forked = app.fork_conversation(self.turns(), new_forks(), None)
@@ -3095,7 +3649,7 @@ class ConversationListWiringTests(unittest.TestCase):
 
     def test_a_change_to_the_conversation_state_redraws_the_list(self):
         refresh = self.named("refresh_conversation_list")
-        state, _metrics, _context = self.named("stop_generation").inputs
+        state, _scale = self.named("stop_generation").inputs
         forks = self.named("remember_forks").inputs[1]
         self.assertEqual(refresh.targets, [(state._id, "change")])
         self.assertEqual(refresh.outputs, [self.conversation_list(), forks])
@@ -3115,7 +3669,7 @@ class ConversationListWiringTests(unittest.TestCase):
 
     def test_the_saved_conversations_come_back_when_the_page_loads(self):
         restore = self.named("restore_conversations")
-        state, _metrics, _context = self.named("stop_generation").inputs
+        state, _scale = self.named("stop_generation").inputs
         forks = self.named("remember_forks").inputs[1]
         self.assertEqual(restore.targets, [(self.demo._id, "load")])
         self.assertEqual(restore.inputs, [])
@@ -3131,7 +3685,7 @@ class ConversationListWiringTests(unittest.TestCase):
         # state and is not a streaming handler is on the queue, and every
         # streaming handler is off it, since the redraw has to run between
         # its frames.
-        state, _metrics, _context = self.named("stop_generation").inputs
+        state, _scale = self.named("stop_generation").inputs
         forks = self.named("remember_forks").inputs[1]
         writers = [fn for fn in self.demo.fns.values() if state in fn.outputs or forks in fn.outputs]
         self.assertTrue(writers)
@@ -3146,7 +3700,7 @@ class ConversationListWiringTests(unittest.TestCase):
 
     def test_a_change_to_the_forks_saves_them(self):
         remember = self.named("remember_forks")
-        state, _metrics, _context = self.named("stop_generation").inputs
+        state, _scale = self.named("stop_generation").inputs
         forks = remember.inputs[1]
         self.assertEqual(remember.targets, [(forks._id, "change")])
         self.assertEqual(remember.inputs, [state, forks])
@@ -3643,7 +4197,7 @@ class CancelWiringTests(unittest.TestCase):
     def conversation_state(self):
         """Stop reads the conversation state first, then token provenance."""
 
-        state, _metrics, _context = self.named("stop_generation").inputs
+        state, _scale = self.named("stop_generation").inputs
         return state
 
     def writers(self):
@@ -3798,7 +4352,7 @@ class LayerInspectionTests(unittest.TestCase):
 
         frames = list(app.chat("hi", [], *SETTINGS))
         final = list(frames[-1])
-        for slot in (PROMPT_METRICS, CONTEXT_IDS):
+        for slot in (PROMPT_METRICS, CONTEXT_IDS, CHAT_CONTEXT_IDS):
             final[slot] = next(
                 frame[slot] for frame in reversed(frames) if isinstance(frame[slot], tuple)
             )
@@ -3818,10 +4372,123 @@ class LayerInspectionTests(unittest.TestCase):
 
     def test_scored_text_publishes_its_context_ids(self):
         result = list(app.score_text("", "Hello", False, DEFAULT_COLOR_SCALE))[-1]
-        stamp, ids, load = result[10]
+        stamp, ids, load = result[13]
         self.assertEqual(stamp, result[1][0])
         self.assertEqual(ids, [])
         self.assertEqual(load, runtime.MANAGER.load_id)
+
+    def test_scored_layers_use_the_scored_sequence_after_chatting(self):
+        scored = score_known_passage()
+        final = self.finished()
+        target = app.remember_inspect_target("score")(scored[2], select(0))
+        self.assertIsNotNone(target)
+        *_, insight, status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS],
+            0, scored[2], scored[14],
+        )
+        expected = scored[14][1] + [m["token_id"] for m in scored[2][1]]
+        context_count = len(scored[14][1])
+        self.assertEqual(self.calls, [(expected, context_count, context_count)])
+        self.assertEqual(insight["token_id"], scored[2][1][0]["token_id"])
+        self.assertIn("Token 1", status)
+
+    def test_chat_layers_use_the_reply_sequence_after_scoring(self):
+        final = self.finished()
+        scored = score_known_passage()
+        # A click queued before scoring still cannot overwrite its reset.
+        self.assertEqual(
+            app.select_transcript_token(final[TURNS], final[METRICS], token_span(final[TURNS], 1)),
+            (gr.skip(),) * 5,
+        )
+        _, _, _, target, _ = app.select_transcript_token(
+            final[TURNS], scored[1], token_span(final[TURNS], 1)
+        )
+        self.assertEqual(target, {"generation": final[METRICS][0], "strip": "response", "index": 1})
+        *_, insight, status = self.inspect(
+            target, scored[1], scored[4], scored[13], 0,
+            scored[2], scored[14], final[CHAT_METRICS], final[CHAT_CONTEXT_IDS],
+        )
+        self.assertEqual(self.calls, [([0, 2, 3, THINK_EOS], 2, 1)])
+        self.assertEqual(insight["token_id"], 3)
+        self.assertIn("Token 2", status)
+        app.clear_chat()
+        *_, status = self.inspect(
+            target, scored[1], scored[4], scored[13], 0,
+            scored[2], scored[14], final[CHAT_METRICS], final[CHAT_CONTEXT_IDS],
+        )
+        self.assertEqual(status, app.INSPECT_HINT)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_rescoring_rejects_queued_score_clicks_and_inspection(self):
+        scored = score_known_passage()
+        target = app.remember_inspect_target("score")(scored[2], select(0))
+        score_known_passage(" world", "Hello")
+        self.assertIsNone(app.remember_inspect_target("score")(scored[2], select(0)))
+        self.assertEqual(app.inspect_token("score")(scored[2], select(0)), (gr.skip(), gr.skip()))
+        *_, status = self.inspect(
+            target, scored[1], scored[4], scored[13], 0, scored[2], scored[14]
+        )
+        self.assertEqual(status, app.INSPECT_HINT)
+        self.assertEqual(self.calls, [])
+
+    def test_scored_inspection_still_checks_the_model_load(self):
+        scored = score_known_passage()
+        final = self.finished()
+        target = app.remember_inspect_target("score")(scored[2], select(0))
+        stale_context = (*scored[14][:2], "previous-load")
+        *_, status = self.inspect(
+            target, final[METRICS], final[PROMPT_METRICS], final[CONTEXT_IDS],
+            0, scored[2], stale_context,
+        )
+        self.assertEqual(status, app.INSPECT_MODEL_CHANGED)
+        self.assertEqual(self.calls, [])
+
+    def test_scored_inspection_checks_its_stamp_before_and_after_delivery(self):
+        from ui.panel import new_metrics_generation
+
+        original_inspect = runtime.MANAGER.inspect
+        for before_delivery in (True, False):
+            with self.subTest(before_delivery=before_delivery):
+                scored = score_known_passage()
+                target = app.remember_inspect_target("score")(scored[2], select(0))
+
+                def replace_scored_passage(*args, **kwargs):
+                    result = original_inspect(*args, **kwargs)
+                    new_metrics_generation(scored=True)
+                    return result
+
+                runtime.MANAGER.inspect = (
+                    replace_scored_passage if before_delivery else original_inspect
+                )
+                stream = app.inspect_layers(
+                    target, scored[1], scored[4], scored[13], 0, scored[2], scored[14]
+                )
+                try:
+                    frame = next(stream)
+                    if before_delivery:
+                        self.assertEqual(frame[-1], app.INSPECT_GONE)
+                        self.assertEqual(frame[0], gr.skip())
+                    else:
+                        self.assertIsInstance(frame[3], dict)
+                        new_metrics_generation(scored=True)
+                        frame = next(stream)
+                        self.assertEqual(frame[-1], app.INSPECT_GONE)
+                        self.assertIsNone(frame[3])
+                finally:
+                    stream.close()
+                    runtime.MANAGER.inspect = original_inspect
+
+    def test_score_context_is_wired_separately_from_chat_context(self):
+        demo = app.build_app()
+        score = next(fn for fn in demo.fns.values() if fn.fn is app.score_text)
+        chat = next(fn for fn in demo.fns.values() if fn.fn is app.chat)
+        inspect = next(fn for fn in demo.fns.values() if fn.fn is app.inspect_layers)
+        self.assertEqual(inspect.inputs[3], chat.outputs[CONTEXT_IDS])
+        self.assertEqual(inspect.inputs[5:7], [score.outputs[2], score.outputs[14]])
+        self.assertEqual(inspect.inputs[7:], [chat.outputs[CHAT_METRICS], chat.outputs[CHAT_CONTEXT_IDS]])
+        self.assertNotIn(chat.outputs[CHAT_METRICS], score.outputs)
+        self.assertNotIn(chat.outputs[CHAT_CONTEXT_IDS], score.outputs)
+        self.assertNotIn(score.outputs[14], chat.outputs)
 
     def test_a_response_token_is_inspected_in_its_full_sequence(self):
         final = self.finished()

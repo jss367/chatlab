@@ -56,7 +56,11 @@ def score_text(
     """
 
     skip = gr.skip()
-    refused = (skip,) * 7
+    # Everything the success path publishes before the status line: the scored
+    # strip, the two copies of its measurements, the context strip with its
+    # own state and note, and the two charts.
+    refused = (skip,) * 8
+
     # A generation holds the model lock across every one of its yields, so
     # without the slot this pass would simply wait on it: the button would sit
     # dead for the length of the response and then fire, with nothing on screen
@@ -75,11 +79,11 @@ def score_text(
     # start, so "loaded" read under it stays true until the slot goes back.
     held = runtime.MANAGER.claim_generation()
     if held:
-        yield refused + (score_busy(held), skip, skip, skip)
+        yield refused + (score_busy(held),) + (skip,) * 6
         return
     try:
         if not runtime.MANAGER.loaded:
-            yield refused + ("Download and load a model first.", skip, skip, skip)
+            yield refused + ("Download and load a model first.",) + (skip,) * 6
             return
         try:
             result = runtime.MANAGER.score_text(
@@ -88,10 +92,7 @@ def score_text(
         except Exception as error:
             yield refused + (
                 failure_status("Could not score that text", str(error)),
-                skip,
-                skip,
-                skip,
-            )
+            ) + (skip,) * 6
             return
 
         summary = summarize(result.metrics)
@@ -108,10 +109,21 @@ def score_text(
             status = f"{status} {SEAM_CAVEAT}"
         # Both strips are replaced, so they take one shared stamp - and that
         # stamp is what drops a click made against the response they overwrite.
-        generation = new_metrics_generation()
+        generation = new_metrics_generation(scored=True)
+        scored = stamped(result.metrics, generation)
+        context_state = (
+            generation, [int(value) for value in result.context_ids], runtime.MANAGER.load_id
+        )
         yield (
             strip_update(result.metrics, scale_name, "Scored tokens — click one"),
-            stamped(result.metrics, generation),
+            # Twice: to the inspector, which now describes this passage, and to
+            # the scored strip's own state, which nothing but another scoring
+            # pass rewrites. The inspector's copy is replaced by the next reply
+            # while the strip goes on showing the passage, so the strip is
+            # repainted and its clicks are read from the copy that still
+            # matches what is drawn there.
+            scored,
+            scored,
             strip_update(result.context_metrics, scale_name),
             stamped(result.context_metrics, generation),
             prompt_note_text(len(result.context_metrics), "", "context"),
@@ -120,7 +132,13 @@ def score_text(
             status,
             NO_TOKEN_SELECTED,
             [],
-            (generation, [int(value) for value in result.context_ids], runtime.MANAGER.load_id),
+            # The panel is reset, so whatever it had armed is disarmed with it.
+            # A branch the reader can no longer see must not still be waiting
+            # on the button.
+            None,
+            None,
+            context_state,
+            context_state,
         )
         # Resumed once the browser has the frame above, so nothing between the
         # mint and the strips arriving can hold the slot.

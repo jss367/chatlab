@@ -20,6 +20,20 @@ system prompt, the transcript so far and the template around them - and
 that was typed, rewritten by hand, loaded from an older file, or never
 finished measuring may carry none of these, and the list says so rather than
 guessing.
+
+A reply also carries the measurements behind every token it is made of, which
+is what lets the conversation itself be painted by rank or surprise and
+branched at any token in it rather than only in the newest reply:
+
+    {"tokens": [metric, ...], "load_id": str, "metrics_generation": int}
+
+``tokens`` is what ``token_metrics.build_metric`` produced for that reply,
+``load_id`` names the model load that produced it, and
+``metrics_generation`` is the stamp the token panel was drawn with while the
+reply was the live one (see ``ui.panel``). These three are memory only:
+:func:`turn_entries` leaves them out, so the saved file stays the size it
+was. It is rewritten on every streaming frame, and a few hundred numbers per
+token would make that a multi-megabyte write per token.
 """
 
 from __future__ import annotations
@@ -44,6 +58,10 @@ TITLE_LIMIT = 40
 
 # The per-turn provenance fields, and the type each must have in a saved file.
 TURN_ORIGIN_FIELDS = {"model": str, "prompt_tokens": int, "generated_tokens": int}
+
+# What a reply carries of its own measurements. These never reach the file;
+# see the module docstring for why.
+TURN_MEASUREMENT_FIELDS = ("tokens", "load_id", "metrics_generation")
 
 # The sampling a conversation can carry of its own, and the type each must
 # have in a saved file. The settings module owns what the values may be; this
@@ -138,9 +156,34 @@ def make_turn(role: str, content: str, reasoning: str = "") -> dict:
 
 
 def copy_turns(turns: list[dict] | None) -> list[dict]:
-    """Snapshot turns so a streaming update cannot mutate stored state."""
+    """Snapshot turns so a streaming update cannot mutate stored state.
 
-    return copy.deepcopy(turns or [])
+    Deep, because a turn carries nested values - a steering entry above all -
+    that a shallow copy would leave two copies sharing.
+
+    The measurements are the exception. The list itself is copied, so a turn
+    can gain or lose tokens without disturbing a copy of it, but the metrics
+    inside are shared rather than duplicated. Each is written once by
+    ``token_metrics.build_metric`` and never edited afterwards, and each holds
+    a dozen numbers plus its eight alternatives. Copying them here would mean
+    copying every measurement in the conversation on every streaming frame,
+    for a cost that grows with the square of the reply's length: about 1.6
+    seconds of copying across a 500-token reply, and twenty-five across a
+    2,000-token one.
+    """
+
+    copied: list[dict] = []
+    for turn in turns or []:
+        tokens = turn.get("tokens")
+        if tokens is None:
+            copied.append(copy.deepcopy(turn))
+            continue
+        entry = copy.deepcopy(
+            {key: value for key, value in turn.items() if key != "tokens"}
+        )
+        entry["tokens"] = list(tokens)
+        copied.append(entry)
+    return copied
 
 
 def display_messages(
@@ -416,6 +459,13 @@ def fork_at(
     return turns[: position + 1], None
 
 
+def turn_tokens(turn: dict | None) -> list[dict]:
+    """The per-token measurements a reply carries, or nothing."""
+
+    tokens = (turn or {}).get("tokens")
+    return tokens if isinstance(tokens, list) else []
+
+
 def forget_measurements(turns: list[dict] | None, position: int) -> list[dict]:
     """The turns after the reply at ``position`` was rewritten by hand.
 
@@ -426,6 +476,14 @@ def forget_measurements(turns: list[dict] | None, position: int) -> list[dict]:
     exists. ``model`` stays throughout: rewording an answer does not change
     who gave it. The list then falls back to the last reply measured before
     the edit, the newest size that is still true.
+
+    The per-token measurements go from the edited reply and from every reply
+    after it. Each of those was produced from a transcript the edit has
+    replaced, so their ranks and probabilities no longer describe anything on
+    screen, and replaying their tokens onto the edited conversation would
+    force a reply the model never gave that prompt. ``generated_tokens``
+    survives where the text does because a count of tokens is still a true
+    count; a distribution over a prompt that is gone is not.
     """
 
     turns = copy_turns(turns)
@@ -434,6 +492,8 @@ def forget_measurements(turns: list[dict] | None, position: int) -> list[dict]:
         if turn["role"] != "assistant":
             continue
         turn.pop("prompt_tokens", None)
+        for field in TURN_MEASUREMENT_FIELDS:
+            turn.pop(field, None)
         if index == position:
             turn.pop("generated_tokens", None)
     return turns

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import html
+from functools import partial
 
 import gradio as gr
 
@@ -35,7 +36,7 @@ from ui.common import (
     NAV_PANE_WIDTH,
     NO_TOKEN_SELECTED,
     PAGES,
-    RESPONSE_STRIP_LABEL,
+    TRANSCRIPT_LABEL,
     show_page,
     status_card,
 )
@@ -50,6 +51,7 @@ from ui.conversations import (
     remember_branch_sampling,
     remember_forks,
     remember_message,
+    remember_transcript_message,
     restore_conversations,
     sampling_updates,
     save_conversation,
@@ -127,7 +129,9 @@ from ui.panel import (
     empty_metrics,
     inspect_token,
     recolor,
-    remember_selection,
+    remember_strip_selection,
+    select_transcript_token,
+    show_token_view,
 )
 from ui.prompts import (
     BATCH_HEADERS,
@@ -202,10 +206,15 @@ def build_app() -> gr.Blocks:
         conversation_state = gr.State([])
         metrics_state = gr.State(empty_metrics())
         prompt_metrics_state = gr.State(empty_metrics())
+        # What the Score text tab's strip is showing. The inspector's own
+        # state moves on to the next reply; this one is rewritten only by
+        # another scoring pass, so it still describes the passage drawn there.
+        score_metrics_state = gr.State(empty_metrics())
         trace_state = gr.State({})
-        # Branching from a token: the stamp of the last chat response's strip,
-        # the strip position last clicked, and the alternative picked for it.
-        branch_source = gr.State(None)
+        # Branching from a token: the token last clicked - which turn, and
+        # which of its tokens - and the alternative picked for it. Both name a
+        # turn rather than a strip position, so a click keeps meaning what it
+        # meant however the conversation moves under it.
         selected_token = gr.State(None)
         branch_pick = gr.State(None)
         # Forking: the other transcripts, and the chatbot message last clicked.
@@ -214,6 +223,11 @@ def build_app() -> gr.Blocks:
         # Layer inspection: the prompt ids behind the strips, the strip
         # position last clicked, and the last readout for re-rendering.
         context_ids_state = gr.State((*empty_metrics(), None))
+        score_context_ids_state = gr.State((0, [], None))
+        # The latest reply stays inspectable when scoring replaces the shared
+        # prompt panel. Its measurements and exact input belong to the chat.
+        chat_metrics_state = gr.State((0, []))
+        chat_context_ids_state = gr.State((0, [], None))
         steering_state = gr.State(None)
         inspect_target = gr.State(None)
         insight_state = gr.State(None)
@@ -318,6 +332,25 @@ def build_app() -> gr.Blocks:
 
                         with gr.Tabs(elem_id="conversation-tabs"):
                             with gr.Tab("Chat", elem_id="chat-tab"):
+                                # Two views of one conversation, one at a
+                                # time. The chatbot renders the reply as the
+                                # reader would read it - markdown, code
+                                # blocks, a collapsed reasoning block. The
+                                # token view writes the same messages out
+                                # token by token, whitespace shown, painted by
+                                # the scale on the right. Neither is a
+                                # substitute for the other, which is why this
+                                # is a switch and not a replacement.
+                                token_view = gr.Checkbox(
+                                    value=False,
+                                    label="Token view",
+                                    info=(
+                                        "Show the conversation as the tokens it "
+                                        "is made of. Click one to inspect it or "
+                                        "branch from it."
+                                    ),
+                                    elem_id="token-view",
+                                )
                                 chatbot = gr.Chatbot(
                                     type="messages",
                                     label="Conversation",
@@ -326,6 +359,14 @@ def build_app() -> gr.Blocks:
                                     elem_id="conversation",
                                     editable="all",
                                     placeholder="Load a model, then start a conversation.",
+                                )
+                                token_strip = gr.HighlightedText(
+                                    label=TRANSCRIPT_LABEL,
+                                    color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
+                                    show_legend=True,
+                                    combine_adjacent=False,
+                                    visible=False,
+                                    elem_id="token-strip",
                                 )
                                 prompt = gr.Textbox(
                                     label="Message",
@@ -513,6 +554,18 @@ def build_app() -> gr.Blocks:
                                 )
                                 score_button = gr.Button("Score text", variant="primary")
                                 score_status = gr.Markdown("Nothing scored yet.")
+                                # The scored tokens are shown here rather than
+                                # beside the chat: this tab has no conversation
+                                # to paint, and the inspector's business is
+                                # whichever token was last clicked, wherever
+                                # it was clicked.
+                                score_strip = gr.HighlightedText(
+                                    label="Scored tokens — click one",
+                                    color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
+                                    show_legend=True,
+                                    combine_adjacent=False,
+                                    elem_id="score-strip",
+                                )
 
                             with gr.Tab("Prompts", elem_id="prompts-tab"):
                                 gr.Markdown(
@@ -615,13 +668,6 @@ def build_app() -> gr.Blocks:
                             COLOR_SCALES[saved.color_scale].caption,
                             visible=False,
                             elem_classes=["scale-caption"],
-                        )
-                        token_strip = gr.HighlightedText(
-                            label=RESPONSE_STRIP_LABEL,
-                            color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
-                            show_legend=True,
-                            combine_adjacent=False,
-                            elem_id="token-strip",
                         )
                         token_detail = gr.Markdown(NO_TOKEN_SELECTED)
                         alternatives = gr.Dataframe(
@@ -1712,8 +1758,11 @@ def build_app() -> gr.Blocks:
             summary_panel,
             surprise_panel,
             trace_state,
-            branch_source,
             context_ids_state,
+            chat_metrics_state,
+            chat_context_ids_state,
+            selected_token,
+            branch_pick,
         ]
         undo_outputs = [
             prompt,
@@ -1732,6 +1781,8 @@ def build_app() -> gr.Blocks:
             summary_panel,
             surprise_panel,
             trace_state,
+            selected_token,
+            branch_pick,
         ]
 
         running = [
@@ -1742,27 +1793,27 @@ def build_app() -> gr.Blocks:
             chatbot.edit(edit_message, chat_inputs, chat_outputs),
             branch_button.click(
                 branch_from,
-                [branch_pick, branch_source, metrics_state, *chat_inputs],
+                [branch_pick, *chat_inputs],
                 chat_outputs,
             ),
             branch_text_button.click(
                 branch_with_text,
-                [selected_token, branch_source, metrics_state, branch_text, *chat_inputs],
+                [selected_token, branch_text, *chat_inputs],
                 chat_outputs,
             ),
         ]
 
         stop_button.click(
             stop_generation,
-            inputs=[conversation_state, metrics_state, context_ids_state],
+            inputs=[conversation_state, color_scale],
             concurrency_id=CONVERSATION_PANE_QUEUE,
             outputs=[
                 chatbot,
                 conversation_state,
+                token_strip,
                 send_button,
                 stop_button,
                 generation_status,
-                branch_source,
             ],
             cancels=running,
         )
@@ -1831,6 +1882,8 @@ def build_app() -> gr.Blocks:
                 summary_panel,
                 surprise_panel,
                 trace_state,
+                selected_token,
+                branch_pick,
                 forks_state,
                 conversation_list,
                 clear_confirm,
@@ -1860,6 +1913,8 @@ def build_app() -> gr.Blocks:
             summary_panel,
             surprise_panel,
             trace_state,
+            selected_token,
+            branch_pick,
         ]
         chatbot.select(remember_message, conversation_state, selected_message)
 
@@ -1968,6 +2023,8 @@ def build_app() -> gr.Blocks:
                 summary_panel,
                 surprise_panel,
                 trace_state,
+                selected_token,
+                branch_pick,
                 forks_state,
                 *steering_outputs,
             ],
@@ -1979,8 +2036,9 @@ def build_app() -> gr.Blocks:
             score_text,
             [score_context, score_input, use_chat_template, color_scale],
             [
-                token_strip,
+                score_strip,
                 metrics_state,
+                score_metrics_state,
                 prompt_strip,
                 prompt_metrics_state,
                 prompt_note,
@@ -1989,7 +2047,10 @@ def build_app() -> gr.Blocks:
                 score_status,
                 token_detail,
                 alternatives,
+                selected_token,
+                branch_pick,
                 context_ids_state,
+                score_context_ids_state,
             ],
         )
         # A batch reads its prompts from the box and everything else from the
@@ -2041,42 +2102,62 @@ def build_app() -> gr.Blocks:
             [prompts_upload, prompts_box, loaded_prompts_state],
             [prompts_box, batch_status, loaded_prompts_state],
         )
+        # The conversation is painted from the turns; the two strips are
+        # painted from the measurements they were handed.
         color_scale.change(
             recolor,
-            [metrics_state, prompt_metrics_state, color_scale],
-            [token_strip, prompt_strip, scale_caption],
+            [conversation_state, score_metrics_state, prompt_metrics_state, color_scale],
+            [token_strip, score_strip, prompt_strip, scale_caption],
+        )
+        # Which view of the conversation is on screen. The token view is
+        # redrawn on the way in rather than left to the next frame, since the
+        # conversation may have moved on while it was hidden.
+        token_view.change(
+            partial(show_token_view, conversation_id=conversation_state._id),
+            [token_view, conversation_state, color_scale],
+            [chatbot, token_strip],
+            show_progress="hidden",
         )
 
+        # One click in the conversation answers every question the inspector
+        # asks of it, so it is one listener rather than four.
         token_strip.select(
-            inspect_token,
-            inputs=metrics_state,
-            outputs=[token_detail, alternatives],
+            select_transcript_token,
+            [conversation_state, metrics_state],
+            [token_detail, alternatives, selected_token, inspect_target, branch_pick],
         )
-        prompt_strip.select(
-            inspect_token,
-            inputs=prompt_metrics_state,
-            outputs=[token_detail, alternatives],
+        # And a second that keeps the message it landed in, so Fork works from
+        # the token view exactly as it does from the chatbot.
+        token_strip.select(
+            remember_transcript_message, conversation_state, selected_message
         )
-        # A second listener on each strip keeps the clicked position for the
-        # alternatives table. The prompt strip's clicks always clear it: a
-        # prompt token cannot be branched, and a stale response position would
-        # otherwise pair with the prompt token's rows.
-        token_strip.select(remember_selection, metrics_state, selected_token)
-        prompt_strip.select(remember_selection, prompt_metrics_state, selected_token)
+
+        for strip, strip_metrics, source, where in (
+            (score_strip, score_metrics_state, "score", "score"),
+            (prompt_strip, prompt_metrics_state, "prompt", "prompt"),
+        ):
+            strip.select(
+                inspect_token(source),
+                inputs=strip_metrics,
+                outputs=[token_detail, alternatives],
+            )
+            # A second listener keeps the clicked position for the
+            # alternatives table, and a third the position the layer
+            # inspector would explain. Neither strip is part of a
+            # conversation, so clicking one disarms whatever branch the
+            # conversation had armed, and a row chosen in either is told it
+            # has nothing to branch rather than pairing with the token last
+            # clicked in the chat.
+            strip.select(
+                remember_strip_selection(source),
+                strip_metrics,
+                [selected_token, branch_pick],
+            )
+            strip.select(remember_inspect_target(where), strip_metrics, inspect_target)
         alternatives.select(
             choose_alternative,
-            [metrics_state, selected_token, branch_source],
+            [conversation_state, score_metrics_state, prompt_metrics_state, selected_token],
             [token_detail, branch_pick],
-        )
-
-        # Layer inspection. A third listener on each strip keeps the clicked
-        # position, the button does the forward pass, and the slider repaints
-        # the attention strip from the stored readout.
-        token_strip.select(
-            remember_inspect_target("response"), metrics_state, inspect_target
-        )
-        prompt_strip.select(
-            remember_inspect_target("prompt"), prompt_metrics_state, inspect_target
         )
         inspection_outputs = [lens_panel, attention_panel, insight_state, inspect_status]
         inspect_button.click(
@@ -2087,6 +2168,10 @@ def build_app() -> gr.Blocks:
                 prompt_metrics_state,
                 context_ids_state,
                 attention_layer,
+                score_metrics_state,
+                score_context_ids_state,
+                chat_metrics_state,
+                chat_context_ids_state,
             ],
             [lens_panel, attention_panel, attention_layer, insight_state, inspect_status],
         )

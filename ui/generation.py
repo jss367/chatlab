@@ -26,6 +26,7 @@ from conversation import (
     model_messages,
     new_forks,
     split_reasoning,
+    turn_tokens,
     user_index_at_or_before,
 )
 from model_runtime import (
@@ -41,7 +42,6 @@ from ui import runtime
 from ui.common import (
     CHART_EVERY,
     NO_TOKEN_SELECTED,
-    RESPONSE_STRIP_LABEL,
     SEED_LIMIT,
     failure_status,
     finalize_partial,
@@ -53,15 +53,15 @@ from ui.conversations import (
 from ui.panel import (
     BRANCH_HINT,
     BRANCH_MODEL_CHANGED,
-    BRANCH_REASONING_CLOSE,
     BRANCH_TEXT_EMPTY,
     BRANCH_TEXT_HINT,
-    current_metrics_generation,
-    cleared_strips,
+    branch_target,
+    cleared_panel,
     new_metrics_generation,
     prompt_note_text,
     strip_update,
-    strip_value,
+    transcript_update,
+    transcript_visible,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,8 +88,11 @@ CHAT_OUTPUT_NAMES = (
     "summary",
     "surprise",
     "trace",
-    "branch_source",
     "context_ids",
+    "chat_metrics",
+    "chat_context_ids",
+    "selected_token",
+    "branch_pick",
 )
 
 
@@ -191,34 +194,31 @@ def split_response_text(
 
 def stop_generation(
     turns: list[dict] | None,
-    metrics_state: tuple[int, list[dict]] = (0, []),
-    context_state: tuple[int, list[int], str | None] = (0, [], None),
+    scale_name: str = DEFAULT_COLOR_SCALE,
 ):
     """Finish the turn that the cancelled generator left behind.
 
     Gradio closes ``generate_reply`` at its last yield, so nothing else ever
     finalizes that turn. A kept partial response is still a response: the
-    tokens on screen are the ones it is made of, so it can be branched from.
-    ``context_state`` carries the producing load captured while the model lock
-    was held; a waiting load may finish after cancellation but before this
-    handler runs, so consulting the manager here would mislabel the old IDs.
+    tokens it carries are the ones it is made of, and it carries the load that
+    produced them, so it can be branched from like any other reply.
+
+    The token view is redrawn because this is what decides the stopped turn's
+    fate: a reply with nothing in it is dropped here, and the cancelled
+    generator's last frame is still on screen showing it.
     """
 
     turns = copy_turns(turns)
     kept = finalize_partial(turns)
     messages, _ = display_messages(turns)
-    generation, metrics = metrics_state
-    context_generation, _context_ids, producing_load_id = context_state[:3]
     return (
         messages,
         turns,
+        transcript_update(turns, scale_name),
         *send_stop_buttons(False),
         "Stopped. The partial response was kept."
         if kept
         else "Stopped before the model produced anything.",
-        (generation, producing_load_id)
-        if kept and metrics and context_generation == generation
-        else None,
     )
 
 
@@ -266,14 +266,16 @@ def idle_state(
     The token panel is normally left alone as well: paths such as "Enter a
     message first." must not wipe the diagnostics of the response already on
     screen. ``clear_tokens`` is for the one case where those diagnostics stop
-    describing the visible text - an edited assistant reply. Both strips go
-    together there: they carry one shared stamp, so re-stamping the response
-    strip alone would silently stop the prompt strip's clicks from publishing.
+    describing the visible text - an edited assistant reply. The prompt strip
+    goes with the response metrics there: they carry one shared stamp, so
+    re-stamping one alone would silently stop the other's clicks from
+    publishing. The conversation's own token view is redrawn rather than
+    emptied, since the edit is already in ``turns``.
     """
 
     messages, _ = display_messages(turns)
     panels = (
-        cleared_strips(scale_name)
+        cleared_panel(turns, scale_name)
         if clear_tokens
         else (gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip())
     )
@@ -296,7 +298,10 @@ def idle_state(
         charts.EMPTY_CHART if clear_tokens else gr.skip(),
         {} if clear_tokens else gr.skip(),
         gr.skip(),
+        metrics,
         gr.skip(),
+        None if clear_tokens else gr.skip(),
+        None if clear_tokens else gr.skip(),
     )
 
 
@@ -548,7 +553,6 @@ def _stream_reply(
     turns.append(pending)
 
     def snapshot(
-        highlight,
         metrics,
         status,
         busy=True,
@@ -556,15 +560,19 @@ def _stream_reply(
         prompt_panel=None,
         charts_panel=None,
         trace=None,
-        branch_source=gr.skip(),
         context_ids=gr.skip(),
     ):
         """One frame of the stream.
 
-        ``reset_details`` belongs to the first frame only. That frame empties
-        the strip, so a token selected in the previous response is gone and its
-        probabilities must go with it. Later frames only append to the strip, so
-        a token picked mid-stream stays valid and its details are left alone.
+        The conversation's token view is drawn from ``turns``, which the loop
+        has already written this frame's tokens into, so the reply paints
+        itself as it arrives beneath the ones before it.
+
+        ``reset_details`` belongs to the first frame only. That frame replaces
+        the reply being answered into, so a token selected in the response it
+        overwrites is gone and its probabilities must go with it. Later frames
+        only append tokens, so a token picked mid-stream stays valid and its
+        details are left alone.
 
         ``prompt_panel`` and ``charts_panel`` are skipped on most frames. The
         prompt tokens are all measured before the first one is generated, so
@@ -587,7 +595,7 @@ def _stream_reply(
             prompt_text,
             messages,
             copy_turns(turns),
-            highlight,
+            transcript_update(turns, scale_name) if transcript_visible() else gr.skip(),
             (generation, metrics),
             status,
             used_seed,
@@ -605,28 +613,29 @@ def _stream_reply(
             summary_panel,
             surprise_panel,
             gr.skip() if trace is None else trace,
-            branch_source,
             context_ids,
+            (generation, metrics),
+            context_ids,
+            None if reset_details else gr.skip(),
+            None if reset_details else gr.skip(),
         )
 
     # The opening frame empties everything the previous response left behind,
     # the export included: a trace kept here would still be downloadable while
-    # a different response was streaming in above it. The branch source goes
-    # too: nothing is branchable until this response has finished or been
-    # stopped, and the stamp would refuse it anyway.
+    # a different response was streaming in above it. Clear the branch states
+    # with their visible details: an older turn can still be a valid branch
+    # target, but a choice the panel no longer shows must not remain armed.
     applied_prefill = bool(assistant_prefill and not forced_ids)
     stream_note = branch_note or (
         "Assistant prefill applied." if applied_prefill else ""
     )
     yield snapshot(
-        strip_update([], scale_name, RESPONSE_STRIP_LABEL),
         [],
         f"{stream_note} Generating…".strip(),
         reset_details=True,
         prompt_panel=(strip_update([], scale_name), (generation, []), ""),
         charts_panel=(charts.summary_tiles({}), charts.EMPTY_CHART),
         trace={},
-        branch_source=None,
         context_ids=(generation, [], runtime.MANAGER.load_id),
     )
 
@@ -635,14 +644,12 @@ def _stream_reply(
     # Reasoning templates end the prompt with the opening <think> marker, so the
     # generated text never carries one. Only the runtime can tell us that.
     prefilled = False
-    highlight: list[tuple[str, str]] = []
     metrics: list[dict] = []
     status = "The model produced no tokens."
     first = True
     forced_prefix_tokens = 0
     literal_prefill = ""
     literal_spans: tuple[tuple[int, int], ...] = ()
-    producing_load_id: str | None = None
 
     stream = runtime.MANAGER.generate(
         request,
@@ -667,7 +674,6 @@ def _stream_reply(
         with contextlib.closing(stream):
             for update in stream:
                 raw_text = update.text
-                producing_load_id = update.load_id
                 prefilled = update.reasoning_prefilled
                 forced_prefix_tokens = update.forced_prefix_tokens
                 if update.literal_prefill_text:
@@ -684,8 +690,14 @@ def _stream_reply(
                 pending["reasoning"] = reasoning
                 pending["content"] = answer
                 pending["reasoning_closed"] = closed
-                highlight = strip_value(update.metrics, scale_name)
                 metrics = list(update.metrics)
+                # The reply carries its own measurements from here on, which
+                # is what paints it in the conversation and what a branch
+                # taken later replays. They are replaced rather than appended
+                # to, so the copy the previous frame published stays as it was.
+                pending["tokens"] = metrics
+                pending["load_id"] = update.load_id
+                pending["metrics_generation"] = generation
                 pending["generated_tokens"] = len(metrics)
                 status = generation_progress(len(metrics), started, used_seed)
                 if stream_note:
@@ -716,7 +728,6 @@ def _stream_reply(
                         *([steering] if steering is not None else []),
                     )
                 yield snapshot(
-                    highlight,
                     metrics,
                     status,
                     prompt_panel=prompt_panel,
@@ -760,11 +771,9 @@ def _stream_reply(
         # opening frame emptied stays empty. What did arrive is still on
         # screen, though, and can be branched from like a stopped response.
         yield snapshot(
-            highlight,
             metrics,
             failure_status("Generation failed", str(error)),
             busy=False,
-            branch_source=(generation, producing_load_id) if kept and metrics else None,
         )
         return
 
@@ -819,7 +828,6 @@ def _stream_reply(
     if trace:
         status = f"{status} Exports are ready."
     yield snapshot(
-        highlight,
         metrics,
         status,
         busy=False,
@@ -828,7 +836,6 @@ def _stream_reply(
             charts.surprise_chart(metrics),
         ),
         trace=trace,
-        branch_source=(generation, producing_load_id) if kept and metrics else None,
     )
 
 
@@ -1100,14 +1107,12 @@ def automatic_reasoning_close_count(metrics: list[dict], kept: int) -> int:
 
 def branch_with_text(
     selected_token: dict | None,
-    branch_source: tuple[int, str | None] | None,
-    metrics_state: tuple[int, list[dict]],
     replacement: str,
     prompt_text: str,
     turns: list[dict] | None,
     *settings,
 ):
-    """Replay the last response up to the clicked token, put typed text in its
+    """Replay the clicked reply up to the clicked token, put typed text in its
     place, and let the model continue.
 
     The text is not limited to the model's own alternatives, so it is
@@ -1123,8 +1128,8 @@ def branch_with_text(
     generation, and this handler would resume afterwards with the
     conversation it was handed at click time and replay that stale response
     onto the newer one. With the slot owned first, nothing can generate while
-    the encoding waits, and the stamp check below reads a strip that no
-    generation can replace under it.
+    the encoding waits, and the turn the selection names cannot change under
+    it.
     """
 
     held = runtime.MANAGER.claim_generation()
@@ -1135,8 +1140,6 @@ def branch_with_text(
     try:
         yield from _branch_with_text(
             selected_token,
-            branch_source,
-            metrics_state,
             replacement,
             prompt_text,
             turns,
@@ -1150,8 +1153,6 @@ def branch_with_text(
 
 def _branch_with_text(
     selected_token: dict | None,
-    branch_source: tuple[int, str | None] | None,
-    metrics_state: tuple[int, list[dict]],
     replacement: str,
     prompt_text: str,
     turns: list[dict] | None,
@@ -1160,45 +1161,30 @@ def _branch_with_text(
     """The body of branch_with_text(), run with the generation slot held."""
 
     turns = copy_turns(turns)
-    generation, metrics = metrics_state
-    if (
-        not selected_token
-        or selected_token.get("generation") != generation
-        or generation != current_metrics_generation()
-        or branch_source != (generation, runtime.MANAGER.load_id)
-    ):
+    if not selected_token:
         yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
-        return
-    if not replacement:
-        yield idle_state(prompt_text, turns, BRANCH_TEXT_EMPTY)
-        return
-
-    position = last_user_index(turns)
-    if position is None or turns[-1]["role"] != "assistant":
-        yield idle_state(prompt_text, turns, "There is no response to branch from.")
         return
     if not runtime.MANAGER.loaded:
         yield idle_state(prompt_text, turns, "Download and load a model first.")
         return
+    found = branch_target(turns, selected_token)
+    if isinstance(found, str):
+        yield idle_state(prompt_text, turns, found)
+        return
+    position, metric = found
+    if not replacement:
+        yield idle_state(prompt_text, turns, BRANCH_TEXT_EMPTY)
+        return
 
-    try:
-        metric = metrics[int(selected_token["index"])]
-    except (IndexError, TypeError, ValueError):
-        yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
-        return
-    if metric.get("automatic_reasoning_close"):
-        yield idle_state(prompt_text, turns, BRANCH_REASONING_CLOSE)
-        return
-    at = int(metric["position"])
+    metrics = turn_tokens(turns[position])
+    at = int(selected_token["index"]) + 1
     kept = [int(m["token_id"]) for m in metrics[: at - 1]]
-    if len(kept) != at - 1:
-        yield idle_state(prompt_text, turns, BRANCH_TEXT_HINT)
-        return
-    # The stamp check above is the fast path. The load it compared against can
-    # still change before the runtime takes the model lock, so the same load is
+    # The turn's own load is the one its tokens were produced by, and
+    # branch_target() has just agreed it is the one in memory. It can still
+    # change before the runtime takes the model lock, so the same load is
     # handed down and compared again under that lock, for the encoding and for
     # the replay alike; a mismatch there is ModelChanged.
-    _generation, expected_load = branch_source
+    expected_load = turns[position].get("load_id")
     literal_prefill_tokens = literal_prefill_count(metrics, len(kept))
     automatic_reasoning_close_tokens = automatic_reasoning_close_count(
         metrics, len(kept)
@@ -1210,7 +1196,10 @@ def _branch_with_text(
             literal_prefill_tokens=literal_prefill_tokens,
             load_id=expected_load,
         )
-        branch_turns = turns[: position + 1]
+        # Everything from the branched reply on is replaced, so the request is
+        # built from the turns before it - which end with the message it was
+        # an answer to.
+        branch_turns = turns[:position]
         runtime.MANAGER.validate_generation_prefix(
             model_messages(
                 branch_turns,
@@ -1257,18 +1246,17 @@ def _branch_with_text(
 
 def branch_from(
     pick: dict | None,
-    branch_source: tuple[int, str | None] | None,
-    metrics_state: tuple[int, list[dict]],
     prompt_text: str,
     turns: list[dict] | None,
     *settings,
 ):
-    """Replay the last response up to the picked token, swap it, and continue.
+    """Replay the picked reply up to the picked token, swap it, and continue.
 
-    The response being branched is always the last turn: every path that
-    changes the conversation under the strip re-stamps it, and the stamps
-    checked here have to agree with the live one, so a pick that survives the
-    checks was made against the reply on screen.
+    Any reply in the conversation can be branched, not only the newest one:
+    the pick names the turn it was made in, and that turn carries the tokens
+    being replayed and the model load that produced them. What the branch
+    replaces is that reply and everything after it, which is what makes the
+    branch a different continuation rather than an edit in the middle.
     """
 
     held = occupied()
@@ -1277,39 +1265,20 @@ def branch_from(
         return
 
     turns = copy_turns(turns)
-    generation, metrics = metrics_state
-    if (
-        not pick
-        or pick.get("generation") != generation
-        or generation != current_metrics_generation()
-        or branch_source != (generation, runtime.MANAGER.load_id)
-    ):
+    if not pick:
         yield idle_state(prompt_text, turns, BRANCH_HINT)
-        return
-
-    position = last_user_index(turns)
-    if position is None or turns[-1]["role"] != "assistant":
-        yield idle_state(prompt_text, turns, "There is no response to branch from.")
         return
     if not runtime.MANAGER.loaded:
         yield no_model_state(prompt_text, turns)
         return
-
-    try:
-        at = int(pick["position"])
-        selected_metric = metrics[at - 1]
-        if at < 1:
-            raise IndexError
-    except (IndexError, TypeError, ValueError):
-        yield idle_state(prompt_text, turns, BRANCH_HINT)
+    found = branch_target(turns, pick)
+    if isinstance(found, str):
+        yield idle_state(prompt_text, turns, found)
         return
-    if selected_metric.get("automatic_reasoning_close"):
-        yield idle_state(prompt_text, turns, BRANCH_REASONING_CLOSE)
-        return
+    position, _metric = found
+    metrics = turn_tokens(turns[position])
+    at = int(pick["index"]) + 1
     kept = [int(metric["token_id"]) for metric in metrics[: at - 1]]
-    if len(kept) != at - 1:
-        yield idle_state(prompt_text, turns, BRANCH_HINT)
-        return
     forced = (*kept, int(pick["token_id"]))
     literal_prefill_tokens = literal_prefill_count(metrics, len(kept))
     automatic_reasoning_close_tokens = automatic_reasoning_close_count(
@@ -1327,12 +1296,12 @@ def branch_from(
     else:
         note = f"Branched at token {at}: {pick['text']!r} instead of {pick['original']!r}."
 
-    # As in branch_with_text(): the stamp check above is the fast path, and the
+    # As in branch_with_text(): the check above is the fast path, and the
     # runtime compares the same load again under the model lock.
-    _generation, expected_load = branch_source
+    expected_load = turns[position].get("load_id")
     try:
         yield from generate_reply(
-            turns[: position + 1],
+            turns[:position],
             prompt_text,
             *settings,
             forced_ids=forced,
@@ -1378,19 +1347,19 @@ def undo_from(
             gr.skip(),
             messages,
             turns,
-            gr.skip(),
+            transcript_update(turns, scale_name),
             gr.skip(),
             "There is nothing to undo.",
             gr.skip(),
             gr.skip(),
             *send_stop_buttons(False),
-            *(gr.skip(),) * 6,
+            *(gr.skip(),) * 8,
         )
 
     remaining = turns[:position]
     messages, _ = display_messages(remaining)
-    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
-        scale_name
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_panel(
+        remaining, scale_name
     )
     # The selected-token details describe the response being removed, so they
     # go with it, exactly as Clear resets them. So do the prompt tokens, the
@@ -1411,6 +1380,8 @@ def undo_from(
         charts.summary_tiles({}),
         charts.EMPTY_CHART,
         {},
+        None,
+        None,
     )
 
 
@@ -1487,8 +1458,8 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE, forks: dict | None = None)
     the one that was cleared.
     """
 
-    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
-        scale_name
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_panel(
+        [], scale_name
     )
     known = copy_forks(forks)
     forks = new_forks()
@@ -1512,6 +1483,8 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE, forks: dict | None = None)
         charts.summary_tiles({}),
         charts.EMPTY_CHART,
         {},
+        None,
+        None,
         forks,
         conversation_list_update(forks, []),
         gr.update(visible=False),

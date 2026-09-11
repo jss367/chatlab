@@ -43,8 +43,9 @@ from ui.common import (
     send_stop_buttons,
 )
 from ui.panel import (
-    cleared_strips,
+    cleared_panel,
     event_index,
+    transcript_pick,
 )
 
 
@@ -204,6 +205,27 @@ def remember_message(turns: list[dict] | None, event: gr.SelectData):
     return {"index": index, "content": event.value}
 
 
+def remember_transcript_message(turns: list[dict] | None, event: gr.SelectData):
+    """Keep the message a click in the token view landed in, for the Fork button.
+
+    The token view draws the same messages the chatbot does, so a click in it
+    is translated into the chatbot index it would have come from and kept in
+    the same shape. Fork then works from either view without knowing which
+    one the reader was looking at. The text rides along as it does for a
+    chatbot click, so a click that has gone stale is recognized the same way.
+    """
+
+    found = transcript_pick(turns, event)
+    if found is None:
+        return None
+    position, _token_index = found
+    messages, index_map = display_messages(turns)
+    for index, (turn_index, _part) in enumerate(index_map):
+        if turn_index == position:
+            return {"index": index, "content": messages[index]["content"]}
+    return None
+
+
 def selected_turn(turns: list[dict], selected: dict | None) -> tuple[int, str] | None:
     """The turn a remembered chatbot click still points at, if it still does."""
 
@@ -220,11 +242,17 @@ def selected_turn(turns: list[dict], selected: dict | None) -> tuple[int, str] |
     return found
 
 
-def panel_reset(scale_name: str):
-    """Empty the token panel for a conversation that just changed underneath it."""
+def panel_reset(turns: list[dict] | None, scale_name: str):
+    """Reset the token panel for a conversation that just changed underneath it.
 
-    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
-        scale_name
+    The measurements go, because they described a reply that is no longer the
+    one on screen. The conversation's own token view stays, redrawn from
+    ``turns``: the replies it paints carry their own measurements, so a fork
+    switched to shows the colors it was generated with.
+    """
+
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_panel(
+        turns, scale_name
     )
     return (
         strip,
@@ -237,10 +265,12 @@ def panel_reset(scale_name: str):
         charts.summary_tiles({}),
         charts.EMPTY_CHART,
         {},
+        None,
+        None,
     )
 
 
-PANEL_KEPT = (gr.skip(),) * 10
+PANEL_KEPT = (gr.skip(),) * 12
 
 
 def fork_refused(turns: list[dict], forks: dict, status: str):
@@ -332,7 +362,7 @@ def fork_conversation(
         conversation_list_update(forks, forked),
         status,
         *send_stop_buttons(False),
-        *(panel_reset(scale_name) if truncated else PANEL_KEPT),
+        *(panel_reset(forked, scale_name) if truncated else PANEL_KEPT),
     )
 
 
@@ -365,7 +395,7 @@ def switch_fork(
         conversation_list_update(forks, target),
         f"Switched to {name} ({count} message{'s' if count != 1 else ''}).",
         *send_stop_buttons(False),
-        *panel_reset(scale_name),
+        *panel_reset(target, scale_name),
     )
 
 
@@ -397,7 +427,7 @@ def delete_fork(
         conversation_list_update(forks, target),
         f"Deleted {name}. Back on {MAIN_BRANCH}.",
         *send_stop_buttons(False),
-        *panel_reset(scale_name),
+        *panel_reset(target, scale_name),
     )
 
 
@@ -438,7 +468,7 @@ def new_conversation(
         conversation_list_update(forks, []),
         f"Started {name}. Send a message to begin it.",
         *send_stop_buttons(False),
-        *panel_reset(scale_name),
+        *panel_reset([], scale_name),
     )
 
 
@@ -497,7 +527,7 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE, *
             gr.skip(),
             gr.skip(),
             *send_stop_buttons(False),
-            *(gr.skip(),) * 6,
+            *(gr.skip(),) * 8,
             *((gr.skip(),) if include_steering else ()),
         )
 
@@ -514,13 +544,15 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE, *
     # cancelled generator left behind goes with it and needs no finalizing.
     turns = loaded
     messages, _ = display_messages(turns)
-    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_strips(
-        scale_name
+    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_panel(
+        turns, scale_name
     )
     # The selected token described a response from the conversation being
     # replaced, so it goes with it, exactly as Clear and Undo reset it. The
     # charts and the export measured that response too, and a loaded
-    # conversation has no measurements of its own to put in their place.
+    # conversation has no measurements of its own to put in their place: a
+    # saved file holds the text and the counts, not the distributions, so its
+    # replies come back as plain text in the token view.
     return (
         messages,
         turns,
@@ -537,5 +569,7 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE, *
         charts.summary_tiles({}),
         charts.EMPTY_CHART,
         {},
+        None,
+        None,
         *((steering,) if include_steering else ()),
     )

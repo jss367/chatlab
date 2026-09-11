@@ -397,11 +397,23 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 .model-detail {{ font-size: 0.85rem; }}
 .model-detail p, .model-detail ul, .model-detail li {{ margin: 0.15rem 0; }}
 .model-detail code {{ word-break: break-all; }}
-#token-strip {{ min-height: 110px; }}
-#token-strip span, #prompt-strip span {{ cursor: pointer; border-radius: 5px; }}
+/* The token view stands where the chatbot stands, so it takes the same
+   height rather than the strip's old sliver beside it, and scrolls. */
+#token-strip {{
+  flex: 1 1 0 !important; min-height: 180px; overflow-y: auto;
+}}
+#score-strip {{ min-height: 110px; }}
+#token-strip span, #score-strip span, #prompt-strip span {{
+  cursor: pointer; border-radius: 5px;
+}}
 /* Token fills are light in both themes, so their ink is pinned dark. */
-#token-strip .textspan.hl, #prompt-strip .textspan.hl,
-#token-strip .category-label, #prompt-strip .category-label {{ color: #0b0b0b; }}
+#token-strip .textspan.hl, #score-strip .textspan.hl, #prompt-strip .textspan.hl,
+#token-strip .category-label, #score-strip .category-label,
+#prompt-strip .category-label {{ color: #0b0b0b; }}
+/* The toggle above the conversation is a control, not a heading: it sits on
+   one line and keeps its explanation to the tooltip-sized line Gradio draws. */
+#token-view {{ flex: none; }}
+#token-view label {{ font-size: 13px; }}
 .footer-note {{ color: var(--body-text-color-subdued); font-size: 0.9rem; }}
 .scale-caption {{ color: var(--body-text-color-subdued); font-size: 0.85rem; }}
 
