@@ -66,7 +66,9 @@ TURN_ORIGIN_FIELDS = {
 
 # What a reply carries of its own measurements. These never reach the file;
 # see the module docstring for why.
-TURN_MEASUREMENT_FIELDS = ("tokens", "load_id", "metrics_generation")
+TURN_MEASUREMENT_FIELDS = (
+    "tokens", "load_id", "metrics_generation", "ends_on_stop_token",
+)
 
 # The sampling a conversation can carry of its own, and the type each must
 # have in a saved file. The settings module owns what the values may be; this
@@ -218,6 +220,10 @@ def display_messages(
             )
             index_map.append((position, "reasoning"))
         if content or not reasoning:
+            if not content and turn.get("token_step_paused"):
+                content = "Paused before visible text."
+                if turn_tokens(turn):
+                    content += " Press Next token to continue."
             messages.append({"role": turn["role"], "content": content})
             index_map.append((position, "content"))
 
@@ -278,12 +284,13 @@ def model_messages(
         if include_reasoning and reasoning:
             content = f"{THINK_OPEN}\n{reasoning}\n{THINK_CLOSE}\n{content}".strip()
         if not content:
-            if turn["role"] == "assistant" and reasoning:
-                # A Think model stopped mid-answer leaves an assistant turn with
-                # reasoning but no text. The visible conversation still shows a
-                # reply, so dropping the turn here would hand the model two user
-                # messages in a row and break templates that require alternating
-                # roles. Keep the slot, empty, since the reasoning is not replayed.
+            if turn["role"] == "assistant" and (
+                reasoning or turn.get("token_step_paused")
+            ):
+                # A reasoning-only reply or an invisible token step still owns
+                # an assistant slot in the visible conversation. Keep it empty
+                # so a subsequent Send preserves alternating roles, without
+                # replaying hidden tokens or the display-only pause notice.
                 messages.append({"role": "assistant", "content": ""})
             continue
         messages.append({"role": turn["role"], "content": content})
@@ -501,6 +508,7 @@ def forget_measurements(turns: list[dict] | None, position: int) -> list[dict]:
             turn.pop(field, None)
         if index == position:
             turn.pop("generated_tokens", None)
+            turn.pop("token_step_paused", None)
     return turns
 
 
@@ -630,6 +638,10 @@ def turn_entries(turns: list[dict] | None) -> list[dict]:
             "content": turn.get("content") or "",
             "reasoning": turn.get("reasoning") or "",
         }
+        # This is transcript structure, not a measurement: an invisible step
+        # still owns an assistant slot after the token metrics are discarded.
+        if turn["role"] == "assistant" and turn.get("token_step_paused") is True:
+            entry["token_step_paused"] = True
         for key, kind in TURN_ORIGIN_FIELDS.items():
             value = turn.get(key)
             # bool is an int to isinstance(), and a True here would be a bug.
@@ -659,6 +671,11 @@ def turns_from_entries(raw_turns) -> list[dict]:
         if not isinstance(content, str) or not isinstance(reasoning, str):
             raise ValueError("Turn content and reasoning must be strings.")
         turn = make_turn(role, content, reasoning)
+        if "token_step_paused" in entry:
+            if not isinstance(entry["token_step_paused"], bool):
+                raise ValueError("Turn token_step_paused must be a bool.")
+            if role == "assistant" and entry["token_step_paused"]:
+                turn["token_step_paused"] = True
         for key, kind in TURN_ORIGIN_FIELDS.items():
             if key not in entry:
                 continue

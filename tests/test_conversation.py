@@ -690,6 +690,21 @@ class SaveLoadTests(unittest.TestCase):
         self.assertEqual(payload["format"], SAVE_FORMAT)
         self.assertEqual(set(payload["turns"][0]), {"role", "content", "reasoning"})
 
+    def test_editing_an_earlier_reply_preserves_later_invisible_assistant_slots(self):
+        paused = dict(make_turn("assistant", ""), token_step_paused=True)
+        turns = [make_turn("user", "one"), make_turn("assistant", "first"),
+                 make_turn("user", "two"), paused]
+        edited = forget_measurements(turns, 1)
+        self.assertEqual(model_messages(edited)[-1], {"role": "assistant", "content": ""})
+        self.assertNotIn("token_step_paused", forget_measurements(turns, 3)[-1])
+
+    def test_rejects_a_nonboolean_paused_marker(self):
+        for value in ("false", 1, None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                from_json(json.dumps({"format": SAVE_FORMAT, "turns": [
+                    {"role": "assistant", "content": "", "token_step_paused": value}
+                ]}))
+
     def test_rejects_files_from_elsewhere(self):
         for payload in (
             "not json",

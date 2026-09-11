@@ -154,6 +154,16 @@ class ThinkingChatTests(unittest.TestCase):
         self.assertEqual(validate.call_args.kwargs["thinking_mode"], "off")
         self.assertEqual(typed[TURNS][-1]["thinking_mode"], "off")
 
+    def test_next_token_keeps_the_original_mode_for_validation_and_replay(self):
+        result = self.reply("off")
+        controls = (*SETTINGS, None, None, None, None, "on")
+        with mock.patch.object(self.manager, "validate_generation_prefix", wraps=self.manager.validate_generation_prefix) as validate:
+            stepped = list(app.next_token(None, "", result[TURNS], *controls))[-1]
+        self.assertEqual(validate.call_args.kwargs["thinking_mode"], "off")
+        self.assertEqual(stepped[TURNS][-1]["thinking_mode"], "off")
+        self.assertEqual(stepped[TRACE]["sampling"]["thinking_mode"], "off")
+        self.assertEqual(len(stepped[TURNS][-1]["tokens"]), len(result[TURNS][-1]["tokens"]) + 1)
+
     def test_visibility_follows_loaded_capability_without_resetting_choice(self):
         self.assertTrue(refresh_thinking_mode()["visible"])
         self.manager.tokenizer.chat_template = "assistant: <think>"
@@ -171,7 +181,7 @@ class ThinkingChatTests(unittest.TestCase):
         control = next(block for block in demo.blocks.values() if getattr(block, "label", None) == "Thinking mode")
         self.assertTrue(control.visible)
         for fn in demo.fns.values():
-            if fn.fn in (app.chat, app.retry_last, app.branch_from, app.branch_with_text):
+            if fn.fn in (app.chat, app.retry_last, app.branch_from, app.branch_with_text, app.next_token):
                 self.assertIs(fn.inputs[-1], control)
             if fn.fn is app.remember_settings:
                 self.assertIs(fn.inputs[app.PERSISTED_SETTING_NAMES.index("thinking_mode")], control)

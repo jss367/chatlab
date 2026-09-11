@@ -423,6 +423,7 @@ def generate_reply(
     literal_text_ranges: tuple[tuple[int, int], ...] = (),
     branch_note: str = "",
     expected_load_id: str | None = None,
+    single_step: bool = False,
     branch_thinking_mode: str | None = None,
 ):
     """Stream one assistant reply for ``turns``, which must end with a user turn.
@@ -496,6 +497,7 @@ def generate_reply(
             literal_text_ranges=literal_text_ranges,
             branch_note=branch_note,
             expected_load_id=expected_load_id,
+            single_step=single_step,
             branch_thinking_mode=branch_thinking_mode,
         )
     finally:
@@ -532,18 +534,19 @@ def _stream_reply(
     literal_text_ranges: tuple[tuple[int, int], ...] = (),
     branch_note: str = "",
     expected_load_id: str | None = None,
+    single_step: bool = False,
+    previous_turns: list[dict] | None = None,
     branch_thinking_mode: str | None = None,
 ):
     """The body of generate_reply(), run with the generation slot held."""
 
     turns = copy_turns(turns)
     used_seed = resolve_seed(seed, randomize_seed)
-    # Minted once for the whole stream, not once per frame: the strip is
-    # replaced by the opening frame and only appended to afterwards, so a token
-    # picked mid-stream is still on screen and its click must stay valid. What
-    # this number invalidates is every selection made against the response this
-    # one replaces.
-    generation = new_metrics_generation()
+    # Minted once when the reply is replaced, not once per frame, so selections
+    # made mid-stream stay valid. A branch defers this until replay succeeds;
+    # its original diagnostics must still work if the reader cancels first.
+    preserving_previous = previous_turns is not None
+    generation = None if preserving_previous else new_metrics_generation()
     request = model_messages(
         turns, system_prompt=system_prompt, include_reasoning=keep_reasoning
     )
@@ -594,7 +597,10 @@ def _stream_reply(
         inspector rebuilds the model's input from.
         """
 
-        messages, _ = display_messages(turns)
+        # Until replay produces a result, cancellation and failures must leave
+        # the original conversation available to Stop and autosave.
+        visible_turns = previous_turns if previous_turns is not None else turns
+        messages, _ = display_messages(visible_turns)
         prompt_strip, prompt_metrics, prompt_note = prompt_panel or (
             gr.skip(),
             gr.skip(),
@@ -604,8 +610,8 @@ def _stream_reply(
         return (
             prompt_text,
             messages,
-            copy_turns(turns),
-            transcript_update(turns, scale_name) if transcript_visible() else gr.skip(),
+            copy_turns(visible_turns),
+            transcript_update(visible_turns, scale_name) if transcript_visible() else gr.skip(),
             (generation, metrics),
             status,
             used_seed,
@@ -630,26 +636,35 @@ def _stream_reply(
             None if reset_details else gr.skip(),
         )
 
-    # The opening frame empties everything the previous response left behind,
-    # the export included: a trace kept here would still be downloadable while
-    # a different response was streaming in above it. Clear the branch states
-    # with their visible details: an older turn can still be a valid branch
-    # target, but a choice the panel no longer shows must not remain armed.
+    # Clear diagnostics and branch selections when the new reply appears. For
+    # branches that is the first replay result; until then the old transcript
+    # and its diagnostics remain together on screen.
     # A branch at the first token has an empty replay prefix, but must still
     # ignore the current prefill control just like every other branch.
     applied_prefill = bool(assistant_prefill and not forced_ids and expected_load_id is None)
     stream_note = branch_note or (
         "Assistant prefill applied." if applied_prefill else ""
     )
-    yield snapshot(
-        [],
-        f"{stream_note} Generating…".strip(),
-        reset_details=True,
-        prompt_panel=(strip_update([], scale_name), (generation, []), ""),
-        charts_panel=(charts.summary_tiles({}), charts.EMPTY_CHART),
-        trace={},
-        context_ids=(generation, [], runtime.MANAGER.load_id),
-    )
+    def previous_snapshot(status, busy):
+        values = list(idle_state(prompt_text, previous_turns, status, scale_name=scale_name))
+        values[CHAT_OUTPUT_NAMES.index("send")], values[CHAT_OUTPUT_NAMES.index("stop")] = send_stop_buttons(busy)
+        return tuple(values)
+
+    opening_status = f"{stream_note} Generating…".strip()
+    if preserving_previous:
+        # Keep diagnostics and their live generation stamp until replay succeeds.
+        # Stop only finalizes the transcript; it cannot restore discarded panels.
+        yield previous_snapshot(opening_status, busy=True)
+    else:
+        yield snapshot(
+            [],
+            opening_status,
+            reset_details=True,
+            prompt_panel=(strip_update([], scale_name), (generation, []), ""),
+            charts_panel=(charts.summary_tiles({}), charts.EMPTY_CHART),
+            trace={},
+            context_ids=(generation, [], runtime.MANAGER.load_id),
+        )
 
     started = time.monotonic()
     raw_text = ""
@@ -688,6 +703,9 @@ def _stream_reply(
         # this event and Gradio closes the outer generator.
         with contextlib.closing(stream):
             for update in stream:
+                if generation is None:
+                    generation = new_metrics_generation()
+                previous_turns = None
                 raw_text = update.text
                 prefilled = update.reasoning_prefilled
                 forced_prefix_tokens = update.forced_prefix_tokens
@@ -715,6 +733,9 @@ def _stream_reply(
                 pending["tokens"] = metrics
                 pending["load_id"] = update.load_id
                 pending["metrics_generation"] = generation
+                pending["ends_on_stop_token"] = update.ends_on_stop_token
+                if single_step:
+                    pending["token_step_paused"] = bool(metrics and not update.ends_on_stop_token)
                 pending["generated_tokens"] = len(metrics)
                 status = generation_progress(len(metrics), started, used_seed)
                 if stream_note:
@@ -747,6 +768,8 @@ def _stream_reply(
                 yield snapshot(
                     metrics,
                     status,
+                    reset_details=first and preserving_previous,
+                    trace={} if first and preserving_previous else None,
                     prompt_panel=prompt_panel,
                     context_ids=context_ids,
                     charts_panel=(
@@ -775,6 +798,9 @@ def _stream_reply(
         # assistant turn would feed the failure back to the model next turn.
         # The traceback goes to the log so the cause is recoverable.
         logger.exception("Generation failed")
+        if previous_turns is not None:
+            yield previous_snapshot(failure_status("Generation failed", str(error)), busy=False)
+            return
         reasoning, answer, _ = split_response_text(
             raw_text,
             literal_prefill=literal_prefill,
@@ -802,19 +828,16 @@ def _stream_reply(
     )
     pending["reasoning"] = reasoning
     pending["content"] = answer
-    # A generation can succeed and still leave nothing renderable behind: the
-    # first sampled token is a hidden EOS, the model emits only whitespace,
-    # which split_reasoning() strips away, or it opens and closes a reasoning
-    # block without writing in it. Publishing that turn would draw a blank
-    # bubble in display_messages() that model_messages() skips, so the visible
-    # conversation and the model's would disagree - the UI would show a reply
-    # the model never sees. finalize_partial() is what the failure and
-    # cancellation paths already use for exactly this, so success uses it too:
-    # it closes the reasoning block when the turn is worth keeping and drops
-    # the turn when it holds neither answer nor reasoning. Dropping it leaves
-    # the user turn without a reply, which is the honest shape - no assistant
-    # bubble is drawn, so both transcripts agree that no reply exists.
-    kept = finalize_partial(turns)
+    # Finished replies with no visible text are dropped, as on cancellation.
+    # A single step can contain only whitespace or a reasoning marker; keep
+    # those measured tokens so the next click can advance past them. The chat
+    # displays a pause notice while model_messages() keeps an empty assistant slot.
+    if single_step and metrics and not pending.get("ends_on_stop_token"):
+        pending["token_step_paused"] = True
+        pending["reasoning_closed"] = True
+        kept = True
+    else:
+        kept = finalize_partial(turns)
     sampling = {
         "temperature": float(temperature),
         "top_p": float(top_p),
@@ -1260,6 +1283,7 @@ def _branch_with_text(
             ),
             branch_note=note,
             expected_load_id=expected_load,
+            previous_turns=turns,
             branch_thinking_mode=turns[position].get("thinking_mode", "default"),
         )
     except ModelChanged:
@@ -1274,6 +1298,7 @@ def branch_from(
     prompt_text: str,
     turns: list[dict] | None,
     *settings,
+    single_step: bool = False,
     resample: bool = False,
 ):
     """Replay the picked reply up to the picked token, swap it, and continue.
@@ -1288,17 +1313,28 @@ def branch_from(
     it are replayed, and the selected token is sampled again as well.
     """
 
-    held = occupied()
+    # Validation tokenizes the prompt under the model lock. Own the generation
+    # slot first so a competing Send cannot replace the conversation meanwhile.
+    held = runtime.MANAGER.claim_generation()
     if held:
         yield busy_state(held)
         return
+
+    try:
+        yield from _branch_from(pick, prompt_text, turns, *settings, single_step=single_step, resample=resample)
+    finally:
+        runtime.MANAGER.release_generation()
+
+
+def _branch_from(pick, prompt_text, turns, *settings, single_step=False, resample=False):
+    """Validate and replay a token branch with the generation slot held."""
 
     turns = copy_turns(turns)
     if not pick:
         yield idle_state(prompt_text, turns, BRANCH_HINT)
         return
     if not runtime.MANAGER.loaded:
-        yield no_model_state(prompt_text, turns)
+        yield idle_state(prompt_text, turns, NO_MODEL_STATUS)
         return
     found = branch_target(turns, pick)
     if isinstance(found, str):
@@ -1326,12 +1362,37 @@ def branch_from(
         note = f"Resampling from token {at} ({pick['text']!r})."
     else:
         note = f"Branched at token {at}: {pick['text']!r} instead of {pick['original']!r}."
+    if single_step:
+        settings = (*settings[:6], 1, *settings[7:])
+        note = (
+            f"Keeping through token {at}; generating one next token."
+            if unchanged else f"{note} Generating one next token."
+        )
 
     # As in branch_with_text(): the check above is the fast path, and the
     # runtime compares the same load again under the model lock.
     expected_load = turns[position].get("load_id")
     try:
-        yield from generate_reply(
+        runtime.MANAGER.validate_generation_prefix(
+            model_messages(
+                turns[:position],
+                system_prompt=settings[0],
+                include_reasoning=settings[1],
+            ),
+            forced,
+            max_new_tokens=int(settings[6]),
+            load_id=expected_load,
+            thinking_mode=turns[position].get("thinking_mode", "default"),
+        )
+    except ModelChanged:
+        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+        return
+    except (ValueError, RuntimeError) as error:
+        yield idle_state(prompt_text, turns, f"🌱 {error}")
+        return
+
+    try:
+        yield from _stream_reply(
             turns[:position],
             prompt_text,
             *settings,
@@ -1343,6 +1404,8 @@ def branch_from(
             ),
             branch_note=note,
             expected_load_id=expected_load,
+            single_step=single_step,
+            previous_turns=turns,
             branch_thinking_mode=turns[position].get("thinking_mode", "default"),
         )
     except ModelChanged:
@@ -1350,6 +1413,44 @@ def branch_from(
         yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
     except SteeringError as error:
         yield idle_state(prompt_text, turns, failure_status("Could not branch", str(error)), clear_tokens=True)
+
+
+def next_token(pick, prompt_text, turns, *settings):
+    """Branch from a chosen alternative, or extend the latest reply, by one token."""
+
+    held = occupied()
+    if held:
+        yield busy_state(held)
+        return
+    turns = copy_turns(turns)
+    if not runtime.MANAGER.loaded:
+        yield no_model_state(prompt_text, turns)
+        return
+    if not pick:
+        turn = turns[-1] if turns else {}
+        metrics = turn_tokens(turn)
+        if turn.get("role") != "assistant" or not metrics:
+            yield idle_state(prompt_text, turns, "Generate a reply and choose a token alternative first.")
+            return
+        if turn.get("load_id") != runtime.MANAGER.load_id:
+            yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+            return
+        if turn.get("ends_on_stop_token"):
+            yield idle_state(prompt_text, turns, "This reply has ended. Choose an earlier token alternative to branch from.")
+            return
+        metric = metrics[-1]
+        pick = {
+            "source": "turn",
+            "turn": len(turns) - 1,
+            "index": len(metrics) - 1,
+            "at_generation": turn.get("metrics_generation"),
+            "at_token_id": metric["token_id"],
+            "token_id": metric["token_id"],
+            "original_id": metric["token_id"],
+            "text": metric["text"],
+            "original": metric["text"],
+        }
+    yield from branch_from(pick, prompt_text, turns, *settings, single_step=True)
 
 
 def undo_from(
