@@ -146,7 +146,7 @@ the Settings page is the direct way to bound it.
 
 ## The pages
 
-A pane at the far left switches between four pages, each tile an icon above the page's name. **Chat** is the conversation, with the conversations pane beside it and the token panel to its right. **Images** is the same shape with a picture where the transcript goes. **Models** is everything about which model is running. **Settings**, at the bottom of the pane, is how every reply is prompted and measured.
+A pane at the far left switches between four pages, each tile an icon above the page's name. **Chat** is the conversation, with the conversations pane beside it and the inspector to its right: whatever token you last clicked, and what the model was doing when it produced it. **Images** is the same shape with a picture where the transcript goes. **Models** is everything about which model is running. **Settings**, at the bottom of the pane, is how every reply is prompted and measured.
 
 One model is in memory at a time whichever kind it is, because the two share the device and, on Apple silicon, the machine's memory. So loading an image model unloads a text one and the other way round, and each page's badge says whether what is in memory is a model it can use: a model of the other kind is named and greyed rather than reported as nothing loaded, which would send you off to load a second one on top of it.
 
@@ -278,6 +278,26 @@ average beside a moved frame would be quietly wrong.
 - Hovering a message in the transcript gives per-message retry, edit, and undo. Editing one of your messages truncates the conversation there and generates a new reply; editing a reply just corrects it in place. **↩️ Undo last** removes the last exchange and puts your message back in the input box.
 - **💾 Save conversation** writes a JSON file containing every turn, its reasoning block, and the system prompt, along with the model and token counts behind each reply. **📂 Load conversation** restores it.
 
+### Token view
+
+The transcript has two views of the same conversation, and **Token view** above
+it switches between them. Off, the chatbot renders each reply the way you would
+read it: markdown, code blocks, a collapsed reasoning block. On, the same
+messages are written out as the tokens the model actually emitted — spaces as
+`␠`, newlines as `↵`, special tokens named — each painted by whichever scale
+**Color tokens by** is set to.
+
+Click any token there and the inspector on the right describes it: its rank,
+its probabilities, its surprise, and the alternatives the model ranked highest.
+That is the same click that starts a branch, and the same click **🔬 Inspect
+layers** reads. Clicking a heading or a message you typed clears the panel
+instead, since neither has a distribution behind it.
+
+Replies carry their own measurements, so the whole conversation is painted, not
+just the newest reply. A message you typed, a reply you edited by hand, and a
+conversation restored from the saved library have no measurements to paint and
+appear as plain text.
+
 ### Assistant prefill
 
 Enter text in **Assistant prefill (optional)** to force every new reply to begin
@@ -297,11 +317,13 @@ text as `assistant_prefill` and the replayed token count as
 
 Every response token comes with the alternatives the model ranked highest. Branching lets you take one of them instead and see where the model goes from there.
 
-1. Click a token in **Response tokens**.
+1. Tick **Token view** and click the token in the conversation.
 2. Click a row in **Most likely alternatives**. The detail panel confirms what the branch will do.
 3. Press **🌱 Branch from token**.
 
-The response is kept up to the token before the one you clicked, the alternative is put in its place, and the model continues from there under the current sampling settings. The branched response replaces the one on screen, so **Retry** and **Undo** work on it as usual. Choosing the token the model already picked resamples the rest of the response from that point, which is a way to see how much of what followed was chance.
+The reply is kept up to the token before the one you clicked, the alternative is put in its place, and the model continues from there under the current sampling settings. The branch replaces the reply it was taken from and every message after it, so it is a different continuation of the conversation rather than an edit buried in the middle of one; **Retry** and **Undo** then work on it as usual. Choosing the token the model already picked resamples the rest of the reply from that point, which is a way to see how much of what followed was chance.
+
+Any reply in the conversation can be branched, not only the newest one, because each carries the tokens it was made of. What it cannot outlive is the model: a reply's token IDs belong to the tokenizer that produced them, so loading another model - or reloading the same one - leaves the older replies readable but unbranchable, and the detail panel says so when you click one.
 
 The replayed tokens are still measured against the model's own distribution, so a token the model would never have chosen shows its real rank and surprise. **Maximum new tokens** counts the tokens sampled after the branch point, so a branch made late in a long response still has room to finish. The JSON export records how many tokens were replayed as `forced_prefix_tokens`.
 
@@ -309,7 +331,7 @@ The replayed tokens are still measured against the model's own distribution, so 
 
 The alternatives table only offers what the model ranked highly. To put anything else at a token position, click the token, type the replacement in **Or type your own replacement**, and press **✏️ Branch with text**. The typed text is spliced in exactly as written where the clicked token was, and the model continues from there. Type the space yourself if the word needs one: the text is checked in place, after the tokens that are kept, so it reads the same whether the tokenizer keeps the word-boundary space inside the token (as BPE does) or drops it from the start of what it decodes (as SentencePiece does). It can be one word or a whole sentence. Text the tokenizer cannot reproduce exactly at that position is refused rather than approximated. The prompt and replayed response prefix together are capped at 8,192 tokens, or at the model's shorter positional limit; an oversized branch is refused without replacing the response on screen.
 
-Only a chat response can be branched. Prompt tokens and text measured in the **Score text** tab have no conversation to continue.
+Only a reply the model wrote can be branched. Prompt tokens, text measured in the **Score text** tab, and a message typed or edited by hand have no measured tokens to continue from. Editing a reply also takes the measurements off it and off every reply after it: those were produced from a transcript the edit replaced.
 
 ## The conversations pane
 
@@ -321,7 +343,7 @@ The token count is the size of the conversation as the model last saw it: every 
 
 Click a message before pressing Fork to fork at that point. Forking at a reply keeps the conversation through that reply, ready for a different next question. Forking at one of your own messages keeps what came before it and puts the message back in the input box so it can be reworded, the same shape **Undo** gives.
 
-Each conversation has its own transcript, but the token panel describes only the response on screen: switching conversations clears it until the next response. **💾 Save conversation** writes the conversation on screen.
+Each conversation carries its own token view, since the measurements live on the replies themselves; what switching conversations does clear is the prompt strip, the charts and the export, which describe one reply at a time. **💾 Save conversation** writes the conversation on screen.
 
 Every conversation in the pane is kept between sessions, its own sampling
 included, and the two are kept apart when two windows disagree: a window
@@ -346,9 +368,10 @@ it was when it loaded, and a reload brings it up to date. The file is:
 `XDG_DATA_HOME` moves the directory and `CHATLAB_LIBRARY_PATH` names the file
 outright, the same two knobs the settings file answers to. It is written whole
 and swapped into place, so a crash mid-write leaves the previous copy rather
-than half of a new one. The token measurements are not in it: they describe a
-response as one model produced it, so a restored conversation comes back with
-an empty token panel until its next reply. **💾 Save conversation** is still
+than half of a new one. The token measurements are not in it: the file is rewritten on
+every streaming frame, and a few hundred numbers per token would make that a
+multi-megabyte write per token. A restored conversation therefore comes back
+as plain text in the token view, and measured again from its next reply on. **💾 Save conversation** is still
 the way to hand one conversation to someone else, and **📂 Load conversation**
 brings such a file in.
 
@@ -356,8 +379,10 @@ brings such a file in.
 
 The token panel says how likely a token was. **Layers and attention** says how the model got there.
 
-1. Click a token in **Response tokens** or **Prompt and context tokens**.
+1. Click a token in the conversation's **Token view**, or in **Prompt and context tokens**.
 2. Open **Layers and attention** and press **🔬 Inspect layers**.
+
+The readout is offered for the reply on screen and the prompt behind it. An earlier reply's prompt is no longer on screen to rebuild the pass from, so clicking one of its tokens reports its numbers without offering the layers.
 
 The model is run again over everything before the token, one extra pass. That costs a few seconds on a 7B model with a long context, which is why it is a button rather than something that happens on every click. The key-value cache that pass builds is kept for the next inspection: clicking through the tokens of one response feeds the model only the tokens between one click and the next, so the second and later inspections of a response take a fraction of a second. The cache is given back the moment a response or a scoring pass starts, so it never competes with a reply for memory.
 
@@ -386,7 +411,7 @@ By default that reasoning is **not** sent back to the model on the next turn. Th
 
 Each of these names carries its own sentence in the token detail panel, so hovering one — or reaching it with a screen reader — says what the number is without leaving the page.
 
-**Color tokens by** repaints the strip without regenerating anything. Rank, surprise, and entropy are magnitudes and share one light-to-dark blue ramp; sampling shift is a diverging red-to-blue scale around no change. Quantized model weights can slightly change logits, probabilities, and ranks.
+**Color tokens by** repaints the conversation without regenerating anything. Rank, surprise, and entropy are magnitudes and share one light-to-dark blue ramp; sampling shift is a diverging red-to-blue scale around no change. Quantized model weights can slightly change logits, probabilities, and ranks.
 
 Under each response are its headline numbers — perplexity, mean surprise, the share of tokens the model ranked first, mean entropy — and a trace of surprise across the response, so a stretch where the model lost the thread is visible at a glance. Long responses are grouped into bins, with the range inside each bin shaded.
 

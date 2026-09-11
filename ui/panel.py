@@ -1,4 +1,4 @@
-"""The token panel: the strips, the token detail, and branching from a token."""
+"""The token panel: the conversation in tokens, the token detail, and branching."""
 
 from __future__ import annotations
 
@@ -7,6 +7,9 @@ import threading
 
 import gradio as gr
 
+from conversation import (
+    turn_tokens,
+)
 from model_runtime import (
     PROMPT_SCORE_LIMIT,
 )
@@ -19,7 +22,7 @@ from token_metrics import (
 from ui import runtime
 from ui.common import (
     NO_TOKEN_SELECTED,
-    RESPONSE_STRIP_LABEL,
+    ROLE_HEADINGS,
     metric_term,
 )
 
@@ -50,6 +53,140 @@ def strip_update(metrics: list[dict], scale_name: str, label: str | None = None)
     if label is not None:
         update["label"] = label
     return gr.update(**update)
+
+
+def transcript_entries(
+    turns: list[dict] | None, scale_name: str
+) -> tuple[list[tuple[str, str | None]], list[tuple[int, int | None]]]:
+    """The whole conversation as spans, plus what each span stands for.
+
+    This is the token view of the chat: the same messages the chatbot draws,
+    written out token by token and painted by whichever scale is chosen. A
+    reply that carries its measurements contributes one span per token; every
+    other span - a role heading, a message the reader typed, a reply whose
+    text was rewritten by hand or read back from a saved file - is one
+    unpainted span of plain text.
+
+    The second list runs parallel to the first and says, for each span, which
+    turn it belongs to and which of that turn's tokens it is. ``None`` in the
+    token place means the span is not a measured token, so clicking it has
+    nothing to report and nothing to branch. It is built here rather than
+    kept in a state because it is a function of the turns alone, and the
+    handlers that need it are handed those turns anyway - the same
+    arrangement ``display_messages`` and ``locate`` already use for the
+    chatbot's own indices.
+    """
+
+    scale = resolve_scale(scale_name)
+    spans: list[tuple[str, str | None]] = []
+    index: list[tuple[int, int | None]] = []
+
+    for position, turn in enumerate(turns or []):
+        spans.append((ROLE_HEADINGS.get(turn["role"], "\n\n"), None))
+        index.append((position, None))
+        tokens = turn_tokens(turn)
+        if tokens:
+            # The tokens are the raw stream, reasoning markers included, so
+            # they already cover everything the turn holds. The chatbot folds
+            # reasoning into its own bubble; here it is simply where the model
+            # put it.
+            for token_index, metric in enumerate(tokens):
+                spans.append(
+                    (metric["display_text"], category_for(metric, scale.name))
+                )
+                index.append((position, token_index))
+            continue
+        reasoning = turn.get("reasoning") or ""
+        content = turn.get("content") or ""
+        if reasoning:
+            spans.append((f"{reasoning}\n", None))
+            index.append((position, None))
+        if content or not reasoning:
+            spans.append((content, None))
+            index.append((position, None))
+
+    return spans, index
+
+
+# What the token view says when there is nothing to say. An empty
+# HighlightedText draws its color scale as a bare gradient bar, which reads as
+# a broken chart rather than an empty conversation; one span of plain text
+# says what is actually true. It is deliberately not in transcript_entries():
+# it belongs to no turn, so a click on it finds no row in the index and is
+# ignored, which is what should happen.
+EMPTY_TRANSCRIPT = [("No messages yet. Send one to see it token by token.", None)]
+
+
+def transcript_value(turns: list[dict] | None, scale_name: str):
+    return transcript_entries(turns, scale_name)[0] or EMPTY_TRANSCRIPT
+
+
+def transcript_update(turns: list[dict] | None, scale_name: str):
+    """Repaint the conversation's token view, legend and all."""
+
+    scale = resolve_scale(scale_name)
+    return gr.update(
+        value=transcript_value(turns, scale.name), color_map=scale.color_map
+    )
+
+
+def show_token_view(on, turns: list[dict] | None, scale_name: str):
+    """Swap the chatbot for the conversation's token view, or back.
+
+    The view being switched to is drawn on the way in. The one that was
+    hidden has been kept up to date all along - every handler publishes both -
+    but drawing it here costs one list and removes the question.
+    """
+
+    if not on:
+        return gr.update(visible=True), gr.update(visible=False)
+    scale = resolve_scale(scale_name)
+    return (
+        gr.update(visible=False),
+        gr.update(
+            visible=True,
+            value=transcript_value(turns, scale.name),
+            color_map=scale.color_map,
+        ),
+    )
+
+
+def transcript_pick(
+    turns: list[dict] | None, event: gr.SelectData
+) -> tuple[int, int | None] | None:
+    """The turn and token a click in the token view landed on."""
+
+    try:
+        return transcript_entries(turns, DEFAULT_COLOR_SCALE)[1][event_index(event)]
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def selected_metric(
+    turns: list[dict] | None, selection: dict | None
+) -> dict | None:
+    """The measured token a transcript selection still points at.
+
+    A selection is checked against the turns it is used with rather than
+    trusted: the conversation can be edited, undone, switched or replaced
+    between the click and whatever the click is used for, and the turn that
+    now sits at that index may be a different one entirely.
+    """
+
+    if not selection or selection.get("source") != "turn":
+        return None
+    try:
+        turn = (turns or [])[int(selection["turn"])]
+        metric = turn_tokens(turn)[int(selection["index"])]
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+    if turn["role"] != "assistant":
+        return None
+    if int(metric["token_id"]) != int(selection.get("at_token_id", -1)):
+        # The turns have moved under the click - edited, undone, switched for
+        # another fork - and a different token now sits where it landed.
+        return None
+    return metric
 
 
 # The token strip's select listener runs independently of the generation
@@ -114,17 +251,25 @@ def empty_metrics() -> tuple[int, list[dict]]:
     return stamped([])
 
 
-def cleared_strips(scale_name: str):
-    """Empty both token strips under one stamp.
+def cleared_panel(turns: list[dict] | None, scale_name: str):
+    """Drop the live response's measurements and redraw the conversation.
 
-    The response strip and the prompt strip are replaced together, so they
-    share a stamp: minting one each would leave the first of them looking
-    stale to inspect_token() the instant the second was minted.
+    The prompt strip is emptied and the response metrics with it, under one
+    fresh stamp: the two are replaced together, so minting one each would
+    leave the first looking stale to inspect_token() the instant the second
+    was minted. The stamp is also what invalidates a click made against the
+    panel this replaces.
+
+    The token view is not emptied, because it is not a copy of one response:
+    it is the conversation, and the conversation is still on screen. It is
+    redrawn from ``turns`` instead, so a handler that took a reply's
+    measurements away - an edit, an undo, a switch to another fork - shows
+    exactly what is left.
     """
 
     generation = new_metrics_generation()
     return (
-        strip_update([], scale_name, RESPONSE_STRIP_LABEL),
+        transcript_update(turns, scale_name),
         stamped([], generation),
         strip_update([], scale_name),
         stamped([], generation),
@@ -203,12 +348,13 @@ def describe_token(metric: dict) -> tuple[str, list[list]]:
 
 
 BRANCH_HINT = (
-    "Click a response token, then one of its alternatives, then branch."
+    "Click a token in the conversation, then one of its alternatives, then branch."
 )
 
 
 BRANCH_TEXT_HINT = (
-    "Click a response token, type the text to put in its place, then branch."
+    "Click a token in the conversation, type the text to put in its place, "
+    "then branch."
 )
 
 
@@ -222,24 +368,29 @@ BRANCH_REASONING_CLOSE = (
 
 
 BRANCH_UNAVAILABLE = (
-    "🌱 Only a chat response can be branched. Scored text and prompt tokens "
-    "have no conversation to continue."
+    "🌱 Only a reply the model wrote can be branched. Scored text, prompt "
+    "tokens and a message typed or edited by hand have no measured tokens to "
+    "continue from."
 )
 
 
 BRANCH_MODEL_CHANGED = (
-    "🌱 The model was reloaded before the branch could be replayed, so the "
-    "response's tokens no longer belong to the weights in memory. The "
-    "conversation was left as it was."
+    "🌱 The model was reloaded since this reply was generated, so its tokens "
+    "no longer belong to the weights in memory. Load that model again, or "
+    "send the message again under this one, to branch it."
 )
 
 
-def remember_selection(metrics_state: tuple[int, list[dict]], event: gr.SelectData):
-    """Keep the strip position a click landed on, for the alternatives table.
+def remember_strip_selection(
+    metrics_state: tuple[int, list[dict]], event: gr.SelectData
+):
+    """Keep a prompt or scored-text click, for the alternatives table.
 
-    Only a scored response token is worth keeping. A prompt token, or one that
-    was never predicted, has no alternatives to branch into, and remembering
-    it would let a click in the table pair its row with the wrong token.
+    These tokens have alternatives worth reading and no conversation to
+    continue, so the selection records where the click landed and marks it as
+    coming from a strip rather than from a turn. ``choose_alternative`` then
+    describes the row that was clicked and says why it cannot be branched,
+    rather than appearing to do nothing at all.
     """
 
     generation, metrics = metrics_state
@@ -249,9 +400,53 @@ def remember_selection(metrics_state: tuple[int, list[dict]], event: gr.SelectDa
         metric = metrics[event_index(event)]
     except (IndexError, TypeError, ValueError):
         return None
-    if metric.get("segment") != "response" or not metric.get("scored", True):
+    if not metric.get("scored", True):
         return None
-    return {"generation": generation, "index": event_index(event)}
+    return {"source": "strip", "generation": generation, "index": event_index(event)}
+
+
+def selection_metric(
+    turns: list[dict] | None,
+    metrics_state: tuple[int, list[dict]],
+    selection: dict | None,
+) -> dict | None:
+    """The token a selection points at, from a turn or from a strip."""
+
+    if not selection:
+        return None
+    if selection.get("source") == "turn":
+        return selected_metric(turns, selection)
+    generation, metrics = metrics_state
+    if generation != _metrics_generation or selection.get("generation") != generation:
+        return None
+    try:
+        return metrics[int(selection["index"])]
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+
+
+def branch_target(
+    turns: list[dict] | None, selection: dict | None
+) -> tuple[int, dict] | str:
+    """The turn and token a branch would start from, or why there is none.
+
+    Every branch path checks the same three things, so they are checked in
+    one place: the selection still points at a measured token of an assistant
+    turn, that turn was generated by the weights now in memory, and the token
+    is not one of the reasoning-boundary tokens the template supplied rather
+    than the model choosing.
+    """
+
+    metric = selected_metric(turns, selection)
+    if metric is None:
+        return BRANCH_UNAVAILABLE
+    position = int(selection["turn"])
+    turn = (turns or [])[position]
+    if turn.get("load_id") != runtime.MANAGER.load_id:
+        return BRANCH_MODEL_CHANGED
+    if metric.get("automatic_reasoning_close"):
+        return BRANCH_REASONING_CLOSE
+    return position, metric
 
 
 def branch_ready_text(pick: dict) -> str:
@@ -260,7 +455,7 @@ def branch_ready_text(pick: dict) -> str:
     original = html.escape(repr(pick["original"]))
     if pick["token_id"] == pick["original_id"]:
         return (
-            f"🌱 **Branch ready:** keep the response through token {position} "
+            f"🌱 **Branch ready:** keep the reply through token {position} "
             f"(`{chosen}`) and let the model continue from there with a fresh "
             "sample. Press **Branch from token**."
         )
@@ -271,32 +466,78 @@ def branch_ready_text(pick: dict) -> str:
     )
 
 
+def select_transcript_token(turns: list[dict] | None, event: gr.SelectData):
+    """Publish the token the reader clicked in the conversation's token view.
+
+    One listener rather than four, because all of them ask the same question
+    of the same click: which token is this. It publishes the detail panel and
+    its alternatives, the selection the branch buttons read, the position the
+    layer inspector would explain, and an empty pick - a row chosen for the
+    previous token must not stay armed under a different one.
+
+    The layer inspector is offered for the live reply alone. It rebuilds the
+    model's input from the prompt token ids published with that reply, and an
+    older turn's prompt is not on screen to rebuild from; the turn carries the
+    stamp it was drawn under, so "the live one" is a comparison rather than a
+    guess.
+    """
+
+    found = transcript_pick(turns, event)
+    if found is None:
+        return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
+    position, token_index = found
+    turn = (turns or [])[position]
+    if token_index is None:
+        return NO_TOKEN_SELECTED, [], None, None, None
+
+    metric = turn_tokens(turn)[token_index]
+    summary, rows = describe_token(metric)
+    selection = {
+        "source": "turn",
+        "turn": position,
+        "index": token_index,
+        "at_token_id": int(metric["token_id"]),
+    }
+    if turn.get("load_id") != runtime.MANAGER.load_id:
+        summary = f"{summary}\n\n{BRANCH_MODEL_CHANGED}"
+    target = (
+        {
+            "generation": current_metrics_generation(),
+            "strip": "response",
+            "index": token_index,
+        }
+        if turn.get("metrics_generation") == current_metrics_generation()
+        else None
+    )
+    return summary, rows, selection, target, None
+
+
 def choose_alternative(
+    turns: list[dict] | None,
     metrics_state: tuple[int, list[dict]],
     selected_token: dict | None,
-    branch_source: tuple[int, str | None] | None,
     event: gr.SelectData,
 ):
     """Pair a row of the alternatives table with the token it belongs to."""
 
-    generation, metrics = metrics_state
-    if (
-        generation != _metrics_generation
-        or not selected_token
-        or selected_token.get("generation") != generation
-    ):
+    metric = selection_metric(turns, metrics_state, selected_token)
+    if metric is None:
         return gr.skip(), None
     try:
-        metric = metrics[int(selected_token["index"])]
         candidate = metric["top_candidates"][event_index(event)]
     except (IndexError, KeyError, TypeError, ValueError):
         return gr.skip(), None
 
     summary, _rows = describe_token(metric)
-    if branch_source != (generation, runtime.MANAGER.load_id):
-        return f"{summary}\n\n{BRANCH_UNAVAILABLE}", None
+    found = branch_target(turns, selected_token)
+    if isinstance(found, str):
+        return f"{summary}\n\n{found}", None
+    position, _metric = found
     pick = {
-        "generation": generation,
+        "source": "turn",
+        "turn": position,
+        "index": int(selected_token["index"]),
+        "at_token_id": int(metric["token_id"]),
         "position": int(metric["position"]),
         "token_id": int(candidate["token_id"]),
         "text": candidate["text"],
@@ -306,13 +547,19 @@ def choose_alternative(
     return f"{summary}\n\n{branch_ready_text(pick)}", pick
 
 
-def recolor(response_state, prompt_state, scale_name: str):
-    """Repaint both strips when the reader picks a different color scale."""
+def recolor(turns, response_state, prompt_state, scale_name: str):
+    """Repaint everything painted by tokens when another scale is picked.
+
+    The conversation is repainted from the turns, since that is what it is
+    drawn from; the Score text tab's strip and the prompt strip are repainted
+    from the measurements they were given.
+    """
 
     _generation, metrics = response_state
     _prompt_generation, prompt_metrics = prompt_state
     scale = resolve_scale(scale_name)
     return (
+        transcript_update(turns, scale.name),
         strip_update(metrics, scale.name),
         strip_update(prompt_metrics, scale.name),
         scale.caption,

@@ -532,6 +532,27 @@ class ConversationListTests(unittest.TestCase):
         self.assertEqual(turns[3]["prompt_tokens"], 30)
         self.assertEqual(turns[5]["prompt_tokens"], 50)
 
+    def test_rewriting_a_reply_forgets_the_measurements_after_it_too(self):
+        # A later reply's own text is untouched, so its token count is still a
+        # true count. Its distributions are not: they were produced from a
+        # transcript the edit replaced, and replaying its tokens onto the
+        # edited conversation would force a reply the model never gave.
+        tokens = [{"token_id": 1}]
+        turns = [
+            make_turn("user", "one"),
+            dict(measured("first", prompt=10, generated=5), tokens=tokens, load_id="a"),
+            make_turn("user", "two"),
+            dict(measured("second", prompt=30, generated=7), tokens=tokens, load_id="a"),
+        ]
+        result = forget_measurements(turns, 1)
+        for reply in (result[1], result[3]):
+            self.assertNotIn("tokens", reply)
+            self.assertNotIn("load_id", reply)
+            self.assertNotIn("metrics_generation", reply)
+        self.assertEqual(result[3]["generated_tokens"], 7)
+        # The input was not mutated.
+        self.assertEqual(turns[1]["tokens"], tokens)
+
     def test_the_label_of_an_empty_conversation(self):
         self.assertEqual(branch_label(MAIN_BRANCH, []), "Main\nNo messages yet")
 

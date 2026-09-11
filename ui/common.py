@@ -83,7 +83,15 @@ NO_TOKEN_SELECTED = "Select a token to inspect it."
 CHART_EVERY = 16
 
 
-RESPONSE_STRIP_LABEL = "Response tokens — click one"
+# The conversation itself, painted token by token. It replaces the copy of the
+# newest reply that used to sit in the inspector: the same text was on screen
+# twice, and only one of the two could be clicked.
+TRANSCRIPT_LABEL = "Conversation tokens — click one to inspect or branch"
+
+
+# What a turn is headed with in the token view. The chatbot draws a bubble per
+# message; a strip of spans has no bubbles, so the role is written out.
+ROLE_HEADINGS = {"user": "\n\nYOU\n", "assistant": "\n\nASSISTANT\n"}
 
 
 # This tokenizer offers neither offsets nor a decode that round trips, so
