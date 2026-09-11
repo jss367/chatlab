@@ -1550,6 +1550,13 @@ def build_app() -> gr.Blocks:
 
         # Selecting a default is navigation only. The Models page owns the
         # explicit download and load actions, including their errors.
+        #
+        # The search table is not among the outputs. Its highlight is kept
+        # by the browser, and the click on this button is itself a click
+        # outside the table, which Gradio's Dataframe answers by clearing
+        # that highlight (Table.svelte, handle_click_outside). Repainting
+        # the table would not clear it: a new value leaves the selected
+        # cells alone, and an identical value is not applied at all.
         default_model_button.click(
             select_default_model,
             None,
