@@ -3349,11 +3349,45 @@ class NextTokenTests(unittest.TestCase):
         paused = self.step(initial, self.pick(initial, token_id=0))
         self.assertEqual([m["token_id"] for m in paused[TURNS][-1]["tokens"]], [0, 1])
         self.assertIn("Paused before visible text", paused[CHATBOT][-1]["content"])
-        self.assertEqual(model_messages(paused[TURNS]), [{"role": "user", "content": "hi"}])
+        self.assertEqual(model_messages(paused[TURNS]), [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": ""},
+        ])
         runtime.MANAGER.model.script = [2]
         resumed = self.step(paused)
         self.assertEqual(resumed[TURNS][-1]["content"], "Hello")
         self.assertEqual(len(resumed[TURNS][-1]["tokens"]), 3)
+
+    def test_send_after_an_invisible_step_preserves_role_alternation(self):
+        for prefix in (("   ", "\n"), ("<think>", " "), ("<think>", "</think>")):
+            for keep_reasoning in (False, True):
+                with self.subTest(prefix=prefix, keep_reasoning=keep_reasoning):
+                    pieces = [*prefix, "Hello", " world", "<eos>"]
+                    runtime.MANAGER = loaded_manager([2], pieces, 4)
+                    initial = self.reply()
+                    runtime.MANAGER.model.script = [1]
+                    pick = dict(self.pick(initial, token_id=0), text=pieces[0])
+                    paused = self.step(initial, pick)
+                    self.assertEqual(paused[TURNS][-1]["content"], "")
+                    self.assertEqual(paused[TURNS][-1]["reasoning"], "")
+                    self.assertEqual(
+                        [m["token_id"] for m in paused[TURNS][-1]["tokens"]], [0, 1]
+                    )
+
+                    runtime.MANAGER.model.script = [2]
+                    sampling = dict(FIXED, keep_reasoning=keep_reasoning)
+                    with mock.patch.object(
+                        runtime.MANAGER, "generate", wraps=runtime.MANAGER.generate
+                    ) as generate:
+                        final = list(app.chat("continue", paused[TURNS], *sampling.values()))[-1]
+
+                    self.assertEqual(generate.call_args.args[0], [
+                        {"role": "user", "content": "hi"},
+                        {"role": "assistant", "content": ""},
+                        {"role": "user", "content": "continue"},
+                    ])
+                    self.assertTrue(final[TURNS][-1]["content"].startswith("Hello"))
+                    self.assertEqual(final[TURNS][1]["tokens"], paused[TURNS][1]["tokens"])
 
     def test_reloaded_model_and_edited_reply_are_refused(self):
         initial = self.reply()

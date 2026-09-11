@@ -792,7 +792,7 @@ def _stream_reply(
     # Finished replies with no visible text are dropped, as on cancellation.
     # A single step can contain only whitespace or a reasoning marker; keep
     # those measured tokens so the next click can advance past them. The chat
-    # displays a pause notice while model_messages() skips the empty text.
+    # displays a pause notice while model_messages() keeps an empty assistant slot.
     if single_step and metrics and not pending.get("ends_on_stop_token"):
         pending["token_step_paused"] = True
         pending["reasoning_closed"] = True

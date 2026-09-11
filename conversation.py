@@ -277,12 +277,13 @@ def model_messages(
         if include_reasoning and reasoning:
             content = f"{THINK_OPEN}\n{reasoning}\n{THINK_CLOSE}\n{content}".strip()
         if not content:
-            if turn["role"] == "assistant" and reasoning:
-                # A Think model stopped mid-answer leaves an assistant turn with
-                # reasoning but no text. The visible conversation still shows a
-                # reply, so dropping the turn here would hand the model two user
-                # messages in a row and break templates that require alternating
-                # roles. Keep the slot, empty, since the reasoning is not replayed.
+            if turn["role"] == "assistant" and (
+                reasoning or turn.get("token_step_paused")
+            ):
+                # A reasoning-only reply or an invisible token step still owns
+                # an assistant slot in the visible conversation. Keep it empty
+                # so a subsequent Send preserves alternating roles, without
+                # replaying hidden tokens or the display-only pause notice.
                 messages.append({"role": "assistant", "content": ""})
             continue
         messages.append({"role": turn["role"], "content": content})
