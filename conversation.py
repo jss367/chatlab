@@ -12,7 +12,7 @@ and so the next request can deliberately include or drop it.
 A generated assistant turn also records where it came from, so the list of
 conversations can say which model answered and how big the exchange was:
 
-    {"model": str, "prompt_tokens": int, "generated_tokens": int}
+    {"model": str, "prompt_tokens": int, "generated_tokens": int, "thinking_mode": str}
 
 ``prompt_tokens`` is every token the model was given for that reply - the
 system prompt, the transcript so far and the template around them - and
@@ -57,7 +57,12 @@ CHAT_PREFIX = "Chat"
 TITLE_LIMIT = 40
 
 # The per-turn provenance fields, and the type each must have in a saved file.
-TURN_ORIGIN_FIELDS = {"model": str, "prompt_tokens": int, "generated_tokens": int}
+TURN_ORIGIN_FIELDS = {
+    "model": str,
+    "prompt_tokens": int,
+    "generated_tokens": int,
+    "thinking_mode": str,
+}
 
 # What a reply carries of its own measurements. These never reach the file;
 # see the module docstring for why.

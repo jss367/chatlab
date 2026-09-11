@@ -3448,7 +3448,7 @@ class BranchFromTokenTests(unittest.TestCase):
             for fn in demo.fns.values()
             if getattr(fn.fn, "__name__", None) == "branch_with_text"
         )
-        self.assertEqual(len(listener.inputs), 2 + 2 + len(SETTINGS) + 4)
+        self.assertEqual(len(listener.inputs), 2 + 2 + len(SETTINGS) + 5)
         self.assertEqual(len(listener.outputs), CHAT_OUTPUTS)
 
     def test_the_branch_button_is_wired_as_a_generation(self):
@@ -3458,7 +3458,7 @@ class BranchFromTokenTests(unittest.TestCase):
             for fn in demo.fns.values()
             if getattr(fn.fn, "__name__", None) == "branch_from"
         )
-        self.assertEqual(len(listener.inputs), 1 + 2 + len(SETTINGS) + 4)
+        self.assertEqual(len(listener.inputs), 1 + 2 + len(SETTINGS) + 5)
         self.assertEqual(len(listener.outputs), CHAT_OUTPUTS)
 
 
@@ -3712,7 +3712,7 @@ class NextTokenTests(unittest.TestCase):
     def test_button_is_wired_as_a_cancellable_generation(self):
         demo = app.build_app()
         listener = next(fn for fn in demo.fns.values() if fn.fn is app.next_token)
-        self.assertEqual(len(listener.inputs), 1 + 2 + len(SETTINGS) + 4)
+        self.assertEqual(len(listener.inputs), 1 + 2 + len(SETTINGS) + 5)
         self.assertEqual(len(listener.outputs), CHAT_OUTPUTS)
 
 

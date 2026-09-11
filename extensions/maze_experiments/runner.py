@@ -24,7 +24,7 @@ class Episode:
     config: dict
     run_id: str = field(default_factory=lambda: uuid4().hex)
     phase: str = "ready"
-    detail: str = "Ready. Run the episode or generate one response at a time."
+    detail: str = "Ready. Play the episode or use Next to generate one response."
     messages: list = field(default_factory=list)
     events: list = field(default_factory=list)
     turns: list = field(default_factory=list)
@@ -55,6 +55,8 @@ class Episode:
     # Which playback run owns the view. Starting one supersedes the last, so
     # two runs in the same session cannot repaint each other's frames.
     playback_token: int = 0
+    playing: bool = False
+    reveal_route: bool = False
     created_at: float = field(default_factory=time.time)
 
     def __deepcopy__(self, memo):
@@ -476,7 +478,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
         if episode.busy:
             raise ValueError("This episode is already generating. Pause it before changing the run.")
         if episode.phase in TERMINAL or episode.replay_only:
-            raise ValueError("Start a new episode to run again. This episode is finished or is a saved replay. Play it back or step through it under Path and replay.")
+            raise ValueError("Start a new episode to run again. This episode is finished or is a saved replay. Use Play or Next to inspect its recorded responses.")
         manager = models.open_session()
         episode.busy = True
         episode.pause_requested = episode.stop_requested = False

@@ -415,6 +415,7 @@ def generate_reply(
     steering_enabled: bool | None = None,
     steering_strength: float | None = None,
     steering_layer: int | None = None,
+    thinking_mode: str = "default",
     *,
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
@@ -423,6 +424,7 @@ def generate_reply(
     branch_note: str = "",
     expected_load_id: str | None = None,
     single_step: bool = False,
+    branch_thinking_mode: str | None = None,
 ):
     """Stream one assistant reply for ``turns``, which must end with a user turn.
 
@@ -443,6 +445,10 @@ def generate_reply(
     They are kept separate from ``literal_prefill_tokens`` because a terminal
     stop token typed into a branch must still end it even though reasoning
     markers earlier in the same replacement remain visible prose.
+
+    ``thinking_mode`` selects the model's native template mode for a new reply.
+    Token branches supply ``branch_thinking_mode`` from the original reply so
+    a changed control cannot change the prompt underneath the replayed tokens.
 
     ``automatic_reasoning_close_tokens`` preserves the provenance of the
     template close at the start of an assistant prefill, so later branches
@@ -484,6 +490,7 @@ def generate_reply(
             steering_enabled,
             steering_strength,
             steering_layer,
+            thinking_mode,
             forced_ids=forced_ids,
             literal_prefill_tokens=literal_prefill_tokens,
             automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
@@ -491,6 +498,7 @@ def generate_reply(
             branch_note=branch_note,
             expected_load_id=expected_load_id,
             single_step=single_step,
+            branch_thinking_mode=branch_thinking_mode,
         )
     finally:
         # Every exit runs this: a finished stream, a failure, and - the one
@@ -518,6 +526,7 @@ def _stream_reply(
     steering_enabled: bool | None = None,
     steering_strength: float | None = None,
     steering_layer: int | None = None,
+    thinking_mode: str = "default",
     *,
     forced_ids: tuple[int, ...] = (),
     literal_prefill_tokens: int = 0,
@@ -527,6 +536,7 @@ def _stream_reply(
     expected_load_id: str | None = None,
     single_step: bool = False,
     previous_turns: list[dict] | None = None,
+    branch_thinking_mode: str | None = None,
 ):
     """The body of generate_reply(), run with the generation slot held."""
 
@@ -676,6 +686,9 @@ def _stream_reply(
         analyze_prompt=bool(analyze_prompt),
         forced_ids=tuple(int(value) for value in forced_ids),
         answer_prefill=assistant_prefill if applied_prefill else "",
+        thinking_mode=(
+            branch_thinking_mode if branch_thinking_mode is not None else thinking_mode
+        ),
         literal_prefill_tokens=literal_prefill_tokens,
         automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
         literal_text_ranges=literal_text_ranges,
@@ -705,6 +718,8 @@ def _stream_reply(
                     streaming=True,
                     reasoning_prefilled=prefilled,
                 )
+                if update.thinking_mode is not None:
+                    pending["thinking_mode"] = update.thinking_mode
                 pending["reasoning"] = reasoning
                 pending["content"] = answer
                 pending["reasoning_closed"] = closed
@@ -828,6 +843,8 @@ def _stream_reply(
         "max_new_tokens": int(max_new_tokens),
         "seed": used_seed,
     }
+    if pending.get("thinking_mode") is not None:
+        sampling["thinking_mode"] = pending["thinking_mode"]
     if steering is not None:
         sampling["steering"] = steering
     if forced_prefix_tokens:
@@ -880,6 +897,7 @@ def chat(
     steering_enabled: bool | None = None,
     steering_strength: float | None = None,
     steering_layer: int | None = None,
+    thinking_mode: str = "default",
 ):
     held = occupied()
     if held:
@@ -918,6 +936,7 @@ def chat(
             steering_enabled,
             steering_strength,
             steering_layer,
+            thinking_mode,
         )
     except SteeringError as error:
         yield idle_state("", turns, failure_status("Steering failed", str(error)), clear_tokens=True, scale_name=scale_name)
@@ -942,6 +961,7 @@ def regenerate_from(
     steering_enabled: bool | None = None,
     steering_strength: float | None = None,
     steering_layer: int | None = None,
+    thinking_mode: str = "default",
     *,
     restore_turns: list[dict] | None = None,
 ):
@@ -981,6 +1001,7 @@ def regenerate_from(
             steering_enabled,
             steering_strength,
             steering_layer,
+            thinking_mode,
         )
     except SteeringError as error:
         yield idle_state(
@@ -1232,6 +1253,7 @@ def _branch_with_text(
             (*kept, *replacement_ids),
             max_new_tokens=int(settings[6]),
             load_id=expected_load,
+            thinking_mode=turns[position].get("thinking_mode", "default"),
         )
     except ModelChanged:
         yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
@@ -1260,6 +1282,7 @@ def _branch_with_text(
             branch_note=note,
             expected_load_id=expected_load,
             previous_turns=turns,
+            branch_thinking_mode=turns[position].get("thinking_mode", "default"),
         )
     except ModelChanged:
         # ``turns`` is still the whole conversation, old response included.
@@ -1351,6 +1374,7 @@ def _branch_from(pick, prompt_text, turns, *settings, single_step=False):
             forced,
             max_new_tokens=int(settings[6]),
             load_id=expected_load,
+            thinking_mode=turns[position].get("thinking_mode", "default"),
         )
     except ModelChanged:
         yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
@@ -1374,6 +1398,7 @@ def _branch_from(pick, prompt_text, turns, *settings, single_step=False):
             expected_load_id=expected_load,
             single_step=single_step,
             previous_turns=turns,
+            branch_thinking_mode=turns[position].get("thinking_mode", "default"),
         )
     except ModelChanged:
         # ``turns`` is still the whole conversation, old response included.

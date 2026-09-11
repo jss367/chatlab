@@ -4105,6 +4105,7 @@ class SavedSettingsTests(unittest.TestCase):
             "🎲 New seed each response",
             "Measure prompt tokens",
             "Color tokens by",
+            "Thinking mode",
             "Enter sends the message",
             "Hugging Face model ID",
         ]:
@@ -4282,6 +4283,7 @@ class SavedSettingsTests(unittest.TestCase):
                         "🎲 New seed each response",
                         "Measure prompt tokens",
                         "Color tokens by",
+                        "Thinking mode",
                         "Enter sends the message",
                         "Hugging Face model ID",
                         "Weight precision",

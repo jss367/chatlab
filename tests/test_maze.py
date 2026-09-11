@@ -13,7 +13,7 @@ from model_runtime import GENERATING, ModelManager
 from extension_api import ModelService
 from extension_api import TokenInspector
 from token_metrics import unscored_metric
-from extensions.maze_experiments.page import board, build_page, export_run, views
+from extensions.maze_experiments.page import board, build_page, export_run, views, timeline, transport_text
 import gradio as gr
 
 CONFIG = dict(supplied_moves=0, interrupt_after=0, interruption_text="Distracted", prefix_tokens=2,
@@ -167,6 +167,7 @@ class MazeTests(unittest.TestCase):
                 metrics = views(ep, False, selections, session_id)[7]
                 selected = callbacks['select_token'].fn(ep, session_id, metrics, SimpleNamespace(index=1))
                 self.assertEqual(selected[3], 'b')
+                self.assertTrue(selected[5]['visible'])
                 self.assertIn(("'x' · token 120", '120'), selected[4]['choices'])
                 edit = callbacks['edit_token']
                 frames = list(edit.fn(ep, False, session_id, metrics, selected[2], 'ignored', '120'))
@@ -794,18 +795,18 @@ class MazeTests(unittest.TestCase):
                 # Stepping reads the episode, so repeated clicks advance even
                 # when the dropdown the browser sent has not caught up.
                 self.assertEqual(replay.viewing, -1)
-                self.assertEqual([selected(forward(replay, False, session)) for _ in range(3)], [0, 1, 1])
+                self.assertEqual([selected(list(forward(replay, False, session))[-1]) for _ in range(3)], [0, 1, 1])
                 self.assertEqual([selected(back(replay, False, session)) for _ in range(3)], [0, -1, -1])
                 playback = callbacks['play_back']
                 with mock.patch('extensions.maze_experiments.page.time.sleep') as sleep:
                     frames = list(playback.fn(replay, False, session, .4))
-                self.assertEqual(sleep.call_args_list, [mock.call(.4)] * 2)
-                self.assertEqual([selected(frame) for frame in frames], [-1, 0, 1])
+                self.assertEqual(sleep.call_args_list, [mock.call(.05)] * 16)
+                self.assertEqual([selected(frame) for frame in frames], [-1, 0, 1, 1])
                 self.assertTrue(all(len(frame) == len(playback.outputs) for frame in frames))
                 for frame, column in zip(frames, (0, 1, 2)):
                     self.assertIn(f'Character at row 0, column {column}', frame[0])
                 with mock.patch('extensions.maze_experiments.page.time.sleep') as sleep:
-                    self.assertEqual([selected(frame) for frame in playback.fn(replay, False, session, .4)], [1])
+                    self.assertEqual([selected(frame) for frame in playback.fn(replay, False, session, .4)], [1, 1])
                 sleep.assert_not_called()
                 # Starting playback again supersedes the run already going, so
                 # the older one cannot repaint a response the newer passed.
@@ -817,17 +818,133 @@ class MazeTests(unittest.TestCase):
                 self.assertEqual(selected(next(current)), -1)
                 with mock.patch('extensions.maze_experiments.page.time.sleep'):
                     self.assertEqual(list(superseded), [])
-                    self.assertEqual([selected(frame) for frame in current], [0, 1])
-                with mock.patch.object(gr, 'Info') as info:
-                    self.assertIn('Replay', callbacks['stop_playback'].fn(replay))
-                info.assert_called_once()
+                    self.assertEqual([selected(frame) for frame in current], [0, 1, 1])
+                self.assertFalse(replay.playing)
                 replay.viewing = 9
                 self.assertEqual(selected(back(replay, False, session)), 0)
                 replay.busy = True
-                for call in (lambda: forward(replay, False, session), lambda: back(replay, False, session),
+                for call in (lambda: list(forward(replay, False, session)), lambda: back(replay, False, session),
                              lambda: list(playback.fn(replay, False, session, .4))):
                     with self.assertRaisesRegex(gr.Error, 'Pause'):
                         call()
+            finally:
+                demo.close()
+
+    def test_unified_transport_continues_live_runs_and_pauses_without_stopping(self):
+        move = call_text(MAZE.maze_id, 'east')
+        manager = Manager([(move, list(move.encode()) + [0])] * 12)
+        manager.generate = scored(manager.generate)
+        inspector = TokenInspector()
+        selections = inspector.selections()
+        inspector.selections = lambda: selections
+        session = selections.new_session()
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                pause_button = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'maze-pause')
+                pause = next(fn.fn for fn in demo.fns.values() if fn.targets == [(pause_button._id, 'click')])
+                forward, playback = callbacks['step_forward'].fn, callbacks['play_back'].fn
+                ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+                list(forward(ep, False, session))
+                self.assertEqual((ep.phase, len(ep.turns), ep.position), ('paused', 1, (0, 1)))
+                ep.viewing = -1
+                before = len(manager.calls)
+                list(forward(ep, False, session))
+                self.assertEqual(ep.viewing, 0)
+                self.assertEqual(len(manager.calls), before)
+                # Play traverses the same history, then generates at its end.
+                ep.viewing = -1
+                with mock.patch('extensions.maze_experiments.page.time.sleep'):
+                    frames = list(playback(ep, False, session, .1))
+                self.assertEqual(ep.phase, 'arrived')
+                self.assertEqual(len(manager.calls), before + 1)
+                self.assertTrue(any('Replaying' in frame[11] for frame in frames))
+                self.assertTrue(any('Generating' in frame[11] for frame in frames))
+                self.assertFalse(ep.playing)
+                # Pausing while replaying must prevent the handoff to generation.
+                ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+                list(forward(ep, False, session))
+                ep.viewing = -1
+                stream = playback(ep, False, session, .1)
+                next(stream)
+                before = len(manager.calls)
+                pause(ep)
+                with mock.patch('extensions.maze_experiments.page.time.sleep'):
+                    self.assertEqual(list(stream), [])
+                self.assertEqual(len(manager.calls), before)
+                self.assertEqual(ep.phase, 'paused')
+                # Pause after the opening generation frame retains a full move.
+                ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+                stream = playback(ep, False, session, .1)
+                while not ep.busy:
+                    next(stream)
+                pause(ep)
+                list(stream)
+                self.assertEqual((ep.phase, ep.position, len(ep.turns)), ('paused', (0, 1), 1))
+                self.assertFalse(ep.busy)
+                self.assertFalse(ep.playing)
+                list(forward(ep, False, session))
+                self.assertEqual(ep.phase, 'arrived')
+                # Toggling the viewer overlay during generation survives every
+                # streamed frame and the transport's final completion frame.
+                ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+                stream = playback(ep, False, session, .1)
+                while not ep.busy:
+                    next(stream)
+                callbacks['change_reveal'].fn(ep, True, session)
+                frames = list(stream)
+                self.assertEqual(ep.phase, 'arrived')
+                self.assertIn('stroke="#b4bdcc"', frames[-1][0])
+                # An uploaded paused run reaches its end without new model calls.
+                ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+                list(forward(ep, False, session))
+                replay = from_payload(json.loads(json.dumps(ep.payload())))
+                before = len(manager.calls)
+                with mock.patch('extensions.maze_experiments.page.time.sleep'):
+                    list(playback(replay, False, session, .1))
+                list(forward(replay, False, session))
+                self.assertEqual(len(manager.calls), before)
+            finally:
+                demo.close()
+
+    def test_history_selects_rejected_and_no_move_responses_and_cancels_replay(self):
+        replies = [call_text(MAZE.maze_id, 'east'), call_text(MAZE.maze_id, 'north'), 'I give up.']
+        manager = Manager([(text, list(text.encode()) + [0]) for text in replies])
+        manager.generate = scored(manager.generate)
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        list(stream_episode(ep, manager))
+        self.assertEqual(ep.phase, 'abandoned')
+        inspector = TokenInspector()
+        selections = inspector.selections()
+        inspector.selections = lambda: selections
+        session = selections.new_session()
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                callbacks = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}
+                rows = timeline(ep)
+                self.assertEqual(len(rows), 4)
+                self.assertEqual([row[1] for row in rows], ['(0, 0)', '(0, 1)', '(0, 1)', '(0, 1)'])
+                self.assertEqual(rows[2][3], 'blocked move')
+                self.assertEqual(rows[3][3], 'No move')
+                stream = callbacks['play_back'](ep, False, session, .1)
+                next(stream)
+                for row in (2, 3, 0):
+                    frame = callbacks['select_history'](ep, False, session, SimpleNamespace(index=(row, 1)))
+                    self.assertEqual(frame[8]['value'], row - 1)
+                    self.assertEqual(frame[3], replies[row - 1] if row else '')
+                    self.assertTrue(frame[6][row][0].startswith('▶'))
+                with mock.patch('extensions.maze_experiments.page.time.sleep'):
+                    self.assertEqual(list(stream), [])
+                ep.interrupt_next = True
+                self.assertIn('Interruption queued', transport_text(ep))
             finally:
                 demo.close()
 

@@ -492,6 +492,17 @@ Attention weights need the model's eager attention kernel, which is switched on 
 
 Text the model wraps in `<think>` tags is pulled out of the reply and shown as a collapsible **Reasoning** section, so the answer stays readable while the trace stays available.
 
+For supported Qwen3 models, **Thinking mode** under *System prompt, reasoning,
+and prefill* offers **Model default**, **On**, and **Off**. This controls the
+model's native thinking mode for the next chat reply or retry, on both PyTorch
+and MLX. The control appears only when the loaded Qwen3 checkpoint's chat
+template supports switching; thinking-only and instruct-only variants do not
+get a switch. The choice is saved between sessions and recorded with each
+reply and in its JSON/CSV token trace. Token branches keep the original reply's
+mode so their replay uses the same template. An assistant prefill still starts
+directly in the answer, even with thinking enabled. Batch prompts and the local
+API continue to use the model's default mode.
+
 By default that reasoning is **not** sent back to the model on the next turn. Think models are trained to produce a fresh reasoning block each time, so replaying old ones spends context and tends to degrade the next answer. Enable **Send previous reasoning back to the model** under *System prompt, reasoning, and prefill* if you want the older behavior.
 
 ## Reading the visualization
