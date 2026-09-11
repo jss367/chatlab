@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from .maze import Maze, TOOLS, apply_call, initial_history, parse_call
+from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call
 from extension_api import write_private_text
 
 FORMAT = "chatlab-maze-run-1"
@@ -76,9 +76,16 @@ class Episode:
         self.config = copy.deepcopy(self.config)
         self.config.setdefault("goal_mode", "coordinates")
         self.config.setdefault("goal_hint", "")
+        # Runs predating editable wording carry no prompt, so they keep the
+        # defaults their goal mode sent. An empty string is a deliberate blank.
+        if not isinstance(self.config.get("system_prompt"), str):
+            self.config["system_prompt"] = SYSTEM
+        if not isinstance(self.config.get("instruction"), str):
+            self.config["instruction"] = default_instruction(self.config["goal_mode"])
         supplied = int(self.config.get("supplied_moves", 3))
         self.messages, self.events, self.position = initial_history(
-            self.maze, supplied, goal_mode=self.config["goal_mode"], goal_hint=self.config["goal_hint"])
+            self.maze, supplied, goal_mode=self.config["goal_mode"], goal_hint=self.config["goal_hint"],
+            system=self.config["system_prompt"], instruction=self.config["instruction"])
         self.supplied_moves = supplied
 
     def model_state(self, error=None):

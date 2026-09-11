@@ -9,7 +9,7 @@ from pathlib import Path
 
 import gradio as gr
 
-from .maze import GOAL_MODES, PASSAGES, generate
+from .maze import GOAL_MODES, PASSAGES, SYSTEM, default_instruction, generate
 from .runner import TERMINAL, Episode, fork_token_edit, from_payload, stream_episode
 from extension_api import TokenInspector
 
@@ -121,6 +121,11 @@ def board(ep, index=None, reveal=False, animate=False):
     return "".join(parts)
 
 
+def edited_prompt(config):
+    return (config.get("system_prompt", SYSTEM) != SYSTEM
+            or config.get("instruction") != default_instruction(config["goal_mode"]))
+
+
 def status(ep):
     partial = 0
     if ep.turns and ep.turns[-1]["finish_reason"] is None:
@@ -131,7 +136,8 @@ def status(ep):
             f"{ep.maze.size} × {ep.maze.size} · shortest route {len(ep.maze.route())-1} moves · "
             f"{ep.moves-ep.supplied_moves} model moves + {ep.supplied_moves} supplied · "
             f"{ep.sampled_tokens+partial:,} sampled tokens · {ep.tool_attempts} calls\n\n"
-            f"**Goal information:** {GOAL_MODES[ep.config['goal_mode']]}\n\n"
+            f"**Goal information:** {GOAL_MODES[ep.config['goal_mode']]} · "
+            f"**Setup prompt:** {'Edited' if edited_prompt(ep.config) else 'Default'}\n\n"
             f"**Recovery:** {recovery} · **Model:** {html.escape(ep.model_id or 'load one on the Models page')}")
 
 
@@ -223,6 +229,11 @@ def _build_page(context):
             gr.Markdown("## Scenario")
             gr.Markdown("Settings apply to the next episode.")
             prepare = gr.Button("New episode · apply settings", elem_id="maze-prepare")
+            with gr.Accordion("Setup prompt", open=False):
+                system_prompt = gr.Textbox(value=SYSTEM, label="System prompt", lines=2, elem_id="maze-system-prompt")
+                instruction = gr.Textbox(value=default_instruction("coordinates"), label="Task instruction", lines=6,
+                                         elem_id="maze-instruction",
+                                         info="Sent verbatim ahead of the JSON state. Changing Goal information rewrites this unless you have edited it.")
             with gr.Row():
                 size = gr.Slider(3, 15, value=5, step=1, label="Maze size")
                 distance = gr.Number(value=10, precision=0, minimum=1, maximum=224, label="Shortest route length")
@@ -297,17 +308,18 @@ def _build_page(context):
         return (*frame, transport_text(ep), *transport_buttons(ep),
                 gr.update(visible=False) if frame[9] != gr.skip() else gr.skip())
 
-    controls = [size, seed, distance, openness, supplied, after, text, prefix, temperature, sampling_seed, per_turn, budget, attempts, goal_mode, goal_hint]
+    controls = [size, seed, distance, openness, supplied, after, text, prefix, temperature, sampling_seed, per_turn,
+                budget, attempts, goal_mode, goal_hint, system_prompt, instruction]
 
     def prepare_episode(ep, show, session_id, *values):
         if ep.busy:
             raise gr.Error("Stop or pause this episode before starting another.")
-        n, s, d, o, supplied_n, trigger, passage_text, count, temp, sample_seed, per, total, tries, mode, hint = values
+        n, s, d, o, supplied_n, trigger, passage_text, count, temp, sample_seed, per, total, tries, mode, hint, system_text, instruction_text = values
         try:
             new = Episode(generate(n, s, d, o), dict(supplied_moves=int(supplied_n), interrupt_after=int(trigger),
                           interruption_text=passage_text, prefix_tokens=int(count), temperature=float(temp),
                           sampling_seed=int(sample_seed), per_turn_tokens=int(per), token_budget=int(total), attempt_budget=int(tries),
-                          goal_mode=mode, goal_hint=hint))
+                          goal_mode=mode, goal_hint=hint, system_prompt=system_text, instruction=instruction_text))
         except (ValueError, TypeError) as exc:
             raise gr.Error(str(exc)) from exc
         stop_replay(ep)
@@ -422,7 +434,7 @@ def _build_page(context):
         if ep.busy:
             raise gr.Error("Pause or stop this episode before loading a replay.")
         if not path:
-            return (gr.skip(), *[gr.skip() for _ in outputs])
+            return (gr.skip(),) * (len(outputs) + 3)
         try:
             if Path(path).stat().st_size > 50_000_000:
                 raise ValueError("Run files must be smaller than 50 MB.")
@@ -431,7 +443,7 @@ def _build_page(context):
         except (ValueError, TypeError, KeyError, IndexError, OSError) as exc:
             raise gr.Error(f"Could not load run: {exc}") from exc
         stop_replay(ep)
-        return (replay, *rendered)
+        return (replay, *rendered, replay.config["system_prompt"], replay.config["instruction"])
 
     def select_token(ep, session_id, metrics, evt: gr.SelectData):
         index = evt.index[0] if isinstance(evt.index, (tuple, list)) else evt.index
@@ -489,8 +501,14 @@ def _build_page(context):
     stop.click(lambda ep: command(ep, "stop"), episode, command_outputs, queue=False)
     interrupt.click(lambda ep: command(ep, "interrupt"), episode, command_outputs, queue=False)
     passage.input(lambda name: "" if name == "None" else PASSAGES.get(name, ""), passage, text, queue=False)
-    goal_mode.input(lambda mode: (gr.update(visible=mode == "hint"), 0 if mode != "coordinates" else gr.skip()),
-                    goal_mode, [goal_hint, supplied], queue=False)
+    def change_goal_mode(mode, wording):
+        # A mode's stock instruction describes that mode, so switching rewrites
+        # it. Wording you have typed yourself is never overwritten.
+        stock = wording in {default_instruction(m) for m in GOAL_MODES}
+        return (gr.update(visible=mode == "hint"), 0 if mode != "coordinates" else gr.skip(),
+                default_instruction(mode) if stock else gr.skip())
+
+    goal_mode.input(change_goal_mode, [goal_mode, instruction], [goal_hint, supplied, instruction], queue=False)
     reveal.input(change_reveal, [episode, reveal, selection_session], outputs, queue=False)
     turn_picker.input(inspect, [episode, reveal, turn_picker, selection_session], outputs,
                       show_progress="hidden", concurrency_id="maze-view")
@@ -502,7 +520,7 @@ def _build_page(context):
     edit_button.click(edit_token, [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate],
                       [episode, *outputs, edit_selection, download], concurrency_id="maze-view", show_progress="hidden")
     save.click(export, episode, download, show_progress="hidden")
-    upload.upload(load, [upload, episode, reveal, selection_session], [episode, *outputs],
+    upload.upload(load, [upload, episode, reveal, selection_session], [episode, *outputs, system_prompt, instruction],
                   concurrency_id="maze-view", show_progress="hidden")
     context.navigation.open_models(models)
 
