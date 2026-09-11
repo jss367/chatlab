@@ -309,6 +309,8 @@ class BackgroundConversationTests(unittest.TestCase):
         self.assertEqual(self.state[self.turns._id][-1]["content"], "Hello world")
 
     def test_next_token_resumes_a_background_response_one_token_at_a_time(self):
+        self.manager = loaded_manager([2], THINK_PIECES, THINK_EOS)
+        runtime.MANAGER = self.manager
         self.release.set()
         values = {0: "hi", **dict(enumerate(SETTINGS, 2))}
         values[8] = 1  # max_new_tokens in the existing chat input order
