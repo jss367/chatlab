@@ -2897,7 +2897,12 @@ fire('document', 'pointerdown', {
 fire('window', 'pointermove', { buttons: 1, clientX: 760, pointerId: 7 });
 assert.strictEqual(documentElement.style.props['--inspector-pane-width'], '354px');
 
-// A second finger moves and then lifts.
+// A second finger lands on the same strip, moves and then lifts.
+fire('document', 'pointerdown', {
+  target: handle, button: 0, buttons: 1, clientX: 300, pointerId: 9,
+  preventDefault: () => {},
+});
+assert.ok(handle.hasPointerCapture(7), 'the first pointer keeps the drag');
 fire('window', 'pointermove', { buttons: 1, clientX: 300, pointerId: 9 });
 assert.strictEqual(
   documentElement.style.props['--inspector-pane-width'], '354px',

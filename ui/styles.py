@@ -866,6 +866,10 @@ RESIZE_JS = """
   document.addEventListener('pointerdown', (event) => {
     const handle = event.target.closest && event.target.closest('.pane-resizer');
     if (!handle || event.button !== 0) { return; }
+    // A drag belongs to the pointer that began it until that pointer ends
+    // it. A second finger landing on the strip meanwhile would otherwise
+    // take the pane over while the first one still holds the capture.
+    if (dragging) { return; }
     const pane = paneOf(handle);
     if (!pane) { return; }
     event.preventDefault();
