@@ -161,6 +161,9 @@ from ui.settings_page import (
     sampling_label,
     update_sampling_label,
 )
+from ui.token_menu import (
+    TOKEN_MENU_CSS, TOKEN_MENU_JS, branch_from_menu, token_menu_payload,
+)
 from ui.styles import (
     CSS,
     THEME,
@@ -203,7 +206,7 @@ def build_app() -> gr.Blocks:
     # The shell wants every pixel: the two side panes are a fixed width, so the
     # width the cap was holding back goes to the chat and the panel beside it.
     with gr.Blocks(
-        title="ChatLab", css=CSS + extension_css(extensions), theme=THEME, fill_width=True
+        title="ChatLab", css=CSS + TOKEN_MENU_CSS + extension_css(extensions), theme=THEME, fill_width=True
     ) as demo:
         conversation_state = gr.State([])
         metrics_state = gr.State(empty_metrics())
@@ -217,6 +220,9 @@ def build_app() -> gr.Blocks:
         # which of its tokens - and the alternative picked for it. Both name a
         # turn rather than a strip position, so a click keeps meaning what it
         # meant however the conversation moves under it.
+        menu_request = gr.Textbox(elem_id="token-menu-request", elem_classes=["token-menu-bridge"])
+        menu_response = gr.HTML(elem_id="token-menu-response", elem_classes=["token-menu-bridge"])
+        menu_action = gr.Textbox(elem_id="token-menu-action", elem_classes=["token-menu-bridge"])
         selected_token = gr.State(None)
         branch_pick = gr.State(None)
         # Forking: the other transcripts, and the chatbot message last clicked.
@@ -349,8 +355,9 @@ def build_app() -> gr.Blocks:
                                     label="Token view",
                                     info=(
                                         "Show the conversation as the tokens it "
-                                        "is made of. Click one to inspect it or "
-                                        "branch from it; click your own message to edit it."
+                                        "is made of. Click to inspect; right-click "
+                                        "for alternatives or your own text. "
+                                        "Click your own message to edit it."
                                     ),
                                     elem_id="token-view",
                                 )
@@ -1500,6 +1507,8 @@ def build_app() -> gr.Blocks:
             [*models_outputs, search_results, search_detail, device_read],
             show_progress="hidden",
         )
+        # The menu handles Escape before the global generation shortcut.
+        demo.load(None, None, None, js=TOKEN_MENU_JS)
         # Escape stops a running generation, from anywhere on the page.
         demo.load(None, None, None, js=SHORTCUT_JS)
         # The two readings panes are dragged wider or narrower by the handle
@@ -1827,6 +1836,7 @@ def build_app() -> gr.Blocks:
         ]
 
         running = [
+            menu_action.input(branch_from_menu, [menu_action, *chat_inputs], chat_outputs),
             send_button.click(chat, chat_inputs, chat_outputs),
             prompt.submit(chat, chat_inputs, chat_outputs),
             retry_button.click(retry_last, chat_inputs, chat_outputs),
@@ -2181,7 +2191,14 @@ def build_app() -> gr.Blocks:
             [conversation_state, metrics_state],
             [token_detail, alternatives, selected_token, inspect_target, branch_pick],
         )
-        # And a second that keeps the message it landed in, so Fork works from
+        token_strip.select(
+            token_menu_payload,
+            [conversation_state, metrics_state, menu_request],
+            menu_response,
+            show_progress="hidden",
+            queue=False,
+        )
+        # Also keep the message it landed in, so Fork works from
         # the token view exactly as it does from the chatbot.
         token_strip.select(
             remember_transcript_message, conversation_state, selected_message

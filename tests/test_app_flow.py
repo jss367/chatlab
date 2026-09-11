@@ -4435,6 +4435,7 @@ class CancelWiringTests(unittest.TestCase):
                 "load_with_steering",
                 "branch_from",
                 "branch_with_text",
+                "branch_from_menu",
                 "fork_conversation",
                 "switch_fork",
                 "delete_fork",
