@@ -15,6 +15,7 @@ from gradio.utils import get_function_with_locals
 
 import app
 from ui import runtime
+from ui.token_edit import close_token_editor, open_token_editor, save_token_edit
 import charts
 from conversation import (
     MAIN_BRANCH,
@@ -1184,6 +1185,83 @@ class TokenViewTests(unittest.TestCase):
 
     def respond(self, message="hi", turns=()):
         return list(app.chat(message, list(turns), *SETTINGS))[-1]
+
+    def open_editor(self, frame, turn=0):
+        spans, mapping = app.transcript_entries(frame[TURNS], DEFAULT_COLOR_SCALE)
+        index = mapping.index((turn, None)) + 1
+        return open_token_editor(
+            frame[TURNS], frame[METRICS],
+            gr.SelectData(None, {"index": index, "value": list(spans[index])}),
+        )
+
+    def test_editing_an_earlier_user_message_regenerates_in_token_view(self):
+        first = self.respond()
+        final = self.respond("follow-up", first[TURNS])
+        app.show_token_view(True, final[TURNS], DEFAULT_COLOR_SCALE)
+        self.addCleanup(app.show_token_view, False, [], DEFAULT_COLOR_SCALE)
+        panel, text, target = self.open_editor(final)
+        self.assertTrue(panel["visible"])
+        self.assertEqual(text, "hi")
+        edited = list(save_token_edit(target, "revised question", "draft", final[TURNS], *SETTINGS))[-1]
+        self.assertEqual([t["role"] for t in edited[TURNS]], ["user", "assistant"])
+        self.assertEqual(edited[TURNS][0]["content"], "revised question")
+        self.assertTrue(edited[TURNS][1]["tokens"])
+        self.assertIn(("revised question", None), strip_of(edited[STRIP]))
+        self.assertFalse(edited[-2]["visible"])
+        self.assertIsNone(edited[-1])
+        self.assertEqual(final[TURNS][0]["content"], "hi")
+
+    def test_empty_edit_keeps_the_draft_open_and_conversation_intact(self):
+        final = self.respond()
+        _, _, target = self.open_editor(final)
+        edited = list(save_token_edit(target, "  ", "draft", final[TURNS], *SETTINGS))[-1]
+        self.assertEqual(edited[TURNS], final[TURNS])
+        self.assertIn("cannot be empty", edited[STATUS])
+        self.assertEqual(edited[-2:], (gr.skip(), gr.skip()))
+
+    def test_stale_edit_cannot_replace_a_new_conversation(self):
+        final = self.respond()
+        _, _, target = self.open_editor(final)
+        newer = self.respond("another question")
+        edited = list(save_token_edit(target, "replacement", "draft", newer[TURNS], *SETTINGS))[-1]
+        self.assertEqual(edited[TURNS], gr.skip())
+        self.assertIn("conversation changed", edited[STATUS])
+
+    def test_edit_without_a_loaded_model_preserves_the_conversation_and_draft(self):
+        final = self.respond()
+        _, _, target = self.open_editor(final)
+        with mock.patch.object(type(runtime.MANAGER), "loaded", new_callable=mock.PropertyMock, return_value=False):
+            edited = list(save_token_edit(target, "replacement", "draft", final[TURNS], *SETTINGS))[-1]
+        self.assertEqual(edited[TURNS], final[TURNS])
+        self.assertEqual(edited[STATUS], app.NO_MODEL_STATUS)
+        self.assertEqual(edited[-2:], (gr.skip(), gr.skip()))
+
+    def test_edit_during_generation_does_not_overwrite_streaming_state(self):
+        final = self.respond()
+        _, _, target = self.open_editor(final)
+        self.assertIsNone(runtime.MANAGER.claim_generation())
+        try:
+            edited = list(save_token_edit(target, "replacement", "draft", final[TURNS], *SETTINGS))[-1]
+        finally:
+            runtime.MANAGER.release_generation()
+        self.assertEqual(edited[TURNS], gr.skip())
+        self.assertEqual(edited[-2:], (gr.skip(), gr.skip()))
+
+    def test_assistant_click_does_not_open_or_replace_a_user_draft(self):
+        final = self.respond()
+        result = open_token_editor(final[TURNS], final[METRICS], token_span(final[TURNS], 0))
+        self.assertEqual(result, (gr.skip(),) * 3)
+
+    def test_cancel_clears_editor_without_conversation_outputs(self):
+        self.assertEqual(close_token_editor(), (gr.update(visible=False), "", None))
+
+    def test_token_editor_is_wired_to_click_save_and_stop(self):
+        demo = app.build_app()
+        opener = next(fn for fn in demo.fns.values() if fn.fn is open_token_editor)
+        saver = next(fn for fn in demo.fns.values() if fn.fn is save_token_edit)
+        self.assertEqual(opener.outputs[0].elem_id, "token-editor")
+        self.assertEqual(saver.outputs[3].elem_id, "token-strip")
+        self.assertEqual(saver.outputs[-2].elem_id, "token-editor")
 
     def test_a_reply_is_drawn_token_by_token_under_its_heading(self):
         final = self.respond()
@@ -4248,6 +4326,7 @@ class CancelWiringTests(unittest.TestCase):
                 "retry_last",
                 "retry_message",
                 "edit_message",
+                "save_token_edit",
                 "stop_generation",
                 "undo_last",
                 "undo_message",

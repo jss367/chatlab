@@ -314,8 +314,11 @@ messages are written out as the tokens the model actually emitted — spaces as
 Click any token there and the inspector on the right describes it: its rank,
 its probabilities, its surprise, and the alternatives the model ranked highest.
 That is the same click that starts a branch, and the same click **🔬 Inspect
-layers** reads. Clicking a heading or a message you typed clears the panel
-instead, since neither has a distribution behind it.
+layers** reads. Click your own message to open **Edit your message** below the
+transcript. **Save and regenerate** replaces everything after that message with
+a new reply; **Cancel** discards the edit. You stay in token view throughout.
+Clicking a heading or a message you typed also clears the inspector, since
+neither has a distribution behind it.
 
 Replies carry their own measurements, so the whole conversation is painted, not
 just the newest reply. A message you typed, a reply you edited by hand, and a

@@ -27,6 +27,7 @@ from token_metrics import (
 )
 from trace_export import write_trace_export
 from ui import runtime
+from ui.token_edit import close_token_editor, open_token_editor, save_token_edit
 from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from extensions.registry import load_enabled
 from ui.extensions_page import build_extension_settings, data_directory, extension_css, restore_extensions
@@ -220,6 +221,7 @@ def build_app() -> gr.Blocks:
         # Forking: the other transcripts, and the chatbot message last clicked.
         forks_state = gr.State(new_forks())
         selected_message = gr.State(None)
+        token_edit_target = gr.State(None)
         # Layer inspection: the prompt ids behind the strips, the strip
         # position last clicked, and the last readout for re-rendering.
         context_ids_state = gr.State((*empty_metrics(), None))
@@ -347,7 +349,7 @@ def build_app() -> gr.Blocks:
                                     info=(
                                         "Show the conversation as the tokens it "
                                         "is made of. Click one to inspect it or "
-                                        "branch from it."
+                                        "branch from it; click your own message to edit it."
                                     ),
                                     elem_id="token-view",
                                 )
@@ -368,6 +370,14 @@ def build_app() -> gr.Blocks:
                                     visible=False,
                                     elem_id="token-strip",
                                 )
+                                with gr.Group(visible=False, elem_id="token-editor") as token_editor:
+                                    token_edit_text = gr.Textbox(
+                                        label="Edit your message", lines=3,
+                                        info="Saving replaces the replies after this message and generates a new reply.",
+                                    )
+                                    with gr.Row():
+                                        token_edit_save = gr.Button("Save and regenerate", variant="primary")
+                                        token_edit_cancel = gr.Button("Cancel")
                                 prompt = gr.Textbox(
                                     label="Message",
                                     show_label=False,
@@ -1791,6 +1801,11 @@ def build_app() -> gr.Blocks:
             retry_button.click(retry_last, chat_inputs, chat_outputs),
             chatbot.retry(retry_message, chat_inputs, chat_outputs),
             chatbot.edit(edit_message, chat_inputs, chat_outputs),
+            token_edit_save.click(
+                save_token_edit,
+                [token_edit_target, token_edit_text, *chat_inputs],
+                [*chat_outputs, token_editor, token_edit_target],
+            ),
             branch_button.click(
                 branch_from,
                 [branch_pick, *chat_inputs],
@@ -2116,6 +2131,15 @@ def build_app() -> gr.Blocks:
             partial(show_token_view, conversation_id=conversation_state._id),
             [token_view, conversation_state, color_scale],
             [chatbot, token_strip],
+            show_progress="hidden",
+        )
+        editor_outputs = [token_editor, token_edit_text, token_edit_target]
+        token_view.change(close_token_editor, outputs=editor_outputs, show_progress="hidden")
+        token_edit_cancel.click(close_token_editor, outputs=editor_outputs, show_progress="hidden")
+        token_strip.select(
+            open_token_editor,
+            [conversation_state, metrics_state],
+            editor_outputs,
             show_progress="hidden",
         )
 
