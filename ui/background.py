@@ -31,6 +31,21 @@ def skipped(value):
     return isinstance(value, dict) and value == gr.skip()
 
 
+def copy_frame(values):
+    """Copy mutable UI containers while sharing immutable token measurements."""
+
+    copied = {}
+    for index, value in values.items():
+        if index == NAMES["turns"] and isinstance(value, list):
+            copied[index] = copy_turns(value)
+        elif index in (NAMES["metrics"], NAMES["prompt_metrics"], NAMES["chat_metrics"]):
+            generation, metrics = value
+            copied[index] = generation, list(metrics)
+        else:
+            copied[index] = copy.deepcopy(value)
+    return copied
+
+
 class ConversationJob:
     """One session's latest run; deepcopy creates an independent browser session."""
 
@@ -52,8 +67,11 @@ class ConversationJob:
     def _publish(self, frame):
         with self.lock:
             changed = {i: value for i, value in enumerate(frame) if not skipped(value)}
-            self.frame.update(copy.deepcopy(changed))
-            self.pending.update(copy.deepcopy(changed))
+            snapshot = copy_frame(changed)
+            # These dictionaries only replace snapshot entries. Consumers get
+            # independent containers from render(), so one snapshot serves both.
+            self.frame.update(snapshot)
+            self.pending.update(snapshot)
             self.version += 1
             turns = self.frame.get(NAMES["turns"])
             if isinstance(turns, list):
@@ -183,7 +201,7 @@ class ConversationJob:
                 and self.saved["updated"].get(active, "") >= forks["updated"].get(active, "")
             )
             if current:
-                values = copy.deepcopy(self.frame if switched else self.pending)
+                values = copy_frame(self.frame if switched else self.pending)
                 metrics = self.frame.get(NAMES["metrics"])
                 if metrics is not None:
                     restore_chat_metrics_generation(metrics[0])

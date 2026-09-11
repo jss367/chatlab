@@ -325,3 +325,43 @@ class BackgroundConversationTests(unittest.TestCase):
         self.assertEqual(reply["generated_tokens"], 2)
         self.assertTrue(reply["token_step_paused"])
         self.assertFalse(self.manager.busy)
+
+
+class BackgroundSnapshotTests(unittest.TestCase):
+    def test_large_frames_share_immutable_metrics_and_isolate_mutable_containers(self):
+        class ImmutableMetric(dict):
+            def __deepcopy__(self, memo):
+                raise AssertionError("A growing response's immutable metric was deep-copied")
+
+        metric = ImmutableMetric(display_text="word", rank=1, raw_rank=1)
+        metrics = [metric] * 2000
+        turns = [make_turn("assistant", "word", "")]
+        turns[0]["tokens"] = list(metrics)
+        frame = [gr.skip() for _ in app.CHAT_OUTPUT_NAMES]
+        frame[NAMES["turns"]] = turns
+        for name in ("metrics", "prompt_metrics", "chat_metrics"):
+            frame[NAMES[name]] = (123, list(metrics))
+        frame[NAMES["alternatives"]] = gr.update(value=[["choice"]])
+        job = ConversationJob()
+        job.owner = MAIN_BRANCH
+        job.saved = new_forks()
+        with mock.patch.object(library, "write"):
+            job._publish(frame)
+        # The producer can reuse its lists without altering a published frame.
+        turns[0]["content"] = "changed"
+        turns[0]["tokens"].clear()
+        frame[NAMES["metrics"]][1].clear()
+        frame[NAMES["alternatives"]]["value"].clear()
+        self.assertEqual(job.frame[NAMES["turns"]][0]["content"], "word")
+        self.assertEqual(len(job.frame[NAMES["metrics"]][1]), 2000)
+        shown, _, _ = job.render(new_forks(), [], "Raw rank")
+        self.assertIs(shown[NAMES["turns"]][0]["tokens"][0], metric)
+        for name in ("metrics", "prompt_metrics", "chat_metrics"):
+            self.assertIs(shown[NAMES[name]][1][0], metric)
+        # Gradio may change returned containers without changing the cached run.
+        shown[NAMES["turns"]][0]["tokens"].clear()
+        shown[NAMES["metrics"]][1].clear()
+        shown[NAMES["alternatives"]]["value"].clear()
+        self.assertEqual(len(job.frame[NAMES["turns"]][0]["tokens"]), 2000)
+        self.assertEqual(len(job.frame[NAMES["metrics"]][1]), 2000)
+        self.assertEqual(job.frame[NAMES["alternatives"]]["value"], [["choice"]])
