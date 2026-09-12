@@ -431,6 +431,14 @@ def refresh_model_actions(
     """
 
     cleaned = chosen_model(model_id, selected)
+    active = runtime.MANAGER.active_downloads.get(cleaned)
+    if active is not None:
+        return (
+            "**Downloading** · " + download_detail(cleaned, active.snapshot(), None),
+            gr.update(visible=True),
+            gr.update(visible=True),
+            gr.update(visible=False, variant="secondary"),
+        )
     try:
         cached = cache_status(cleaned) if cleaned else CacheStatus()
     except ValueError as error:
@@ -476,6 +484,43 @@ def refresh_model_actions(
         gr.update(visible=download, interactive=can_download),
         gr.update(visible=cached.complete, variant="primary" if cached.complete else "secondary"),
     )
+
+
+def refresh_stale_model_actions(
+    model_id: str, selected: str | None, repository: dict | None,
+    hf_token: str | None, stamp: tuple[bool, int] | None,
+):
+    """The timer's refresh: repaint only when the local-file status has moved.
+
+    A download runs in a worker thread, so nothing this tab does tells it
+    that files are arriving - or that another tab started or finished one.
+    The timer covers that, but it ticks in every open session for the whole
+    life of the app, and :func:`refresh_model_actions` ends in
+    :func:`cache_status`, which stats every blob and walks the snapshot. On
+    a large or network-mounted cache that is continuous disk work for a page
+    nobody is looking at, so an idle tick paints nothing at all. Same shape
+    as :func:`refresh_stale_model_switch`, and for the same reason.
+
+    Two things make the card wrong, and both are read without touching the
+    disk. A download of the chosen model is in flight, so its bytes have
+    moved since the last tick; the card is repainted every tick until it
+    ends, which is the progress. And what a cache scan would find changed -
+    ``cache_revision``, which :meth:`ModelManager.note_cache_change` moves
+    on every download start and end and every removal, whichever tab did it.
+    A download ending is both, so the one repaint that turns "Downloading"
+    back into a local-file reading is the revision's, not a special case.
+
+    ``stamp`` is what this tab last painted from; a tab that has not painted
+    yet passes ``None`` and is painted.
+    """
+
+    cleaned = chosen_model(model_id, selected)
+    downloading = runtime.MANAGER.active_downloads.get(cleaned) is not None
+    revision = runtime.MANAGER.cache_revision
+    if stamp is not None and not downloading and tuple(stamp) == (False, revision):
+        return (*(gr.skip(),) * 4, stamp)
+    painted = refresh_model_actions(model_id, selected, repository, hf_token)
+    return (*painted, (downloading, revision))
 
 
 def download_model(model_id: str, hf_token: str, selected: str | None = None):

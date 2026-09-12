@@ -119,6 +119,7 @@ from ui.models_page import (
     refresh_model_switch,
     refresh_my_models,
     refresh_search_results,
+    refresh_stale_model_actions,
     refresh_stale_model_switch,
     remove_my_model,
     search_models,
@@ -993,6 +994,9 @@ def build_app() -> gr.Blocks:
                                 )
                                 check_model_button = gr.Button("Check model", size="sm", scale=1, min_width=100)
                             repository_result = gr.State(None)
+                            # What the timer's refresh last painted this card
+                            # from; see refresh_stale_model_actions.
+                            action_stamp = gr.State(None)
                             repository_detail = gr.Markdown(UNCHECKED, elem_id="model-repository")
                             with gr.Accordion("Access token", open=False, elem_classes=["model-access"]):
                                 hf_token = gr.Textbox(
@@ -1017,14 +1021,18 @@ def build_app() -> gr.Blocks:
                             model_availability = gr.Markdown(
                                 "Checking downloaded files…", elem_id="model-availability"
                             )
+                            with gr.Column(elem_classes=["model-activity"]):
+                                gr.Markdown("### Latest model action")
+                                model_status = gr.Markdown(
+                                    "No downloads or loads started in this tab.",
+                                    elem_id="model-status",
+                                )
                             with gr.Row():
                                 download_load_button = gr.Button(
                                     "Download and load", variant="primary", size="sm"
                                 )
                                 download_button = gr.Button("Download only", size="sm")
                                 cached_button = gr.Button("Load cached", size="sm")
-                        with gr.Accordion("Latest model action", open=True, elem_classes=["model-activity"]):
-                            model_status = gr.Markdown("No downloads or loads started in this tab.", elem_id="model-status")
 
                         with gr.Column(elem_id="model-search", elem_classes=["model-card"]):
                             gr.Markdown("## Discover models")
@@ -1442,6 +1450,19 @@ def build_app() -> gr.Blocks:
                 show_progress="hidden", trigger_mode="always_last",
                 concurrency_id="model-actions",
             )
+        # Downloads run in worker threads, so selections alone cannot keep the
+        # local-file status current while files arrive (or in another tab).
+        # The timer covers that, but an idle tick paints nothing rather than
+        # scanning the cache every couple of seconds forever in every open
+        # session; see refresh_stale_model_actions, which hands back the stamp
+        # the next tick compares against.
+        badge_timer.tick(
+            refresh_stale_model_actions,
+            [*action_inputs, action_stamp],
+            [*action_outputs, action_stamp],
+            show_progress="hidden", trigger_mode="always_last",
+            concurrency_id="model-actions",
+        )
 
         # Slow network requests scope state to the ID and credentials; rendering
         # reads both again so an old request cannot verify a newer selection.
