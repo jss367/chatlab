@@ -191,6 +191,20 @@ from ui.styles import (
 # has to run between their frames.
 CONVERSATION_PANE_QUEUE = "conversation-pane"
 
+# What a handler that repaints on a timer passes instead of nothing.
+#
+# Gradio fades every output component of a running event down to 20% opacity
+# for as long as it is in flight, and fades it back when the event lands.
+# show_progress="hidden" does not turn that off: it only hides the spinner and
+# the runtime counter. The fade is a class on the component, and which
+# components get it is show_progress_on, which defaults to every output. So a
+# handler on a timer hands its outputs a fade in and out on every tick, which
+# at the quarter-second the conversation pane polls at reads as a blink
+# several times a second, on text nobody asked to have redrawn. An empty
+# show_progress_on says to mark nothing as pending, which is what a poll the
+# reader did not ask for should be doing.
+QUIET_TICK = {"show_progress": "hidden", "show_progress_on": []}
+
 
 def build_app() -> gr.Blocks:
     # Read once, here, rather than per control: a build is one snapshot of
@@ -1284,7 +1298,7 @@ def build_app() -> gr.Blocks:
         # the "no model" state the page was left in.
         nav.change(refresh_thinking_mode, None, thinking_mode, show_progress="hidden")
         demo.load(refresh_thinking_mode, None, thinking_mode)
-        badge_timer.tick(refresh_thinking_mode, None, thinking_mode, show_progress="hidden")
+        badge_timer.tick(refresh_thinking_mode, None, thinking_mode, **QUIET_TICK)
         badge_outputs = [model_badge_view, default_model_button]
         nav.change(refresh_model_badge, None, badge_outputs)
         demo.load(refresh_model_badge, None, badge_outputs)
@@ -1300,18 +1314,15 @@ def build_app() -> gr.Blocks:
             refresh_stale_model_switch,
             [model_switch, switch_stamp, weight_precision],
             switch_outputs,
-            show_progress="hidden",
+            **QUIET_TICK,
         )
         # And on a timer, so a tab that did not start the load hears about it
         # too. demo.load stays: it draws the badge at once rather than leaving
         # the value baked in when the page was built there for a tick.
-        # show_progress="hidden" because this one runs on its own: the default
-        # puts a pending shimmer on a handler's outputs, which every couple of
-        # seconds would have the badge flickering at a reader who never asked
-        # it anything.
-        badge_timer.tick(
-            refresh_model_badge, None, badge_outputs, show_progress="hidden"
-        )
+        # QUIET_TICK because this one runs on its own: the default fades a
+        # handler's outputs in and out, which every couple of seconds would
+        # have the badge flickering at a reader who never asked it anything.
+        badge_timer.tick(refresh_model_badge, None, badge_outputs, **QUIET_TICK)
         # The same timer un-sticks the scored token count. A count asked for
         # during a reply gives up, and nothing about that message corrects
         # itself once the reply ends; see recover_score_budget, which is why
@@ -1321,8 +1332,8 @@ def build_app() -> gr.Blocks:
             recover_score_budget,
             [score_budget, score_budget_load, *score_budget_inputs],
             score_budget_outputs,
-            show_progress="hidden",
             concurrency_id=SCORE_BUDGET_QUEUE,
+            **QUIET_TICK,
         )
         image_load_button.click(
             go_to_models,
@@ -1385,9 +1396,7 @@ def build_app() -> gr.Blocks:
         image_badge_outputs = [image_badge_view, image_load_button]
         nav.change(refresh_image_badge, None, image_badge_outputs)
         demo.load(refresh_image_badge, None, image_badge_outputs)
-        badge_timer.tick(
-            refresh_image_badge, None, image_badge_outputs, show_progress="hidden"
-        )
+        badge_timer.tick(refresh_image_badge, None, image_badge_outputs, **QUIET_TICK)
 
         image_settings_inputs = [
             image_negative,
@@ -1455,7 +1464,7 @@ def build_app() -> gr.Blocks:
             )
         hf_token.input(lambda: None, None, repository_result, show_progress="hidden")
         for event in (demo.load, nav.change, badge_timer.tick):
-            event(refresh_current_model, None, current_model, show_progress="hidden")
+            event(refresh_current_model, None, current_model, **QUIET_TICK)
 
         def refresh_actions(event):
             return event.then(
@@ -1552,7 +1561,7 @@ def build_app() -> gr.Blocks:
             refresh_after_device,
             [device_read, *models_inputs, search_selection, search_results_state, fits_only],
             [*models_outputs, search_results, search_detail, search_selection, device_read],
-            show_progress="hidden",
+            **QUIET_TICK,
         )
         # The menu handles Escape before the global generation shortcut.
         demo.load(None, None, None, js=TOKEN_MENU_JS)
@@ -1904,7 +1913,7 @@ def build_app() -> gr.Blocks:
             [background_state, conversation_state, forks_state, color_scale],
             [*chat_outputs, token_editor, token_edit_target, forks_state, conversation_list],
             concurrency_id=CONVERSATION_PANE_QUEUE,
-            show_progress="hidden",
+            **QUIET_TICK,
         )
 
         start_response = partial(conversation_events.bind, generation=True)
