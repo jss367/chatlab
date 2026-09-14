@@ -346,6 +346,35 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
   overflow-wrap: anywhere;
 }}
 .model-badge-dot {{ width: 6px; height: 6px; border-radius: 50%; flex: none; }}
+/* A load's progress, along the bottom edge of the badge, which is the thing
+   beside the chat page's model switcher: the reader who just picked a model
+   there is looking at this and not at the Models page, where the load's own
+   card goes. Amber like the dot above it, and until the loader reports a
+   figure it sweeps instead of filling - a bar pinned at zero for the seconds
+   before the first weight lands reads as a load that has stalled. */
+.model-badge[data-state="loading"] {{ position: relative; padding-bottom: 6px; }}
+.model-badge-bar {{
+  position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+  border-radius: 0 0 5px 5px; overflow: hidden;
+  background: var(--border-color-primary);
+}}
+.model-badge-bar > span {{
+  display: block; height: 100%; width: 0; background: #d97706;
+  /* Redrawn every couple of seconds (BADGE_REFRESH_SECONDS); the transition
+     is what makes those steps read as a bar filling rather than jumping. */
+  transition: width 1s linear;
+}}
+.model-badge-bar[data-progress="unknown"] > span {{
+  width: 30%; animation: model-badge-sweep 1.5s ease-in-out infinite;
+}}
+@keyframes model-badge-sweep {{
+  from {{ transform: translateX(-100%); }}
+  to {{ transform: translateX(333%); }}
+}}
+@media (prefers-reduced-motion: reduce) {{
+  .model-badge-bar > span {{ transition: none; }}
+  .model-badge-bar[data-progress="unknown"] > span {{ width: 100%; animation: none; opacity: 0.4; }}
+}}
 .model-badge[data-state="ready"] .model-badge-dot {{ background: #16a34a; }}
 .model-badge[data-state="loading"] .model-badge-dot,
 .model-badge[data-state="empty"] .model-badge-dot {{ background: #d97706; }}

@@ -2139,8 +2139,9 @@ class ModelSwitchTests(unittest.TestCase):
     def test_picking_the_model_already_in_memory_does_nothing(self):
         self.load()
 
-        self.assertEqual(list(app.switch_model(OLMO)), [(gr.skip(), gr.skip())])
-        self.assertEqual(list(app.switch_model(None)), [(gr.skip(), gr.skip())])
+        nothing = [(gr.skip(), gr.skip(), gr.skip())]
+        self.assertEqual(list(app.switch_model(OLMO)), nothing)
+        self.assertEqual(list(app.switch_model(None)), nothing)
 
     def test_a_pick_during_a_reply_is_refused_and_put_back(self):
         self.load()
@@ -2149,7 +2150,7 @@ class ModelSwitchTests(unittest.TestCase):
         with mock.patch.object(models_page, "alarm") as alarm:
             frames = list(app.switch_model("org/small"))
 
-        self.assertEqual(frames, [(gr.update(value=OLMO), gr.skip())])
+        self.assertEqual(frames, [(gr.update(value=OLMO), gr.skip(), gr.skip())])
         alarm.assert_called_once()
         self.assertIn(app.SWITCH_BUSY, alarm.call_args.args)
 
@@ -2158,7 +2159,7 @@ class ModelSwitchTests(unittest.TestCase):
         with mock.patch.object(models_page, "alarm") as alarm:
             frames = list(app.switch_model("org/small"))
 
-        self.assertEqual(frames, [(gr.update(value=OLMO), gr.skip())])
+        self.assertEqual(frames, [(gr.update(value=OLMO), gr.skip(), gr.skip())])
         self.assertIn(app.SWITCH_LOADING, alarm.call_args.args)
 
     def test_a_pick_refused_by_a_load_that_then_ends_still_names_the_load(self):
@@ -2182,7 +2183,7 @@ class ModelSwitchTests(unittest.TestCase):
             frames = list(app.switch_model("org/small"))
 
         self.assertIsNone(self.manager.occupant, "the load ended in between")
-        self.assertEqual(frames, [(gr.update(value=OLMO), gr.skip())])
+        self.assertEqual(frames, [(gr.update(value=OLMO), gr.skip(), gr.skip())])
         self.assertIn(app.SWITCH_LOADING, alarm.call_args.args)
         self.assertNotIn(app.SWITCH_BUSY, alarm.call_args.args)
 
@@ -2220,8 +2221,16 @@ class ModelSwitchTests(unittest.TestCase):
         # page's buttons, and a second claim here would refuse this one.
         load.assert_called_once_with("org/small", None, "4-bit", mock.ANY)
         # The switcher itself is left to the rescan that follows; the cards
-        # go to the Models page, as Load cached's do.
-        self.assertEqual(frames, [(gr.skip(), "loading card"), (gr.skip(), "ready card")])
+        # go to the Models page, as Load cached's do, and the badge beside
+        # the switcher is repainted with each of them and once more at the
+        # end, so the reader sees the load where they are looking.
+        self.assertEqual([frame[:2] for frame in frames[:-1]], [
+            (gr.skip(), "loading card"),
+            (gr.skip(), "ready card"),
+        ])
+        for frame in frames:
+            self.assertIn("model-badge", frame[2])
+        self.assertEqual(frames[-1][:2], (gr.skip(), gr.skip()))
         self.assertIsNone(self.manager.loading_id, "the claim is given back")
 
     def test_a_pick_takes_the_load_before_it_yields_its_first_card(self):
@@ -2244,9 +2253,14 @@ class ModelSwitchTests(unittest.TestCase):
             frames = list(app.switch_model("org/small"))
 
         self.assertEqual(during["claimed"], "org/small", "claimed before any card")
-        self.assertEqual(during["second"], [(gr.update(value=OLMO), gr.skip())])
+        self.assertEqual(
+            during["second"], [(gr.update(value=OLMO), gr.skip(), gr.skip())]
+        )
         self.assertIn(app.SWITCH_LOADING, during["told"])
-        self.assertEqual(frames, [(gr.skip(), "card")])
+        self.assertEqual([frame[:2] for frame in frames], [
+            (gr.skip(), "card"),
+            (gr.skip(), gr.skip()),
+        ])
         self.assertIsNone(self.manager.loading_id, "the claim is given back")
 
     def test_a_pick_gives_the_load_back_when_the_cards_stop_early(self):
@@ -2419,7 +2433,10 @@ class ModelSwitchTests(unittest.TestCase):
             with mock.patch.object(models_page, "alarm") as alarm:
                 frames = list(app.switch_model("org/small"))
 
-        self.assertEqual(frames, [(gr.skip(), card)])
+        self.assertEqual([frame[:2] for frame in frames], [
+            (gr.skip(), card),
+            (gr.skip(), gr.skip()),
+        ])
         alarm.assert_called_once_with(
             "Not cached", "Nothing for `org/small` is in the cache."
         )
@@ -2432,7 +2449,7 @@ class ModelSwitchTests(unittest.TestCase):
         with mock.patch.object(models_page, "alarm") as alarm:
             frames = list(app.switch_model("org/gone"))
 
-        self.assertIn("Not cached", frames[-1][1])
+        self.assertIn("Not cached", frames[-2][1])
         alarm.assert_called_once()
         self.assertEqual(alarm.call_args.args[0], "Not cached")
         self.assertIsNone(self.manager.loading_id, "the claim is still given back")
@@ -2573,6 +2590,75 @@ class ModelBadgeTests(unittest.TestCase):
 
         self.assertIn('data-state="loading"', badge)
         self.assertIn("Loading org/second", badge)
+
+    def progress_for(self, model_id, steps_done=0, steps_total=0):
+        """Claim a load of ``model_id`` and publish a bar that far along."""
+
+        from model_runtime import LoadProgress
+
+        _checked_id, claim = self.manager.reserve_load(model_id)
+        progress = LoadProgress()
+        self.manager.note_load_progress(claim, progress)
+        if steps_total:
+            progress.bar_class()(desc="Loading weights", total=steps_total).update(
+                steps_done
+            )
+        return claim, progress
+
+    def test_a_load_in_progress_fills_a_bar_in_the_badge(self):
+        # The reader who picked a model in the switcher beside the badge is
+        # watching this, not the Models page where the load's card goes.
+        self.progress_for(OLMO, steps_done=3, steps_total=4)
+
+        badge, _offer = app.refresh_model_badge()
+
+        self.assertIn('data-state="loading"', badge)
+        self.assertIn(f"Loading {OLMO}… 75%", badge)
+        self.assertIn('data-progress="known"', badge)
+        self.assertIn("width: 75%", badge)
+
+    def test_a_load_that_has_not_begun_reporting_shows_no_figure(self):
+        # A load queued behind a reply, or still opening the snapshot, has
+        # nothing to report, and a bar pinned at zero through it would read
+        # as a load that has stalled.
+        self.progress_for(OLMO)
+
+        badge, _offer = app.refresh_model_badge()
+
+        self.assertIn('data-progress="unknown"', badge)
+        self.assertNotIn("%", badge)
+
+    def test_a_load_started_elsewhere_is_measured_on_the_chat_page(self):
+        # The cards a load streams reach only the handler that started it,
+        # so the manager is where every other tab, and every other page,
+        # reads how far it has come.
+        self.progress_for(OLMO, steps_done=1, steps_total=2)
+
+        images, _button = app.refresh_image_badge()
+
+        self.assertIn("50%", images)
+
+    def test_the_bar_follows_the_load_the_badge_names(self):
+        # Two claims can stand at once, and the one holding the model lock is
+        # the one being named; showing the other's figures beside that name
+        # would describe two loads as one.
+        self.progress_for(OLMO, steps_done=1, steps_total=4)
+        self.progress_for("org/second", steps_done=3, steps_total=4)
+        with self.manager._reading_weights(OLMO):
+            badge, _offer = app.refresh_model_badge()
+
+        self.assertIn(f"Loading {OLMO}… 25%", badge)
+
+    def test_a_finished_load_leaves_no_bar_behind(self):
+        claim, _progress = self.progress_for(OLMO, steps_done=4, steps_total=4)
+        self.manager.release_load(claim)
+        self.load()
+
+        badge, _offer = app.refresh_model_badge()
+
+        self.assertIn('data-state="ready"', badge)
+        self.assertNotIn("model-badge-bar", badge)
+        self.assertIsNone(self.manager.loading_progress())
 
     def test_the_model_id_is_escaped(self):
         self.load()
@@ -3405,7 +3491,10 @@ class PageLayoutTests(unittest.TestCase):
         self.assertEqual(len(listeners), 1)
         self.assertEqual(listeners[0].targets, [(switch._id, "input")])
         self.assertEqual(listeners[0].inputs, [switch, self.labelled("Weight precision")])
-        self.assertEqual(listeners[0].outputs, [switch, self.by_id("model-status")])
+        self.assertEqual(
+            listeners[0].outputs,
+            [switch, self.by_id("model-status"), self.by_id("model-badge")],
+        )
         # And is followed by the same rescan as Load cached: the badge, the
         # token count and the hardware panel all change with the model.
         for name in ("refresh_my_models", "refresh_model_badge", "refresh_hardware"):
