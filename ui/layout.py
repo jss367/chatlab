@@ -125,6 +125,7 @@ from ui.models_page import (
     search_models,
     search_table,
     select_default_model,
+    select_model_to_load,
     select_my_model,
     select_search_result,
     switch_model,
@@ -772,7 +773,8 @@ def build_app() -> gr.Blocks:
 
             extension_pages = []
             extension_model_buttons = []
-            navigation = NavigationService(extension_model_buttons.append)
+            navigation = NavigationService(
+                lambda button, model_id: extension_model_buttons.append((button, model_id)))
             for extension in extensions:
                 with gr.Column(scale=1, visible=False, elem_classes=["extension-page"]) as extension_page:
                     context = ExtensionContext(
@@ -1283,16 +1285,36 @@ def build_app() -> gr.Blocks:
             def show_extension(page, expected=label):
                 return gr.update(visible=page == expected)
             nav.change(show_extension, nav, extension_page)
+        # Every page container go_to_models() publishes an update for, in the
+        # order show_page() returns them.
+        extension_page_outputs = [nav, conversation_pane, chat_page, images_page,
+                                  models_page, settings_page,
+                                  *(page for _, page in extension_pages)]
+        # The ID box and everything that has to move with it, in the order
+        # select_model_to_load() returns them.
+        extension_model_outputs = [model_id, my_models, my_model_detail,
+                                   search_selection, search_detail, model_status,
+                                   remove_confirm, pending_removal]
         def open_models_from_extension():
             return (*go_to_models(), *(gr.update(visible=False) for _ in extension_pages))
-        for button in extension_model_buttons:
-            button.click(
-                open_models_from_extension, None,
-                # Every page container go_to_models() publishes an update
-                # for, in the order show_page() returns them.
-                [nav, conversation_pane, chat_page, images_page, models_page,
-                 settings_page, *(page for _, page in extension_pages)],
-            )
+        def open_named_model_from_extension(wanted):
+            # An extension names the model its own view needs - a saved run
+            # names the one that recorded it - and the reader still presses
+            # Load. Nothing to name, or something no model ID could be, opens
+            # the page with the box untouched rather than writing nonsense
+            # into it.
+            try:
+                filled = select_model_to_load(wanted)
+            except (ValueError, AttributeError):
+                return (*(gr.skip() for _ in extension_model_outputs),
+                        *open_models_from_extension())
+            return (*filled, *(gr.update(visible=False) for _ in extension_pages))
+        for button, wanted_model in extension_model_buttons:
+            if wanted_model is None:
+                button.click(open_models_from_extension, None, extension_page_outputs)
+            else:
+                button.click(open_named_model_from_extension, wanted_model,
+                             [*extension_model_outputs, *extension_page_outputs])
         # The scored token count follows the boxes as they are typed into.
         # always_last coalesces a burst of keystrokes into the one count that
         # matters, and the progress bar is hidden because a spinner on every

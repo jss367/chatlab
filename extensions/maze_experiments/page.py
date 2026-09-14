@@ -237,6 +237,19 @@ def transport_buttons(ep):
     return gr.update(visible=not active), gr.update(visible=active)
 
 
+def model_button(ep):
+    """Name the model a saved run needs on the button that opens Models.
+
+    A replay was generated elsewhere, so editing its tokens needs that model
+    in memory. Naming it on the button, and handing the ID to the Models
+    page, turns the refusal that would otherwise follow into one click. A
+    live episode runs under whatever is already loaded, so the button keeps
+    its plain label and names nothing.
+    """
+    wanted = ep.model_id if ep.replay_only else None
+    return gr.update(value=f"Load {wanted}" if wanted else "Choose / load model"), wanted or ""
+
+
 def stop_replay(ep):
     # Cooperative cancellation must never close an active model generator:
     # Pause lets it finish its response and persist the accepted move.
@@ -276,6 +289,8 @@ def _build_page(context):
     selection_session = gr.State(value=selections.new_session, delete_callback=selections.forget)
     metrics_state = gr.State((None, []))
     edit_selection = gr.State(None)
+    # The model a saved run needs, for the button that opens the Models page.
+    wanted_model = gr.State("")
     gr.Markdown("# Maze workbench")
     with gr.Row(elem_id="maze-workspace"):
         with gr.Column(elem_id="maze-scenario"):
@@ -376,7 +391,7 @@ def _build_page(context):
         except (ValueError, TypeError) as exc:
             raise gr.Error(str(exc)) from exc
         stop_replay(ep)
-        return (new, *render(new, show, session_id), None)
+        return (new, *render(new, show, session_id), None, *model_button(new))
 
     def play(ep, show, session_id, single=False):
         last_board = None
@@ -487,7 +502,7 @@ def _build_page(context):
         if ep.busy:
             raise gr.Error("Pause or stop this episode before loading a replay.")
         if not path:
-            return (gr.skip(),) * (len(outputs) + len(controls) + 2)
+            return (gr.skip(),) * (len(outputs) + len(controls) + 4)
         try:
             if Path(path).stat().st_size > 50_000_000:
                 raise ValueError("Run files must be smaller than 50 MB.")
@@ -499,7 +514,7 @@ def _build_page(context):
         except (ValueError, TypeError, KeyError, IndexError, OSError) as exc:
             raise gr.Error(f"Could not load run: {exc}") from exc
         stop_replay(ep)
-        return (replay, *rendered, *values)
+        return (replay, *rendered, *values, *model_button(replay))
 
     def select_token(ep, session_id, metrics, evt: gr.SelectData):
         index = evt.index[0] if isinstance(evt.index, (tuple, list)) else evt.index
@@ -547,16 +562,20 @@ def _build_page(context):
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
         stop_replay(ep)
-        yield (new, *render(new, show, session_id), None, None)
+        # The fork runs under the weights in memory now, so the button stops
+        # naming the uploaded run's model.
+        buttons = model_button(new)
+        yield (new, *render(new, show, session_id), None, None, *buttons)
         for frame in play(new, show, session_id, single=True):
-            yield (new, *frame, None, None)
+            yield (new, *frame, None, None, *buttons)
 
     # Replay is per browser; the model service arbitrates generation globally.
     # Never use Gradio cancels here: it closes generators and would turn Pause
     # or an inspection click into a terminal stop with a partial response.
     toggle.click(play_back, [episode, reveal, selection_session, pace], outputs,
                  show_progress="hidden", concurrency_limit=None, trigger_mode="multiple")
-    prepare.click(prepare_episode, [episode, reveal, selection_session, *controls], [episode, *outputs, download],
+    prepare.click(prepare_episode, [episode, reveal, selection_session, *controls],
+                  [episode, *outputs, download, models, wanted_model],
                   concurrency_id="maze-view", show_progress="hidden")
     back.click(step_back, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")
     forward.click(step_forward, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")
@@ -582,11 +601,13 @@ def _build_page(context):
                  [detail, alternatives, edit_selection, replacement, candidate, editor, transport_status, toggle, pause],
                  queue=False, show_progress="hidden")
     edit_button.click(edit_token, [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate],
-                      [episode, *outputs, edit_selection, download], concurrency_id="maze-view", show_progress="hidden")
+                      [episode, *outputs, edit_selection, download, models, wanted_model],
+                      concurrency_id="maze-view", show_progress="hidden")
     save.click(export, episode, download, show_progress="hidden")
-    upload.upload(load, [upload, episode, reveal, selection_session], [episode, *outputs, *controls, passage],
+    upload.upload(load, [upload, episode, reveal, selection_session],
+                  [episode, *outputs, *controls, passage, models, wanted_model],
                   concurrency_id="maze-view", show_progress="hidden")
-    context.navigation.open_models(models)
+    context.navigation.open_models(models, wanted_model)
 
 
 def build_page(context):

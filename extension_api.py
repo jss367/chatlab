@@ -249,9 +249,17 @@ class NavigationService:
     def __init__(self, register_models_button):
         self._register_models_button = register_models_button
 
-    def open_models(self, button):
-        """Make this button open model loading when clicked."""
-        self._register_models_button(button)
+    def open_models(self, button, model_id=None):
+        """Make this button open model loading when clicked.
+
+        ``model_id`` is an optional component holding the ID of the model the
+        extension wants. When it holds one at the click, Models opens with
+        that ID already in its box; when it is empty, or is not a model ID at
+        all, the page opens with the box as the reader left it. Filling the
+        box is the whole of it: reading weights is still an explicit click on
+        the Models page, whoever named the model.
+        """
+        self._register_models_button(button, model_id)
 
 
 @dataclass(frozen=True)

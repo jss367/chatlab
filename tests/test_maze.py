@@ -159,7 +159,7 @@ class MazeTests(unittest.TestCase):
         original = copy.deepcopy(ep.payload())
         with tempfile.TemporaryDirectory() as directory:
             context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
-                                      navigation=SimpleNamespace(open_models=lambda button: None))
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -672,7 +672,7 @@ class MazeTests(unittest.TestCase):
             suffix = move[index + len("east"):]
             manager.replies = iter([(suffix, list(suffix.encode()) + [0])])
             context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
-                                      navigation=SimpleNamespace(open_models=lambda button: None))
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -701,7 +701,7 @@ class MazeTests(unittest.TestCase):
         list(stream_episode(ep, manager))
         with tempfile.TemporaryDirectory() as directory:
             context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
-                                      navigation=SimpleNamespace(open_models=lambda button: None))
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -819,7 +819,7 @@ class MazeTests(unittest.TestCase):
         session = selections.new_session()
         with tempfile.TemporaryDirectory() as directory:
             context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
-                                      navigation=SimpleNamespace(open_models=lambda button: None))
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -874,7 +874,7 @@ class MazeTests(unittest.TestCase):
         session = selections.new_session()
         with tempfile.TemporaryDirectory() as directory:
             context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
-                                      navigation=SimpleNamespace(open_models=lambda button: None))
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -958,7 +958,7 @@ class MazeTests(unittest.TestCase):
         session = selections.new_session()
         with tempfile.TemporaryDirectory() as directory:
             context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
-                                      navigation=SimpleNamespace(open_models=lambda button: None))
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -1018,7 +1018,7 @@ class MazeTests(unittest.TestCase):
         session = selections.new_session()
         with tempfile.TemporaryDirectory() as directory:
             context = SimpleNamespace(tokens=inspector, models=Manager([]), data_dir=Path(directory),
-                                      navigation=SimpleNamespace(open_models=lambda button: None))
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -1035,11 +1035,53 @@ class MazeTests(unittest.TestCase):
                 self.assertTrue(new.messages[1]['content'].startswith('Reach the star.\n{'))
                 loaded = callbacks['load'](str(new.export()), ep, False, session)
                 self.assertEqual(loaded[0].config['instruction'], 'Reach the star.')
-                # The pane describes the run on screen, so every control follows it.
-                filled = loaded[-18:]
+                # The pane describes the run on screen, so every control follows
+                # it, ahead of the model button and the ID it hands over.
+                filled = loaded[-20:-2]
                 self.assertEqual(filled[:14], values[:14])
                 self.assertEqual((filled[14]['value'], filled[14]['visible']), ('', False))
                 self.assertEqual(filled[15:], ('Be brief.', 'Reach the star.', 'Custom'))
+            finally:
+                demo.close()
+
+    def test_loaded_run_names_its_model_on_the_button_that_opens_models(self):
+        # A replay was generated elsewhere, and its tokens cannot be edited
+        # until that model is in memory. The button that opens Models names
+        # it and hands the ID over, so loading it is one click rather than a
+        # copied string. A fresh episode runs under whatever is loaded, so
+        # the button goes back to naming nothing.
+        manager = Manager([('abc', [97, 98, 99, 0])])
+        manager.generate = scored(manager.generate)
+        inspector = TokenInspector()
+        selections = inspector.selections()
+        inspector.selections = lambda: selections
+        session = selections.new_session()
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        list(stream_episode(ep, manager))
+        self.assertEqual(ep.model_id, 'test/model')
+        with tempfile.TemporaryDirectory() as directory:
+            registered = []
+            context = SimpleNamespace(
+                tokens=inspector, models=manager, data_dir=Path(directory),
+                navigation=SimpleNamespace(
+                    open_models=lambda button, model_id=None: registered.append(model_id)))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                callbacks = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}
+                loaded = callbacks['load'](str(ep.export()), Episode(MAZE, CONFIG), False, session)
+                self.assertTrue(loaded[0].replay_only)
+                self.assertEqual(loaded[-2]['value'], 'Load test/model')
+                self.assertEqual(loaded[-1], 'test/model')
+                values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10,
+                          'coordinates', '', 'Be brief.', 'Reach the star.')
+                fresh = callbacks['prepare_episode'](loaded[0], False, session, *values)
+                self.assertEqual(fresh[-2]['value'], 'Choose / load model')
+                self.assertEqual(fresh[-1], '')
+                # The ID reaches the Models page through the state the page
+                # registered, not through the button's own label.
+                self.assertEqual(len(registered), 1)
+                self.assertIsInstance(registered[0], gr.State)
             finally:
                 demo.close()
 

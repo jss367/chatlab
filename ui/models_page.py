@@ -56,6 +56,7 @@ from model_runtime import (
     search_hub_models,
     snapshot_folder,
     sort_cached_models,
+    validate_model_id,
 )
 from ui import runtime
 from ui.model_repository import matching_repository
@@ -1259,29 +1260,44 @@ def go_to_models():
     return MODELS_PAGE, *show_page(MODELS_PAGE)
 
 
-def select_default_model():
-    """Select the default and open Models; loading requires a separate click.
+def select_model_to_load(model_id, title="Model selected", note=""):
+    """Put ``model_id`` in the ID box and open Models; loading stays a click away.
 
     Update the ID, both model selections and removal confirmation together.
     Programmatic ID changes do not fire the typing listener that normally
     clears the selected row, which would otherwise override this ID.
+
+    The ID is validated rather than trusted: an extension may be passing on
+    one it read from a saved run, and a model ID cannot hold the characters
+    that would turn the card below into something other than a quoted name.
+    ``note`` is appended to the card for a caller with more to say about the
+    model it named.
     """
 
+    model_id = validate_model_id(model_id)
     return (
-        settings.DEFAULT_MODEL_ID,
+        model_id,
         *clear_my_model_selection(),
         None,
         NO_RESULT_SELECTED,
         status_card(
-            "Default model selected",
-            f"`{settings.DEFAULT_MODEL_ID}` is selected. "
-            "Choose **Load cached** to use local files, or **Download and load** "
-            f"to fetch the model ({DEFAULT_MODEL_DOWNLOAD} for a full download) "
-            "and load it. If local files are incomplete, **Download and load** "
-            "can fetch the rest.",
+            title,
+            f"`{model_id}` is selected. Choose **Load cached** to use local files, "
+            "or **Download and load** to fetch the model and load it." + note,
         ),
         *hide_remove_confirm(),
         *go_to_models(),
+    )
+
+
+def select_default_model():
+    """Select the default and open Models; loading requires a separate click."""
+
+    return select_model_to_load(
+        settings.DEFAULT_MODEL_ID,
+        "Default model selected",
+        f" A full download is {DEFAULT_MODEL_DOWNLOAD}. If local files are "
+        "incomplete, **Download and load** can fetch the rest.",
     )
 
 
