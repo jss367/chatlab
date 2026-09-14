@@ -121,6 +121,58 @@ def board(ep, index=None, reveal=False, animate=False):
     return "".join(parts)
 
 
+def scenario_values(ep):
+    """The scenario controls in the order `controls` lists them, then the passage
+    name, so loading a run can describe the run on screen rather than leaving the
+    defaults of an unrelated episode beside it."""
+    config, maze = ep.config, ep.maze
+    text = config.get("interruption_text", "")
+    named = next((name for name, passage in PASSAGES.items() if passage == text), None)
+    mode = config["goal_mode"]
+    openness = openness_of(ep)
+    return (maze.size, maze.seed, len(maze.route()) - 1, gr.skip() if openness is None else openness,
+            config.get("supplied_moves", 0), config.get("interrupt_after", 0), text,
+            config.get("prefix_tokens", 0), config.get("temperature", .7), config.get("sampling_seed", 0),
+            config.get("per_turn_tokens", 1024), config.get("token_budget", 8192), config.get("attempt_budget", 32),
+            mode, gr.update(value=config["goal_hint"], visible=mode == "hint"),
+            config["system_prompt"], config["instruction"],
+            "None" if not text else named or "Custom")
+
+
+OPENNESS_CHOICES = tuple(round(.35 + .05 * step, 2) for step in range(13))
+
+
+def openness_of(ep):
+    """The probability a run was drawn with, or None when it predates the recorded
+    setting and its maze cannot name one. A recovered value is kept on the run, so
+    the search runs once and everything reading the run afterwards agrees with it."""
+    if "openness" not in ep.config:
+        recovered = recovered_openness(ep.maze)
+        if recovered is None:
+            return None
+        ep.config["openness"] = recovered
+    return float(ep.config["openness"])
+
+
+def recovered_openness(maze):
+    """Runs predating the recorded setting are searched for the slider value that
+    redraws their maze. Every value is tried before the answer is unknown, because
+    a small maze deviates from the probability that drew it and elapsed time is no
+    evidence about the values not yet reached; the share of cells the maze leaves
+    open only orders the search, so a recoverable run usually answers on the first
+    try and an exhausted search costs a few seconds once per upload. The redrawn
+    maze has to match whole: the same walls placed around a different start or
+    destination is a maze the run never used."""
+    share = sum(row.count(".") for row in maze.grid) / maze.size ** 2
+    for value in sorted(OPENNESS_CHOICES, key=lambda v: abs(v - share)):
+        try:
+            if generate(maze.size, maze.seed, len(maze.route()) - 1, value) == maze:
+                return value
+        except ValueError:
+            pass
+    return None
+
+
 def edited_prompt(config):
     return (config.get("system_prompt", SYSTEM) != SYSTEM
             or config.get("instruction") != default_instruction(config["goal_mode"]))
@@ -137,7 +189,8 @@ def status(ep):
             f"{ep.moves-ep.supplied_moves} model moves + {ep.supplied_moves} supplied · "
             f"{ep.sampled_tokens+partial:,} sampled tokens · {ep.tool_attempts} calls\n\n"
             f"**Goal information:** {GOAL_MODES[ep.config['goal_mode']]} · "
-            f"**Setup prompt:** {'Edited' if edited_prompt(ep.config) else 'Default'}\n\n"
+            f"**Setup prompt:** {'Edited' if edited_prompt(ep.config) else 'Default'}"
+            f"{'' if 'openness' in ep.config else ' · **Open cells:** Unrecorded, so the slider beside this run is not its own'}\n\n"
             f"**Recovery:** {recovery} · **Model:** {html.escape(ep.model_id or 'load one on the Models page')}")
 
 
@@ -216,7 +269,7 @@ def views(ep, reveal, selections, session_id, index=None, animate=False):
 def _build_page(context):
     default_config = dict(supplied_moves=3, interrupt_after=3, interruption_text=next(iter(PASSAGES.values())),
                           prefix_tokens=8, temperature=.7, sampling_seed=20260914, per_turn_tokens=1024,
-                          token_budget=8192, attempt_budget=32)
+                          token_budget=8192, attempt_budget=32, openness=.7)
     initial = Episode(generate(), default_config)
     episode = gr.State(initial)
     selections = context.tokens.selections()
@@ -227,7 +280,7 @@ def _build_page(context):
     with gr.Row(elem_id="maze-workspace"):
         with gr.Column(elem_id="maze-scenario"):
             gr.Markdown("## Scenario")
-            gr.Markdown("Settings apply to the next episode.")
+            gr.Markdown("Settings apply to the next episode. Loading a saved run shows the settings it used.")
             prepare = gr.Button("New episode · apply settings", elem_id="maze-prepare")
             with gr.Accordion("Setup prompt", open=False):
                 system_prompt = gr.Textbox(value=SYSTEM, label="System prompt", lines=2, elem_id="maze-system-prompt")
@@ -317,7 +370,7 @@ def _build_page(context):
         n, s, d, o, supplied_n, trigger, passage_text, count, temp, sample_seed, per, total, tries, mode, hint, system_text, instruction_text = values
         try:
             new = Episode(generate(n, s, d, o), dict(supplied_moves=int(supplied_n), interrupt_after=int(trigger),
-                          interruption_text=passage_text, prefix_tokens=int(count), temperature=float(temp),
+                          interruption_text=passage_text, prefix_tokens=int(count), temperature=float(temp), openness=float(o),
                           sampling_seed=int(sample_seed), per_turn_tokens=int(per), token_budget=int(total), attempt_budget=int(tries),
                           goal_mode=mode, goal_hint=hint, system_prompt=system_text, instruction=instruction_text))
         except (ValueError, TypeError) as exc:
@@ -434,16 +487,19 @@ def _build_page(context):
         if ep.busy:
             raise gr.Error("Pause or stop this episode before loading a replay.")
         if not path:
-            return (gr.skip(),) * (len(outputs) + 3)
+            return (gr.skip(),) * (len(outputs) + len(controls) + 2)
         try:
             if Path(path).stat().st_size > 50_000_000:
                 raise ValueError("Run files must be smaller than 50 MB.")
             replay = from_payload(json.loads(Path(path).read_text()))
+            # Before the first frame: recovering the open-cell probability writes
+            # it onto the run, and Run details reports whichever way that went.
+            values = scenario_values(replay)
             rendered = render(replay, show, session_id)
         except (ValueError, TypeError, KeyError, IndexError, OSError) as exc:
             raise gr.Error(f"Could not load run: {exc}") from exc
         stop_replay(ep)
-        return (replay, *rendered, replay.config["system_prompt"], replay.config["instruction"])
+        return (replay, *rendered, *values)
 
     def select_token(ep, session_id, metrics, evt: gr.SelectData):
         index = evt.index[0] if isinstance(evt.index, (tuple, list)) else evt.index
@@ -528,7 +584,7 @@ def _build_page(context):
     edit_button.click(edit_token, [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate],
                       [episode, *outputs, edit_selection, download], concurrency_id="maze-view", show_progress="hidden")
     save.click(export, episode, download, show_progress="hidden")
-    upload.upload(load, [upload, episode, reveal, selection_session], [episode, *outputs, system_prompt, instruction],
+    upload.upload(load, [upload, episode, reveal, selection_session], [episode, *outputs, *controls, passage],
                   concurrency_id="maze-view", show_progress="hidden")
     context.navigation.open_models(models)
 

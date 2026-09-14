@@ -7,13 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from extensions.maze_experiments.maze import Maze, apply_call, call_text, default_instruction, generate, parse_call
+from extensions.maze_experiments.maze import PASSAGES, Maze, apply_call, call_text, default_instruction, generate, parse_call
 from extensions.maze_experiments.runner import Episode, TERMINAL, fork_token_edit, from_payload, stream_episode
 from model_runtime import GENERATING, ModelManager
 from extension_api import ModelService
 from extension_api import TokenInspector
 from token_metrics import unscored_metric
-from extensions.maze_experiments.page import board, build_page, export_run, status, views, timeline, transport_text
+from extensions.maze_experiments.page import board, build_page, export_run, scenario_values, status, views, timeline, transport_text
 import gradio as gr
 
 CONFIG = dict(supplied_moves=0, interrupt_after=0, interruption_text="Distracted", prefix_tokens=2,
@@ -1035,9 +1035,52 @@ class MazeTests(unittest.TestCase):
                 self.assertTrue(new.messages[1]['content'].startswith('Reach the star.\n{'))
                 loaded = callbacks['load'](str(new.export()), ep, False, session)
                 self.assertEqual(loaded[0].config['instruction'], 'Reach the star.')
-                self.assertEqual(loaded[-2:], ('Be brief.', 'Reach the star.'))
+                # The pane describes the run on screen, so every control follows it.
+                filled = loaded[-18:]
+                self.assertEqual(filled[:14], values[:14])
+                self.assertEqual((filled[14]['value'], filled[14]['visible']), ('', False))
+                self.assertEqual(filled[15:], ('Be brief.', 'Reach the star.', 'Custom'))
             finally:
                 demo.close()
+
+    def test_loading_a_run_fills_the_scenario_pane(self):
+        stock = next(iter(PASSAGES.items()))
+        ep = Episode(MAZE, CONFIG | dict(interruption_text=stock[1], openness=.55,
+                                         goal_mode='hint', goal_hint='Top row.'))
+        size, seed, distance, openness, *_ = values = scenario_values(from_payload(json.loads(json.dumps(ep.payload()))))
+        self.assertEqual((size, seed, distance, openness), (3, 0, 2, .55))
+        self.assertEqual(values[6], stock[1])
+        self.assertEqual(values[-1], stock[0])
+        self.assertEqual(values[13], 'hint')
+        # The hint box is hidden for the other modes, so loading a hint run reveals it.
+        self.assertEqual((values[14]['value'], values[14]['visible']), ('Top row.', True))
+        # Runs predating the recorded setting are searched for the value that redraws
+        # their maze, and Run details says so when no value does.
+        old = ep.payload()
+        old['config'].pop('openness')
+        legacy = from_payload(json.loads(json.dumps(old)))
+        self.assertEqual(scenario_values(legacy)[3], gr.skip())
+        self.assertIn('**Open cells:** Unrecorded', status(legacy))
+        drawn = Episode(generate(5, 20260911, 10, .6), CONFIG)
+        recovered = from_payload(json.loads(json.dumps(drawn.payload())))
+        self.assertEqual(scenario_values(recovered)[3], .6)
+        self.assertNotIn('Unrecorded', status(recovered))
+        # The same walls around a different start is a maze the run never used, so a
+        # value is accepted only when it redraws the maze whole.
+        whole = Episode(generate(3, 34, 1, .8), CONFIG)
+        self.assertEqual(scenario_values(from_payload(json.loads(json.dumps(whole.payload()))))[3], .8)
+        # A small maze deviates from the probability that drew it, so every value is
+        # tried; any of them that redraws the maze answers the pane.
+        sparse = Episode(generate(3, 1, 1, .35), CONFIG)
+        value = scenario_values(from_payload(json.loads(json.dumps(sparse.payload()))))[3]
+        self.assertEqual(generate(3, 1, 1, value), sparse.maze)
+        # The search reaches a match that several slow candidates are ordered ahead of,
+        # because elapsed time says nothing about the values it has not tried yet.
+        late = Episode(generate(5, 2, 15, .45), CONFIG)
+        value = scenario_values(from_payload(json.loads(json.dumps(late.payload()))))[3]
+        self.assertEqual(generate(5, 2, 15, value), late.maze)
+        blank = scenario_values(Episode(MAZE, CONFIG | {'interruption_text': ''}))
+        self.assertEqual((blank[6], blank[-1]), ('', 'None'))
 
     def test_goal_mode_validation_and_legacy_replay(self):
         for options in ({'goal_mode': 'unknown'}, {'goal_mode': 'hint'},
