@@ -236,6 +236,7 @@ def _write_reply(
             metrics = list(update.metrics)
             model_id = update.model_id or model_id
             yield None, len(metrics)
+    decoded, ends = _decoded_spans(metrics)
     yield {
         "kind": compare.REPLY,
         "model_id": model_id,
@@ -245,6 +246,8 @@ def _write_reply(
         "prompt": prompt,
         "text": text,
         "metrics": metrics,
+        "decoded": decoded,
+        "token_ends": ends,
         "settings": {
             "system_prompt": system_prompt or "",
             "assistant_prefill": assistant_prefill or "",
@@ -276,6 +279,8 @@ def _measure_text(context, measured, use_chat_template, vector, published):
         load_id=published.load_id,
         steering=vector,
     )
+    metrics = list(result.metrics)
+    decoded, ends = _decoded_spans(metrics)
     return {
         "kind": compare.MEASUREMENT,
         "model_id": published.model_id,
@@ -284,7 +289,9 @@ def _measure_text(context, measured, use_chat_template, vector, published):
         "precision": published.precision,
         "prompt": context or "",
         "text": measured,
-        "metrics": list(result.metrics),
+        "metrics": metrics,
+        "decoded": decoded,
+        "token_ends": ends,
         "settings": {
             "use_chat_template": bool(use_chat_template),
             "seam_verified": result.seam_verified,
@@ -292,6 +299,39 @@ def _measure_text(context, measured, use_chat_template, vector, published):
             "steering": vector,
         },
     }
+
+
+def _decoded_spans(metrics) -> tuple[str, list[int]]:
+    """The run's text as the tokenizer really decodes it, and each token's end.
+
+    Decoding is not piecewise. A byte-level tokenizer can split one character
+    across two tokens, and each of those decoded on its own is a replacement
+    character rather than half of anything, so adding up standalone decodes
+    gives neither the run's text nor the right boundaries. Two runs of one
+    passage would then look like two different passages wherever the models
+    split a character differently, which is exactly where the comparison is
+    most worth having.
+
+    ``IncrementalDecoder`` is what the chat stream already uses for this: its
+    text always equals a full decode of every token pushed so far, at a cost
+    proportional to its cache rather than to the length of the run.
+
+    Called with the generation slot held, so the tokenizer cannot be swapped
+    out underneath it. An empty answer where there is nothing to decode with;
+    the alignment falls back to standalone lengths and says so.
+    """
+
+    from model_runtime import IncrementalDecoder
+
+    tokenizer = runtime.MANAGER.tokenizer
+    if tokenizer is None:
+        return "", []
+    decoder = IncrementalDecoder(tokenizer)
+    ends = []
+    for metric in metrics:
+        decoder.push(int(metric["token_id"]))
+        ends.append(len(decoder.text))
+    return decoder.text, ends
 
 
 def clear_slots():

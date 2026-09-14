@@ -176,6 +176,44 @@ class ReadingTests(unittest.TestCase):
         self.assertEqual(painted[0][1], painted[1][1])
         self.assertEqual(len(compare.strip(right, spans, "right")), 2)
 
+    def test_a_character_split_across_tokens_does_not_look_like_a_split(self):
+        # A byte-level tokenizer decodes each half of a character as the
+        # replacement character, so the standalone decodes say the two runs
+        # never agreed. The recorded offsets say they read the same thing.
+        def half(position, token_id, end):
+            return dict(
+                metric(position, token_id, 1.0), text="\ufffd", display_text="\ufffd"
+            ), end
+
+        a_one, a_end_one = half(1, 1, 0)
+        a_two, a_end_two = half(2, 2, 1)
+        left = [a_one, a_two]
+        right = [dict(metric(1, 9, 2.0), text="é", display_text="é")]
+        left_run = dict(
+            run(left, ), decoded="é", token_ends=[0, 1],
+        )
+        right_run = dict(
+            run(right, model_id="other/model"), decoded="é", token_ends=[1],
+        )
+        reading = compare.reading(left_run, right_run)
+        self.assertEqual(reading["spans"], 1)
+        self.assertTrue(reading["complete"])
+        self.assertEqual(reading["readings"][0]["text"], "é")
+        # Without the recording there is nothing but the standalone decodes,
+        # and the two runs do look like two different passages.
+        bare = compare.reading(run(left), run(right, model_id="other/model"))
+        self.assertEqual(bare["spans"], 0)
+
+    def test_token_ends_prefer_the_recording_over_standalone_decodes(self):
+        metrics = [
+            dict(metric(1, 1, 1.0), text="\ufffd"),
+            dict(metric(2, 2, 1.0), text="\ufffd"),
+        ]
+        self.assertEqual(compare.token_ends(metrics, [0, 1]), [0, 1])
+        # A recording that does not describe these tokens is not used.
+        self.assertEqual(compare.token_ends(metrics, [0]), [1, 2])
+        self.assertEqual(compare.token_ends(metrics, None), [1, 2])
+
     def test_text_that_genuinely_parts_ends_the_alignment(self):
         def piece(position, token_id, text):
             return dict(metric(position, token_id, 1.0), text=text, display_text=text)
@@ -187,6 +225,42 @@ class ReadingTests(unittest.TestCase):
         self.assertFalse(reading["complete"])
         self.assertEqual(compare.strip(left, reading["readings"], "left")[2][1],
                          compare.SPLIT_LABEL)
+
+    def test_only_one_to_one_spans_are_in_the_top_choice_denominator(self):
+        def piece(position, token_id, text, surprise=1.0, top="a"):
+            return dict(
+                metric(position, token_id, surprise, top=top),
+                text=text, display_text=text,
+            )
+
+        # A 2-to-1 span, then one comparable token whose choice changed.
+        # Across two vocabularies the decoded choice is what can be compared.
+        left = [piece(1, 1, "hel"), piece(2, 2, "lo"), piece(3, 3, "!", top="a")]
+        right = [piece(1, 9, "hello"), piece(2, 8, "!", top="z")]
+        reading = compare.reading(
+            dict(run(left), decoded="hello!", token_ends=[3, 5, 6]),
+            dict(run(right, model_id="other/model"), decoded="hello!", token_ends=[5, 6]),
+        )
+        self.assertEqual(reading["compared"], 2)
+        # Only the second span had two first choices to put side by side.
+        self.assertEqual(reading["choices_compared"], 1)
+        self.assertEqual(reading["top_choice_changed"], 1)
+        self.assertIn("1 of the 1 span", compare.headline(reading, None, None))
+        self.assertIn("100%", charts.comparison_tiles(reading))
+
+    def test_no_pairable_span_leaves_the_percentage_unstated(self):
+        def piece(position, token_id, text):
+            return dict(metric(position, token_id, 1.0), text=text, display_text=text)
+
+        left = [piece(1, 1, "hel"), piece(2, 2, "lo")]
+        right = [piece(1, 9, "hello")]
+        reading = compare.reading(
+            dict(run(left), decoded="hello", token_ends=[3, 5]),
+            dict(run(right, model_id="other/model"), decoded="hello", token_ends=[5]),
+        )
+        self.assertEqual(reading["choices_compared"], 0)
+        self.assertIn("no first choices", compare.headline(reading, None, None))
+        self.assertIn("—", charts.comparison_tiles(reading))
 
     def test_a_measurement_records_no_system_prompt_to_differ_over(self):
         # score_text has nowhere to put a system message, so recording one

@@ -687,7 +687,11 @@ share a tokenizer, so every span is one token on each side, matched on token
 IDs. Two runs of different models share neither IDs nor token boundaries — one
 model's `hel` + `lo` is the next one's `hello` — so the two are walked together
 by the characters they have covered and a span closes wherever both sides have
-covered the same text. Summing surprise over a span is what makes that honest:
+covered the same text. Those characters are counted from what each run decoded
+as it was made, not from token decodes added together: decoding is not
+piecewise, and a byte-level tokenizer that splits one character across two
+tokens decodes each of them, on its own, as a replacement character rather than
+half of anything. Summing surprise over a span is what makes that honest:
 total bits over the same characters is the same question asked of both models,
 where one model's reading of half a word against another's reading of a whole
 one is not. Both of A's tokens for a span take that span's color, so a stretch

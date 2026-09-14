@@ -230,11 +230,22 @@ def comparison_tiles(reading: dict) -> str:
                 f"At span {reading['widest_position']:,}.",
             ),
             _tile(
-                f"{reading['top_choice_changed'] / reading['compared']:.0%}",
+                (
+                    f"{reading['top_choice_changed'] / reading['choices_compared']:.0%}"
+                    if reading["choices_compared"]
+                    else "—"
+                ),
                 "top choice changed",
-                f"{reading['top_choice_changed']:,} of {reading['compared']:,} compared "
-                "spans had a different first choice in the two runs. Only a span of one "
-                "token against one has first choices to compare.",
+                (
+                    f"{reading['top_choice_changed']:,} of the "
+                    f"{reading['choices_compared']:,} spans where both runs spent a "
+                    "single token had a different first choice. A span of several "
+                    "tokens against one has no pair of first choices to compare, so "
+                    "it is not counted either way."
+                    if reading["choices_compared"]
+                    else "No span was one token against one, so there were no first "
+                    "choices to put side by side."
+                ),
             ),
             _tile(
                 f"{left['perplexity']:,.1f} → {right['perplexity']:,.1f}",

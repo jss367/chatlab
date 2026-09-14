@@ -82,7 +82,41 @@ def gap_category(delta: float) -> str:
     return GAP_LABELS[-1]
 
 
-def align(left, right, *, by_text: bool = False) -> list[dict]:
+def token_ends(metrics, recorded=None) -> list[int]:
+    """Where each token ends in its run's decoded text.
+
+    ``recorded`` is what the run measured as it was made, one cumulative
+    character count per token. It is preferred over anything derived here
+    because decoding is not piecewise: a byte-level tokenizer can split one
+    character across two tokens, and each of those tokens decoded on its own
+    is a replacement character rather than half of anything. Adding up the
+    lengths of standalone decodes would put the boundaries in the wrong
+    places and, worse, make two runs of the same text look different.
+
+    Without a recording - an older export, a caller that has only metrics -
+    the standalone lengths are all there is, and they are right wherever no
+    character was split.
+    """
+
+    if recorded and len(recorded) == len(metrics):
+        return [int(value) for value in recorded]
+    ends, total = [], 0
+    for metric in metrics:
+        total += len(_token_text(metric))
+        ends.append(total)
+    return ends
+
+
+def align(
+    left,
+    right,
+    *,
+    by_text: bool = False,
+    left_text: str = "",
+    right_text: str = "",
+    left_ends=None,
+    right_ends=None,
+) -> list[dict]:
     """Where the two runs are reading the same thing, as a list of spans.
 
     A span is a stretch of characters both runs covered, together with the
@@ -109,11 +143,20 @@ def align(left, right, *, by_text: bool = False) -> list[dict]:
     be made to agree, because after that the runs are reading different
     things and later characters that happen to coincide were arrived at
     through different contexts.
+
+    The characters are counted from what each run decoded as it was made -
+    see :func:`token_ends` - rather than from token decodes added together,
+    which is not the same string when a character is split across two tokens.
     """
 
     left, right = list(left or ()), list(right or ())
+    ends_here = token_ends(left, left_ends)
+    ends_there = token_ends(right, right_ends)
+    text_here = left_text or "".join(_token_text(metric) for metric in left)
+    text_there = right_text or "".join(_token_text(metric) for metric in right)
     spans: list[dict] = []
     here = there = 0
+    covered_here = covered_there = 0
     while here < len(left) and there < len(right):
         start_here, start_there = here, there
         if not by_text:
@@ -121,26 +164,31 @@ def align(left, right, *, by_text: bool = False) -> list[dict]:
                 break
             here, there = here + 1, there + 1
         else:
-            text_here = _token_text(left[here])
-            text_there = _token_text(right[there])
             here, there = here + 1, there + 1
-            while text_here != text_there:
-                # Extend whichever side has covered less, and only while one
-                # text is still the start of the other: the moment neither is,
-                # the runs have parted and no amount of extending closes it.
-                if len(text_here) < len(text_there):
-                    if here >= len(left) or not text_there.startswith(text_here):
+            # Extend whichever side has covered fewer characters until both
+            # stand at the same place. Running out on either side ends the
+            # alignment: there is no boundary left for the other to meet.
+            while ends_here[here - 1] != ends_there[there - 1]:
+                if ends_here[here - 1] < ends_there[there - 1]:
+                    if here >= len(left):
                         break
-                    text_here += _token_text(left[here])
                     here += 1
                 else:
-                    if there >= len(right) or not text_here.startswith(text_there):
+                    if there >= len(right):
                         break
-                    text_there += _token_text(right[there])
                     there += 1
-            if text_here != text_there:
+            if ends_here[here - 1] != ends_there[there - 1]:
                 break
-        spans.append(_span(left, right, start_here, here, start_there, there, len(spans) + 1))
+        end_here, end_there = ends_here[here - 1], ends_there[there - 1]
+        covered = text_here[covered_here:end_here]
+        if by_text and covered != text_there[covered_there:end_there]:
+            # The two stand at the same offset over different characters, so
+            # they were never reading the same thing.
+            break
+        spans.append(_span(
+            left, right, start_here, here, start_there, there, len(spans) + 1, covered,
+        ))
+        covered_here, covered_there = end_here, end_there
     return spans
 
 
@@ -148,7 +196,7 @@ def _token_text(metric: dict) -> str:
     return metric.get("text") or ""
 
 
-def _span(left, right, here0, here1, there0, there1, index) -> dict:
+def _span(left, right, here0, here1, there0, there1, index, covered) -> dict:
     """One aligned stretch, with what each run spent on it."""
 
     mine, yours = left[here0:here1], right[there0:there1]
@@ -164,7 +212,7 @@ def _span(left, right, here0, here1, there0, there1, index) -> dict:
     right_top = _top_choice(yours[0]) if one_to_one else (None, "")
     return {
         "position": index,
-        "text": "".join(_token_text(metric) for metric in mine),
+        "text": covered,
         "display_text": "".join(
             metric.get("display_text") or _token_text(metric) for metric in mine
         ),
@@ -407,7 +455,15 @@ def reading(left: dict | None, right: dict | None) -> dict:
     # them - a precision, a steering vector - so their tokens still line up
     # one for one. Two model IDs do not, and are walked by text instead.
     cross_model = (left.get("model_id") or "") != (right.get("model_id") or "")
-    spans = align(here, there, by_text=cross_model)
+    spans = align(
+        here,
+        there,
+        by_text=cross_model,
+        left_text=left.get("decoded") or "",
+        right_text=right.get("decoded") or "",
+        left_ends=left.get("token_ends"),
+        right_ends=right.get("token_ends"),
+    )
     left_shared = spans[-1]["left_range"][1] if spans else 0
     right_shared = spans[-1]["right_range"][1] if spans else 0
     scored = [item for item in spans if item["scored"]]
@@ -426,6 +482,11 @@ def reading(left: dict | None, right: dict | None) -> dict:
             if item["one_to_one"] and item["left_top_id"] is not None
             and item["left_top_id"] != item["right_top_id"]
         ]
+    # Only a span of one token against one has two first choices to compare,
+    # so it is the only thing the percentage can be out of. Counting the rest
+    # in the denominator would read as "the choice held here" for spans where
+    # no choice was ever put side by side.
+    pairable = [item for item in scored if item["one_to_one"]]
     widest = max(scored, key=lambda item: item["surprise_bits"], default=None)
     return {
         "shared": left_shared,
@@ -444,6 +505,7 @@ def reading(left: dict | None, right: dict | None) -> dict:
         "widest_gap_bits": widest["surprise_bits"] if widest else 0.0,
         "widest_position": widest["position"] if widest else 0,
         "top_choice_changed": len(changed),
+        "choices_compared": len(pairable),
         "compared": len(scored),
         "left_summary": summarize(here),
         "right_summary": summarize(there),
@@ -528,12 +590,21 @@ def headline(reading: dict, left: dict, right: dict) -> str:
         where = f"{where} {note}"
     if not reading["compared"]:
         return where
-    return (
+    found = (
         f"{where} Mean gap {reading['mean_gap_bits']:.2f} bits, widest "
         f"{reading['widest_gap_bits']:.2f} bits at span "
-        f"{reading['widest_position']:,}. The top choice changed at "
-        f"{reading['top_choice_changed']:,} of {reading['compared']:,} "
-        "compared spans."
+        f"{reading['widest_position']:,}."
+    )
+    if not reading["choices_compared"]:
+        return (
+            f"{found} No span was one token against one, so there were no "
+            "first choices to put side by side."
+        )
+    return (
+        f"{found} The top choice changed at {reading['top_choice_changed']:,} "
+        f"of the {reading['choices_compared']:,} span"
+        f"{'' if reading['choices_compared'] == 1 else 's'} where both runs "
+        "spent a single token."
     )
 
 
