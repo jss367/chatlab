@@ -74,7 +74,7 @@ CROSS_MODEL_CAVEAT = (
 
 
 def gap_category(delta: float) -> str:
-    """Which bucket a shared token's surprise gap falls in."""
+    """Which bucket an aligned span's surprise gap falls in."""
 
     for label, edge in zip(GAP_LABELS, GAP_EDGES):
         if abs(delta) < edge:
@@ -82,68 +82,104 @@ def gap_category(delta: float) -> str:
     return GAP_LABELS[-1]
 
 
-def shared_prefix(left, right, *, by_text: bool = False) -> int:
-    """How many leading tokens the two runs have in common.
+def align(left, right, *, by_text: bool = False) -> list[dict]:
+    """Where the two runs are reading the same thing, as a list of spans.
 
-    Within one vocabulary, counted on token IDs: two different tokens can
-    decode to the same characters, and a comparison that called them equal
-    would go on subtracting measurements taken in contexts that had already
-    parted.
+    A span is a stretch of characters both runs covered, together with the
+    tokens each spent on it. It is the unit a comparison can be made in,
+    because it is the largest unit two runs are guaranteed to share.
 
-    Across two vocabularies there are no IDs to count on. A token ID means
-    nothing outside the tokenizer that issued it - ID 4192 in one model and
-    ID 4192 in another stand for unrelated text - so two runs from different
-    models are matched on the text each token stands for and on nothing else.
-    That also handles the other half of the problem: one passage can be cut
-    into different tokens by two models, and the first position whose text
-    disagrees is where the two runs stop describing the same thing, whatever
-    the characters after it are. Matching by text stops there rather than
-    subtracting one model's reading of half a word from another's reading of
-    a whole one.
+    Within one vocabulary every span is one token on each side, matched on
+    token IDs: two different tokens can decode to the same characters, and a
+    comparison that called them equal would subtract measurements taken in
+    contexts that had already parted.
+
+    Across two vocabularies there are no IDs to match on - ID 4192 in one
+    model and ID 4192 in another stand for unrelated text - and there are not
+    always matching tokens either: ``hel`` + ``lo`` in one tokenizer is
+    ``hello`` in the next. Matching token against token would call that
+    identical passage divergent at its first character. So the two are walked
+    together by the characters they have covered, and a span closes wherever
+    both sides have covered the same text. Summing surprise over a span is
+    what makes that honest: total bits over the same characters is the same
+    question asked of both models, where one model's reading of half a word
+    against another's reading of a whole one is not.
+
+    Alignment is a prefix. It stops at the first place the two texts cannot
+    be made to agree, because after that the runs are reading different
+    things and later characters that happen to coincide were arrived at
+    through different contexts.
     """
 
-    count = 0
-    for here, there in zip(left or (), right or ()):
-        if by_text:
-            if (here.get("text") or "") != (there.get("text") or ""):
+    left, right = list(left or ()), list(right or ())
+    spans: list[dict] = []
+    here = there = 0
+    while here < len(left) and there < len(right):
+        start_here, start_there = here, there
+        if not by_text:
+            if int(left[here]["token_id"]) != int(right[there]["token_id"]):
                 break
-        elif int(here["token_id"]) != int(there["token_id"]):
-            break
-        count += 1
-    return count
+            here, there = here + 1, there + 1
+        else:
+            text_here = _token_text(left[here])
+            text_there = _token_text(right[there])
+            here, there = here + 1, there + 1
+            while text_here != text_there:
+                # Extend whichever side has covered less, and only while one
+                # text is still the start of the other: the moment neither is,
+                # the runs have parted and no amount of extending closes it.
+                if len(text_here) < len(text_there):
+                    if here >= len(left) or not text_there.startswith(text_here):
+                        break
+                    text_here += _token_text(left[here])
+                    here += 1
+                else:
+                    if there >= len(right) or not text_here.startswith(text_there):
+                        break
+                    text_there += _token_text(right[there])
+                    there += 1
+            if text_here != text_there:
+                break
+        spans.append(_span(left, right, start_here, here, start_there, there, len(spans) + 1))
+    return spans
 
 
-def gaps(left, right, shared: int) -> list[dict]:
-    """The surprise gap at every shared position, with both sides' readings.
+def _token_text(metric: dict) -> str:
+    return metric.get("text") or ""
 
-    Positions where either side has no measurement - the first token of a
-    sequence, which nothing predicted - are given no gap; the caller paints
-    them as unscored rather than as agreement.
-    """
 
-    readings = []
-    for index in range(shared):
-        here, there = left[index], right[index]
-        scored = here.get("scored", True) and there.get("scored", True)
-        left_top, right_top = _top_choice(here), _top_choice(there)
-        readings.append({
-            "position": index + 1,
-            "token_id": int(here["token_id"]),
-            "text": here.get("display_text") or here.get("text") or "",
-            "scored": scored,
-            "surprise_bits": (
-                abs(float(here["surprise_bits"]) - float(there["surprise_bits"]))
-                if scored
-                else 0.0
-            ),
-            "left_surprise": float(here["surprise_bits"]) if scored else None,
-            "right_surprise": float(there["surprise_bits"]) if scored else None,
-            "left_top": left_top[1],
-            "left_top_id": left_top[0],
-            "right_top": right_top[1],
-            "right_top_id": right_top[0],
-        })
-    return readings
+def _span(left, right, here0, here1, there0, there1, index) -> dict:
+    """One aligned stretch, with what each run spent on it."""
+
+    mine, yours = left[here0:here1], right[there0:there1]
+    scored = all(metric.get("scored", True) for metric in mine + yours)
+    left_bits = sum(float(metric["surprise_bits"]) for metric in mine) if scored else None
+    right_bits = sum(float(metric["surprise_bits"]) for metric in yours) if scored else None
+    # One token a side is the ordinary case and the only one where "what
+    # would this model have written instead" has an answer: a span of three
+    # tokens against one has three first choices on one side and one on the
+    # other, and no pairing between them.
+    one_to_one = len(mine) == 1 and len(yours) == 1
+    left_top = _top_choice(mine[0]) if one_to_one else (None, "")
+    right_top = _top_choice(yours[0]) if one_to_one else (None, "")
+    return {
+        "position": index,
+        "text": "".join(_token_text(metric) for metric in mine),
+        "display_text": "".join(
+            metric.get("display_text") or _token_text(metric) for metric in mine
+        ),
+        "left_range": (here0, here1),
+        "right_range": (there0, there1),
+        "one_to_one": one_to_one,
+        "scored": scored,
+        "surprise_bits": abs(left_bits - right_bits) if scored else 0.0,
+        "left_surprise": left_bits,
+        "right_surprise": right_bits,
+        "left_top": left_top[1],
+        "left_top_id": left_top[0],
+        "right_top": right_top[1],
+        "right_top_id": right_top[0],
+    }
 
 
 def _top_choice(metric: dict) -> tuple[int | None, str]:
@@ -153,8 +189,8 @@ def _top_choice(metric: dict) -> tuple[int | None, str]:
     whether the choice changed: distinct vocabulary entries can decode to the
     same characters, and two special tokens can both decode to nothing at
     all. Within one vocabulary the ID is the answer, for the same reason
-    :func:`shared_prefix` counts on IDs there. Across two it is meaningless,
-    and the text is all there is.
+    :func:`align` matches on IDs there. Across two it is meaningless, and the
+    text is all there is.
     """
 
     candidates = metric.get("top_candidates") or ()
@@ -168,24 +204,32 @@ def _top_choice(metric: dict) -> tuple[int | None, str]:
     return (None if token_id is None else int(token_id)), text
 
 
-def strip(metrics, shared: int, readings) -> list[tuple[str, str]]:
-    """One run's tokens, colored by how far the other run sat from them."""
+def strip(metrics, spans, side: str = "left") -> list[tuple[str, str]]:
+    """One run's tokens, colored by how far the other run sat from them.
 
-    painted = []
-    for index, metric in enumerate(metrics or ()):
-        if index >= shared:
-            label = SPLIT_LABEL
-        elif not readings[index]["scored"]:
-            label = UNSCORED_LABEL
-        else:
-            label = gap_category(readings[index]["surprise_bits"])
-        painted.append((metric["display_text"], label))
-    return painted
+    A span's color goes on every token this run spent inside it, so a stretch
+    one model wrote in three tokens and the other in one is drawn as the one
+    reading it is. Tokens past the aligned region take the split color: the
+    two runs are no longer reading the same thing there.
+    """
+
+    labels: dict[int, str] = {}
+    for span in spans or ():
+        low, high = span["left_range"] if side == "left" else span["right_range"]
+        label = (
+            gap_category(span["surprise_bits"]) if span["scored"] else UNSCORED_LABEL
+        )
+        for index in range(low, high):
+            labels[index] = label
+    return [
+        (metric["display_text"], labels.get(index, SPLIT_LABEL))
+        for index, metric in enumerate(metrics or ())
+    ]
 
 
 DIVERGENCE_HEADERS = [
     "#",
-    "Token",
+    "Text",
     "A surprise",
     "B surprise",
     "Δ bits",
@@ -199,18 +243,23 @@ DIVERGENCE_HEADERS = [
 DIVERGENCE_ROWS = 25
 
 
-def divergence_rows(readings, limit: int = DIVERGENCE_ROWS) -> list[list]:
-    """The shared positions the two runs read most differently, widest first."""
+def divergence_rows(spans, limit: int = DIVERGENCE_ROWS) -> list[list]:
+    """The aligned spans the two runs read most differently, widest first.
+
+    The last two columns are empty for a span of several tokens against one:
+    there are three first choices on one side and one on the other, and no
+    pairing between them to report.
+    """
 
     ranked = sorted(
-        (item for item in readings if item["scored"]),
+        (item for item in spans if item["scored"]),
         key=lambda item: item["surprise_bits"],
         reverse=True,
     )
     return [
         [
             item["position"],
-            item["text"],
+            item["display_text"],
             round(item["left_surprise"], 3),
             round(item["right_surprise"], 3),
             round(item["surprise_bits"], 3),
@@ -276,12 +325,26 @@ def configuration(run: dict | None) -> dict:
             "Thinking mode": settings.get("thinking_mode") or "model default",
         }
     else:
-        reading |= {
-            "Context read as": (
-                "a chat message" if settings.get("use_chat_template") else "plain text"
-            ),
-        }
+        # What the pass did, not what the box asked for. A model with no chat
+        # template reads the context as ordinary characters however the box
+        # is ticked, and so does an empty context; a label taken from the
+        # checkbox would show that tick as an experimental difference neither
+        # run received.
+        reading |= {"Context read as": context_framing(run)}
     return reading
+
+
+def context_framing(run: dict | None) -> str:
+    """How a measurement's context was really read."""
+
+    settings = (run or {}).get("settings") or {}
+    if not settings.get("use_chat_template"):
+        return "plain text"
+    if not (run or {}).get("prompt"):
+        return "plain text (no context to frame)"
+    if settings.get("chat_template_missing"):
+        return "plain text (this model has no chat template)"
+    return "a chat message"
 
 
 CONFIGURATION_HEADERS = ["Setting", "A", "B"]
@@ -341,33 +404,40 @@ def reading(left: dict | None, right: dict | None) -> dict:
         return {}
     here, there = left["metrics"], right["metrics"]
     # Two loads of one model ID share a tokenizer whatever else changed about
-    # them - a precision, a steering vector - so their IDs still line up. Two
-    # model IDs do not, and are aligned by text instead.
+    # them - a precision, a steering vector - so their tokens still line up
+    # one for one. Two model IDs do not, and are walked by text instead.
     cross_model = (left.get("model_id") or "") != (right.get("model_id") or "")
-    shared = shared_prefix(here, there, by_text=cross_model)
-    readings = gaps(here, there, shared)
-    scored = [item for item in readings if item["scored"]]
+    spans = align(here, there, by_text=cross_model)
+    left_shared = spans[-1]["left_range"][1] if spans else 0
+    right_shared = spans[-1]["right_range"][1] if spans else 0
+    scored = [item for item in spans if item["scored"]]
     # Within one vocabulary the IDs decide it; across two there are no IDs to
-    # decide it with, and the decoded text is the only reading left.
+    # decide it with, and the decoded text is the only reading left. Either
+    # way only a span of one token against one has first choices to compare.
     if cross_model:
         changed = [
             item for item in scored
-            if item["left_top"] and item["left_top"] != item["right_top"]
+            if item["one_to_one"] and item["left_top"]
+            and item["left_top"] != item["right_top"]
         ]
     else:
         changed = [
             item for item in scored
-            if item["left_top_id"] is not None
+            if item["one_to_one"] and item["left_top_id"] is not None
             and item["left_top_id"] != item["right_top_id"]
         ]
     widest = max(scored, key=lambda item: item["surprise_bits"], default=None)
     return {
-        "shared": shared,
+        "shared": left_shared,
+        "left_shared": left_shared,
+        "right_shared": right_shared,
+        "spans": len(spans),
         "cross_model": cross_model,
         "left_count": len(here),
         "right_count": len(there),
-        "complete": shared == len(here) == len(there),
-        "readings": readings,
+        "complete": left_shared == len(here) and right_shared == len(there),
+        "readings": spans,
+        "caveats": _caveats(left, right, cross_model),
         "mean_gap_bits": (
             sum(item["surprise_bits"] for item in scored) / len(scored) if scored else 0.0
         ),
@@ -380,47 +450,95 @@ def reading(left: dict | None, right: dict | None) -> dict:
     }
 
 
+def _caveats(left: dict, right: dict, cross_model: bool) -> list[str]:
+    """What a reader has to know before believing the numbers.
+
+    Every one of these is something the run itself recorded and the strips
+    cannot show. A seam the tokenizer could not confirm is the sharpest: the
+    Score text tab says so plainly, and a comparison that dropped the warning
+    would present two guessed boundaries as an exact difference.
+    """
+
+    notes = []
+    if cross_model:
+        notes.append(CROSS_MODEL_CAVEAT)
+    for run, slot in ((left, "A"), (right, "B")):
+        settings = (run or {}).get("settings") or {}
+        if run and run["kind"] == MEASUREMENT and settings.get("seam_verified") is False:
+            notes.append(
+                f"Slot {slot}'s tokenizer could not confirm where its context "
+                "ends, so the boundary between it and the measured passage may "
+                "sit a token off. Every probability is the whole passage's own; "
+                "what is uncertain is which side of the line its first token "
+                "fell on."
+            )
+    framings = {
+        slot: context_framing(run)
+        for run, slot in ((left, "A"), (right, "B"))
+        if run and run["kind"] == MEASUREMENT
+    }
+    fell_back = {
+        slot: framing for slot, framing in framings.items() if framing.startswith("plain text (")
+    }
+    for slot, framing in fell_back.items():
+        notes.append(
+            f"Slot {slot} asked for the context to be read as a chat message "
+            f"and got {framing[:-1].replace('plain text (', 'plain text: ')}."
+        )
+    return notes
+
+
 def headline(reading: dict, left: dict, right: dict) -> str:
     """What the comparison found, said once, above the strips."""
 
     if not reading:
         return "Fill both slots to compare them."
-    shared, left_count, right_count = (
-        reading["shared"], reading["left_count"], reading["right_count"]
-    )
-    if reading["complete"]:
+    left_shared, right_shared = reading["left_shared"], reading["right_shared"]
+    left_count, right_count = reading["left_count"], reading["right_count"]
+    spans = reading["spans"]
+    # Two models can spend different numbers of tokens on the same text, so
+    # what they share is a stretch of characters and a count of comparable
+    # spans, not one token count that describes both runs.
+    if reading["complete"] and left_shared == right_shared:
         where = (
-            f"Both runs read the same {shared:,} token"
-            f"{'' if shared == 1 else 's'}."
+            f"Both runs read the same {left_shared:,} token"
+            f"{'' if left_shared == 1 else 's'}."
         )
-    elif shared:
+    elif reading["complete"]:
         where = (
-            f"The two runs agreed for {shared:,} token"
-            f"{'' if shared == 1 else 's'}, then parted: "
-            f"A ran to {left_count:,}, B to {right_count:,}. "
-            "Only the shared tokens are compared - after the split the two "
-            "runs are reading different text."
+            f"Both runs read the same text, A in {left_shared:,} tokens and B "
+            f"in {right_shared:,}, lining up in {spans:,} comparable span"
+            f"{'' if spans == 1 else 's'}."
+        )
+    elif spans:
+        where = (
+            f"The two runs agreed for {spans:,} span"
+            f"{'' if spans == 1 else 's'} — A's first {left_shared:,} token"
+            f"{'' if left_shared == 1 else 's'}, B's first {right_shared:,} — "
+            f"then parted: A ran to {left_count:,}, B to {right_count:,}. "
+            "Only the shared text is compared; after the split the two runs "
+            "are reading different things."
         )
     else:
         where = (
-            f"The two runs parted at the first token, so there is nothing to "
+            "The two runs parted at their first token, so there is nothing to "
             f"compare: A ran to {left_count:,} tokens, B to {right_count:,}."
         )
-    if reading["cross_model"]:
-        where = f"{where} {CROSS_MODEL_CAVEAT}"
+    for note in reading["caveats"]:
+        where = f"{where} {note}"
     if not reading["compared"]:
         return where
     return (
         f"{where} Mean gap {reading['mean_gap_bits']:.2f} bits, widest "
-        f"{reading['widest_gap_bits']:.2f} bits at token "
+        f"{reading['widest_gap_bits']:.2f} bits at span "
         f"{reading['widest_position']:,}. The top choice changed at "
         f"{reading['top_choice_changed']:,} of {reading['compared']:,} "
-        "compared tokens."
+        "compared spans."
     )
 
 
 def gap_metrics(reading: dict) -> list[dict]:
-    """The gap per shared token, shaped for the surprise chart to draw."""
+    """The gap per aligned span, shaped for the surprise chart to draw."""
 
     return [
         {"position": item["position"], "surprise_bits": item["surprise_bits"], "scored": True}
@@ -485,11 +603,13 @@ def export(left: dict | None, right: dict | None, reading: dict) -> dict:
             for key, value in reading.items()
             if key not in ("readings", "left_summary", "right_summary")
         },
-        "shared_tokens": [
+        "caveats": list(reading.get("caveats", ())),
+        "aligned_spans": [
             {
                 "position": item["position"],
-                "token_id": item["token_id"],
                 "text": item["text"],
+                "a_tokens": list(item["left_range"]),
+                "b_tokens": list(item["right_range"]),
                 "a_surprise_bits": item["left_surprise"],
                 "b_surprise_bits": item["right_surprise"],
                 "gap_bits": item["surprise_bits"] if item["scored"] else None,

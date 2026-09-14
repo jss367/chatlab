@@ -72,32 +72,34 @@ def run(metrics, *, kind=compare.REPLY, model_id="fake/model", **settings):
 
 
 class ReadingTests(unittest.TestCase):
-    def test_shared_prefix_stops_at_the_first_different_token(self):
+    def test_alignment_stops_at_the_first_different_token(self):
         left = [metric(1, 5, 1.0), metric(2, 6, 1.0), metric(3, 7, 1.0)]
         right = [metric(1, 5, 1.0), metric(2, 9, 1.0), metric(3, 7, 1.0)]
         # The third token matches again, but its context no longer does.
-        self.assertEqual(compare.shared_prefix(left, right), 1)
-        self.assertEqual(compare.shared_prefix(left, left), 3)
-        self.assertEqual(compare.shared_prefix(left, []), 0)
+        self.assertEqual(len(compare.align(left, right)), 1)
+        self.assertEqual(len(compare.align(left, left)), 3)
+        self.assertEqual(compare.align(left, []), [])
+        # Within one vocabulary every span is one token against one.
+        self.assertTrue(all(span["one_to_one"] for span in compare.align(left, left)))
 
-    def test_gaps_and_categories_follow_the_surprise_difference(self):
+    def test_span_gaps_and_categories_follow_the_surprise_difference(self):
         left = [metric(1, 5, 1.0, top="a"), metric(2, 6, 2.0, top="a")]
         right = [metric(1, 5, 1.2, top="a"), metric(2, 6, 9.0, top="b")]
-        readings = compare.gaps(left, right, 2)
-        self.assertAlmostEqual(readings[0]["surprise_bits"], 0.2)
-        self.assertAlmostEqual(readings[1]["surprise_bits"], 7.0)
-        self.assertEqual(compare.gap_category(readings[0]["surprise_bits"]), compare.GAP_LABELS[0])
-        self.assertEqual(compare.gap_category(readings[1]["surprise_bits"]), compare.GAP_LABELS[-1])
-        self.assertEqual(readings[1]["left_top"], "a")
-        self.assertEqual(readings[1]["right_top"], "b")
+        spans = compare.align(left, right)
+        self.assertAlmostEqual(spans[0]["surprise_bits"], 0.2)
+        self.assertAlmostEqual(spans[1]["surprise_bits"], 7.0)
+        self.assertEqual(compare.gap_category(spans[0]["surprise_bits"]), compare.GAP_LABELS[0])
+        self.assertEqual(compare.gap_category(spans[1]["surprise_bits"]), compare.GAP_LABELS[-1])
+        self.assertEqual(spans[1]["left_top"], "a")
+        self.assertEqual(spans[1]["right_top"], "b")
 
     def test_an_unscored_token_gets_no_gap_and_no_color(self):
         left = [metric(1, 5, 0.0, scored=False), metric(2, 6, 1.0)]
         right = [metric(1, 5, 0.0, scored=False), metric(2, 6, 1.0)]
-        readings = compare.gaps(left, right, 2)
-        self.assertFalse(readings[0]["scored"])
-        self.assertIsNone(readings[0]["left_surprise"])
-        painted = compare.strip(left, 2, readings)
+        spans = compare.align(left, right)
+        self.assertFalse(spans[0]["scored"])
+        self.assertIsNone(spans[0]["left_surprise"])
+        painted = compare.strip(left, spans, "left")
         self.assertEqual(painted[0][1], "Not predicted")
         self.assertEqual(painted[1][1], compare.GAP_LABELS[0])
 
@@ -105,9 +107,9 @@ class ReadingTests(unittest.TestCase):
         left = [metric(1, 5, 1.0), metric(2, 6, 1.0)]
         right = [metric(1, 5, 1.0), metric(2, 9, 1.0)]
         reading = compare.reading(run(left), run(right))
-        self.assertEqual(reading["shared"], 1)
+        self.assertEqual(reading["spans"], 1)
         self.assertFalse(reading["complete"])
-        painted = compare.strip(left, reading["shared"], reading["readings"])
+        painted = compare.strip(left, reading["readings"], "left")
         self.assertEqual([label for _text, label in painted][1], compare.SPLIT_LABEL)
         self.assertIn("parted", compare.headline(reading, run(left), run(right)))
 
@@ -145,19 +147,46 @@ class ReadingTests(unittest.TestCase):
         self.assertEqual(same["shared"], 2)
         self.assertNotIn("different models", compare.headline(same, None, None))
 
-    def test_two_tokenizers_that_cut_a_passage_differently_stop_the_alignment(self):
+    def test_two_tokenizers_that_cut_a_passage_differently_still_line_up(self):
+        def piece(position, token_id, text, surprise=1.0):
+            return dict(metric(position, token_id, surprise), text=text, display_text=text)
+
+        # "hel" + "lo" against "hello": the same characters, cut differently.
+        left = [piece(1, 1, "hel", 2.0), piece(2, 2, "lo", 3.0), piece(3, 3, "!", 1.0)]
+        right = [piece(1, 9, "hello", 4.0), piece(2, 8, "!", 1.5)]
+        reading = compare.reading(run(left), run(right, model_id="other/model"))
+        self.assertTrue(reading["cross_model"])
+        self.assertEqual(reading["spans"], 2)
+        self.assertTrue(reading["complete"])
+        self.assertEqual(reading["left_shared"], 3)
+        self.assertEqual(reading["right_shared"], 2)
+        spans = reading["readings"]
+        self.assertEqual(spans[0]["text"], "hello")
+        self.assertFalse(spans[0]["one_to_one"])
+        # Total bits over the same characters is the question both models
+        # were asked; 2 + 3 against 4.
+        self.assertAlmostEqual(spans[0]["left_surprise"], 5.0)
+        self.assertAlmostEqual(spans[0]["right_surprise"], 4.0)
+        self.assertAlmostEqual(spans[0]["surprise_bits"], 1.0)
+        # A span of several tokens against one has no first choices to pair.
+        self.assertEqual(spans[0]["left_top"], "")
+        self.assertTrue(spans[1]["one_to_one"])
+        # Both of A's tokens for that span take the span's color.
+        painted = compare.strip(left, spans, "left")
+        self.assertEqual(painted[0][1], painted[1][1])
+        self.assertEqual(len(compare.strip(right, spans, "right")), 2)
+
+    def test_text_that_genuinely_parts_ends_the_alignment(self):
         def piece(position, token_id, text):
             return dict(metric(position, token_id, 1.0), text=text, display_text=text)
 
-        left = [piece(1, 1, "hel"), piece(2, 2, "lo"), piece(3, 3, "!")]
-        right = [piece(1, 9, "hello"), piece(2, 8, "!"), piece(3, 7, "?")]
+        left = [piece(1, 1, "hel"), piece(2, 2, "lo"), piece(3, 3, " there")]
+        right = [piece(1, 9, "hello"), piece(2, 8, " world")]
         reading = compare.reading(run(left), run(right, model_id="other/model"))
-        # The characters agree; the boundaries do not, and that is where the
-        # two runs stop describing the same thing.
-        self.assertEqual(reading["shared"], 0)
-        self.assertEqual(
-            compare.shared_prefix(left, [piece(1, 9, "hel"), piece(2, 8, "lo")], by_text=True), 2
-        )
+        self.assertEqual(reading["spans"], 1)
+        self.assertFalse(reading["complete"])
+        self.assertEqual(compare.strip(left, reading["readings"], "left")[2][1],
+                         compare.SPLIT_LABEL)
 
     def test_a_measurement_records_no_system_prompt_to_differ_over(self):
         # score_text has nowhere to put a system message, so recording one
@@ -188,6 +217,50 @@ class ReadingTests(unittest.TestCase):
         bare = dict(metric(1, 5, 1.0), top_candidates=[])
         reading = compare.reading(run([bare]), run([metric(1, 5, 1.0)]))
         self.assertEqual(reading["top_choice_changed"], 0)
+
+    def test_the_framing_label_says_what_the_pass_really_did(self):
+        def measured(**settings):
+            return dict(
+                run([metric(1, 5, 1.0)], kind=compare.MEASUREMENT, **settings),
+                prompt="some context",
+            )
+
+        asked = measured(use_chat_template=True)
+        self.assertEqual(compare.context_framing(asked), "a chat message")
+        # A model with no chat template reads plain text however the box is
+        # ticked, and the table must not show that tick as a difference.
+        fell_back = measured(use_chat_template=True, chat_template_missing=True)
+        self.assertIn("no chat template", compare.context_framing(fell_back))
+        # An empty context has nothing to frame.
+        self.assertIn(
+            "no context",
+            compare.context_framing(dict(measured(use_chat_template=True), prompt="")),
+        )
+        self.assertEqual(compare.context_framing(measured()), "plain text")
+        rows = compare.configuration_rows(asked, fell_back)
+        self.assertIn("Context read as", [row[0] for row in rows])
+
+    def test_an_unverified_seam_is_carried_into_the_comparison(self):
+        # The Score text tab warns here; a comparison that dropped the warning
+        # would present two guessed boundaries as an exact difference.
+        guessed = dict(
+            run([metric(1, 5, 1.0)], kind=compare.MEASUREMENT, seam_verified=False),
+            prompt="some context",
+        )
+        exact = dict(
+            run([metric(1, 5, 2.0)], kind=compare.MEASUREMENT, seam_verified=True),
+            prompt="some context",
+        )
+        reading = compare.reading(guessed, exact)
+        self.assertTrue(any("Slot A" in note for note in reading["caveats"]))
+        self.assertFalse(any("Slot B" in note for note in reading["caveats"]))
+        self.assertIn("could not confirm", compare.headline(reading, guessed, exact))
+        # And it reaches the export beside the numbers it qualifies.
+        document = compare.export(guessed, exact, reading)
+        self.assertTrue(document["caveats"])
+        # A reply has no seam to be unsure about.
+        clean = compare.reading(run([metric(1, 5, 1.0)]), run([metric(1, 5, 2.0)]))
+        self.assertEqual(clean["caveats"], [])
 
     def test_configuration_rows_name_only_what_differed(self):
         left = run([metric(1, 5, 1.0)], seed=1)
@@ -245,10 +318,11 @@ class ReadingTests(unittest.TestCase):
     def test_divergence_rows_are_ordered_widest_first(self):
         left = [metric(1, 5, 1.0), metric(2, 6, 1.0), metric(3, 7, 1.0)]
         right = [metric(1, 5, 1.5), metric(2, 6, 5.0), metric(3, 7, 1.1)]
-        rows = compare.divergence_rows(compare.gaps(left, right, 3))
+        spans = compare.align(left, right)
+        rows = compare.divergence_rows(spans)
         self.assertEqual([row[0] for row in rows], [2, 1, 3])
         self.assertEqual(rows[0][4], 4.0)
-        self.assertEqual(len(compare.divergence_rows(compare.gaps(left, right, 3), limit=1)), 1)
+        self.assertEqual(len(compare.divergence_rows(spans, limit=1)), 1)
 
     def test_export_holds_both_runs_and_every_shared_token(self):
         left = [metric(1, 5, 1.0), metric(2, 6, 1.0)]
@@ -257,8 +331,8 @@ class ReadingTests(unittest.TestCase):
         reading = compare.reading(left_run, right_run)
         document = compare.export(left_run, right_run, reading)
         self.assertEqual(document["a"]["model_id"], "fake/model")
-        self.assertEqual(len(document["shared_tokens"]), 2)
-        self.assertEqual(document["shared_tokens"][0]["gap_bits"], 1.0)
+        self.assertEqual(len(document["aligned_spans"]), 2)
+        self.assertEqual(document["aligned_spans"][0]["gap_bits"], 1.0)
         # Serializable as it stands: the download writes exactly this.
         json.dumps(document)
 
@@ -389,7 +463,7 @@ class HandlerTests(unittest.TestCase):
         self.addCleanup(lambda: path.unlink(missing_ok=True))
         document = json.loads(path.read_text())
         self.assertEqual(document["b"]["model_id"], "fake/model")
-        self.assertEqual(document["shared_tokens"][0]["gap_bits"], 1.0)
+        self.assertEqual(document["aligned_spans"][0]["gap_bits"], 1.0)
 
     def test_the_mode_switch_renames_the_prompt_box_and_shows_the_passage(self):
         prompt, text, template = controls.mode_controls(compare.MEASUREMENT)

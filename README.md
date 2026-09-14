@@ -681,14 +681,27 @@ prompt: the pass feeds the context and the passage and nothing else, with no
 turn for a system message to sit in front of, so a measurement's framing goes
 in the context box.
 
-Two runs from the same model are lined up on token IDs. Two runs from different
-models cannot be: an ID means nothing outside the tokenizer that issued it, and
-two tokenizers cut one passage into different tokens. Those runs are lined up on
-the text each token stands for instead, which stops the comparison at the first
-position where the two cut the passage differently rather than subtracting one
-model's reading of half a word from another's reading of a whole one. Read the
-per-token gaps with that in mind — a bit of surprise is not the same size in two
-vocabularies — and the tab says so above the strips when the two models differ. **Stop** — or Escape — closes a run
+What the two runs are compared in is a **span**: a stretch of characters both
+runs covered, together with the tokens each spent on it. Two runs of one model
+share a tokenizer, so every span is one token on each side, matched on token
+IDs. Two runs of different models share neither IDs nor token boundaries — one
+model's `hel` + `lo` is the next one's `hello` — so the two are walked together
+by the characters they have covered and a span closes wherever both sides have
+covered the same text. Summing surprise over a span is what makes that honest:
+total bits over the same characters is the same question asked of both models,
+where one model's reading of half a word against another's reading of a whole
+one is not. Both of A's tokens for a span take that span's color, so a stretch
+one model wrote in three tokens and the other in one is drawn as the single
+reading it is, and a span of several tokens against one has no first choices to
+pair, so those columns stay empty.
+
+Alignment is a prefix either way: it stops at the first place the two texts
+cannot be made to agree, because after that the runs are reading different
+things and later characters that happen to coincide were arrived at through
+different contexts. Read cross-model gaps knowing a bit of surprise is not the
+same size in two vocabularies; the tab says so above the strips when the models
+differ, and says the same about a context the tokenizer could not cleanly
+separate from the passage, or a chat framing the model had no template for. **Stop** — or Escape — closes a run
 where it stands and leaves the slot as it was: half a response is not a
 measurement of anything.
 

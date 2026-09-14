@@ -212,26 +212,29 @@ def comparison_tiles(reading: dict) -> str:
     tiles = "".join(
         (
             _tile(
-                f"{reading['shared']:,}",
-                "tokens shared",
-                f"A ran to {reading['left_count']:,} tokens, B to {reading['right_count']:,}. "
-                "Only the leading tokens both runs produced are compared.",
+                f"{reading['spans']:,}",
+                "spans shared",
+                f"A ran to {reading['left_count']:,} tokens, B to {reading['right_count']:,}; "
+                f"they line up over A's first {reading['left_shared']:,} and B's first "
+                f"{reading['right_shared']:,}. A span is a stretch of characters both runs "
+                "covered, which is one token each where the two share a tokenizer.",
             ),
             _tile(
                 f"{reading['mean_gap_bits']:.2f}",
                 "mean gap (bits)",
-                "Average distance between the two runs' surprise at a shared token.",
+                "Average distance between the two runs' surprise over a shared span.",
             ),
             _tile(
                 f"{reading['widest_gap_bits']:.2f}",
                 "widest gap (bits)",
-                f"At token {reading['widest_position']:,}.",
+                f"At span {reading['widest_position']:,}.",
             ),
             _tile(
                 f"{reading['top_choice_changed'] / reading['compared']:.0%}",
                 "top choice changed",
                 f"{reading['top_choice_changed']:,} of {reading['compared']:,} compared "
-                "tokens had a different first choice in the two runs.",
+                "spans had a different first choice in the two runs. Only a span of one "
+                "token against one has first choices to compare.",
             ),
             _tile(
                 f"{left['perplexity']:,.1f} → {right['perplexity']:,.1f}",

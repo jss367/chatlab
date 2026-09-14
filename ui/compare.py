@@ -312,14 +312,13 @@ def render(left, right):
     """Draw both slots and, when both are filled, what separates them."""
 
     reading = compare.reading(left, right)
-    readings = reading.get("readings", [])
-    shared = reading.get("shared", 0)
+    spans = reading.get("readings", [])
     strips = []
-    for run in (left, right):
+    for run, side in ((left, "left"), (right, "right")):
         metrics = (run or {}).get("metrics") or []
         strips.append(
             gr.update(
-                value=compare.strip(metrics, shared if reading else 0, readings),
+                value=compare.strip(metrics, spans if reading else [], side),
                 color_map=compare.GAP_COLORS,
             )
         )
@@ -337,7 +336,7 @@ def render(left, right):
         ),
         compare.headline(reading, left, right),
         gr.update(value=compare.configuration_rows(left, right)),
-        gr.update(value=compare.divergence_rows(readings)),
+        gr.update(value=compare.divergence_rows(spans)),
         {"left": left, "right": right, "reading": reading},
     )
 
