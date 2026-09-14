@@ -93,6 +93,19 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(saved.keep_reasoning, settings.DEFAULTS.keep_reasoning)
         self.assertEqual(saved.color_scale, settings.DEFAULTS.color_scale)
 
+    def test_typing_predictions_are_on_until_the_file_says_otherwise(self):
+        self.write_file({})
+        saved, _unknown = settings.read(self.path)
+        self.assertTrue(saved.writing_suggestions)
+
+        self.write_file({"writing_suggestions": False})
+        saved, _unknown = settings.read(self.path)
+        self.assertFalse(saved.writing_suggestions)
+
+        self.write_file({"writing_suggestions": "off"})
+        saved, _unknown = settings.read(self.path)
+        self.assertTrue(saved.writing_suggestions)
+
     def test_a_weight_precision_this_version_does_not_offer_falls_back(self):
         self.write_file({"weight_precision": "3-bit"})
         saved, _unknown = settings.read(self.path)

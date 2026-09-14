@@ -157,6 +157,7 @@ PERSISTED_SETTING_NAMES = (
     "color_scale",
     "thinking_mode",
     "enter_sends",
+    "writing_suggestions",
     "model_id",
     "weight_precision",
 )

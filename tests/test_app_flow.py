@@ -4719,6 +4719,42 @@ class MessageBoxKeysTests(unittest.TestCase):
         self.assertIn("closes the reasoning block", prefill.info)
 
 
+class WritingSuggestionsTests(unittest.TestCase):
+    """macOS's own typing predictions, which the setting turns off."""
+
+    SUGGESTIONS_LABEL = "Let the system suggest text while typing"
+
+    def checkbox(self, demo):
+        return next(
+            c
+            for c in demo.blocks.values()
+            if isinstance(c, gr.Checkbox) and c.label == self.SUGGESTIONS_LABEL
+        )
+
+    def test_the_predictions_are_offered_until_they_are_turned_off(self):
+        box = self.checkbox(app.build_app())
+
+        self.assertTrue(box.value)
+        self.assertIn("macOS", box.info)
+
+    def test_the_script_runs_on_the_first_paint_and_on_every_change(self):
+        """A reload restores the file's value, which is a change like any other."""
+
+        demo = app.build_app()
+        box = self.checkbox(demo)
+        events = [
+            fn for fn in demo.fns.values() if fn.js == app.WRITING_SUGGESTIONS_JS
+        ]
+
+        self.assertEqual(
+            {target[1] for fn in events for target in fn.targets},
+            {"load", "change"},
+        )
+        # Each one is handed the checkbox, since the script is the setting.
+        for event in events:
+            self.assertEqual(list(event.inputs), [box])
+
+
 if __name__ == "__main__":
     unittest.main()
 

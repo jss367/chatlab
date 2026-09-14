@@ -4379,6 +4379,13 @@ class SavedSettingsTests(unittest.TestCase):
             app.message_box_settings(enter_sends=False)["placeholder"],
         )
 
+    def test_the_typing_predictions_start_from_the_saved_file(self):
+        self.build_with(writing_suggestions=False)
+
+        self.assertFalse(
+            self.labelled("Let the system suggest text while typing").value
+        )
+
     def test_the_response_length_cannot_exceed_the_context_limit(self):
         self.build_with(prefill_token_limit=2048)
 
@@ -4612,6 +4619,7 @@ class SavedSettingsTests(unittest.TestCase):
                         "Color tokens by",
                         "Thinking mode",
                         "Enter sends the message",
+                        "Let the system suggest text while typing",
                         "Hugging Face model ID",
                         "Weight precision",
                     ]
