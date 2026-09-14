@@ -20,6 +20,7 @@ from token_metrics import (
     COLOR_SCALES,
     DEFAULT_COLOR_SCALE,
     UNSCORED_BEYOND_LIMIT,
+    UNSCORED_FIRST_TOKEN,
     category_for,
 )
 from ui import runtime
@@ -392,20 +393,40 @@ def event_index(event: gr.SelectData) -> int:
     return int(index)
 
 
+def unscored_explanation(metric: dict) -> str:
+    """Why one token carries no measurement, in the words of whatever recorded it.
+
+    ChatLab writes two reasons of its own. A run made elsewhere - a batch
+    rollout that kept token IDs and threw the distributions away, say - is
+    loaded with its metrics as they were saved, so its reason is a sentence
+    this code has never seen. That sentence is printed as it stands. Falling
+    through to the first-token wording instead told the reader that nothing
+    preceded a token in the middle of a response, which is plainly false and
+    sends them looking for a fault in the model rather than at how the run
+    was collected.
+    """
+
+    reason = str(metric.get("unscored_reason", "") or UNSCORED_FIRST_TOKEN)
+    if reason == UNSCORED_BEYOND_LIMIT:
+        return (
+            f"Only the most recent {PROMPT_SCORE_LIMIT:,} tokens of a long "
+            "prompt are scored, and this one sits before that window, so it "
+            "was skipped."
+        )
+    if reason == UNSCORED_FIRST_TOKEN:
+        return "Nothing came before this token, so the model never predicted it."
+    # A recorded sentence, not a known tag: it reaches Markdown, so it is
+    # escaped like any other value read out of a saved run.
+    return html.escape(reason)
+
+
 def describe_token(metric: dict) -> tuple[str, list[list]]:
     """The detail panel and the alternatives table for one token."""
 
     token_repr = html.escape(repr(metric["text"]))
     where = "Prompt token" if metric["segment"] == "prompt" else "Token"
     if not metric.get("scored", True):
-        if metric.get("unscored_reason") == UNSCORED_BEYOND_LIMIT:
-            why = (
-                f"Only the most recent {PROMPT_SCORE_LIMIT:,} tokens of a long "
-                "prompt are scored, and this one sits before that window, so it "
-                "was skipped."
-            )
-        else:
-            why = "Nothing came before this token, so the model never predicted it."
+        why = unscored_explanation(metric)
         return (
             f"### {where} {metric['position']}: `{token_repr}`\n\n"
             f"{why}\n\n"
