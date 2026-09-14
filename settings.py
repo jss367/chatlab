@@ -184,6 +184,7 @@ class Settings:
     thinking_mode: str = "default"
     keep_reasoning: bool = False
     enter_sends: bool = True
+    writing_suggestions: bool = True
     temperature: float = 0.8
     top_p: float = 0.95
     top_k: int = 50
@@ -259,6 +260,10 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
         ),
         enter_sends=_flag(
             values.get("enter_sends", DEFAULTS.enter_sends), DEFAULTS.enter_sends
+        ),
+        writing_suggestions=_flag(
+            values.get("writing_suggestions", DEFAULTS.writing_suggestions),
+            DEFAULTS.writing_suggestions,
         ),
         temperature=_clamped_float(
             values.get("temperature", DEFAULTS.temperature),

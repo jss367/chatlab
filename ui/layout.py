@@ -174,6 +174,7 @@ from ui.styles import (
     THEME,
     RESIZE_JS,
     SHORTCUT_JS,
+    WRITING_SUGGESTIONS_JS,
     pane_handle,
     message_box_settings,
     set_message_box_keys,
@@ -1193,6 +1194,15 @@ def build_app() -> gr.Blocks:
                                 label="Enter sends the message",
                                 info="Shift+Enter starts a new line. Turn off to swap the two.",
                             )
+                            writing_suggestions = gr.Checkbox(
+                                value=saved.writing_suggestions,
+                                label="Let the system suggest text while typing",
+                                info=(
+                                    "macOS offers the rest of a sentence in grey as you type, "
+                                    "from its own predictions rather than the loaded model. "
+                                    "Turn off to type without them."
+                                ),
+                            )
                             gr.Markdown(
                                 "Escape stops a response that is still being written, "
                                 "from anywhere on the Chat page - including the message "
@@ -1594,6 +1604,13 @@ def build_app() -> gr.Blocks:
         # The two readings panes are dragged wider or narrower by the handle
         # on their seam, and remember the width they were left at.
         demo.load(None, None, None, js=RESIZE_JS)
+        # The system's own typing predictions, on or off from the first paint
+        # and whenever the setting is changed after it. The change fires when
+        # a reload restores the file's value as well as when it is clicked.
+        demo.load(None, writing_suggestions, None, js=WRITING_SUGGESTIONS_JS)
+        writing_suggestions.change(
+            None, writing_suggestions, None, js=WRITING_SUGGESTIONS_JS
+        )
 
         # Selecting a default is navigation only. The Models page owns the
         # explicit download and load actions, including their errors.
@@ -1795,7 +1812,14 @@ def build_app() -> gr.Blocks:
         chat_inputs = [prompt, conversation_state, *settings_inputs, *steering_inputs, thinking_mode]
 
         # Everything saved between sessions, in PERSISTED_SETTING_NAMES order.
-        persisted_inputs = [*settings_inputs, thinking_mode, enter_sends, model_id, weight_precision]
+        persisted_inputs = [
+            *settings_inputs,
+            thinking_mode,
+            enter_sends,
+            writing_suggestions,
+            model_id,
+            weight_precision,
+        ]
         for control in (
             thinking_mode,
             system_prompt,
@@ -1805,6 +1829,7 @@ def build_app() -> gr.Blocks:
             analyze_prompt,
             color_scale,
             enter_sends,
+            writing_suggestions,
             model_id,
             weight_precision,
         ):

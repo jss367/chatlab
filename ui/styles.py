@@ -1138,3 +1138,22 @@ def message_box_settings(enter_sends: bool) -> dict:
 
 def set_message_box_keys(enter_sends: bool):
     return gr.update(**message_box_settings(enter_sends))
+
+
+# macOS writes grey text ahead of the cursor in any WebKit text box, offering
+# the rest of the sentence to whoever presses Tab. The prediction comes from
+# the system rather than from the loaded model, and in a window whose point
+# is to watch what a model does with the words it was actually given, a
+# second guesser in the message box is worth being able to turn off. The
+# desktop window is a WKWebView, so it is offered there; a browser without
+# the feature ignores the attribute.
+#
+# The attribute is inherited, so one on the body covers every box on every
+# page, including the pages Gradio has not built yet - which is why this is
+# not set on the boxes themselves.
+WRITING_SUGGESTIONS_JS = """
+(on) => {
+  if (on) { document.body.removeAttribute('writingsuggestions'); }
+  else { document.body.setAttribute('writingsuggestions', 'false'); }
+}
+"""

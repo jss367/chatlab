@@ -37,6 +37,7 @@ drove.
 - A draggable seam between the transcript and the panel beside it, remembered between sessions
 - Every conversation kept between sessions in one JSON file, so a reload or a restart brings the pane back as it was
 - Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response, or a run of prompts, from anywhere on the Chat page
+- A setting for macOS's own inline text predictions, which grey in the rest of a sentence as you type, so the typing suggestions can be turned off inside ChatLab alone
 - Right-click a token to regenerate from it, choose an alternative, or type a custom replacement and continue the response
 - Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
 - Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it

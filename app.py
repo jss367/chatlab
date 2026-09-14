@@ -382,6 +382,7 @@ from ui.styles import (
     MESSAGE_BOX_MAX_LINES,
     RESIZE_JS,
     SHORTCUT_JS,
+    WRITING_SUGGESTIONS_JS,
     message_box_settings,
     set_message_box_keys,
 )
