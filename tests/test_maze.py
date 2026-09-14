@@ -1166,6 +1166,35 @@ class MazeTests(unittest.TestCase):
         self.assertIn('as recorded, untemplated', note)
         self.assertTrue(text.startswith('[tool schemas]'))
 
+    def test_a_template_that_refuses_this_history_is_not_reported_as_no_model(self):
+        # A model without a native tool template is loaded and cannot render
+        # this prompt. Saying no model is loaded would send the reader to the
+        # Models page to fix a model that is already there.
+        class NoToolTemplate(Manager):
+            def _prompt_token_ids(self, messages, tools=None):
+                if tools is not None:
+                    raise ValueError("Tool use requires a model with a native chat/tool template.")
+                return list(b'plain'), False
+
+        ep = Episode(MAZE, CONFIG)
+        note, text = context_view(ep, NoToolTemplate([]), -1)
+        self.assertIn('as recorded, untemplated', note)
+        self.assertIn('The loaded model did not render this prompt (ValueError: Tool use requires', note)
+        self.assertNotIn('No model is loaded', note)
+        self.assertTrue(text.startswith('[tool schemas]'))
+        # A response whose recorded IDs this vocabulary cannot spell still has
+        # the template as a second best, and takes it.
+        ep.turns.append({'prompt_ids': [999999], 'load_id': 'test-load', 'metrics': [],
+                         'forced_prefix_tokens': 0, 'text': ''})
+        note, _ = context_view(ep, Manager([]), 0)
+        self.assertIn('**Response 1 · as the loaded model would be given it**', note)
+        # When the template refuses as well, the pane names that refusal
+        # rather than the IDs, because the template is what it fell back to.
+        note, text = context_view(ep, NoToolTemplate([]), 0)
+        self.assertIn('as recorded, untemplated', note)
+        self.assertIn('Tool use requires a model with a native chat/tool template', note)
+        self.assertTrue(text.startswith('[tool schemas]'))
+
     def test_context_messages_scope_each_response_to_what_it_was_given(self):
         ep = Episode(MAZE, CONFIG | {'supplied_moves': 1, 'interruption_text': ''})
         # Setup plus one supplied move: the prompt the first response is given.

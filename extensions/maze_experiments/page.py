@@ -248,17 +248,30 @@ def under_load(recorded, used):
 
 
 def read_through(reading, *arguments):
-    """Read the model, or report that it did not answer.
+    """Read the model, or report how it failed to answer.
 
     A view of a prompt has a worse answer than its best one - the messages as
     recorded - so a template that refuses this history, or IDs a vocabulary
     cannot spell, falls back to that rather than replacing the pane with an
-    error about the model it was describing.
+    error about the model it was describing. What went wrong comes back with
+    the empty reading, because a refusal is not an absence: a reader sent to
+    the Models page by a model already loaded is troubleshooting the wrong
+    thing.
     """
     try:
-        return reading(*arguments)
-    except Exception:
-        return None, None
+        return (*reading(*arguments), None)
+    except Exception as exc:
+        return None, None, exc
+
+
+def unspelled(models, failure):
+    """Why a prompt is being shown without a model's own spelling of it."""
+    if failure is not None:
+        return (f"The loaded model did not render this prompt ({type(failure).__name__}: "
+                f"{html.escape(str(failure))})")
+    if not models.loaded:
+        return "No model is loaded to spell this prompt"
+    return "A load landed while this prompt was being read"
 
 
 def context_view(ep, models, index=None):
@@ -281,19 +294,20 @@ def context_view(ep, models, index=None):
     tail = (f" A supplied prefix of {supplied:,} tokens followed it, shown under **Supplied text & full response**."
             if supplied else "")
     ids = turn.get("prompt_ids")
+    failure = None
     if ids:
-        text, load_id = read_through(models.decode, ids)
+        text, load_id, failure = read_through(models.decode, ids)
         if text is not None:
             return (f"**{where} · as recorded** · {len(ids):,} prompt tokens, decoded"
                     f"{under_load(turn.get('load_id'), load_id)}.{tail}", text)
     messages = context_messages(ep, index)
-    text, load_id = read_through(models.prompt_text, messages, TOOLS)
+    text, load_id, refused = read_through(models.prompt_text, messages, TOOLS)
     if text is not None:
         return (f"**{where} · as the loaded model would be given it** · {len(messages)} messages and the move tool "
                 f"through that model's own template{under_load(ep.load_id, load_id)}.{tail}", text)
-    return (f"**{where} · as recorded, untemplated** · No model is loaded to spell this prompt, so the {len(messages)} "
-            "messages and the move tool are shown as the run recorded them. A template adds its own turn markers and "
-            f"writes the tool schemas its own way.{tail}", transcript(messages))
+    return (f"**{where} · as recorded, untemplated** · {unspelled(models, refused or failure)}, so the "
+            f"{len(messages)} messages and the move tool are shown as the run recorded them. A template adds its own "
+            f"turn markers and writes the tool schemas its own way.{tail}", transcript(messages))
 
 
 def transport_buttons(ep):
