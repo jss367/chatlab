@@ -129,7 +129,8 @@ def scenario_values(ep):
     text = config.get("interruption_text", "")
     named = next((name for name, passage in PASSAGES.items() if passage == text), None)
     mode = config["goal_mode"]
-    return (maze.size, maze.seed, len(maze.route()) - 1, openness_of(ep),
+    openness = openness_of(ep)
+    return (maze.size, maze.seed, len(maze.route()) - 1, gr.skip() if openness is None else openness,
             config.get("supplied_moves", 0), config.get("interrupt_after", 0), text,
             config.get("prefix_tokens", 0), config.get("temperature", .7), config.get("sampling_seed", 0),
             config.get("per_turn_tokens", 1024), config.get("token_budget", 8192), config.get("attempt_budget", 32),
@@ -138,13 +139,38 @@ def scenario_values(ep):
             "None" if not text else named or "Custom")
 
 
+OPENNESS_CHOICES = tuple(round(.35 + .05 * step, 2) for step in range(13))
+
+
 def openness_of(ep):
-    """Runs predating the recorded setting report the share of cells their maze
-    leaves open, which is what that maze was drawn around."""
-    if "openness" in ep.config:
-        return float(ep.config["openness"])
-    share = sum(row.count(".") for row in ep.maze.grid) / ep.maze.size ** 2
-    return min(.95, max(.35, round(share / .05) * .05))
+    """The probability a run was drawn with, or None when it predates the recorded
+    setting and its maze cannot name one. A recovered value is kept on the run, so
+    the search runs once and everything reading the run afterwards agrees with it."""
+    if "openness" not in ep.config:
+        recovered = recovered_openness(ep.maze)
+        if recovered is None:
+            return None
+        ep.config["openness"] = recovered
+    return float(ep.config["openness"])
+
+
+def recovered_openness(maze, budget=1.):
+    """Runs predating the recorded setting are searched for the slider value that
+    redraws their maze. The share of cells the maze leaves open is close to that
+    probability without being it, so it only orders the search: a value that draws
+    a different grid would answer the pane with a maze the run never used."""
+    share = sum(row.count(".") for row in maze.grid) / maze.size ** 2
+    distance = len(maze.route()) - 1
+    deadline = time.monotonic() + budget
+    for value in sorted(OPENNESS_CHOICES, key=lambda v: abs(v - share))[:5]:
+        try:
+            if generate(maze.size, maze.seed, distance, value).grid == maze.grid:
+                return value
+        except ValueError:
+            pass
+        if time.monotonic() > deadline:
+            break
+    return None
 
 
 def edited_prompt(config):
@@ -163,7 +189,8 @@ def status(ep):
             f"{ep.moves-ep.supplied_moves} model moves + {ep.supplied_moves} supplied · "
             f"{ep.sampled_tokens+partial:,} sampled tokens · {ep.tool_attempts} calls\n\n"
             f"**Goal information:** {GOAL_MODES[ep.config['goal_mode']]} · "
-            f"**Setup prompt:** {'Edited' if edited_prompt(ep.config) else 'Default'}\n\n"
+            f"**Setup prompt:** {'Edited' if edited_prompt(ep.config) else 'Default'}"
+            f"{'' if 'openness' in ep.config else ' · **Open cells:** Unrecorded, so the slider beside this run is not its own'}\n\n"
             f"**Recovery:** {recovery} · **Model:** {html.escape(ep.model_id or 'load one on the Models page')}")
 
 
@@ -465,11 +492,14 @@ def _build_page(context):
             if Path(path).stat().st_size > 50_000_000:
                 raise ValueError("Run files must be smaller than 50 MB.")
             replay = from_payload(json.loads(Path(path).read_text()))
+            # Before the first frame: recovering the open-cell probability writes
+            # it onto the run, and Run details reports whichever way that went.
+            values = scenario_values(replay)
             rendered = render(replay, show, session_id)
         except (ValueError, TypeError, KeyError, IndexError, OSError) as exc:
             raise gr.Error(f"Could not load run: {exc}") from exc
         stop_replay(ep)
-        return (replay, *rendered, *scenario_values(replay))
+        return (replay, *rendered, *values)
 
     def select_token(ep, session_id, metrics, evt: gr.SelectData):
         index = evt.index[0] if isinstance(evt.index, (tuple, list)) else evt.index

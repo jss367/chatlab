@@ -1020,10 +1020,17 @@ class MazeTests(unittest.TestCase):
         self.assertEqual(values[13], 'hint')
         # The hint box is hidden for the other modes, so loading a hint run reveals it.
         self.assertEqual((values[14]['value'], values[14]['visible']), ('Top row.', True))
-        # Runs predating the recorded setting report the openness of their own maze.
+        # Runs predating the recorded setting are searched for the value that redraws
+        # their maze, and Run details says so when no value does.
         old = ep.payload()
         old['config'].pop('openness')
-        self.assertEqual(scenario_values(from_payload(json.loads(json.dumps(old))))[3], .8)
+        legacy = from_payload(json.loads(json.dumps(old)))
+        self.assertEqual(scenario_values(legacy)[3], gr.skip())
+        self.assertIn('**Open cells:** Unrecorded', status(legacy))
+        drawn = Episode(generate(5, 20260911, 10, .6), CONFIG)
+        recovered = from_payload(json.loads(json.dumps(drawn.payload())))
+        self.assertEqual(scenario_values(recovered)[3], .6)
+        self.assertNotIn('Unrecorded', status(recovered))
         blank = scenario_values(Episode(MAZE, CONFIG | {'interruption_text': ''}))
         self.assertEqual((blank[6], blank[-1]), ('', 'None'))
 
