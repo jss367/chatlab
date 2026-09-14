@@ -531,7 +531,7 @@ def _build_page(context):
         # The same description a loaded run gets: the trial is in the episode
         # now, so nothing here has to spell the controls out a second time.
         return (new, *render(new, show, session_id), *scenario_values(new),
-                trial_note_text(new), None, None)
+                trial_note_text(new), None, None, *model_button(new))
 
     def play(ep, show, session_id, single=False):
         last_board = None
@@ -794,7 +794,8 @@ def _build_page(context):
                   concurrency_id="maze-view", show_progress="hidden")
     trial_upload.upload(load_trial_file, trial_upload, [trial_data, trial_picker, trial_note], show_progress="hidden")
     trial_load.click(load_trial, [trial_data, trial_picker, episode, reveal, selection_session],
-                     [episode, *outputs, *controls, passage, trial_note, edit_selection, download],
+                     [episode, *outputs, *controls, passage, trial_note, edit_selection, download,
+                      models, wanted_model],
                      concurrency_id="maze-view", show_progress="hidden")
     back.click(step_back, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")
     forward.click(step_forward, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")

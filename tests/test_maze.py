@@ -1353,13 +1353,13 @@ class MazeTests(unittest.TestCase):
                 build_page(context)
             try:
                 callbacks = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}
-                loaded = callbacks['load'](str(ep.export()), Episode(MAZE, CONFIG), False, session)
+                loaded = callbacks['load'](str(ep.export()), Episode(MAZE, CONFIG), False, session, None)
                 self.assertTrue(loaded[0].replay_only)
                 self.assertEqual(loaded[-2]['value'], 'Load test/model')
                 self.assertEqual(loaded[-1], 'test/model')
                 values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10,
                           'coordinates', '', 'Be brief.', 'Reach the star.')
-                fresh = callbacks['prepare_episode'](loaded[0], False, session, *values)
+                fresh = callbacks['prepare_episode'](loaded[0], False, session, None, *values)
                 self.assertEqual(fresh[-2]['value'], 'Choose / load model')
                 self.assertEqual(fresh[-1], '')
                 # The ID reaches the Models page through the state the page
