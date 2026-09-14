@@ -125,6 +125,7 @@ def gaps(left, right, shared: int) -> list[dict]:
     for index in range(shared):
         here, there = left[index], right[index]
         scored = here.get("scored", True) and there.get("scored", True)
+        left_top, right_top = _top_choice(here), _top_choice(there)
         readings.append({
             "position": index + 1,
             "token_id": int(here["token_id"]),
@@ -137,20 +138,34 @@ def gaps(left, right, shared: int) -> list[dict]:
             ),
             "left_surprise": float(here["surprise_bits"]) if scored else None,
             "right_surprise": float(there["surprise_bits"]) if scored else None,
-            "left_top": _top_text(here),
-            "right_top": _top_text(there),
+            "left_top": left_top[1],
+            "left_top_id": left_top[0],
+            "right_top": right_top[1],
+            "right_top_id": right_top[0],
         })
     return readings
 
 
-def _top_text(metric: dict) -> str:
-    """What this run's model would have written here, left to itself."""
+def _top_choice(metric: dict) -> tuple[int | None, str]:
+    """What this run's model would have written here, left to itself.
+
+    The ID comes back with the text because the text alone cannot answer
+    whether the choice changed: distinct vocabulary entries can decode to the
+    same characters, and two special tokens can both decode to nothing at
+    all. Within one vocabulary the ID is the answer, for the same reason
+    :func:`shared_prefix` counts on IDs there. Across two it is meaningless,
+    and the text is all there is.
+    """
 
     candidates = metric.get("top_candidates") or ()
     if not candidates:
-        return ""
+        return None, ""
     first = candidates[0]
-    return first.get("text", "") if isinstance(first, dict) else getattr(first, "text", "")
+    if isinstance(first, dict):
+        token_id, text = first.get("token_id"), first.get("text", "")
+    else:
+        token_id, text = getattr(first, "token_id", None), getattr(first, "text", "")
+    return (None if token_id is None else int(token_id)), text
 
 
 def strip(metrics, shared: int, readings) -> list[tuple[str, str]]:
@@ -302,10 +317,19 @@ def reading(left: dict | None, right: dict | None) -> dict:
     shared = shared_prefix(here, there, by_text=cross_model)
     readings = gaps(here, there, shared)
     scored = [item for item in readings if item["scored"]]
-    changed = [
-        item for item in scored
-        if item["left_top"] and item["left_top"] != item["right_top"]
-    ]
+    # Within one vocabulary the IDs decide it; across two there are no IDs to
+    # decide it with, and the decoded text is the only reading left.
+    if cross_model:
+        changed = [
+            item for item in scored
+            if item["left_top"] and item["left_top"] != item["right_top"]
+        ]
+    else:
+        changed = [
+            item for item in scored
+            if item["left_top_id"] is not None
+            and item["left_top_id"] != item["right_top_id"]
+        ]
     widest = max(scored, key=lambda item: item["surprise_bits"], default=None)
     return {
         "shared": shared,
@@ -375,6 +399,33 @@ def gap_metrics(reading: dict) -> list[dict]:
     ]
 
 
+def _portable_settings(settings: dict) -> dict:
+    """One run's settings with its steering vector written out in full.
+
+    A run holds a reference to a vector stored once beside the conversation
+    library, which is what keeps a streaming response from copying a few
+    thousand numbers per token. That reference resolves against one machine's
+    asset directory and nothing else, so an export carrying it would promise
+    the run's whole configuration and deliver an identifier - and lose the
+    vector that defined the experiment the moment the file moves or the
+    assets are cleaned up. ``trace_to_json`` expands it for the same reason.
+
+    A vector that cannot be resolved leaves the reference where it is: an
+    export missing one number is worth more than a download button that
+    fails, and the reference at least names what is missing.
+    """
+
+    value = settings.get("steering")
+    if value is None:
+        return dict(settings)
+    from steering import SteeringError, expand
+
+    try:
+        return dict(settings, steering=expand(value))
+    except (SteeringError, OSError):
+        return dict(settings)
+
+
 def export(left: dict | None, right: dict | None, reading: dict) -> dict:
     """The whole comparison as one document: both runs and what was found."""
 
@@ -389,7 +440,7 @@ def export(left: dict | None, right: dict | None, reading: dict) -> dict:
             "precision": run.get("precision"),
             "prompt": run.get("prompt", ""),
             "text": run.get("text", ""),
-            "settings": run.get("settings") or {},
+            "settings": _portable_settings(run.get("settings") or {}),
             "seconds": run.get("seconds"),
             "summary": summarize(run["metrics"]),
             "tokens": run["metrics"],
@@ -413,7 +464,9 @@ def export(left: dict | None, right: dict | None, reading: dict) -> dict:
                 "b_surprise_bits": item["right_surprise"],
                 "gap_bits": item["surprise_bits"] if item["scored"] else None,
                 "a_top_choice": item["left_top"],
+                "a_top_choice_id": item["left_top_id"],
                 "b_top_choice": item["right_top"],
+                "b_top_choice_id": item["right_top_id"],
             }
             for item in reading.get("readings", ())
         ],

@@ -22,7 +22,7 @@ def tearDownModule():
     settings_sandbox.stop()
 
 
-def metric(position, token_id, surprise, *, top="a", scored=True, entropy=1.0, rank=1):
+def metric(position, token_id, surprise, *, top="a", top_id=1, scored=True, entropy=1.0, rank=1):
     """One token's measurements, in the shape the runtime publishes them."""
 
     return {
@@ -39,7 +39,7 @@ def metric(position, token_id, surprise, *, top="a", scored=True, entropy=1.0, r
         "entropy_bits": entropy,
         "top1_margin": 0.1,
         "sampling_shift_bits": 0.0,
-        "top_candidates": [{"token_id": 1, "text": top, "probability": 0.5}],
+        "top_candidates": [{"token_id": top_id, "text": top, "probability": 0.5}],
         "scored": scored,
         "segment": "response",
         "unscored_reason": "",
@@ -123,8 +123,8 @@ class ReadingTests(unittest.TestCase):
         self.assertIn("same 4 tokens", compare.headline(reading, None, None))
 
     def test_top_choice_changes_are_counted_over_the_shared_tokens_only(self):
-        left = [metric(1, 5, 1.0, top="a"), metric(2, 6, 1.0, top="a")]
-        right = [metric(1, 5, 1.0, top="b"), metric(2, 7, 1.0, top="z")]
+        left = [metric(1, 5, 1.0, top="a", top_id=1), metric(2, 6, 1.0, top="a", top_id=1)]
+        right = [metric(1, 5, 1.0, top="b", top_id=2), metric(2, 7, 1.0, top="z", top_id=3)]
         reading = compare.reading(run(left), run(right))
         self.assertEqual(reading["compared"], 1)
         self.assertEqual(reading["top_choice_changed"], 1)
@@ -171,6 +171,24 @@ class ReadingTests(unittest.TestCase):
             ["Context read as"],
         )
 
+    def test_a_same_model_top_choice_change_is_read_from_the_token_id(self):
+        # Two vocabulary entries can decode to the same characters, and two
+        # special tokens to nothing at all, so text cannot answer this.
+        left = [metric(1, 5, 1.0, top="", top_id=11), metric(2, 6, 1.0, top="a", top_id=1)]
+        right = [metric(1, 5, 1.0, top="", top_id=12), metric(2, 6, 1.0, top="a", top_id=1)]
+        reading = compare.reading(run(left), run(right))
+        self.assertEqual(reading["compared"], 2)
+        self.assertEqual(reading["top_choice_changed"], 1)
+        # Across two vocabularies an ID means nothing, so the text decides.
+        across = compare.reading(run(left), run(right, model_id="other/model"))
+        self.assertTrue(across["cross_model"])
+        self.assertEqual(across["top_choice_changed"], 0)
+
+    def test_a_token_with_no_candidates_is_not_counted_as_a_change(self):
+        bare = dict(metric(1, 5, 1.0), top_candidates=[])
+        reading = compare.reading(run([bare]), run([metric(1, 5, 1.0)]))
+        self.assertEqual(reading["top_choice_changed"], 0)
+
     def test_configuration_rows_name_only_what_differed(self):
         left = run([metric(1, 5, 1.0)], seed=1)
         right = run([metric(1, 5, 1.0)], seed=2, temperature=0.7)
@@ -210,6 +228,34 @@ class ReadingTests(unittest.TestCase):
         self.assertEqual(document["shared_tokens"][0]["gap_bits"], 1.0)
         # Serializable as it stands: the download writes exactly this.
         json.dumps(document)
+
+    def test_the_export_writes_the_steering_vector_out_in_full(self):
+        import steering
+
+        held = steering.compact(steering.normalize({
+            "model_id": "fake/model", "layer": 1, "vector": [1.0, -2.0, 3.0],
+        }))
+        self.assertNotIn("vector", held)
+        left = run([metric(1, 5, 1.0)], steering=held)
+        right = run([metric(1, 5, 2.0)])
+        document = compare.export(left, right, compare.reading(left, right))
+        # The reference resolves against one machine only; the file has to
+        # carry the numbers themselves.
+        self.assertEqual(document["a"]["settings"]["steering"]["vector"], [1.0, -2.0, 3.0])
+        self.assertIsNone(document["b"]["settings"]["steering"])
+        json.dumps(document)
+
+    def test_an_unresolvable_vector_leaves_its_reference_rather_than_failing(self):
+        import steering
+
+        held = steering.compact(steering.normalize({
+            "model_id": "fake/model", "layer": 1, "vector": [1.0, -2.0, 3.0],
+        }))
+        (steering.asset_directory() / f"{held['vector_id']}.json").unlink()
+        left = run([metric(1, 5, 1.0)], steering=held)
+        right = run([metric(1, 5, 2.0)])
+        document = compare.export(left, right, compare.reading(left, right))
+        self.assertEqual(document["a"]["settings"]["steering"]["vector_id"], held["vector_id"])
 
     def test_an_empty_pair_reads_as_empty_everywhere(self):
         self.assertEqual(compare.reading(None, run([metric(1, 5, 1.0)])), {})
