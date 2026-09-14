@@ -910,6 +910,27 @@ class LoadCardTests(unittest.TestCase):
         self.assertEqual(order, [("claimed", self.MODEL), ("loaded", self.MODEL)])
         self.assertIsNone(runtime.MANAGER.loading_id, "given back when the load ends")
 
+    def test_the_load_publishes_its_progress_for_the_other_pages(self):
+        # The cards below reach only the handler that started the load. The
+        # chat page's badge is repainted by a timer that has nothing but the
+        # manager to read, so the progress is published there as well.
+        seen = []
+
+        def work(progress):
+            bar = progress.bar_class()(desc="Loading weights", total=4)
+            bar.update(1)
+            seen.append(runtime.MANAGER.loading_progress())
+            return "CPU"
+
+        runtime.MANAGER = self.Manager(work)
+
+        list(app.load_cached_model(self.MODEL))
+
+        self.assertEqual(len(seen), 1)
+        self.assertAlmostEqual(seen[0].fraction, 0.25)
+        # And is dropped with the claim, so nothing is left to report over.
+        self.assertIsNone(runtime.MANAGER.loading_progress())
+
     def test_a_worker_that_cannot_start_gives_the_claim_back(self):
         runtime.MANAGER = ModelManager()
 

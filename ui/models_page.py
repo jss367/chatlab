@@ -292,6 +292,10 @@ def stream_load(
     # snapshot the load is about to read. The worker names the load only once
     # it reaches runtime.MANAGER.load, and the model lock is taken later still.
     _model_id, claim = runtime.MANAGER.reserve_load(model_id)
+    # Published against that claim so the chat page's badge can show how far
+    # the load has come, wherever the load was started from; the cards below
+    # only ever reach the handler that started it.
+    runtime.MANAGER.note_load_progress(claim, progress)
     try:
         worker.start()
     except BaseException:
@@ -792,18 +796,56 @@ NO_MODEL_BADGE = "No model loaded"
 BADGE_REFRESH_SECONDS = 2.0
 
 
-def model_badge(state: str, text: str) -> str:
-    """A pill naming the model in memory. ``state`` is the stylesheet's hook."""
+def load_fraction(progress: LoadSnapshot | None) -> float | None:
+    """How much of a load is done, or ``None`` while it has nothing to say.
 
+    A load reports nothing between being claimed and the loader placing its
+    first weights - a wait that covers a queue behind a reply, and the
+    seconds a big snapshot takes to be opened - and a bar drawn at zero
+    through all of that reads as a load that is stuck. ``None`` is that
+    state, and the stylesheet draws it as movement without a figure.
+    """
+
+    if progress is None or not progress.started:
+        return None
+    return progress.fraction
+
+
+def load_percent(progress: LoadSnapshot | None) -> str:
+    """`` 42%`` for a load that has begun, and nothing for one that has not."""
+
+    fraction = load_fraction(progress)
+    return "" if fraction is None else f" {round(fraction * 100)}%"
+
+
+def model_badge(state: str, text: str, fraction: float | None = None) -> str:
+    """A pill naming the model in memory. ``state`` is the stylesheet's hook.
+
+    ``fraction`` fills a bar along the bottom of the pill: how much of the
+    load is done, between 0 and 1, or ``None`` for a load that has not begun
+    to report yet, which the stylesheet draws as a stripe that moves on its
+    own. The bar lives in the badge rather than beside it because the badge
+    is what already sits next to the chat page's model switcher, which is
+    where the reader who asked for the load is looking.
+    """
+
+    bar = ""
+    if state == "loading":
+        width = "" if fraction is None else f' style="width: {min(100, max(0, round(fraction * 100)))}%"'
+        known = "known" if fraction is not None else "unknown"
+        bar = (
+            f'<span class="model-badge-bar" data-progress="{known}" aria-hidden="true">'
+            f"<span{width}></span></span>"
+        )
     return (
         f'<div class="model-badge" data-state="{state}">'
         f'<span class="model-badge-dot" aria-hidden="true"></span>'
-        f"<span>{html.escape(text)}</span></div>"
+        f"<span>{html.escape(text)}</span>{bar}</div>"
     )
 
 
-def model_snapshot() -> tuple[str | None, str | None, str | None, str]:
-    """The load under way, the model in memory, its device and its kind, read once.
+def model_snapshot() -> tuple[str | None, str | None, str | None, str, LoadSnapshot | None]:
+    """The load under way, how far it has come, the model in memory, its device and kind.
 
     Reuse these values so the badge and setup links render from the same
     readings. This is display state, not an atomic snapshot or a reservation
@@ -812,13 +854,20 @@ def model_snapshot() -> tuple[str | None, str | None, str | None, str]:
     The kind is read from what is really in memory rather than from what the
     last load was asked for, so it can never disagree with the object a page
     would go on to use.
+
+    The load's progress is read here, beside the ID it belongs to, so the bar
+    and the name in one badge cannot describe two different loads. It is read
+    only while a load is named: with none under way there is nothing to read,
+    and the reading itself asks the device allocator.
     """
 
+    loading = runtime.MANAGER.loading_id
     return (
-        runtime.MANAGER.loading_id,
+        loading,
         runtime.MANAGER.model_id,
         runtime.MANAGER.device_name,
         IMAGE_KIND if runtime.MANAGER.image_loaded else TEXT_KIND,
+        runtime.MANAGER.loading_progress() if loading else None,
     )
 
 
@@ -848,7 +897,7 @@ def loaded_model_badge(snapshot=None, *, kind: str = TEXT_KIND) -> str:
     :func:`refresh_model_badge`.
     """
 
-    loading, model_id, device, loaded_kind = (
+    loading, model_id, device, loaded_kind, progress = (
         model_snapshot() if snapshot is None else snapshot
     )
     if model_id and device:
@@ -859,7 +908,7 @@ def loaded_model_badge(snapshot=None, *, kind: str = TEXT_KIND) -> str:
             f"{model_id} · {KIND_NAMES.get(loaded_kind, 'model')}, not used here",
         )
     if loading:
-        return model_badge("loading", f"Loading {loading}…")
+        return model_badge("loading", f"Loading {loading}…{load_percent(progress)}", load_fraction(progress))
     return model_badge("empty", NO_MODEL_BADGE)
 
 
@@ -874,7 +923,7 @@ def _setup_links(snapshot, kind: str):
     to disable them.
     """
 
-    loading, model_id, device, loaded_kind = snapshot
+    loading, model_id, device, loaded_kind, _progress = snapshot
     ready = bool(model_id and device and loaded_kind == kind)
     return gr.update(visible=not (ready or bool(loading)))
 
@@ -1110,12 +1159,16 @@ def refresh_stale_model_switch(
 def switch_model(selected: str | None, precision: str = "full"):
     """Load the model picked in the switcher, at the Models page's precision.
 
-    Yields the switcher's own update and the Models page's status card, so
-    the load shows there exactly as **Load cached** would show it, and the
-    badge beside the switcher names the load as it goes. A pick during a
-    reply is refused and the switcher put back: the load would only queue
-    behind the generation, and its first act on winning the lock would be
-    to unload the model still producing the tokens.
+    Yields the switcher's own update, the Models page's status card, and the
+    badge beside the switcher, so the load shows there exactly as **Load
+    cached** would show it while the reader who asked for it watches it fill
+    where they are looking. The badge is written from here as well as by its
+    own timer because the timer's beat is seconds wide: a pick that repainted
+    nothing until the next tick reads as a click that did nothing, and the
+    cards that carry the figures go to a page this reader is not on. A pick
+    during a reply is refused and the switcher put back: the load would only
+    queue behind the generation, and its first act on winning the lock would
+    be to unload the model still producing the tokens.
 
     Both refusals are one reservation, not a pair of checks. A second load
     and a reply starting in the same instant are the same hazard read from
@@ -1137,31 +1190,37 @@ def switch_model(selected: str | None, precision: str = "full"):
 
     current = switch_value()
     if not selected or selected == current:
-        yield gr.skip(), gr.skip()
+        yield gr.skip(), gr.skip(), gr.skip()
         return
     try:
         claimed, held = runtime.MANAGER.claim_exclusive_load(selected)
     except ValueError as error:
         yield gr.update(value=current), failure_card(
             "Could not load cached model", html.escape(str(error))
-        )
+        ), gr.skip()
         return
     if claimed is None:
         alarm(
             "Cannot switch models now",
             occupied_reason(held, SWITCH_LOADING, SWITCH_BUSY),
         )
-        yield gr.update(value=current), gr.skip()
+        yield gr.update(value=current), gr.skip(), gr.skip()
         return
     _checked_id, claim = claimed
     last = None
     try:
+        # The badge is redrawn on every card, which is every half second
+        # while the weights are read (LOAD_POLL_SECONDS), so its bar moves at
+        # the pace of the load rather than of the badge's own timer.
         for card in load_cached_model(selected, None, precision, claim):
             last = card
-            yield gr.skip(), card
+            yield gr.skip(), card, loaded_model_badge(kind=TEXT_KIND)
     finally:
         runtime.MANAGER.release_load(claim)
     announce_switch_outcome(last)
+    # The load is over, one way or the other: say so without waiting for the
+    # timer, which would leave "Loading…" on screen for another tick.
+    yield gr.skip(), gr.skip(), loaded_model_badge(kind=TEXT_KIND)
 
 
 def announce_switch_outcome(card: str | None) -> None:

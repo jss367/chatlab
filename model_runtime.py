@@ -4298,6 +4298,12 @@ class ModelManager:
         # ever given back by the load that took it.
         self._load_claims: dict[int, str] = {}
         self._next_claim = 0
+        # The live progress of each claimed load that has one, by the same
+        # claim number, so a page that did not start the load can still show
+        # how far it has come. The card streaming beside a load reaches only
+        # the tab that asked for it; the chat page's badge is on a timer and
+        # has nothing but the manager to read.
+        self._load_progress: dict[int, LoadProgress] = {}
         # Guards the claims, so that taking one and reading them are each a
         # single step for handlers running on several workers.
         self._claims_lock = threading.Lock()
@@ -4719,6 +4725,50 @@ class ModelManager:
 
         with self._claims_lock:
             self._load_claims.pop(claim, None)
+            self._load_progress.pop(claim, None)
+
+    def note_load_progress(self, claim: int, progress: LoadProgress) -> None:
+        """Publish ``claim``'s progress, for pages that did not start the load.
+
+        The reader who picks a model in the chat page's switcher watches the
+        badge beside it, and the badge is redrawn by a timer that has only
+        this manager to read: the cards a load streams go back to the one
+        handler that started it. Registering the progress object here is what
+        lets any tab, on any page, say how far the load has come.
+
+        Kept by claim number, as the claim itself is, so
+        :meth:`release_load` clears both together and an overlapping load
+        cannot drop another's readings.
+        """
+
+        with self._claims_lock:
+            self._load_progress[claim] = progress
+
+    def loading_progress(self) -> LoadSnapshot | None:
+        """How far the load :attr:`loading_id` names has come, or ``None``.
+
+        The load reading weights right now when one is, matching
+        :attr:`loading_id` claim for claim, so the figure the badge shows
+        belongs to the model it names. A load that has been claimed but has
+        not reached :func:`stream_load` yet has published nothing and is
+        reported as ``None``; so is a load whose reader is on the page that
+        started it, for whom there is nothing to answer.
+        """
+
+        with self._claims_lock:
+            active = self._active_load
+            found = None
+            for claim, model_id in reversed(self._load_claims.items()):
+                progress = self._load_progress.get(claim)
+                if progress is None:
+                    continue
+                if active is None or model_id == active:
+                    found = progress
+                    break
+        # Snapshotting reads the device allocator, which takes a lock the
+        # loading thread holds for much of a load, so it happens with this
+        # manager's own lock let go.
+        return None if found is None else found.snapshot()
 
     @contextlib.contextmanager
     def _reading_weights(self, model_id: str) -> Iterator[None]:

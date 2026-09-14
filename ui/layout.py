@@ -1556,13 +1556,16 @@ def build_app() -> gr.Blocks:
         # followed by the same rescan as the button. Its status goes to the
         # Models page's card, where the switcher's own repaint would
         # otherwise drop the progress the load is reporting. That page is not
-        # the one the reader is on, so switch_model also toasts an ending the
-        # card alone would have kept to itself; see announce_switch_outcome.
+        # the one the reader is on, so the badge beside the switcher is
+        # written from the same handler - it is what shows the reader the
+        # load and how far it has come - and switch_model also toasts an
+        # ending the card alone would have kept to itself; see
+        # announce_switch_outcome.
         rescan(
             model_switch.input(
                 switch_model,
                 [model_switch, weight_precision],
-                [model_switch, model_status],
+                [model_switch, model_status, model_badge_view],
             )
         )
         # A manual refresh and a new sort order reorder a list; neither
