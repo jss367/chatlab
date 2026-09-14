@@ -24,6 +24,7 @@ drove.
 - Prompt tokens scored in the same pass that warms the cache
 - A **Score text** tab for measuring text the model did not write
 - A **Prompts** tab that runs a list of prompts, each in a conversation of its own, and writes one trace per prompt plus a table of every token
+- A **Compare** tab holding two runs side by side — two models, two precisions, a vector on and off, two seeds — with the tokens aligned, colored by how far the two runs' measurements sat apart, and the settings that differed named
 - Perplexity, mean surprise, and a surprise trace for each response
 - Full metric-trace export as JSON or CSV
 - An OpenAI-compatible HTTP API on the same port, so the measurements can be scripted
@@ -31,12 +32,13 @@ drove.
 - Every setting saved to one JSON file you can edit by hand or share between machines
 - Temperature, top-p, top-k and response length kept per conversation, so two forks can be compared at different settings
 - Per-conversation activation steering: import a vector, choose its layer and strength, and compare forks with steering enabled or disabled
+- Steering vectors read out of the model itself: give examples of what you want and of the opposite, and every layer's direction is taken in one pass, with a reading of how cleanly each separates the two sets
 - Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
 - A draggable seam between the transcript and the panel beside it, remembered between sessions
 - Every conversation kept between sessions in one JSON file, so a reload or a restart brings the pane back as it was
-- Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response, or a run of prompts, from anywhere on the Chat page
+- Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response, a run of prompts, or a comparison run, from anywhere on the Chat page
 - A setting for macOS's own inline text predictions, which grey in the rest of a sentence as you type, so the typing suggestions can be turned off inside ChatLab alone
 - Right-click a token to regenerate from it, choose an alternative, or type a custom replacement and continue the response
 - Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
@@ -453,6 +455,49 @@ setting, including inactive forks and disabled steering. It uses the same
 if the saved library is unreadable or invalid. Cleanup runs only when explicitly
 requested; keeping ChatLab closed protects references still held by live sessions.
 
+### Extracting a vector from examples
+
+**Extract from examples**, inside the same panel, makes a vector rather than
+reading one from a file. Write examples of what you want on one side and
+examples of the opposite on the other, one per line, up to 64 a side. Each
+example is run through the model once, every decoder block's output is pooled
+to a single vector, and the direction for a block is the wanted examples' mean
+minus the unwanted ones'. That difference in means is exactly the shape the
+import format has always held; this only saves making it somewhere else.
+
+Every layer is returned, because the pass that reads one reads them all and
+which layer to steer at is the question a reader has least way of answering in
+advance. The table gives, per layer, how far apart the two sets sat along that
+layer's direction, the direction's own length, and the length of a typical
+activation there. The separation is a standardized effect size — the gap
+between the two sets' projections over the spread they share — so it can be
+read across layers whose activations are on very different scales, which the
+raw length cannot. It is measured on the examples the direction came from, so
+it says how cleanly these examples split and not how the direction will behave
+on anything else. Click a row, or move the slider, to choose a layer;
+**Use this layer** puts that layer's vector on the conversation at strength 1
+with steering on, and **Download vector** writes it as a file the import button
+would take.
+
+Pool each example at its **last token** for a behaviour a chat model would show
+when it starts writing — tick **Read each example as a user turn** as well, and
+each example is wrapped in the model's chat template so the last position is
+the one a reply would begin from. Pool at the **mean** over the example's tokens
+to describe the passage as a whole. The length of a direction against the length
+of an ordinary activation at the same layer is what makes a strength usable: a
+vector a hundredth the size of what it is added to does nothing at strength 1.
+
+The reading is taken through forward hooks on the decoder blocks rather than
+from the hidden states the model reports, for two reasons. The hook sees the
+tensor the steering hook will later add to; the reported final hidden state is
+not that tensor, because a decoder stack appends it *after* the final norm, and
+a direction read from there would be added back in the wrong basis. And nothing
+but the pooled vectors is ever held, where asking for the hidden states would
+materialize every layer's full sequence at once.
+
+Extraction needs a PyTorch model, for the same reason steering does: an MLX
+checkpoint is not a `torch.nn.Module` and has nowhere to put the hook.
+
 ## Branching from a token
 
 Every response token comes with the alternatives the model ranked highest. Branching lets you take one of them instead and see where the model goes from there.
@@ -587,6 +632,51 @@ Each prompt is answered in a conversation of its own. Nothing carries over from 
 The results table gives one row per prompt — an excerpt of the prompt and the answer, the token count, perplexity, mean surprise, and the seed. Below it are the files: `prompt-001.json` and its siblings, each a full trace in the same schema **Download JSON** writes for a single response, and `prompts.csv`, one row per generated token across the whole run with a `prompt_index` column naming the prompt each row came from and a `stopped` column saying whether that answer was cut short. Both are written as the run goes, so **Stop** — or Escape — leaves every prompt that produced tokens downloadable, the one it was in the middle of included; that one's trace says `stopped` in its sampling, since the model may have had more to say.
 
 A prompt that fails does not end the run. Its row says what went wrong, the rest of the set still runs, and the status line counts the failures at the end. A model swapped in from another tab does end it: the run is pinned to the model it started on, so the rest of the prompts are refused rather than answered by other weights and reported in the same table.
+
+## Comparing two runs
+
+The **Compare** tab holds two runs side by side. A run is one pass of the model
+over one piece of text, kept whole: what it produced, every token's
+measurements, and the configuration it ran under — the model, the device, the
+weight precision, the system prompt, the sampling settings and the steering
+vector. Fill slot **A**, change one thing, fill slot **B**, and read the two
+against each other. A single run has nothing to be different from, which is why
+questions like *what did four bits cost* have had no answer here until now.
+
+Only one model is ever in memory, so the slots are filled one after the other.
+That is what makes comparing two models — or one model at two precisions —
+work: fill A, load the other model on the **Models** page, fill B. Each slot
+keeps the load it was filled under, so the pair still says which weights
+answered after both have been unloaded.
+
+A slot is filled one of two ways. **Writing a reply** sends the prompt as a
+fresh conversation and keeps the answer. Two replies share a prompt and part
+company somewhere inside the answer, so only their shared opening can be
+compared: after the split the two runs are writing about different things and
+their measurements are not each other's to subtract. **Measuring fixed text**
+gives both runs the same passage to read instead. Those never part, so every
+position is the same question asked of two models, and the comparison stays
+exact to the last token. It is the mode for a question about the model rather
+than about the answer: the same passage with a steering vector and without it,
+or at sixteen bits and at four.
+
+Both slots are drawn as token strips, colored by how far the two runs' surprise
+at each shared token sat apart, in bits. Warmer is further apart; red is where
+the two runs stopped writing the same tokens, after which nothing is comparable.
+Above them are the headline numbers — how many tokens the runs shared, the mean
+and widest gap, how often the model's own first choice changed, and each run's
+perplexity — and a chart of the gap across the shared tokens. Below them, a
+table naming every setting that differed between the two runs, and a table of
+the shared tokens the two read most differently, with what each run would have
+written there left to itself. **Download comparison JSON** writes both runs,
+their settings, every token's measurements and the comparison as one document.
+
+Sampling, the steering vector and the thinking mode come from the **Chat** tab
+and the system prompt from **Settings**, so a slot is filled under exactly the
+settings a reply typed by hand would have used. That is what makes changing one
+of them between A and B a clean experiment. **Stop** — or Escape — closes a run
+where it stands and leaves the slot as it was: half a response is not a
+measurement of anything.
 
 ## The local API
 

@@ -51,6 +51,17 @@ PROMPT_SCORE_LIMIT = 1024
 # Refuse to score a wall of pasted text rather than appearing to hang.
 SCORE_TOKEN_LIMIT = 4096
 
+# One steering example is read with every decoder block's output captured, so
+# a long one costs a forward pass and nothing more - but a reader pasting an
+# essay into the examples box is not describing a behaviour, they are asking
+# for a summary. Short examples are also what the difference in means is for.
+STEERING_EXAMPLE_TOKEN_LIMIT = 512
+
+# How one example's tokens become one vector: the position the model would
+# have written from, or the average over the whole example. The first is what
+# a chat behaviour lives at; the second describes the passage as a whole.
+STEERING_POOLS = ("last", "mean")
+
 # Where a config keeps the length of its position table, newest name first.
 # ``max_seq_len`` is MPT's and DBRX's spelling. RWKV's ``context_length`` is
 # deliberately absent: it is recurrent, so a longer sequence costs accuracy
@@ -3564,6 +3575,29 @@ class ScoredText:
     context_ids: tuple[int, ...] = ()
 
 
+@dataclass(frozen=True)
+class SteeringExtraction:
+    """A steering direction taken from contrasting examples, at every layer.
+
+    ``layers`` holds one vector per decoder block, indexed the way the
+    steering hook indexes them, so ``layers[n]`` is the direction to add to
+    block ``n``'s output. ``stats`` is the reading beside each one; see
+    :func:`steering.contrast_directions`. The whole stack is returned rather
+    than a chosen layer because the examples are read at every layer in the
+    one pass: picking the layer afterwards costs nothing, and picking it
+    beforehand would mean guessing.
+    """
+
+    model_id: str
+    load_id: str
+    layers: tuple[tuple[float, ...], ...]
+    stats: tuple[dict, ...]
+    positive_count: int
+    negative_count: int
+    pool: str
+    chat_template_missing: bool = False
+
+
 # The final norm of a decoder stack, under the names the common architectures
 # give it. Llama, OLMo, Mistral and Qwen say ``norm``; GPT-2 says ``ln_f``;
 # OPT and BLOOM say ``final_layer_norm``; Mamba says ``norm_f``. Some models
@@ -5818,11 +5852,17 @@ class ModelManager:
             )
         return token_ids
 
-    def _encode_plain(self, text: str) -> list[int]:
-        """Token ids for ``text`` alone: no special tokens, no chat template."""
+    def _encode_plain(self, text: str, *, add_special_tokens: bool = False) -> list[int]:
+        """Token ids for ``text`` alone, with no chat template around it.
+
+        Special tokens are left off by default because the callers that
+        branch a response are splicing into a sequence that already has its
+        opening marker. A passage read on its own wants the marker the model
+        was trained to see first, and asks for it.
+        """
 
         assert self.tokenizer is not None
-        encoded = self.tokenizer(text, add_special_tokens=False)
+        encoded = self.tokenizer(text, add_special_tokens=add_special_tokens)
         if isinstance(encoded, Mapping):
             encoded = encoded["input_ids"]
         elif hasattr(encoded, "input_ids"):
@@ -6674,6 +6714,7 @@ class ModelManager:
         context: str = "",
         use_chat_template: bool = False,
         load_id: str | None = None,
+        steering: dict | None = None,
     ) -> ScoredText:
         """Measure text the model did not write, in one pass over the tokens.
 
@@ -6682,6 +6723,12 @@ class ModelManager:
         load that finished while this waited for the lock is refused with
         :class:`ModelChanged` rather than measuring one model's text and
         reporting it as another's.
+
+        ``steering`` adds a vector while the passage is read, as it does
+        while a reply is written. Measuring one fixed passage with a vector
+        and again without it is the one comparison that stays exact to the
+        last token: the tokens are the reader's either way, so every position
+        is the same question asked of two models.
         """
 
         import torch
@@ -6727,13 +6774,14 @@ class ModelManager:
                     "Score it in smaller pieces."
                 )
 
-            metrics, _, _ = self._prefill(
-                token_ids,
-                segments=["prompt"] * len(context_ids) + ["response"] * len(text_ids),
-                positions=list(range(1, len(context_ids) + 1))
-                + list(range(1, len(text_ids) + 1)),
-                score_from=1,
-            )
+            with self._steering(steering):
+                metrics, _, _ = self._prefill(
+                    token_ids,
+                    segments=["prompt"] * len(context_ids) + ["response"] * len(text_ids),
+                    positions=list(range(1, len(context_ids) + 1))
+                    + list(range(1, len(text_ids) + 1)),
+                    score_from=1,
+                )
             return ScoredText(
                 context_metrics=[
                     metric for metric in metrics if metric["segment"] == "prompt"
@@ -6744,6 +6792,179 @@ class ModelManager:
                 seam_verified=split.seam_verified,
                 chat_template_missing=split.chat_template_missing,
                 context_ids=tuple(context_ids),
+            )
+
+    def _example_ids(self, text: str, use_chat_template: bool) -> list[int]:
+        """Token ids for one steering example, as the reader asked for it.
+
+        A chat model answers from the end of a turn, which is where a vector
+        meant to steer its replies should be read; ticking the box puts each
+        example in a user turn and appends the generation prompt, so the last
+        position is the one the model would have written from. A model with
+        no chat template has no turn to build, and the example is read as
+        plain text with whatever marker the tokenizer opens a sequence with.
+        """
+
+        assert self.tokenizer is not None
+        if use_chat_template and self.tokenizer.chat_template:
+            ids, _prefilled = self._prompt_token_ids([{"role": "user", "content": text}])
+            return ids
+        return self._encode_plain(text, add_special_tokens=True)
+
+    def _pooled_block_outputs(self, token_ids: Sequence[int], blocks, pool: str) -> np.ndarray:
+        """Every decoder block's output for one example, pooled to one vector each.
+
+        Read through forward hooks on the blocks themselves rather than
+        through ``output_hidden_states``, for two reasons. The hook sees the
+        tensor the steering hook would add to, so a direction taken here and
+        a direction added later are defined against the same thing. The
+        reported hidden states are not that tensor for the last block: a
+        decoder stack appends its final state *after* the final norm, so a
+        direction read from there would be in the normed basis and adding it
+        back before the norm would not do what it measured.
+
+        And nothing but the pooled vectors is ever materialized: asking for
+        the hidden states would hold every layer's full sequence at once,
+        which on a 7B model with a few hundred tokens is hundreds of
+        megabytes taken from the weights sitting beside it.
+
+        Called under the model lock, inside inference mode.
+        """
+
+        import torch
+
+        captured: list[np.ndarray | None] = [None] * len(blocks)
+
+        def record(index: int):
+            def capture(_module, _inputs, output):
+                hidden = output[0] if isinstance(output, tuple) else output
+                if not isinstance(hidden, torch.Tensor) or hidden.dim() != 3:
+                    raise steering_vectors.SteeringError(
+                        "This model's decoder blocks do not return a residual "
+                        "tensor a vector could be read from."
+                    )
+                row = hidden[0, -1] if pool == "last" else hidden[0].mean(dim=0)
+                captured[index] = row.detach().float().cpu().clone().numpy()
+
+            return capture
+
+        handles = [block.register_forward_hook(record(index)) for index, block in enumerate(blocks)]
+        try:
+            self.model(
+                input_ids=torch.tensor(
+                    [[int(value) for value in token_ids]],
+                    dtype=torch.long,
+                    device=next(self.model.parameters()).device,
+                ),
+                use_cache=False,
+            )
+        finally:
+            for handle in handles:
+                handle.remove()
+        if any(row is None for row in captured):
+            raise steering_vectors.SteeringError(
+                "Some of this model's decoder blocks did not run, so no "
+                "direction could be read from them."
+            )
+        return np.stack(captured)
+
+    @_guards_device_memory
+    def extract_steering(
+        self,
+        positive: Sequence[str],
+        negative: Sequence[str],
+        *,
+        use_chat_template: bool = False,
+        pool: str = "last",
+        load_id: str | None = None,
+    ) -> SteeringExtraction:
+        """Read a steering direction out of two sets of examples.
+
+        Each example is run through the model once and every decoder block's
+        output is pooled to a single vector; the direction for a block is the
+        positive examples' mean minus the negative examples' mean. That is
+        the difference in means, and it is what the vector import format has
+        held all along - this only saves making it somewhere else.
+
+        Every layer is returned, because the pass that reads one reads them
+        all, and which layer to steer at is the question the reader has least
+        way of answering in advance. :func:`steering.contrast_directions`
+        says what the numbers beside each layer mean.
+
+        ``load_id`` names the load the caller checked against, as
+        :meth:`generate` and :meth:`score_text` take it: compared under the
+        model lock, so weights that changed while this waited are refused
+        rather than quietly measured.
+        """
+
+        if pool not in STEERING_POOLS:
+            raise ValueError("Pool the examples by their last token or their mean.")
+        positive = [str(value) for value in positive]
+        negative = [str(value) for value in negative]
+        if not positive or not negative:
+            raise ValueError("Give at least one example on each side.")
+        for side, examples in (("wanted", positive), ("unwanted", negative)):
+            if len(examples) > steering_vectors.MAX_EXAMPLES:
+                raise ValueError(
+                    f"That is {len(examples):,} {side} examples, above the "
+                    f"{steering_vectors.MAX_EXAMPLES} one side can hold."
+                )
+
+        import torch
+
+        with self._lock, torch.inference_mode():
+            if not self.loaded:
+                raise RuntimeError("Download and load a model before extracting a vector.")
+            if load_id is not None and load_id != self.load_id:
+                raise ModelChanged(
+                    f"The model in memory is {self.model_id}, not the one these "
+                    "examples were to be read through. Ask again."
+                )
+            engine = self._engine()
+            if getattr(engine, "backend", "torch") != "torch":
+                raise steering_vectors.SteeringError(
+                    "Extracting a vector needs a PyTorch model: the reading is "
+                    "taken through a forward hook, which an MLX checkpoint has "
+                    "nowhere to put. Load the model's unquantized Transformers "
+                    "version to extract from it."
+                )
+            # Refuse an architecture the vector could not be added back to,
+            # here rather than at the end of a pass over every example. This
+            # is the same block list the steering hook installs on.
+            blocks = steering_vectors.decoder_layers(self.model)
+            self._drop_inspect_cache()
+
+            window = model_position_limit(self.model)
+            limit = STEERING_EXAMPLE_TOKEN_LIMIT
+            if window is not None:
+                limit = min(limit, window)
+            chat_template_missing = use_chat_template and not self.tokenizer.chat_template
+
+            readings = []
+            for examples in (positive, negative):
+                side = []
+                for index, example in enumerate(examples, start=1):
+                    ids = self._example_ids(example, use_chat_template)
+                    if not ids:
+                        raise ValueError(f"Example {index} did not produce any tokens.")
+                    if len(ids) > limit:
+                        raise ValueError(
+                            f"Example {index} is {len(ids):,} tokens, above the "
+                            f"{limit:,} one example may be. Shorten it."
+                        )
+                    side.append(self._pooled_block_outputs(ids, blocks, pool))
+                readings.append(side)
+
+            layers, stats = steering_vectors.contrast_directions(*readings)
+            return SteeringExtraction(
+                model_id=self.model_id,
+                load_id=self.load_id,
+                layers=tuple(tuple(row) for row in layers),
+                stats=tuple(stats),
+                positive_count=len(positive),
+                negative_count=len(negative),
+                pool=pool,
+                chat_template_missing=chat_template_missing,
             )
 
     def _final_norm(self):

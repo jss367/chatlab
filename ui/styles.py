@@ -750,11 +750,12 @@ SHORTCUT_JS = """
     if (event.key !== 'Escape') { return; }
     if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) { return; }
     // Whichever stop button is in the page: the chat's while a reply is
-    // streaming, the Prompts tab's while a batch runs, the Images page's
-    // while a picture is being drawn. Never more than one, because they
+    // streaming, the Prompts tab's while a batch runs, the Compare tab's
+    // while a slot is being filled, the Images page's while a picture is
+    // being drawn. Never more than one, because they
     // contend for the same generation slot and the losers refuse.
     const stop = document.querySelector(
-      '#stop-button, #stop-batch-button, #stop-drawing'
+      '#stop-button, #stop-batch-button, #stop-compare, #stop-drawing'
     );
     if (!stop) { return; }
     event.preventDefault();

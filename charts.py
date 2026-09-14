@@ -198,6 +198,52 @@ def summary_tiles(summary: dict, *, note: str = "") -> str:
     return f'<div class="viz-root viz-tiles">{tiles}</div>{footer}'
 
 
+def comparison_tiles(reading: dict) -> str:
+    """Headline numbers for two runs read against each other."""
+
+    if not reading:
+        return '<div class="viz-empty">Fill both slots to compare them.</div>'
+    if not reading["compared"]:
+        return (
+            '<div class="viz-empty">The two runs share no measured tokens, so '
+            "there is nothing to compare.</div>"
+        )
+    left, right = reading["left_summary"], reading["right_summary"]
+    tiles = "".join(
+        (
+            _tile(
+                f"{reading['shared']:,}",
+                "tokens shared",
+                f"A ran to {reading['left_count']:,} tokens, B to {reading['right_count']:,}. "
+                "Only the leading tokens both runs produced are compared.",
+            ),
+            _tile(
+                f"{reading['mean_gap_bits']:.2f}",
+                "mean gap (bits)",
+                "Average distance between the two runs' surprise at a shared token.",
+            ),
+            _tile(
+                f"{reading['widest_gap_bits']:.2f}",
+                "widest gap (bits)",
+                f"At token {reading['widest_position']:,}.",
+            ),
+            _tile(
+                f"{reading['top_choice_changed'] / reading['compared']:.0%}",
+                "top choice changed",
+                f"{reading['top_choice_changed']:,} of {reading['compared']:,} compared "
+                "tokens had a different first choice in the two runs.",
+            ),
+            _tile(
+                f"{left['perplexity']:,.1f} → {right['perplexity']:,.1f}",
+                "perplexity A → B",
+                f"Mean surprise {left['mean_surprise_bits']:.2f} → "
+                f"{right['mean_surprise_bits']:.2f} bits, over each run's whole output.",
+            ),
+        )
+    )
+    return f'<div class="viz-root viz-tiles">{tiles}</div>'
+
+
 # ------------------------------------------------------- layers and attention
 
 EMPTY_LENS = (
