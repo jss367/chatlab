@@ -13,7 +13,10 @@ gradio>=5.20,<6
 # on anything older.
 huggingface-hub>=1.1
 # Fetches the Metal kernels the 8-bit and 4-bit weight precisions run on.
-kernels>=0.16
+# Transformers decides for itself which versions it will use, and 5.x reads
+# 0.17 as too new: is_kernels_available checks a window that ends there, and
+# turns the quantizer off outside it. So the ceiling is theirs, not ours.
+kernels>=0.16,<0.17
 # Inspect chat templates for native thinking controls.
 jinja2>=3.1
 # Runs the MLX-quantized checkpoints mlx-community publishes, on Apple
