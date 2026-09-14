@@ -456,10 +456,18 @@ def _build_page(context):
         stop_replay(ep)
         if ep.busy:
             ep.request_pause()
+        detail_text, rows = selections.inspect(session_id, metrics, evt)
+        if detail_text == gr.skip():
+            # A replay or generation frame landed between resolving this click
+            # and describing it, so the strip now shows other tokens. Opening
+            # the editor here would leave the measurements and the probability
+            # table of a token nobody picked, or empty ones.
+            return (*(gr.skip(),) * 5, gr.update(visible=False),
+                    transport_text(ep), *transport_buttons(ep))
         choices = [("Use replacement text", "text")] + [
             (f"{c['text']!r} · token {c['token_id']}", str(c["token_id"]))
             for c in metric.get("top_candidates", [])]
-        return (*selections.inspect(session_id, metrics, evt),
+        return (detail_text, rows,
                 dict(view_id=view_id, stamp=metrics[0], index=index), metric.get("text", ""),
                 gr.update(choices=choices, value="text"), gr.update(visible=True),
                 transport_text(ep), *transport_buttons(ep))

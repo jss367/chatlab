@@ -689,6 +689,40 @@ class MazeTests(unittest.TestCase):
             self.assertEqual(archive.read_bytes(), completed)
             self.assertTrue((Path(directory) / f"{forked.run_id}.json").exists())
 
+    def test_a_frame_landing_under_a_click_closes_the_editor_instead_of_emptying_it(self):
+        """A click the strip outran must not leave an open editor describing nothing."""
+        manager = Manager([('abc', [97, 98, 99, 0])])
+        manager.generate = scored(manager.generate)
+        inspector = TokenInspector()
+        selections = inspector.selections()
+        inspector.selections = lambda: selections
+        session_id = selections.new_session()
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        list(stream_episode(ep, manager))
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                metrics = views(ep, False, selections, session_id)[7]
+                resolve = selections.resolve
+
+                def outrun(*args, **kwargs):
+                    # The replay moves to another response between resolving
+                    # this click and describing the token it landed on.
+                    result = resolve(*args, **kwargs)
+                    views(ep, False, selections, session_id, index=-1)
+                    return result
+
+                with mock.patch.object(selections, 'resolve', outrun):
+                    selected = callbacks['select_token'].fn(ep, session_id, metrics, SimpleNamespace(index=1))
+            finally:
+                demo.close()
+        self.assertEqual(selected[5], gr.update(visible=False))
+        self.assertEqual(selected[:5], (gr.skip(),) * 5)
+
     def test_edit_to_stop_token_finishes_without_executing_partial_action(self):
         ep = Episode(MAZE, CONFIG | {"interruption_text": ""})
         manager = Manager([('abc', [97, 98, 99, 0])])
