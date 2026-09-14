@@ -3,6 +3,7 @@
 import logging
 import logging.handlers
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,14 @@ def setUpModule():
 
 def tearDownModule():
     settings_sandbox.stop()
+
+
+def _release_claim() -> None:
+    """Drop the lock this process holds, so each test claims from nothing."""
+
+    if logs._claim is not None:
+        logs._claim.close()
+        logs._claim = None
 
 
 class _Handlers:
@@ -78,11 +87,77 @@ class LevelTests(unittest.TestCase):
             self.assertEqual(logs.level(), logging.INFO)
 
 
+class ClaimTests(unittest.TestCase):
+    """One process owns the plain log name; a second writes beside it.
+
+    A rotating handler renames files as it rolls over, and two processes
+    doing that to the same file lose records. Two are possible: the desktop
+    launcher takes a free port rather than refusing a second instance, and a
+    checkout runs beside the installed app.
+    """
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / "ChatLab.log"
+        self.addCleanup(_release_claim)
+        _release_claim()
+
+    def test_the_first_claim_takes_the_plain_name(self):
+        self.assertEqual(logs.claim(self.path), self.path)
+
+    def test_a_second_process_writes_under_its_own_name(self):
+        # A real second process, because flock is only guaranteed to refuse
+        # another process: macOS lets one process lock the same file twice
+        # through two descriptors, so a claim faked in this one would prove
+        # nothing about the case this guards.
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys;from pathlib import Path;import logs;"
+                "print(logs.claim(Path(sys.argv[1])),flush=True);sys.stdin.read()",
+                str(self.path),
+            ],
+            cwd=Path(__file__).resolve().parent.parent,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+
+
+        def done() -> None:
+            child.kill()
+            child.wait()
+            child.stdout.close()
+            child.stdin.close()
+
+        self.addCleanup(done)
+        self.assertEqual(child.stdout.readline().strip(), str(self.path), "the child took the plain name")
+
+        self.assertEqual(logs.claim(self.path), self.path.with_name(f"ChatLab-{os.getpid()}.log"))
+
+    def test_a_lock_the_kernel_refuses_moves_this_process_aside(self):
+        with mock.patch("fcntl.flock", side_effect=OSError("held elsewhere")):
+            self.assertEqual(logs.claim(self.path), self.path.with_name(f"ChatLab-{os.getpid()}.log"))
+        self.assertIsNone(logs._claim, "a refused claim is not recorded as held")
+
+    def test_asking_twice_in_one_process_does_not_rename_its_own_log(self):
+        self.assertEqual(logs.claim(self.path), self.path)
+        self.assertEqual(logs.claim(self.path), self.path, "configure() is safe to call twice")
+
+    def test_a_lock_that_cannot_be_written_leaves_the_name_alone(self):
+        with mock.patch("builtins.open", side_effect=OSError("read-only")):
+            self.assertEqual(logs.claim(self.path), self.path)
+
+
 class ConfigureTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.path = Path(directory.name) / "logs" / "ChatLab.log"
+        self.addCleanup(_release_claim)
+        _release_claim()
 
     def test_the_file_is_rotated_rather_than_left_to_grow(self):
         with _Handlers() as root, mock.patch.dict(

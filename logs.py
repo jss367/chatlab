@@ -109,6 +109,55 @@ def log_path() -> Path:
     return log_directory() / f"{APP_NAME}.log"
 
 
+# The open lock file whose flock says this process owns the plain log name.
+# Held for the life of the process and never closed on purpose: the kernel
+# drops it when the process ends, however it ends, which is the case that
+# matters here.
+_claim = None
+
+
+def claim(target: Path) -> Path:
+    """``target`` if this process can have it to itself, otherwise a name only it uses.
+
+    A rotating handler renames files as it rolls over, and two processes
+    rolling over the same file scramble and drop records - exactly the
+    records this log exists to keep. Two ChatLab processes at once is not
+    hypothetical: ``desktop_launcher.start_local_server`` falls back to a
+    free port rather than refusing a second instance, and a checkout running
+    beside the installed app is an ordinary afternoon.
+
+    So the first process to ask takes the plain name and the next writes
+    beside it under its own process id. The lock is on a file of its own
+    rather than on the log, because a rollover closes and reopens the log and
+    a lock closed with it would not be a lock.
+    """
+
+    global _claim
+    if _claim is not None:
+        # Already ours. Asking again with a second descriptor would be
+        # refused by the kernel, which counts flocks per open file rather
+        # than per process, and a second configure() would rename the log
+        # out from under the first.
+        return target
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - POSIX only, which is where ChatLab runs
+        return target
+    try:
+        handle = open(target.parent / f"{target.name}.lock", "w")
+    except OSError:
+        # No lock file, so no claim to make. One process writing an
+        # unprotected log is the situation this had before.
+        return target
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return target.with_name(f"{target.stem}-{os.getpid()}{target.suffix}")
+    _claim = handle
+    return target
+
+
 def level() -> int:
     """The level to record at, from ``CHATLAB_LOG_LEVEL``; INFO by default.
 
@@ -156,6 +205,7 @@ def configure(to_file: bool = True) -> Path | None:
     target = log_path()
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
+        target = claim(target)
         handler = logging.handlers.RotatingFileHandler(
             target, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
         )

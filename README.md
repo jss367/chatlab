@@ -175,7 +175,10 @@ It goes to `~/Library/Logs/ChatLab/ChatLab.log`, where Console.app looks, and
 elsewhere to `$XDG_STATE_HOME/chatlab/ChatLab.log`. Two megabytes a file and
 five files behind it, so days of use survive without the file growing
 unbounded in a directory nobody opens. `python app.py` writes to the same
-file and to the terminal; the app bundle has only the file.
+file and to the terminal; the app bundle has only the file. One process owns
+that name at a time, held with a lock beside it, and a second instance writes
+to `ChatLab-<pid>.log` rather than rotating the first one's file out from
+under it.
 
 A session opens with what it is running on: the ChatLab version and whether
 this is the packaged app or a checkout, the platform and Python, the
