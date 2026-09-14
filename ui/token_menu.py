@@ -129,8 +129,11 @@ TOKEN_MENU_JS = r"""
   window.__chatlabTokenMenu = true;
   let menu = null, pending = null, sequence = 0, anchor = null;
   const close = () => { menu?.remove(); menu = null; pending = null; };
+  // An element id is not a selector: an extension may name its strip anything
+  // the HTML allows, including characters CSS reads as syntax.
   const bridge = (id, value) => {
-    const input = document.querySelector(`#${id} textarea, #${id} input`);
+    const at = `#${CSS.escape(id)}`;
+    const input = document.querySelector(`${at} textarea, ${at} input`);
     if (!input) return false;
     const prototype = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(prototype, 'value').set.call(input, value);
@@ -249,7 +252,7 @@ TOKEN_MENU_JS = r"""
   new MutationObserver(() => {
     if (!pending) return;
     if (!anchor?.isConnected || !anchor.closest('.token-menu-strip')?.getClientRects().length) { close(); return; }
-    const response = document.querySelector(`#${pending.key}-menu-response [data-token-menu]`);
+    const response = document.querySelector(`#${CSS.escape(`${pending.key}-menu-response`)} [data-token-menu]`);
     if (response) {
       try { show(JSON.parse(response.dataset.tokenMenu)); } catch { close(); }
     }
