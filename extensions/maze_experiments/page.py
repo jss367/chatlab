@@ -689,7 +689,7 @@ def _build_page(context):
                 gr.update(choices=choices, value="text"), gr.update(visible=True),
                 transport_text(ep), *transport_buttons(ep))
 
-    def edit_token(ep, show, session_id, metrics, selected, text_value, candidate_value):
+    def edit_token(ep, show, session_id, metrics, selected, text_value, candidate_value, data):
         try:
             if selected is None or selected["stamp"] != metrics[0]:
                 raise ValueError(STALE_TOKEN)
@@ -710,7 +710,7 @@ def _build_page(context):
         stop_replay(ep)
         # The fork runs under the weights in memory now, so the button stops
         # naming the uploaded run's model.
-        buttons, note = model_button(new), trial_note_text(new)
+        buttons, note = model_button(new), trial_note_text(new, data)
         yield (new, *render(new, show, session_id), None, None, *buttons, note)
         for frame in play(new, show, session_id, single=True):
             yield (new, *frame, None, None, *buttons, note)
@@ -828,7 +828,9 @@ def _build_page(context):
                  [detail, alternatives, edit_selection, replacement, candidate, editor, transport_status, toggle, pause],
                  queue=False, show_progress="hidden")
     edit_outputs = [episode, *outputs, edit_selection, download, models, wanted_model, trial_note]
-    edit_button.click(edit_token, [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate],
+    edit_button.click(edit_token,
+                      [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate,
+                       trial_data],
                       edit_outputs, concurrency_id="maze-view", show_progress="hidden")
     alternatives.select(branch_alternative, [episode, reveal, selection_session, metrics_state, edit_selection],
                         edit_outputs, concurrency_id="maze-view", show_progress="hidden")

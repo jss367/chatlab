@@ -191,7 +191,7 @@ class MazeTests(unittest.TestCase):
                 self.assertTrue(selected[5]['visible'])
                 self.assertIn(("'x' · token 120", '120'), selected[4]['choices'])
                 edit = callbacks['edit_token']
-                frames = list(edit.fn(ep, False, session_id, metrics, selected[2], 'ignored', '120'))
+                frames = list(edit.fn(ep, False, session_id, metrics, selected[2], 'ignored', '120', None))
                 self.assertTrue(all(len(frame) == len(edit.outputs) for frame in frames))
                 result = frames[-1][0]
                 self.assertEqual(result.turns[0]['text'], 'axyz')
@@ -201,7 +201,7 @@ class MazeTests(unittest.TestCase):
                 self.assertTrue((Path(directory) / f'{result.run_id}.json').exists())
                 self.assertEqual(ep.payload(), original)
                 with self.assertRaisesRegex(gr.Error, 'current response'):
-                    list(edit.fn(ep, False, session_id, metrics, selected[2], 'x', 'text'))
+                    list(edit.fn(ep, False, session_id, metrics, selected[2], 'x', 'text', None))
             finally:
                 demo.close()
 
@@ -793,7 +793,7 @@ class MazeTests(unittest.TestCase):
                 metrics = views(replay, False, selections, session_id)[7]
                 selected = callbacks["select_token"].fn(replay, session_id, metrics, SimpleNamespace(index=index))
                 edit = callbacks["edit_token"]
-                frames = list(edit.fn(replay, False, session_id, metrics, selected[2], "west", "text"))
+                frames = list(edit.fn(replay, False, session_id, metrics, selected[2], "west", "text", None))
                 # Every yield has to fill the callback's outputs, or a pane it
                 # forgot keeps describing the run the fork replaced.
                 self.assertTrue(all(len(frame) == len(edit.outputs) for frame in frames))

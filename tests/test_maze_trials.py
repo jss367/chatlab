@@ -104,6 +104,15 @@ class TrialFileTests(unittest.TestCase):
         self.assertTrue(replay.replay_only)
         self.assertIn('Replaying: Clean trial', trial_note_text(replay))
 
+    def test_a_fork_keeps_the_collection_the_picker_is_still_offering(self):
+        # The trial on screen and the collection loaded beside it are separate
+        # facts, and a fork changes only the first.
+        data = self.read()
+        live = prepare_trial(data, 'clean', Episode(MAZE, CONFIG))
+        note = trial_note_text(live, data)
+        self.assertIn('Running: Clean trial', note)
+        self.assertIn('Example trials', note)
+
     def test_ui_loads_exact_trial_updates_controls_and_leaves_old_run_intact(self):
         data = self.read()
         context = SimpleNamespace(tokens=TokenInspector(), models=None, data_dir=Path(self.directory.name),
