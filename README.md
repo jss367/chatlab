@@ -557,7 +557,7 @@ By default that reasoning is **not** sent back to the model on the next turn. Th
 
 Each of these names carries its own sentence in the token detail panel, so hovering one — or reaching it with a screen reader — says what the number is without leaving the page.
 
-**Color tokens by** repaints the conversation without regenerating anything. Rank, surprise, and entropy are magnitudes and share one light-to-dark blue ramp; sampling shift is a diverging red-to-blue scale around no change. Quantized model weights can slightly change logits, probabilities, and ranks.
+**Color tokens by** repaints the conversation without regenerating anything. Rank, surprise, and entropy are magnitudes and share one cool-to-warm ramp, pale blue for the ordinary end through amber to red for the extreme one; sampling shift is a diverging red-to-blue scale around no change. Quantized model weights can slightly change logits, probabilities, and ranks.
 
 Under each response are its headline numbers — perplexity, mean surprise, the share of tokens the model ranked first, mean entropy — and a trace of surprise across the response, so a stretch where the model lost the thread is visible at a glance. Long responses are grouped into bins, with the range inside each bin shaded.
 
