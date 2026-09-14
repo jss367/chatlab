@@ -43,6 +43,11 @@ def read_trials(path):
         if item["id"] in ids:
             raise ValueError("Trial IDs must be unique.")
         ids.add(item["id"])
+        # from_dict takes what a saved run may have recorded, and defaults or
+        # coerces a seed. A trial is a pinned input under a checksum, so the
+        # seed the pane and the export report has to be the one written here.
+        if not isinstance(item.get("maze"), dict) or type(item["maze"].get("seed")) is not int:
+            raise ValueError("Each trial maze needs an integer seed.")
         maze = Maze.from_dict(item["maze"])
         config = item["config"]
         if not isinstance(config, dict) or set(config) - PROMPT_KEYS != CONFIG_KEYS:

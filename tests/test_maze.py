@@ -792,8 +792,11 @@ class MazeTests(unittest.TestCase):
                 callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
                 metrics = views(replay, False, selections, session_id)[7]
                 selected = callbacks["select_token"].fn(replay, session_id, metrics, SimpleNamespace(index=index))
-                frames = list(callbacks["edit_token"].fn(replay, False, session_id, metrics,
-                                                         selected[2], "west", "text"))
+                edit = callbacks["edit_token"]
+                frames = list(edit.fn(replay, False, session_id, metrics, selected[2], "west", "text"))
+                # Every yield has to fill the callback's outputs, or a pane it
+                # forgot keeps describing the run the fork replaced.
+                self.assertTrue(all(len(frame) == len(edit.outputs) for frame in frames))
                 forked = frames[-1][0]
             finally:
                 demo.close()

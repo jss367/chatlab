@@ -364,17 +364,23 @@ def trial_note_text(ep, data=None):
 
     The episode is replaced by several other controls, and a note that still
     named a trial after one of them would have an experimenter running or
-    exporting something else in its name.
+    exporting something else in its name. Uploading a collection does not
+    replace the episode, so what it says about the run stands.
     """
 
-    trial = ep.config.get("trial")
+    parts, trial = [], ep.config.get("trial")
     if trial:
-        verb = "Replaying" if ep.replay_only else "Running"
-        return (f"**{verb}: {html.escape(trial['label'])}**, from {html.escape(trial['title'])}. "
-                "New episode starts a separate run from the controls.")
+        parts.append(f"**{'Replaying' if ep.replay_only else 'Running'}: {html.escape(trial['label'])}**, "
+                     f"from {html.escape(trial['title'])}.")
     if data:
-        return f"**{html.escape(data['title'])}** · {len(data['trials'])} trials. Select one and click Load trial."
-    return "Upload a trial file, choose a trial, then load it. Inspect the maze before playing."
+        count = len(data["trials"])
+        parts.append(f"Loaded **{html.escape(data['title'])}** · {count} trial{'s' if count != 1 else ''}. "
+                     "Select one and click Load trial.")
+    elif not trial:
+        parts.append("Upload a trial file, choose a trial, then load it. Inspect the maze before playing.")
+    else:
+        parts.append("New episode starts a separate run from the controls.")
+    return " ".join(parts)
 
 
 def _build_page(context):
@@ -510,15 +516,15 @@ def _build_page(context):
         stop_replay(ep)
         return (new, *render(new, show, session_id), trial_note_text(new, data), None, *model_button(new))
 
-    def load_trial_file(path):
+    def load_trial_file(path, ep):
         if not path:
-            return None, gr.update(choices=[], value=None), "Choose a trial file."
+            return None, gr.update(choices=[], value=None), trial_note_text(ep)
         try:
             data = read_trials(path)
         except (ValueError, TypeError, KeyError, OSError) as exc:
             raise gr.Error(f"Could not load trials: {exc}") from exc
         return (data, gr.update(choices=[(t["label"], t["id"]) for t in data["trials"]], value=data["trials"][0]["id"]),
-                f"**{html.escape(data['title'])}** · {len(data['trials'])} trials. Select one and click Load trial.")
+                trial_note_text(ep, data))
 
     def load_trial(data, trial_id, ep, show, session_id):
         try:
@@ -704,10 +710,10 @@ def _build_page(context):
         stop_replay(ep)
         # The fork runs under the weights in memory now, so the button stops
         # naming the uploaded run's model.
-        buttons = model_button(new)
-        yield (new, *render(new, show, session_id), None, None, *buttons)
+        buttons, note = model_button(new), trial_note_text(new)
+        yield (new, *render(new, show, session_id), None, None, *buttons, note)
         for frame in play(new, show, session_id, single=True):
-            yield (new, *frame, None, None, *buttons)
+            yield (new, *frame, None, None, *buttons, note)
 
     def show_context(ep):
         # Read on request rather than with every frame: a prompt is thousands
@@ -792,7 +798,8 @@ def _build_page(context):
     prepare.click(prepare_episode, [episode, reveal, selection_session, trial_data, *controls],
                   [episode, *outputs, trial_note, download, models, wanted_model],
                   concurrency_id="maze-view", show_progress="hidden")
-    trial_upload.upload(load_trial_file, trial_upload, [trial_data, trial_picker, trial_note], show_progress="hidden")
+    trial_upload.upload(load_trial_file, [trial_upload, episode], [trial_data, trial_picker, trial_note],
+                        show_progress="hidden")
     trial_load.click(load_trial, [trial_data, trial_picker, episode, reveal, selection_session],
                      [episode, *outputs, *controls, passage, trial_note, edit_selection, download,
                       models, wanted_model],
@@ -820,7 +827,7 @@ def _build_page(context):
     strip.select(select_token, [episode, selection_session, metrics_state],
                  [detail, alternatives, edit_selection, replacement, candidate, editor, transport_status, toggle, pause],
                  queue=False, show_progress="hidden")
-    edit_outputs = [episode, *outputs, edit_selection, download, models, wanted_model]
+    edit_outputs = [episode, *outputs, edit_selection, download, models, wanted_model, trial_note]
     edit_button.click(edit_token, [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate],
                       edit_outputs, concurrency_id="maze-view", show_progress="hidden")
     alternatives.select(branch_alternative, [episode, reveal, selection_session, metrics_state, edit_selection],

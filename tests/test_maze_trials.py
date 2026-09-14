@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import gradio as gr
 
 from extension_api import TokenInspector
-from extensions.maze_experiments.page import build_page
+from extensions.maze_experiments.page import build_page, trial_note_text
 from extensions.maze_experiments.runner import Episode, from_payload
 from extensions.maze_experiments.maze import SYSTEM, default_instruction
 from extensions.maze_experiments.trials import FORMAT, prepare_trial, read_trials
@@ -55,6 +55,15 @@ class TrialFileTests(unittest.TestCase):
         self.payload['trials'] *= 2
         with self.assertRaisesRegex(ValueError, 'unique'):
             self.read()
+        # The seed is a pinned input under a checksum, so a trial cannot leave
+        # it to be defaulted or coerced the way a saved run's may be.
+        for seed in (7.9, True, '7', None):
+            self.payload = copy.deepcopy(good)
+            maze = dict(self.payload['trials'][0]['maze'])
+            maze.pop('seed') if seed is None else maze.update(seed=seed)
+            self.payload['trials'][0]['maze'] = maze
+            with self.assertRaisesRegex(ValueError, 'integer seed'):
+                self.read()
         self.payload = Episode(MAZE, CONFIG).payload()
         with self.assertRaisesRegex(ValueError, 'not a saved replay'):
             self.read()
@@ -86,6 +95,15 @@ class TrialFileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'smaller than 8 MB'):
             read_trials(self.path)
 
+    def test_the_note_calls_a_replay_a_replay_and_a_fork_of_one_live(self):
+        # A fork of an uploaded trial run is a live episode again, so the pane
+        # stops calling it a replay while it regenerates.
+        live = prepare_trial(self.read(), 'clean', Episode(MAZE, CONFIG))
+        self.assertIn('Running: Clean trial', trial_note_text(live))
+        replay = from_payload(json.loads(json.dumps(live.payload())))
+        self.assertTrue(replay.replay_only)
+        self.assertIn('Replaying: Clean trial', trial_note_text(replay))
+
     def test_ui_loads_exact_trial_updates_controls_and_leaves_old_run_intact(self):
         data = self.read()
         context = SimpleNamespace(tokens=TokenInspector(), models=None, data_dir=Path(self.directory.name),
@@ -94,8 +112,9 @@ class TrialFileTests(unittest.TestCase):
             build_page(context)
         self.addCleanup(demo.close)
         callbacks = {fn.fn.__name__: fn for fn in demo.fns.values()}
-        loaded = callbacks['load_trial_file'].fn(str(self.path))
+        loaded = callbacks['load_trial_file'].fn(str(self.path), Episode(MAZE, CONFIG))
         self.assertEqual(loaded[1]['value'], 'clean')
+        self.assertIn('1 trial.', loaded[2])
         old = Episode(MAZE, CONFIG)
         before = old.payload()
         callback = callbacks['load_trial']
@@ -126,6 +145,13 @@ class TrialFileTests(unittest.TestCase):
         self.assertIsNone(fresh[0].config.get('trial'))
         self.assertNotIn('Clean trial', fresh[-4])
         self.assertIn('Example trials', fresh[-4])
+
+        # Uploading another collection replaces no episode, so the run keeps
+        # its name in the pane.
+        upload = callbacks['load_trial_file']
+        still = upload.fn(str(self.path), loaded[0])
+        self.assertIn('Running: Clean trial', still[2])
+        self.assertIn('Example trials', still[2])
 
         path = Path(self.directory.name) / 'run.json'
         path.write_text(json.dumps(loaded[0].payload()))
