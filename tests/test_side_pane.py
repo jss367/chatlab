@@ -4441,6 +4441,7 @@ class SavedSettingsTests(unittest.TestCase):
             "Color tokens by",
             "Thinking mode",
             "Enter sends the message",
+            "Color theme",
             "Hugging Face model ID",
         ]:
             with self.subTest(label=label):
@@ -4620,6 +4621,7 @@ class SavedSettingsTests(unittest.TestCase):
                         "Thinking mode",
                         "Enter sends the message",
                         "Let the system suggest text while typing",
+                        "Color theme",
                         "Hugging Face model ID",
                         "Weight precision",
                     ]

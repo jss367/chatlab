@@ -60,6 +60,10 @@ html, body {{ height: 100%; overflow: hidden; }}
    select the whole row and the whole column. Every table here is read by eye
    or clicked to pick a row, so the arrows only cover the text beside them. */
 .selection-button {{ display: none; }}
+/* The chosen theme's colors ride in a block of their own (see themes.py).
+   A style element applies wherever it lands in the document, so the block
+   holding it takes no room in the layout. */
+#theme-style {{ display: none !important; }}
 #shell {{
   height: 100dvh; min-height: 0; gap: 0; flex-wrap: nowrap;
   align-items: stretch; overflow: hidden;

@@ -10,6 +10,7 @@ import gradio as gr
 
 import charts
 import settings
+import themes
 from thinking import THINKING_CHOICES
 from conversation import (
     MAIN_BRANCH,
@@ -157,6 +158,7 @@ from ui.scoring import (
     score_token_count,
 )
 from ui.settings_page import (
+    apply_theme,
     hardware_card,
     refresh_hardware,
     refresh_thinking_mode,
@@ -230,6 +232,14 @@ def build_app() -> gr.Blocks:
     with gr.Blocks(
         title="ChatLab", css=CSS + TOKEN_MENU_CSS + extension_css(extensions), theme=THEME, fill_width=True
     ) as demo:
+        # The chosen theme's colors, as a stylesheet on the page. Gradio fixes
+        # THEME above when the interface is built, so a theme picked later is
+        # a set of variables written over that one rather than another Blocks;
+        # see the themes module. It is drawn first so nothing is painted in
+        # the built-in colors and then repainted.
+        theme_style = gr.HTML(
+            themes.style_tag(saved.theme), elem_id="theme-style", padding=False
+        )
         conversation_state = gr.State([])
         metrics_state = gr.State(empty_metrics())
         prompt_metrics_state = gr.State(empty_metrics())
@@ -1227,6 +1237,23 @@ def build_app() -> gr.Blocks:
 
                     with gr.Column(min_width=360, elem_id="settings-machine"):
                         with gr.Column(elem_classes=["settings-card"]):
+                            gr.Markdown("## Appearance")
+                            theme_choice = gr.Dropdown(
+                                choices=themes.THEME_CHOICES,
+                                value=saved.theme,
+                                label="Color theme",
+                                info=(
+                                    "The colors the whole interface is drawn in. "
+                                    "Each one follows the system's light and dark "
+                                    "setting rather than fixing one of the two."
+                                ),
+                            )
+                            theme_caption = gr.Markdown(
+                                themes.caption(saved.theme),
+                                elem_classes=["scale-caption"],
+                            )
+
+                        with gr.Column(elem_classes=["settings-card"]):
                             gr.Markdown("## Memory")
                             prefill_token_limit = gr.Number(
                                 value=saved.prefill_token_limit,
@@ -1844,6 +1871,7 @@ def build_app() -> gr.Blocks:
             thinking_mode,
             enter_sends,
             writing_suggestions,
+            theme_choice,
             model_id,
             weight_precision,
         ]
@@ -1857,10 +1885,23 @@ def build_app() -> gr.Blocks:
             color_scale,
             enter_sends,
             writing_suggestions,
+            theme_choice,
             model_id,
             weight_precision,
         ):
             control.change(remember_settings, persisted_inputs, None)
+        # Repainting is separate from saving: the stylesheet has to follow the
+        # dropdown whether the change came from the reader or from the file
+        # being read back on a reload.
+        # always_last so a run down the list lands on the last pick: this
+        # shares the queue with everything else on the page, and with Gradio's
+        # default a repaint still in flight drops the ones behind it.
+        theme_choice.change(
+            apply_theme,
+            theme_choice,
+            [theme_style, theme_caption],
+            trigger_mode="always_last",
+        )
         # The four that belong to a conversation are saved on input, like the
         # write into the conversation itself. Switching conversations sets
         # them, and a save from that would put the sampling of the
@@ -1924,6 +1965,8 @@ def build_app() -> gr.Blocks:
         # startup, not as it is now.
         demo.load(
             restore_settings, None, [*persisted_inputs, prefill_token_limit]
+        ).then(
+            apply_theme, theme_choice, [theme_style, theme_caption]
         ).then(
             update_sampling_label,
             sampling_controls,
