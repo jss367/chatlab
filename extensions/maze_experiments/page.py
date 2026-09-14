@@ -11,6 +11,7 @@ import gradio as gr
 
 from .maze import GOAL_MODES, PASSAGES, SYSTEM, TOOLS, default_instruction, generate
 from .runner import TERMINAL, Episode, context_messages, fork_token_edit, from_payload, stream_episode
+from .trials import prepare_trial, read_trials
 from extension_api import TokenInspector
 
 TOKENS = TokenInspector()
@@ -358,6 +359,43 @@ def views(ep, reveal, selections, session_id, index=None, animate=False):
             "Select a model-generated token above." if changed else gr.skip(), [] if changed else gr.skip())
 
 
+# The note is Markdown, and the names in it come from a file that may have
+# been written anywhere. Escaping the HTML leaves `**` and `[…](…)` to be read
+# as syntax, which is enough to close the bold span the provenance is written
+# in and continue in a voice that looks like the workbench's own.
+MARKDOWN = str.maketrans({character: "\\" + character for character in "\\`*_{}[]()#+-.!>|~"})
+
+
+def as_text(value):
+    """A name from a trial file, read as the characters it is."""
+
+    return html.escape(value).translate(MARKDOWN)
+
+
+def trial_note_text(ep, data=None):
+    """What the trials pane says about the episode on screen right now.
+
+    The episode is replaced by several other controls, and a note that still
+    named a trial after one of them would have an experimenter running or
+    exporting something else in its name. Uploading a collection does not
+    replace the episode, so what it says about the run stands.
+    """
+
+    parts, trial = [], ep.config.get("trial")
+    if trial:
+        parts.append(f"**{'Replaying' if ep.replay_only else 'Running'}: {as_text(trial['label'])}**, "
+                     f"from {as_text(trial['title'])}.")
+    if data:
+        count = len(data["trials"])
+        parts.append(f"Loaded **{as_text(data['title'])}** · {count} trial{'s' if count != 1 else ''}. "
+                     "Select one and click Load trial.")
+    elif not trial:
+        parts.append("Upload a trial file, choose a trial, then load it. Inspect the maze before playing.")
+    else:
+        parts.append("New episode starts a separate run from the controls.")
+    return " ".join(parts)
+
+
 def _build_page(context):
     default_config = dict(supplied_moves=3, interrupt_after=3, interruption_text=next(iter(PASSAGES.values())),
                           prefix_tokens=8, temperature=.7, sampling_seed=20260914, per_turn_tokens=1024,
@@ -371,6 +409,7 @@ def _build_page(context):
     edit_selection = gr.State(None)
     # The model a saved run needs, for the button that opens the Models page.
     wanted_model = gr.State("")
+    trial_data = gr.State(None)
     gr.Markdown("# Maze workbench")
     with gr.Row(elem_id="maze-workspace"):
         with gr.Column(elem_id="maze-scenario"):
@@ -406,6 +445,12 @@ def _build_page(context):
                 budget = gr.Number(value=8192, precision=0, minimum=1, maximum=32768, label="Total sampled-token limit")
                 attempts = gr.Number(value=32, precision=0, minimum=1, maximum=256, label="Tool-attempt limit")
             models = gr.Button("Choose / load model", size="sm")
+            with gr.Accordion("Experiment trials", open=False):
+                trial_upload = gr.File(label="Trial definitions JSON", file_types=[".json"], type="filepath")
+                trial_picker = gr.Dropdown(choices=[], label="Trial", interactive=True,
+                                           info="Type to filter a long collection.")
+                trial_load = gr.Button("Load trial", size="sm", elem_id="maze-load-trial")
+                trial_note = gr.Markdown(trial_note_text(initial))
             with gr.Accordion("Saved runs", open=False):
                 save = gr.Button("Export run JSON", size="sm")
                 download = gr.File(label="Saved run", interactive=False)
@@ -470,7 +515,7 @@ def _build_page(context):
     controls = [size, seed, distance, openness, supplied, after, text, prefix, temperature, sampling_seed, per_turn,
                 budget, attempts, goal_mode, goal_hint, system_prompt, instruction]
 
-    def prepare_episode(ep, show, session_id, *values):
+    def prepare_episode(ep, show, session_id, data, *values):
         if ep.busy:
             raise gr.Error("Stop or pause this episode before starting another.")
         n, s, d, o, supplied_n, trigger, passage_text, count, temp, sample_seed, per, total, tries, mode, hint, system_text, instruction_text = values
@@ -482,7 +527,34 @@ def _build_page(context):
         except (ValueError, TypeError) as exc:
             raise gr.Error(str(exc)) from exc
         stop_replay(ep)
-        return (new, *render(new, show, session_id), None, *model_button(new))
+        return (new, *render(new, show, session_id), trial_note_text(new, data), None, *model_button(new))
+
+    def load_trial_file(path, ep, loaded):
+        if not path:
+            return None, gr.update(choices=[], value=None), trial_note_text(ep)
+        try:
+            data = read_trials(path)
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            # A file that will not load replaces nothing, so the picker keeps
+            # offering the collection it was offering. The widget names the
+            # file that failed, so the error names the one that is still there.
+            kept = f" Still loaded: {as_text(loaded['title'])}." if loaded else ""
+            raise gr.Error(f"Could not load trials: {exc}{kept}") from exc
+        return (data, gr.update(choices=[(t["label"], t["id"]) for t in data["trials"]], value=data["trials"][0]["id"]),
+                trial_note_text(ep, data))
+
+    def load_trial(data, trial_id, ep, show, session_id):
+        try:
+            if data is None:
+                raise ValueError("Load a trial definitions file first.")
+            new = prepare_trial(data, trial_id, ep)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise gr.Error(str(exc)) from exc
+        stop_replay(ep)
+        # The same description a loaded run gets: the trial is in the episode
+        # now, so nothing here has to spell the controls out a second time.
+        return (new, *render(new, show, session_id), *scenario_values(new),
+                trial_note_text(new), None, None, *model_button(new))
 
     def play(ep, show, session_id, single=False):
         last_board = None
@@ -589,11 +661,11 @@ def _build_page(context):
     def export(ep):
         return export_run(ep, runs_dir(context))
 
-    def load(path, ep, show, session_id):
+    def load(path, ep, show, session_id, data):
         if ep.busy:
             raise gr.Error("Pause or stop this episode before loading a replay.")
         if not path:
-            return (gr.skip(),) * (len(outputs) + len(controls) + 4)
+            return (gr.skip(),) * (len(outputs) + len(controls) + 5)
         try:
             if Path(path).stat().st_size > 50_000_000:
                 raise ValueError("Run files must be smaller than 50 MB.")
@@ -605,7 +677,7 @@ def _build_page(context):
         except (ValueError, TypeError, KeyError, IndexError, OSError) as exc:
             raise gr.Error(f"Could not load run: {exc}") from exc
         stop_replay(ep)
-        return (replay, *rendered, *values, *model_button(replay))
+        return (replay, *rendered, *values, trial_note_text(replay, data), *model_button(replay))
 
     def select_token(ep, session_id, metrics, evt: gr.SelectData):
         index = evt.index[0] if isinstance(evt.index, (tuple, list)) else evt.index
@@ -634,7 +706,7 @@ def _build_page(context):
                 gr.update(choices=choices, value="text"), gr.update(visible=True),
                 transport_text(ep), *transport_buttons(ep))
 
-    def edit_token(ep, show, session_id, metrics, selected, text_value, candidate_value):
+    def edit_token(ep, show, session_id, metrics, selected, text_value, candidate_value, data):
         try:
             if selected is None or selected["stamp"] != metrics[0]:
                 raise ValueError(STALE_TOKEN)
@@ -655,10 +727,10 @@ def _build_page(context):
         stop_replay(ep)
         # The fork runs under the weights in memory now, so the button stops
         # naming the uploaded run's model.
-        buttons = model_button(new)
-        yield (new, *render(new, show, session_id), None, None, *buttons)
+        buttons, note = model_button(new), trial_note_text(new, data)
+        yield (new, *render(new, show, session_id), None, None, *buttons, note)
         for frame in play(new, show, session_id, single=True):
-            yield (new, *frame, None, None, *buttons)
+            yield (new, *frame, None, None, *buttons, note)
 
     def show_context(ep):
         # Read on request rather than with every frame: a prompt is thousands
@@ -671,7 +743,7 @@ def _build_page(context):
     context_refresh.click(show_context, episode, [context_note, context_body], show_progress="hidden")
     context_pane.expand(show_context, episode, [context_note, context_body], show_progress="hidden")
 
-    def branch_alternative(ep, show, session_id, metrics, selected, evt: gr.SelectData):
+    def branch_alternative(ep, show, session_id, metrics, selected, data, evt: gr.SelectData):
         """One click in the probabilities table branches into that alternative.
 
         The row is read against the token the editor is open on, so a table
@@ -687,7 +759,7 @@ def _build_page(context):
             candidate = metric.get("top_candidates", [])[row]
         except (IndexError, KeyError, TypeError, ValueError) as exc:
             raise gr.Error(STALE_TOKEN) from exc
-        yield from edit_token(ep, show, session_id, metrics, selected, "", str(candidate["token_id"]))
+        yield from edit_token(ep, show, session_id, metrics, selected, "", str(candidate["token_id"]), data)
 
     def offer_menu(ep, session_id, metrics, request_id, evt: gr.SelectData):
         """Answer one right-click with the alternatives recorded for that token."""
@@ -704,7 +776,7 @@ def _build_page(context):
             verb="Branch this run at", label="Your own replacement text",
             submit="Replace token and regenerate")
 
-    def edit_from_menu(ep, show, session_id, metrics, action):
+    def edit_from_menu(ep, show, session_id, metrics, action, data):
         """Apply a branch chosen in the menu through the editor's own path."""
         try:
             chosen = json.loads(action)
@@ -733,16 +805,29 @@ def _build_page(context):
             candidate_value = str(candidates[index]["token_id"])
         else:
             raise gr.Error(STALE_TOKEN)
-        yield from edit_token(ep, show, session_id, metrics, selection, text_value, candidate_value)
+        yield from edit_token(ep, show, session_id, metrics, selection, text_value, candidate_value, data)
 
     # Replay is per browser; the model service arbitrates generation globally.
     # Never use Gradio cancels here: it closes generators and would turn Pause
     # or an inspection click into a terminal stop with a partial response.
     toggle.click(play_back, [episode, reveal, selection_session, pace], outputs,
                  show_progress="hidden", concurrency_limit=None, trigger_mode="multiple")
-    prepare.click(prepare_episode, [episode, reveal, selection_session, *controls],
-                  [episode, *outputs, download, models, wanted_model],
+    prepare.click(prepare_episode, [episode, reveal, selection_session, trial_data, *controls],
+                  [episode, *outputs, trial_note, download, models, wanted_model],
                   concurrency_id="maze-view", show_progress="hidden")
+    # On the view's own queue, so a Load trial click cannot run between the
+    # upload arriving and the picker it fills, preparing a trial from the
+    # collection being replaced.
+    # Clearing the widget is its own event, and it means the collection is
+    # gone: the same handler reads the empty path and empties the picker with
+    # it, so nothing is left to load from a file no longer chosen.
+    for event in (trial_upload.upload, trial_upload.clear):
+        event(load_trial_file, [trial_upload, episode, trial_data], [trial_data, trial_picker, trial_note],
+              concurrency_id="maze-view", show_progress="hidden")
+    trial_load.click(load_trial, [trial_data, trial_picker, episode, reveal, selection_session],
+                     [episode, *outputs, *controls, passage, trial_note, edit_selection, download,
+                      models, wanted_model],
+                     concurrency_id="maze-view", show_progress="hidden")
     back.click(step_back, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")
     forward.click(step_forward, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")
     command_outputs = [state_text, transport_status, toggle, pause]
@@ -766,20 +851,23 @@ def _build_page(context):
     strip.select(select_token, [episode, selection_session, metrics_state],
                  [detail, alternatives, edit_selection, replacement, candidate, editor, transport_status, toggle, pause],
                  queue=False, show_progress="hidden")
-    edit_outputs = [episode, *outputs, edit_selection, download, models, wanted_model]
-    edit_button.click(edit_token, [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate],
+    edit_outputs = [episode, *outputs, edit_selection, download, models, wanted_model, trial_note]
+    edit_button.click(edit_token,
+                      [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate,
+                       trial_data],
                       edit_outputs, concurrency_id="maze-view", show_progress="hidden")
-    alternatives.select(branch_alternative, [episode, reveal, selection_session, metrics_state, edit_selection],
+    alternatives.select(branch_alternative,
+                        [episode, reveal, selection_session, metrics_state, edit_selection, trial_data],
                         edit_outputs, concurrency_id="maze-view", show_progress="hidden")
     strip.select(offer_menu, [episode, selection_session, metrics_state, menu_request], menu_response,
                  queue=False, show_progress="hidden")
     # The menu carries the token it was opened on, so the branch it sends back
     # does not depend on which click Gradio snapshotted for this listener.
-    menu_action.input(edit_from_menu, [episode, reveal, selection_session, metrics_state, menu_action],
+    menu_action.input(edit_from_menu, [episode, reveal, selection_session, metrics_state, menu_action, trial_data],
                       edit_outputs, concurrency_id="maze-view", show_progress="hidden")
     save.click(export, episode, download, show_progress="hidden")
-    upload.upload(load, [upload, episode, reveal, selection_session],
-                  [episode, *outputs, *controls, passage, models, wanted_model],
+    upload.upload(load, [upload, episode, reveal, selection_session, trial_data],
+                  [episode, *outputs, *controls, passage, trial_note, models, wanted_model],
                   concurrency_id="maze-view", show_progress="hidden")
     context.navigation.open_models(models, wanted_model)
 

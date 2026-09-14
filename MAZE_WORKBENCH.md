@@ -23,6 +23,12 @@ An uploaded run itself stays read-only: Play and Next only replay recorded respo
 
 A dashed path marks supplied moves; the solid indigo path marks actual accepted model moves. The amber ring marks the position where the interruption was inserted. The board always shows you the destination, including in hidden and hint modes. The shortest-route overlay is only for the viewer, never part of the prompt. The status reports the current episode's goal mode and whether its setup prompt is default or edited; editing those controls affects the next new episode.
 
+## Experiment trials
+
+A trial file holds the inputs for runs you want to repeat: each trial pins one map and one set of settings, so a collection is a whole experiment in one file. Open **Experiment trials** in the scenario pane, upload the JSON, pick a trial and click **Load trial**. That prepares the episode without generating anything: the board and the controls change to the trial's own, and **Play** or **Next** runs it. **New episode · apply settings** still generates a fresh map from the controls, so it leaves the trial behind. Each run records its trial ID, label, collection title and the file's checksum, and exports keep them. Saved replays stay separate and read-only.
+
+The format is `chatlab-maze-trials-1`: a `title` and a `trials` list. Each entry supplies a unique `id`, a `label` that is descriptive and unique too, since it is what the picker shows, a `maze` (`grid`, `start`, `goal`, and an integer `seed`, which a trial has to write rather than leave to a default), `openness` and a `config`. The configuration requires `supplied_moves`, `interrupt_after`, `interruption_text`, `prefix_tokens`, `temperature`, `sampling_seed`, `per_turn_tokens`, `token_budget`, `attempt_budget`, `goal_mode` and `goal_hint`, and may pin `system_prompt` and `instruction`; a trial that leaves those out runs the stock wording for its goal mode. A file may hold up to 2000 trials and 8 MB, which is room for a full condition sweep across a set of mazes. The picker filters as you type, so labels that open with the maze and narrow from there (`Maze 7 · Clouds · Matched · 256 tokens`) stay quick to find in a collection that size. The model is whichever one ChatLab has loaded, and each result records which one it was.
+
 ## Run locally
 
 Use the repository's normal Python environment and dependencies:

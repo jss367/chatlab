@@ -191,7 +191,7 @@ class MazeTests(unittest.TestCase):
                 self.assertTrue(selected[5]['visible'])
                 self.assertIn(("'x' · token 120", '120'), selected[4]['choices'])
                 edit = callbacks['edit_token']
-                frames = list(edit.fn(ep, False, session_id, metrics, selected[2], 'ignored', '120'))
+                frames = list(edit.fn(ep, False, session_id, metrics, selected[2], 'ignored', '120', None))
                 self.assertTrue(all(len(frame) == len(edit.outputs) for frame in frames))
                 result = frames[-1][0]
                 self.assertEqual(result.turns[0]['text'], 'axyz')
@@ -201,7 +201,7 @@ class MazeTests(unittest.TestCase):
                 self.assertTrue((Path(directory) / f'{result.run_id}.json').exists())
                 self.assertEqual(ep.payload(), original)
                 with self.assertRaisesRegex(gr.Error, 'current response'):
-                    list(edit.fn(ep, False, session_id, metrics, selected[2], 'x', 'text'))
+                    list(edit.fn(ep, False, session_id, metrics, selected[2], 'x', 'text', None))
             finally:
                 demo.close()
 
@@ -228,10 +228,11 @@ class MazeTests(unittest.TestCase):
                 # from an earlier one, must not fork anything.
                 for stale in (None, dict(selected[2], stamp='gone')):
                     with self.assertRaisesRegex(gr.Error, 'current response'):
-                        list(branch.fn(ep, False, session_id, metrics, stale, SimpleNamespace(index=(0, 1))))
+                        list(branch.fn(ep, False, session_id, metrics, stale, None, SimpleNamespace(index=(0, 1))))
                 with self.assertRaisesRegex(gr.Error, 'current response'):
-                    list(branch.fn(ep, False, session_id, metrics, selected[2], SimpleNamespace(index=(4, 1))))
-                frames = list(branch.fn(ep, False, session_id, metrics, selected[2], SimpleNamespace(index=(0, 1))))
+                    list(branch.fn(ep, False, session_id, metrics, selected[2], None, SimpleNamespace(index=(4, 1))))
+                frames = list(branch.fn(ep, False, session_id, metrics, selected[2], None,
+                                SimpleNamespace(index=(0, 1))))
                 self.assertTrue(all(len(frame) == len(branch.outputs) for frame in frames))
                 result = frames[-1][0]
                 self.assertEqual(result.token_edit['replacement_ids'], [120])
@@ -277,7 +278,7 @@ class MazeTests(unittest.TestCase):
                     **payload['selection'], 'view_id': ['other-run', 0, 0]}))
                 menu_edit = callbacks['edit_from_menu']
                 with self.assertRaisesRegex(gr.Error, 'current response'):
-                    list(menu_edit.fn(ep, False, session_id, metrics, foreign))
+                    list(menu_edit.fn(ep, False, session_id, metrics, foreign, None))
             finally:
                 demo.close()
 
@@ -288,7 +289,7 @@ class MazeTests(unittest.TestCase):
                 try:
                     menu_edit = callbacks['edit_from_menu']
                     action = json.dumps({**chosen, 'selection': payload['selection']})
-                    frames = list(menu_edit.fn(ep, False, session_id, metrics, action))
+                    frames = list(menu_edit.fn(ep, False, session_id, metrics, action, None))
                     self.assertTrue(all(len(frame) == len(menu_edit.outputs) for frame in frames))
                     result = frames[-1][0]
                     self.assertEqual(result.turns[0]['text'], expected)
@@ -792,8 +793,11 @@ class MazeTests(unittest.TestCase):
                 callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
                 metrics = views(replay, False, selections, session_id)[7]
                 selected = callbacks["select_token"].fn(replay, session_id, metrics, SimpleNamespace(index=index))
-                frames = list(callbacks["edit_token"].fn(replay, False, session_id, metrics,
-                                                         selected[2], "west", "text"))
+                edit = callbacks["edit_token"]
+                frames = list(edit.fn(replay, False, session_id, metrics, selected[2], "west", "text", None))
+                # Every yield has to fill the callback's outputs, or a pane it
+                # forgot keeps describing the run the fork replaced.
+                self.assertTrue(all(len(frame) == len(edit.outputs) for frame in frames))
                 forked = frames[-1][0]
             finally:
                 demo.close()
@@ -1313,14 +1317,15 @@ class MazeTests(unittest.TestCase):
                 ep = Episode(MAZE, CONFIG)
                 values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10,
                           'coordinates', '', 'Be brief.', 'Reach the star.')
-                new = callbacks['prepare_episode'](ep, False, session, *values)[0]
+                new = callbacks['prepare_episode'](ep, False, session, None, *values)[0]
                 self.assertEqual(new.messages[0]['content'], 'Be brief.')
                 self.assertTrue(new.messages[1]['content'].startswith('Reach the star.\n{'))
-                loaded = callbacks['load'](str(new.export()), ep, False, session)
+                loaded = callbacks['load'](str(new.export()), ep, False, session, None)
                 self.assertEqual(loaded[0].config['instruction'], 'Reach the star.')
                 # The pane describes the run on screen, so every control follows
-                # it, ahead of the model button and the ID it hands over.
-                filled = loaded[-20:-2]
+                # it, ahead of the trial note, the model button and the ID it
+                # hands over.
+                filled = loaded[-21:-3]
                 self.assertEqual(filled[:14], values[:14])
                 self.assertEqual((filled[14]['value'], filled[14]['visible']), ('', False))
                 self.assertEqual(filled[15:], ('Be brief.', 'Reach the star.', 'Custom'))
@@ -1352,13 +1357,13 @@ class MazeTests(unittest.TestCase):
                 build_page(context)
             try:
                 callbacks = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}
-                loaded = callbacks['load'](str(ep.export()), Episode(MAZE, CONFIG), False, session)
+                loaded = callbacks['load'](str(ep.export()), Episode(MAZE, CONFIG), False, session, None)
                 self.assertTrue(loaded[0].replay_only)
                 self.assertEqual(loaded[-2]['value'], 'Load test/model')
                 self.assertEqual(loaded[-1], 'test/model')
                 values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10,
                           'coordinates', '', 'Be brief.', 'Reach the star.')
-                fresh = callbacks['prepare_episode'](loaded[0], False, session, *values)
+                fresh = callbacks['prepare_episode'](loaded[0], False, session, None, *values)
                 self.assertEqual(fresh[-2]['value'], 'Choose / load model')
                 self.assertEqual(fresh[-1], '')
                 # The ID reaches the Models page through the state the page
