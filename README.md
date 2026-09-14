@@ -668,17 +668,34 @@ and anything that can reach one can already do everything the other can.
 
 ## Releasing a new version
 
-1. Set the new number in `version.py` and merge it to `main`.
-2. Tag that commit and push the tag:
+```bash
+./scripts/release.sh
+```
 
-   ```bash
-   git tag v0.2.0 && git push origin v0.2.0
-   ```
+The script bumps the minor version in `version.py`, lands it on `main`,
+builds `ChatLab.app` from the commit it landed, runs the tests and the
+bundle's smoke test, tags that commit, publishes a GitHub Release with
+`ChatLab-macos-arm64.zip` and its `.sha256` checksum, and swaps the new
+bundle into `/Applications`. It refuses to start on a dirty tree or on a
+checkout holding commits that are not on `origin/main`, and it stops before
+publishing if the zip exceeds GitHub's 2 GB asset limit. Three flags:
+`--version X.Y.Z` releases a number of your choosing, `--notes-file FILE`
+supplies release notes instead of GitHub's generated ones, and
+`--skip-install` leaves the installed app alone.
 
-The `Release macOS app` workflow builds `ChatLab.app` on an Apple Silicon
-runner, smoke-tests it, and attaches `ChatLab-macos-arm64.zip` and its
-`.sha256` checksum to a GitHub Release for that tag. It fails if the tag
-disagrees with `version.py` or the zip exceeds GitHub's 2 GB asset limit.
+Run it again to finish an interrupted release. A version that is on `main`
+without a published release is completed rather than bumped past, and an
+existing tag is reused when it already names that commit. Once the release is
+published the bare command cuts the next one, so a run that died in its install
+step is finished with `--version` naming the version on `main`: the tag and the
+release are left as they are and the bundle is rebuilt and installed.
+
+The build needs a Mac with a real GPU. GitHub's hosted macOS runners report a
+Metal device backed by no memory, so the bundle's smoke test fails there while
+allocating a few kilobytes. `Release macOS app` therefore runs only when it is
+dispatched by hand with a tag, and asks for a self-hosted Apple Silicon runner.
+No such runner is registered, so a dispatch queues until one is.
+
 Installed apps offer the release the next time they start; the updater
 verifies the download against the published checksum and confirms the
 unpacked bundle is ChatLab at the release's version before installing it.
