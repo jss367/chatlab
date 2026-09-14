@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import threading
 from dataclasses import dataclass
+from string import punctuation
 from weakref import WeakKeyDictionary
 
 import gradio as gr
@@ -393,6 +394,25 @@ def event_index(event: gr.SelectData) -> int:
     return int(index)
 
 
+# Markdown is as much a rendering language as HTML is, so text that came out of
+# a file the reader opened has to be neutered in both. Escaping the HTML alone
+# leaves `![beacon](https://elsewhere.example/pixel)` live, and the detail panel
+# would fetch that image the moment the token was clicked. CommonMark lets any
+# ASCII punctuation carry a backslash, so the whole set goes through, bar the
+# two characters that hold the entities html.escape() has just written.
+MARKDOWN_LITERAL = str.maketrans(
+    {character: f"\\{character}" for character in punctuation if character not in "&;"}
+)
+
+
+def as_plain_text(text: str) -> str:
+    """One recorded sentence, rendered as the characters it actually contains."""
+
+    # quote=False: an entity of the &#x27; shape would need its own # escaped,
+    # and escaping that character is what breaks the entity back open.
+    return html.escape(text, quote=False).translate(MARKDOWN_LITERAL)
+
+
 def unscored_explanation(metric: dict) -> str:
     """Why one token carries no measurement, in the words of whatever recorded it.
 
@@ -415,9 +435,7 @@ def unscored_explanation(metric: dict) -> str:
         )
     if reason == UNSCORED_FIRST_TOKEN:
         return "Nothing came before this token, so the model never predicted it."
-    # A recorded sentence, not a known tag: it reaches Markdown, so it is
-    # escaped like any other value read out of a saved run.
-    return html.escape(reason)
+    return as_plain_text(reason)
 
 
 def describe_token(metric: dict) -> tuple[str, list[list]]:
