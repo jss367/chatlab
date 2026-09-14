@@ -78,10 +78,10 @@ else
     target=$current
     echo "v$current is not published; finishing that release rather than bumping"
 fi
-case "$target" in
-    [0-9]*.[0-9]*.[0-9]*) ;;
-    *) die "Not a MAJOR.MINOR.PATCH version: $target" ;;
-esac
+# updater.parse_version accepts numbers and dots and nothing else, so a
+# version it cannot read is a release every installed app would skip.
+echo "$target" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+    || die "Not a MAJOR.MINOR.PATCH version: $target"
 if released "$target"; then
     die "v$target is already published; pass --version for a different one."
 fi
@@ -125,8 +125,12 @@ else
     git tag -a "$tag" -m "ChatLab $target" "$release_commit"
 fi
 git push --quiet origin "$tag"
-remote_tag=$(git ls-remote --tags origin "$tag^{}" | awk '{print $1}')
-[ "$remote_tag" = "$release_commit" ] || die "$tag on GitHub names $remote_tag, not $release_commit."
+# Only an annotated tag has a peeled ref; a lightweight one, as an earlier
+# release made by hand may have left behind, is itself the commit.
+remote_tag=$(git ls-remote origin "refs/tags/$tag^{}" | awk '{print $1}')
+[ -n "$remote_tag" ] || remote_tag=$(git ls-remote origin "refs/tags/$tag" | awk '{print $1}')
+[ "$remote_tag" = "$release_commit" ] \
+    || die "$tag on GitHub names ${remote_tag:-nothing}, not $release_commit."
 
 step "Packaging the bundle"
 staging=$(mktemp -d)

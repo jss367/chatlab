@@ -35,6 +35,9 @@ printf '#!/bin/sh\nexit 0\n' > "$root/bin/open"
 chmod +x "$root/bin/gh" "$root/bin/open"
 
 git init -q --bare "$root/origin.git"
+# The default branch of a fresh repository is master on an unconfigured Git,
+# and every clone below wants main.
+git -C "$root/origin.git" symbolic-ref HEAD refs/heads/main
 git clone -q "$root/origin.git" "$root/work" 2>/dev/null
 cd "$root/work"
 git config user.email t@example.invalid; git config user.name Test
@@ -116,7 +119,7 @@ check "message" "$(grep -c 'not on origin/main' "$root/err.txt")" 1
 
 echo "== 7. a push that loses a race rebases and retries =="
 git checkout -q --detach origin/main
-git clone -q "$root/origin.git" "$root/other" 2>/dev/null
+git clone -q --branch main "$root/origin.git" "$root/other" 2>/dev/null
 git -C "$root/other" config user.email o@example.invalid
 git -C "$root/other" config user.name Other
 mkdir -p .git/hooks
@@ -141,6 +144,21 @@ check "competing commit kept" "$(git log origin/main --format=%s | grep -c 'Comp
 check "version commit on top" "$(git log -1 --format=%s origin/main)" "Release ChatLab 0.19.0"
 check "tag follows the rebase" "$(git ls-remote --tags "$root/origin.git" 'v0.19.0^{}' | awk '{print $1}')" "$(git rev-parse origin/main)"
 rm -f .git/hooks/pre-push
+
+echo "== 8. a lightweight tag from an earlier hand-made release is accepted =="
+git checkout -q --detach origin/main
+sed -i '' 's/^__version__ = .*/__version__ = "0.20.0"/' version.py
+git commit -qam "Release ChatLab 0.20.0" && git push -q origin HEAD:main
+git tag v0.20.0 && git push -q origin v0.20.0
+before=$(git rev-parse HEAD)
+code=$(run); check "exit 0" "$code" 0
+git fetch -q origin main
+check "no extra commit" "$(git rev-parse origin/main)" "$before"
+check "released 0.20.0" "$(tail -1 "$RELHARNESS_STATE")" v0.20.0
+
+echo "== 9. a version the updater could not read is refused =="
+code=$(run --version 1.2.3beta); check "exit 1" "$code" 1
+check "message" "$(grep -c 'Not a MAJOR.MINOR.PATCH' "$root/err.txt")" 1
 
 echo
 echo "$pass passed, $fail failed"
