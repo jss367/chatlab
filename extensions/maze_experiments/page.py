@@ -421,7 +421,8 @@ def _build_page(context):
                 edit_button = gr.Button("Replace token and regenerate", elem_id="maze-edit-token")
                 gr.Markdown("Editing creates a new run from this token. The original run is saved.")
                 with gr.Accordion("Token probabilities", open=False):
-                    alternatives = gr.Dataframe(headers=["Token ID", "Text", "Raw probability"], interactive=False)
+                    alternatives = gr.Dataframe(headers=["Token ID", "Text", "Raw probability"], interactive=False,
+                                                label="Click a row to branch this response into that token")
             gr.Markdown("## Movement history\nSelect a row to show its position and response.")
             events = gr.Dataframe(value=timeline(initial), headers=["Response", "Position", "Direction", "Result"],
                                   interactive=False, wrap=True, max_height=260, elem_id="maze-history")
@@ -648,6 +649,24 @@ def _build_page(context):
     context_refresh.click(show_context, episode, [context_note, context_body], show_progress="hidden")
     context_pane.expand(show_context, episode, [context_note, context_body], show_progress="hidden")
 
+    def branch_alternative(ep, show, session_id, metrics, selected, evt: gr.SelectData):
+        """One click in the probabilities table branches into that alternative.
+
+        The row is read against the token the editor is open on, so a table
+        left over from an earlier selection cannot fork on a token nobody
+        picked. Everything after that is the button's path, with the clicked
+        alternative standing in for the dropdown.
+        """
+        row = evt.index[0] if isinstance(evt.index, (tuple, list)) else evt.index
+        try:
+            if selected is None or not metrics or selected["stamp"] != metrics[0]:
+                raise ValueError("Select a token in the current response again.")
+            _view_id, _index, metric = selections.resolve(session_id, metrics, selected["index"])
+            candidate = metric.get("top_candidates", [])[row]
+        except (IndexError, KeyError, TypeError, ValueError) as exc:
+            raise gr.Error("Select a token in the current response again.") from exc
+        yield from edit_token(ep, show, session_id, metrics, selected, "", str(candidate["token_id"]))
+
     # Replay is per browser; the model service arbitrates generation globally.
     # Never use Gradio cancels here: it closes generators and would turn Pause
     # or an inspection click into a terminal stop with a partial response.
@@ -682,6 +701,9 @@ def _build_page(context):
     edit_button.click(edit_token, [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate],
                       [episode, *outputs, edit_selection, download, models, wanted_model],
                       concurrency_id="maze-view", show_progress="hidden")
+    alternatives.select(branch_alternative, [episode, reveal, selection_session, metrics_state, edit_selection],
+                        [episode, *outputs, edit_selection, download, models, wanted_model],
+                        concurrency_id="maze-view", show_progress="hidden")
     save.click(export, episode, download, show_progress="hidden")
     upload.upload(load, [upload, episode, reveal, selection_session],
                   [episode, *outputs, *controls, passage, models, wanted_model],
