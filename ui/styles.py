@@ -56,6 +56,10 @@ html, body {{ height: 100%; overflow: hidden; }}
 .gradio-container {{ min-height: 0 !important; }}
 .gradio-container .app {{ padding: 0 !important; }}
 .gradio-container footer {{ display: none !important; }}
+/* Selecting a cell in any table makes Gradio sprout two accent arrows that
+   select the whole row and the whole column. Every table here is read by eye
+   or clicked to pick a row, so the arrows only cover the text beside them. */
+.selection-button {{ display: none; }}
 #shell {{
   height: 100dvh; min-height: 0; gap: 0; flex-wrap: nowrap;
   align-items: stretch; overflow: hidden;
@@ -234,8 +238,6 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 #model-search-results tbody td:not(:first-child) .text {{ white-space: nowrap; }}
 /* The page's own button border (above) would box every column heading. */
 #model-search-results button {{ border-width: 0; }}
-/* A click picks a model, so whole-row and whole-column selection mean nothing here. */
-#model-search-results .selection-button {{ display: none; }}
 #models-page .model-list {{ padding: 0; border: 0; }}
 #models-page .model-list label {{ padding: 12px; border-width: 1px; border-radius: 8px; }}
 #models-page .block.model-detail, #settings-page .block.model-detail {{
