@@ -1,7 +1,7 @@
 """Single source of truth for the ChatLab release version.
 
-Bump this, commit, then tag the commit ``v<version>`` and push the tag. The
-release workflow refuses to publish when the tag and this value disagree.
+``scripts/release.sh`` writes this, tags the commit ``v<version>`` and
+publishes the release; nothing else should need to set it by hand.
 """
 
 __version__ = "0.15.0"
