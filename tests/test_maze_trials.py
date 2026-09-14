@@ -81,6 +81,10 @@ class TrialFileTests(unittest.TestCase):
         self.payload['trials'] = [trial | dict(id=f'trial-{n:04d}') for n in range(2001)]
         with self.assertRaisesRegex(ValueError, '1\u20132000 trials'):
             self.read()
+        # Refused on its size alone, before anything reads or parses it.
+        self.path.write_text('x' * 8_000_001)
+        with self.assertRaisesRegex(ValueError, 'smaller than 8 MB'):
+            read_trials(self.path)
 
     def test_ui_loads_exact_trial_updates_controls_and_leaves_old_run_intact(self):
         data = self.read()

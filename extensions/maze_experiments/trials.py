@@ -18,9 +18,13 @@ PROMPT_KEYS = {"system_prompt", "instruction"}
 
 
 def read_trials(path):
-    raw = Path(path).read_bytes()
-    if len(raw) > 8_000_000:
+    # Size first, as the saved-run loader does: nothing caps what the file
+    # widget accepts, so a huge pick would otherwise be read whole to be told
+    # it is too big.
+    path = Path(path)
+    if path.stat().st_size > 8_000_000:
         raise ValueError("Trial files must be smaller than 8 MB.")
+    raw = path.read_bytes()
     data = json.loads(raw)
     if not isinstance(data, dict) or data.get("format") != FORMAT:
         raise ValueError("Choose a ChatLab maze trial file, not a saved replay.")
