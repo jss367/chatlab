@@ -23,6 +23,7 @@ import gradio as gr
 from gradio.utils import get_upload_folder
 
 import api
+import branding
 import charts
 import library
 import logs
@@ -407,6 +408,7 @@ if __name__ == "__main__":
         inbrowser=conductor_port is None,
         server_port=int(conductor_port) if conductor_port else None,
         prevent_thread_lock=True,
+        favicon_path=branding.favicon_path(),
     )
     api.attach(demo.app)
     demo.block_thread()

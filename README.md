@@ -75,6 +75,13 @@ downloaded on first use and remain in the standard Hugging Face cache, which
 keeps the app bundle manageable and lets terminal and desktop launches reuse the
 same downloads.
 
+The icon is drawn from `assets/chatlab-logo.png`, which arrives as a tile on a
+black square. `scripts/make_icons.py` cuts the tile out of that surround and
+writes the two files the app uses: `assets/ChatLab.icns` for the Dock and the
+Finder, and `assets/icon.png` for the browser tab the window is really made of.
+Both are committed, so a build does not run it; run it after replacing the
+drawing.
+
 ### In Conductor
 
 Create a workspace for this repository. Its setup script creates the Python environment and installs the dependencies. Use the **ChatLab** action to start the app on the workspace's assigned port.
