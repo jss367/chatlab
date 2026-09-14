@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import threading
 from dataclasses import dataclass
+from string import punctuation
 from weakref import WeakKeyDictionary
 
 import gradio as gr
@@ -20,6 +21,7 @@ from token_metrics import (
     COLOR_SCALES,
     DEFAULT_COLOR_SCALE,
     UNSCORED_BEYOND_LIMIT,
+    UNSCORED_FIRST_TOKEN,
     category_for,
 )
 from ui import runtime
@@ -392,20 +394,57 @@ def event_index(event: gr.SelectData) -> int:
     return int(index)
 
 
+# Markdown is as much a rendering language as HTML is, so text that came out of
+# a file the reader opened has to be neutered in both. Escaping the HTML alone
+# leaves `![beacon](https://elsewhere.example/pixel)` live, and the detail panel
+# would fetch that image the moment the token was clicked. CommonMark lets any
+# ASCII punctuation carry a backslash, so the whole set goes through, bar the
+# two characters that hold the entities html.escape() has just written.
+MARKDOWN_LITERAL = str.maketrans(
+    {character: f"\\{character}" for character in punctuation if character not in "&;"}
+)
+
+
+def as_plain_text(text: str) -> str:
+    """One recorded sentence, rendered as the characters it actually contains."""
+
+    # quote=False: an entity of the &#x27; shape would need its own # escaped,
+    # and escaping that character is what breaks the entity back open.
+    return html.escape(text, quote=False).translate(MARKDOWN_LITERAL)
+
+
+def unscored_explanation(metric: dict) -> str:
+    """Why one token carries no measurement, in the words of whatever recorded it.
+
+    ChatLab writes two reasons of its own. A run made elsewhere - a batch
+    rollout that kept token IDs and threw the distributions away, say - is
+    loaded with its metrics as they were saved, so its reason is a sentence
+    this code has never seen. That sentence is printed as it stands. Falling
+    through to the first-token wording instead told the reader that nothing
+    preceded a token in the middle of a response, which is plainly false and
+    sends them looking for a fault in the model rather than at how the run
+    was collected.
+    """
+
+    reason = str(metric.get("unscored_reason", "") or UNSCORED_FIRST_TOKEN)
+    if reason == UNSCORED_BEYOND_LIMIT:
+        return (
+            f"Only the most recent {PROMPT_SCORE_LIMIT:,} tokens of a long "
+            "prompt are scored, and this one sits before that window, so it "
+            "was skipped."
+        )
+    if reason == UNSCORED_FIRST_TOKEN:
+        return "Nothing came before this token, so the model never predicted it."
+    return as_plain_text(reason)
+
+
 def describe_token(metric: dict) -> tuple[str, list[list]]:
     """The detail panel and the alternatives table for one token."""
 
     token_repr = html.escape(repr(metric["text"]))
     where = "Prompt token" if metric["segment"] == "prompt" else "Token"
     if not metric.get("scored", True):
-        if metric.get("unscored_reason") == UNSCORED_BEYOND_LIMIT:
-            why = (
-                f"Only the most recent {PROMPT_SCORE_LIMIT:,} tokens of a long "
-                "prompt are scored, and this one sits before that window, so it "
-                "was skipped."
-            )
-        else:
-            why = "Nothing came before this token, so the model never predicted it."
+        why = unscored_explanation(metric)
         return (
             f"### {where} {metric['position']}: `{token_repr}`\n\n"
             f"{why}\n\n"

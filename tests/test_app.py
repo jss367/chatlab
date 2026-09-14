@@ -66,6 +66,79 @@ class InspectTokenTests(unittest.TestCase):
         self.assertIn("skipped", detail)
         self.assertEqual(rows, [])
 
+    def test_a_reason_recorded_elsewhere_is_repeated_rather_than_guessed(self):
+        # A run collected outside ChatLab - a batch rollout that kept token IDs
+        # and no distributions - writes its own sentence. Answering it with the
+        # first-token wording claims nothing preceded a token in the middle of
+        # a response, which is false and hides why the numbers are missing.
+        recorded = "Batch collection retained token IDs; distributions were not collected"
+        metric = unscored_metric(
+            position=48,
+            token_id=1_815,
+            token_text=" path",
+            fallback_text=" path",
+            segment="generated",
+        ).to_dict()
+        metric["unscored_reason"] = recorded
+
+        detail, rows = self.inspect(metric)
+
+        self.assertIn(recorded, detail)
+        self.assertNotIn("Nothing came before", detail)
+        self.assertEqual(rows, [])
+
+    def test_a_recorded_reason_cannot_smuggle_html_into_the_panel(self):
+        # The sentence comes out of a file the reader opened, so it is escaped
+        # like every other value read back from a saved run.
+        metric = unscored_metric(
+            position=3, token_id=7, token_text="a", fallback_text="a"
+        ).to_dict()
+        metric["unscored_reason"] = "<img src=x onerror=alert(1)>"
+
+        detail, _rows = self.inspect(metric)
+
+        self.assertIn("&lt;img", detail)
+        self.assertNotIn("<img", detail)
+
+    def test_a_recorded_reason_cannot_fetch_a_picture_through_markdown(self):
+        # Markdown renders as surely as HTML does: an image in the sentence
+        # would have the panel call an address of the file's choosing the
+        # moment a token was clicked, which is a reader's click reporting
+        # itself to whoever wrote the run.
+        metric = unscored_metric(
+            position=3, token_id=7, token_text="a", fallback_text="a"
+        ).to_dict()
+        metric["unscored_reason"] = "![x](https://elsewhere.example/pixel)"
+
+        detail, _rows = self.inspect(metric)
+
+        self.assertNotIn("![x](https://elsewhere.example/pixel)", detail)
+        self.assertIn(r"\!\[x\]", detail)
+
+    def test_a_recorded_reason_cannot_take_over_the_panel_with_a_heading(self):
+        # The panel's own heading names the token. A sentence that opened its
+        # own would read as ChatLab's words rather than the file's.
+        metric = unscored_metric(
+            position=3, token_id=7, token_text="a", fallback_text="a"
+        ).to_dict()
+        metric["unscored_reason"] = "# Nothing is wrong here"
+
+        detail, _rows = self.inspect(metric)
+
+        self.assertIn(r"\# Nothing is wrong here", detail)
+
+    def test_an_unscored_token_with_no_reason_reads_as_the_opening_one(self):
+        # Runs saved before the reason was recorded carry an empty string, and
+        # the first token of a sequence was the only unscored token then.
+        metric = unscored_metric(
+            position=1, token_id=7, token_text="<s>", fallback_text="<s>"
+        ).to_dict()
+        metric["unscored_reason"] = ""
+
+        detail, _rows = self.inspect(metric)
+
+        self.assertIn("Nothing came before this token", detail)
+
 
 class StubManager:
     """A loaded manager that returns one scored token and nothing else."""
