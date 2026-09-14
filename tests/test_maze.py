@@ -1031,6 +1031,15 @@ class MazeTests(unittest.TestCase):
         recovered = from_payload(json.loads(json.dumps(drawn.payload())))
         self.assertEqual(scenario_values(recovered)[3], .6)
         self.assertNotIn('Unrecorded', status(recovered))
+        # The same walls around a different start is a maze the run never used, so a
+        # value is accepted only when it redraws the maze whole.
+        whole = Episode(generate(3, 34, 1, .8), CONFIG)
+        self.assertEqual(scenario_values(from_payload(json.loads(json.dumps(whole.payload()))))[3], .8)
+        # A small maze deviates from the probability that drew it, so every value is
+        # tried; any of them that redraws the maze answers the pane.
+        sparse = Episode(generate(3, 1, 1, .35), CONFIG)
+        value = scenario_values(from_payload(json.loads(json.dumps(sparse.payload()))))[3]
+        self.assertEqual(generate(3, 1, 1, value), sparse.maze)
         blank = scenario_values(Episode(MAZE, CONFIG | {'interruption_text': ''}))
         self.assertEqual((blank[6], blank[-1]), ('', 'None'))
 
