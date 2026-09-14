@@ -212,6 +212,7 @@ def _write_reply(
     messages = model_messages([make_turn("user", prompt)], system_prompt=system_prompt)
     text = ""
     metrics: list[dict] = []
+    prompt_ids: tuple[int, ...] = ()
     model_id = published.model_id
     stream = runtime.MANAGER.generate(
         messages,
@@ -235,8 +236,12 @@ def _write_reply(
             text = update.text
             metrics = list(update.metrics)
             model_id = update.model_id or model_id
+            prompt_ids = update.prompt_ids or prompt_ids
             yield None, len(metrics)
-    decoded, ends = _decoded_spans(metrics)
+    # Seeded with the prompt for the same reason a measurement is seeded with
+    # its context: the first token of a reply decodes differently depending on
+    # what the model had just read.
+    decoded, ends = _decoded_spans(metrics, prompt_ids)
     yield {
         "kind": compare.REPLY,
         "model_id": model_id,
@@ -280,7 +285,11 @@ def _measure_text(context, measured, use_chat_template, vector, published):
         steering=vector,
     )
     metrics = list(result.metrics)
-    decoded, ends = _decoded_spans(metrics)
+    # The seam between a context and the passage can fall inside a token,
+    # which score_text assigns whole to the passage; decoding from the
+    # context is what keeps that token's context characters out of the
+    # recorded text rather than in one run's and not the other's.
+    decoded, ends = _decoded_spans(metrics, result.context_ids)
     return {
         "kind": compare.MEASUREMENT,
         "model_id": published.model_id,
@@ -301,7 +310,7 @@ def _measure_text(context, measured, use_chat_template, vector, published):
     }
 
 
-def _decoded_spans(metrics) -> tuple[str, list[int]]:
+def _decoded_spans(metrics, context_ids=()) -> tuple[str, list[int]]:
     """The run's text as the tokenizer really decodes it, and each token's end.
 
     Decoding is not piecewise. A byte-level tokenizer can split one character
@@ -311,6 +320,18 @@ def _decoded_spans(metrics) -> tuple[str, list[int]]:
     passage would then look like two different passages wherever the models
     split a character differently, which is exactly where the comparison is
     most worth having.
+
+    ``context_ids`` is everything the model read before the tokens being
+    measured, and the decode starts from it rather than from the measured
+    tokens alone. What comes before a token changes what it decodes to: a
+    SentencePiece tokenizer attaches a word-boundary space to the first
+    token of a passage only when something precedes it, and a token sitting
+    across the seam between a context and the passage carries characters
+    from both. Decoding from the measured tokens alone would put those
+    characters in one run's text and not another's, and the alignment would
+    call an identical passage divergent at its first character. The context's
+    own characters are then cut back off, so what is recorded is the measured
+    passage and the offsets are relative to it.
 
     ``IncrementalDecoder`` is what the chat stream already uses for this: its
     text always equals a full decode of every token pushed so far, at a cost
@@ -327,11 +348,16 @@ def _decoded_spans(metrics) -> tuple[str, list[int]]:
     if tokenizer is None:
         return "", []
     decoder = IncrementalDecoder(tokenizer)
+    for token_id in context_ids or ():
+        decoder.push(int(token_id))
+    base = len(decoder.text)
     ends = []
     for metric in metrics:
         decoder.push(int(metric["token_id"]))
-        ends.append(len(decoder.text))
-    return decoder.text, ends
+        # Clamped, because a token pushed after the context can in principle
+        # redraw the boundary behind it; a negative end would be nonsense.
+        ends.append(max(len(decoder.text) - base, 0))
+    return decoder.text[base:], ends
 
 
 def clear_slots():

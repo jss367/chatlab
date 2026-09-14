@@ -262,6 +262,28 @@ class ReadingTests(unittest.TestCase):
         self.assertIn("no first choices", compare.headline(reading, None, None))
         self.assertIn("—", charts.comparison_tiles(reading))
 
+    def test_an_empty_decoded_choice_is_a_choice_like_any_other(self):
+        # A valid special token can decode to nothing, and "nothing" is a
+        # different answer from "something" whichever slot it lands in.
+        def piece(top, top_id):
+            return dict(metric(1, 5, 1.0, top=top, top_id=top_id), text="x", display_text="x")
+
+        blank, spoken = piece("", 11), piece("word", 12)
+        for left, right in ((blank, spoken), (spoken, blank)):
+            with self.subTest(left=left["top_candidates"][0]["text"]):
+                reading = compare.reading(
+                    run([left]), run([right], model_id="other/model")
+                )
+                self.assertEqual(reading["choices_compared"], 1)
+                self.assertEqual(reading["top_choice_changed"], 1)
+
+    def test_a_span_with_a_missing_candidate_is_counted_in_neither(self):
+        bare = dict(metric(1, 5, 1.0), top_candidates=[])
+        reading = compare.reading(run([bare]), run([metric(1, 5, 1.0)]))
+        self.assertEqual(reading["compared"], 1)
+        self.assertEqual(reading["choices_compared"], 0)
+        self.assertEqual(reading["top_choice_changed"], 0)
+
     def test_a_measurement_records_no_system_prompt_to_differ_over(self):
         # score_text has nowhere to put a system message, so recording one
         # would have the table report a difference neither run saw.
@@ -459,6 +481,26 @@ class HandlerTests(unittest.TestCase):
             "default", None, False, 1.0, 0,
         ))
         return frames[-1]
+
+    def test_the_context_is_decoded_through_but_kept_out_of_the_text(self):
+        # The token at the seam is assigned whole to the passage, and what
+        # comes before a token changes what it decodes to, so the decode has
+        # to start at the context and then cut the context back off.
+        metrics = [dict(metric(1, 1, 1.0), text=" world")]
+        decoded, ends = controls._decoded_spans(metrics, context_ids=[0])
+        self.assertEqual(decoded, " world")
+        self.assertEqual(ends, [len(" world")])
+        # Without a context the offsets are the passage's own from the start.
+        self.assertEqual(controls._decoded_spans(metrics), (" world", [6]))
+
+    def test_decoding_gives_up_quietly_with_no_tokenizer(self):
+        runtime.MANAGER.tokenizer = None
+        self.assertEqual(controls._decoded_spans([metric(1, 1, 1.0)]), ("", []))
+
+    def test_a_reply_records_where_each_token_ends_in_its_own_text(self):
+        held, _status, *_buttons = self.fill("A")
+        self.assertEqual(len(held["token_ends"]), len(held["metrics"]))
+        self.assertEqual(held["token_ends"][-1], len(held["decoded"]))
 
     def test_a_measurement_run_keeps_no_system_prompt_in_its_settings(self):
         held, _status, *_buttons = self.fill(

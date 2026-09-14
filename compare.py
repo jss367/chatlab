@@ -210,6 +210,11 @@ def _span(left, right, here0, here1, there0, there1, index, covered) -> dict:
     one_to_one = len(mine) == 1 and len(yours) == 1
     left_top = _top_choice(mine[0]) if one_to_one else (None, "")
     right_top = _top_choice(yours[0]) if one_to_one else (None, "")
+    # Both candidates have to exist for the question to have an answer. The
+    # IDs establish that and nothing else: a valid special token can decode
+    # to the empty string, so an empty text is a choice like any other and
+    # only a missing candidate is a missing choice.
+    comparable_choice = one_to_one and left_top[0] is not None and right_top[0] is not None
     return {
         "position": index,
         "text": covered,
@@ -219,6 +224,7 @@ def _span(left, right, here0, here1, there0, there1, index, covered) -> dict:
         "left_range": (here0, here1),
         "right_range": (there0, there1),
         "one_to_one": one_to_one,
+        "comparable_choice": comparable_choice,
         "scored": scored,
         "surprise_bits": abs(left_bits - right_bits) if scored else 0.0,
         "left_surprise": left_bits,
@@ -467,26 +473,21 @@ def reading(left: dict | None, right: dict | None) -> dict:
     left_shared = spans[-1]["left_range"][1] if spans else 0
     right_shared = spans[-1]["right_range"][1] if spans else 0
     scored = [item for item in spans if item["scored"]]
+    # A span has two first choices to put side by side only when it is one
+    # token against one and both runs offered a candidate there. That set is
+    # the denominator as well as the numerator: counting a span with nothing
+    # to compare would read as "the choice held here".
+    pairable = [item for item in scored if item["comparable_choice"]]
     # Within one vocabulary the IDs decide it; across two there are no IDs to
-    # decide it with, and the decoded text is the only reading left. Either
-    # way only a span of one token against one has first choices to compare.
+    # decide it with, and the decoded text is the only reading left - the
+    # empty string included, since a special token can decode to nothing and
+    # still be a different choice from a token that decodes to something.
     if cross_model:
-        changed = [
-            item for item in scored
-            if item["one_to_one"] and item["left_top"]
-            and item["left_top"] != item["right_top"]
-        ]
+        changed = [item for item in pairable if item["left_top"] != item["right_top"]]
     else:
         changed = [
-            item for item in scored
-            if item["one_to_one"] and item["left_top_id"] is not None
-            and item["left_top_id"] != item["right_top_id"]
+            item for item in pairable if item["left_top_id"] != item["right_top_id"]
         ]
-    # Only a span of one token against one has two first choices to compare,
-    # so it is the only thing the percentage can be out of. Counting the rest
-    # in the denominator would read as "the choice held here" for spans where
-    # no choice was ever put side by side.
-    pairable = [item for item in scored if item["one_to_one"]]
     widest = max(scored, key=lambda item: item["surprise_bits"], default=None)
     return {
         "shared": left_shared,
