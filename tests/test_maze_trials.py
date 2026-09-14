@@ -100,6 +100,19 @@ class TrialFileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'smaller than 8 MB'):
             read_trials(self.path)
 
+    def test_a_name_from_the_file_cannot_write_the_note_it_appears_in(self):
+        # The note is Markdown, and the file may have been written anywhere.
+        self.payload['title'] = '**Bold** [link](http://example.test)'
+        self.payload['trials'][0]['label'] = '**Closed**, from elsewhere.'
+        data = self.read()
+        episode = prepare_trial(data, 'clean', Episode(MAZE, CONFIG))
+        note = trial_note_text(episode, data)
+        self.assertNotIn('**Closed**', note)
+        self.assertNotIn('[link](http://example.test)', note)
+        self.assertIn(r'\*\*Closed\*\*', note)
+        # The wording the workbench writes itself still renders as Markdown.
+        self.assertTrue(note.startswith('**Running:'))
+
     def test_uploading_a_collection_queues_with_the_rest_of_the_view(self):
         # Off the view's queue, a Load trial click could be served between the
         # upload arriving and the picker it fills, and prepare a trial from the

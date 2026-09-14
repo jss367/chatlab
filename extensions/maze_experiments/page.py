@@ -359,6 +359,19 @@ def views(ep, reveal, selections, session_id, index=None, animate=False):
             "Select a model-generated token above." if changed else gr.skip(), [] if changed else gr.skip())
 
 
+# The note is Markdown, and the names in it come from a file that may have
+# been written anywhere. Escaping the HTML leaves `**` and `[…](…)` to be read
+# as syntax, which is enough to close the bold span the provenance is written
+# in and continue in a voice that looks like the workbench's own.
+MARKDOWN = str.maketrans({character: "\\" + character for character in "\\`*_{}[]()#+-.!>|~"})
+
+
+def as_text(value):
+    """A name from a trial file, read as the characters it is."""
+
+    return html.escape(value).translate(MARKDOWN)
+
+
 def trial_note_text(ep, data=None):
     """What the trials pane says about the episode on screen right now.
 
@@ -370,11 +383,11 @@ def trial_note_text(ep, data=None):
 
     parts, trial = [], ep.config.get("trial")
     if trial:
-        parts.append(f"**{'Replaying' if ep.replay_only else 'Running'}: {html.escape(trial['label'])}**, "
-                     f"from {html.escape(trial['title'])}.")
+        parts.append(f"**{'Replaying' if ep.replay_only else 'Running'}: {as_text(trial['label'])}**, "
+                     f"from {as_text(trial['title'])}.")
     if data:
         count = len(data["trials"])
-        parts.append(f"Loaded **{html.escape(data['title'])}** · {count} trial{'s' if count != 1 else ''}. "
+        parts.append(f"Loaded **{as_text(data['title'])}** · {count} trial{'s' if count != 1 else ''}. "
                      "Select one and click Load trial.")
     elif not trial:
         parts.append("Upload a trial file, choose a trial, then load it. Inspect the maze before playing.")

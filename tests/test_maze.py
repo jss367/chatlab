@@ -278,7 +278,7 @@ class MazeTests(unittest.TestCase):
                     **payload['selection'], 'view_id': ['other-run', 0, 0]}))
                 menu_edit = callbacks['edit_from_menu']
                 with self.assertRaisesRegex(gr.Error, 'current response'):
-                    list(menu_edit.fn(ep, False, session_id, metrics, foreign))
+                    list(menu_edit.fn(ep, False, session_id, metrics, foreign, None))
             finally:
                 demo.close()
 
@@ -289,7 +289,7 @@ class MazeTests(unittest.TestCase):
                 try:
                     menu_edit = callbacks['edit_from_menu']
                     action = json.dumps({**chosen, 'selection': payload['selection']})
-                    frames = list(menu_edit.fn(ep, False, session_id, metrics, action))
+                    frames = list(menu_edit.fn(ep, False, session_id, metrics, action, None))
                     self.assertTrue(all(len(frame) == len(menu_edit.outputs) for frame in frames))
                     result = frames[-1][0]
                     self.assertEqual(result.turns[0]['text'], expected)
