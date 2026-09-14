@@ -50,7 +50,16 @@ version_in() { sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$1"; }
 bump_minor() { echo "$1" | awk -F. '{printf "%s.%s.0\n", $1, $2 + 1}'; }
 higher() { printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1; }
 plist_version() { plutil -extract CFBundleShortVersionString raw "$1/Contents/Info.plist"; }
-released() { gh release view "v$1" --repo "$repo_slug" --json tagName >/dev/null 2>&1; }
+# missing, draft, incomplete (a create that did not finish its uploads), or
+# published. Only the last one is a release the updater can offer.
+release_status() {
+    gh release view "v$1" --repo "$repo_slug" --json isDraft,assets --jq "
+        if .isDraft then \"draft\"
+        elif ([.assets[].name] | index(\"$asset_name\")) == null then \"incomplete\"
+        elif ([.assets[].name] | index(\"$asset_name.sha256\")) == null then \"incomplete\"
+        else \"published\" end" 2>/dev/null || echo missing
+}
+released() { [ "$(release_status "$1")" = published ]; }
 
 step "Checking the working tree and GitHub access"
 [ "$(uname -m)" = arm64 ] || die "ChatLab releases are Apple Silicon only; this is $(uname -m)."
@@ -87,6 +96,19 @@ if released "$target" && [ "$target" != "$current" ]; then
 fi
 tag="v$target"
 
+# A resumed release builds the commit its tag already names. An ordinary commit
+# landing on main since the tag was pushed would otherwise displace it, and the
+# build would carry code the tag does not name.
+tag_commit=$(git rev-parse -q --verify "refs/tags/$tag^{commit}" || true)
+if [ "$target" = "$current" ] && [ -n "$tag_commit" ] && [ "$tag_commit" != "$(git rev-parse HEAD)" ]; then
+    git merge-base --is-ancestor "$tag_commit" origin/main \
+        || die "$tag names $tag_commit, which is not on main; resolve that before releasing."
+    git checkout --quiet --detach "$tag_commit"
+    [ "$(version_in version.py)" = "$target" ] \
+        || die "$tag names a commit whose version.py says $(version_in version.py), not $target."
+    echo "resuming at $(git log --oneline -1), which $tag already names"
+fi
+
 if [ "$target" != "$current" ]; then
     step "Landing $tag on main"
     sed -i '' "s/^__version__ = \".*\"$/__version__ = \"$target\"/" version.py
@@ -120,7 +142,8 @@ desktop_venv=${CHATLAB_DESKTOP_VENV:-"$repo_root/.desktop-venv"}
 step "Smoke testing the bundle"
 "$built/Contents/MacOS/ChatLab" --smoke-test
 
-if released "$target"; then
+status=$(release_status "$target")
+if [ "$status" = published ]; then
     step "v$target is published already; rebuilt it to install rather than cutting another"
 else
     step "Tagging $tag"
@@ -154,8 +177,17 @@ else
     else
         set -- --generate-notes
     fi
-    gh release create "$tag" --repo "$repo_slug" --verify-tag --title "ChatLab $tag" "$@" \
-        "$staging/$asset_name" "$staging/$asset_name.sha256"
+    if [ "$status" = missing ]; then
+        gh release create "$tag" --repo "$repo_slug" --verify-tag --title "ChatLab $tag" "$@" \
+            "$staging/$asset_name" "$staging/$asset_name.sha256"
+    else
+        # A create that stopped partway leaves a draft, or a release whose
+        # uploads did not finish. Finish that one rather than making a second.
+        echo "v$target exists as $status; uploading its assets and publishing it"
+        gh release upload "$tag" --repo "$repo_slug" --clobber \
+            "$staging/$asset_name" "$staging/$asset_name.sha256"
+        gh release edit "$tag" --repo "$repo_slug" --draft=false
+    fi
 fi
 
 if [ "$skip_install" -eq 1 ]; then
@@ -182,7 +214,10 @@ else
         echo "The copy failed; putting the previous bundle back." >&2
         restore; exit 1
     fi
-    open "$dest"
+    if ! open "$dest"; then
+        echo "Launch Services refused to open $dest; putting the previous bundle back." >&2
+        restore; exit 1
+    fi
     sleep 5
     if ! pgrep -xq ChatLab; then
         echo "ChatLab exited within 5s of launch; putting the previous bundle back." >&2
