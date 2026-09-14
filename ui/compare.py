@@ -295,9 +295,17 @@ def _measure_text(context, measured, use_chat_template, vector, published):
 
 
 def clear_slots():
-    """Empty both slots and everything drawn from them."""
+    """Empty both slots and everything drawn from them.
 
-    return (None, None, COMPARE_EMPTY, *render(None, None))
+    Bound with ``cancels`` on the run events, because clearing during a run
+    is otherwise undone by the run itself: the frames still in flight would
+    write their progress over the cleared status and the last one would put
+    the slot back. Cancelling closes that generator where it stands, which
+    is also what gives the model lock back, so the buttons are published
+    here as well - the cancelled run never reaches its own final frame.
+    """
+
+    return (None, None, COMPARE_EMPTY, *_running(False), *render(None, None))
 
 
 def render(left, right):

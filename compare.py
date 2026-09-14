@@ -249,6 +249,17 @@ def configuration(run: dict | None) -> dict:
         "Weights": run.get("precision") or "—",
         "Steering": steered,
     }
+    # What each run was actually given, not only how it was configured. A box
+    # edited between filling A and filling B changes the experiment's variable
+    # without touching a single control, and a comparison that showed only the
+    # controls would hand the reader a gap to attribute to the wrong thing -
+    # worst of all for a measurement, where two contexts leave the passage
+    # lining up token for token and every position looking comparable.
+    if run["kind"] == REPLY:
+        reading["Prompt"] = run.get("prompt") or "—"
+    else:
+        reading["Context"] = run.get("prompt") or "—"
+        reading["Measured text"] = run.get("text") or "—"
     if run["kind"] == REPLY:
         # The system prompt is only in the reading for a reply. A measurement
         # is a fixed passage read as it stands, and there is nowhere in that
@@ -276,8 +287,27 @@ def configuration(run: dict | None) -> dict:
 CONFIGURATION_HEADERS = ["Setting", "A", "B"]
 
 
+# How much of a prompt or a passage a table cell shows. Whether two runs
+# differ is always decided on the whole value; this is only what is drawn.
+CELL_LENGTH = 160
+
+
+def cell(value: str) -> str:
+    """One line of ``value``, short enough for a table cell."""
+
+    flattened = " ".join((value or "").split())
+    if len(flattened) <= CELL_LENGTH:
+        return flattened or "—"
+    return flattened[: CELL_LENGTH - 1].rstrip() + "…"
+
+
 def configuration_rows(left, right, *, differences_only: bool = True) -> list[list]:
-    """The two configurations beside each other, by default only where they differ."""
+    """The two configurations beside each other, by default only where they differ.
+
+    Compared whole and drawn short: two prompts that agree for the first
+    hundred words and part in the last are a difference, and a row that
+    compared what the cell shows would call them the same.
+    """
 
     here, there = configuration(left), configuration(right)
     rows = []
@@ -285,7 +315,7 @@ def configuration_rows(left, right, *, differences_only: bool = True) -> list[li
         mine, yours = here.get(key, "—"), there.get(key, "—")
         if differences_only and mine == yours:
             continue
-        rows.append([key, mine, yours])
+        rows.append([key, cell(mine), cell(yours)])
     return rows
 
 

@@ -199,6 +199,39 @@ class ReadingTests(unittest.TestCase):
             len(compare.configuration(left)),
         )
 
+    def test_the_inputs_each_run_was_given_are_compared_too(self):
+        # A box edited between filling A and filling B changes the variable
+        # without touching a control.
+        left = run([metric(1, 5, 1.0)])
+        right = dict(run([metric(1, 5, 1.0)]), prompt="a different question")
+        rows = compare.configuration_rows(left, right)
+        self.assertEqual([row[0] for row in rows], ["Prompt"])
+        self.assertEqual(rows[0][2], "a different question")
+        # Worst for a measurement: two contexts leave the passage lining up
+        # token for token, so every position looks comparable.
+        measured = run([metric(1, 5, 1.0)], kind=compare.MEASUREMENT)
+        framed = dict(measured, prompt="framed differently")
+        self.assertEqual(
+            [row[0] for row in compare.configuration_rows(measured, framed)], ["Context"]
+        )
+        passage = dict(measured, text="another passage")
+        self.assertEqual(
+            [row[0] for row in compare.configuration_rows(measured, passage)],
+            ["Measured text"],
+        )
+
+    def test_long_inputs_are_compared_whole_and_drawn_short(self):
+        body = "word " * 80
+        left = dict(run([metric(1, 5, 1.0)]), prompt=body + "one")
+        right = dict(run([metric(1, 5, 1.0)]), prompt=body + "two")
+        rows = compare.configuration_rows(left, right)
+        # They agree far past what a cell shows, and still differ.
+        self.assertEqual([row[0] for row in rows], ["Prompt"])
+        self.assertTrue(rows[0][1].endswith("…"))
+        self.assertEqual(len(rows[0][1]), compare.CELL_LENGTH)
+        self.assertEqual(compare.cell("  a\n b  "), "a b")
+        self.assertEqual(compare.cell(""), "—")
+
     def test_a_steered_run_says_so_in_its_configuration(self):
         steered = run(
             [metric(1, 5, 1.0)],
@@ -334,11 +367,16 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(settings_table["value"], [])
         self.assertEqual(rows_table["value"][0][4], 3.0)
 
-    def test_clearing_empties_both_slots(self):
-        left, right, status, *drawn = controls.clear_slots()
+    def test_clearing_empties_both_slots_and_puts_the_buttons_back(self):
+        left, right, status, run_a, run_b, stop, *drawn = controls.clear_slots()
         self.assertIsNone(left)
         self.assertIsNone(right)
         self.assertEqual(status, controls.COMPARE_EMPTY)
+        # Clearing cancels a run in flight, so that run never reaches its own
+        # final frame and the buttons are published from here instead.
+        self.assertTrue(run_a["interactive"])
+        self.assertTrue(run_b["interactive"])
+        self.assertFalse(stop["visible"])
         self.assertIn("Empty", drawn[0])
         self.assertEqual(drawn[-1], {"left": None, "right": None, "reading": {}})
 

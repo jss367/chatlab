@@ -666,7 +666,9 @@ the two runs stopped writing the same tokens, after which nothing is comparable.
 Above them are the headline numbers — how many tokens the runs shared, the mean
 and widest gap, how often the model's own first choice changed, and each run's
 perplexity — and a chart of the gap across the shared tokens. Below them, a
-table naming every setting that differed between the two runs, and a table of
+table naming every setting *and input* that differed between the two runs — the
+prompt or the measured passage included, since a box edited between filling A
+and filling B changes the experiment without touching a control — and a table of
 the shared tokens the two read most differently, with what each run would have
 written there left to itself. **Download comparison JSON** writes both runs,
 their settings, every token's measurements and the comparison as one document.

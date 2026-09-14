@@ -2573,10 +2573,14 @@ def build_app() -> gr.Blocks:
         compare_stop.click(
             stop_comparison, None, compare_slot_outputs, cancels=compare_runs
         )
+        # cancels, because clearing during a run is otherwise undone by the
+        # run: its remaining frames would write over the cleared status and
+        # its last one would put the slot back. See clear_slots().
         compare_clear.click(
             clear_slots,
             None,
-            [compare_a_state, compare_b_state, compare_status, *compare_outputs],
+            [compare_a_state, compare_b_state, *compare_slot_outputs, *compare_outputs],
+            cancels=compare_runs,
         )
         compare_mode.change(
             mode_controls,
