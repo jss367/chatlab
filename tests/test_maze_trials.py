@@ -126,6 +126,22 @@ class TrialFileTests(unittest.TestCase):
         with self.assertRaisesRegex(gr.Error, 'Still loaded: Example trials'):
             upload.fn(str(bad), Episode(MAZE, CONFIG), data)
 
+    def test_clearing_the_widget_empties_the_picker_with_it(self):
+        # Clearing is its own event, so registering the upload alone would
+        # leave the picker offering a collection the pane no longer names.
+        data = self.read()
+        context = SimpleNamespace(tokens=TokenInspector(), models=None, data_dir=Path(self.directory.name),
+                                  navigation=SimpleNamespace(open_models=lambda button, wanted=None: None))
+        with gr.Blocks() as demo:
+            build_page(context)
+        self.addCleanup(demo.close)
+        handlers = [fn for fn in demo.fns.values() if getattr(fn.fn, '__name__', '') == 'load_trial_file']
+        self.assertEqual({event for fn in handlers for _target, event in fn.targets}, {'upload', 'clear'})
+        cleared = handlers[0].fn(None, Episode(MAZE, CONFIG), data)
+        self.assertIsNone(cleared[0])
+        self.assertEqual(cleared[1]['choices'], [])
+        self.assertNotIn('Example trials', cleared[2])
+
     def test_uploading_a_collection_queues_with_the_rest_of_the_view(self):
         # Off the view's queue, a Load trial click could be served between the
         # upload arriving and the picker it fills, and prepare a trial from the
