@@ -4,6 +4,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -4115,3 +4116,219 @@ class MlxHubSearchTests(unittest.TestCase):
 
         self.assertEqual([result.model_id for result in found], ["meta-llama/Llama-3.2-3B-Instruct"])
         self.assertEqual(found[0].kind, model_runtime.TEXT_KIND)
+
+
+def logged(caught, opening: str) -> str:
+    """The one captured line containing ``opening``.
+
+    ``assertLogs`` captures every record on the logger, and ``warm_device``
+    writes the device line from a background thread that any earlier test may
+    have started, so a test about one line has to say which line it means
+    rather than taking the first one that arrived.
+    """
+
+    lines = [text for text in caught.output if opening in text]
+    if len(lines) != 1:
+        raise AssertionError(f"expected one line holding {opening!r}, got {caught.output}")
+    return lines[0]
+
+
+class MemoryWatchTests(unittest.TestCase):
+    """The periodic record that gives a memory kill a run-up to read."""
+
+    GB = 1024**3
+
+    def watch(self, readings):
+        """A watch reading the given ``(held, available)`` pairs in turn."""
+
+        watch = model_runtime.MemoryWatch()
+        remaining = list(readings)
+        watch.read = lambda: remaining.pop(0)
+        return watch
+
+    def test_the_first_reading_is_always_recorded(self):
+        watch = self.watch([(self.GB, 8 * self.GB)])
+        with self.assertLogs(model_runtime.logger, level="INFO") as caught:
+            self.assertTrue(watch.tick(0.0))
+        written = logged(caught, "Memory:")
+        self.assertIn("1.0 GB held on the device", written)
+        self.assertIn("8.0 GB available on the machine", written)
+
+    def test_a_picture_that_has_not_moved_writes_nothing(self):
+        watch = self.watch([(self.GB, 8 * self.GB), (self.GB, 8 * self.GB)])
+        watch.tick(0.0)
+        self.assertFalse(watch.tick(30.0))
+
+    def test_a_figure_that_moved_past_the_step_is_recorded(self):
+        watch = self.watch([(self.GB, 8 * self.GB), (self.GB, 6 * self.GB)])
+        watch.tick(0.0)
+        with self.assertLogs(model_runtime.logger, level="INFO"):
+            self.assertTrue(watch.tick(30.0), "two gigabytes of the machine went somewhere")
+
+    def test_a_small_move_is_not_worth_a_line(self):
+        watch = self.watch([(self.GB, 8 * self.GB), (self.GB + 1024, 8 * self.GB)])
+        watch.tick(0.0)
+        self.assertFalse(watch.tick(30.0))
+
+    def test_a_long_quiet_stretch_still_leaves_an_anchor(self):
+        watch = self.watch([(self.GB, 8 * self.GB), (self.GB, 8 * self.GB)])
+        watch.tick(0.0)
+        with self.assertLogs(model_runtime.logger, level="INFO"):
+            self.assertTrue(watch.tick(model_runtime.MEMORY_WATCH_IDLE_SECONDS))
+
+    def test_a_figure_that_appeared_is_news_whatever_its_size(self):
+        # torch finishing its import, which is when the device starts
+        # answering at all.
+        watch = self.watch([(None, 8 * self.GB), (1024, 8 * self.GB)])
+        watch.tick(0.0)
+        with self.assertLogs(model_runtime.logger, level="INFO"):
+            self.assertTrue(watch.tick(30.0))
+
+    def test_an_unreadable_platform_still_writes_its_first_line(self):
+        watch = self.watch([(None, None)])
+        with self.assertLogs(model_runtime.logger, level="INFO") as caught:
+            self.assertTrue(watch.tick(0.0))
+        self.assertIn("unknown", logged(caught, "Memory:"))
+
+    def test_the_reading_does_not_wait_for_torch(self):
+        with mock.patch.object(model_runtime, "imported_torch", return_value=None), mock.patch.object(
+            model_runtime, "system_memory", return_value=(16 * self.GB, 4 * self.GB)
+        ):
+            self.assertEqual(model_runtime.MemoryWatch().read(), (None, 4 * self.GB))
+
+    def test_the_thread_runs_the_watch_and_outlives_a_bad_reading(self):
+        watch = model_runtime.MemoryWatch()
+        calls = []
+        watch.tick = lambda now: calls.append(now)
+        with mock.patch.object(model_runtime, "MemoryWatch", return_value=watch):
+            thread = model_runtime.watch_memory(interval=0.001)
+            deadline = time.monotonic() + 2
+            while not calls and time.monotonic() < deadline:
+                time.sleep(0.005)
+        self.assertTrue(thread.daemon, "the watch must not hold the process open")
+        self.assertTrue(calls, "the thread should have taken a reading")
+
+
+class DeviceRecordTests(unittest.TestCase):
+    """The line naming the device and the budget a load is judged against."""
+
+    GB = 1024**3
+
+    def profile(self, **fields):
+        base = dict(
+            backend="mps",
+            dtype="float16",
+            total=48 * self.GB,
+            available=30 * self.GB,
+            ceiling=24 * self.GB,
+            pool="this machine",
+            recommended=37 * self.GB,
+            fraction=0.64,
+            held=2 * self.GB,
+        )
+        base.update(fields)
+        return model_runtime.DeviceProfile(**base)
+
+    def record(self, profile) -> str:
+        with mock.patch.object(model_runtime, "device_profile", return_value=profile):
+            with self.assertLogs(model_runtime.logger, level="INFO") as caught:
+                model_runtime.log_device_profile()
+        return logged(caught, "full weights as")
+
+    def test_metal_records_the_ceiling_and_where_it_came_from(self):
+        written = self.record(self.profile())
+        self.assertIn("Metal ceiling 24.0 GB", written)
+        self.assertIn("0.64 of the 37.0 GB recommended", written)
+        self.assertIn("48.0 GB in the pool", written)
+        self.assertIn("30.0 GB estimated available", written)
+        self.assertIn("full weights as float16", written)
+
+    def test_another_device_is_not_given_a_metal_ceiling_it_does_not_have(self):
+        written = self.record(
+            self.profile(backend="cpu", ceiling=None, recommended=None, fraction=None, held=None)
+        )
+        self.assertNotIn("Metal ceiling", written)
+        self.assertIn("48.0 GB in the pool", written)
+
+    def test_a_device_that_holds_nothing_yet_says_nothing_about_it(self):
+        self.assertNotIn("already held", self.record(self.profile(held=None)))
+
+
+class LoadRecordTests(unittest.TestCase):
+    """What the log holds about a model arriving, leaving, and being fetched."""
+
+    GB = 1024**3
+
+    def test_an_unload_closes_the_entry_the_load_opened(self):
+        manager = ModelManager()
+        manager.model_id = "org/model"
+        manager.precision = "4-bit"
+        manager.loaded_bytes = 4 * self.GB
+        with mock.patch.object(manager, "_release_device_cache"), mock.patch.object(
+            model_runtime, "reserved_bytes", return_value=self.GB // 2
+        ):
+            with self.assertLogs(model_runtime.logger, level="INFO") as caught:
+                manager._unload_locked(types.SimpleNamespace())
+        written = logged(caught, "Unloaded")
+        self.assertIn("Unloaded org/model", written)
+        self.assertIn("4-bit weights", written)
+        self.assertIn("4.0 GB estimated", written)
+        self.assertIn("0.5 GB held on the device now", written)
+        self.assertIsNone(manager.model_id)
+
+    def test_clearing_nothing_writes_nothing(self):
+        # Every load clears the slot before it fills it, and a line saying a
+        # model that was never there has gone would be in the log twice as
+        # often as a real one.
+        manager = ModelManager()
+        with mock.patch.object(manager, "_release_device_cache"):
+            with mock.patch.object(model_runtime.logger, "info") as written:
+                manager._unload_locked(types.SimpleNamespace())
+        self.assertEqual([call for call in written.call_args_list if "Unloaded" in str(call)], [])
+
+    def test_a_download_records_its_start_and_what_landed(self):
+        manager = ModelManager()
+
+        def fetch(repo_id, token, tqdm_class):
+            tqdm_class(desc="Fetching 2 files", total=2).update(2)
+            bar = tqdm_class(desc="model.safetensors", total=3_000_000_000, unit="B", unit_scale=True)
+            bar.update(3_000_000_000)
+            return "/cache/snapshots/abc"
+
+        with mock.patch("huggingface_hub.snapshot_download", fetch):
+            with self.assertLogs(model_runtime.logger, level="INFO") as caught:
+                manager.download("org/model")
+        started = logged(caught, "Downloading org/model")
+        finished = logged(caught, "Downloaded org/model")
+        self.assertIn("Downloading org/model from the Hub", started)
+        self.assertNotIn("access token", started)
+        self.assertIn("Downloaded org/model", finished)
+        self.assertIn("2 files", finished)
+        self.assertIn("3.0 GB", finished)
+        self.assertIn("/cache/snapshots/abc", finished)
+
+    def test_a_download_with_a_token_says_so_without_writing_it_down(self):
+        manager = ModelManager()
+        with mock.patch("huggingface_hub.snapshot_download", lambda **kwargs: "/cache/abc"):
+            with self.assertLogs(model_runtime.logger, level="INFO") as caught:
+                manager.download("org/model", "hf_secret")
+        written = "\n".join(caught.output)
+        self.assertIn("with an access token", written)
+        self.assertNotIn("hf_secret", written)
+
+    def test_an_interrupted_download_records_how_far_it_got(self):
+        manager = ModelManager()
+
+        def fetch(repo_id, token, tqdm_class):
+            bar = tqdm_class(desc="model.safetensors", total=3_000_000_000, unit="B", unit_scale=True)
+            bar.update(1_000_000_000)
+            raise OSError("connection reset")
+
+        with mock.patch("huggingface_hub.snapshot_download", fetch):
+            with self.assertLogs(model_runtime.logger, level="WARNING") as caught:
+                with self.assertRaises(OSError):
+                    manager.download("org/model")
+        written = logged(caught, "Download of org/model")
+        self.assertIn("Download of org/model stopped", written)
+        self.assertIn("1.0 GB of 3.0 GB", written)
+        self.assertIn("connection reset", written)

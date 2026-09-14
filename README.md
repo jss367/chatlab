@@ -149,7 +149,7 @@ finishes, so the process returns to the model's own size between requests.
 Each load and each response is recorded in the log with the model, the
 weight precision, the estimate, what the device ended up holding and the
 estimated memory available beforehand, which is what makes a memory failure
-readable after the fact.
+readable after the fact. See [The log](#the-log).
 
 When the weights will not fit, **Weight precision** on the Models page is the
 first thing to try. At 4 bits the default 7B model's linear layers shrink from
@@ -164,6 +164,42 @@ the model's own doing: an architecture with grouped-query attention, which
 most current models have, spends a fraction of what one with a key-value head
 per query head does at the same size. Lowering **Context limit (tokens)** on
 the Settings page is the direct way to bound it.
+
+## The log
+
+macOS ends a process that takes too much memory without giving it the chance
+to say anything, so whatever reached the log before the kill is the whole
+account of what happened. That is what the log is written for.
+
+It goes to `~/Library/Logs/ChatLab/ChatLab.log`, where Console.app looks, and
+elsewhere to `$XDG_STATE_HOME/chatlab/ChatLab.log`. Two megabytes a file and
+five files behind it, so days of use survive without the file growing
+unbounded in a directory nobody opens. `python app.py` writes to the same
+file and to the terminal; the app bundle has only the file. One process owns
+that name at a time, held with a lock beside it, and a second instance writes
+to `ChatLab-<pid>.log` rather than rotating the first one's file out from
+under it.
+
+A session opens with what it is running on: the ChatLab version and whether
+this is the packaged app or a checkout, the platform and Python, the
+machine's memory, the versions of torch, transformers, kernels, mlx and the
+rest, and the saved settings a memory report has to be read against. The
+device follows once torch has finished importing, with the pool it draws on,
+the memory estimated available and, on Apple silicon, the Metal ceiling and
+the share of Metal's recommendation it comes to.
+
+After that: every download with what landed and how long it took, or how far
+it got before it stopped; every load with the estimate, what the device ended
+up holding and what was available beforehand; every unload, so two loads in a
+row can be told apart from two models in memory at once; and every response
+with the token counts, the time and what the device was holding when it
+finished. Between those, a line whenever the memory picture moves by a
+quarter of a gigabyte, and one every ten minutes regardless, so a kill always
+has a recent reading in front of it.
+
+`CHATLAB_LOG_LEVEL=debug` turns the detail up without a rebuild and lets the
+libraries' own logging through, which is otherwise held at warnings so
+ChatLab's lines are findable. `CHATLAB_LOG_PATH` writes somewhere else.
 
 ## The pages
 

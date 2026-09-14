@@ -13,6 +13,8 @@ from pathlib import Path
 from urllib.request import urlopen
 
 import api
+import logs
+import model_runtime
 import updater
 from app import build_app
 from desktop_smoke import smoke_test_metal, smoke_test_mlx, smoke_test_pipelines
@@ -40,18 +42,15 @@ def app_support_directory() -> Path:
     return Path.home() / "Library" / "Application Support" / APP_NAME
 
 
-def configure_logging() -> Path:
-    """Write desktop-launch errors somewhere accessible without a terminal."""
+def configure_logging() -> Path | None:
+    """Put the log somewhere reachable without a terminal, and say where.
 
-    log_directory = Path.home() / "Library" / "Logs" / APP_NAME
-    log_directory.mkdir(parents=True, exist_ok=True)
-    log_path = log_directory / "ChatLab.log"
-    logging.basicConfig(
-        filename=log_path,
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    return log_path
+    The rules live in :mod:`logs` so that ``python app.py`` gets the same
+    ones. ``None`` means nothing could be opened for writing, which costs the
+    file and not the launch.
+    """
+
+    return logs.configure()
 
 
 def find_available_port() -> int:
@@ -296,6 +295,10 @@ def run_desktop() -> int:
     bundle = updater.running_app_bundle()
     demo, local_url = start_local_server()
     logging.info("Started ChatLab %s at %s", __version__, local_url)
+    # Only once the window is really opening. A smoke test runs for seconds
+    # and has nothing to watch; this records the run-up to a memory kill,
+    # which is a thing that happens to sessions, not to checks.
+    model_runtime.watch_memory()
     flow: UpdateFlow | None = None
 
     try:
@@ -358,7 +361,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     multiprocessing.freeze_support()
-    configure_logging()
+    logs.log_environment(configure_logging())
     args = parse_args(argv)
     try:
         return smoke_test() if args.smoke_test else run_desktop()

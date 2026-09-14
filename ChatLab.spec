@@ -17,6 +17,17 @@ hiddenimports = []
 for package in ("requests", "filelock", "numpy"):
     datas += copy_metadata(package)
 
+# The startup record in logs.py reads these versions from package metadata
+# rather than by importing the packages, which would cost the launch several
+# seconds. Metadata a bundle was built without reads as "absent", and a
+# memory report naming the wrong torch is worse than one naming none. The
+# rest of logs.RECORDED_PACKAGES come with the collect_all calls below.
+for package in ("torch", "transformers", "accelerate"):
+    try:
+        datas += copy_metadata(package)
+    except Exception:  # noqa: BLE001 - a version this cannot read is not a build failure
+        pass
+
 # Gradio ships its browser client as package data. Transformers and diffusers
 # both discover model implementations lazily, so include their built-in
 # architectures for downloaded Hugging Face models rather than limiting the

@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import socket
 import unittest
+from pathlib import Path
+from unittest import mock
 from urllib.request import urlopen
 
+import desktop_launcher
+import logs
 from desktop_launcher import (
     DESKTOP_PORT,
     LOOPBACK_ADDRESS,
@@ -69,3 +73,34 @@ class DesktopPortTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LaunchRecordTests(unittest.TestCase):
+    """The log the launcher opens with, and the watch it leaves running.
+
+    The desktop app has no terminal, so the file it writes is the whole
+    account of a session. Both halves are wired here rather than in ``logs``
+    itself, so both are worth a test that they are still wired.
+    """
+
+    def test_the_launcher_uses_the_shared_rules_rather_than_its_own(self):
+        with mock.patch.object(logs, "configure", return_value=Path("/tmp/ChatLab.log")) as configure:
+            self.assertEqual(desktop_launcher.configure_logging(), Path("/tmp/ChatLab.log"))
+        configure.assert_called_once_with()
+
+    def test_starting_up_records_the_environment_before_anything_else_runs(self):
+        order = []
+        with mock.patch.object(logs, "configure", side_effect=lambda: order.append("configure")), \
+                mock.patch.object(logs, "log_environment", side_effect=lambda target: order.append("record")), \
+                mock.patch.object(desktop_launcher, "run_desktop", side_effect=lambda: order.append("run") or 0):
+            self.assertEqual(desktop_launcher.main([]), 0)
+        self.assertEqual(order, ["configure", "record", "run"])
+
+    def test_a_launch_that_fails_is_recorded_rather_than_swallowed(self):
+        with mock.patch.object(logs, "configure", return_value=None), \
+                mock.patch.object(logs, "log_environment"), \
+                mock.patch.object(desktop_launcher, "run_desktop", side_effect=RuntimeError("no window")):
+            with self.assertLogs(level="ERROR") as caught:
+                with self.assertRaises(RuntimeError):
+                    desktop_launcher.main([])
+        self.assertIn("ChatLab failed to start", "\n".join(caught.output))
