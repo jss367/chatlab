@@ -5,7 +5,7 @@ import math
 from pathlib import Path
 
 from .maze import Maze, goal_instruction
-from .runner import Episode
+from .runner import RECOVERY_DEFAULTS, Episode
 
 FORMAT = "chatlab-maze-trials-1"
 CONFIG_KEYS = {"supplied_moves", "interrupt_after", "interruption_text", "prefix_tokens",
@@ -15,6 +15,11 @@ CONFIG_KEYS = {"supplied_moves", "interrupt_after", "interruption_text", "prefix
 # goal mode, which is what a file written before the prompt became editable
 # meant by omitting it.
 PROMPT_KEYS = {"system_prompt", "instruction"}
+# A trial may pin the window a first move after the interruption has to fall in.
+# Left out, it runs the pilot's window, which is what a file written before the
+# window became configurable meant by omitting it.
+RECOVERY_KEYS = set(RECOVERY_DEFAULTS)
+OPTIONAL_KEYS = PROMPT_KEYS | RECOVERY_KEYS
 
 
 def read_trials(path):
@@ -52,11 +57,13 @@ def read_trials(path):
             raise ValueError("Each trial maze needs an integer seed.")
         maze = Maze.from_dict(item["maze"])
         config = item["config"]
-        if not isinstance(config, dict) or set(config) - PROMPT_KEYS != CONFIG_KEYS:
+        if not isinstance(config, dict) or set(config) - OPTIONAL_KEYS != CONFIG_KEYS:
             raise ValueError("Trial configuration fields do not match the supported format.")
         limits = {"supplied_moves": (0, len(maze.route()) - 2), "interrupt_after": (0, 255),
                   "prefix_tokens": (0, 1024), "sampling_seed": (0, 2147483647),
-                  "per_turn_tokens": (1, 8192), "token_budget": (1, 32768), "attempt_budget": (1, 256)}
+                  "per_turn_tokens": (1, 8192), "token_budget": (1, 32768), "attempt_budget": (1, 256),
+                  **{name: (1, 32768) if name == "recovery_tokens" else (1, 256)
+                     for name in RECOVERY_KEYS & set(config)}}
         for name, (low, high) in limits.items():
             if type(config[name]) is not int or not low <= config[name] <= high:
                 raise ValueError(f"{name} must be an integer between {low} and {high}.")

@@ -10,7 +10,7 @@ from pathlib import Path
 import gradio as gr
 
 from .maze import GOAL_MODES, PASSAGES, SYSTEM, TOOLS, default_instruction, generate
-from .runner import TERMINAL, Episode, context_messages, fork_token_edit, from_payload, stream_episode
+from .runner import RECOVERY_DEFAULTS, TERMINAL, Episode, context_messages, fork_token_edit, from_payload, stream_episode
 from .trials import prepare_trial, read_trials
 from extension_api import TokenInspector
 
@@ -136,6 +136,7 @@ def scenario_values(ep):
             config.get("supplied_moves", 0), config.get("interrupt_after", 0), text,
             config.get("prefix_tokens", 0), config.get("temperature", .7), config.get("sampling_seed", 0),
             config.get("per_turn_tokens", 1024), config.get("token_budget", 8192), config.get("attempt_budget", 32),
+            config["recovery_tokens"], config["recovery_attempts"],
             mode, gr.update(value=config["goal_hint"], visible=mode == "hint"),
             config["system_prompt"], config["instruction"],
             "None" if not text else named or "Custom")
@@ -186,6 +187,7 @@ def status(ep):
         t = ep.turns[-1]
         partial = max(0, len(t["metrics"]) - t["forced_prefix_tokens"])
     recovery = "Not inserted" if not ep.interrupted else ("Pending" if ep.resumed is None else (f"Returned in {ep.latency} sampled tokens" if ep.resumed else "No return"))
+    window = f"{ep.config['recovery_tokens']:,} sampled tokens / {ep.config['recovery_attempts']} attempts"
     return (f"**{'Replay · ' if ep.replay_only else ''}{ep.phase.title()}** · {html.escape(ep.detail)}\n\n"
             f"{ep.maze.size} × {ep.maze.size} · shortest route {len(ep.maze.route())-1} moves · "
             f"{ep.moves-ep.supplied_moves} model moves + {ep.supplied_moves} supplied · "
@@ -193,7 +195,8 @@ def status(ep):
             f"**Goal information:** {GOAL_MODES[ep.config['goal_mode']]} · "
             f"**Setup prompt:** {'Edited' if edited_prompt(ep.config) else 'Default'}"
             f"{'' if 'openness' in ep.config else ' · **Open cells:** Unrecorded, so the slider beside this run is not its own'}\n\n"
-            f"**Recovery:** {recovery} · **Model:** {html.escape(ep.model_id or 'load one on the Models page')}")
+            f"**Recovery:** {recovery} · **Recovery window:** {window} · "
+            f"**Model:** {html.escape(ep.model_id or 'load one on the Models page')}")
 
 
 def timeline(ep):
@@ -399,7 +402,7 @@ def trial_note_text(ep, data=None):
 def _build_page(context):
     default_config = dict(supplied_moves=3, interrupt_after=3, interruption_text=next(iter(PASSAGES.values())),
                           prefix_tokens=8, temperature=.7, sampling_seed=20260914, per_turn_tokens=1024,
-                          token_budget=8192, attempt_budget=32, openness=.7)
+                          token_budget=8192, attempt_budget=32, openness=.7, **RECOVERY_DEFAULTS)
     initial = Episode(generate(), default_config)
     episode = gr.State(initial)
     selections = context.tokens.selections()
@@ -444,6 +447,12 @@ def _build_page(context):
                 per_turn = gr.Number(value=1024, precision=0, minimum=1, maximum=8192, label="Tokens per response")
                 budget = gr.Number(value=8192, precision=0, minimum=1, maximum=32768, label="Total sampled-token limit")
                 attempts = gr.Number(value=32, precision=0, minimum=1, maximum=256, label="Tool-attempt limit")
+                recovery_tokens = gr.Number(value=RECOVERY_DEFAULTS["recovery_tokens"], precision=0, minimum=1, maximum=32768,
+                                            label="Recovery window · sampled tokens", elem_id="maze-recovery-tokens",
+                                            info="After the interruption, a first accepted move has to arrive inside this many sampled tokens.")
+                recovery_attempts = gr.Number(value=RECOVERY_DEFAULTS["recovery_attempts"], precision=0, minimum=1, maximum=256,
+                                              label="Recovery window · tool attempts", elem_id="maze-recovery-attempts",
+                                              info="And inside this many attempted calls.")
             models = gr.Button("Choose / load model", size="sm")
             with gr.Accordion("Experiment trials", open=False):
                 trial_upload = gr.File(label="Trial definitions JSON", file_types=[".json"], type="filepath")
@@ -513,16 +522,18 @@ def _build_page(context):
                 gr.update(visible=False) if frame[9] != gr.skip() else gr.skip())
 
     controls = [size, seed, distance, openness, supplied, after, text, prefix, temperature, sampling_seed, per_turn,
-                budget, attempts, goal_mode, goal_hint, system_prompt, instruction]
+                budget, attempts, recovery_tokens, recovery_attempts, goal_mode, goal_hint, system_prompt, instruction]
 
     def prepare_episode(ep, show, session_id, data, *values):
         if ep.busy:
             raise gr.Error("Stop or pause this episode before starting another.")
-        n, s, d, o, supplied_n, trigger, passage_text, count, temp, sample_seed, per, total, tries, mode, hint, system_text, instruction_text = values
+        (n, s, d, o, supplied_n, trigger, passage_text, count, temp, sample_seed, per, total, tries,
+         window_tokens, window_attempts, mode, hint, system_text, instruction_text) = values
         try:
             new = Episode(generate(n, s, d, o), dict(supplied_moves=int(supplied_n), interrupt_after=int(trigger),
                           interruption_text=passage_text, prefix_tokens=int(count), temperature=float(temp), openness=float(o),
                           sampling_seed=int(sample_seed), per_turn_tokens=int(per), token_budget=int(total), attempt_budget=int(tries),
+                          recovery_tokens=int(window_tokens), recovery_attempts=int(window_attempts),
                           goal_mode=mode, goal_hint=hint, system_prompt=system_text, instruction=instruction_text))
         except (ValueError, TypeError) as exc:
             raise gr.Error(str(exc)) from exc
