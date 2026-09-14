@@ -1,4 +1,5 @@
 import copy
+import html
 import json
 import tempfile
 import threading
@@ -238,6 +239,63 @@ class MazeTests(unittest.TestCase):
                 self.assertEqual(result.turns[0]['text'], 'axyz')
             finally:
                 demo.close()
+
+    def test_context_menu_offers_alternatives_and_branches_where_it_was_opened(self):
+        """A right-click reaches the same fork the editor pane does, in one gesture."""
+        def opened(directory):
+            """A finished episode, its page, and the menu's answer for token 'b'."""
+            manager = Manager([('abc', [97, 98, 99, 0]), ('yz', [121, 122, 0])])
+            manager.generate = scored(manager.generate)
+            inspector = TokenInspector()
+            selections = inspector.selections()
+            inspector.selections = lambda: selections
+            session_id = selections.new_session()
+            ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+            list(stream_episode(ep, manager))
+            context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+            metrics = views(ep, False, selections, session_id)[7]
+            markup = callbacks["offer_menu"].fn(ep, session_id, metrics, 'open-1',
+                                                 SimpleNamespace(index=1))
+            payload = json.loads(html.unescape(markup.split('data-token-menu="')[1].split('"')[0]))
+            return demo, callbacks, ep, session_id, metrics, payload
+
+        with tempfile.TemporaryDirectory() as directory:
+            demo, callbacks, ep, session_id, metrics, payload = opened(directory)
+            try:
+                self.assertEqual(payload['request'], 'open-1')
+                self.assertEqual(payload['text'], 'b')
+                self.assertEqual(payload['candidates'],
+                                 [{'token_id': 120, 'text': 'x', 'probability': .1}])
+                self.assertEqual(payload['selection']['index'], 1)
+                self.assertFalse(payload['error'])
+                # A token of another run is refused rather than branched.
+                foreign = json.dumps(dict(kind='candidate', index=0, selection={
+                    **payload['selection'], 'view_id': ['other-run', 0, 0]}))
+                menu_edit = callbacks['edit_from_menu']
+                with self.assertRaisesRegex(gr.Error, 'current response'):
+                    list(menu_edit.fn(ep, False, session_id, metrics, foreign))
+            finally:
+                demo.close()
+
+        for chosen, expected in [(dict(kind='candidate', index=0), 'axyz'),
+                                 (dict(kind='text', text='Q'), 'aQyz')]:
+            with self.subTest(kind=chosen['kind']), tempfile.TemporaryDirectory() as directory:
+                demo, callbacks, ep, session_id, metrics, payload = opened(directory)
+                try:
+                    menu_edit = callbacks['edit_from_menu']
+                    action = json.dumps({**chosen, 'selection': payload['selection']})
+                    frames = list(menu_edit.fn(ep, False, session_id, metrics, action))
+                    self.assertTrue(all(len(frame) == len(menu_edit.outputs) for frame in frames))
+                    result = frames[-1][0]
+                    self.assertEqual(result.turns[0]['text'], expected)
+                    self.assertEqual(result.token_edit['token_index'], 1)
+                    self.assertTrue((Path(directory) / f'{ep.run_id}.json').exists())
+                finally:
+                    demo.close()
 
     def test_token_edit_rewinds_history_and_moves_and_preserves_original(self):
         move = call_text(MAZE.maze_id, "east")

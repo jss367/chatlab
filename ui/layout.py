@@ -168,7 +168,8 @@ from ui.settings_page import (
     update_sampling_label,
 )
 from ui.token_menu import (
-    TOKEN_MENU_CSS, TOKEN_MENU_JS, branch_from_menu, token_menu_payload,
+    MENU_BRIDGE_CLASS, MENU_STRIP_CLASS, TOKEN_MENU_CSS, TOKEN_MENU_JS,
+    branch_from_menu, menu_bridge_ids, token_menu_payload,
 )
 from ui.styles import (
     CSS,
@@ -241,9 +242,12 @@ def build_app() -> gr.Blocks:
         # which of its tokens - and the alternative picked for it. Both name a
         # turn rather than a strip position, so a click keeps meaning what it
         # meant however the conversation moves under it.
-        menu_request = gr.Textbox(elem_id="token-menu-request", elem_classes=["token-menu-bridge"])
-        menu_response = gr.HTML(elem_id="token-menu-response", elem_classes=["token-menu-bridge"])
-        menu_action = gr.Textbox(elem_id="token-menu-action", elem_classes=["token-menu-bridge"])
+        # The script names these after the strip they serve, so a second strip
+        # elsewhere - the maze workbench's - carries its own three.
+        request_id, response_id, action_id = menu_bridge_ids("token-strip")
+        menu_request = gr.Textbox(elem_id=request_id, elem_classes=[MENU_BRIDGE_CLASS])
+        menu_response = gr.HTML(elem_id=response_id, elem_classes=[MENU_BRIDGE_CLASS])
+        menu_action = gr.Textbox(elem_id=action_id, elem_classes=[MENU_BRIDGE_CLASS])
         selected_token = gr.State(None)
         branch_pick = gr.State(None)
         # Forking: the other transcripts, and the chatbot message last clicked.
@@ -415,6 +419,7 @@ def build_app() -> gr.Blocks:
                                     combine_adjacent=False,
                                     visible=False,
                                     elem_id="token-strip",
+                                    elem_classes=[MENU_STRIP_CLASS],
                                 )
                                 with gr.Group(visible=False, elem_id="token-editor") as token_editor:
                                     token_edit_text = gr.Textbox(

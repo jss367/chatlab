@@ -1,4 +1,11 @@
-"""A context menu that reuses the token panel's validated branch operations."""
+"""A context menu that reuses the token panel's validated branch operations.
+
+The script is generic: any strip carrying the ``token-menu-strip`` class opens
+the menu, and its answers travel through three hidden components named after
+that strip's element id. What the menu offers is the server's to say, so a view
+with its own branch rules - the maze workbench, which forks a run rather than
+continuing a conversation - describes its own buttons in the payload.
+"""
 
 import html
 import json
@@ -13,6 +20,19 @@ from ui.panel import (
     select_transcript_token,
 )
 
+MENU_STRIP_CLASS = "token-menu-strip"
+MENU_BRIDGE_CLASS = "token-menu-bridge"
+
+
+def menu_bridge_ids(strip_id):
+    """The element ids the script reads and writes for one strip."""
+    return tuple(f"{strip_id}-menu-{part}" for part in ("request", "response", "action"))
+
+
+def menu_markup(payload):
+    """One right-click's answer, in the hidden span the script watches for."""
+    return '<span data-token-menu="' + html.escape(json.dumps(payload), quote=True) + '"></span>'
+
 
 def token_menu_payload(turns, metrics, request_id, event: gr.SelectData):
     result = select_transcript_token(turns, metrics, event)
@@ -24,8 +44,15 @@ def token_menu_payload(turns, metrics, request_id, event: gr.SelectData):
         payload.update(selection=None, error=found)
     else:
         _, metric = found
-        payload.update(text=metric["text"], candidates=metric["top_candidates"])
-    return '<span data-token-menu="' + html.escape(json.dumps(payload), quote=True) + '"></span>'
+        payload.update(
+            text=metric["text"],
+            candidates=metric["top_candidates"],
+            verb="Continue from",
+            actions=[{"kind": "regenerate", "label": "Regenerate from this token"}],
+            label="Your own replacement",
+            submit="Continue with this text",
+        )
+    return menu_markup(payload)
 
 
 def branch_from_menu(action, prompt_text, turns, *settings):
@@ -102,8 +129,11 @@ TOKEN_MENU_JS = r"""
   window.__chatlabTokenMenu = true;
   let menu = null, pending = null, sequence = 0, anchor = null;
   const close = () => { menu?.remove(); menu = null; pending = null; };
+  // An element id is not a selector: an extension may name its strip anything
+  // the HTML allows, including characters CSS reads as syntax.
   const bridge = (id, value) => {
-    const input = document.querySelector(`#${id} textarea, #${id} input`);
+    const at = `#${CSS.escape(id)}`;
+    const input = document.querySelector(`${at} textarea, ${at} input`);
     if (!input) return false;
     const prototype = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(prototype, 'value').set.call(input, value);
@@ -132,15 +162,17 @@ TOKEN_MENU_JS = r"""
       menu.append(element('div', payload.error, 'menu-heading'));
       fit(); return;
     }
-    menu.append(element('div', `Continue from ${JSON.stringify(payload.text)}`, 'menu-heading'));
+    menu.append(element('div', `${payload.verb} ${JSON.stringify(payload.text)}`, 'menu-heading'));
     const send = (action) => {
-      bridge('token-menu-action', JSON.stringify({...action, selection: payload.selection, request: payload.request}));
+      bridge(`${pending.key}-menu-action`, JSON.stringify({...action, selection: payload.selection, request: payload.request}));
       close();
     };
-    const regenerate = element('button', 'Regenerate from this token', 'menu-option');
-    regenerate.type = 'button';
-    regenerate.addEventListener('click', () => send({kind: 'regenerate'}));
-    menu.append(regenerate);
+    (payload.actions || []).forEach((action) => {
+      const button = element('button', action.label, 'menu-option');
+      button.type = 'button';
+      button.addEventListener('click', () => send({kind: action.kind}));
+      menu.append(button);
+    });
     const options = element('div', undefined, 'menu-options');
     payload.candidates.forEach((candidate, index) => {
       const button = element('button', undefined, 'menu-option');
@@ -153,12 +185,12 @@ TOKEN_MENU_JS = r"""
     if (!payload.candidates.length) options.append(element('div', 'No alternatives recorded.', 'menu-heading'));
     menu.append(options);
     const form = element('form');
-    const label = element('label', 'Your own replacement');
+    const label = element('label', payload.label);
     label.htmlFor = 'token-menu-text';
     const input = element('textarea');
     input.id = 'token-menu-text';
     input.placeholder = 'Type text, including any leading space…';
-    const submit = element('button', 'Continue with this text');
+    const submit = element('button', payload.submit);
     submit.type = 'submit'; submit.disabled = true;
     input.addEventListener('input', () => { submit.disabled = input.value.length === 0; });
     form.addEventListener('submit', (event) => {
@@ -171,16 +203,17 @@ TOKEN_MENU_JS = r"""
       }
     });
     form.append(label, input, submit); menu.append(form); fit();
-    regenerate.focus({preventScroll: true});
+    (menu.querySelector('button:not(:disabled)') || input).focus({preventScroll: true});
   };
   document.addEventListener('contextmenu', (event) => {
-    const token = event.target.closest('#token-strip .textspan.hl');
-    if (!token) { close(); return; }
+    const token = event.target.closest('.token-menu-strip .textspan.hl');
+    const strip = token?.closest('.token-menu-strip');
+    if (!token || !strip?.id) { close(); return; }
     event.preventDefault(); close(); anchor = token;
     const id = `${Date.now()}-${++sequence}`;
-    if (!bridge('token-menu-request', id)) return;
+    if (!bridge(`${strip.id}-menu-request`, id)) return;
     const bounds = token.getBoundingClientRect();
-    pending = {id, x: event.clientX, y: event.clientY, anchorX: bounds.x, anchorY: bounds.y};
+    pending = {id, key: strip.id, x: event.clientX, y: event.clientY, anchorX: bounds.x, anchorY: bounds.y};
     menu = element('div'); menu.id = 'token-context-menu';
     menu.setAttribute('role', 'dialog'); menu.setAttribute('aria-label', 'Token alternatives');
     menu.append(element('div', 'Loading alternatives…', 'menu-heading'));
@@ -218,8 +251,8 @@ TOKEN_MENU_JS = r"""
   }, true);
   new MutationObserver(() => {
     if (!pending) return;
-    if (!anchor?.isConnected || !anchor.closest('#token-strip')?.getClientRects().length) { close(); return; }
-    const response = document.querySelector('#token-menu-response [data-token-menu]');
+    if (!anchor?.isConnected || !anchor.closest('.token-menu-strip')?.getClientRects().length) { close(); return; }
+    const response = document.querySelector(`#${CSS.escape(`${pending.key}-menu-response`)} [data-token-menu]`);
     if (response) {
       try { show(JSON.parse(response.dataset.tokenMenu)); } catch { close(); }
     }

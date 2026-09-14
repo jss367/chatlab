@@ -40,7 +40,7 @@ def build_page(context):
 The host passes `extension_api.ExtensionContext`:
 
 - `models`: the model service; obtain exclusive access with `open_session()`, or read the loaded model without claiming it with `decode(ids)` and `prompt_text(messages, tools)`.
-- `tokens`: the shared `TokenInspector`, with `color_map`, `strip(metrics)`, `describe(metric)` and `selections()` for dated token selection.
+- `tokens`: the shared `TokenInspector`, with `color_map`, `strip(metrics)`, `describe(metric)`, `selections()` for dated token selection and `menu(strip_id)` for the right-click token menu.
 - `data_dir`: an extension-specific directory. Create it only when writing data.
 - `navigation`: the host navigation service; call `context.navigation.open_models(button)` during page construction to make a Gradio button open model loading. The host updates the sidebar selection and all page visibility together. Pass a second component holding a model ID - `open_models(button, wanted_model)` - and the Models page also opens with that ID in its box, which is how an extension points at the model its own view needs. The host validates the ID and opens the page with the box untouched when it is empty or is not a model ID. Loading is still an explicit click on the Models page.
 - `api_version`: the version supplied by this host.
@@ -50,6 +50,12 @@ The host passes `extension_api.ExtensionContext`:
 For an interactive token strip, create one `selections = context.tokens.selections()` controller per view. Store its session ID using `gr.State(value=selections.new_session, delete_callback=selections.forget)`. `selections.view(session_id, response_identity, metrics)` returns a stamped metrics payload and a flag telling the UI to clear its selected-token details when the response changes. Keep the identity stable while appending tokens to that response. Pass the stamped payload to `selections.inspect(session_id, payload, event)` in the strip's selection callback: it discards delayed clicks from replaced responses. Current stamps stay in the controller, outside Gradio's event input snapshots, and are isolated from other browser sessions, extension views and core Chat.
 
 For actions such as token editing, `selections.resolve(session_id, payload, index)` returns the current response identity, token index, and a copied metric. It raises `ValueError` for stale selections or invalid indices. Resolve again when applying an edit and verify that the response belongs to the episode being changed.
+
+### The right-click token menu
+
+`context.tokens.menu(strip_id)` attaches ChatLab's token context menu to the strip with that element id. Build the strip with `elem_classes=menu.strip_classes`, and create the three hidden components the menu talks through with `menu.bridges()`, which returns the request, response and action components in that order. Answer the strip's `select` event with `menu.offer(request_id, selection, text=..., candidates=..., verb=..., label=..., submit=..., actions=())`, taking the request component as an input, or with `menu.refuse(request_id, message)` when the token has nothing to offer. Candidates are metric `top_candidates` entries; the menu shows each one's text and probability. `selection` is the extension's own: whatever identifies the token in your view comes back untouched in the action.
+
+Act on the action component's `input` event. The action names a `kind`: `"candidate"` with an `index` into the alternatives offered, `"text"` with the reader's own text, or one of the extra `actions` named in the offer. What the browser sends back is a claim rather than a fact, so resolve the selection through `selections.resolve` again and check the token identity before acting on it, exactly as for a click. Naming an alternative by its position in the menu, and reading its token ID from the resolved metric, keeps that check in one place.
 
 ```python
 with context.models.open_session() as session:
