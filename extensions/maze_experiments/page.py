@@ -798,8 +798,11 @@ def _build_page(context):
     prepare.click(prepare_episode, [episode, reveal, selection_session, trial_data, *controls],
                   [episode, *outputs, trial_note, download, models, wanted_model],
                   concurrency_id="maze-view", show_progress="hidden")
+    # On the view's own queue, so a Load trial click cannot run between the
+    # upload arriving and the picker it fills, preparing a trial from the
+    # collection being replaced.
     trial_upload.upload(load_trial_file, [trial_upload, episode], [trial_data, trial_picker, trial_note],
-                        show_progress="hidden")
+                        concurrency_id="maze-view", show_progress="hidden")
     trial_load.click(load_trial, [trial_data, trial_picker, episode, reveal, selection_session],
                      [episode, *outputs, *controls, passage, trial_note, edit_selection, download,
                       models, wanted_model],

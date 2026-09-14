@@ -95,6 +95,18 @@ class TrialFileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'smaller than 8 MB'):
             read_trials(self.path)
 
+    def test_uploading_a_collection_queues_with_the_rest_of_the_view(self):
+        # Off the view's queue, a Load trial click could be served between the
+        # upload arriving and the picker it fills, and prepare a trial from the
+        # collection on its way out.
+        context = SimpleNamespace(tokens=TokenInspector(), models=None, data_dir=Path(self.directory.name),
+                                  navigation=SimpleNamespace(open_models=lambda button, wanted=None: None))
+        with gr.Blocks() as demo:
+            build_page(context)
+        self.addCleanup(demo.close)
+        queues = {fn.fn.__name__: fn.concurrency_id for fn in demo.fns.values() if fn.fn is not None}
+        self.assertEqual(queues['load_trial_file'], queues['load_trial'])
+
     def test_the_note_calls_a_replay_a_replay_and_a_fork_of_one_live(self):
         # A fork of an uploaded trial run is a live episode again, so the pane
         # stops calling it a replay while it regenerates.
