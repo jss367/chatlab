@@ -26,6 +26,44 @@ class ModelService:
     def loaded(self):
         return self._provider().loaded
 
+    def decode(self, ids):
+        """Read recorded token IDs back as text without reserving the model.
+
+        A view showing what a model was given must not queue behind the
+        response it is showing, nor keep a load from starting, so this takes
+        no claim. The load is read either side of the tokenizer it uses: a
+        load landing in between replaces the vocabulary, and the answer would
+        describe one model's IDs in another's spelling. Returns the text with
+        the load that spelled it, or ``(None, None)`` when nothing is loaded
+        or a load moved underneath the reading.
+        """
+        return self._read(lambda manager: manager.tokenizer.decode(
+            ids, skip_special_tokens=False, clean_up_tokenization_spaces=False,
+        ))
+
+    def prompt_text(self, messages, tools=None):
+        """The prompt these messages would become, as the loaded model would be given it.
+
+        Built through the same template path generation uses, so a reader
+        seeing it here is seeing the tool schemas, turn markers and generation
+        prompt that would actually be sent, rather than a description of them.
+        Returned with its load, or ``(None, None)`` as :meth:`decode`.
+        """
+        def render(manager):
+            ids, _ = manager._prompt_token_ids(messages, tools)
+            return manager.tokenizer.decode(
+                ids, skip_special_tokens=False, clean_up_tokenization_spaces=False,
+            )
+        return self._read(render)
+
+    def _read(self, reading):
+        manager = self._provider()
+        load_id = manager.load_id
+        if not manager.loaded:
+            return None, None
+        text = reading(manager)
+        return (text, load_id) if manager.load_id == load_id else (None, None)
+
     def open_session(self):
         """Reserve the shared model until close; fail rather than queue behind Chat.
 

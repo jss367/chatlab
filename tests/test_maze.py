@@ -8,12 +8,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 from extensions.maze_experiments.maze import PASSAGES, Maze, apply_call, call_text, default_instruction, generate, parse_call
-from extensions.maze_experiments.runner import Episode, TERMINAL, fork_token_edit, from_payload, stream_episode
+from extensions.maze_experiments.runner import Episode, TERMINAL, context_messages, fork_token_edit, from_payload, stream_episode
 from model_runtime import GENERATING, ModelManager
 from extension_api import ModelService
 from extension_api import TokenInspector
 from token_metrics import unscored_metric
-from extensions.maze_experiments.page import board, build_page, export_run, scenario_values, status, views, timeline, transport_text
+from extensions.maze_experiments.page import board, build_page, context_view, export_run, scenario_values, status, views, timeline, transport_text
 import gradio as gr
 
 CONFIG = dict(supplied_moves=0, interrupt_after=0, interruption_text="Distracted", prefix_tokens=2,
@@ -35,6 +35,19 @@ class Manager:
 
     def open_session(self):
         return ModelService(lambda: self).open_session()
+
+    def decode(self, ids):
+        return ModelService(lambda: self).decode(ids)
+
+    def prompt_text(self, messages, tools=None):
+        return ModelService(lambda: self).prompt_text(messages, tools)
+
+    def _prompt_token_ids(self, messages, tools=None):
+        # Stands in for a chat template: the fixture's vocabulary is UTF-8
+        # bytes, so a rendering the reader can read round-trips through decode.
+        rendered = "".join([f"<tools>{json.dumps(tools)}</tools>" if tools else ""]
+                           + [f"<{m['role']}>{m['content']}" for m in messages] + ["<assistant>"])
+        return list(rendered.encode()), False
 
     def claim_generation(self):
         if self.busy:
@@ -66,7 +79,10 @@ class Manager:
         text, ids = next(self.replies)
         prefix = kwargs["forced_ids"]
         metrics = [{"token_id": t} for t in prefix + ids]
-        yield SimpleNamespace(text=self.tokenizer.decode(prefix) + text, metrics=metrics, prompt_ids=[10, 20],
+        # Prompt IDs come from the template, as the runtime's do, so a reader
+        # decoding them back sees the tools and history the turn was given.
+        prompt_ids, _ = self._prompt_token_ids(messages, kwargs.get("tools"))
+        yield SimpleNamespace(text=self.tokenizer.decode(prefix) + text, metrics=metrics, prompt_ids=prompt_ids,
                               forced_prefix_tokens=len(prefix), reasoning_prefilled=self.reasoning_prefilled,
                               load_id=self.load_id, model_id=self.model_id)
 
@@ -1010,6 +1026,101 @@ class MazeTests(unittest.TestCase):
         legacy = from_payload(json.loads(json.dumps(old)))
         self.assertEqual(legacy.config["instruction"], default_instruction("coordinates"))
         self.assertIn("**Setup prompt:** Default", status(legacy))
+
+    def test_context_view_reads_a_response_prompt_as_recorded(self):
+        # The run's own answer is its recorded prompt IDs, so a response is read
+        # back from those: the tool schemas and the JSON state are in there as
+        # the template wrote them, rather than described beside it.
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        east = call_text(MAZE.maze_id, 'east')
+        manager = Manager([(east, [8, 0]), (east, [8, 0])])
+        list(stream_episode(ep, manager))
+        self.assertEqual(ep.phase, 'arrived')
+        note, text = context_view(ep, manager, 1)
+        self.assertIn('**Response 2 · as recorded**', note)
+        self.assertIn(f"{len(ep.turns[1]['prompt_ids']):,} prompt tokens", note)
+        self.assertIn('"name": "move"', text)
+        self.assertIn('Move one cell in the specified direction', text)
+        self.assertIn(default_instruction('coordinates'), text)
+        # The first response and the simulator's reply to it are in the second
+        # response's prompt; the second response's own text is not.
+        self.assertIn(f'<assistant>{east}', text)
+        self.assertIn('"current":[0,1]', text)
+        self.assertEqual(text.count(east), 1)
+        # A later load spells IDs its own way, so a reading made under one that
+        # is not the recorded load says so rather than passing as the record.
+        manager.load_id = 'test-load-2'
+        self.assertIn('under test-load-2 rather than the test-load that recorded it',
+                      context_view(ep, manager, 1)[0])
+
+    def test_context_view_templates_the_initial_prompt_and_falls_back_without_a_model(self):
+        ep = Episode(MAZE, CONFIG | {'system_prompt': 'Be brief.'})
+        manager = Manager([])
+        # No response has been asked for yet, so there are no recorded IDs. The
+        # loaded model's own template answers instead, ending where generation
+        # would begin.
+        note, text = context_view(ep, manager, -1)
+        self.assertIn('**Initial prompt · as the loaded model would be given it**', note)
+        self.assertIn('2 messages and the move tool', note)
+        self.assertIn('<system>Be brief.', text)
+        self.assertIn('"name": "move"', text)
+        self.assertTrue(text.endswith('<assistant>'))
+        # With nothing loaded there is no vocabulary to spell it, so the run is
+        # read as it was recorded and the pane says that is what it is.
+        unloaded = ModelService(lambda: SimpleNamespace(loaded=False, load_id=None, tokenizer=None))
+        note, text = context_view(ep, unloaded, -1)
+        self.assertIn('**Initial prompt · as recorded, untemplated**', note)
+        self.assertIn('A template adds its own turn markers', note)
+        self.assertTrue(text.startswith('[tool schemas]'))
+        self.assertIn('"name": "move"', text)
+        self.assertIn('[system]\nBe brief.', text)
+        self.assertIn('[user]\n' + default_instruction('coordinates'), text)
+        # An uploaded run read under whatever is loaded now is not that run's
+        # own spelling either, and the note carries the same warning.
+        ep.load_id = 'elsewhere#1'
+        self.assertIn('under test-load rather than the elsewhere#1 that recorded it',
+                      context_view(ep, manager, -1)[0])
+
+    def test_context_messages_scope_each_response_to_what_it_was_given(self):
+        ep = Episode(MAZE, CONFIG | {'supplied_moves': 1, 'interruption_text': ''})
+        # Setup plus one supplied move: the prompt the first response is given.
+        self.assertEqual(len(context_messages(ep, -1)), 4)
+        self.assertEqual(context_messages(ep, -1), ep.messages)
+        manager = Manager([(call_text(MAZE.maze_id, 'north'), [8, 0]), ('I will stay here.', [8, 0])])
+        list(stream_episode(ep, manager))
+        self.assertEqual(ep.phase, 'abandoned')
+        # A rejected call still answers, so the second response was given two
+        # more messages; the response that made no call adds none, and the
+        # prompt of a response yet to be generated is the whole history.
+        self.assertFalse(ep.events[-1]['accepted'])
+        self.assertEqual(len(context_messages(ep, 0)), 4)
+        self.assertEqual(len(context_messages(ep, 1)), 6)
+        self.assertEqual(context_messages(ep, 1), ep.messages)
+        self.assertEqual(context_messages(ep, 2), ep.messages)
+        # Each recorded prompt matches the messages that response was given.
+        for index, (sent, _) in enumerate(manager.calls):
+            self.assertEqual(sent, context_messages(ep, index))
+
+    def test_context_pane_fills_on_opening_and_on_request(self):
+        inspector = TokenInspector()
+        selections = inspector.selections()
+        inspector.selections = lambda: selections
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=inspector, models=Manager([]), data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                shown = [fn.fn for fn in demo.fns.values() if fn.fn is not None and fn.fn.__name__ == 'show_context']
+                # Opening the accordion and the refresh button reach the same view.
+                self.assertEqual(len(shown), 2)
+                ep = Episode(MAZE, CONFIG)
+                ep.viewing = -1
+                note, text = shown[0](ep)
+                self.assertIn('**Initial prompt', note)
+                self.assertIn('"name": "move"', text)
+            finally:
+                demo.close()
 
     def test_setup_prompt_controls_start_episodes_and_follow_a_loaded_run(self):
         inspector = TokenInspector()
