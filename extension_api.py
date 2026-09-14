@@ -31,13 +31,12 @@ class ModelService:
 
         A view showing what a model was given must not queue behind the
         response it is showing, nor keep a load from starting, so this takes
-        no claim. The load is read either side of the tokenizer it uses: a
-        load landing in between replaces the vocabulary, and the answer would
-        describe one model's IDs in another's spelling. Returns the text with
-        the load that spelled it, or ``(None, None)`` when nothing is loaded
-        or a load moved underneath the reading.
+        no claim. What it reads is framed by the load instead, as :meth:`_read`
+        describes. Returns the text with the load that spelled it, or
+        ``(None, None)`` when nothing is loaded or a load moved underneath the
+        reading.
         """
-        return self._read(lambda manager: manager.tokenizer.decode(
+        return self._read(lambda manager, tokenizer: tokenizer.decode(
             ids, skip_special_tokens=False, clean_up_tokenization_spaces=False,
         ))
 
@@ -49,20 +48,33 @@ class ModelService:
         prompt that would actually be sent, rather than a description of them.
         Returned with its load, or ``(None, None)`` as :meth:`decode`.
         """
-        def render(manager):
+        def render(manager, tokenizer):
             ids, _ = manager._prompt_token_ids(messages, tools)
-            return manager.tokenizer.decode(
+            return tokenizer.decode(
                 ids, skip_special_tokens=False, clean_up_tokenization_spaces=False,
             )
         return self._read(render)
 
     def _read(self, reading):
+        """Read the loaded model, or answer that no one load made the reading.
+
+        A load publishes its weights field by field and the snapshot naming
+        them last, so ``loaded`` turns true while the identifiers still name
+        the load before it - a window wide enough on MLX to decode inside,
+        because the engine is built in it. The snapshot is the reading that
+        moves as one, and an unload empties it before a load begins, so a read
+        framed by two equal snapshots that name a load was made under that
+        load and no other: an unfinished load is nameless, and a load count
+        only rises, so no cycle of loads can put the frame back the way it
+        was. Returns the text with that load, or ``(None, None)``.
+        """
         manager = self._provider()
-        load_id = manager.load_id
-        if not manager.loaded:
+        published = manager.loaded_model()
+        tokenizer = manager.tokenizer
+        if published.load_id is None or tokenizer is None:
             return None, None
-        text = reading(manager)
-        return (text, load_id) if manager.load_id == load_id else (None, None)
+        text = reading(manager, tokenizer)
+        return (text, published.load_id) if manager.loaded_model() == published else (None, None)
 
     def open_session(self):
         """Reserve the shared model until close; fail rather than queue behind Chat.

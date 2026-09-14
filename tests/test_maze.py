@@ -9,7 +9,7 @@ from unittest import mock
 
 from extensions.maze_experiments.maze import PASSAGES, Maze, apply_call, call_text, default_instruction, generate, parse_call
 from extensions.maze_experiments.runner import Episode, TERMINAL, context_messages, fork_token_edit, from_payload, stream_episode
-from model_runtime import GENERATING, ModelManager
+from model_runtime import GENERATING, LoadedModel, ModelManager
 from extension_api import ModelService
 from extension_api import TokenInspector
 from token_metrics import unscored_metric
@@ -35,6 +35,10 @@ class Manager:
 
     def open_session(self):
         return ModelService(lambda: self).open_session()
+
+    def loaded_model(self):
+        # Published as one reading, the way a finished load publishes it.
+        return LoadedModel(self.model_id, "test-device", "full", self.load_id)
 
     def decode(self, ids):
         return ModelService(lambda: self).decode(ids)
@@ -1067,7 +1071,8 @@ class MazeTests(unittest.TestCase):
         self.assertTrue(text.endswith('<assistant>'))
         # With nothing loaded there is no vocabulary to spell it, so the run is
         # read as it was recorded and the pane says that is what it is.
-        unloaded = ModelService(lambda: SimpleNamespace(loaded=False, load_id=None, tokenizer=None))
+        unloaded = ModelService(lambda: SimpleNamespace(
+            loaded=False, load_id=None, tokenizer=None, loaded_model=LoadedModel))
         note, text = context_view(ep, unloaded, -1)
         self.assertIn('**Initial prompt · as recorded, untemplated**', note)
         self.assertIn('A template adds its own turn markers', note)
@@ -1080,6 +1085,51 @@ class MazeTests(unittest.TestCase):
         ep.load_id = 'elsewhere#1'
         self.assertIn('under test-load rather than the elsewhere#1 that recorded it',
                       context_view(ep, manager, -1)[0])
+
+    def test_reading_a_model_mid_load_is_refused_rather_than_stamped(self):
+        # A load publishes its weights before the snapshot naming them, so the
+        # tokenizer answers while the identifiers still name the load before
+        # it. Reading the fields would stamp the new vocabulary's text with an
+        # identifier no load ever had, and read twice it would agree with
+        # itself. The snapshot is what says a load has finished.
+        class MidLoad:
+            loaded = True
+            model_id = None
+            load_count = 2
+            tokenizer = SimpleNamespace(decode=lambda ids, **kw: 'partly loaded')
+
+            @property
+            def load_id(self):
+                return f'{self.model_id}#{self.load_count}'
+
+            def loaded_model(self):
+                return LoadedModel()
+
+        service = ModelService(MidLoad)
+        self.assertEqual(service.decode([1, 2]), (None, None))
+        self.assertEqual(service.prompt_text([{'role': 'user', 'content': 'hi'}]), (None, None))
+
+        # A load that lands while the reading is under way is refused too: the
+        # text belongs to one vocabulary and the identifier to another.
+        class LoadsDuringRead(Manager):
+            def __init__(self):
+                super().__init__([])
+                self.reads = 0
+
+            def loaded_model(self):
+                self.reads += 1
+                # The first reading frames the start of the read; the load
+                # lands before the second.
+                return LoadedModel('test/model', 'test-device', 'full',
+                                   'test-load' if self.reads < 2 else 'test-load-2')
+
+        self.assertEqual(ModelService(LoadsDuringRead).decode([65]), (None, None))
+        # The maze pane falls back to the recorded messages rather than
+        # showing a prompt it cannot say was spelled by any one load.
+        ep = Episode(MAZE, CONFIG)
+        note, text = context_view(ep, ModelService(LoadsDuringRead), -1)
+        self.assertIn('as recorded, untemplated', note)
+        self.assertTrue(text.startswith('[tool schemas]'))
 
     def test_context_messages_scope_each_response_to_what_it_was_given(self):
         ep = Episode(MAZE, CONFIG | {'supplied_moves': 1, 'interruption_text': ''})
