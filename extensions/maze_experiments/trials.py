@@ -33,16 +33,18 @@ def read_trials(path):
     items = data.get("trials")
     if not isinstance(items, list) or not 1 <= len(items) <= 2000:
         raise ValueError("A trial file must contain 1–2000 trials.")
-    ids = set()
+    # The label is what the picker shows, so two conditions carrying the same
+    # one are indistinguishable there however different their IDs are.
+    seen = {"id": set(), "label": set()}
     for item in items:
         if not isinstance(item, dict):
             raise ValueError("Each trial must be an object.")
         for name in ("id", "label"):
             if not isinstance(item.get(name), str) or not item[name].strip():
                 raise ValueError(f"Each trial needs a {name}.")
-        if item["id"] in ids:
-            raise ValueError("Trial IDs must be unique.")
-        ids.add(item["id"])
+            if item[name] in seen[name]:
+                raise ValueError(f"Trial {'IDs' if name == 'id' else 'labels'} must be unique.")
+            seen[name].add(item[name])
         # from_dict takes what a saved run may have recorded, and defaults or
         # coerces a seed. A trial is a pinned input under a checksum, so the
         # seed the pane and the export report has to be the one written here.

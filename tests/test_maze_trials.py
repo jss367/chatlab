@@ -53,7 +53,12 @@ class TrialFileTests(unittest.TestCase):
                 self.read()
         self.payload = copy.deepcopy(good)
         self.payload['trials'] *= 2
-        with self.assertRaisesRegex(ValueError, 'unique'):
+        with self.assertRaisesRegex(ValueError, 'IDs must be unique'):
+            self.read()
+        # Distinct IDs are no help in a picker that shows the label.
+        self.payload = copy.deepcopy(good)
+        self.payload['trials'] = [self.payload['trials'][0] | dict(id=f'trial-{n}') for n in range(2)]
+        with self.assertRaisesRegex(ValueError, 'labels must be unique'):
             self.read()
         # The seed is a pinned input under a checksum, so a trial cannot leave
         # it to be defaulted or coerced the way a saved run's may be.
