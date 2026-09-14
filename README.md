@@ -672,9 +672,21 @@ written there left to itself. **Download comparison JSON** writes both runs,
 their settings, every token's measurements and the comparison as one document.
 
 Sampling, the steering vector and the thinking mode come from the **Chat** tab
-and the system prompt from **Settings**, so a slot is filled under exactly the
-settings a reply typed by hand would have used. That is what makes changing one
-of them between A and B a clean experiment. **Stop** — or Escape — closes a run
+and the system prompt from **Settings**, so a reply slot is filled under exactly
+the settings a reply typed by hand would have used. That is what makes changing
+one of them between A and B a clean experiment. A measurement takes no system
+prompt: the pass feeds the context and the passage and nothing else, with no
+turn for a system message to sit in front of, so a measurement's framing goes
+in the context box.
+
+Two runs from the same model are lined up on token IDs. Two runs from different
+models cannot be: an ID means nothing outside the tokenizer that issued it, and
+two tokenizers cut one passage into different tokens. Those runs are lined up on
+the text each token stands for instead, which stops the comparison at the first
+position where the two cut the passage differently rather than subtracting one
+model's reading of half a word from another's reading of a whole one. Read the
+per-token gaps with that in mind — a bit of surprise is not the same size in two
+vocabularies — and the tab says so above the strips when the two models differ. **Stop** — or Escape — closes a run
 where it stands and leaves the slot as it was: half a response is not a
 measurement of anything.
 

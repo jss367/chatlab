@@ -173,7 +173,7 @@ def fill_slot(
                         )
             else:
                 result = _measure_text(
-                    prompt, measured, use_chat_template, system_prompt, vector, published,
+                    prompt, measured, use_chat_template, vector, published,
                 )
         except ModelChanged as error:
             yield refuse(failure_status("The model changed while this ran", str(error)))
@@ -259,8 +259,15 @@ def _write_reply(
     }, len(metrics)
 
 
-def _measure_text(context, measured, use_chat_template, system_prompt, vector, published):
-    """The same fixed passage, read by whatever is in memory now."""
+def _measure_text(context, measured, use_chat_template, vector, published):
+    """The same fixed passage, read by whatever is in memory now.
+
+    The system prompt from Settings is deliberately not taken here. A
+    measurement pass feeds the context and the passage and nothing else -
+    there is no turn for a system message to sit in front of - so recording
+    one would have the comparison table report a difference neither run saw.
+    The context box is where a measurement's framing goes.
+    """
 
     result = runtime.MANAGER.score_text(
         measured,
@@ -279,7 +286,6 @@ def _measure_text(context, measured, use_chat_template, system_prompt, vector, p
         "text": measured,
         "metrics": list(result.metrics),
         "settings": {
-            "system_prompt": system_prompt or "",
             "use_chat_template": bool(use_chat_template),
             "seam_verified": result.seam_verified,
             "chat_template_missing": result.chat_template_missing,

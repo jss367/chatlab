@@ -624,7 +624,7 @@ def build_app() -> gr.Blocks:
                                                 extract_apply = gr.Button(
                                                     "Use this layer", interactive=False, min_width=110
                                                 )
-                                                extract_download = gr.DownloadButton(
+                                                gr.DownloadButton(
                                                     "Download vector",
                                                     value=download_extracted,
                                                     inputs=[extract_state, extract_layer],
@@ -809,7 +809,11 @@ def build_app() -> gr.Blocks:
                                         "Two replies part company somewhere in the "
                                         "answer and only their shared opening can be "
                                         "compared. Two runs over one fixed passage "
-                                        "never part, so every token is comparable."
+                                        "never part, so every token is comparable — "
+                                        "and a measurement reads the context and the "
+                                        "passage alone, so put a measurement's framing "
+                                        "in the context box rather than in the system "
+                                        "prompt."
                                     ),
                                 )
                                 compare_prompt = gr.Textbox(
@@ -900,7 +904,7 @@ def build_app() -> gr.Blocks:
                                     elem_id="compare-divergences",
                                     label="Where the two runs read a shared token most differently",
                                 )
-                                compare_download = gr.DownloadButton(
+                                gr.DownloadButton(
                                     "Download comparison JSON",
                                     value=download_comparison,
                                     inputs=compare_export_state,

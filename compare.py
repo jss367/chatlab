@@ -59,6 +59,20 @@ GAP_CAPTION = (
 EMPTY_SLOT = "Empty. Run the prompt into this slot to fill it."
 
 
+# Two models are two tokenizers, and a token ID says nothing across them, so
+# the runs are lined up on the text each token stands for. Surprise is in bits
+# either way, but a bit costs more in a small vocabulary than in a large one,
+# and the two runs cut the same passage into different numbers of tokens - so
+# the per-token gap is a reading about this token, not a score for the models.
+CROSS_MODEL_CAVEAT = (
+    "The two runs came from different models, so they are lined up on the text "
+    "each token stands for rather than on token IDs, which mean nothing across "
+    "two vocabularies. Compare the per-token gaps with that in mind: two "
+    "tokenizers cut the same passage differently, and a bit of surprise is not "
+    "the same size in two vocabularies."
+)
+
+
 def gap_category(delta: float) -> str:
     """Which bucket a shared token's surprise gap falls in."""
 
@@ -68,17 +82,32 @@ def gap_category(delta: float) -> str:
     return GAP_LABELS[-1]
 
 
-def shared_prefix(left, right) -> int:
+def shared_prefix(left, right, *, by_text: bool = False) -> int:
     """How many leading tokens the two runs have in common.
 
-    Counted on token IDs rather than on text: two different tokens can decode
-    to the same characters, and a comparison that called them equal would go
-    on subtracting measurements taken in contexts that had already parted.
+    Within one vocabulary, counted on token IDs: two different tokens can
+    decode to the same characters, and a comparison that called them equal
+    would go on subtracting measurements taken in contexts that had already
+    parted.
+
+    Across two vocabularies there are no IDs to count on. A token ID means
+    nothing outside the tokenizer that issued it - ID 4192 in one model and
+    ID 4192 in another stand for unrelated text - so two runs from different
+    models are matched on the text each token stands for and on nothing else.
+    That also handles the other half of the problem: one passage can be cut
+    into different tokens by two models, and the first position whose text
+    disagrees is where the two runs stop describing the same thing, whatever
+    the characters after it are. Matching by text stops there rather than
+    subtracting one model's reading of half a word from another's reading of
+    a whole one.
     """
 
     count = 0
     for here, there in zip(left or (), right or ()):
-        if int(here["token_id"]) != int(there["token_id"]):
+        if by_text:
+            if (here.get("text") or "") != (there.get("text") or ""):
+                break
+        elif int(here["token_id"]) != int(there["token_id"]):
             break
         count += 1
     return count
@@ -203,11 +232,15 @@ def configuration(run: dict | None) -> dict:
         "Model": run.get("model_id") or "—",
         "Device": run.get("device_name") or "—",
         "Weights": run.get("precision") or "—",
-        "System prompt": settings.get("system_prompt") or "—",
         "Steering": steered,
     }
     if run["kind"] == REPLY:
+        # The system prompt is only in the reading for a reply. A measurement
+        # is a fixed passage read as it stands, and there is nowhere in that
+        # pass for a system message to go; naming one here would have the
+        # table report a difference the two runs never saw.
         reading |= {
+            "System prompt": settings.get("system_prompt") or "—",
             "Temperature": f"{float(settings.get('temperature', 0)):g}",
             "Top-p": f"{float(settings.get('top_p', 1)):g}",
             "Top-k": f"{int(settings.get('top_k', 0))}",
@@ -262,7 +295,11 @@ def reading(left: dict | None, right: dict | None) -> dict:
     if not left or not right:
         return {}
     here, there = left["metrics"], right["metrics"]
-    shared = shared_prefix(here, there)
+    # Two loads of one model ID share a tokenizer whatever else changed about
+    # them - a precision, a steering vector - so their IDs still line up. Two
+    # model IDs do not, and are aligned by text instead.
+    cross_model = (left.get("model_id") or "") != (right.get("model_id") or "")
+    shared = shared_prefix(here, there, by_text=cross_model)
     readings = gaps(here, there, shared)
     scored = [item for item in readings if item["scored"]]
     changed = [
@@ -272,6 +309,7 @@ def reading(left: dict | None, right: dict | None) -> dict:
     widest = max(scored, key=lambda item: item["surprise_bits"], default=None)
     return {
         "shared": shared,
+        "cross_model": cross_model,
         "left_count": len(here),
         "right_count": len(there),
         "complete": shared == len(here) == len(there),
@@ -314,6 +352,8 @@ def headline(reading: dict, left: dict, right: dict) -> str:
             f"The two runs parted at the first token, so there is nothing to "
             f"compare: A ran to {left_count:,} tokens, B to {right_count:,}."
         )
+    if reading["cross_model"]:
+        where = f"{where} {CROSS_MODEL_CAVEAT}"
     if not reading["compared"]:
         return where
     return (

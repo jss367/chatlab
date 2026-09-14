@@ -9,7 +9,7 @@ import charts
 import compare
 import settings_sandbox
 from model_runtime import LoadedModel, ModelChanged
-from test_streaming import EOS_ID, PIECES, loaded_manager
+from test_streaming import EOS_ID, loaded_manager
 from ui import compare as controls
 from ui import runtime
 
@@ -129,6 +129,48 @@ class ReadingTests(unittest.TestCase):
         self.assertEqual(reading["compared"], 1)
         self.assertEqual(reading["top_choice_changed"], 1)
 
+    def test_two_models_are_lined_up_on_text_not_on_token_ids(self):
+        # The same two IDs stand for unrelated text in two vocabularies, so
+        # matching on them would subtract one model's reading from another's.
+        left = [metric(1, 5, 1.0), metric(2, 6, 1.0)]
+        right = [dict(metric(1, 5, 4.0), text="other", display_text="other"),
+                 metric(2, 6, 1.0)]
+        reading = compare.reading(run(left), run(right, model_id="other/model"))
+        self.assertTrue(reading["cross_model"])
+        self.assertEqual(reading["shared"], 0)
+        self.assertIn("different models", compare.headline(reading, None, None))
+        # Matching IDs in one model still count, and the caveat stays away.
+        same = compare.reading(run(left), run(right))
+        self.assertFalse(same["cross_model"])
+        self.assertEqual(same["shared"], 2)
+        self.assertNotIn("different models", compare.headline(same, None, None))
+
+    def test_two_tokenizers_that_cut_a_passage_differently_stop_the_alignment(self):
+        def piece(position, token_id, text):
+            return dict(metric(position, token_id, 1.0), text=text, display_text=text)
+
+        left = [piece(1, 1, "hel"), piece(2, 2, "lo"), piece(3, 3, "!")]
+        right = [piece(1, 9, "hello"), piece(2, 8, "!"), piece(3, 7, "?")]
+        reading = compare.reading(run(left), run(right, model_id="other/model"))
+        # The characters agree; the boundaries do not, and that is where the
+        # two runs stop describing the same thing.
+        self.assertEqual(reading["shared"], 0)
+        self.assertEqual(
+            compare.shared_prefix(left, [piece(1, 9, "hel"), piece(2, 8, "lo")], by_text=True), 2
+        )
+
+    def test_a_measurement_records_no_system_prompt_to_differ_over(self):
+        # score_text has nowhere to put a system message, so recording one
+        # would have the table report a difference neither run saw.
+        left = run([metric(1, 5, 1.0)], kind=compare.MEASUREMENT, use_chat_template=False)
+        right = run([metric(1, 5, 1.0)], kind=compare.MEASUREMENT, use_chat_template=True)
+        self.assertNotIn("System prompt", compare.configuration(left))
+        self.assertIn("System prompt", compare.configuration(run([metric(1, 5, 1.0)])))
+        self.assertEqual(
+            [row[0] for row in compare.configuration_rows(left, right)],
+            ["Context read as"],
+        )
+
     def test_configuration_rows_name_only_what_differed(self):
         left = run([metric(1, 5, 1.0)], seed=1)
         right = run([metric(1, 5, 1.0)], seed=2, temperature=0.7)
@@ -190,6 +232,13 @@ class HandlerTests(unittest.TestCase):
             "default", None, False, 1.0, 0,
         ))
         return frames[-1]
+
+    def test_a_measurement_run_keeps_no_system_prompt_in_its_settings(self):
+        held, _status, *_buttons = self.fill(
+            "A", mode=compare.MEASUREMENT, prompt="", measured="Hello world"
+        )
+        self.assertEqual(held["kind"], compare.MEASUREMENT)
+        self.assertNotIn("system_prompt", held["settings"])
 
     def test_a_reply_fills_its_slot_with_the_settings_it_ran_under(self):
         held, status, *_buttons = self.fill("A")
