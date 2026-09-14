@@ -154,22 +154,22 @@ def openness_of(ep):
     return float(ep.config["openness"])
 
 
-def recovered_openness(maze, budget=2.):
+def recovered_openness(maze):
     """Runs predating the recorded setting are searched for the slider value that
-    redraws their maze. Every value is tried, because a small maze deviates from
-    the probability that drew it; the share of cells it leaves open only orders
-    the search. The redrawn maze has to match whole: the same walls placed around
-    a different start or destination is a maze the run never used."""
+    redraws their maze. Every value is tried before the answer is unknown, because
+    a small maze deviates from the probability that drew it and elapsed time is no
+    evidence about the values not yet reached; the share of cells the maze leaves
+    open only orders the search, so a recoverable run usually answers on the first
+    try and an exhausted search costs a few seconds once per upload. The redrawn
+    maze has to match whole: the same walls placed around a different start or
+    destination is a maze the run never used."""
     share = sum(row.count(".") for row in maze.grid) / maze.size ** 2
-    deadline = time.monotonic() + budget
     for value in sorted(OPENNESS_CHOICES, key=lambda v: abs(v - share)):
         try:
             if generate(maze.size, maze.seed, len(maze.route()) - 1, value) == maze:
                 return value
         except ValueError:
             pass
-        if time.monotonic() > deadline:
-            break
     return None
 
 

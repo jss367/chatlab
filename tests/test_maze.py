@@ -1040,6 +1040,11 @@ class MazeTests(unittest.TestCase):
         sparse = Episode(generate(3, 1, 1, .35), CONFIG)
         value = scenario_values(from_payload(json.loads(json.dumps(sparse.payload()))))[3]
         self.assertEqual(generate(3, 1, 1, value), sparse.maze)
+        # The search reaches a match that several slow candidates are ordered ahead of,
+        # because elapsed time says nothing about the values it has not tried yet.
+        late = Episode(generate(5, 2, 15, .45), CONFIG)
+        value = scenario_values(from_payload(json.loads(json.dumps(late.payload()))))[3]
+        self.assertEqual(generate(5, 2, 15, value), late.maze)
         blank = scenario_values(Episode(MAZE, CONFIG | {'interruption_text': ''}))
         self.assertEqual((blank[6], blank[-1]), ('', 'None'))
 
