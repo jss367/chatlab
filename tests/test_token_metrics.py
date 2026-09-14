@@ -194,10 +194,6 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summarize([])["perplexity"], 0.0)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 # The strip paints these fills behind dark body text, and a reader has to tell
 # two of them apart while they sit side by side in arbitrary order. Both of
 # those are arithmetic, so they are checked rather than eyeballed. The ink is
@@ -290,3 +286,7 @@ class PaletteTests(unittest.TestCase):
                         self.assertGreaterEqual(
                             _separation(fill, other, vision), MIN_SEPARATION
                         )
+
+
+if __name__ == "__main__":
+    unittest.main()
