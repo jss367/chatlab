@@ -1934,9 +1934,143 @@ def warm_device() -> None:
             return
         # Only now is every attribute there to be read.
         _torch_ready.set()
-        logger.info("Device: %s", device_label(detect_backend()))
+        log_device_profile()
 
     threading.Thread(target=read, name="chatlab-device", daemon=True).start()
+
+
+def log_device_profile() -> None:
+    """Record the device and the budget every load will be judged against.
+
+    Written once torch has landed rather than at startup, because none of it
+    can be read before then. It is the second half of the record
+    :func:`logs.log_environment` opens: that one names the build and the
+    machine, this one names what the allocator on it will allow, which is the
+    figure a refused load or a fatal one has to be read against. The device
+    alone used to be logged here, and a device name says nothing about how
+    much of the machine a load was allowed to take.
+    """
+
+    profile = device_profile()
+    parts = [
+        f"full weights as {profile.dtype or 'unknown'}",
+        f"{memory_note(profile.total)} in the pool ({profile.pool})",
+        f"{memory_note(profile.available)} estimated available",
+    ]
+    if profile.backend == "mps":
+        ceiling = f"Metal ceiling {memory_note(profile.ceiling)}"
+        if profile.fraction is not None:
+            ceiling += (
+                f" at {profile.fraction:.2f} of the "
+                f"{memory_note(profile.recommended)} recommended"
+            )
+        parts.append(ceiling)
+    if profile.held is not None:
+        parts.append(f"{memory_note(profile.held)} already held")
+    logger.info("Device: %s - %s", device_label(profile.backend), "; ".join(parts))
+
+
+# How often the memory watch looks, how far a figure has to move before it is
+# worth a line, and how long the watch will stay quiet before writing one
+# anyway.
+MEMORY_WATCH_SECONDS = 30.0
+MEMORY_WATCH_STEP_BYTES = 256 * 1024**2
+MEMORY_WATCH_IDLE_SECONDS = 600.0
+
+
+class MemoryWatch:
+    """A periodic record of what the device holds and what the machine has left.
+
+    macOS kills a process that takes too much memory without giving it the
+    chance to say so, so the last line in the log is whatever was written
+    before the kill. Loads and replies are recorded when they finish, which
+    leaves a session that died partway through a long reply with nothing at
+    all between the load and the silence - no way to tell a steady climb from
+    one large allocation, which is the difference between a leak and a model
+    that never fitted.
+
+    This writes a line while nothing else is happening, and writes as few as
+    it can: one only when a figure has moved by ``step`` since the last one,
+    so an idle app is silent, and one every ``idle`` seconds regardless so a
+    kill always has a recent reading in front of it.
+    """
+
+    def __init__(
+        self,
+        step: int = MEMORY_WATCH_STEP_BYTES,
+        idle: float = MEMORY_WATCH_IDLE_SECONDS,
+    ) -> None:
+        self.step = step
+        self.idle = idle
+        self._last: tuple[int | None, int | None] | None = None
+        self._at: float | None = None
+
+    def read(self) -> tuple[int | None, int | None]:
+        """What the device allocator holds, and what the machine has free.
+
+        Both are ``None`` where the platform offers no figure, and the first
+        is ``None`` until torch has finished importing - this never waits for
+        that import, since a watch that blocked the interface's first seconds
+        to report on memory would be its own problem.
+        """
+
+        torch = imported_torch()
+        held = reserved_bytes(torch) if torch is not None else None
+        return held, system_memory()[1]
+
+    def tick(self, now: float) -> bool:
+        """Write a line if this reading is worth one; say whether it did."""
+
+        reading = self.read()
+        if not self._worth_recording(reading, now):
+            return False
+        held, available = reading
+        logger.info(
+            "Memory: %s held on the device, %s available on the machine",
+            memory_note(held),
+            memory_note(available),
+        )
+        self._last = reading
+        self._at = now
+        return True
+
+    def _worth_recording(self, reading: tuple[int | None, int | None], now: float) -> bool:
+        if self._last is None or self._at is None:
+            return True
+        if now - self._at >= self.idle:
+            return True
+        for current, previous in zip(reading, self._last):
+            # A figure that appeared or went away is news whatever its size:
+            # the first is torch finishing its import, the second a device
+            # that stopped answering.
+            if (current is None) != (previous is None):
+                return True
+            if current is not None and previous is not None and abs(current - previous) >= self.step:
+                return True
+        return False
+
+
+def watch_memory(interval: float = MEMORY_WATCH_SECONDS) -> threading.Thread:
+    """Run a :class:`MemoryWatch` beside the app for as long as the process lives.
+
+    Started by the two entry points rather than by ``build_app``, so the test
+    suite, which builds the interface many times over, does not accumulate a
+    thread per build.
+    """
+
+    watch = MemoryWatch()
+
+    def loop() -> None:
+        while True:
+            time.sleep(interval)
+            try:
+                watch.tick(time.monotonic())
+            except Exception:  # noqa: BLE001 - the watch has to outlive a bad reading
+                logger.debug("Could not record the memory reading", exc_info=True)
+
+    thread = threading.Thread(target=loop, name="chatlab-memory", daemon=True)
+    thread.start()
+    return thread
 
 
 def model_fit(
@@ -4531,21 +4665,54 @@ class ModelManager:
 
         checked_id = validate_model_id(model_id)
         progress = progress or DownloadProgress()
+        token = hf_token.strip() if hf_token and hf_token.strip() else None
+        started = time.monotonic()
+        # A download is the longest thing the app does and the one most likely
+        # to be interrupted, and until now it left no trace at all: a cache
+        # holding a partial 14 GB repo looked the same in the log as one that
+        # was never asked for.
+        logger.info(
+            "Downloading %s from the Hub%s",
+            checked_id,
+            " with an access token" if token else "",
+        )
         try:
             self._list_download(checked_id, progress)
             from huggingface_hub import snapshot_download
 
             path = snapshot_download(
                 repo_id=checked_id,
-                token=hf_token.strip() if hf_token and hf_token.strip() else None,
+                token=token,
                 tqdm_class=progress.bar_class(),
             )
+        except Exception as error:
+            reached = progress.snapshot()
+            logger.warning(
+                "Download of %s stopped after %.1fs at %s of %s files, %s of %s: %s",
+                checked_id,
+                time.monotonic() - started,
+                reached.files_done,
+                reached.files_total,
+                format_bytes(reached.bytes_done),
+                format_bytes(reached.bytes_total),
+                first_line(error),
+            )
+            raise
         finally:
             # The end of the download is noted by release_download, which
             # covers both halves of what changed: the files that landed, and
             # the model becoming loadable again now that nothing is writing
             # its folder.
             self.release_download(checked_id, progress)
+        landed = progress.snapshot()
+        logger.info(
+            "Downloaded %s in %.1fs: %s files, %s, cached at %s",
+            checked_id,
+            time.monotonic() - started,
+            landed.files_total or landed.files_done,
+            format_bytes(landed.bytes_done),
+            path,
+        )
         return Path(path)
 
     def note_cache_change(self) -> None:
@@ -5004,6 +5171,7 @@ class ModelManager:
     def _unload_locked(self, torch) -> None:
         """Clear the loaded model while the caller holds ``_lock``."""
 
+        released, precision, estimated = self.model_id, self.precision, self.loaded_bytes
         self._inspect_cache = None
         self.model = None
         self.tokenizer = None
@@ -5019,6 +5187,20 @@ class ModelManager:
             self._loaded = LoadedModel()
         gc.collect()
         self._release_device_cache(torch)
+        if released is not None:
+            # The line that closes a load's entry in the log. Without it two
+            # "Loaded" lines read the same whether the first model was let go
+            # or is still in memory beside the second, and only one of those
+            # accounts for a machine that started paging. The figure is read
+            # after the cache has gone back, so it is what the process kept
+            # rather than what it was holding a moment earlier.
+            logger.info(
+                "Unloaded %s (%s weights, %s estimated): %s held on the device now",
+                released,
+                precision or "full",
+                memory_note(estimated),
+                memory_note(reserved_bytes(torch)),
+            )
 
     def _drop_inspect_cache(self) -> None:
         """Forget the cache the last inspection kept, and give its memory back."""

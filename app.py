@@ -25,6 +25,7 @@ from gradio.utils import get_upload_folder
 import api
 import charts
 import library
+import logs
 import settings
 from conversation import (
     CHAT_PREFIX,
@@ -78,6 +79,7 @@ from model_runtime import (
     list_cached_models,
     search_hub_models,
     sort_cached_models,
+    watch_memory,
 )
 from token_metrics import (
     COLOR_SCALES,
@@ -390,10 +392,11 @@ logger = logging.getLogger(__name__)
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    # The same rules the desktop app runs under, so a problem reproduced from
+    # a checkout is recorded the way it was recorded on the machine that hit
+    # it. CHATLAB_LOG_LEVEL=debug turns the detail up without a code change.
+    logs.log_environment(logs.configure())
+    watch_memory()
     conductor_port = os.environ.get("CONDUCTOR_PORT")
     demo = build_app().queue(default_concurrency_limit=1)
     # Gradio builds its FastAPI application inside launch(), so the API is
