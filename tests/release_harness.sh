@@ -107,8 +107,8 @@ check "no extra commit" "$(git rev-parse origin/main)" "$before"
 check "released 0.18.0" "$(tail -1 "$RELHARNESS_STATE")" v0.18.0
 check "no 0.19.0" "$(grep -c v0.19.0 "$RELHARNESS_STATE")" 0
 
-echo "== 5. an already published --version aborts =="
-code=$(run --version 0.18.0); check "exit 1" "$code" 1
+echo "== 5. a published version that is not the one on main aborts =="
+code=$(run --version 0.17.0); check "exit 1" "$code" 1
 check "message" "$(grep -c 'already published' "$root/err.txt")" 1
 
 echo "== 6. a local commit that is not on main aborts =="
@@ -159,6 +159,29 @@ check "released 0.20.0" "$(tail -1 "$RELHARNESS_STATE")" v0.20.0
 echo "== 9. a version the updater could not read is refused =="
 code=$(run --version 1.2.3beta); check "exit 1" "$code" 1
 check "message" "$(grep -c 'Not a MAJOR.MINOR.PATCH' "$root/err.txt")" 1
+
+echo "== 10. a run interrupted after publishing installs without cutting another =="
+before=$(git rev-parse origin/main)
+code=$(run --version 0.20.0); check "exit 0" "$code" 0
+check "said so" "$(grep -c 'published already' "$root/out.txt")" 1
+git fetch -q origin main
+check "no extra commit" "$(git rev-parse origin/main)" "$before"
+check "no second release" "$(grep -c '^v0.20.0$' "$RELHARNESS_STATE")" 1
+check "no 0.21.0" "$(grep -c v0.21.0 "$RELHARNESS_STATE")" 0
+
+echo "== 11. an older published version is still refused =="
+code=$(run --version 0.19.0); check "exit 1" "$code" 1
+check "message names the one on main" "$(grep -c 'pass --version 0.20.0' "$root/err.txt")" 1
+
+echo "== 12. the tests run in the environment the build used =="
+mkdir -p "$root/altvenv/bin"
+printf '#!/bin/sh\ntouch "$RELHARNESS_ALT_MARKER"\nexit 0\n' > "$root/altvenv/bin/python"
+chmod +x "$root/altvenv/bin/python"
+export RELHARNESS_ALT_MARKER="$root/altvenv-ran"
+code=$(CHATLAB_DESKTOP_VENV="$root/altvenv" ./scripts/release.sh --skip-install --version 0.20.0 \
+    > "$root/out.txt" 2> "$root/err.txt"; echo $?)
+check "exit 0" "$code" 0
+check "the override ran the tests" "$([ -e "$root/altvenv-ran" ] && echo yes || echo no)" yes
 
 echo
 echo "$pass passed, $fail failed"

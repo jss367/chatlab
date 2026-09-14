@@ -685,13 +685,16 @@ supplies release notes instead of GitHub's generated ones, and
 
 Run it again to finish an interrupted release. A version that is on `main`
 without a published release is completed rather than bumped past, and an
-existing tag is reused when it already names that commit.
+existing tag is reused when it already names that commit. Once the release is
+published the bare command cuts the next one, so a run that died in its install
+step is finished with `--version` naming the version on `main`: the tag and the
+release are left as they are and the bundle is rebuilt and installed.
 
-The build needs a Mac with a real GPU. GitHub's macOS runners report a Metal
-device backed by no memory, so the bundle's smoke test fails there while
-allocating a few kilobytes. `Release macOS app` therefore runs only when it
-is dispatched by hand with a tag, which is worth doing only against a
-self-hosted Apple Silicon runner.
+The build needs a Mac with a real GPU. GitHub's hosted macOS runners report a
+Metal device backed by no memory, so the bundle's smoke test fails there while
+allocating a few kilobytes. `Release macOS app` therefore runs only when it is
+dispatched by hand with a tag, and asks for a self-hosted Apple Silicon runner.
+No such runner is registered, so a dispatch queues until one is.
 
 Installed apps offer the release the next time they start; the updater
 verifies the download against the published checksum and confirms the

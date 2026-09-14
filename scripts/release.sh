@@ -82,8 +82,8 @@ fi
 # version it cannot read is a release every installed app would skip.
 echo "$target" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
     || die "Not a MAJOR.MINOR.PATCH version: $target"
-if released "$target"; then
-    die "v$target is already published; pass --version for a different one."
+if released "$target" && [ "$target" != "$current" ]; then
+    die "v$target is already published, and main is on $current; pass --version $current to reinstall that release, or a version that has not been cut."
 fi
 tag="v$target"
 
@@ -112,44 +112,51 @@ built=dist/ChatLab.app
     || die "The built bundle says $(plist_version "$built"), not $target."
 
 step "Running the tests"
-./.desktop-venv/bin/python -m unittest discover -s tests
+# scripts/build_macos_app.sh honours this too, so the tests run against the
+# environment the bundle was built from.
+desktop_venv=${CHATLAB_DESKTOP_VENV:-"$repo_root/.desktop-venv"}
+"$desktop_venv/bin/python" -m unittest discover -s tests
 
 step "Smoke testing the bundle"
 "$built/Contents/MacOS/ChatLab" --smoke-test
 
-step "Tagging $tag"
-if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-    [ "$(git rev-list -n1 "$tag")" = "$release_commit" ] \
-        || die "$tag already names a different commit; resolve that before releasing."
+if released "$target"; then
+    step "v$target is published already; rebuilt it to install rather than cutting another"
 else
-    git tag -a "$tag" -m "ChatLab $target" "$release_commit"
-fi
-git push --quiet origin "$tag"
-# Only an annotated tag has a peeled ref; a lightweight one, as an earlier
-# release made by hand may have left behind, is itself the commit.
-remote_tag=$(git ls-remote origin "refs/tags/$tag^{}" | awk '{print $1}')
-[ -n "$remote_tag" ] || remote_tag=$(git ls-remote origin "refs/tags/$tag" | awk '{print $1}')
-[ "$remote_tag" = "$release_commit" ] \
-    || die "$tag on GitHub names ${remote_tag:-nothing}, not $release_commit."
+    step "Tagging $tag"
+    if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+        [ "$(git rev-list -n1 "$tag")" = "$release_commit" ] \
+            || die "$tag already names a different commit; resolve that before releasing."
+    else
+        git tag -a "$tag" -m "ChatLab $target" "$release_commit"
+    fi
+    git push --quiet origin "$tag"
+    # Only an annotated tag has a peeled ref; a lightweight one, as an earlier
+    # release made by hand may have left behind, is itself the commit.
+    remote_tag=$(git ls-remote origin "refs/tags/$tag^{}" | awk '{print $1}')
+    [ -n "$remote_tag" ] || remote_tag=$(git ls-remote origin "refs/tags/$tag" | awk '{print $1}')
+    [ "$remote_tag" = "$release_commit" ] \
+        || die "$tag on GitHub names ${remote_tag:-nothing}, not $release_commit."
 
-step "Packaging the bundle"
-staging=$(mktemp -d)
-trap 'rm -rf "$staging"' EXIT
-ditto -c -k --sequesterRsrc --keepParent "$built" "$staging/$asset_name"
-size=$(stat -f %z "$staging/$asset_name")
-echo "$asset_name is $size bytes"
-[ "$size" -le 2147483648 ] \
-    || die "The asset is over GitHub's 2 GB release limit; the updater could not use it."
-shasum -a 256 "$staging/$asset_name" | awk '{print $1}' > "$staging/$asset_name.sha256"
+    step "Packaging the bundle"
+    staging=$(mktemp -d)
+    trap 'rm -rf "$staging"' EXIT
+    ditto -c -k --sequesterRsrc --keepParent "$built" "$staging/$asset_name"
+    size=$(stat -f %z "$staging/$asset_name")
+    echo "$asset_name is $size bytes"
+    [ "$size" -le 2147483648 ] \
+        || die "The asset is over GitHub's 2 GB release limit; the updater could not use it."
+    shasum -a 256 "$staging/$asset_name" | awk '{print $1}' > "$staging/$asset_name.sha256"
 
-step "Publishing the release"
-if [ -n "$notes_file" ]; then
-    set -- --notes-file "$notes_file"
-else
-    set -- --generate-notes
+    step "Publishing the release"
+    if [ -n "$notes_file" ]; then
+        set -- --notes-file "$notes_file"
+    else
+        set -- --generate-notes
+    fi
+    gh release create "$tag" --repo "$repo_slug" --verify-tag --title "ChatLab $tag" "$@" \
+        "$staging/$asset_name" "$staging/$asset_name.sha256"
 fi
-gh release create "$tag" --repo "$repo_slug" --verify-tag --title "ChatLab $tag" "$@" \
-    "$staging/$asset_name" "$staging/$asset_name.sha256"
 
 if [ "$skip_install" -eq 1 ]; then
     step "Leaving $dest alone (--skip-install)"

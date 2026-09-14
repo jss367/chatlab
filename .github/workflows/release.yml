@@ -12,11 +12,13 @@ permissions:
 
 jobs:
   build:
-    # GitHub's macos-14 runners report a Metal device with no memory behind it,
-    # so the smoke test dies allocating a few kilobytes. Releases are cut on a
-    # real Mac with scripts/release.sh; this workflow is kept for a self-hosted
-    # Apple Silicon runner, which is why it no longer runs on every tag.
-    runs-on: macos-14
+    # GitHub's hosted macOS runners report a Metal device with no memory behind
+    # it, so the smoke test dies allocating a few kilobytes. Releases are cut on
+    # a real Mac with scripts/release.sh. This job asks for a self-hosted Apple
+    # Silicon runner and will sit queued until one is registered, which is the
+    # honest state of it: dispatching it onto the hosted pool only reproduces
+    # the failure that took it off tag pushes.
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v4
         with:
