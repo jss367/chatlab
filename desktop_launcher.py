@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.request import urlopen
 
 import api
+import branding
 import logs
 import model_runtime
 import updater
@@ -85,6 +86,7 @@ def start_local_server():
             server_name=LOOPBACK_ADDRESS,
             server_port=port,
             show_api=False,
+            favicon_path=branding.favicon_path(),
         )
         # The local API shares the window's port. Gradio builds the
         # application inside launch(), so this is the first moment there is

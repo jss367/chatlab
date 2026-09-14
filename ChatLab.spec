@@ -1,5 +1,6 @@
 """PyInstaller recipe for the ChatLab macOS application bundle."""
 
+import os
 import sys
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
@@ -11,6 +12,11 @@ from version import BUNDLE_IDENTIFIER, __version__  # noqa: E402
 datas = []
 binaries = []
 hiddenimports = []
+
+# The mark: the .icns macOS draws in the Dock and the Finder, and the PNG
+# branding.py hands Gradio for the window's own tab.
+ICON = os.path.join(SPECPATH, "assets", "ChatLab.icns")
+datas += [(os.path.join(SPECPATH, "assets", "icon.png"), "assets")]
 
 # Diffusers checks these distributions' versions when imported. Their modules
 # alone are insufficient in a frozen bundle; retain the package metadata too.
@@ -123,7 +129,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name="ChatLab.app",
-    icon=None,
+    icon=ICON,
     bundle_identifier=BUNDLE_IDENTIFIER,
     info_plist={
         "CFBundleDisplayName": "ChatLab",
