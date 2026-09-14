@@ -11,6 +11,7 @@ import gradio as gr
 
 from .maze import GOAL_MODES, PASSAGES, SYSTEM, TOOLS, default_instruction, generate
 from .runner import TERMINAL, Episode, context_messages, fork_token_edit, from_payload, stream_episode
+from .trials import control_values, prepare_trial, read_trials
 from extension_api import TokenInspector
 
 TOKENS = TokenInspector()
@@ -371,6 +372,7 @@ def _build_page(context):
     edit_selection = gr.State(None)
     # The model a saved run needs, for the button that opens the Models page.
     wanted_model = gr.State("")
+    trial_data = gr.State(None)
     gr.Markdown("# Maze workbench")
     with gr.Row(elem_id="maze-workspace"):
         with gr.Column(elem_id="maze-scenario"):
@@ -406,6 +408,12 @@ def _build_page(context):
                 budget = gr.Number(value=8192, precision=0, minimum=1, maximum=32768, label="Total sampled-token limit")
                 attempts = gr.Number(value=32, precision=0, minimum=1, maximum=256, label="Tool-attempt limit")
             models = gr.Button("Choose / load model", size="sm")
+            with gr.Accordion("Experiment trials", open=False):
+                trial_upload = gr.File(label="Trial definitions JSON", file_types=[".json"], type="filepath")
+                trial_picker = gr.Dropdown(choices=[], label="Trial", interactive=True,
+                                           info="Type to filter a long collection.")
+                trial_load = gr.Button("Load trial", size="sm", elem_id="maze-load-trial")
+                trial_note = gr.Markdown("Upload a trial file, choose a trial, then load it. Inspect the maze before playing.")
             with gr.Accordion("Saved runs", open=False):
                 save = gr.Button("Export run JSON", size="sm")
                 download = gr.File(label="Saved run", interactive=False)
@@ -483,6 +491,34 @@ def _build_page(context):
             raise gr.Error(str(exc)) from exc
         stop_replay(ep)
         return (new, *render(new, show, session_id), None, *model_button(new))
+
+    def load_trial_file(path):
+        if not path:
+            return None, gr.update(choices=[], value=None), "Choose a trial file."
+        try:
+            data = read_trials(path)
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            raise gr.Error(f"Could not load trials: {exc}") from exc
+        return (data, gr.update(choices=[(t["label"], t["id"]) for t in data["trials"]], value=data["trials"][0]["id"]),
+                f"**{html.escape(data['title'])}** · {len(data['trials'])} trials. Select one and click Load trial.")
+
+    def load_trial(data, trial_id, ep, show, session_id):
+        try:
+            if data is None:
+                raise ValueError("Load a trial definitions file first.")
+            new, item = prepare_trial(data, trial_id, ep)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise gr.Error(str(exc)) from exc
+        stop_replay(ep)
+        # control_values follows the order of controls, so the hint is the one
+        # value that also decides whether its box is on screen.
+        values = control_values(item)
+        hint = controls.index(goal_hint)
+        values[hint] = gr.update(value=values[hint], visible=item["config"]["goal_mode"] == "hint")
+        note = (f"**Loaded: {html.escape(item['label'])}.** Playing uses the trial's own map, prompt and settings. "
+                "New episode starts a separate run from the controls.")
+        return (new, *render(new, show, session_id), *values,
+                "Custom" if item["config"]["interruption_text"] else "None", note, None, None)
 
     def play(ep, show, session_id, single=False):
         last_board = None
@@ -743,6 +779,10 @@ def _build_page(context):
     prepare.click(prepare_episode, [episode, reveal, selection_session, *controls],
                   [episode, *outputs, download, models, wanted_model],
                   concurrency_id="maze-view", show_progress="hidden")
+    trial_upload.upload(load_trial_file, trial_upload, [trial_data, trial_picker, trial_note], show_progress="hidden")
+    trial_load.click(load_trial, [trial_data, trial_picker, episode, reveal, selection_session],
+                     [episode, *outputs, *controls, passage, trial_note, edit_selection, download],
+                     concurrency_id="maze-view", show_progress="hidden")
     back.click(step_back, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")
     forward.click(step_forward, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")
     command_outputs = [state_text, transport_status, toggle, pause]
