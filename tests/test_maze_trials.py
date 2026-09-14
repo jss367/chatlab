@@ -101,3 +101,31 @@ class TrialFileTests(unittest.TestCase):
         self.assertEqual(old.payload(), before)
         self.assertEqual(frame[-4], 'None')
         self.assertEqual(frame[-2:], (None, None))
+        self.assertIn('Clean trial', frame[-3])
+
+    def test_the_trial_note_stops_naming_a_trial_the_episode_no_longer_is(self):
+        # Every other way of replacing the episode has to say so, or the pane
+        # keeps crediting a trial for a run that came from somewhere else.
+        data = self.read()
+        context = SimpleNamespace(tokens=TokenInspector(), models=None, data_dir=Path(self.directory.name),
+                                  navigation=SimpleNamespace(open_models=lambda button: None))
+        with gr.Blocks() as demo:
+            build_page(context)
+        self.addCleanup(demo.close)
+        callbacks = {fn.fn.__name__: fn for fn in demo.fns.values()}
+        loaded = callbacks['load_trial'].fn(data, 'clean', Episode(MAZE, CONFIG), False, 'test-session')
+        self.assertIn('Clean trial', loaded[-3])
+        prepare = callbacks['prepare_episode']
+        values = [component.value for component in prepare.inputs[4:]]
+        fresh = prepare.fn(loaded[0], False, 'test-session', data, *values)
+        self.assertEqual(len(fresh), len(prepare.outputs))
+        self.assertIsNone(fresh[0].config.get('trial'))
+        self.assertNotIn('Clean trial', fresh[-2])
+        self.assertIn('Example trials', fresh[-2])
+
+        path = Path(self.directory.name) / 'run.json'
+        path.write_text(json.dumps(loaded[0].payload()))
+        load = callbacks['load']
+        replayed = load.fn(str(path), Episode(MAZE, CONFIG), False, 'test-session', None)
+        self.assertEqual(len(replayed), len(load.outputs))
+        self.assertIn('Replaying: Clean trial', replayed[-1])
