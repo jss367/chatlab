@@ -9,8 +9,8 @@ from pathlib import Path
 
 import gradio as gr
 
-from .maze import GOAL_MODES, PASSAGES, SYSTEM, default_instruction, generate
-from .runner import TERMINAL, Episode, fork_token_edit, from_payload, stream_episode
+from .maze import GOAL_MODES, PASSAGES, SYSTEM, TOOLS, default_instruction, generate
+from .runner import TERMINAL, Episode, context_messages, fork_token_edit, from_payload, stream_episode
 from extension_api import TokenInspector
 
 TOKENS = TokenInspector()
@@ -39,7 +39,7 @@ CSS = """
 #maze-history {font-size:12px;}
 #maze-history td, #maze-history th {font:12px/1.5 system-ui;}
 #maze-history td {cursor:pointer;}
-#maze-raw textarea {font-family:ui-monospace,monospace; font-size:12px;}
+#maze-raw textarea, #maze-context textarea {font-family:ui-monospace,monospace; font-size:12px;}
 #maze-scenario .form, #maze-inspector .form {min-width:0 !important;}
 #maze-scenario .row {gap:8px;}
 #maze-scenario .row > * {min-width:100px !important;}
@@ -232,6 +232,84 @@ def transport_text(ep):
     return f"**{mode}** · {selected} · ({position[0]}, {position[1]}){queued}\n\n{end}"
 
 
+def transcript(messages):
+    """The messages and the move tool as they were recorded, with no model to spell them."""
+    parts = [f"[tool schemas]\n{json.dumps(TOOLS, indent=2)}"]
+    parts += [f"[{message['role']}]\n{message['content']}" for message in messages]
+    return "\n\n".join(parts)
+
+
+def under_load(recorded, used):
+    """Name the load a reading was made under when it is not the one that recorded it."""
+    if not recorded or recorded == used:
+        return ""
+    return (f", under {html.escape(used)} rather than the {html.escape(recorded)} that recorded it, "
+            "so a vocabulary that has moved since would read differently here")
+
+
+def read_through(reading, *arguments):
+    """Read the model, or report how it failed to answer.
+
+    A view of a prompt has a worse answer than its best one - the messages as
+    recorded - so a template that refuses this history, or IDs a vocabulary
+    cannot spell, falls back to that rather than replacing the pane with an
+    error about the model it was describing. What went wrong comes back with
+    the empty reading, because a refusal is not an absence: a reader sent to
+    the Models page by a model already loaded is troubleshooting the wrong
+    thing.
+    """
+    try:
+        return (*reading(*arguments), None)
+    except Exception as exc:
+        return None, None, exc
+
+
+def unspelled(models, failure):
+    """Why a prompt is being shown without a model's own spelling of it."""
+    if failure is not None:
+        return (f"The loaded model did not render this prompt ({type(failure).__name__}: "
+                f"{html.escape(str(failure))})")
+    if not models.loaded:
+        return "No model is loaded to spell this prompt"
+    return "A load landed while this prompt was being read"
+
+
+def context_view(ep, models, index=None):
+    """Everything the model was given for the selected response, and how it was spelled.
+
+    The recorded prompt IDs are the run's own answer, so they are read back
+    first and decoded whole: the tool schemas, the turn markers and the JSON
+    state are in there as the template wrote them. A response that has none -
+    the initial prompt, which no response has been asked for yet - is put
+    through the loaded model's template instead, which is the same path
+    generation takes. With nothing loaded, the messages and the tool schema
+    are shown as recorded, which is as close as a run can be read without the
+    vocabulary that spelled it.
+    """
+    index = ep.viewing if index is None else index
+    index = max(-1, min(index, len(ep.turns) - 1))
+    turn = ep.turns[index] if index >= 0 else {}
+    where = "Initial prompt" if index < 0 else f"Response {index + 1}"
+    supplied = turn.get("forced_prefix_tokens") or 0
+    tail = (f" A supplied prefix of {supplied:,} tokens followed it, shown under **Supplied text & full response**."
+            if supplied else "")
+    ids = turn.get("prompt_ids")
+    failure = None
+    if ids:
+        text, load_id, failure = read_through(models.decode, ids)
+        if text is not None:
+            return (f"**{where} · as recorded** · {len(ids):,} prompt tokens, decoded"
+                    f"{under_load(turn.get('load_id'), load_id)}.{tail}", text)
+    messages = context_messages(ep, index)
+    text, load_id, refused = read_through(models.prompt_text, messages, TOOLS)
+    if text is not None:
+        return (f"**{where} · as the loaded model would be given it** · {len(messages)} messages and the move tool "
+                f"through that model's own template{under_load(ep.load_id, load_id)}.{tail}", text)
+    return (f"**{where} · as recorded, untemplated** · {unspelled(models, refused or failure)}, so the "
+            f"{len(messages)} messages and the move tool are shown as the run recorded them. A template adds its own "
+            f"turn markers and writes the tool schemas its own way.{tail}", transcript(messages))
+
+
 def transport_buttons(ep):
     active = ep.playing or ep.busy
     return gr.update(visible=not active), gr.update(visible=active)
@@ -366,6 +444,10 @@ def _build_page(context):
                 prefix_note = gr.Markdown("No supplied interruption in this response.")
                 prefix_text = gr.Textbox(label="Supplied prefix", interactive=False, lines=2)
                 raw = gr.Textbox(label="Full response", interactive=False, lines=6, max_lines=12, elem_id="maze-raw")
+            with gr.Accordion("Context sent to the model", open=False) as context_pane:
+                context_note = gr.Markdown("Open or refresh this to read the whole prompt behind the selected response.")
+                context_refresh = gr.Button("Show the selected response's context", size="sm", elem_id="maze-context-refresh")
+                context_body = gr.Textbox(label="Prompt", interactive=False, lines=10, max_lines=24, elem_id="maze-context")
             with gr.Accordion("Run details", open=False):
                 state_text = gr.Markdown(status(initial), elem_id="maze-status")
                 gr.Markdown("Movement requires a completed, valid move call. Supplied text is separate from generated tokens. Token edits rewind the selected response and regenerate later moves.")
@@ -569,6 +651,17 @@ def _build_page(context):
         yield (new, *render(new, show, session_id), None, None, *buttons)
         for frame in play(new, show, session_id, single=True):
             yield (new, *frame, None, None, *buttons)
+
+    def show_context(ep):
+        # Read on request rather than with every frame: a prompt is thousands
+        # of tokens, and decoding and resending it beside each generated token
+        # would cost more than the response it belongs to. The note names the
+        # response it read, so an open pane left behind by a later selection
+        # says which one it is showing.
+        return context_view(ep, context.models)
+
+    context_refresh.click(show_context, episode, [context_note, context_body], show_progress="hidden")
+    context_pane.expand(show_context, episode, [context_note, context_body], show_progress="hidden")
 
     def branch_alternative(ep, show, session_id, metrics, selected, evt: gr.SelectData):
         """One click in the probabilities table branches into that alternative.

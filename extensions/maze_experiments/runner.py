@@ -147,6 +147,20 @@ class Episode:
         self.interrupt_next, self.manual_intervention = True, True
 
 
+def context_messages(episode, index):
+    """The messages a response was given, or is about to be given at ``index`` -1.
+
+    The history grows by exactly two messages - the assistant's response and
+    the simulator's reply - for each response that attempted a call, and by
+    none for one that ended without attempting anything, so a response's own
+    prompt is the history up to the calls the responses before it made. The
+    initial block is the setup plus one such pair per supplied move.
+    """
+    supplied = sum(event["source"] == "supplied" for event in episode.events)
+    attempts = sum("event" in turn for turn in episode.turns[:max(index, 0)])
+    return episode.messages[:2 + 2 * (supplied + attempts)]
+
+
 def interrupted_prefix(episode, manager):
     if episode.interrupted or not episode.config.get("interruption_text"):
         return []
