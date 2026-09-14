@@ -228,10 +228,11 @@ class MazeTests(unittest.TestCase):
                 # from an earlier one, must not fork anything.
                 for stale in (None, dict(selected[2], stamp='gone')):
                     with self.assertRaisesRegex(gr.Error, 'current response'):
-                        list(branch.fn(ep, False, session_id, metrics, stale, SimpleNamespace(index=(0, 1))))
+                        list(branch.fn(ep, False, session_id, metrics, stale, None, SimpleNamespace(index=(0, 1))))
                 with self.assertRaisesRegex(gr.Error, 'current response'):
-                    list(branch.fn(ep, False, session_id, metrics, selected[2], SimpleNamespace(index=(4, 1))))
-                frames = list(branch.fn(ep, False, session_id, metrics, selected[2], SimpleNamespace(index=(0, 1))))
+                    list(branch.fn(ep, False, session_id, metrics, selected[2], None, SimpleNamespace(index=(4, 1))))
+                frames = list(branch.fn(ep, False, session_id, metrics, selected[2], None,
+                                SimpleNamespace(index=(0, 1))))
                 self.assertTrue(all(len(frame) == len(branch.outputs) for frame in frames))
                 result = frames[-1][0]
                 self.assertEqual(result.token_edit['replacement_ids'], [120])

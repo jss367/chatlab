@@ -726,7 +726,7 @@ def _build_page(context):
     context_refresh.click(show_context, episode, [context_note, context_body], show_progress="hidden")
     context_pane.expand(show_context, episode, [context_note, context_body], show_progress="hidden")
 
-    def branch_alternative(ep, show, session_id, metrics, selected, evt: gr.SelectData):
+    def branch_alternative(ep, show, session_id, metrics, selected, data, evt: gr.SelectData):
         """One click in the probabilities table branches into that alternative.
 
         The row is read against the token the editor is open on, so a table
@@ -742,7 +742,7 @@ def _build_page(context):
             candidate = metric.get("top_candidates", [])[row]
         except (IndexError, KeyError, TypeError, ValueError) as exc:
             raise gr.Error(STALE_TOKEN) from exc
-        yield from edit_token(ep, show, session_id, metrics, selected, "", str(candidate["token_id"]))
+        yield from edit_token(ep, show, session_id, metrics, selected, "", str(candidate["token_id"]), data)
 
     def offer_menu(ep, session_id, metrics, request_id, evt: gr.SelectData):
         """Answer one right-click with the alternatives recorded for that token."""
@@ -759,7 +759,7 @@ def _build_page(context):
             verb="Branch this run at", label="Your own replacement text",
             submit="Replace token and regenerate")
 
-    def edit_from_menu(ep, show, session_id, metrics, action):
+    def edit_from_menu(ep, show, session_id, metrics, action, data):
         """Apply a branch chosen in the menu through the editor's own path."""
         try:
             chosen = json.loads(action)
@@ -788,7 +788,7 @@ def _build_page(context):
             candidate_value = str(candidates[index]["token_id"])
         else:
             raise gr.Error(STALE_TOKEN)
-        yield from edit_token(ep, show, session_id, metrics, selection, text_value, candidate_value)
+        yield from edit_token(ep, show, session_id, metrics, selection, text_value, candidate_value, data)
 
     # Replay is per browser; the model service arbitrates generation globally.
     # Never use Gradio cancels here: it closes generators and would turn Pause
@@ -832,13 +832,14 @@ def _build_page(context):
                       [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate,
                        trial_data],
                       edit_outputs, concurrency_id="maze-view", show_progress="hidden")
-    alternatives.select(branch_alternative, [episode, reveal, selection_session, metrics_state, edit_selection],
+    alternatives.select(branch_alternative,
+                        [episode, reveal, selection_session, metrics_state, edit_selection, trial_data],
                         edit_outputs, concurrency_id="maze-view", show_progress="hidden")
     strip.select(offer_menu, [episode, selection_session, metrics_state, menu_request], menu_response,
                  queue=False, show_progress="hidden")
     # The menu carries the token it was opened on, so the branch it sends back
     # does not depend on which click Gradio snapshotted for this listener.
-    menu_action.input(edit_from_menu, [episode, reveal, selection_session, metrics_state, menu_action],
+    menu_action.input(edit_from_menu, [episode, reveal, selection_session, metrics_state, menu_action, trial_data],
                       edit_outputs, concurrency_id="maze-view", show_progress="hidden")
     save.click(export, episode, download, show_progress="hidden")
     upload.upload(load, [upload, episode, reveal, selection_session, trial_data],
