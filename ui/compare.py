@@ -346,7 +346,12 @@ def _decoded_spans(metrics, context_ids=(), expected: str = "") -> tuple[str, li
 
     ``IncrementalDecoder`` is what the chat stream already uses for this: its
     text always equals a full decode of every token pushed so far, at a cost
-    proportional to its cache rather than to the length of the run.
+    proportional to its cache rather than to the length of the run. It is
+    given the manager's hidden token ids, which is the same set generation
+    decoded under: a reply ending on a stop token that decodes to something
+    visible would otherwise pick up that token's label here and nowhere else,
+    and two identical replies from models that spell their stop token
+    differently would part at their last character.
 
     Called with the generation slot held, so the tokenizer cannot be swapped
     out underneath it. An empty answer where there is nothing to decode with;
@@ -358,7 +363,7 @@ def _decoded_spans(metrics, context_ids=(), expected: str = "") -> tuple[str, li
     tokenizer = runtime.MANAGER.tokenizer
     if tokenizer is None:
         return "", []
-    decoder = IncrementalDecoder(tokenizer)
+    decoder = IncrementalDecoder(tokenizer, runtime.MANAGER.hidden_token_ids())
     for token_id in context_ids or ():
         decoder.push(int(token_id))
     context_end = len(decoder.text)

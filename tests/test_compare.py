@@ -542,6 +542,17 @@ class HandlerTests(unittest.TestCase):
         )
         self.assertEqual(decoded, "Hello world")
 
+    def test_a_hidden_stop_token_stays_out_of_the_recorded_text(self):
+        # Generation decodes without these, so a decode that kept them would
+        # disagree with the reply's own text — and two models spelling their
+        # stop token differently would part at their last character.
+        from test_streaming import EOS_ID
+
+        metrics = [metric(1, 0, 1.0), metric(2, EOS_ID, 1.0)]
+        decoded, ends = controls._decoded_spans(metrics)
+        self.assertEqual(decoded, "Hello")
+        self.assertEqual(ends, [len("Hello"), len("Hello")])
+
     def test_decoding_gives_up_quietly_with_no_tokenizer(self):
         runtime.MANAGER.tokenizer = None
         self.assertEqual(controls._decoded_spans([metric(1, 1, 1.0)]), ("", []))
