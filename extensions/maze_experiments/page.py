@@ -14,6 +14,7 @@ from .runner import TERMINAL, Episode, fork_token_edit, from_payload, stream_epi
 from extension_api import TokenInspector
 
 TOKENS = TokenInspector()
+STALE_TOKEN = "Select a token in the current response again."
 
 CSS = """
 #maze-page {padding:20px 24px; min-width:0 !important; min-height:0; height:100%; box-sizing:border-box; flex-wrap:nowrap; gap:16px; overflow:hidden;}
@@ -286,6 +287,7 @@ def _build_page(context):
     initial = Episode(generate(), default_config)
     episode = gr.State(initial)
     selections = context.tokens.selections()
+    menu = context.tokens.menu("maze-tokens")
     selection_session = gr.State(value=selections.new_session, delete_callback=selections.forget)
     metrics_state = gr.State((None, []))
     edit_selection = gr.State(None)
@@ -348,8 +350,14 @@ def _build_page(context):
                 stop = gr.Button("Stop now · end episode", size="sm", elem_id="maze-stop")
         with gr.Column(elem_id="maze-inspector"):
             gr.Markdown("## Emitted tokens")
-            strip = gr.HighlightedText(label="Click a token to inspect or edit", color_map=context.tokens.color_map,
-                                       combine_adjacent=False, show_legend=True, elem_id="maze-tokens")
+            strip = gr.HighlightedText(label="Click a token to inspect or edit; right-click to branch on the spot",
+                                       color_map=context.tokens.color_map, combine_adjacent=False,
+                                       show_legend=True, elem_id="maze-tokens",
+                                       elem_classes=menu.strip_classes)
+            # The right-click menu carries one token's alternatives out through
+            # these and the branch chosen in it back, without the reader
+            # crossing the pane to the editor below.
+            menu_request, menu_response, menu_action = menu.bridges()
             with gr.Column(visible=False, elem_id="maze-token-editor") as editor:
                 detail = gr.Markdown("Select a model-generated token above.")
                 replacement = gr.Textbox(label="Replacement text", lines=2)
@@ -546,10 +554,10 @@ def _build_page(context):
     def edit_token(ep, show, session_id, metrics, selected, text_value, candidate_value):
         try:
             if selected is None or selected["stamp"] != metrics[0]:
-                raise ValueError("Select a token in the current response again.")
+                raise ValueError(STALE_TOKEN)
             view_id, index, _ = selections.resolve(session_id, metrics, selected["index"])
             if view_id != selected["view_id"] or view_id[:2] != (ep.run_id, id(ep)):
-                raise ValueError("Select a token in the current response again.")
+                raise ValueError(STALE_TOKEN)
             turn_index = view_id[2]
             token_index = ep.turns[turn_index]["forced_prefix_tokens"] + index
             with context.models.open_session() as manager:
@@ -568,6 +576,52 @@ def _build_page(context):
         yield (new, *render(new, show, session_id), None, None, *buttons)
         for frame in play(new, show, session_id, single=True):
             yield (new, *frame, None, None, *buttons)
+
+    def offer_menu(ep, session_id, metrics, request_id, evt: gr.SelectData):
+        """Answer one right-click with the alternatives recorded for that token."""
+        index = evt.index[0] if isinstance(evt.index, (tuple, list)) else evt.index
+        try:
+            view_id, index, metric = selections.resolve(session_id, metrics, index)
+        except ValueError:
+            return menu.refuse(request_id, STALE_TOKEN)
+        if view_id[:2] != (ep.run_id, id(ep)):
+            return menu.refuse(request_id, STALE_TOKEN)
+        return menu.offer(
+            request_id, dict(view_id=list(view_id), stamp=metrics[0], index=index),
+            text=metric.get("text", ""), candidates=metric.get("top_candidates", []),
+            verb="Branch this run at", label="Your own replacement text",
+            submit="Replace token and regenerate")
+
+    def edit_from_menu(ep, show, session_id, metrics, action):
+        """Apply a branch chosen in the menu through the editor's own path."""
+        try:
+            chosen = json.loads(action)
+            named = chosen["selection"]
+            selection = dict(view_id=tuple(named["view_id"]), stamp=named["stamp"], index=named["index"])
+            kind = chosen["kind"]
+            text_value = chosen["text"] if kind == "text" else ""
+        except (KeyError, TypeError, ValueError) as exc:
+            raise gr.Error(STALE_TOKEN) from exc
+        if kind == "text":
+            if not isinstance(text_value, str):
+                raise gr.Error(STALE_TOKEN)
+            candidate_value = "text"
+        elif kind == "candidate":
+            # The alternative is named by its place in the menu that was
+            # offered, so its token ID is read from the metric here rather than
+            # taken from the browser. fork_token_edit checks it again.
+            try:
+                _, _, metric = selections.resolve(session_id, metrics, selection["index"])
+            except ValueError as exc:
+                raise gr.Error(STALE_TOKEN) from exc
+            candidates = metric.get("top_candidates", [])
+            index = chosen.get("index")
+            if not isinstance(index, int) or not 0 <= index < len(candidates):
+                raise gr.Error("Choose an alternative for the selected token.")
+            candidate_value = str(candidates[index]["token_id"])
+        else:
+            raise gr.Error(STALE_TOKEN)
+        yield from edit_token(ep, show, session_id, metrics, selection, text_value, candidate_value)
 
     # Replay is per browser; the model service arbitrates generation globally.
     # Never use Gradio cancels here: it closes generators and would turn Pause
@@ -600,9 +654,15 @@ def _build_page(context):
     strip.select(select_token, [episode, selection_session, metrics_state],
                  [detail, alternatives, edit_selection, replacement, candidate, editor, transport_status, toggle, pause],
                  queue=False, show_progress="hidden")
+    edit_outputs = [episode, *outputs, edit_selection, download, models, wanted_model]
     edit_button.click(edit_token, [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate],
-                      [episode, *outputs, edit_selection, download, models, wanted_model],
-                      concurrency_id="maze-view", show_progress="hidden")
+                      edit_outputs, concurrency_id="maze-view", show_progress="hidden")
+    strip.select(offer_menu, [episode, selection_session, metrics_state, menu_request], menu_response,
+                 queue=False, show_progress="hidden")
+    # The menu carries the token it was opened on, so the branch it sends back
+    # does not depend on which click Gradio snapshotted for this listener.
+    menu_action.input(edit_from_menu, [episode, reveal, selection_session, metrics_state, menu_action],
+                      edit_outputs, concurrency_id="maze-view", show_progress="hidden")
     save.click(export, episode, download, show_progress="hidden")
     upload.upload(load, [upload, episode, reveal, selection_session],
                   [episode, *outputs, *controls, passage, models, wanted_model],

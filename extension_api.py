@@ -15,7 +15,7 @@ from model_runtime import LOADING
 from trace_export import write_private_text
 
 API_VERSION = 1
-__all__ = ["API_VERSION", "ExtensionContext", "ModelService", "GenerationSession", "TokenInspector", "TokenSelections", "NavigationService", "write_private_text"]
+__all__ = ["API_VERSION", "ExtensionContext", "ModelService", "GenerationSession", "TokenInspector", "TokenMenu", "TokenSelections", "NavigationService", "write_private_text"]
 
 
 class ModelService:
@@ -182,6 +182,63 @@ class TokenInspector:
     def selections(self):
         """Create an independent selection controller for one extension view."""
         return TokenSelections(self)
+
+    def menu(self, strip_id):
+        """The right-click token menu for the strip with this element id."""
+        return TokenMenu(strip_id)
+
+
+class TokenMenu:
+    """ChatLab's right-click token menu, attached to one extension strip.
+
+    The script the host loads is shared: it opens on any strip built with
+    ``strip_classes`` and talks to the three hidden components ``bridges()``
+    returns, which are named after that strip. What the menu offers is the
+    extension's to say. Answer the strip's select event with ``offer`` or
+    ``refuse``, passing whatever identifies the token in your own view; the
+    same value comes back in the action the reader clicks, alongside its
+    ``kind`` - ``"candidate"`` with an ``index`` into the alternatives you
+    offered, ``"text"`` with the reader's own text, or one of your ``actions``.
+    A selection travelling through the browser is a claim, not a fact: resolve
+    it again before acting on it, exactly as with a click.
+    """
+
+    def __init__(self, strip_id):
+        self._strip_id = strip_id
+
+    @property
+    def strip_classes(self):
+        from ui.token_menu import MENU_STRIP_CLASS
+        return [MENU_STRIP_CLASS]
+
+    def bridges(self):
+        """Create the request, response and action components, in that order.
+
+        The request holds the identifier of the right-click being answered,
+        the response the answer, and the action what the reader chose. Read
+        the request in the strip's select callback and act on the action's
+        ``input`` event. All three are hidden.
+        """
+        import gradio as gr
+        from ui.token_menu import MENU_BRIDGE_CLASS, menu_bridge_ids
+        request, response, action = menu_bridge_ids(self._strip_id)
+        return (gr.Textbox(elem_id=request, elem_classes=[MENU_BRIDGE_CLASS]),
+                gr.HTML(elem_id=response, elem_classes=[MENU_BRIDGE_CLASS]),
+                gr.Textbox(elem_id=action, elem_classes=[MENU_BRIDGE_CLASS]))
+
+    def offer(self, request_id, selection, *, text, candidates, verb, label, submit, actions=()):
+        from ui.token_menu import menu_markup
+        return menu_markup({
+            "request": request_id, "selection": selection, "error": "", "text": text,
+            "candidates": [{"token_id": c["token_id"], "text": c["text"],
+                            "probability": c["probability"]} for c in candidates],
+            "verb": verb, "label": label, "submit": submit, "actions": list(actions),
+        })
+
+    def refuse(self, request_id, message):
+        """Open the menu on a message instead of a branch."""
+        from ui.token_menu import menu_markup
+        return menu_markup({"request": request_id, "selection": None, "error": message})
 
 
 class TokenSelections:
