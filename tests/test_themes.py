@@ -248,6 +248,31 @@ class ThemeControlTests(unittest.TestCase):
             [self.demo.blocks[block_id] for fn in saving for block_id, _ in fn.targets],
         )
 
+    def test_saving_and_repainting_keep_the_same_last_pick(self):
+        # A reader trying the themes on picks one while the one before it is
+        # still in flight. If only one of the two listeners kept the last
+        # pick, the page would be painted in one theme and the file would hold
+        # another, and a reload would undo a choice that was there on screen.
+        dropdown = self.labelled("Color theme")
+        listening = [
+            fn
+            for fn in self.demo.fns.values()
+            if dropdown in fn.inputs
+            and dropdown
+            in [
+                self.demo.blocks[block_id]
+                for block_id, _ in fn.targets
+                if block_id is not None
+            ]
+        ]
+        self.assertEqual(
+            sorted(fn.fn.__name__ for fn in listening),
+            ["apply_theme", "remember_settings"],
+        )
+        for fn in listening:
+            with self.subTest(handler=fn.fn.__name__):
+                self.assertEqual(fn.trigger_mode, "always_last")
+
     def test_a_reload_paints_the_theme_the_file_now_names(self):
         # restore_settings re-reads the file, so the stylesheet has to follow
         # the dropdown on the way back rather than staying as it was built.

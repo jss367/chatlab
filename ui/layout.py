@@ -1885,17 +1885,24 @@ def build_app() -> gr.Blocks:
             color_scale,
             enter_sends,
             writing_suggestions,
-            theme_choice,
             model_id,
             weight_precision,
         ):
             control.change(remember_settings, persisted_inputs, None)
-        # Repainting is separate from saving: the stylesheet has to follow the
-        # dropdown whether the change came from the reader or from the file
-        # being read back on a reload.
-        # always_last so a run down the list lands on the last pick: this
-        # shares the queue with everything else on the page, and with Gradio's
-        # default a repaint still in flight drops the ones behind it.
+        # The theme is wired apart from the loop above because it takes two
+        # listeners rather than one: saving it, and repainting the page, which
+        # has to follow the dropdown whether the change came from the reader
+        # or from the file being read back on a reload.
+        #
+        # always_last on both, and on both for the same reason. A reader
+        # trying the themes on picks one while the one before it is still in
+        # flight, and with Gradio's default the pick behind is dropped. On one
+        # listener alone that is worse than on neither: the page would be
+        # painted in the theme last picked while the file kept an earlier one,
+        # and a reload would undo a choice that was there on screen.
+        theme_choice.change(
+            remember_settings, persisted_inputs, None, trigger_mode="always_last"
+        )
         theme_choice.change(
             apply_theme,
             theme_choice,
