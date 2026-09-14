@@ -277,6 +277,35 @@ class ReadingTests(unittest.TestCase):
                 self.assertEqual(reading["choices_compared"], 1)
                 self.assertEqual(reading["top_choice_changed"], 1)
 
+    def test_two_models_that_both_chose_to_stop_have_not_changed_their_minds(self):
+        # A token that decodes to nothing is shown under its vocabulary
+        # label, and those labels differ between models. Comparing the labels
+        # would call two models that both chose to stop a change of mind.
+        def stopped(label):
+            held = metric(1, 5, 1.0)
+            held["top_candidates"] = [
+                {"token_id": 7, "text": label, "probability": 0.9, "raw_text": ""}
+            ]
+            return dict(held, text="x", display_text="x")
+
+        reading = compare.reading(
+            run([stopped("<|endoftext|>")]),
+            run([stopped("</s>")], model_id="other/model"),
+        )
+        self.assertEqual(reading["choices_compared"], 1)
+        self.assertEqual(reading["top_choice_changed"], 0)
+        # Without a recorded raw decode there is only the label to go on.
+        def labelled(label):
+            held = metric(1, 5, 1.0)
+            held["top_candidates"] = [{"token_id": 7, "text": label, "probability": 0.9}]
+            return dict(held, text="x", display_text="x")
+
+        older = compare.reading(
+            run([labelled("<|endoftext|>")]),
+            run([labelled("</s>")], model_id="other/model"),
+        )
+        self.assertEqual(older["top_choice_changed"], 1)
+
     def test_a_span_with_a_missing_candidate_is_counted_in_neither(self):
         bare = dict(metric(1, 5, 1.0), top_candidates=[])
         reading = compare.reading(run([bare]), run([metric(1, 5, 1.0)]))
@@ -492,6 +521,26 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(ends, [len(" world")])
         # Without a context the offsets are the passage's own from the start.
         self.assertEqual(controls._decoded_spans(metrics), (" world", [6]))
+
+    def test_the_seam_comes_from_the_passage_not_the_context_tokens(self):
+        # A token straddling the seam belongs to the passage, so it is not
+        # among context_ids at all: decoding those alone stops short of the
+        # characters that token carries.
+        # Token 0 is "Hello" and token 1 is " world". Both are in the
+        # measured list with no context tokens behind them, which is what a
+        # seam falling inside the first measured token looks like.
+        straddling = [metric(1, 0, 1.0), metric(2, 1, 1.0)]
+        decoded, ends = controls._decoded_spans(
+            straddling, context_ids=[], expected=" world"
+        )
+        self.assertEqual(decoded, " world")
+        self.assertEqual(ends, [0, len(" world")])
+        # A tokenizer that does not round-trip its input falls back to the
+        # context's own decode rather than slicing at the wrong place.
+        decoded, _ends = controls._decoded_spans(
+            straddling, context_ids=[], expected="nothing like it"
+        )
+        self.assertEqual(decoded, "Hello world")
 
     def test_decoding_gives_up_quietly_with_no_tokenizer(self):
         runtime.MANAGER.tokenizer = None

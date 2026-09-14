@@ -707,14 +707,32 @@ class ExtractionControlTests(unittest.TestCase):
                 held.release_generation()
             self.assertEqual(result[0], gr.skip())
             self.assertEqual(result[-1], controls.EXTRACT_BUSY)
+            self.assertEqual(result[1], gr.skip())
 
-    def test_a_failed_extraction_reports_it_and_frees_the_model(self):
+    def test_a_failed_extraction_clears_the_result_it_could_not_replace(self):
+        # Download vector reads the state directly, so a cleared table with a
+        # kept state would serve a vector the page says is not there.
         with mock.patch.object(runtime, "MANAGER", self.manager()) as held:
             with mock.patch.object(held, "extract_steering", side_effect=ValueError("no good")):
                 result = controls.extract_vector("Hello world", "How are", False, "last")
             self.assertIn("no good", result[-1])
+            self.assertIsNone(result[0])
+            self.assertEqual(result[1]["value"], [])
             self.assertFalse(result[3]["interactive"])
             self.assertFalse(held.busy)
+
+    def test_a_refusal_leaves_the_previous_extraction_where_it_is(self):
+        # Nothing ran, so the direction already on screen is still the truth
+        # and the state behind it still matches the table.
+        with mock.patch.object(runtime, "MANAGER", self.manager()) as held:
+            controls.extract_vector("Hello world", "How are", False, "last")
+            self.assertTrue(held.reserve_generation())
+            try:
+                refused = controls.extract_vector("Hello world", "How are", False, "last")
+            finally:
+                held.release_generation()
+        self.assertEqual(refused[:-1], (gr.skip(),) * 4)
+        self.assertEqual(refused[-1], controls.EXTRACT_BUSY)
 
     def test_choosing_a_layer_moves_the_control_and_describes_it(self):
         with mock.patch.object(runtime, "MANAGER", self.manager()):

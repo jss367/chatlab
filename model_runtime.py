@@ -5904,9 +5904,12 @@ class ModelManager:
             fallback_text=self._token_fallback(token_id),
             raw_log_probabilities=raw_log_probabilities,
             sampled_probabilities=sampled_probabilities,
-            decode_token=lambda candidate_id: (
-                self._decode_token(candidate_id) or self._token_fallback(candidate_id)
-            ),
+            # The raw decode and the label to show where it is empty, kept
+            # apart: a token that decodes to nothing is shown under its
+            # vocabulary label, and those labels differ between models, so a
+            # comparison of two models' choices needs the decode itself.
+            decode_token=self._decode_token,
+            fallback_token=self._token_fallback,
             segment=segment,
         )
         return metric.to_dict()

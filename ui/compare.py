@@ -241,7 +241,7 @@ def _write_reply(
     # Seeded with the prompt for the same reason a measurement is seeded with
     # its context: the first token of a reply decodes differently depending on
     # what the model had just read.
-    decoded, ends = _decoded_spans(metrics, prompt_ids)
+    decoded, ends = _decoded_spans(metrics, prompt_ids, text)
     yield {
         "kind": compare.REPLY,
         "model_id": model_id,
@@ -289,7 +289,7 @@ def _measure_text(context, measured, use_chat_template, vector, published):
     # which score_text assigns whole to the passage; decoding from the
     # context is what keeps that token's context characters out of the
     # recorded text rather than in one run's and not the other's.
-    decoded, ends = _decoded_spans(metrics, result.context_ids)
+    decoded, ends = _decoded_spans(metrics, result.context_ids, measured)
     return {
         "kind": compare.MEASUREMENT,
         "model_id": published.model_id,
@@ -310,7 +310,7 @@ def _measure_text(context, measured, use_chat_template, vector, published):
     }
 
 
-def _decoded_spans(metrics, context_ids=()) -> tuple[str, list[int]]:
+def _decoded_spans(metrics, context_ids=(), expected: str = "") -> tuple[str, list[int]]:
     """The run's text as the tokenizer really decodes it, and each token's end.
 
     Decoding is not piecewise. A byte-level tokenizer can split one character
@@ -333,6 +333,17 @@ def _decoded_spans(metrics, context_ids=()) -> tuple[str, list[int]]:
     own characters are then cut back off, so what is recorded is the measured
     passage and the offsets are relative to it.
 
+    Where the context ends is taken from ``expected`` - the passage the run
+    was actually given - rather than from the length of the context's own
+    tokens. A token straddling the seam belongs to the passage, so it is not
+    among ``context_ids`` at all, and decoding those alone stops short of the
+    characters that token carries: encoding ``"foo"`` + ``"bar"`` can leave a
+    context of nothing but the opening marker and one ``"foobar"`` token, and
+    a boundary taken from the context's tokens would record ``"foobar"`` as
+    the passage. The decoded tail that matches what was given is the seam.
+    Where the tail does not match - a tokenizer that does not round-trip its
+    input - the context's own decode is the best boundary available.
+
     ``IncrementalDecoder`` is what the chat stream already uses for this: its
     text always equals a full decode of every token pushed so far, at a cost
     proportional to its cache rather than to the length of the run.
@@ -350,14 +361,20 @@ def _decoded_spans(metrics, context_ids=()) -> tuple[str, list[int]]:
     decoder = IncrementalDecoder(tokenizer)
     for token_id in context_ids or ():
         decoder.push(int(token_id))
-    base = len(decoder.text)
+    context_end = len(decoder.text)
     ends = []
     for metric in metrics:
         decoder.push(int(metric["token_id"]))
-        # Clamped, because a token pushed after the context can in principle
-        # redraw the boundary behind it; a negative end would be nonsense.
-        ends.append(max(len(decoder.text) - base, 0))
-    return decoder.text[base:], ends
+        ends.append(len(decoder.text))
+    full = decoder.text
+    base = (
+        len(full) - len(expected)
+        if expected and full.endswith(expected)
+        else context_end
+    )
+    # Clamped, because a token pushed after the context can in principle
+    # redraw the boundary behind it; a negative end would be nonsense.
+    return full[base:], [max(end - base, 0) for end in ends]
 
 
 def clear_slots():

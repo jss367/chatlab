@@ -253,9 +253,15 @@ def _top_choice(metric: dict) -> tuple[int | None, str]:
     first = candidates[0]
     if isinstance(first, dict):
         token_id, text = first.get("token_id"), first.get("text", "")
+        raw = first.get("raw_text")
     else:
         token_id, text = getattr(first, "token_id", None), getattr(first, "text", "")
-    return (None if token_id is None else int(token_id)), text
+        raw = getattr(first, "raw_text", None)
+    # The raw decode where the run recorded one. What is shown for a token
+    # that decodes to nothing is its vocabulary label, and two models label
+    # their end-of-text markers differently, so comparing the labels would
+    # call two models that both chose to stop a change of mind.
+    return (None if token_id is None else int(token_id)), (text if raw is None else raw)
 
 
 def strip(metrics, spans, side: str = "left") -> list[tuple[str, str]]:

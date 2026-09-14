@@ -130,6 +130,21 @@ def empty_extraction():
     )
 
 
+def keep_extraction(message: str):
+    """Say why nothing was extracted, and leave what is on screen alone.
+
+    Nothing ran, so the previous extraction is still the truth: a reader who
+    pressed the button during a reply should not lose the direction they
+    already have. What must not happen is the table being emptied while the
+    state behind **Download vector** keeps the old result - the button reads
+    that state directly, and would serve a vector the page says is not there.
+    So the two move together: both kept here, both cleared when an extraction
+    really was attempted and failed.
+    """
+
+    return (gr.skip(), gr.skip(), gr.skip(), gr.skip(), message)
+
+
 def layer_rows(stats) -> list[list]:
     """One row per layer for the table beside the extraction."""
 
@@ -192,31 +207,28 @@ def extract_vector(positive_text, negative_text, use_chat_template, pool):
     positive = parse_examples(positive_text)
     negative = parse_examples(negative_text)
     if not positive or not negative:
-        return (
-            gr.skip(),
-            *empty_extraction(),
+        return keep_extraction(
             "Give at least one example on each side. One example per line, "
-            f"up to {MAX_EXAMPLES} a side.",
+            f"up to {MAX_EXAMPLES} a side."
         )
 
     held = runtime.MANAGER.claim_generation()
     if held:
-        return (
-            gr.skip(),
-            *empty_extraction(),
-            EXTRACT_LOADING if held == LOADING else EXTRACT_BUSY,
-        )
+        return keep_extraction(EXTRACT_LOADING if held == LOADING else EXTRACT_BUSY)
     started = time.monotonic()
     try:
         if not runtime.MANAGER.loaded:
-            return gr.skip(), *empty_extraction(), EXTRACT_NO_MODEL
+            return keep_extraction(EXTRACT_NO_MODEL)
         try:
             extraction = runtime.MANAGER.extract_steering(
                 positive, negative, use_chat_template=bool(use_chat_template), pool=pool,
             )
         except Exception as error:
+            # This one did run, and what it produced is nothing. The state
+            # goes with the table, or Download vector would still be holding
+            # the model before last's direction.
             return (
-                gr.skip(),
+                None,
                 *empty_extraction(),
                 failure_status("Could not extract a direction", str(error)),
             )

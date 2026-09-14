@@ -17,6 +17,16 @@ class Candidate:
     token_id: int
     text: str
     probability: float
+    raw_text: str = ""
+    """What this token really decodes to, before any display fallback.
+
+    ``text`` is what a reader is shown, and a token that decodes to nothing -
+    an end-of-text marker, most often - is shown under its vocabulary label
+    instead, because an empty cell in the alternatives table says nothing.
+    That label is the tokenizer's own and differs between models, so anything
+    comparing two models' choices has to compare what they decode to rather
+    than what they are called. Equal to ``text`` where no fallback was used.
+    """
 
 
 @dataclass(frozen=True)
@@ -305,9 +315,18 @@ def build_metric(
     raw_log_probabilities: np.ndarray,
     sampled_probabilities: np.ndarray,
     decode_token: Callable[[int], str],
+    fallback_token: Callable[[int], str] | None = None,
     alternatives: int = 8,
     segment: str = "response",
 ) -> TokenMetric:
+    """Measure one token against the distribution that predicted it.
+
+    ``decode_token`` is the tokenizer's own decode, empty results and all.
+    ``fallback_token`` names a token that decodes to nothing, for the
+    alternatives table to show in its place; a caller that leaves it out gets
+    whatever ``decode_token`` returned, which is what callers that fold the
+    fallback into ``decode_token`` themselves have always got.
+    """
     raw_log_probs = np.asarray(raw_log_probabilities, dtype=np.float64).reshape(-1)
     raw_probs = np.exp(raw_log_probs)
     chosen = float(raw_log_probs[token_id])
@@ -316,14 +335,16 @@ def build_metric(
     count = min(alternatives, raw_probs.size)
     top_ids = np.argpartition(raw_probs, -count)[-count:]
     top_ids = top_ids[np.argsort(-raw_probs[top_ids])]
-    candidates = [
-        Candidate(
-            token_id=int(candidate_id),
-            text=decode_token(int(candidate_id)),
+    def candidate(candidate_id: int) -> Candidate:
+        raw = decode_token(candidate_id)
+        return Candidate(
+            token_id=candidate_id,
+            text=raw or (fallback_token(candidate_id) if fallback_token else raw),
             probability=float(raw_probs[candidate_id]),
+            raw_text=raw,
         )
-        for candidate_id in top_ids
-    ]
+
+    candidates = [candidate(int(candidate_id)) for candidate_id in top_ids]
 
     raw_probability = float(raw_probs[token_id])
     sampling_probability = float(sampled_probabilities[token_id])
