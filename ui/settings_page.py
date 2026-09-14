@@ -29,7 +29,7 @@ from ui.conversations import remember_branch_sampling
 # process is holding right now. They were only in the log before, which meant
 # reading a log file to find out why a load was refused.
 HARDWARE_UNREAD = (
-    "Reading the device… press **↻ Refresh** in a moment. ChatLab imports "
+    "Reading the device… press **Refresh** in a moment. ChatLab imports "
     "PyTorch in the background at startup, and the device cannot be named "
     "until that has finished."
 )

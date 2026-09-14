@@ -13,9 +13,10 @@ from uuid import uuid4
 
 from model_runtime import LOADING
 from trace_export import write_private_text
+from ui.icons import icon_classes
 
 API_VERSION = 1
-__all__ = ["API_VERSION", "ExtensionContext", "ModelService", "GenerationSession", "TokenInspector", "TokenMenu", "TokenSelections", "NavigationService", "write_private_text"]
+__all__ = ["API_VERSION", "ExtensionContext", "ModelService", "GenerationSession", "TokenInspector", "TokenMenu", "TokenSelections", "NavigationService", "write_private_text", "icon_classes"]
 
 
 class ModelService:

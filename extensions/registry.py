@@ -20,13 +20,14 @@ class ExtensionSpec:
     page_label: str
     module: str
     api_version: int = API_VERSION
-    icon: str = "▦"
+    # A name in ui.icons, drawn as a mask on the extension's nav tile.
+    icon: str = "box"
 
 
 CATALOGUE = (
     ExtensionSpec("maze_experiments", "Maze experiments",
                   "Run navigation trials, insert interruptions, inspect tokens and replay saved runs.",
-                  "Maze", "extensions.maze_experiments"),
+                  "Maze", "extensions.maze_experiments", icon="route"),
 )
 
 

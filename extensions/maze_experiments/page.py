@@ -12,7 +12,7 @@ import gradio as gr
 from .maze import GOAL_MODES, PASSAGES, SYSTEM, TOOLS, default_instruction, generate
 from .runner import RECOVERY_DEFAULTS, TERMINAL, Episode, context_messages, fork_token_edit, from_payload, stream_episode
 from .trials import prepare_trial, read_trials
-from extension_api import TokenInspector
+from extension_api import TokenInspector, icon_classes
 
 TOKENS = TokenInspector()
 STALE_TOKEN = "Select a token in the current response again."
@@ -468,10 +468,14 @@ def _build_page(context):
             maze_board = gr.HTML(board(initial), elem_id="maze-board")
             transport_status = gr.Markdown(transport_text(initial), elem_id="maze-transport-status")
             with gr.Row(elem_id="maze-transport"):
-                back = gr.Button("◀ Previous", size="sm", elem_id="maze-previous")
-                toggle = gr.Button("▶ Play", variant="primary", size="sm", elem_id="maze-run")
-                pause = gr.Button("Ⅱ Pause", variant="primary", size="sm", visible=False, elem_id="maze-pause")
-                forward = gr.Button("Next ▶", size="sm", elem_id="maze-next")
+                back = gr.Button("Previous", size="sm", elem_id="maze-previous",
+                                 elem_classes=icon_classes("chevron-left"))
+                toggle = gr.Button("Play", variant="primary", size="sm", elem_id="maze-run",
+                                   elem_classes=icon_classes("play"))
+                pause = gr.Button("Pause", variant="primary", size="sm", visible=False, elem_id="maze-pause",
+                                  elem_classes=icon_classes("pause"))
+                forward = gr.Button("Next", size="sm", elem_id="maze-next",
+                                    elem_classes=icon_classes("chevron-right", trailing=True))
                 interrupt = gr.Button("Interrupt", size="sm", elem_id="maze-interrupt")
             turn_picker = gr.Dropdown(choices=[("Initial / supplied history", -1)], value=-1,
                                       label="Selected response", interactive=True)

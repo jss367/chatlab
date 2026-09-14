@@ -61,14 +61,16 @@ CHAT_PAGE, IMAGES_PAGE, MODELS_PAGE, SETTINGS_PAGE = PAGES = (
 
 # Each nav tile shows an icon above the page's own name. The name is the
 # label's own text, so it is what a screen reader reads; the stylesheet draws
-# the icon in front of it and keeps it out of that reading.
+# the icon above it as a mask, which generates no text at all and so cannot
+# join that reading.
+#
+# These are names in ui.icons, not drawings: one stroke set at one weight,
+# where the emoji they replaced were a different typeface each.
 NAV_ICONS = {
-    CHAT_PAGE: "💬",
-    IMAGES_PAGE: "🖼️",
-    MODELS_PAGE: "🧠",
-    # The gear has a text form and an emoji form; the variation selector
-    # asks for the emoji, so it matches the other two tiles.
-    SETTINGS_PAGE: "⚙️",
+    CHAT_PAGE: "message-square",
+    IMAGES_PAGE: "image",
+    MODELS_PAGE: "box",
+    SETTINGS_PAGE: "settings",
 }
 
 
