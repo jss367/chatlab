@@ -113,6 +113,19 @@ class TrialFileTests(unittest.TestCase):
         # The wording the workbench writes itself still renders as Markdown.
         self.assertTrue(note.startswith('**Running:'))
 
+    def test_a_file_that_will_not_load_replaces_nothing_and_says_so(self):
+        data = self.read()
+        context = SimpleNamespace(tokens=TokenInspector(), models=None, data_dir=Path(self.directory.name),
+                                  navigation=SimpleNamespace(open_models=lambda button, wanted=None: None))
+        with gr.Blocks() as demo:
+            build_page(context)
+        self.addCleanup(demo.close)
+        upload = {fn.fn.__name__: fn for fn in demo.fns.values()}['load_trial_file']
+        bad = Path(self.directory.name) / 'bad.json'
+        bad.write_text('{"format": "chatlab-maze-trials-1", "title": "B", "trials": []}')
+        with self.assertRaisesRegex(gr.Error, 'Still loaded: Example trials'):
+            upload.fn(str(bad), Episode(MAZE, CONFIG), data)
+
     def test_uploading_a_collection_queues_with_the_rest_of_the_view(self):
         # Off the view's queue, a Load trial click could be served between the
         # upload arriving and the picker it fills, and prepare a trial from the
@@ -151,7 +164,7 @@ class TrialFileTests(unittest.TestCase):
             build_page(context)
         self.addCleanup(demo.close)
         callbacks = {fn.fn.__name__: fn for fn in demo.fns.values()}
-        loaded = callbacks['load_trial_file'].fn(str(self.path), Episode(MAZE, CONFIG))
+        loaded = callbacks['load_trial_file'].fn(str(self.path), Episode(MAZE, CONFIG), None)
         self.assertEqual(loaded[1]['value'], 'clean')
         self.assertIn('1 trial.', loaded[2])
         old = Episode(MAZE, CONFIG)
@@ -188,7 +201,7 @@ class TrialFileTests(unittest.TestCase):
         # Uploading another collection replaces no episode, so the run keeps
         # its name in the pane.
         upload = callbacks['load_trial_file']
-        still = upload.fn(str(self.path), loaded[0])
+        still = upload.fn(str(self.path), loaded[0], None)
         self.assertIn('Running: Clean trial', still[2])
         self.assertIn('Example trials', still[2])
 

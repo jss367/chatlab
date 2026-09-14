@@ -529,13 +529,17 @@ def _build_page(context):
         stop_replay(ep)
         return (new, *render(new, show, session_id), trial_note_text(new, data), None, *model_button(new))
 
-    def load_trial_file(path, ep):
+    def load_trial_file(path, ep, loaded):
         if not path:
             return None, gr.update(choices=[], value=None), trial_note_text(ep)
         try:
             data = read_trials(path)
         except (ValueError, TypeError, KeyError, OSError) as exc:
-            raise gr.Error(f"Could not load trials: {exc}") from exc
+            # A file that will not load replaces nothing, so the picker keeps
+            # offering the collection it was offering. The widget names the
+            # file that failed, so the error names the one that is still there.
+            kept = f" Still loaded: {as_text(loaded['title'])}." if loaded else ""
+            raise gr.Error(f"Could not load trials: {exc}{kept}") from exc
         return (data, gr.update(choices=[(t["label"], t["id"]) for t in data["trials"]], value=data["trials"][0]["id"]),
                 trial_note_text(ep, data))
 
@@ -814,7 +818,8 @@ def _build_page(context):
     # On the view's own queue, so a Load trial click cannot run between the
     # upload arriving and the picker it fills, preparing a trial from the
     # collection being replaced.
-    trial_upload.upload(load_trial_file, [trial_upload, episode], [trial_data, trial_picker, trial_note],
+    trial_upload.upload(load_trial_file, [trial_upload, episode, trial_data],
+                        [trial_data, trial_picker, trial_note],
                         concurrency_id="maze-view", show_progress="hidden")
     trial_load.click(load_trial, [trial_data, trial_picker, episode, reveal, selection_session],
                      [episode, *outputs, *controls, passage, trial_note, edit_selection, download,
