@@ -1,9 +1,13 @@
+import math
 import unittest
 
 import numpy as np
 
 from token_metrics import (
     COLOR_SCALES,
+    DIVERGING_FILLS,
+    SEQUENTIAL_FILLS,
+    UNSCORED_FILL,
     UNSCORED_LABEL,
     build_metric,
     category_for,
@@ -192,3 +196,97 @@ class SummaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# The strip paints these fills behind dark body text, and a reader has to tell
+# two of them apart while they sit side by side in arbitrary order. Both of
+# those are arithmetic, so they are checked rather than eyeballed. The ink is
+# #0b0b0b, pinned in ui/styles.py.
+STRIP_INK = "#0b0b0b"
+MIN_INK_CONTRAST = 4.5
+MIN_SEPARATION = 8.0
+
+# Machado, Oliveira and Fernandes (2009) at full severity, the simulation the
+# separation floor is calibrated against.
+COLOR_VISION = {
+    "protanopia": (
+        (0.152286, 1.052583, -0.204868),
+        (0.114503, 0.786281, 0.099216),
+        (-0.003882, -0.048116, 1.051998),
+    ),
+    "deuteranopia": (
+        (0.367322, 0.860646, -0.227968),
+        (0.280085, 0.672501, 0.047413),
+        (-0.011820, 0.042940, 0.968881),
+    ),
+}
+
+
+def _linear(fill: str) -> tuple[float, float, float]:
+    channels = [int(fill[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+    return tuple(
+        channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+        for channel in channels
+    )
+
+
+def _contrast(fill: str, other: str) -> float:
+    weights = (0.2126, 0.7152, 0.0722)
+    luminances = sorted(
+        sum(weight * channel for weight, channel in zip(weights, _linear(color)))
+        for color in (fill, other)
+    )
+    return (luminances[1] + 0.05) / (luminances[0] + 0.05)
+
+
+def _oklab(linear: tuple[float, float, float]) -> tuple[float, float, float]:
+    red, green, blue = linear
+    long = (0.4122214708 * red + 0.5363325363 * green + 0.0514459929 * blue) ** (1 / 3)
+    medium = (0.2119034982 * red + 0.6806995451 * green + 0.1073969566 * blue) ** (
+        1 / 3
+    )
+    short = (0.0883024619 * red + 0.2817188376 * green + 0.6299787005 * blue) ** (1 / 3)
+    return (
+        0.2104542553 * long + 0.7936177850 * medium - 0.0040720468 * short,
+        1.9779984951 * long - 2.4285922050 * medium + 0.4505937099 * short,
+        0.0259040371 * long + 0.7827717662 * medium - 0.8086757660 * short,
+    )
+
+
+def _separation(fill: str, other: str, vision: str = "") -> float:
+    def seen(color: str) -> tuple[float, float, float]:
+        linear = _linear(color)
+        if not vision:
+            return _oklab(linear)
+        matrix = COLOR_VISION[vision]
+        return _oklab(
+            tuple(
+                min(1.0, max(0.0, sum(w * c for w, c in zip(row, linear))))
+                for row in matrix
+            )
+        )
+
+    return 100 * math.dist(seen(fill), seen(other))
+
+
+class PaletteTests(unittest.TestCase):
+    def test_every_fill_keeps_the_strip_text_readable(self):
+        fills = {*SEQUENTIAL_FILLS, *DIVERGING_FILLS, UNSCORED_FILL}
+        for fill in sorted(fills):
+            with self.subTest(fill=fill):
+                self.assertGreaterEqual(
+                    _contrast(fill, STRIP_INK), MIN_INK_CONTRAST, fill
+                )
+
+    def test_rank_fills_stay_apart_in_any_pairing(self):
+        # Any two buckets can end up neighbours, because tokens arrive in the
+        # order the model wrote them, so every pair is checked and not just
+        # the adjacent ones.
+        fills = [*SEQUENTIAL_FILLS, UNSCORED_FILL]
+        for index, fill in enumerate(fills):
+            for other in fills[index + 1 :]:
+                for vision in ("", *COLOR_VISION):
+                    with self.subTest(pair=(fill, other), vision=vision or "normal"):
+                        self.assertGreaterEqual(
+                            _separation(fill, other, vision), MIN_SEPARATION
+                        )
