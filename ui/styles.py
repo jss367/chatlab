@@ -520,10 +520,12 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 #token-strip span, #score-strip span, #prompt-strip span {{
   cursor: pointer; border-radius: 5px;
 }}
-/* Token fills are light in both themes, so their ink is pinned dark. */
-#token-strip .textspan.hl, #score-strip .textspan.hl, #prompt-strip .textspan.hl,
-#token-strip .category-label, #score-strip .category-label,
-#prompt-strip .category-label {{ color: #0b0b0b; }}
+/* Token fills are light in both themes, so their ink is pinned dark. Every
+   highlighted strip in the app draws from the one palette in token_metrics,
+   including the ones an extension mounts, so this is deliberately not scoped
+   to a strip's id: naming them would leave the next strip unreadable in dark
+   mode the day it is added. */
+.textspan.hl, .category-label {{ color: #0b0b0b; }}
 /* A compact, two-option switch at the upper right of the conversation. */
 #token-view {{
   flex: none; width: fit-content; min-width: 0; padding: 0;

@@ -45,8 +45,16 @@ class TokenMetric:
 
 # Fills are deliberately light in both themes: the token strip paints them
 # behind body text, so the ink is pinned dark and every step clears 4.5:1
-# against it. Steps come from the reference data-visualization palette.
-SEQUENTIAL_FILLS = ("#cde2fb", "#9ec5f4", "#6da7ec", "#5598e7", "#3987e5")
+# against it. That ink floor is what makes the ramp run cool to warm rather
+# than pale blue to dark blue. Readable dark text caps a fill at about OKLCH
+# L 0.58, and a fill any lighter than L 0.78 stops separating from the page, so
+# one hue has roughly 0.20 of lightness to spend on four gaps — about 0.05
+# each, under the 0.06 a reader needs. The last two steps of the old blue ramp
+# sat 0.046 and 0.049 apart and rare tokens disappeared into common ones. Hue
+# is the channel that is left: blue holds the three buckets the model
+# considered, and amber then red carry rank 21 and beyond. Worst pair over the
+# whole set, under protanopia and deuteranopia, goes from ΔE 4.7 to 10.9.
+SEQUENTIAL_FILLS = ("#daeafc", "#9fc8f8", "#62a4f4", "#f0a03c", "#e34948")
 DIVERGING_FILLS = ("#e34948", "#f09b9a", "#f0efec", "#9ec5f4", "#3987e5")
 UNSCORED_LABEL = "Not predicted"
 UNSCORED_FILL = "#c3c2b7"
@@ -96,7 +104,7 @@ COLOR_SCALES: dict[str, ColorScale] = {
             labels=RANK_LABELS,
             fills=SEQUENTIAL_FILLS,
             edges=(1.5, 5.5, 20.5, 100.5),
-            caption="Where the token sat in the model's unmodified distribution. Darker is further down the list.",
+            caption="Where the token sat in the model's unmodified distribution. Warmer is further down the list.",
         ),
         ColorScale(
             name="Surprise",
@@ -110,7 +118,7 @@ COLOR_SCALES: dict[str, ColorScale] = {
             ),
             fills=SEQUENTIAL_FILLS,
             edges=(1.0, 3.0, 6.0, 10.0),
-            caption="How unexpected this token was. Darker is more surprising.",
+            caption="How unexpected this token was. Warmer is more surprising.",
         ),
         ColorScale(
             name="Entropy",
@@ -124,7 +132,7 @@ COLOR_SCALES: dict[str, ColorScale] = {
             ),
             fills=SEQUENTIAL_FILLS,
             edges=(0.5, 1.5, 3.0, 5.0),
-            caption="How undecided the model was before it chose. Darker means more of the distribution was in play.",
+            caption="How undecided the model was before it chose. Warmer means more of the distribution was in play.",
         ),
         ColorScale(
             name="Sampling shift",
@@ -165,7 +173,7 @@ PROMPT_ATTENTION_SCALE = ColorScale(
     ),
     fills=SEQUENTIAL_FILLS,
     edges=(0.2, 0.4, 0.6, 0.85),
-    caption="Each token's share of the picture's cross-attention, against the strongest token in the prompt. Darker drove more of the picture.",
+    caption="Each token's share of the picture's cross-attention, against the strongest token in the prompt. Warmer drove more of the picture.",
 )
 
 
