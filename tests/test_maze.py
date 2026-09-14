@@ -1315,7 +1315,7 @@ class MazeTests(unittest.TestCase):
                     self.assertEqual(change(mode, default_instruction('coordinates'))[2], default_instruction(mode))
                 self.assertEqual(change('hidden', 'Find the star yourself.')[2], gr.skip())
                 ep = Episode(MAZE, CONFIG)
-                values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10,
+                values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10, 700, 5,
                           'coordinates', '', 'Be brief.', 'Reach the star.')
                 new = callbacks['prepare_episode'](ep, False, session, None, *values)[0]
                 self.assertEqual(new.messages[0]['content'], 'Be brief.')
@@ -1325,10 +1325,10 @@ class MazeTests(unittest.TestCase):
                 # The pane describes the run on screen, so every control follows
                 # it, ahead of the trial note, the model button and the ID it
                 # hands over.
-                filled = loaded[-21:-3]
-                self.assertEqual(filled[:14], values[:14])
-                self.assertEqual((filled[14]['value'], filled[14]['visible']), ('', False))
-                self.assertEqual(filled[15:], ('Be brief.', 'Reach the star.', 'Custom'))
+                filled = loaded[-23:-3]
+                self.assertEqual(filled[:16], values[:16])
+                self.assertEqual((filled[16]['value'], filled[16]['visible']), ('', False))
+                self.assertEqual(filled[17:], ('Be brief.', 'Reach the star.', 'Custom'))
             finally:
                 demo.close()
 
@@ -1361,7 +1361,7 @@ class MazeTests(unittest.TestCase):
                 self.assertTrue(loaded[0].replay_only)
                 self.assertEqual(loaded[-2]['value'], 'Load test/model')
                 self.assertEqual(loaded[-1], 'test/model')
-                values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10,
+                values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10, 700, 5,
                           'coordinates', '', 'Be brief.', 'Reach the star.')
                 fresh = callbacks['prepare_episode'](loaded[0], False, session, None, *values)
                 self.assertEqual(fresh[-2]['value'], 'Choose / load model')
@@ -1381,9 +1381,9 @@ class MazeTests(unittest.TestCase):
         self.assertEqual((size, seed, distance, openness), (3, 0, 2, .55))
         self.assertEqual(values[6], stock[1])
         self.assertEqual(values[-1], stock[0])
-        self.assertEqual(values[13], 'hint')
+        self.assertEqual(values[15], 'hint')
         # The hint box is hidden for the other modes, so loading a hint run reveals it.
-        self.assertEqual((values[14]['value'], values[14]['visible']), ('Top row.', True))
+        self.assertEqual((values[16]['value'], values[16]['visible']), ('Top row.', True))
         # Runs predating the recorded setting are searched for the value that redraws
         # their maze, and Run details says so when no value does.
         old = ep.payload()
@@ -1559,6 +1559,45 @@ class MazeTests(unittest.TestCase):
         bad["events"][0]["after"] = [2, 2]
         with self.assertRaises(ValueError):
             from_payload(bad)
+
+    def test_recovery_window_is_configured_recorded_and_capped_per_response(self):
+        blocked = '\n' + call_text(MAZE.maze_id, "south")
+        move = '\n' + call_text(MAZE.maze_id, "east")
+        # One attempt to come back. The interrupted response makes a rejected
+        # call, which uses the window up without moving.
+        narrow = Episode(MAZE, CONFIG | {"recovery_attempts": 1})
+        list(stream_episode(narrow, Manager([(blocked, [8, 0])])))
+        self.assertEqual(narrow.phase, "budget")
+        self.assertIn("recovery window", narrow.detail)
+        self.assertFalse(narrow.resumed)
+        # The pilot's window reads the same responses as a recovery.
+        wide = Episode(MAZE, CONFIG)
+        list(stream_episode(wide, Manager([(blocked, [8, 0]), (move, [8, 0]), (move, [8, 0])])))
+        self.assertEqual(wide.phase, "arrived")
+        self.assertTrue(wide.resumed)
+        # The window a run was scored under travels with it, so a replay is
+        # read under its own window rather than whatever is configured now.
+        replay = from_payload(json.loads(json.dumps(narrow.payload())))
+        self.assertEqual(replay.config["recovery_attempts"], 1)
+        self.assertEqual(replay.config["recovery_tokens"], 1024)
+        # Runs predating the recorded window are read under the one that scored them.
+        legacy = json.loads(json.dumps(narrow.payload()))
+        for key in ("recovery_tokens", "recovery_attempts"):
+            legacy["config"].pop(key)
+        self.assertEqual(from_payload(legacy).config, narrow.config | {"recovery_attempts": 4})
+        for bad in (0, -1, 2.5, True, "1024"):
+            with self.assertRaisesRegex(ValueError, "recovery window"):
+                Episode(MAZE, CONFIG | {"recovery_tokens": bad})
+
+    def test_recovery_window_caps_the_interrupted_response(self):
+        ep = Episode(MAZE, CONFIG | {"recovery_tokens": 50, "per_turn_tokens": 100})
+        manager = Manager([('\n' + call_text(MAZE.maze_id, "south"), [8, 0]),
+                           ('\n' + call_text(MAZE.maze_id, "east"), [8, 0])])
+        list(stream_episode(ep, manager))
+        # The interrupted response and the one still inside the window are both
+        # cut to what is left of it, not to the larger per-response limit.
+        self.assertEqual(manager.calls[0][1]["max_new_tokens"], 50)
+        self.assertEqual(manager.calls[1][1]["max_new_tokens"], 50 - ep.turns[0]["sampled_tokens"])
 
     def test_abandonment_does_not_prompt_again(self):
         ep = Episode(MAZE, CONFIG)

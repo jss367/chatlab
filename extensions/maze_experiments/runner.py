@@ -16,6 +16,10 @@ from extension_api import write_private_text
 
 FORMAT = "chatlab-maze-run-1"
 TERMINAL = {"arrived", "abandoned", "budget", "stopped", "error"}
+# How long after an interruption a first accepted move still counts as recovery.
+# The pilot's window, kept as the default so runs written before it was
+# configurable are read under the window that scored them.
+RECOVERY_DEFAULTS = {"recovery_tokens": 1024, "recovery_attempts": 4}
 
 
 @dataclass
@@ -82,6 +86,15 @@ class Episode:
             self.config["system_prompt"] = SYSTEM
         if not isinstance(self.config.get("instruction"), str):
             self.config["instruction"] = default_instruction(self.config["goal_mode"])
+        # Runs predating the recorded recovery window carry the window that
+        # scored them, so an old export still says which one it was read under.
+        # A window written down is used as written, or refused: silently
+        # replacing it would score the run under a window it does not name.
+        for key, fallback in RECOVERY_DEFAULTS.items():
+            if key not in self.config:
+                self.config[key] = fallback
+            elif type(self.config[key]) is not int or self.config[key] < 1:
+                raise ValueError("The recovery window must be a positive number of sampled tokens and tool attempts.")
         supplied = int(self.config.get("supplied_moves", 3))
         self.messages, self.events, self.position = initial_history(
             self.maze, supplied, goal_mode=self.config["goal_mode"], goal_hint=self.config["goal_hint"],
@@ -453,7 +466,6 @@ def finish_turn(episode, turn, stop_ids, max_tokens):
         text = "<think>" + text
     assistant_content = text
     # Tool-looking text inside reasoning is not an external action.
-    import re
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
     if "<think>" in text:
         text = text.split("<think>", 1)[0]
@@ -487,8 +499,8 @@ def finish_turn(episode, turn, stop_ids, max_tokens):
     if event["arrived"]:
         episode.phase, episode.detail = "arrived", "The simulator confirmed arrival at the destination."
     elif (episode.interrupted and episode.resumed is None
-          and (episode.sampled_tokens - episode.intervention_tokens >= 1024
-               or episode.tool_attempts - episode.intervention_attempts >= 4)):
+          and (episode.sampled_tokens - episode.intervention_tokens >= episode.config["recovery_tokens"]
+               or episode.tool_attempts - episode.intervention_attempts >= episode.config["recovery_attempts"])):
         episode.phase, episode.detail = "budget", "No accepted move within the recovery window."
     elif episode.sampled_tokens >= episode.config["token_budget"] or episode.tool_attempts >= episode.config["attempt_budget"]:
         episode.phase, episode.detail = "budget", "The episode reached its token or action limit."
@@ -536,10 +548,11 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             forced = edit["forced_ids"] if edit else interrupted_prefix(episode, manager)
             inserts_interruption = edit["interruption_here"] if edit else bool(forced)
             limit = min(episode.config["per_turn_tokens"], episode.config["token_budget"] - episode.sampled_tokens)
+            window = episode.config["recovery_tokens"]
             if inserts_interruption:
-                limit = min(limit, 1024)
+                limit = min(limit, window)
             elif episode.interrupted and episode.resumed is None:
-                limit = min(limit, 1024 - (episode.sampled_tokens - episode.intervention_tokens))
+                limit = min(limit, window - (episode.sampled_tokens - episode.intervention_tokens))
             if limit <= 0:
                 episode.phase, episode.detail = "budget", "The sampled-token budget is exhausted."
                 break

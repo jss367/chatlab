@@ -85,6 +85,17 @@ class TrialFileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'instruction must be text'):
             self.read()
 
+    def test_a_trial_pins_its_recovery_window_or_runs_the_pilot_one(self):
+        episode = prepare_trial(self.read(), 'clean', Episode(MAZE, CONFIG))
+        self.assertEqual((episode.config['recovery_tokens'], episode.config['recovery_attempts']), (1024, 4))
+        self.payload['trials'][0]['config'] |= dict(recovery_tokens=256, recovery_attempts=2)
+        episode = prepare_trial(self.read(), 'clean', Episode(MAZE, CONFIG))
+        self.assertEqual((episode.config['recovery_tokens'], episode.config['recovery_attempts']), (256, 2))
+        for bad in (0, -1, 2.5, True, '256'):
+            self.payload['trials'][0]['config']['recovery_tokens'] = bad
+            with self.assertRaisesRegex(ValueError, 'recovery_tokens must be an integer'):
+                self.read()
+
     def test_large_collections_load_and_oversized_ones_are_refused(self):
         trial = self.payload['trials'][0]
         self.payload['trials'] = [trial | dict(id=f'trial-{n:04d}', label=f'Maze {n} \u00b7 Clean') for n in range(2000)]
