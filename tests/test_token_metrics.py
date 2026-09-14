@@ -1,7 +1,10 @@
 import math
+import re
 import unittest
 
 import numpy as np
+
+from ui.styles import CSS
 
 from token_metrics import (
     COLOR_SCALES,
@@ -286,6 +289,23 @@ class PaletteTests(unittest.TestCase):
                         self.assertGreaterEqual(
                             _separation(fill, other, vision), MIN_SEPARATION
                         )
+
+class StripInkTests(unittest.TestCase):
+    def test_dark_ink_is_pinned_for_every_strip(self):
+        # The fills are only readable under dark text, and extensions mount
+        # their own strips off the same palette, so the rule that pins the ink
+        # must not be scoped to the ids the app happens to ship today.
+        stylesheet = re.sub(r"/\*.*?\*/", "", CSS, flags=re.S)
+        rules = [
+            rule.partition("{")
+            for rule in stylesheet.split("}")
+            if ".textspan.hl" in rule.split("{")[0]
+        ]
+        self.assertTrue(rules, "no rule pins ink on highlighted spans")
+        for selector, _, body in rules:
+            with self.subTest(selector=selector.strip()):
+                self.assertNotIn("#", selector)
+                self.assertIn(STRIP_INK, body)
 
 
 if __name__ == "__main__":
