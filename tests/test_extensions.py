@@ -312,6 +312,40 @@ class RegistryTests(unittest.TestCase):
         finally:
             demo.close()
 
+    def test_extension_model_button_fills_the_id_box_with_the_model_it_names(self):
+        # An extension that knows which model its view needs - a saved run
+        # names the one that recorded it - hands the ID over and the reader
+        # arrives on Models with the box already filled. Loading is still
+        # their own click, and an ID no box could hold fills nothing.
+        buttons = []
+        def build(context):
+            button = gr.Button("Load the run's model")
+            wanted = gr.State("org/recorded-it")
+            context.navigation.open_models(button, wanted)
+            buttons.append(button)
+        extension = LoadedExtension(
+            ExtensionSpec("example", "Example", "", "Example", "example"), build, "",
+        )
+        with mock.patch('ui.layout.load_enabled', return_value=([extension], [])):
+            demo = app.build_app()
+        try:
+            listener = next(fn for fn in demo.fns.values() if fn.targets == [(buttons[0]._id, 'click')])
+            box = next(b for b in listener.outputs
+                       if getattr(b, 'label', None) == 'Hugging Face model ID')
+            nav = next(b for b in listener.outputs if getattr(b, 'elem_id', None) == 'nav')
+            filled = dict(zip(listener.outputs, listener.fn("org/recorded-it"), strict=True))
+            self.assertEqual(filled[box], "org/recorded-it")
+            self.assertEqual(filled[nav], 'Models')
+            self.assertIn("org/recorded-it", str(filled[next(
+                b for b in listener.outputs if getattr(b, 'elem_id', None) == 'model-status')]))
+            for junk in ("", None, "not a model id"):
+                with self.subTest(junk=junk):
+                    opened = dict(zip(listener.outputs, listener.fn(junk), strict=True))
+                    self.assertEqual(opened[box], gr.skip())
+                    self.assertEqual(opened[nav], 'Models')
+        finally:
+            demo.close()
+
 
 class ExtensionSettingsTests(unittest.TestCase):
     def setUp(self):

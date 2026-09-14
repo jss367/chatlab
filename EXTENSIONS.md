@@ -42,7 +42,7 @@ The host passes `extension_api.ExtensionContext`:
 - `models`: the model service; obtain exclusive access with `open_session()`.
 - `tokens`: the shared `TokenInspector`, with `color_map`, `strip(metrics)`, `describe(metric)` and `selections()` for dated token selection.
 - `data_dir`: an extension-specific directory. Create it only when writing data.
-- `navigation`: the host navigation service; call `context.navigation.open_models(button)` during page construction to make a Gradio button open model loading. The host updates the sidebar selection and all page visibility together.
+- `navigation`: the host navigation service; call `context.navigation.open_models(button)` during page construction to make a Gradio button open model loading. The host updates the sidebar selection and all page visibility together. Pass a second component holding a model ID - `open_models(button, wanted_model)` - and the Models page also opens with that ID in its box, which is how an extension points at the model its own view needs. The host validates the ID and opens the page with the box untouched when it is empty or is not a model ID. Loading is still an explicit click on the Models page.
 - `api_version`: the version supplied by this host.
 
 ### Generating
