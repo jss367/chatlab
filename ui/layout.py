@@ -1460,8 +1460,7 @@ def build_app() -> gr.Blocks:
             refresh_stale_model_actions,
             [*action_inputs, action_stamp],
             [*action_outputs, action_stamp],
-            show_progress="hidden", trigger_mode="always_last",
-            concurrency_id="model-actions",
+            trigger_mode="always_last", concurrency_id="model-actions", **QUIET_TICK,
         )
 
         # Slow network requests scope state to the ID and credentials; rendering
