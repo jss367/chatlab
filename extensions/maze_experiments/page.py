@@ -11,7 +11,7 @@ import gradio as gr
 
 from .maze import GOAL_MODES, PASSAGES, SYSTEM, TOOLS, default_instruction, generate
 from .runner import TERMINAL, Episode, context_messages, fork_token_edit, from_payload, stream_episode
-from .trials import control_values, prepare_trial, read_trials
+from .trials import prepare_trial, read_trials
 from extension_api import TokenInspector
 
 TOKENS = TokenInspector()
@@ -524,17 +524,13 @@ def _build_page(context):
         try:
             if data is None:
                 raise ValueError("Load a trial definitions file first.")
-            new, item = prepare_trial(data, trial_id, ep)
+            new = prepare_trial(data, trial_id, ep)
         except (ValueError, TypeError, KeyError) as exc:
             raise gr.Error(str(exc)) from exc
         stop_replay(ep)
-        # control_values follows the order of controls, so the hint is the one
-        # value that also decides whether its box is on screen.
-        values = control_values(item)
-        hint = controls.index(goal_hint)
-        values[hint] = gr.update(value=values[hint], visible=item["config"]["goal_mode"] == "hint")
-        return (new, *render(new, show, session_id), *values,
-                "Custom" if item["config"]["interruption_text"] else "None",
+        # The same description a loaded run gets: the trial is in the episode
+        # now, so nothing here has to spell the controls out a second time.
+        return (new, *render(new, show, session_id), *scenario_values(new),
                 trial_note_text(new), None, None)
 
     def play(ep, show, session_id, single=False):

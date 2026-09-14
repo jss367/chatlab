@@ -4,7 +4,7 @@ import json
 import math
 from pathlib import Path
 
-from .maze import SYSTEM, Maze, default_instruction, goal_instruction
+from .maze import Maze, goal_instruction
 from .runner import Episode
 
 FORMAT = "chatlab-maze-trials-1"
@@ -66,24 +66,18 @@ def read_trials(path):
 
 
 def prepare_trial(data, trial_id, current):
+    """A fresh episode of the named trial, which then describes itself."""
+
     if current.busy:
         raise ValueError("Stop or pause the current episode before loading a trial.")
     item = next((t for t in data["trials"] if t["id"] == trial_id), None)
     if item is None:
         raise ValueError("Select a trial from the loaded file.")
     maze = Maze.from_dict(item["maze"])
-    config = dict(item["config"])
+    # The openness lives on the trial rather than its config, and an episode
+    # that cannot name the probability it was drawn with is searched for it
+    # later. Record it now, while the file still says.
+    config = dict(item["config"], openness=item["openness"])
     config["trial"] = {"id": item["id"], "label": item["label"], "title": data["title"],
                        "file_sha256": data["file_sha256"]}
-    return Episode(maze, config), item
-
-
-def control_values(item):
-    """The trial as the scenario controls spell it, in their own order."""
-
-    maze, c = Maze.from_dict(item["maze"]), item["config"]
-    return [maze.size, maze.seed, len(maze.route()) - 1, item["openness"], c["supplied_moves"],
-            c["interrupt_after"], c["interruption_text"], c["prefix_tokens"], c["temperature"],
-            c["sampling_seed"], c["per_turn_tokens"], c["token_budget"], c["attempt_budget"],
-            c["goal_mode"], c["goal_hint"], c.get("system_prompt", SYSTEM),
-            c.get("instruction", default_instruction(c["goal_mode"]))]
+    return Episode(maze, config)

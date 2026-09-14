@@ -11,7 +11,7 @@ from extension_api import TokenInspector
 from extensions.maze_experiments.page import build_page
 from extensions.maze_experiments.runner import Episode, from_payload
 from extensions.maze_experiments.maze import SYSTEM, default_instruction
-from extensions.maze_experiments.trials import FORMAT, control_values, prepare_trial, read_trials
+from extensions.maze_experiments.trials import FORMAT, prepare_trial, read_trials
 from test_maze import CONFIG, MAZE
 
 
@@ -31,8 +31,8 @@ class TrialFileTests(unittest.TestCase):
     def test_fixed_map_fresh_runs_and_replay_provenance(self):
         data = self.read()
         original = Episode(MAZE, CONFIG)
-        first, _ = prepare_trial(data, 'clean', original)
-        second, _ = prepare_trial(data, 'clean', original)
+        first = prepare_trial(data, 'clean', original)
+        second = prepare_trial(data, 'clean', original)
         self.assertEqual(first.maze, MAZE)
         self.assertEqual(first.messages, second.messages)
         self.assertNotEqual(first.run_id, second.run_id)
@@ -60,14 +60,13 @@ class TrialFileTests(unittest.TestCase):
             self.read()
 
     def test_a_trial_pins_its_prompt_or_runs_the_stock_wording(self):
-        episode, item = prepare_trial(self.read(), 'clean', Episode(MAZE, CONFIG))
+        episode = prepare_trial(self.read(), 'clean', Episode(MAZE, CONFIG))
         self.assertEqual(episode.messages[0]['content'], SYSTEM)
-        self.assertEqual(control_values(item)[-2:], [SYSTEM, default_instruction('coordinates')])
+        self.assertEqual(episode.config['instruction'], default_instruction('coordinates'))
         self.payload['trials'][0]['config'] |= dict(system_prompt='Be terse.', instruction='Reach it.')
-        episode, item = prepare_trial(self.read(), 'clean', Episode(MAZE, CONFIG))
+        episode = prepare_trial(self.read(), 'clean', Episode(MAZE, CONFIG))
         self.assertEqual(episode.messages[0]['content'], 'Be terse.')
         self.assertTrue(episode.messages[1]['content'].startswith('Reach it.'))
-        self.assertEqual(control_values(item)[-2:], ['Be terse.', 'Reach it.'])
         self.payload['trials'][0]['config']['instruction'] = 5
         with self.assertRaisesRegex(ValueError, 'instruction must be text'):
             self.read()
@@ -77,7 +76,8 @@ class TrialFileTests(unittest.TestCase):
         self.payload['trials'] = [trial | dict(id=f'trial-{n:04d}', label=f'Maze {n} \u00b7 Clean') for n in range(2000)]
         data = self.read()
         self.assertEqual(len(data['trials']), 2000)
-        self.assertEqual(prepare_trial(data, 'trial-1999', Episode(MAZE, CONFIG))[1]['label'], 'Maze 1999 \u00b7 Clean')
+        self.assertEqual(prepare_trial(data, 'trial-1999', Episode(MAZE, CONFIG)).config['trial']['label'],
+                         'Maze 1999 \u00b7 Clean')
         self.payload['trials'] = [trial | dict(id=f'trial-{n:04d}') for n in range(2001)]
         with self.assertRaisesRegex(ValueError, '1\u20132000 trials'):
             self.read()
