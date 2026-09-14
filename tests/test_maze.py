@@ -185,6 +185,41 @@ class MazeTests(unittest.TestCase):
             finally:
                 demo.close()
 
+    def test_clicking_a_probability_row_branches_into_that_alternative(self):
+        manager = Manager([('abc', [97, 98, 99, 0]), ('yz', [121, 122, 0])])
+        manager.generate = scored(manager.generate)
+        inspector = TokenInspector()
+        selections = inspector.selections()
+        inspector.selections = lambda: selections
+        session_id = selections.new_session()
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        list(stream_episode(ep, manager))
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                metrics = views(ep, False, selections, session_id)[7]
+                selected = callbacks['select_token'].fn(ep, session_id, metrics, SimpleNamespace(index=1))
+                branch = callbacks['branch_alternative']
+                # A row clicked with no token selected, or on a table left over
+                # from an earlier one, must not fork anything.
+                for stale in (None, dict(selected[2], stamp='gone')):
+                    with self.assertRaisesRegex(gr.Error, 'current response'):
+                        list(branch.fn(ep, False, session_id, metrics, stale, SimpleNamespace(index=(0, 1))))
+                with self.assertRaisesRegex(gr.Error, 'current response'):
+                    list(branch.fn(ep, False, session_id, metrics, selected[2], SimpleNamespace(index=(4, 1))))
+                frames = list(branch.fn(ep, False, session_id, metrics, selected[2], SimpleNamespace(index=(0, 1))))
+                self.assertTrue(all(len(frame) == len(branch.outputs) for frame in frames))
+                result = frames[-1][0]
+                self.assertEqual(result.token_edit['replacement_ids'], [120])
+                self.assertEqual(result.token_edit['parent_run_id'], ep.run_id)
+                self.assertEqual(result.turns[0]['text'], 'axyz')
+            finally:
+                demo.close()
+
     def test_context_menu_offers_alternatives_and_branches_where_it_was_opened(self):
         """A right-click reaches the same fork the editor pane does, in one gesture."""
         def opened(directory):

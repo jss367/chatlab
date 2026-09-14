@@ -365,7 +365,8 @@ def _build_page(context):
                 edit_button = gr.Button("Replace token and regenerate", elem_id="maze-edit-token")
                 gr.Markdown("Editing creates a new run from this token. The original run is saved.")
                 with gr.Accordion("Token probabilities", open=False):
-                    alternatives = gr.Dataframe(headers=["Token ID", "Text", "Raw probability"], interactive=False)
+                    alternatives = gr.Dataframe(headers=["Token ID", "Text", "Raw probability"], interactive=False,
+                                                label="Click a row to branch this response into that token")
             gr.Markdown("## Movement history\nSelect a row to show its position and response.")
             events = gr.Dataframe(value=timeline(initial), headers=["Response", "Position", "Direction", "Result"],
                                   interactive=False, wrap=True, max_height=260, elem_id="maze-history")
@@ -577,6 +578,24 @@ def _build_page(context):
         for frame in play(new, show, session_id, single=True):
             yield (new, *frame, None, None, *buttons)
 
+    def branch_alternative(ep, show, session_id, metrics, selected, evt: gr.SelectData):
+        """One click in the probabilities table branches into that alternative.
+
+        The row is read against the token the editor is open on, so a table
+        left over from an earlier selection cannot fork on a token nobody
+        picked. Everything after that is the button's path, with the clicked
+        alternative standing in for the dropdown.
+        """
+        row = evt.index[0] if isinstance(evt.index, (tuple, list)) else evt.index
+        try:
+            if selected is None or not metrics or selected["stamp"] != metrics[0]:
+                raise ValueError(STALE_TOKEN)
+            _view_id, _index, metric = selections.resolve(session_id, metrics, selected["index"])
+            candidate = metric.get("top_candidates", [])[row]
+        except (IndexError, KeyError, TypeError, ValueError) as exc:
+            raise gr.Error(STALE_TOKEN) from exc
+        yield from edit_token(ep, show, session_id, metrics, selected, "", str(candidate["token_id"]))
+
     def offer_menu(ep, session_id, metrics, request_id, evt: gr.SelectData):
         """Answer one right-click with the alternatives recorded for that token."""
         index = evt.index[0] if isinstance(evt.index, (tuple, list)) else evt.index
@@ -657,6 +676,8 @@ def _build_page(context):
     edit_outputs = [episode, *outputs, edit_selection, download, models, wanted_model]
     edit_button.click(edit_token, [episode, reveal, selection_session, metrics_state, edit_selection, replacement, candidate],
                       edit_outputs, concurrency_id="maze-view", show_progress="hidden")
+    alternatives.select(branch_alternative, [episode, reveal, selection_session, metrics_state, edit_selection],
+                        edit_outputs, concurrency_id="maze-view", show_progress="hidden")
     strip.select(offer_menu, [episode, selection_session, metrics_state, menu_request], menu_response,
                  queue=False, show_progress="hidden")
     # The menu carries the token it was opened on, so the branch it sends back
