@@ -538,12 +538,27 @@ CELL_LENGTH = 160
 
 
 def cell(value: str) -> str:
-    """One line of ``value``, short enough for a table cell."""
+    """One line of ``value``, short enough for a table cell.
 
-    flattened = " ".join((value or "").split())
-    if len(flattened) <= CELL_LENGTH:
-        return flattened or "—"
-    return flattened[: CELL_LENGTH - 1].rstrip() + "…"
+    Line breaks and tabs are drawn rather than collapsed, and a value with
+    nothing but spaces in it has those drawn too. A measurement of four
+    spaces against one of a tab is a real experiment - it is the one the
+    whitespace passages exist for - and flattening both to nothing would put
+    two identical-looking cells in a row that exists to say they differ.
+    Runs of spaces inside ordinary prose are still collapsed, which is what
+    keeps a pasted paragraph readable at this width.
+    """
+
+    shown = (value or "").replace("\t", "⇥")
+    for break_ in ("\r\n", "\n", "\r"):
+        shown = shown.replace(break_, "↵")
+    if shown and not shown.strip():
+        shown = shown.replace(" ", "␠")
+    else:
+        shown = " ".join(shown.split())
+    if len(shown) <= CELL_LENGTH:
+        return shown or "—"
+    return shown[: CELL_LENGTH - 1].rstrip() + "…"
 
 
 def configuration_rows(left, right, *, differences_only: bool = True) -> list[list]:
@@ -616,6 +631,13 @@ def reading(left: dict | None, right: dict | None) -> dict:
     # It counts towards how much of each run was accounted for, which is
     # what makes a run complete, and not towards how much the two shared.
     shared_spans = [item for item in spans if not item.get("trailing")]
+    # Whether the two runs matched token for token, which is not the same
+    # question as whether they spent the same number of tokens: one
+    # tokenizer's "a" + "bc" against another's "ab" + "c" is two against two
+    # over one span, and neither the tokens nor their boundaries agree.
+    token_for_token = bool(shared_spans) and all(
+        item["one_to_one"] for item in shared_spans
+    )
     scored = [item for item in spans if item["scored"]]
     # A span has two first choices to put side by side only when it is one
     # token against one and both runs offered a candidate there. That set is
@@ -662,6 +684,7 @@ def reading(left: dict | None, right: dict | None) -> dict:
         "left_shared": left_shared,
         "right_shared": right_shared,
         "spans": len(shared_spans),
+        "token_for_token": token_for_token,
         "cross_model": cross_model,
         "left_count": len(here),
         "right_count": len(there),
@@ -767,7 +790,7 @@ def headline(reading: dict, left: dict, right: dict) -> str:
     # Two models can spend different numbers of tokens on the same text, so
     # what they share is a stretch of characters and a count of comparable
     # spans, not one token count that describes both runs.
-    if reading["complete"] and left_shared == right_shared:
+    if reading["complete"] and reading["token_for_token"] and left_shared == right_shared:
         where = (
             f"Both runs read the same {left_shared:,} token"
             f"{'' if left_shared == 1 else 's'}."

@@ -137,6 +137,45 @@ class ReadingTests(unittest.TestCase):
         self.assertTrue(reading["recut"])
         self.assertIn("cut the passage", " ".join(reading["caveats"]))
 
+    def test_equal_token_counts_over_different_boundaries_are_not_a_match(self):
+        # "a" + "bc" against "ab" + "c": two tokens each, one span, and
+        # neither the tokens nor their boundaries agree.
+        def piece(position, token_id, text):
+            return dict(metric(position, token_id, 1.0), text=text, display_text=text)
+
+        left = [piece(1, 1, "a"), piece(2, 2, "bc")]
+        right = [piece(1, 7, "ab"), piece(2, 8, "c")]
+        reading = compare.reading(
+            dict(run(left, model_id="a/model"), decoded="abc", token_ends=[1, 3]),
+            dict(run(right, model_id="b/model"), decoded="abc", token_ends=[2, 3]),
+        )
+        self.assertTrue(reading["complete"])
+        self.assertEqual(reading["left_shared"], reading["right_shared"])
+        self.assertFalse(reading["token_for_token"])
+        headline = compare.headline(reading, None, None)
+        self.assertNotIn("same 2 tokens", headline)
+        self.assertIn("comparable span", headline)
+        # And a real one-for-one match still says so.
+        same = [piece(1, 1, "a"), piece(2, 2, "bc")]
+        matched = compare.reading(run(left), run(same))
+        self.assertTrue(matched["token_for_token"])
+        self.assertIn("same 2 tokens", compare.headline(matched, None, None))
+
+    def test_whitespace_inputs_are_drawn_rather_than_collapsed(self):
+        # The row exists to say the two runs were given different text; two
+        # cells reading "—" would conceal exactly that.
+        spaces = dict(run([metric(1, 5, 1.0)], kind=compare.MEASUREMENT), text="    ")
+        tab = dict(run([metric(1, 5, 1.0)], kind=compare.MEASUREMENT), text="\t")
+        rows = compare.configuration_rows(spaces, tab)
+        self.assertEqual([row[0] for row in rows], ["Measured text"])
+        self.assertNotEqual(rows[0][1], rows[0][2])
+        self.assertEqual(rows[0][1], "␠␠␠␠")
+        self.assertEqual(rows[0][2], "⇥")
+        # Line breaks survive inside ordinary prose; runs of spaces do not.
+        self.assertEqual(compare.cell("a\nb"), "a↵b")
+        self.assertEqual(compare.cell("a  b"), "a b")
+        self.assertEqual(compare.cell(""), "—")
+
     def test_two_replies_from_one_vocabulary_still_match_on_token_ids(self):
         # Matching on IDs is what keeps a token that merely decodes alike
         # from being subtracted across a divergence that already happened.
@@ -656,7 +695,9 @@ class ReadingTests(unittest.TestCase):
         self.assertEqual([row[0] for row in rows], ["Prompt"])
         self.assertTrue(rows[0][1].endswith("…"))
         self.assertEqual(len(rows[0][1]), compare.CELL_LENGTH)
-        self.assertEqual(compare.cell("  a\n b  "), "a b")
+        # The line break is drawn rather than collapsed; see the whitespace
+        # test above for why.
+        self.assertEqual(compare.cell("  a\n b  "), "a↵ b")
         self.assertEqual(compare.cell(""), "—")
 
     def test_a_steered_run_says_so_in_its_configuration(self):
