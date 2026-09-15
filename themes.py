@@ -52,27 +52,11 @@ class Theme:
 
 
 THEMES: dict[str, Theme] = {
-    "graphite": Theme(
-        label="Graphite",
-        caption=(
-            "Indigo on a neutral gray. ChatLab's original look, and what it "
-            "starts from."
-        ),
-        primary=(
-            "#eef2ff", "#e0e7ff", "#c7d2fe", "#a5b4fc", "#818cf8", "#6366f1",
-            "#4f46e5", "#4338ca", "#3730a3", "#312e81", "#2b2c5e",
-        ),
-        neutral=(
-            "#fafafa", "#f4f4f5", "#e4e4e7", "#d4d4d8", "#bbbbc2", "#71717a",
-            "#52525b", "#3f3f46", "#27272a", "#18181b", "#0f0f11",
-        ),
-        paper="#ffffff",
-    ),
     "aurora": Theme(
         label="Aurora",
         caption=(
             "The logo's speech bubble: electric indigo over the blue-black "
-            "the mark sits on."
+            "the mark sits on. What ChatLab starts from."
         ),
         primary=(
             "#eef3ff", "#dde6ff", "#c2d1ff", "#9bb1ff", "#6f86fb", "#4f5bf0",
@@ -83,6 +67,22 @@ THEMES: dict[str, Theme] = {
             "#474d69", "#363b52", "#252940", "#12152e", "#080a20",
         ),
         paper="#fbfcff",
+    ),
+    "graphite": Theme(
+        label="Graphite",
+        caption=(
+            "Indigo on a neutral gray. The look ChatLab had before it had "
+            "themes."
+        ),
+        primary=(
+            "#eef2ff", "#e0e7ff", "#c7d2fe", "#a5b4fc", "#818cf8", "#6366f1",
+            "#4f46e5", "#4338ca", "#3730a3", "#312e81", "#2b2c5e",
+        ),
+        neutral=(
+            "#fafafa", "#f4f4f5", "#e4e4e7", "#d4d4d8", "#bbbbc2", "#71717a",
+            "#52525b", "#3f3f46", "#27272a", "#18181b", "#0f0f11",
+        ),
+        paper="#ffffff",
     ),
     "nebula": Theme(
         label="Nebula",
@@ -148,8 +148,8 @@ THEMES: dict[str, Theme] = {
 }
 
 # What a new install, and a settings file that names a theme this version has
-# never heard of, both come up in: the look ChatLab had before it had themes.
-DEFAULT_THEME = "graphite"
+# never heard of, both come up in: the app drawn in its own mark's colors.
+DEFAULT_THEME = "aurora"
 
 THEME_NAMES = tuple(THEMES)
 # Label against name, which is what a Dropdown's choices are.

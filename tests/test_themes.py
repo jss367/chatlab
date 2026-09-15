@@ -88,14 +88,28 @@ class RampTests(unittest.TestCase):
                     _contrast(neutral[100], neutral[themes.DARKEST_STEP]), 4.5
                 )
 
-    def test_the_default_theme_is_the_look_the_app_already_had(self):
-        # Graphite is indigo on zinc over white, which is what the Gradio
-        # theme in ui.styles is built from. An install that never opens the
-        # Settings page must not change appearance.
+    def test_the_default_theme_is_the_one_drawn_from_the_mark(self):
+        # An install that never opens the Settings page comes up in Aurora,
+        # the logo's own indigo. The Gradio theme in ui.styles is still built
+        # from indigo and zinc, so the stylesheet has to repaint the page
+        # rather than agree with what Gradio already wrote.
+        self.assertEqual(themes.DEFAULT_THEME, "aurora")
         theme = themes.THEMES[themes.DEFAULT_THEME]
+        self.assertEqual(theme.ramp("primary")[500], "#4f5bf0")
+        self.assertEqual(theme.ramp("neutral")[500], "#5d6486")
+        self.assertEqual(theme.paper, "#fbfcff")
+
+    def test_graphite_is_still_the_look_the_app_had_before_themes(self):
+        # Graphite is indigo on zinc over white, which is what the Gradio
+        # theme in ui.styles is built from. A reader who wants the original
+        # appearance back has to be able to pick it.
+        theme = themes.THEMES["graphite"]
         self.assertEqual(theme.ramp("primary")[500], "#6366f1")
         self.assertEqual(theme.ramp("neutral")[500], "#71717a")
         self.assertEqual(theme.paper, "#ffffff")
+
+    def test_the_default_is_the_first_choice_offered(self):
+        self.assertEqual(themes.THEME_CHOICES[0][1], themes.DEFAULT_THEME)
 
     def test_the_choices_pair_a_label_with_each_name(self):
         self.assertEqual(
