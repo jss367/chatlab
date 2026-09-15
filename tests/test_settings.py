@@ -494,5 +494,52 @@ class SeedFloorTests(unittest.TestCase):
                 )
 
 
+class SettingsLogTests(unittest.TestCase):
+    """What a settings change leaves in the log, which is read after a crash."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / "settings.json"
+        self.addCleanup(settings.load)
+        patch = mock.patch.dict(
+            os.environ, {settings.SETTINGS_PATH_ENV: str(self.path)}
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        settings.load()
+
+    def test_a_change_names_the_setting_and_both_values(self):
+        # Startup records the whole set once. Without this line, a load that
+        # ran at 4 bits reads in the log as the precision the app opened with.
+        with self.assertLogs(settings.logger, level="INFO") as logged:
+            settings.update(weight_precision="4-bit")
+
+        self.assertIn("weight_precision 'full' to '4-bit'", logged.output[0])
+
+    def test_only_the_settings_that_moved_are_named(self):
+        settings.update(weight_precision="4-bit")
+        with self.assertLogs(settings.logger, level="INFO") as logged:
+            settings.update(weight_precision="4-bit", temperature=0.2)
+
+        self.assertIn("temperature", logged.output[0])
+        self.assertNotIn("weight_precision", logged.output[0])
+
+    def test_a_change_that_changes_nothing_writes_no_line(self):
+        # Controls report their value on every frame, so a slider drag would
+        # otherwise cost a line per pixel.
+        settings.update(temperature=0.2)
+        with self.assertNoLogs(settings.logger, level="INFO"):
+            settings.update(temperature=0.2)
+
+    def test_what_the_reader_typed_is_counted_rather_than_quoted(self):
+        # The log is a file someone is asked to send to a stranger.
+        with self.assertLogs(settings.logger, level="INFO") as logged:
+            settings.update(system_prompt="Never mention the acquisition.")
+
+        self.assertNotIn("acquisition", logged.output[0])
+        self.assertIn("system_prompt empty to 30 characters", logged.output[0])
+
+
 if __name__ == "__main__":
     unittest.main()

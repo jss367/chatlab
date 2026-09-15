@@ -3764,6 +3764,17 @@ class ForkTests(unittest.TestCase):
         self.assertIn("Copied", result[FORK_STATUS])
         self.assertEqual(result[FORK_PROMPT], gr.skip())
 
+    def test_the_branch_a_reader_moved_to_is_recorded(self):
+        # A fork bug reads as "the wrong messages came back". Reconstructing
+        # it needs the order the branches were made and left in, which no
+        # part of the app used to write down.
+        with self.assertLogs("ui.conversations", level="INFO") as logged:
+            forked = app.fork_conversation(self.turns(), new_forks(), None)
+            app.switch_fork(MAIN_BRANCH, forked[FORK_TURNS], forked[FORK_STATE])
+
+        self.assertIn(f"Forked {MAIN_BRANCH} into Fork 1 at 4 of 4 messages", logged.output[0])
+        self.assertIn(f"Switched from Fork 1 to {MAIN_BRANCH}", logged.output[1])
+
     def test_a_whole_copy_keeps_the_token_panel(self):
         # The last reply is unchanged, so the strip still describes it.
         result = app.fork_conversation(self.turns(), new_forks(), None)

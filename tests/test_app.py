@@ -961,6 +961,38 @@ class LoadCardTests(unittest.TestCase):
         self.assertIn("Could not load cached model", frames[-1])
         self.assertIn("Metal ran out of memory", frames[-1])
 
+    def test_a_failed_load_leaves_its_traceback_in_the_log(self):
+        # The card reaches a reader as one escaped sentence in a screenshot.
+        # Whoever is asked to explain the failure afterwards has the log and
+        # nothing else, so the model, the precision and the stack go in it.
+        def work(progress):
+            raise RuntimeError("Metal ran out of memory")
+
+        runtime.MANAGER = self.Manager(work)
+
+        with self.assertLogs("ui.models_page", level="INFO") as logged:
+            list(app.load_cached_model(self.MODEL, precision="4-bit"))
+
+        failure = [line for line in logged.output if "ERROR" in line]
+        self.assertEqual(len(failure), 1, logged.output)
+        self.assertIn(self.MODEL, failure[0])
+        self.assertIn("4-bit", failure[0])
+        self.assertIn("Traceback", failure[0])
+        self.assertIn("Metal ran out of memory", failure[0])
+
+    def test_a_load_records_what_was_asked_for_before_it_runs(self):
+        # A log that starts at the failure cannot say which model and which
+        # precision the reader chose to get there.
+        runtime.MANAGER = self.Manager(lambda progress: "Apple Metal (MPS)")
+
+        with self.assertLogs("ui.models_page", level="INFO") as logged:
+            list(app.load_cached_model(self.MODEL, precision="8-bit"))
+
+        self.assertIn(
+            f"Cached load requested for {self.MODEL} at 8-bit weights",
+            logged.output[0],
+        )
+
     def test_the_load_is_claimed_before_its_worker_starts(self):
         # Between the click and the worker's first instruction the manager
         # would otherwise look idle, and a removal or a redownload arriving

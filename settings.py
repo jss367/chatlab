@@ -545,6 +545,7 @@ def update(*, require_saved: bool = False, **values: Any) -> Settings:
         merged = sanitize(base.to_mapping() | values)
         if merged == base and not require_saved:
             return merged
+        _log_change(base, merged)
         if require_saved:
             if write(merged, _unknown) is None:
                 raise OSError("Could not save settings.")
@@ -553,6 +554,46 @@ def update(*, require_saved: bool = False, **values: Any) -> Settings:
             _current = merged
             write(merged, _unknown)
     return merged
+
+
+# Settings holding whatever the reader typed. A log is a file someone is
+# asked to send to a stranger, so these are counted rather than quoted; the
+# length is what a report needs from them anyway, since a prompt long enough
+# to matter to the context window is the one worth knowing about.
+_PRIVATE_SETTING_NAMES = frozenset(
+    {"system_prompt", "assistant_prefill", "image_negative_prompt"}
+)
+
+
+def _describe_setting(name: str, value: Any) -> str:
+    if name in _PRIVATE_SETTING_NAMES:
+        # str() rather than len() on the value itself: sanitize is meant to
+        # have made these strings, and a logging helper is the wrong place to
+        # find out it did not.
+        return f"{len(str(value))} characters" if value else "empty"
+    return repr(value)
+
+
+def _log_change(before: Settings, after: Settings) -> None:
+    """Record which settings moved, and to what.
+
+    Startup writes the whole set down once and there is no save button, so
+    without this every later change is invisible: a log read after a memory
+    kill shows the weight precision the app opened with rather than the one
+    the load actually ran at. Only the fields that moved are named, and a
+    change that changes nothing never reaches here, so a slider drag costs
+    one line per value it settles on rather than one per pixel.
+    """
+
+    old, new = before.to_mapping(), after.to_mapping()
+    moved = [
+        f"{name} {_describe_setting(name, old.get(name))} to "
+        f"{_describe_setting(name, value)}"
+        for name, value in new.items()
+        if old.get(name) != value
+    ]
+    if moved:
+        logger.info("Settings changed: %s", ", ".join(moved))
 
 
 @contextlib.contextmanager
