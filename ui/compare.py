@@ -118,39 +118,53 @@ def fill_slot(
 
     skip = gr.skip()
 
+    def idle(message):
+        """Refuse before the buttons were ever taken; leave them alone.
+
+        The losing side of two clicks lands here while the winner is filling
+        its slot, and publishing the idle buttons from here would re-enable
+        Run and hide Stop under a run that is still going - for as long as
+        the winner's next frame takes, which during a slow prefill can be
+        the whole response. Whoever holds the slot owns those buttons.
+        """
+
+        return skip, message, skip, skip, skip
+
     def refuse(message):
+        """Give the buttons back after this run took them."""
+
         return skip, message, *_running(False)
 
     held = runtime.MANAGER.claim_generation()
     if held:
-        yield refuse(COMPARE_LOADING if held == LOADING else COMPARE_BUSY)
+        yield idle(COMPARE_LOADING if held == LOADING else COMPARE_BUSY)
         return
     result = None
     started = time.monotonic()
     try:
         if not runtime.MANAGER.loaded:
-            yield refuse(COMPARE_NO_MODEL)
+            yield idle(COMPARE_NO_MODEL)
             return
         published = runtime.MANAGER.loaded_model()
         if published.load_id is None:
-            yield refuse(COMPARE_NO_MODEL)
+            yield idle(COMPARE_NO_MODEL)
             return
         if mode == compare.REPLY and not (prompt or "").strip():
-            yield refuse(COMPARE_NO_PROMPT)
+            yield idle(COMPARE_NO_PROMPT)
             return
         # Only a genuinely empty box is refused. Whitespace is worth
         # measuring - how expected a paragraph break or an indent was is a
         # real question, and score_text accepts it for exactly that reason -
         # so a passage of nothing but newlines is an experiment, not a slip.
         if mode != compare.REPLY and not measured:
-            yield refuse(COMPARE_NO_TEXT)
+            yield idle(COMPARE_NO_TEXT)
             return
         try:
             vector = compact_steering(
                 from_controls(steering, steering_enabled, steering_strength, steering_layer)
             )
         except (ValueError, TypeError, OverflowError) as error:
-            yield refuse(failure_status("Could not apply the steering vector", str(error)))
+            yield idle(failure_status("Could not apply the steering vector", str(error)))
             return
 
         yield skip, f"Filling slot {slot}…", *_running(True)
@@ -259,6 +273,7 @@ def _write_reply(
         "metrics": metrics,
         "decoded": decoded,
         "token_ends": ends,
+        "tokenizer": _tokenizer_identity(),
         "settings": {
             "system_prompt": system_prompt or "",
             "assistant_prefill": assistant_prefill or "",
@@ -315,6 +330,7 @@ def _measure_text(context, measured, use_chat_template, vector, published):
         "metrics": metrics,
         "decoded": decoded,
         "token_ends": ends,
+        "tokenizer": _tokenizer_identity(),
         "settings": {
             "use_chat_template": bool(use_chat_template),
             "seam_verified": result.seam_verified,
@@ -322,6 +338,54 @@ def _measure_text(context, measured, use_chat_template, vector, published):
             "steering": vector,
         },
     }
+
+
+# A short string with enough variety in it - letters, digits, punctuation, an
+# accent, an emoji, a marker-shaped run - that two vocabularies encoding it
+# identically are almost certainly the same vocabulary. Encoded once per run
+# and never shown to anyone.
+TOKENIZER_PROBE = "The quick brown fox 0123, é 🙂\n\t<|end|>"
+
+
+def _tokenizer_identity() -> str:
+    """A fingerprint for the tokenizer a run was measured with.
+
+    Two runs are lined up on token IDs only when they share a vocabulary, and
+    the repository ID does not establish that: the same ID re-downloaded can
+    bring in a newer revision with a different vocabulary, which is why the
+    runtime numbers its loads rather than trusting the ID. The load number
+    will not do either - it changes when the same weights are re-read at a
+    different precision, and those runs do share a tokenizer and should still
+    be matched on IDs. What matters is the vocabulary itself, so that is what
+    is recorded: its size, and what it makes of one fixed string.
+
+    Empty where there is nothing to fingerprint; the comparison falls back to
+    the model ID, which is what runs recorded before this existed carry.
+    """
+
+    import hashlib
+
+    tokenizer = runtime.MANAGER.tokenizer
+    if tokenizer is None:
+        return ""
+    # The model ID is part of the fingerprint, not a fallback for it, so two
+    # repositories can never fingerprint alike however little else can be
+    # read from their tokenizers. What the probe and the size add is the
+    # other direction: one repository whose vocabulary changed underneath
+    # its name.
+    parts = [runtime.MANAGER.model_id or "", type(tokenizer).__name__]
+    try:
+        parts.append(",".join(str(value) for value in runtime.MANAGER._encode_plain(TOKENIZER_PROBE)))
+    except Exception:
+        parts.append("")
+    size = getattr(tokenizer, "vocab_size", None)
+    if size is None:
+        try:
+            size = len(tokenizer)
+        except TypeError:
+            size = ""
+    parts.append(str(size))
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
 def _decoded_spans(

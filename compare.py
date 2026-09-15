@@ -478,10 +478,7 @@ def reading(left: dict | None, right: dict | None) -> dict:
     if not left or not right:
         return {}
     here, there = left["metrics"], right["metrics"]
-    # Two loads of one model ID share a tokenizer whatever else changed about
-    # them - a precision, a steering vector - so their tokens still line up
-    # one for one. Two model IDs do not, and are walked by text instead.
-    cross_model = (left.get("model_id") or "") != (right.get("model_id") or "")
+    cross_model = not same_vocabulary(left, right)
     spans = align(
         here,
         there,
@@ -534,6 +531,25 @@ def reading(left: dict | None, right: dict | None) -> dict:
     }
 
 
+def same_vocabulary(left: dict, right: dict) -> bool:
+    """Whether the two runs can be lined up token for token.
+
+    Only a shared vocabulary makes a token ID mean the same thing in both
+    runs. The repository ID does not establish that - the same ID
+    re-downloaded can bring in a newer revision, which is why the runtime
+    numbers its loads rather than trusting the ID - and the load number does
+    not either, since re-reading one checkpoint at another precision makes a
+    new load out of the same vocabulary. So a recorded fingerprint of the
+    vocabulary itself decides it where both runs carry one, and the model ID
+    is the fallback for runs made before that was recorded.
+    """
+
+    here, there = left.get("tokenizer"), right.get("tokenizer")
+    if here and there:
+        return here == there
+    return (left.get("model_id") or "") == (right.get("model_id") or "")
+
+
 def _caveats(left: dict, right: dict, cross_model: bool) -> list[str]:
     """What a reader has to know before believing the numbers.
 
@@ -546,6 +562,17 @@ def _caveats(left: dict, right: dict, cross_model: bool) -> list[str]:
     notes = []
     if cross_model:
         notes.append(CROSS_MODEL_CAVEAT)
+        if (left.get("model_id") or "") == (right.get("model_id") or ""):
+            # Same name, different vocabulary: the repository was fetched
+            # again between the two runs and came back changed. Without
+            # saying so, the reader is looking at two runs of what the table
+            # calls one model being lined up as though they were two.
+            notes.append(
+                "Both runs name the same model, but the two were measured "
+                "with different vocabularies - the repository was downloaded "
+                "again between them and came back changed - so their token "
+                "IDs no longer mean the same thing."
+            )
     for run, slot in ((left, "A"), (right, "B")):
         settings = (run or {}).get("settings") or {}
         if run and run["kind"] == MEASUREMENT and settings.get("seam_verified") is False:

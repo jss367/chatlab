@@ -429,6 +429,26 @@ class ReadingTests(unittest.TestCase):
         clean = compare.reading(run([metric(1, 5, 1.0)]), run([metric(1, 5, 2.0)]))
         self.assertEqual(clean["caveats"], [])
 
+    def test_one_model_id_with_two_vocabularies_is_lined_up_on_text(self):
+        # A repository fetched again can come back with a different
+        # vocabulary, and the ID cannot tell the reader that.
+        left = dict(run([metric(1, 5, 1.0)]), tokenizer="aaaa")
+        right = dict(run([metric(1, 5, 2.0)]), tokenizer="bbbb")
+        self.assertFalse(compare.same_vocabulary(left, right))
+        reading = compare.reading(left, right)
+        self.assertTrue(reading["cross_model"])
+        self.assertIn("same model", " ".join(reading["caveats"]))
+        # The same vocabulary under one ID still matches on token IDs, which
+        # is what two loads at different precisions are.
+        same = dict(right, tokenizer="aaaa")
+        self.assertTrue(compare.same_vocabulary(left, same))
+        self.assertFalse(compare.reading(left, same)["cross_model"])
+        # Runs recorded before the fingerprint existed fall back to the ID.
+        self.assertTrue(compare.same_vocabulary(run([]), run([])))
+        self.assertFalse(
+            compare.same_vocabulary(run([]), run([], model_id="other/model"))
+        )
+
     def test_configuration_rows_name_only_what_differed(self):
         left = run([metric(1, 5, 1.0)], seed=1)
         right = run([metric(1, 5, 1.0)], seed=2, temperature=0.7)
@@ -654,14 +674,45 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(status, controls.COMPARE_NO_PROMPT)
         self.assertFalse(runtime.MANAGER.busy)
 
-    def test_a_busy_model_refuses_without_touching_the_slot(self):
+    def test_a_run_records_the_vocabulary_it_was_measured_with(self):
+        held, _status, *_buttons = self.fill("A")
+        self.assertTrue(held["tokenizer"])
+        other, _status, *_buttons = self.fill("B")
+        # The same tokenizer fingerprints the same way, whatever else moved.
+        self.assertEqual(held["tokenizer"], other["tokenizer"])
+
+    def test_a_busy_model_refuses_without_touching_the_slot_or_the_buttons(self):
         self.assertTrue(runtime.MANAGER.reserve_generation())
         try:
-            held, status, *_buttons = self.fill("B")
+            held, status, *buttons = self.fill("B")
         finally:
             runtime.MANAGER.release_generation()
         self.assertEqual(held, gr.skip())
         self.assertEqual(status, controls.COMPARE_BUSY)
+        # The run that holds the slot owns the buttons. Publishing the idle
+        # ones here would re-enable Run and hide Stop under a live run.
+        self.assertEqual(buttons, [gr.skip()] * 3)
+
+    def test_a_refusal_that_never_took_the_buttons_leaves_them_alone(self):
+        for kwargs, expected in (
+            ({"prompt": "  "}, controls.COMPARE_NO_PROMPT),
+            ({"mode": compare.MEASUREMENT, "prompt": "", "measured": ""},
+             controls.COMPARE_NO_TEXT),
+        ):
+            with self.subTest(expected=expected):
+                held, status, *buttons = self.fill("A", **kwargs)
+                self.assertEqual(held, gr.skip())
+                self.assertEqual(status, expected)
+                self.assertEqual(buttons, [gr.skip()] * 3)
+
+    def test_a_failure_after_the_run_started_gives_the_buttons_back(self):
+        with mock.patch.object(
+            runtime.MANAGER, "generate", side_effect=ModelChanged("gone")
+        ):
+            _held, _status, run_a, run_b, stop = self.fill("A")
+        self.assertTrue(run_a["interactive"])
+        self.assertTrue(run_b["interactive"])
+        self.assertFalse(stop["visible"])
 
     def test_a_model_change_mid_run_leaves_the_slot_as_it_was(self):
         with mock.patch.object(
