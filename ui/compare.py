@@ -399,6 +399,17 @@ def _tokenizer_identity() -> str:
         digest = hashlib.sha256(b"vocabulary\x1e")
         for piece, token_id in sorted(mapping.items(), key=lambda item: (item[1], item[0])):
             digest.update(f"{token_id}\x1f{piece}\x1e".encode("utf-8", "replace"))
+        # The mapping says what each ID stands for; this says what becomes of
+        # it. Two checkpoints can share every token and still register their
+        # markers differently, and a run hides its special tokens when it
+        # decodes - so the same ID can be characters in one run and nothing
+        # in the other. Runs like that do not share text, whatever their
+        # vocabularies say, and must be lined up on what they decoded.
+        digest.update(b"\x1especial\x1e")
+        for value in sorted(int(value) for value in getattr(tokenizer, "all_special_ids", None) or []):
+            digest.update(f"{value},".encode())
+        for name in ("eos_token_id", "bos_token_id", "pad_token_id", "unk_token_id"):
+            digest.update(f"\x1e{name}={getattr(tokenizer, name, None)}".encode())
         return digest.hexdigest()[:16]
 
     digest = hashlib.sha256(b"unread\x1e")

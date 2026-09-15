@@ -199,9 +199,14 @@ def align(
                 break
         end_here, end_there = ends_here[here - 1], ends_there[there - 1]
         covered = text_here[covered_here:end_here]
-        if by_text and covered != text_there[covered_there:end_there]:
+        if covered != text_there[covered_there:end_there]:
             # The two stand at the same offset over different characters, so
-            # they were never reading the same thing.
+            # they were never reading the same thing. Checked on the ID path
+            # too, where it should never fire: equal IDs from one vocabulary
+            # decode alike, unless the two runs disagreed about which tokens
+            # are shown at all. That disagreement is the whole reason this is
+            # not an assertion - a fingerprint can only rule out the causes
+            # it was told to look for, and this rules out the rest.
             break
         spans.append(_span(
             left, right, start_here, here, start_there, there, len(spans) + 1, covered,

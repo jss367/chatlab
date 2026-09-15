@@ -178,10 +178,26 @@ class ReadingTests(unittest.TestCase):
         self.assertEqual(reading["shared"], 0)
         self.assertIn("different models", compare.headline(reading, None, None))
         # Matching IDs in one model still count, and the caveat stays away.
-        same = compare.reading(run(left), run(right))
+        # One vocabulary gives one ID one text, so the fixture does too.
+        echo = [metric(1, 5, 4.0), metric(2, 6, 1.0)]
+        same = compare.reading(run(left), run(echo))
         self.assertFalse(same["cross_model"])
         self.assertEqual(same["shared"], 2)
         self.assertNotIn("different models", compare.headline(same, None, None))
+
+    def test_matching_ids_that_decoded_differently_do_not_count_as_shared(self):
+        # Two checkpoints can share every token and still register their
+        # markers differently, and a run hides its special tokens when it
+        # decodes — so one ID can be characters in one run and nothing in
+        # the other. The fingerprint is told to look for that, and this is
+        # the backstop for whatever it was not told about.
+        left = [metric(1, 5, 1.0)]
+        right = [dict(metric(1, 5, 1.0), text="", display_text="")]
+        reading = compare.reading(
+            dict(run(left), tokenizer="same"), dict(run(right), tokenizer="same")
+        )
+        self.assertFalse(reading["cross_model"])
+        self.assertEqual(reading["spans"], 0)
 
     def test_two_tokenizers_that_cut_a_passage_differently_still_line_up(self):
         def piece(position, token_id, text, surprise=1.0):
@@ -771,6 +787,19 @@ class HandlerTests(unittest.TestCase):
         base = controls._tokenizer_identity()
         runtime.MANAGER.model_id = "someone/fine-tune"
         self.assertEqual(controls._tokenizer_identity(), base)
+
+    def test_registering_a_marker_differently_changes_the_fingerprint(self):
+        # One mapping, two decoders: the same ID is characters in one run and
+        # nothing in the other, so the two do not share text.
+        runtime.MANAGER.tokenizer.get_vocab = lambda: {"a": 0, "</s>": 1}
+        runtime.MANAGER.tokenizer.all_special_ids = []
+        plain = controls._tokenizer_identity()
+        runtime.MANAGER.tokenizer.all_special_ids = [1]
+        self.assertNotEqual(controls._tokenizer_identity(), plain)
+        runtime.MANAGER.tokenizer.all_special_ids = []
+        self.assertEqual(controls._tokenizer_identity(), plain)
+        runtime.MANAGER.tokenizer.eos_token_id = 999
+        self.assertNotEqual(controls._tokenizer_identity(), plain)
 
     def test_a_token_added_to_the_vocabulary_changes_the_fingerprint(self):
         # The likeliest way a refreshed repository differs is a token added
