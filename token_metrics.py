@@ -17,6 +17,16 @@ class Candidate:
     token_id: int
     text: str
     probability: float
+    stops: bool = False
+    """Whether choosing this token would end the response.
+
+    Hidden tokens all add nothing to the text, so their decodes are equally
+    empty and cannot be told apart by what they would write. Only one of them
+    ends the response, though, and "the model wanted to stop" is a different
+    choice from "the model wanted a marker and would have carried on". This
+    is what keeps those two apart where the characters cannot.
+    """
+
     raw_text: str = ""
     """What this token really decodes to, before any display fallback.
 
@@ -316,6 +326,7 @@ def build_metric(
     sampled_probabilities: np.ndarray,
     decode_token: Callable[[int], str],
     fallback_token: Callable[[int], str] | None = None,
+    stops_token: Callable[[int], bool] | None = None,
     alternatives: int = 8,
     segment: str = "response",
 ) -> TokenMetric:
@@ -326,6 +337,9 @@ def build_metric(
     alternatives table to show in its place; a caller that leaves it out gets
     whatever ``decode_token`` returned, which is what callers that fold the
     fallback into ``decode_token`` themselves have always got.
+
+    ``stops_token`` says whether a token would end the response, which no
+    decode can answer: every hidden token writes nothing.
     """
     raw_log_probs = np.asarray(raw_log_probabilities, dtype=np.float64).reshape(-1)
     raw_probs = np.exp(raw_log_probs)
@@ -342,6 +356,7 @@ def build_metric(
             text=raw or (fallback_token(candidate_id) if fallback_token else raw),
             probability=float(raw_probs[candidate_id]),
             raw_text=raw,
+            stops=bool(stops_token(candidate_id)) if stops_token else False,
         )
 
     candidates = [candidate(int(candidate_id)) for candidate_id in top_ids]

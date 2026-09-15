@@ -324,6 +324,8 @@ class ReadingTests(unittest.TestCase):
         self.assertTrue(reading["complete"])
         self.assertEqual(reading["left_shared"], 2)
         self.assertEqual(reading["right_shared"], 1)
+        # One span of shared text, plus a marker that is one run's alone.
+        self.assertEqual(reading["spans"], 1)
         self.assertNotIn("parted", compare.headline(reading, None, None))
         # The leftover token is neither a divergence nor a comparison.
         painted = compare.strip(stopped, reading["readings"], "left")
@@ -461,6 +463,31 @@ class ReadingTests(unittest.TestCase):
         # Within one vocabulary the token ID still answers the question.
         within = compare.reading(run([choosing("\ufffd")]), run([choosing("\ufffd")]))
         self.assertEqual(within["choices_compared"], 1)
+
+    def test_stopping_is_a_different_choice_from_any_other_silence(self):
+        # Every hidden token writes nothing, so the text cannot tell a model
+        # that wanted to stop from one that wanted a padding marker and
+        # would have carried on.
+        def choosing(label, stops):
+            held = metric(1, 5, 1.0)
+            held["top_candidates"] = [
+                {"token_id": 7, "text": label, "probability": 0.9,
+                 "raw_text": "", "stops": stops}
+            ]
+            return dict(held, text="x", display_text="x")
+
+        ending = compare.reading(
+            run([choosing("<|endoftext|>", True)]),
+            run([choosing("</s>", True)], model_id="other/model"),
+        )
+        self.assertEqual(ending["choices_compared"], 1)
+        self.assertEqual(ending["top_choice_changed"], 0)
+        parting = compare.reading(
+            run([choosing("<|endoftext|>", True)]),
+            run([choosing("<pad>", False)], model_id="other/model"),
+        )
+        self.assertEqual(parting["choices_compared"], 1)
+        self.assertEqual(parting["top_choice_changed"], 1)
 
     def test_a_span_with_a_missing_candidate_is_counted_in_neither(self):
         bare = dict(metric(1, 5, 1.0), top_candidates=[])

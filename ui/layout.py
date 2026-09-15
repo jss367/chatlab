@@ -2827,7 +2827,13 @@ def build_app() -> gr.Blocks:
         import_lens_button.click(
             import_jacobian_lens, [lens_file, fitted_model_id], [imported_lens, import_lens_status],
         )
-        imported_lens.change(reset_inspection, insight_state, inspection_outputs)
+        # QUIET_TICK for the same reason the metrics binding below has it:
+        # reset_inspection skips its outputs once there is nothing left to
+        # clear, and Gradio marks them pending regardless, so a spinner
+        # crosses the panel every time a lens is imported or dropped.
+        imported_lens.change(
+            reset_inspection, insight_state, inspection_outputs, **QUIET_TICK,
+        )
         imported_lens.change(
             lambda imported: gr.update(open=False) if imported else gr.skip(),
             imported_lens, lens_setup,

@@ -283,8 +283,8 @@ def _span(left, right, here0, here1, there0, there1, index, covered) -> dict:
     # tokens against one has three first choices on one side and one on the
     # other, and no pairing between them.
     one_to_one = len(mine) == 1 and len(yours) == 1
-    left_top = _top_choice(mine[0]) if one_to_one else (None, "", False)
-    right_top = _top_choice(yours[0]) if one_to_one else (None, "", False)
+    left_top = _top_choice(mine[0]) if one_to_one else (None, "", False, False)
+    right_top = _top_choice(yours[0]) if one_to_one else (None, "", False, False)
     # Both candidates have to exist for the question to have an answer. The
     # IDs establish that and nothing else: a valid special token can decode
     # to the empty string, so an empty text is a choice like any other and
@@ -307,9 +307,11 @@ def _span(left, right, here0, here1, there0, there1, index, covered) -> dict:
         "left_top": left_top[1],
         "left_top_id": left_top[0],
         "left_top_determined": left_top[2],
+        "left_top_stops": left_top[3],
         "right_top": right_top[1],
         "right_top_id": right_top[0],
         "right_top_determined": right_top[2],
+        "right_top_stops": right_top[3],
     }
 
 
@@ -319,7 +321,7 @@ def _span(left, right, here0, here1, there0, there1, index, covered) -> dict:
 UNDETERMINED = "\ufffd"
 
 
-def _top_choice(metric: dict) -> tuple[int | None, str, bool]:
+def _top_choice(metric: dict) -> tuple[int | None, str, bool, bool]:
     """What this run's model would have written here, left to itself.
 
     The ID comes back with the text because the text alone cannot answer
@@ -332,14 +334,14 @@ def _top_choice(metric: dict) -> tuple[int | None, str, bool]:
 
     candidates = metric.get("top_candidates") or ()
     if not candidates:
-        return None, "", False
+        return None, "", False, False
     first = candidates[0]
     if isinstance(first, dict):
         token_id, text = first.get("token_id"), first.get("text", "")
-        raw = first.get("raw_text")
+        raw, stops = first.get("raw_text"), bool(first.get("stops"))
     else:
         token_id, text = getattr(first, "token_id", None), getattr(first, "text", "")
-        raw = getattr(first, "raw_text", None)
+        raw, stops = getattr(first, "raw_text", None), bool(getattr(first, "stops", False))
     # The raw decode where the run recorded one. What is shown for a token
     # that decodes to nothing is its vocabulary label, and two models label
     # their end-of-text markers differently, so comparing the labels would
@@ -353,6 +355,7 @@ def _top_choice(metric: dict) -> tuple[int | None, str, bool]:
         (None if token_id is None else int(token_id)),
         shown,
         UNDETERMINED not in shown,
+        stops,
     )
 
 
@@ -609,6 +612,10 @@ def reading(left: dict | None, right: dict | None) -> dict:
     )
     left_shared = spans[-1]["left_range"][1] if spans else 0
     right_shared = spans[-1]["right_range"][1] if spans else 0
+    # A trailing span holds one run's leftover markers and no shared text.
+    # It counts towards how much of each run was accounted for, which is
+    # what makes a run complete, and not towards how much the two shared.
+    shared_spans = [item for item in spans if not item.get("trailing")]
     scored = [item for item in spans if item["scored"]]
     # A span has two first choices to put side by side only when it is one
     # token against one and both runs offered a candidate there. That set is
@@ -627,7 +634,15 @@ def reading(left: dict | None, right: dict | None) -> dict:
     # empty string included, since a special token can decode to nothing and
     # still be a different choice from a token that decodes to something.
     if cross_model:
-        changed = [item for item in pairable if item["left_top"] != item["right_top"]]
+        # What the choice would write, and whether it would end the response.
+        # Every hidden token writes nothing, so the text alone cannot tell a
+        # model that wanted to stop from one that wanted a padding or control
+        # marker and would have carried on writing.
+        changed = [
+            item for item in pairable
+            if (item["left_top"], item["left_top_stops"])
+            != (item["right_top"], item["right_top_stops"])
+        ]
     else:
         changed = [
             item for item in pairable if item["left_top_id"] != item["right_top_id"]
@@ -639,14 +654,14 @@ def reading(left: dict | None, right: dict | None) -> dict:
     recut = bool(
         not cross_model
         and not both_replies
-        and any(not item["one_to_one"] for item in spans)
+        and any(not item["one_to_one"] for item in shared_spans)
     )
     return {
         "shared": left_shared,
         "recut": recut,
         "left_shared": left_shared,
         "right_shared": right_shared,
-        "spans": len(spans),
+        "spans": len(shared_spans),
         "cross_model": cross_model,
         "left_count": len(here),
         "right_count": len(there),

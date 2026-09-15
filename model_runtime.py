@@ -4441,6 +4441,8 @@ class ModelManager:
         # :meth:`hidden_token_ids` for the load named beside it; see
         # :meth:`_hidden_ids`.
         self._hidden_ids_cache: tuple[str | None, frozenset[int]] = (None, frozenset())
+        # :meth:`_stop_token_ids` for the load named beside it.
+        self._stopping_ids_cache: tuple[str | None, frozenset[int]] = (None, frozenset())
         # The diffusers pipeline, when the model in memory is an image model.
         # It stands apart from ``model`` rather than sharing the slot because
         # everything that generates text asks :attr:`loaded`, and a pipeline
@@ -5917,6 +5919,7 @@ class ModelManager:
         segment: str,
     ) -> dict:
         hidden = self._hidden_ids()
+        stopping = self._stopping_ids()
         metric: TokenMetric = build_metric(
             position=position,
             token_id=token_id,
@@ -5942,6 +5945,11 @@ class ModelManager:
                 "" if candidate_id in hidden else self._decode_token(candidate_id)
             ),
             fallback_token=self._token_fallback,
+            # Which of those silences was the end of the response. Without
+            # it a model choosing to stop and a model choosing a padding or
+            # control marker read as one choice, since neither writes
+            # anything and both are hidden.
+            stops_token=lambda candidate_id: candidate_id in stopping,
             segment=segment,
         )
         return metric.to_dict()
@@ -5956,6 +5964,14 @@ class ModelManager:
         elif candidate:
             values.update(int(value) for value in candidate)
         return values
+
+    def _stopping_ids(self) -> frozenset[int]:
+        """:meth:`_stop_token_ids`, read once per load; see :meth:`_hidden_ids`."""
+
+        load_id = self.load_id
+        if self._stopping_ids_cache[0] != load_id or load_id is None:
+            self._stopping_ids_cache = (load_id, frozenset(self._stop_token_ids()))
+        return self._stopping_ids_cache[1]
 
     def _hidden_ids(self) -> frozenset[int]:
         """:meth:`hidden_token_ids`, read once per load.
