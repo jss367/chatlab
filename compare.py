@@ -523,10 +523,25 @@ def reading(left: dict | None, right: dict | None) -> dict:
         return {}
     here, there = left["metrics"], right["metrics"]
     cross_model = not same_vocabulary(left, right)
+    # Token IDs line two runs up only where an ID identifies the same thing
+    # *and* the two ran over the same tokens. Two replies from one vocabulary
+    # are that case: they share a prompt, part somewhere in the answer, and
+    # matching on IDs is what keeps a token that merely decodes alike from
+    # being subtracted across a divergence that already happened.
+    #
+    # A measurement is not. The passage is fixed and identical by
+    # construction; what can differ is where its tokens fall, because the
+    # context is encoded with it and a different framing can pull characters
+    # of the passage into the seam token. Those two runs read the same text
+    # and would report parting at its first character. So a measurement is
+    # always lined up on what the tokens cover, and vocabulary identity goes
+    # on deciding the questions it really answers - whether a first choice
+    # can be compared by ID, and what the caveats say.
+    both_replies = left["kind"] == REPLY and right["kind"] == REPLY
     spans = align(
         here,
         there,
-        by_text=cross_model,
+        by_text=cross_model or not both_replies,
         left_text=left.get("decoded") or "",
         right_text=right.get("decoded") or "",
         left_ends=left.get("token_ends"),
@@ -558,8 +573,17 @@ def reading(left: dict | None, right: dict | None) -> dict:
             item for item in pairable if item["left_top_id"] != item["right_top_id"]
         ]
     widest = max(scored, key=lambda item: item["surprise_bits"], default=None)
+    # One vocabulary, one passage, and still a different set of tokens: the
+    # two contexts framed it differently. Worth saying, since the reader is
+    # looking at two token strips of unequal length over identical text.
+    recut = bool(
+        not cross_model
+        and not both_replies
+        and any(not item["one_to_one"] for item in spans)
+    )
     return {
         "shared": left_shared,
+        "recut": recut,
         "left_shared": left_shared,
         "right_shared": right_shared,
         "spans": len(spans),
@@ -568,7 +592,7 @@ def reading(left: dict | None, right: dict | None) -> dict:
         "right_count": len(there),
         "complete": left_shared == len(here) and right_shared == len(there),
         "readings": spans,
-        "caveats": _caveats(left, right, cross_model),
+        "caveats": _caveats(left, right, cross_model, recut),
         "mean_gap_bits": (
             sum(item["surprise_bits"] for item in scored) / len(scored) if scored else 0.0
         ),
@@ -601,7 +625,7 @@ def same_vocabulary(left: dict, right: dict) -> bool:
     return (left.get("model_id") or "") == (right.get("model_id") or "")
 
 
-def _caveats(left: dict, right: dict, cross_model: bool) -> list[str]:
+def _caveats(left: dict, right: dict, cross_model: bool, recut: bool = False) -> list[str]:
     """What a reader has to know before believing the numbers.
 
     Every one of these is something the run itself recorded and the strips
@@ -611,6 +635,13 @@ def _caveats(left: dict, right: dict, cross_model: bool) -> list[str]:
     """
 
     notes = []
+    if recut:
+        notes.append(
+            "The two runs cut the passage into different tokens - the context "
+            "in front of it is encoded with it, so a different framing moves "
+            "the boundaries - and they are lined up on the text those tokens "
+            "cover rather than on the tokens themselves."
+        )
     if cross_model:
         notes.append(CROSS_MODEL_CAVEAT)
         if (left.get("model_id") or "") == (right.get("model_id") or ""):

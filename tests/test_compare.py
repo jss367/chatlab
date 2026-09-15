@@ -113,6 +113,42 @@ class ReadingTests(unittest.TestCase):
         self.assertEqual([label for _text, label in painted][1], compare.SPLIT_LABEL)
         self.assertIn("parted", compare.headline(reading, run(left), run(right)))
 
+    def test_one_passage_under_two_contexts_is_lined_up_on_its_text(self):
+        # The context is encoded with the passage, so a different framing can
+        # pull characters into the seam token: the same fixed text comes back
+        # as a different set of tokens under one vocabulary.
+        def piece(position, token_id, text, surprise=1.0):
+            return dict(metric(position, token_id, surprise), text=text, display_text=text)
+
+        framed = [piece(1, 1, "hel", 2.0), piece(2, 2, "lo", 3.0)]
+        plain = [piece(1, 7, "hello", 4.0)]
+        reading = compare.reading(
+            dict(run(framed, kind=compare.MEASUREMENT), prompt="one context",
+                 decoded="hello", token_ends=[3, 5]),
+            dict(run(plain, kind=compare.MEASUREMENT), prompt="another",
+                 decoded="hello", token_ends=[5]),
+        )
+        # Same vocabulary, so the choice comparison keeps its ID rule...
+        self.assertFalse(reading["cross_model"])
+        # ...but the alignment is over the characters, not the tokens.
+        self.assertEqual(reading["spans"], 1)
+        self.assertTrue(reading["complete"])
+        self.assertAlmostEqual(reading["readings"][0]["left_surprise"], 5.0)
+        self.assertTrue(reading["recut"])
+        self.assertIn("cut the passage", " ".join(reading["caveats"]))
+
+    def test_two_replies_from_one_vocabulary_still_match_on_token_ids(self):
+        # Matching on IDs is what keeps a token that merely decodes alike
+        # from being subtracted across a divergence that already happened.
+        def piece(position, token_id, text):
+            return dict(metric(position, token_id, 1.0), text=text, display_text=text)
+
+        left = [piece(1, 1, "a"), piece(2, 2, "b")]
+        right = [piece(1, 1, "a"), piece(2, 9, "b")]
+        reading = compare.reading(run(left), run(right))
+        self.assertEqual(reading["spans"], 1)
+        self.assertFalse(reading["recut"])
+
     def test_a_measurement_pair_is_compared_to_the_last_token(self):
         left = [metric(index, index, 1.0) for index in range(1, 5)]
         right = [metric(index, index, 3.0) for index in range(1, 5)]

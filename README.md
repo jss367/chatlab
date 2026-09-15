@@ -699,6 +699,16 @@ one model wrote in three tokens and the other in one is drawn as the single
 reading it is, and a span of several tokens against one has no first choices to
 pair, so those columns stay empty.
 
+Two replies from one model are the case where token IDs are the right key:
+they share a prompt, part somewhere in the answer, and matching on IDs keeps a
+token that merely decodes alike from being subtracted across a divergence that
+already happened. A measurement is not that case. The passage is fixed, but its
+context is encoded with it, so a different framing moves the boundaries and the
+same text comes back as a different set of tokens — two runs that would
+otherwise report parting at the first character. Measurements are therefore
+always lined up on what their tokens cover, and the tab says so when the two
+cut the passage differently.
+
 Alignment is a prefix either way: it stops at the first place the two texts
 cannot be made to agree, because after that the runs are reading different
 things and later characters that happen to coincide were arrived at through
