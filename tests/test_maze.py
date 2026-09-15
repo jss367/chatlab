@@ -1979,6 +1979,62 @@ class MazeTests(unittest.TestCase):
         self.assertEqual(broken.phase, 'error')
         self.assertIn('MPS backend out of memory', failed.output[0])
 
+    def test_a_response_finalized_on_an_abnormal_exit_is_recorded_too(self):
+        # A turn completed by a stop caught before generation, or by the
+        # cleanup after a failure, is counted as a response by the outcome
+        # line. Recording only the ordinary path left the two exits a log is
+        # read for - a stop and a crash - with nothing between the run
+        # starting and its summary.
+        move = call_text(MAZE.maze_id, 'east')
+        manager = Manager([(move, list(move.encode()) + [0])])
+        manager.generate = scored(manager.generate)
+        stopped = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        with self.assertLogs('extensions.maze_experiments.runner', level='INFO') as logged:
+            stream = stream_episode(stopped, manager)
+            next(stream)
+            # Between the opening frame and generation, which is the window
+            # this branch exists for.
+            stopped.request_stop()
+            list(stream)
+        self.assertEqual(stopped.phase, 'stopped')
+        (response,) = [line for line in logged.output if ' response 1:' in line]
+        self.assertIn('user_stopped', response)
+        self.assertIn(stopped.run_id, response)
+        (outcome,) = [line for line in logged.output if f'{stopped.run_id} stopped after' in line]
+        self.assertIn('1 responses', outcome)
+        # The turn the summary counts carries the duration the line reports.
+        self.assertIn('seconds', stopped.turns[0])
+
+        # A failure inside generation finalizes its turn in cleanup, and that
+        # turn gets its line as well as the traceback.
+        broken = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        def explode(*args, **kwargs):
+            raise RuntimeError('MPS backend out of memory')
+            yield
+        manager.generate = explode
+        with self.assertLogs('extensions.maze_experiments.runner', level='INFO') as logged:
+            list(stream_episode(broken, manager))
+        self.assertEqual(broken.phase, 'error')
+        (response,) = [line for line in logged.output if ' response 1:' in line]
+        self.assertIn('error', response)
+        self.assertIn('seconds', broken.turns[0])
+
+    def test_a_response_is_never_recorded_twice_for_one_turn(self):
+        # Cleanup writes a line for a turn no other path finished. A turn the
+        # ordinary path completed must not get a second one, or a reader
+        # counting responses in the log reads more than the episode ran.
+        move = call_text(MAZE.maze_id, 'east')
+        manager = Manager([(move, list(move.encode()) + [0])] * 2)
+        manager.generate = scored(manager.generate)
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        with self.assertLogs('extensions.maze_experiments.runner', level='INFO') as logged:
+            list(stream_episode(ep, manager))
+        self.assertEqual(ep.phase, 'arrived')
+        responses = [line for line in logged.output if ' response ' in line]
+        self.assertEqual(len(responses), len(ep.turns))
+        self.assertEqual(len({line.split(' response ')[1].split(':')[0] for line in responses}),
+                         len(ep.turns))
+
     def test_a_refused_episode_reaches_the_log_and_not_only_the_toast(self):
         # The warning that sent a reader to the Models page used to leave no
         # trace at all, so the report that followed could not be checked
