@@ -4726,6 +4726,7 @@ class CancelWiringTests(unittest.TestCase):
                 "branch_with_text",
                 "next_token",
                 "branch_from_menu",
+                "edit_prompt_from_menu",
                 "fork_conversation",
                 "switch_fork",
                 "delete_fork",

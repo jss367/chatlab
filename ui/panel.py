@@ -497,7 +497,8 @@ BRANCH_REASONING_CLOSE = (
 BRANCH_UNAVAILABLE = (
     "🌱 Only a reply the model wrote can be branched. Scored text, prompt "
     "tokens and a message typed or edited by hand have no measured tokens to "
-    "continue from."
+    "continue from. A prompt token can be replaced instead: right-click it to "
+    "answer the message again from the edited prompt."
 )
 
 
@@ -506,6 +507,28 @@ BRANCH_MODEL_CHANGED = (
     "no longer belong to the weights in memory. Load that model again, or "
     "send the message again under this one, to branch it."
 )
+
+
+PROMPT_EDIT_UNAVAILABLE = (
+    "✏️ These prompt tokens are no longer the ones the reply on screen was "
+    "given. Send or retry the message to measure its prompt again, then edit "
+    "that."
+)
+
+
+PROMPT_EDIT_MODEL_CHANGED = (
+    "✏️ The model was reloaded since this prompt was measured, so its tokens "
+    "no longer belong to the weights in memory. Send the message again under "
+    "this model to edit its prompt."
+)
+
+
+PROMPT_EDIT_NO_MESSAGE = (
+    "✏️ There is no message for this prompt to answer again. Send one first."
+)
+
+
+PROMPT_EDIT_EMPTY = "Type the text that should replace the prompt token first."
 
 
 # Each strip checks the live stamp for the source that replaces it. A queued
@@ -597,6 +620,44 @@ def branch_target(
     if metric.get("automatic_reasoning_close"):
         return BRANCH_REASONING_CLOSE
     return position, metric
+
+
+def prompt_edit_target(
+    context_state,
+    prompt_state: tuple[int, list[dict]],
+    selection: dict | None,
+) -> tuple[int, list[int], str | None, dict] | str:
+    """The recorded prompt an edit would be made to, or why there is none.
+
+    A prompt edit replaces one token of the exact ids the last reply was
+    generated from, so it needs the strip's measurements and the ids behind
+    them to still describe the same reply. The two are published together
+    under one stamp, and both are checked against it here: a click that was
+    overtaken by a retry, an edit, an undo or a switch of conversation names a
+    prompt that is no longer on screen, and answering it would feed the model
+    a prompt assembled from two different replies.
+
+    The load is checked as well, for the reason a branch checks it: token ids
+    belong to the tokenizer that produced them. It is checked again under the
+    model lock when the edit is encoded and fed, since a load can still land
+    in between.
+    """
+
+    if not selection or selection.get("source") != "prompt":
+        return PROMPT_EDIT_UNAVAILABLE
+    generation, _metrics = prompt_state
+    metric = strip_metric("prompt", prompt_state, selection.get("index"))
+    if metric is None or selection.get("generation") != generation:
+        return PROMPT_EDIT_UNAVAILABLE
+    if not isinstance(context_state, (tuple, list)) or len(context_state) < 3:
+        return PROMPT_EDIT_UNAVAILABLE
+    context_generation, ids, load_id = context_state[0], context_state[1], context_state[2]
+    index = int(selection["index"])
+    if context_generation != generation or not ids or index >= len(ids):
+        return PROMPT_EDIT_UNAVAILABLE
+    if load_id != runtime.MANAGER.load_id:
+        return PROMPT_EDIT_MODEL_CHANGED
+    return index, [int(value) for value in ids], load_id, metric
 
 
 def branch_ready_text(pick: dict) -> str:

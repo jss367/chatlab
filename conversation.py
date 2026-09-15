@@ -68,6 +68,13 @@ TURN_ORIGIN_FIELDS = {
 # see the module docstring for why.
 TURN_MEASUREMENT_FIELDS = (
     "tokens", "load_id", "metrics_generation", "ends_on_stop_token",
+    # The prompt an edited-prompt reply was actually given, kept so a branch
+    # replays its tokens against the context that produced them rather than
+    # against the one the template would write now. It belongs with the
+    # measurements because it is only ever read with them, and is as worthless
+    # without them: whatever drops a reply's tokens has dropped every reason
+    # to feed this prompt again.
+    "prompt_edit",
 )
 
 # The sampling a conversation can carry of its own, and the type each must
@@ -178,18 +185,31 @@ def copy_turns(turns: list[dict] | None) -> list[dict]:
     for a cost that grows with the square of the reply's length: about 1.6
     seconds of copying across a 500-token reply, and twenty-five across a
     2,000-token one.
+
+    An edited prompt is shared for the same reason and on the same terms: it
+    is a few thousand token ids, written once when the reply is generated and
+    read only to replay it.
     """
 
     copied: list[dict] = []
     for turn in turns or []:
-        tokens = turn.get("tokens")
-        if tokens is None:
+        shared = {
+            field: turn[field]
+            for field in ("tokens", "prompt_edit")
+            if turn.get(field) is not None
+        }
+        if not shared:
             copied.append(copy.deepcopy(turn))
             continue
         entry = copy.deepcopy(
-            {key: value for key, value in turn.items() if key != "tokens"}
+            {key: value for key, value in turn.items() if key not in shared}
         )
-        entry["tokens"] = list(tokens)
+        # The tokens are a list a turn can gain or lose entries from, so the
+        # list itself is new and only its metrics are shared. The prompt edit
+        # is replaced whole or not at all.
+        if "tokens" in shared:
+            shared["tokens"] = list(shared["tokens"])
+        entry.update(shared)
         copied.append(entry)
     return copied
 
