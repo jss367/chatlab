@@ -740,6 +740,39 @@ class HandlerTests(unittest.TestCase):
         ))
         return frames[-1]
 
+    def test_half_a_character_establishes_no_boundary(self):
+        # Decoding the first byte of a two-byte character gives one
+        # replacement character, so counting what the decode *shows* would
+        # put a boundary inside the character — and a tokenizer that spent
+        # one token on the whole of it would be lined up against the first
+        # byte alone, with the rest called a divergence.
+        class SplitCharacter:
+            chat_template = None
+            all_special_ids = []
+            pieces = (b"\xc3", b"\xa9", b"x")
+
+            def decode(self, ids, skip_special_tokens=False, **kwargs):
+                raw = b"".join(self.pieces[int(index)] for index in ids)
+                return raw.decode("utf-8", "replace")
+
+            def convert_ids_to_tokens(self, index):
+                return f"<{index}>"
+
+        runtime.MANAGER.tokenizer = SplitCharacter()
+        metrics = [metric(1, 0, 1.0), metric(2, 1, 1.0), metric(3, 2, 1.0)]
+        decoded, ends = controls._decoded_spans(metrics)
+        self.assertEqual(decoded, "éx")
+        # The first token settles nothing; the second completes the character.
+        self.assertEqual(ends, [0, 1, 2])
+        # Which is what lets the two halves line up against one whole token.
+        whole = [dict(metric(1, 9, 1.0), text="é"), dict(metric(2, 8, 1.0), text="x")]
+        reading = compare.reading(
+            dict(run(metrics, model_id="a/model"), decoded=decoded, token_ends=ends),
+            dict(run(whole, model_id="b/model"), decoded="éx", token_ends=[1, 2]),
+        )
+        self.assertTrue(reading["complete"])
+        self.assertEqual(reading["spans"], 2)
+
     def test_the_context_is_decoded_through_but_kept_out_of_the_text(self):
         # The token at the seam is assigned whole to the passage, and what
         # comes before a token changes what it decodes to, so the decode has

@@ -495,12 +495,24 @@ def _decoded_spans(
     decoder = IncrementalDecoder(tokenizer, runtime.MANAGER.hidden_token_ids())
     for token_id in context_ids or ():
         decoder.push(int(token_id))
-    context_end = len(decoder.text)
+    context_end = len(decoder.stable_text)
     ends = []
     for index, metric in enumerate(metrics):
         decoder.push(int(metric["token_id"]), force_visible=index < literal_prefix)
-        ends.append(len(decoder.text))
+        # How many characters this token *established*, not how many the
+        # decode is currently showing. Half of a character comes back as one
+        # replacement character, so counting what is shown would say a
+        # boundary exists in the middle of a character - and a tokenizer that
+        # spent one token on the whole of it would then be lined up against
+        # the first byte of another's and told the rest was a divergence.
+        # stable_text is the decoder's own answer to which characters are
+        # settled; see IncrementalDecoder.
+        ends.append(len(decoder.stable_text))
     full = decoder.text
+    if ends:
+        # Nothing follows the last token, so whatever it left incomplete is
+        # as complete as it is going to get and belongs to it.
+        ends[-1] = len(full)
     base = (
         len(full) - len(expected)
         if expected and full.endswith(expected)
