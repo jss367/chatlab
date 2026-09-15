@@ -814,6 +814,34 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(status, controls.COMPARE_NO_PROMPT)
         self.assertFalse(runtime.MANAGER.busy)
 
+    def test_a_real_run_records_a_stop_marker_as_decoding_to_nothing(self):
+        # The comparison below only works if production metrics agree that a
+        # stop marker adds no characters. Decoded on its own it comes back as
+        # the marker's name, which is what made the earlier fix a no-op.
+        import numpy as np
+        from test_streaming import EOS_ID, PIECES
+
+        probabilities = np.full(len(PIECES), 0.01)
+        probabilities[EOS_ID] = 0.9
+        log_probabilities = np.log(probabilities / probabilities.sum())
+        described = runtime.MANAGER._describe_token(
+            position=1,
+            token_id=0,
+            raw_log_probabilities=log_probabilities,
+            sampled_probabilities=np.exp(log_probabilities),
+            segment="response",
+        )
+        chosen = described["top_candidates"][0]
+        self.assertEqual(chosen["token_id"], EOS_ID)
+        self.assertEqual(chosen["raw_text"], "")
+        # The table still shows the marker under its name.
+        self.assertEqual(chosen["text"], PIECES[EOS_ID])
+        # And an ordinary token is untouched.
+        self.assertEqual(
+            [c["raw_text"] for c in described["top_candidates"] if c["token_id"] == 1],
+            [PIECES[1]],
+        )
+
     def test_a_run_records_the_vocabulary_it_was_measured_with(self):
         held, _status, *_buttons = self.fill("A")
         self.assertTrue(held["tokenizer"])

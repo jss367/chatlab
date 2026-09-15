@@ -4437,6 +4437,9 @@ class ModelManager:
     def __init__(self) -> None:
         self.model = None
         self.tokenizer = None
+        # :meth:`hidden_token_ids` for the load named beside it; see
+        # :meth:`_hidden_ids`.
+        self._hidden_ids_cache: tuple[str | None, frozenset[int]] = (None, frozenset())
         # The diffusers pipeline, when the model in memory is an image model.
         # It stands apart from ``model`` rather than sharing the slot because
         # everything that generates text asks :attr:`loaded`, and a pipeline
@@ -5908,6 +5911,7 @@ class ModelManager:
         sampled_probabilities: np.ndarray,
         segment: str,
     ) -> dict:
+        hidden = self._hidden_ids()
         metric: TokenMetric = build_metric(
             position=position,
             token_id=token_id,
@@ -5919,7 +5923,19 @@ class ModelManager:
             # apart: a token that decodes to nothing is shown under its
             # vocabulary label, and those labels differ between models, so a
             # comparison of two models' choices needs the decode itself.
-            decode_token=self._decode_token,
+            #
+            # A stop marker is one of those tokens, though it does not look
+            # like one: decoded on its own it comes back as ``</s>`` or
+            # ``<|endoftext|>`` rather than empty, because this decode keeps
+            # special tokens. A response never shows those characters - the
+            # decoder that builds it hides exactly these ids - so recording
+            # them here would have two models that both chose to stop read
+            # as two different choices, on the strength of what their
+            # vocabularies happen to call the marker. The same policy the
+            # response text is built under applies to a candidate's text.
+            decode_token=lambda candidate_id: (
+                "" if candidate_id in hidden else self._decode_token(candidate_id)
+            ),
             fallback_token=self._token_fallback,
             segment=segment,
         )
@@ -5935,6 +5951,21 @@ class ModelManager:
         elif candidate:
             values.update(int(value) for value in candidate)
         return values
+
+    def _hidden_ids(self) -> frozenset[int]:
+        """:meth:`hidden_token_ids`, read once per load.
+
+        The set is asked for per token now - every candidate's text is
+        recorded under it - and building it walks every registered special
+        token, converting each back to its piece. That is a handful of work
+        per call and a few hundred thousand over a long response, for an
+        answer that cannot change while one model is in memory.
+        """
+
+        load_id = self.load_id
+        if self._hidden_ids_cache[0] != load_id or load_id is None:
+            self._hidden_ids_cache = (load_id, frozenset(self.hidden_token_ids()))
+        return self._hidden_ids_cache[1]
 
     def hidden_token_ids(self) -> set[int]:
         """Special tokens to keep out of the visible text.
