@@ -532,6 +532,26 @@ class SettingsLogTests(unittest.TestCase):
         with self.assertNoLogs(settings.logger, level="INFO"):
             settings.update(temperature=0.2)
 
+    def test_a_change_that_could_not_be_saved_is_not_claimed(self):
+        # A required save that cannot write raises and publishes nothing, so
+        # a line saying the setting moved would leave the one record of the
+        # session disagreeing with the session.
+        settings.update(temperature=0.2)
+        with mock.patch("settings.write", return_value=None):
+            with self.assertNoLogs(settings.logger, level="INFO"):
+                with self.assertRaises(OSError):
+                    settings.update(require_saved=True, temperature=0.4)
+
+    def test_a_change_the_file_refused_is_still_a_change_to_the_session(self):
+        # The ordinary path publishes whether or not the file takes it, and
+        # write() logs its own failure beside this line.
+        with mock.patch("settings.write", return_value=None):
+            with self.assertLogs(settings.logger, level="INFO") as logged:
+                settings.update(temperature=0.4)
+
+        self.assertIn("temperature", logged.output[0])
+        self.assertEqual(settings.current().temperature, 0.4)
+
     def test_what_the_reader_typed_is_counted_rather_than_quoted(self):
         # The log is a file someone is asked to send to a stranger.
         with self.assertLogs(settings.logger, level="INFO") as logged:

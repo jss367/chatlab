@@ -545,7 +545,6 @@ def update(*, require_saved: bool = False, **values: Any) -> Settings:
         merged = sanitize(base.to_mapping() | values)
         if merged == base and not require_saved:
             return merged
-        _log_change(base, merged)
         if require_saved:
             if write(merged, _unknown) is None:
                 raise OSError("Could not save settings.")
@@ -553,6 +552,13 @@ def update(*, require_saved: bool = False, **values: Any) -> Settings:
         else:
             _current = merged
             write(merged, _unknown)
+        # After the change has actually been made, never before it. A
+        # require_saved caller that cannot write raises instead of publishing
+        # anything, and a log saying the setting moved would then be the one
+        # record of a session disagreeing with the session itself. The
+        # ordinary path publishes whether or not the file takes it, so the
+        # line is true there even when write() has logged its own failure.
+        _log_change(base, merged)
     return merged
 
 
