@@ -50,6 +50,12 @@ for package in (
     "kernels_data",
     "safehttpx",
     "safetensors",
+    # The tokenizer converters. Transformers imports both lazily, inside the
+    # branch that reads a repo shipping no tokenizer.json, and each is a
+    # compiled extension: analysis alone would leave the bundle able to read
+    # a tokenizer.json and nothing else.
+    "sentencepiece",
+    "tiktoken",
     "tokenizers",
 ):
     package_datas, package_binaries, package_imports = collect_all(package)

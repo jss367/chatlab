@@ -28,6 +28,19 @@ numpy>=1.26
 # frames and the attention maps through it directly. 10.1 is the release
 # whose fromarray infers the mode from the array's own shape.
 pillow>=10.1
+# The tokenizer half of a checkpoint. Transformers reads a repo's
+# tokenizer.json itself, but a repo that ships only a SentencePiece vocabulary
+# (tokenizer.model, spiece.model) or a tiktoken one has to have it converted
+# first, and the code that reads those formats lives in these three packages
+# rather than in transformers. Absent, the load fails at the tokenizer before
+# a weight is read, and the message names all three ways the tokenizer could
+# have been built and none of the packages it needed. protobuf and
+# sentencepiece arrived as mlx-lm's dependencies until now, so conversion
+# worked on Apple silicon and nowhere else; tiktoken arrived nowhere, so no
+# tiktoken repository loaded anywhere, the packaged app included.
+protobuf>=4.25
+sentencepiece>=0.2
+tiktoken>=0.7
 torch>=2.5
 # 5.3 is the first release with the Metal quantizer behind the 8-bit and
 # 4-bit weight precisions; everything else runs on 4.57, so that stays the
