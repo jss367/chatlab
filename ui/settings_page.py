@@ -173,6 +173,7 @@ PERSISTED_SETTING_NAMES = (
     "enter_sends",
     "writing_suggestions",
     "theme",
+    "appearance",
     "model_id",
     "weight_precision",
 )

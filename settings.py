@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import image_runtime
-from themes import DEFAULT_THEME, THEMES
+from themes import APPEARANCES, DEFAULT_APPEARANCE, DEFAULT_THEME, THEMES
 from thinking import THINKING_MODES
 from token_metrics import COLOR_SCALES, DEFAULT_COLOR_SCALE
 
@@ -195,6 +195,7 @@ class Settings:
     analyze_prompt: bool = True
     color_scale: str = DEFAULT_COLOR_SCALE
     theme: str = DEFAULT_THEME
+    appearance: str = DEFAULT_APPEARANCE
     prefill_token_limit: int = DEFAULT_PREFILL_TOKEN_LIMIT
     mps_memory_fraction: float | None = None
     weight_precision: str = "full"
@@ -236,6 +237,9 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
     fraction = values.get("mps_memory_fraction", DEFAULTS.mps_memory_fraction)
     scale = _text(values.get("color_scale", DEFAULTS.color_scale), DEFAULTS.color_scale)
     theme = _text(values.get("theme", DEFAULTS.theme), DEFAULTS.theme)
+    appearance = _text(
+        values.get("appearance", DEFAULTS.appearance), DEFAULTS.appearance
+    )
     precision = _text(
         values.get("weight_precision", DEFAULTS.weight_precision), DEFAULTS.weight_precision
     )
@@ -299,6 +303,9 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
         ),
         color_scale=scale if scale in COLOR_SCALES else DEFAULTS.color_scale,
         theme=theme if theme in THEMES else DEFAULTS.theme,
+        appearance=(
+            appearance if appearance in APPEARANCES else DEFAULTS.appearance
+        ),
         weight_precision=(
             precision if precision in WEIGHT_PRECISIONS else DEFAULTS.weight_precision
         ),

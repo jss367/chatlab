@@ -1263,13 +1263,23 @@ def build_app() -> gr.Blocks:
                                 label="Color theme",
                                 info=(
                                     "The colors the whole interface is drawn in. "
-                                    "Each one follows the system's light and dark "
-                                    "setting rather than fixing one of the two."
+                                    "Every one of them is drawn both light and "
+                                    "dark."
                                 ),
                             )
                             theme_caption = gr.Markdown(
                                 themes.caption(saved.theme),
                                 elem_classes=["scale-caption"],
+                            )
+                            appearance_choice = gr.Radio(
+                                choices=themes.APPEARANCE_CHOICES,
+                                value=saved.appearance,
+                                label="Light or dark",
+                                info=(
+                                    "Which of the two the chosen theme is drawn "
+                                    "in. Following the system means the page "
+                                    "turns with it, at whatever hour it does."
+                                ),
                             )
 
                         with gr.Column(elem_classes=["settings-card"]):
@@ -1892,6 +1902,7 @@ def build_app() -> gr.Blocks:
             enter_sends,
             writing_suggestions,
             theme_choice,
+            appearance_choice,
             model_id,
             weight_precision,
         ]
@@ -1929,6 +1940,13 @@ def build_app() -> gr.Blocks:
             [theme_style, theme_caption],
             trigger_mode="always_last",
         )
+        # Light or dark is wired the same way and for the same reasons, except
+        # that the repaint is the browser's own work rather than a round trip:
+        # the class it toggles is already what every dark-mode rule reads.
+        appearance_choice.change(
+            remember_settings, persisted_inputs, None, trigger_mode="always_last"
+        )
+        appearance_choice.change(None, appearance_choice, None, js=themes.APPEARANCE_JS)
         # The four that belong to a conversation are saved on input, like the
         # write into the conversation itself. Switching conversations sets
         # them, and a save from that would put the sampling of the
@@ -1994,6 +2012,8 @@ def build_app() -> gr.Blocks:
             restore_settings, None, [*persisted_inputs, prefill_token_limit]
         ).then(
             apply_theme, theme_choice, [theme_style, theme_caption]
+        ).then(
+            None, appearance_choice, None, js=themes.APPEARANCE_JS
         ).then(
             update_sampling_label,
             sampling_controls,

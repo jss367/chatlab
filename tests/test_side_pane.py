@@ -4742,6 +4742,7 @@ class SavedSettingsTests(unittest.TestCase):
                         "Enter sends the message",
                         "Let the system suggest text while typing",
                         "Color theme",
+                        "Light or dark",
                         "Hugging Face model ID",
                         "Weight precision",
                     ]
