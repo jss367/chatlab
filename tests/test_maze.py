@@ -1950,6 +1950,104 @@ class MazeTests(unittest.TestCase):
             path.unlink()
             path.parent.rmdir()
 
+    def test_a_response_and_its_episode_outcome_are_each_recorded_once(self):
+        # A run read in ChatLab.log afterwards has to say what it did. One line
+        # a response and one an episode, never one a token.
+        move = call_text(MAZE.maze_id, 'east')
+        manager = Manager([(move, list(move.encode()) + [0])] * 2)
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        with self.assertLogs('extensions.maze_experiments.runner', level='INFO') as logged:
+            list(stream_episode(ep, manager))
+        self.assertEqual(ep.phase, 'arrived')
+        responses = [line for line in logged.output if 'response' in line and ' stop ' in line]
+        self.assertEqual(len(responses), len(ep.turns))
+        self.assertIn('Moved east', responses[0])
+        self.assertIn('confirmed arrival', responses[-1])
+        (outcome,) = [line for line in logged.output if 'arrived after' in line]
+        self.assertIn(ep.run_id, outcome)
+        self.assertIn('2 responses', outcome)
+        # And the failure a memory kill leaves behind is recorded with its
+        # traceback rather than only in the panel the reader has closed.
+        broken = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        def explode(*args, **kwargs):
+            raise RuntimeError('MPS backend out of memory')
+            yield
+        manager.replies = iter([])
+        manager.generate = explode
+        with self.assertLogs('extensions.maze_experiments.runner', level='ERROR') as failed:
+            list(stream_episode(broken, manager))
+        self.assertEqual(broken.phase, 'error')
+        self.assertIn('MPS backend out of memory', failed.output[0])
+
+    def test_a_refused_episode_reaches_the_log_and_not_only_the_toast(self):
+        # The warning that sent a reader to the Models page used to leave no
+        # trace at all, so the report that followed could not be checked
+        # against anything. It is the first thing this log has to hold.
+        manager = Manager([])
+        manager.loaded = False
+        inspector = TokenInspector()
+        selections = inspector.selections()
+        inspector.selections = lambda: selections
+        session = selections.new_session()
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                playback = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}['play_back']
+                ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+                with mock.patch('extensions.maze_experiments.page.gr.Warning') as warning:
+                    with self.assertLogs('extensions.maze_experiments.page', level='INFO') as logged:
+                        list(playback(ep, False, session, .1))
+                warning.assert_called_once()
+                self.assertTrue(any('Play on run' in line and ep.run_id in line for line in logged.output))
+                (refused,) = [line for line in logged.output if 'cannot generate' in line]
+                self.assertIn('Load a model on the Models page', refused)
+            finally:
+                demo.close()
+
+    def test_loading_a_run_records_what_arrived_and_what_did_not(self):
+        # Every arrival is recorded, because the failure this is read for is an
+        # upload that appears to do nothing: with the handler logging each
+        # firing, no line at all says the file never reached the extension.
+        move = call_text(MAZE.maze_id, 'east')
+        manager = Manager([(move, list(move.encode()) + [0])])
+        manager.generate = scored(manager.generate)
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        list(stream_episode(ep, manager, single_step=True))
+        inspector = TokenInspector()
+        selections = inspector.selections()
+        inspector.selections = lambda: selections
+        session = selections.new_session()
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                load = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}['load']
+                fresh = Episode(MAZE, CONFIG)
+                with self.assertLogs('extensions.maze_experiments.page', level='INFO') as logged:
+                    loaded = load(str(ep.export()), fresh, False, session, None)
+                self.assertTrue(loaded[0].replay_only)
+                (line,) = logged.output
+                for part in (ep.run_id, '1 responses', 'phase paused', 'model test/model'):
+                    self.assertIn(part, line)
+                # A widget cleared, or one whose file Gradio took as unchanged,
+                # replaces nothing and says which run stayed on screen.
+                with self.assertLogs('extensions.maze_experiments.page', level='INFO') as empty:
+                    self.assertTrue(all(value == gr.skip() for value in load(None, fresh, False, session, None)))
+                self.assertIn(fresh.run_id, empty.output[0])
+                path = Path(directory) / 'broken.json'
+                path.write_text('{"format": "chatlab-maze-run-1"}')
+                with self.assertLogs('extensions.maze_experiments.page', level='WARNING') as failed:
+                    with self.assertRaisesRegex(gr.Error, 'Could not load run'):
+                        load(str(path), fresh, False, session, None)
+                self.assertIn('broken.json', failed.output[0])
+            finally:
+                demo.close()
+
     def test_native_template_gets_tools(self):
         calls = []
         def template(messages, **kwargs):

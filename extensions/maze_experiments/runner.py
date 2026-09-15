@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 import threading
 import tempfile
@@ -13,6 +14,12 @@ from uuid import uuid4
 
 from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call
 from extension_api import write_private_text
+
+# One line for each response and each episode outcome, so a run read in
+# ChatLab.log afterwards says what it did rather than only that a model was
+# asked for tokens. The token counts are here because the memory report beside
+# them is read against them.
+logger = logging.getLogger(__name__)
 
 FORMAT = "chatlab-maze-run-1"
 TERMINAL = {"arrived", "abandoned", "budget", "stopped", "error"}
@@ -147,6 +154,7 @@ class Episode:
                     self.warn_autosave(str(exc))
 
     def warn_autosave(self, error):
+        logger.warning("Autosave of run %s failed: %s", self.run_id, error)
         self.detail += (f" Autosave failed: {error}. Latest changes remain in memory. "
                         "Use Export run JSON to download them, and check the run directory or free disk space.")
 
@@ -518,6 +526,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
         episode.phase = "running"
         episode.model_id = episode.model_id or manager.model_id
         episode.load_id = episode.load_id or manager.load_id
+    logger.info("Run %s generating with %s: %s responses so far, %s sampled tokens, %s moves, %s",
+                episode.run_id, episode.model_id, len(episode.turns), episode.sampled_tokens,
+                episode.moves, "one response" if single_step else "until it ends")
     turn = None
     autosave_error = None
 
@@ -598,6 +609,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
                 generator.close()
             turn["seconds"] = time.time() - turn["started_at"]
             finish_turn(episode, turn, stop_ids, limit)
+            logger.info("Run %s response %s: %s after %s sampled tokens in %.1fs. %s",
+                        episode.run_id, len(episode.turns), turn["finish_reason"],
+                        turn.get("sampled_tokens", 0), turn["seconds"], episode.detail)
             if episode.phase in TERMINAL and episode.interrupted and episode.resumed is None:
                 episode.resumed = False if episode.phase not in ("stopped", "error") else None
                 episode.first_move_progress = False if episode.resumed is False else None
@@ -617,6 +631,10 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             episode.phase, episode.detail = "stopped", "Viewer stopped streaming. The partial response was retained."
         raise
     except Exception as exc:
+        # The panel says this too, but the panel is gone by the time anyone
+        # asks, and a failure inside generation is what a log read after a
+        # memory kill is looking for.
+        logger.exception("Run %s failed while generating", episode.run_id)
         episode.phase, episode.detail = "error", f"{type(exc).__name__}: {exc}"
     finally:
         if turn is not None and turn.get("finish_reason") is None:
@@ -629,6 +647,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             autosave()
             if autosave_error is not None:
                 episode.warn_autosave(autosave_error)
+        logger.info("Run %s %s after %s responses and %s sampled tokens, %s moves: %s",
+                    episode.run_id, episode.phase, len(episode.turns), episode.sampled_tokens,
+                    episode.moves, episode.detail)
     yield episode
 
 
