@@ -2128,35 +2128,52 @@ def search_models(
 ):
     """Browse or search; retain candidates so memory filtering needs no network.
 
+    ``order`` sorts a search of the whole Hub rather than narrowing what is
+    searched: an obscure repository comes back under Popular, Trending and New
+    alike, as long as the query matches its ID. Recommended is the same search
+    with ChatLab's starters pinned above it, and is the one view an empty query
+    can answer offline.
+
     A search drops the previous selection along with the previous results.
     """
 
     cleared = search_table([])
     cleaned = (query or "").strip()
-    # A query that matches no starter searches the Hub instead of dead-ending,
-    # so the "Search Hugging Face" box does what it says in every view.
-    searched_hub = order != "Recommended"
-    try:
-        results = [] if searched_hub else recommended_models(cleaned, kind)
-        if searched_hub or (cleaned and not results):
-            searched_hub = True
-            results = search_hub_models(
+    # Recommended is a sort, not a filter. With something typed it puts the
+    # matching starters first and fills the rest from the Hub, so the "Search
+    # Hugging Face" box searches Hugging Face in every view. Only an empty box
+    # stays offline, and that is the view the page loads with.
+    starters = recommended_models(cleaned, kind) if order == "Recommended" else []
+    searched_hub = order != "Recommended" or bool(cleaned)
+    unreachable = None
+    found = []
+    if searched_hub:
+        try:
+            found = search_hub_models(
                 cleaned, hf_token, kind=kind,
                 order="Popular" if order == "Recommended" else order,
                 limit=DISCOVERY_CANDIDATES,
             )
-    except Exception as error:
-        hint = (
-            "Clear the search to see offline starters, or retry."
-            if order == "Recommended"
-            else "Choose Recommended for offline starters, or retry."
-        )
-        return (
-            cleared,
-            failure_card("Search failed", f"{html.escape(str(error))} {hint}"),
-            {},
-            None,
-        )
+        except Exception as error:
+            # Starters already in hand are worth showing without the Hub. With
+            # none there is nothing left to show, so the failure is the answer.
+            if not starters:
+                hint = (
+                    "Clear the search to see offline starters, or retry."
+                    if order == "Recommended"
+                    else "Choose Recommended for offline starters, or retry."
+                )
+                return (
+                    cleared,
+                    failure_card("Search failed", f"{html.escape(str(error))} {hint}"),
+                    {},
+                    None,
+                )
+            unreachable = error
+    # Starters first, and a starter's curated note says more than the same
+    # repository read from the Hub, so a duplicate is dropped, not listed twice.
+    named = {starter.model_id for starter in starters}
+    results = starters + [result for result in found if result.model_id not in named]
     if not results:
         described = {IMAGE_KIND: "text-to-image models", MLX_KIND: "MLX models"}.get(
             kind, "language models"
@@ -2168,16 +2185,36 @@ def search_models(
         return cleared, message, {}, None
     state = {result.model_id: result for result in results}
     table, detail, _ = refresh_search_results(None, state, precision, fits_only)
-    if order == "Recommended" and searched_hub:
-        ordering = "No starters matched; showing Hugging Face results, most downloaded first."
-    else:
-        ordering = {
-            "Recommended": "Curated starters, available to browse offline.",
+    ordering = search_note(order, bool(starters), searched_hub, unreachable)
+    return table, f"{ordering} {detail}", state, None
+
+
+def search_note(
+    order: str, matched_starters: bool, searched_hub: bool, unreachable: Exception | None
+) -> str:
+    """The line above the results: where they came from, and how they are sorted.
+
+    Popular, Trending and New sort a search of the whole Hub, so each says
+    only what the sort is. Recommended also reaches the Hub once there is a
+    query, and says which part of the list is which.
+    """
+
+    if order != "Recommended":
+        return {
             "Popular": "Most downloaded first.",
             "Trending": "Trending on Hugging Face.",
             "New": "Newest repositories first (not latest updates).",
         }[order]
-    return table, f"{ordering} {detail}", state, None
+    if not searched_hub:
+        return "Curated starters, available to browse offline."
+    if unreachable is not None:
+        return (
+            "Starters only: Hugging Face could not be reached "
+            f"({html.escape(str(unreachable))})."
+        )
+    if not matched_starters:
+        return "No starters matched; showing Hugging Face results, most downloaded first."
+    return "Starters first, then Hugging Face, most downloaded first."
 
 
 def select_search_result(results: dict, precision: str | None, event: gr.SelectData):

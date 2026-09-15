@@ -1744,7 +1744,8 @@ class ModelSearchPaneTests(unittest.TestCase):
 
     def test_recommended_starters_work_offline(self):
         self.results = ConnectionError("offline")
-        # Gradio sends None for an untouched textbox on initial page load.
+        # Gradio sends None for an untouched textbox on initial page load. An
+        # empty query is the one view answered without reaching the Hub.
         table, detail, state, selected = app.search_models(None, "", order="Recommended")
         self.assertEqual(self.queries, [])
         self.assertEqual(len(state), 3)
@@ -1804,12 +1805,35 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertEqual(selected, INSTRUCT.model_id)
         self.assertIn("https://huggingface.co/allenai/Olmo-3-7B-Instruct", detail)
 
-    def test_recommended_query_matching_a_starter_stays_offline(self):
+    def test_recommended_query_searches_the_hub_under_the_starters(self):
+        # A starter matching the query used to end the search there, which
+        # hid the rest of the Hub behind a three-model list.
+        _, detail, state, _ = app.search_models("olmo", "tok", order="Recommended")
+        self.assertEqual(self.queries, [("olmo", "tok", TEXT_KIND)])
+        self.assertEqual(
+            list(state),
+            ["allenai/Olmo-3-7B-Think", INSTRUCT.model_id, GATED.model_id],
+        )
+        self.assertIn("Starters first, then Hugging Face", detail)
+
+    def test_a_starter_is_not_listed_twice_when_the_hub_returns_it(self):
+        self.results = [
+            HubModel(model_id="allenai/Olmo-3-7B-Think", parameters=7_298_011_136), INSTRUCT
+        ]
+        table, _, state, _ = app.search_models("olmo", "", order="Recommended")
+        self.assertEqual(list(state), ["allenai/Olmo-3-7B-Think", INSTRUCT.model_id])
+        # The one kept is the starter, which carries the curated note.
+        self.assertIn("ChatLab", painted(table)["data"][0][0])
+
+    def test_recommended_falls_back_to_starters_when_the_hub_is_unreachable(self):
         self.results = ConnectionError("offline")
-        _, detail, state, _ = app.search_models("qwen", "", order="Recommended")
-        self.assertEqual(self.queries, [])
-        self.assertEqual(list(state), ["Qwen/Qwen3-0.6B"])
-        self.assertIn("Curated starters", detail)
+        table, detail, state, selected = app.search_models("olmo", "", order="Recommended")
+        self.assertEqual(self.queries, [("olmo", "", TEXT_KIND)])
+        self.assertEqual(list(state), ["allenai/Olmo-3-7B-Think"])
+        self.assertIsNone(selected)
+        self.assertIn("Starters only", detail)
+        self.assertIn("offline", detail)
+        self.assertEqual(len(cells(table, "Model")), 1)
 
     def test_recommended_query_with_no_starter_match_searches_the_hub(self):
         _, detail, state, _ = app.search_models("gemma", "tok", order="Recommended")
