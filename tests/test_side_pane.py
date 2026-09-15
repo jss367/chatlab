@@ -1902,6 +1902,19 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertEqual(state, {})
         self.assertIsNone(selected)
 
+    def test_a_failed_search_leaves_its_traceback_in_the_log(self):
+        # The handler is broad enough to catch a mistake in the search as
+        # well as an unreachable Hub, and the card already carries the
+        # message, so a line without the stack would only repeat it.
+        self.results = ConnectionError("hub unreachable")
+
+        with self.assertLogs("ui.models_page", level="WARNING") as logged:
+            app.search_models("olmo", "")
+
+        self.assertIn("Hub search for 'olmo' failed", logged.output[0])
+        self.assertIn("Traceback", logged.output[0])
+        self.assertIn("hub unreachable", logged.output[0])
+
     def test_no_matches_is_said_plainly(self):
         self.results = []
 

@@ -2198,7 +2198,11 @@ def search_models(
         except Exception as error:
             # Starters already in hand are worth showing without the Hub. With
             # none there is nothing left to show, so the failure is the answer.
-            logger.warning("Hub search for %r failed: %s", cleaned, error)
+            # With the stack, because this catches everything: a Hub that is
+            # simply unreachable, and a mistake in the search itself. The card
+            # already carries str(error), so a line without the traceback
+            # would only say again what the reader can already see.
+            logger.warning("Hub search for %r failed", cleaned, exc_info=True)
             if not starters:
                 hint = (
                     "Clear the search to see offline starters, or retry."
