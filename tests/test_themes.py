@@ -178,9 +178,6 @@ class ResolveTests(unittest.TestCase):
                     themes.resolve(name), themes.THEMES[themes.DEFAULT_THEME]
                 )
 
-    def test_the_caption_is_the_chosen_theme_s_own(self):
-        self.assertEqual(themes.caption("lagoon"), themes.THEMES["lagoon"].caption)
-
 
 class StylesheetTests(unittest.TestCase):
     def test_it_writes_both_ramps_over_the_built_in_ones(self):
@@ -387,10 +384,10 @@ class ThemeControlTests(unittest.TestCase):
         ]
         self.assertEqual(len(loading), 1, "a page load does not apply the choice")
 
-    def test_the_handler_gives_back_the_stylesheet_and_the_caption(self):
-        style, caption = app.apply_theme("lagoon")
-        self.assertEqual(style["value"], themes.style_tag("lagoon"))
-        self.assertEqual(caption["value"], themes.THEMES["lagoon"].caption)
+    def test_the_handler_gives_back_the_stylesheet(self):
+        self.assertEqual(
+            app.apply_theme("lagoon")["value"], themes.style_tag("lagoon")
+        )
 
 
 if __name__ == "__main__":
