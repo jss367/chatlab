@@ -502,6 +502,8 @@ def _build_page(context):
             maze_board = gr.HTML(board(initial), elem_id="maze-board")
             transport_status = gr.Markdown(transport_text(initial), elem_id="maze-transport-status")
             with gr.Row(elem_id="maze-transport"):
+                first = gr.Button("First", size="sm", elem_id="maze-first",
+                                  elem_classes=icon_classes("chevron-first"))
                 back = gr.Button("Previous", size="sm", elem_id="maze-previous",
                                  elem_classes=icon_classes("chevron-left"))
                 toggle = gr.Button("Play", variant="primary", size="sm", elem_id="maze-run",
@@ -516,7 +518,7 @@ def _build_page(context):
             with gr.Accordion("Playback & view", open=False):
                 pace = gr.Slider(.1, 4, value=1., step=.1, label="Seconds per recorded response")
                 reveal = gr.Checkbox(label="Show shortest route (viewer only)", value=False)
-                gr.Markdown("Play replays recorded responses, then continues generating in a live episode. Next advances one response. Pause lets a generated response finish.")
+                gr.Markdown("Play replays recorded responses, then continues generating in a live episode. Next advances one response, First returns to the initial history. Pause lets a generated response finish.")
                 stop = gr.Button("Stop now · end episode", size="sm", elem_id="maze-stop")
         with gr.Column(elem_id="maze-inspector"):
             gr.Markdown("## Emitted tokens")
@@ -663,6 +665,12 @@ def _build_page(context):
         # before the first reply arrives would carry the same stale response.
         return max(-1, min(ep.viewing, len(ep.turns) - 1))
 
+    def step_first(ep, show, session_id):
+        if ep.busy:
+            raise gr.Error("Pause the episode before stepping through responses.")
+        stop_replay(ep)
+        return render(ep, show, session_id, -1, animate=True)
+
     def step_back(ep, show, session_id):
         if ep.busy:
             raise gr.Error("Pause the episode before stepping through responses.")
@@ -755,7 +763,10 @@ def _build_page(context):
             # and Run details would all keep showing the episode this replay
             # was picked to replace, with nothing said about why.
             note, buttons = trial_note_text(replay, data), model_button(replay)
-            rendered = render(replay, show, session_id)
+            # At the beginning, not the end: a saved run is opened to be
+            # watched, and Play from its final response has nothing left to
+            # replay and no live end to continue into.
+            rendered = render(replay, show, session_id, -1)
         except (ValueError, TypeError, KeyError, IndexError, OSError) as exc:
             logger.warning("Could not load the run in %s: %s", path, exc)
             raise gr.Error(f"Could not load run: {exc}") from exc
@@ -917,6 +928,7 @@ def _build_page(context):
                      [episode, *outputs, *controls, passage, trial_note, edit_selection, download,
                       models, wanted_model],
                      concurrency_id="maze-view", show_progress="hidden")
+    first.click(step_first, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")
     back.click(step_back, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")
     forward.click(step_forward, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")
     command_outputs = [state_text, transport_status, toggle, pause]
