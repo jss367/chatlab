@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import html
+import threading
 import time
+from uuid import uuid4
 
 import gradio as gr
 
@@ -53,6 +55,49 @@ INSPECT_OUTPUT_ONLY = (
 )
 
 
+class InspectionControls:
+    """Keep live control revisions outside Gradio's queued input snapshots."""
+
+    def __init__(self):
+        self._sessions = {}
+        self._lock = threading.Lock()
+
+    def new_session(self):
+        session = uuid4().hex
+        with self._lock:
+            self._sessions[session] = (0, "Logit", "")
+        return session
+
+    def forget(self, session):
+        with self._lock:
+            self._sessions.pop(session, None)
+
+    def change(self, session, *, mode=None, pin=None):
+        with self._lock:
+            previous = self._sessions.get(session)
+            if previous is None:
+                return
+            revision, old_mode, old_pin = previous
+            self._sessions[session] = (
+                revision + 1, old_mode if mode is None else mode,
+                old_pin if pin is None else pin,
+            )
+
+    def capture(self, session, mode, pin):
+        with self._lock:
+            current = self._sessions.get(session)
+            # Also reject an old queued request that starts after the edit.
+            return current[0] if current is not None and current[1:] == (mode, pin) else None
+
+    def current(self, session, revision):
+        with self._lock:
+            current = self._sessions.get(session)
+            return current is not None and current[0] == revision
+
+
+INSPECTION_CONTROLS = InspectionControls()
+
+
 def remember_inspect_target(strip: str):
     """A select listener that keeps the clicked position for the inspector.
 
@@ -88,6 +133,7 @@ def inspect_layers(
     lens_mode: str = "Logit",
     imported_lens: dict | None = None,
     pinned_text: str = "",
+    inspection_session: str | None = None,
 ):
     """Run the logit lens and attention readout for the clicked token.
 
@@ -110,6 +156,14 @@ def inspect_layers(
 
     skip = gr.skip()
     refused = (skip, skip, skip, skip)
+    revision = INSPECTION_CONTROLS.capture(inspection_session, lens_mode, pinned_text or "")
+
+    def controls_current():
+        return inspection_session is None or INSPECTION_CONTROLS.current(inspection_session, revision)
+
+    if not controls_current():
+        yield (skip,) * 5
+        return
     if not target or target.get("generation") != current_strip_generation(target["strip"]):
         yield (*refused, INSPECT_HINT)
         return
@@ -191,13 +245,22 @@ def inspect_layers(
             else:
                 insight = runtime.MANAGER.inspect(sequence, index, **options).to_dict()
         except ModelChanged:
+            if not controls_current():
+                yield (skip,) * 5
+                return
             yield (*refused, INSPECT_MODEL_CHANGED)
             return
         except Exception as error:
+            if not controls_current():
+                yield (skip,) * 5
+                return
             yield (
                 *refused,
                 failure_status("Could not inspect that token", str(error)),
             )
+            return
+        if not controls_current():
+            yield (skip,) * 5
             return
         if target["generation"] != current_strip_generation(target["strip"]):
             yield (*refused, INSPECT_GONE)
@@ -221,17 +284,28 @@ def inspect_layers(
             status = f"{status} {INSPECT_OUTPUT_ONLY}"
         if not layer_count and insight.get("kind") != "jacobian":
             status = f"{status} This model did not return attention weights."
-        yield (
+        if inspection_session is not None:
+            insight["inspection_controls"] = {"session": inspection_session, "revision": revision}
+        frame = (
             render_lens(insight),
             render_attention(insight, layer),
             gr.update(maximum=max(layer_count, 1), value=layer),
             insight,
             status,
         )
+        if not controls_current():
+            yield (skip,) * 5
+            return
+        yield frame
         # Resumed once the browser has the frame above. If the strips were
         # replaced while it was in flight, their reset was applied first and
         # the readout now sits on top of it, so take it back down.
-        if target["generation"] != current_strip_generation(target["strip"]):
+        if not controls_current():
+            # The control reset may have arrived before this older frame.
+            # The held generation slot prevents a newer inspection result
+            # from landing before this cleanup. Empty HTML fits either mode.
+            yield ("", charts.EMPTY_ATTENTION, skip, None, INSPECT_HINT)
+        elif target["generation"] != current_strip_generation(target["strip"]):
             yield (charts.EMPTY_LENS, charts.EMPTY_ATTENTION, skip, None, INSPECT_GONE)
     finally:
         runtime.MANAGER.release_generation()
@@ -241,6 +315,9 @@ def render_attention(insight: dict | None, layer):
     """Repaint the attention strip for another layer without a new pass."""
 
     if not insight:
+        return gr.skip()
+    controls = insight.get("inspection_controls")
+    if controls and not INSPECTION_CONTROLS.current(controls["session"], controls["revision"]):
         return gr.skip()
     if insight.get("kind") == "jacobian":
         return '<div class="viz-empty">Select the Logit lens to inspect attention behind a prediction.</div>'
@@ -273,13 +350,20 @@ def import_jacobian_lens(path, fitted_model_id):
         runtime.MANAGER.release_generation()
 
 
-def change_lens_mode(mode):
+def change_lens_mode(mode, inspection_session=None):
+    INSPECTION_CONTROLS.change(inspection_session, mode=mode)
     jacobian = mode == "Jacobian"
     return (
         gr.update(visible=jacobian), gr.update(visible=not jacobian),
         charts.EMPTY_JACOBIAN if jacobian else charts.EMPTY_LENS,
         charts.EMPTY_ATTENTION, None, INSPECT_HINT,
     )
+
+
+def change_pinned_token(text, inspection_session):
+    INSPECTION_CONTROLS.change(inspection_session, pin=text or "")
+    # Clear even when the callback's insight snapshot was still empty.
+    return "", charts.EMPTY_ATTENTION, None, INSPECT_HINT
 
 
 def reset_inspection(insight: dict | None):

@@ -93,7 +93,9 @@ from ui.generation import (
 )
 from ui.inspection import (
     INSPECT_HINT,
+    INSPECTION_CONTROLS,
     change_lens_mode,
+    change_pinned_token,
     import_jacobian_lens,
     inspect_layers,
     remember_inspect_target,
@@ -781,6 +783,10 @@ def build_app() -> gr.Blocks:
                                 info="Logit: the prediction before a token. Jacobian: concept readouts after it.",
                             )
                             imported_lens = gr.State(None)
+                            inspection_session = gr.State(
+                                value=lambda: INSPECTION_CONTROLS.new_session(),
+                                delete_callback=INSPECTION_CONTROLS.forget,
+                            )
                             with gr.Column(visible=False) as jacobian_controls:
                                 with gr.Accordion("Lens setup", open=True) as lens_setup:
                                     gr.Markdown(
@@ -2470,6 +2476,7 @@ def build_app() -> gr.Blocks:
                 lens_mode,
                 imported_lens,
                 pinned_concept,
+                inspection_session,
             ],
             [lens_panel, attention_panel, attention_layer, insight_state, inspect_status],
         )
@@ -2477,8 +2484,9 @@ def build_app() -> gr.Blocks:
             render_attention, [insight_state, attention_layer], attention_panel
         )
         lens_mode.change(
-            change_lens_mode, lens_mode,
+            change_lens_mode, [lens_mode, inspection_session],
             [jacobian_controls, attention_layer, *inspection_outputs],
+            queue=False,
         )
         import_lens_button.click(
             import_jacobian_lens, [lens_file, fitted_model_id], [imported_lens, import_lens_status],
@@ -2488,7 +2496,10 @@ def build_app() -> gr.Blocks:
             lambda imported: gr.update(open=False) if imported else gr.skip(),
             imported_lens, lens_setup,
         )
-        pinned_concept.input(reset_inspection, insight_state, inspection_outputs)
+        pinned_concept.input(
+            change_pinned_token, [pinned_concept, inspection_session], inspection_outputs,
+            queue=False,
+        )
         # Every path that redraws the strips writes the metrics state, so this
         # is where a readout of a token that is no longer on screen goes away.
         metrics_state.change(reset_inspection, insight_state, inspection_outputs)

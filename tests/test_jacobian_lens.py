@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -238,6 +239,109 @@ class JacobianLensTests(unittest.TestCase):
             imported, status = inspection.import_jacobian_lens(self.path, self.manager.model_id)
             self.assertIn("import_id", imported)
             self.assertIn("2 fitted layers", status)
+
+
+    @contextmanager
+    def controlled_ui(self, mode="Jacobian", pin="the"):
+        from ui import inspection, runtime
+
+        session = inspection.INSPECTION_CONTROLS.new_session()
+        imported = self.import_lens()
+        inspection.change_lens_mode(mode, session)
+        inspection.change_pinned_token(pin, session)
+        args = (
+            {"generation": 7, "strip": "prompt", "index": 1},
+            (7, [{"token_id": token} for token in self.ids[2:]]),
+            (7, [{"token_id": token} for token in self.ids[:2]]),
+            (7, self.ids[:2], self.manager.load_id), 0,
+        )
+        def request():
+            return inspection.inspect_layers(
+                *args, lens_mode=mode, imported_lens=imported, pinned_text=pin,
+                inspection_session=session,
+            )
+
+        try:
+            with mock.patch.object(runtime, "MANAGER", self.manager), mock.patch.object(
+                inspection, "current_strip_generation", return_value=7,
+            ):
+                yield request, session
+        finally:
+            inspection.INSPECTION_CONTROLS.forget(session)
+
+    def test_control_edits_during_a_pass_discard_results_and_errors(self):
+        import gradio as gr
+        from ui import inspection
+
+        for mode, change in (("Logit", "mode"), ("Jacobian", "mode"), ("Jacobian", "pin")):
+            for fails in (False, True):
+                with self.subTest(mode=mode, change=change, fails=fails), self.controlled_ui(mode) as (request, session):
+                    method = "inspect" if mode == "Logit" else "inspect_jacobian"
+                    original = getattr(self.manager, method)
+
+                    def edited(*args, **kwargs):
+                        if change == "mode":
+                            inspection.change_lens_mode("Jacobian" if mode == "Logit" else "Logit", session)
+                        else:
+                            inspection.change_pinned_token(" cat", session)
+                        if fails:
+                            raise RuntimeError("An error from the obsolete request")
+                        return original(*args, **kwargs)
+
+                    with mock.patch.object(self.manager, method, side_effect=edited):
+                        self.assertEqual(list(request()), [(gr.skip(),) * 5])
+                    self.assertIsNone(self.manager.occupant)
+
+    def test_control_edits_during_delivery_remove_the_old_frame(self):
+        import gradio as gr
+        from ui import inspection
+
+        for change in ("mode", "pin"):
+            with self.subTest(change=change), self.controlled_ui() as (request, session):
+                frames = request()
+                first = next(frames)
+                self.assertIn("jacobian-lens", first[0])
+                if change == "mode":
+                    inspection.change_lens_mode("Logit", session)
+                else:
+                    inspection.change_pinned_token(" cat", session)
+                self.assertEqual(next(frames), ("", charts.EMPTY_ATTENTION, gr.skip(), None, inspection.INSPECT_HINT))
+                self.assertEqual(list(frames), [])
+                self.assertIsNone(self.manager.occupant)
+                self.assertEqual(inspection.render_attention(first[3], 0), gr.skip())
+
+    def test_control_edits_before_a_queued_request_starts_reject_its_old_inputs(self):
+        import gradio as gr
+        from ui import inspection
+
+        for change in ("mode", "pin"):
+            with self.subTest(change=change), self.controlled_ui() as (request, session):
+                frames = request()
+                if change == "mode":
+                    inspection.change_lens_mode("Logit", session)
+                else:
+                    inspection.change_pinned_token(" cat", session)
+                with mock.patch.object(self.manager, "inspect_jacobian") as run:
+                    self.assertEqual(list(frames), [(gr.skip(),) * 5])
+                    run.assert_not_called()
+                self.assertIsNone(self.manager.occupant)
+
+    def test_another_sessions_controls_do_not_invalidate_this_inspection(self):
+        from ui import inspection
+
+        with self.controlled_ui() as (request, session):
+            other = inspection.INSPECTION_CONTROLS.new_session()
+            try:
+                frames = request()
+                first = next(frames)
+                inspection.change_pinned_token(" cat", other)
+                inspection.change_lens_mode("Jacobian", other)
+                self.assertEqual(list(frames), [])
+                self.assertIn("jacobian-lens", first[0])
+                inspection.INSPECTION_CONTROLS.forget(session)
+                self.assertFalse(inspection.INSPECTION_CONTROLS.current(session, first[3]["inspection_controls"]["revision"]))
+            finally:
+                inspection.INSPECTION_CONTROLS.forget(other)
 
 
 if __name__ == "__main__":
