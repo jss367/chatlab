@@ -1576,6 +1576,19 @@ class ManageMyModelsTests(unittest.TestCase):
         self.assertFalse(confirm["visible"])
         self.assertEqual(self.removed, [])
 
+    def test_a_refused_removal_says_why_in_the_log(self):
+        # The card explains itself and then goes. Without these lines the
+        # trail held "Removal confirmed" and no account of why the files
+        # are still there.
+        self.manager._lock.acquire()
+        self.addCleanup(self.manager._lock.release)
+
+        with self.assertLogs("ui.models_page", level="INFO") as logged:
+            app.remove_my_model("org/partial")
+
+        self.assertIn("Removal confirmed for org/partial", logged.output[0])
+        self.assertIn("refused: the manager is busy", logged.output[1])
+
     def test_a_model_that_left_the_cache_is_reported_without_a_question(self):
         status, confirm, _, pending = app.ask_remove_my_model("gone/model")
 
@@ -1901,6 +1914,19 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertIn("hub &lt;unreachable&gt;", detail)
         self.assertEqual(state, {})
         self.assertIsNone(selected)
+
+    def test_a_failed_search_leaves_its_traceback_in_the_log(self):
+        # The handler is broad enough to catch a mistake in the search as
+        # well as an unreachable Hub, and the card already carries the
+        # message, so a line without the stack would only repeat it.
+        self.results = ConnectionError("hub unreachable")
+
+        with self.assertLogs("ui.models_page", level="WARNING") as logged:
+            app.search_models("olmo", "")
+
+        self.assertIn("Hub search for 'olmo' failed", logged.output[0])
+        self.assertIn("Traceback", logged.output[0])
+        self.assertIn("hub unreachable", logged.output[0])
 
     def test_no_matches_is_said_plainly(self):
         self.results = []
