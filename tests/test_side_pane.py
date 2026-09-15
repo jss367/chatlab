@@ -1744,7 +1744,8 @@ class ModelSearchPaneTests(unittest.TestCase):
 
     def test_recommended_starters_work_offline(self):
         self.results = ConnectionError("offline")
-        # Gradio sends None for an untouched textbox on initial page load.
+        # Gradio sends None for an untouched textbox on initial page load. An
+        # empty query is the one view answered without reaching the Hub.
         table, detail, state, selected = app.search_models(None, "", order="Recommended")
         self.assertEqual(self.queries, [])
         self.assertEqual(len(state), 3)
@@ -1804,12 +1805,64 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertEqual(selected, INSTRUCT.model_id)
         self.assertIn("https://huggingface.co/allenai/Olmo-3-7B-Instruct", detail)
 
-    def test_recommended_query_matching_a_starter_stays_offline(self):
+    def test_recommended_query_searches_the_hub_under_the_starters(self):
+        # A starter matching the query used to end the search there, which
+        # hid the rest of the Hub behind a three-model list.
+        _, detail, state, _ = app.search_models("olmo", "tok", order="Recommended")
+        self.assertEqual(self.queries, [("olmo", "tok", TEXT_KIND)])
+        self.assertEqual(
+            list(state),
+            ["allenai/Olmo-3-7B-Think", INSTRUCT.model_id, GATED.model_id],
+        )
+        self.assertIn("Starters first, then Hugging Face", detail)
+
+    def test_a_starter_the_hub_also_returns_is_listed_once_with_both_halves(self):
+        # The catalog has the note and the download estimate; the search has
+        # the popularity and the date. The row keeps all of it.
+        self.results = [
+            HubModel(
+                model_id="allenai/Olmo-3-7B-Think",
+                parameters=7_298_011_136,
+                downloads=94_210,
+                likes=712,
+                last_modified="2026-07-02",
+            ),
+            INSTRUCT,
+        ]
+        table, _, state, _ = app.search_models("olmo", "", order="Recommended")
+        self.assertEqual(list(state), ["allenai/Olmo-3-7B-Think", INSTRUCT.model_id])
+        merged = state["allenai/Olmo-3-7B-Think"]
+        self.assertIn("ChatLab", merged.summary)
+        self.assertEqual(merged.download_bytes, 14_605_886_999)
+        self.assertEqual((merged.downloads, merged.likes), (94_210, 712))
+        self.assertEqual(merged.last_modified, "2026-07-02")
+        sent = painted(table)
+        self.assertEqual(
+            sent["headers"],
+            ["Model", "Params", "Download size", "Fit", "Downloads", "Likes", "Updated"],
+        )
+        self.assertEqual(sent["metadata"]["display_value"][0][2], "14.6 GB")
+        self.assertEqual(sent["metadata"]["display_value"][0][4], "94K")
+
+    def test_a_starter_the_hub_leaves_blank_keeps_the_catalogs_own_facts(self):
+        # A repository with no safetensors index has no parameter count in the
+        # search, and the hub drops a licence as readily.
+        self.results = [HubModel(model_id="allenai/Olmo-3-7B-Think", downloads=12)]
+        _, _, state, _ = app.search_models("olmo", "", order="Recommended")
+        merged = state["allenai/Olmo-3-7B-Think"]
+        self.assertEqual(merged.parameters, 7_298_011_136)
+        self.assertEqual(merged.license, "apache-2.0")
+        self.assertEqual(merged.downloads, 12)
+
+    def test_recommended_falls_back_to_starters_when_the_hub_is_unreachable(self):
         self.results = ConnectionError("offline")
-        _, detail, state, _ = app.search_models("qwen", "", order="Recommended")
-        self.assertEqual(self.queries, [])
-        self.assertEqual(list(state), ["Qwen/Qwen3-0.6B"])
-        self.assertIn("Curated starters", detail)
+        table, detail, state, selected = app.search_models("olmo", "", order="Recommended")
+        self.assertEqual(self.queries, [("olmo", "", TEXT_KIND)])
+        self.assertEqual(list(state), ["allenai/Olmo-3-7B-Think"])
+        self.assertIsNone(selected)
+        self.assertIn("Starters only", detail)
+        self.assertIn("offline", detail)
+        self.assertEqual(len(cells(table, "Model")), 1)
 
     def test_recommended_query_with_no_starter_match_searches_the_hub(self):
         _, detail, state, _ = app.search_models("gemma", "tok", order="Recommended")

@@ -1074,7 +1074,10 @@ def build_app() -> gr.Blocks:
                         with gr.Column(elem_id="model-search", elem_classes=["model-card"]):
                             gr.Markdown("## Discover models")
                             gr.Markdown(
-                                "Start with a recommendation, or browse Hugging Face without a model name. "
+                                "Search Hugging Face by name, or leave the box empty to browse. "
+                                "A sort reorders the results rather than narrowing what is searched. "
+                                "The exception is an empty box under Recommended, which lists the "
+                                "bundled starters without going online. "
                                 "Selecting a model shows its details before you download.",
                                 elem_classes=["scale-caption"],
                             )
@@ -1090,7 +1093,8 @@ def build_app() -> gr.Blocks:
                             with gr.Row():
                                 search_order = gr.Dropdown(
                                     choices=list(DISCOVERY_ORDERS), value="Recommended",
-                                    label="Browse", interactive=True,
+                                    label="Sort", interactive=True,
+                                    info="Recommended lists ChatLab’s starters first, then the Hub.",
                                 )
                                 fits_only = gr.Checkbox(
                                     label="Fits this computer", value=False,
@@ -1755,7 +1759,8 @@ def build_app() -> gr.Blocks:
         search_inputs = [
             search_query, hf_token, weight_precision, search_kind, search_order, fits_only
         ]
-        # The default Recommended view is bundled and does not go online.
+        # The page loads with an empty box, and Recommended answers that from
+        # the bundled starters, so the first paint does not go online.
         demo.load(search_models, search_inputs, search_outputs)
         search_button.click(search_models, search_inputs, search_outputs)
         search_query.submit(search_models, search_inputs, search_outputs)
