@@ -22,6 +22,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 import mlx_runtime
+import jacobian_lens
 import settings
 import steering as steering_vectors
 from conversation import THINK_CLOSE, THINK_OPEN
@@ -4416,6 +4417,9 @@ class ModelManager:
         # can be told from state produced under the next even when both came
         # from the same repository ID (a re-download at a newer revision).
         self.load_count = 0
+        # A fitted lens belongs to one load, including its exact checkpoint.
+        # The opaque import ID prevents another browser tab using its replacement.
+        self._jacobian_lens = None
         # What is in memory, kept as one value beside the fields above so it
         # can be read without straddling a load; see :meth:`loaded_model`.
         self._loaded = LoadedModel()
@@ -5223,6 +5227,7 @@ class ModelManager:
 
         released, precision, estimated = self.model_id, self.precision, self.loaded_bytes
         self._inspect_cache = None
+        self._jacobian_lens = None
         self.model = None
         self.tokenizer = None
         self.pipeline = None
@@ -6750,6 +6755,72 @@ class ModelManager:
         """The norm the LM head reads through; see :meth:`TorchEngine.final_norm`."""
 
         return self._engine().final_norm()
+
+    def import_jacobian_lens(self, path: str, fitted_model_id: str) -> dict:
+        """Validate a reference lens file; caller owns the generation reservation."""
+        with self._lock:
+            if not self.loaded:
+                raise ValueError("Load the model this lens was fitted for first.")
+            if self.precision not in (None, "full"):
+                raise ValueError("Load full-precision weights for Jacobian inspection.")
+            lens = jacobian_lens.FittedLens.load(path, self._engine(), self.model_id, fitted_model_id)
+            import_id = os.urandom(16).hex()
+            self._jacobian_lens = (self.load_id, import_id, lens)
+            return {
+                "import_id": import_id, "load_id": self.load_id,
+                "model_id": self.model_id, "name": lens.name,
+                "layers": len(lens.matrices), "n_prompts": lens.n_prompts,
+            }
+
+    @_guards_device_memory
+    def inspect_jacobian(
+        self, token_ids: Sequence[int], index: int, *, lens_id: str | None,
+        pinned_text: str = "", context_count: int = 0,
+        load_id: str | None = None, steering: dict | None = None,
+    ) -> jacobian_lens.JacobianInsight:
+        """Read concepts after processing the clicked token, with no look-ahead."""
+        import torch
+
+        with self._lock, torch.inference_mode(), contextlib.ExitStack() as scope:
+            if not self.loaded or load_id != self.load_id:
+                raise ModelChanged("The model has been reloaded. Generate or score again.")
+            imported = self._jacobian_lens
+            if imported is None or imported[:2] != (self.load_id, lens_id):
+                raise ValueError("Import a Jacobian lens for the current model load first.")
+            lens = imported[2]
+            engine = self._engine()
+            jacobian_lens.model_layout(engine)
+            ids = [int(token) for token in token_ids]
+            if not 0 <= index < len(ids):
+                raise ValueError("Select a token in the current transcript.")
+            pinned_id = None
+            if pinned_text:
+                encoded = self.tokenizer.encode(pinned_text, add_special_tokens=False)
+                if len(encoded) != 1:
+                    raise ValueError("Pin one vocabulary token. Try a single word, including its leading space if needed.")
+                pinned_id = int(encoded[0])
+            scope.enter_context(self._steering(steering))
+            if steering_vectors.active(steering):
+                self._drop_inspect_cache()
+            cache = self._inspect_cache_for(ids[:index])
+            with lens.record(engine) as states:
+                logits, cache = engine.forward([ids[index]], cache, index)
+            def decode(token):
+                return self._decode_token(token) or self._token_fallback(token)
+
+            actual = logits.row(-1)
+            rows = lens.read(engine, states, actual, decode, pinned_id)
+            if cache is not None and not steering_vectors.active(steering):
+                self._inspect_cache = (self.load_id, ids[:index + 1], cache)
+            return jacobian_lens.JacobianInsight({
+                "kind": "jacobian", "index": index, "token_id": ids[index],
+                "token_text": decode(ids[index]), "layers": rows,
+                "attention": [], "tokens": [], "decided_at": None,
+                "pinned_text": decode(pinned_id) if pinned_id is not None else None,
+                "pinned_id": pinned_id, "vocab_size": len(actual),
+                "lens_name": lens.name, "n_prompts": lens.n_prompts,
+                "model_id": self.model_id,
+            })
 
     def _lens_row(self, layer: int, logits: np.ndarray, token_id: int) -> dict:
         log_probs = normalize_log_probabilities(np.asarray(logits, dtype=np.float32))

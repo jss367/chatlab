@@ -85,6 +85,9 @@ def inspect_layers(
     score_context_state: tuple | None = None,
     chat_metrics_state: tuple[int, list[dict]] | None = None,
     chat_context_state: tuple | None = None,
+    lens_mode: str = "Logit",
+    imported_lens: dict | None = None,
+    pinned_text: str = "",
 ):
     """Run the logit lens and attention readout for the clicked token.
 
@@ -169,17 +172,24 @@ def inspect_layers(
                 yield (*refused, INSPECT_GONE)
                 return
             index = len(context_ids) + position
-        if index == 0:
+        if index == 0 and lens_mode != "Jacobian":
             yield (*refused, INSPECT_FIRST)
             return
         sequence = context_ids + [int(metric["token_id"]) for metric in metrics]
 
         started = time.monotonic()
         try:
-            insight = runtime.MANAGER.inspect(
-                sequence, index, context_count=len(context_ids), load_id=load_id,
-                **({"steering": steering} if steering is not None else {}),
-            ).to_dict()
+            options = {"context_count": len(context_ids), "load_id": load_id}
+            if steering is not None:
+                options["steering"] = steering
+            if lens_mode == "Jacobian":
+                insight = runtime.MANAGER.inspect_jacobian(
+                    sequence, index,
+                    lens_id=(imported_lens or {}).get("import_id"),
+                    pinned_text=pinned_text or "", **options,
+                ).to_dict()
+            else:
+                insight = runtime.MANAGER.inspect(sequence, index, **options).to_dict()
         except ModelChanged:
             yield (*refused, INSPECT_MODEL_CHANGED)
             return
@@ -199,16 +209,21 @@ def inspect_layers(
         shown = html.escape(repr(insight["token_text"]))
         read = len(insight["layers"]) - 1
         status = (
-            f"{where} {position + 1}: `{shown}`, read through {read} "
+            f"{where} {position + 1}: <code>{shown}</code>, read through {read} "
             f"layers in {time.monotonic() - started:.1f}s."
         )
-        if not read:
+        if insight.get("kind") == "jacobian":
+            status = (
+                f"{where} {position + 1}: <code>{shown}</code>, read after processing this token "
+                f"at {len(insight['layers'])} fitted layers in {time.monotonic() - started:.1f}s."
+            )
+        elif not read:
             status = f"{status} {INSPECT_OUTPUT_ONLY}"
-        if not layer_count:
+        if not layer_count and insight.get("kind") != "jacobian":
             status = f"{status} This model did not return attention weights."
         yield (
-            charts.logit_lens_chart(insight),
-            charts.attention_strip(insight, layer),
+            render_lens(insight),
+            render_attention(insight, layer),
             gr.update(maximum=max(layer_count, 1), value=layer),
             insight,
             status,
@@ -227,7 +242,44 @@ def render_attention(insight: dict | None, layer):
 
     if not insight:
         return gr.skip()
+    if insight.get("kind") == "jacobian":
+        return '<div class="viz-empty">Select the Logit lens to inspect attention behind a prediction.</div>'
     return charts.attention_strip(insight, int(layer or 0))
+
+
+def render_lens(insight: dict) -> str:
+    if insight.get("kind") == "jacobian":
+        return charts.jacobian_lens_chart(insight)
+    return charts.logit_lens_chart(insight)
+
+
+def import_jacobian_lens(path, fitted_model_id):
+    """Keep large lens tensors in the model manager, never in browser state."""
+    if not path:
+        return gr.skip(), "Choose a saved lens.pt file first."
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        return gr.skip(), INSPECT_LOADING if held == LOADING else INSPECT_BUSY
+    try:
+        imported = runtime.MANAGER.import_jacobian_lens(path, fitted_model_id or "")
+        return imported, (
+            f"Imported for `{html.escape(imported['model_id'])}`: "
+            f"{imported['layers']} fitted layers, {imported['n_prompts']:,} fitting prompts. "
+            "Reloading the model requires importing the lens again."
+        )
+    except Exception as error:
+        return gr.skip(), failure_status("Could not import the lens", str(error))
+    finally:
+        runtime.MANAGER.release_generation()
+
+
+def change_lens_mode(mode):
+    jacobian = mode == "Jacobian"
+    return (
+        gr.update(visible=jacobian), gr.update(visible=not jacobian),
+        charts.EMPTY_JACOBIAN if jacobian else charts.EMPTY_LENS,
+        charts.EMPTY_ATTENTION, None, INSPECT_HINT,
+    )
 
 
 def reset_inspection(insight: dict | None):
@@ -241,7 +293,8 @@ def reset_inspection(insight: dict | None):
 
     if insight is None:
         return gr.skip(), gr.skip(), gr.skip(), gr.skip()
-    return charts.EMPTY_LENS, charts.EMPTY_ATTENTION, None, INSPECT_HINT
+    empty = charts.EMPTY_JACOBIAN if insight.get("kind") == "jacobian" else charts.EMPTY_LENS
+    return empty, charts.EMPTY_ATTENTION, None, INSPECT_HINT
 
 
 # One rule per tile: which drawing goes in the box the stylesheet has already
