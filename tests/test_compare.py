@@ -348,6 +348,26 @@ class ReadingTests(unittest.TestCase):
         )
         self.assertEqual(older["top_choice_changed"], 1)
 
+    def test_a_candidate_holding_half_a_character_is_not_compared(self):
+        # Two different half-characters both decode to the replacement
+        # character, so counting them as the same choice would be luck.
+        def choosing(raw):
+            held = metric(1, 5, 1.0)
+            held["top_candidates"] = [
+                {"token_id": 7, "text": "?", "probability": 0.9, "raw_text": raw}
+            ]
+            return dict(held, text="x", display_text="x")
+
+        across = compare.reading(
+            run([choosing("\ufffd")]),
+            run([choosing("\ufffd")], model_id="other/model"),
+        )
+        self.assertEqual(across["compared"], 1)
+        self.assertEqual(across["choices_compared"], 0)
+        # Within one vocabulary the token ID still answers the question.
+        within = compare.reading(run([choosing("\ufffd")]), run([choosing("\ufffd")]))
+        self.assertEqual(within["choices_compared"], 1)
+
     def test_a_span_with_a_missing_candidate_is_counted_in_neither(self):
         bare = dict(metric(1, 5, 1.0), top_candidates=[])
         reading = compare.reading(run([bare]), run([metric(1, 5, 1.0)]))

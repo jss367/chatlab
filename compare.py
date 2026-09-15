@@ -69,7 +69,10 @@ CROSS_MODEL_CAVEAT = (
     "each token stands for rather than on token IDs, which mean nothing across "
     "two vocabularies. Compare the per-token gaps with that in mind: two "
     "tokenizers cut the same passage differently, and a bit of surprise is not "
-    "the same size in two vocabularies."
+    "the same size in two vocabularies. The top-choice count is the roughest "
+    "of the readings here: each run's first choice is decoded on its own, "
+    "without the text in front of it, so two tokenizers that differ over "
+    "where a word boundary lives can show the same continuation as a change."
 )
 
 
@@ -223,8 +226,8 @@ def _span(left, right, here0, here1, there0, there1, index, covered) -> dict:
     # tokens against one has three first choices on one side and one on the
     # other, and no pairing between them.
     one_to_one = len(mine) == 1 and len(yours) == 1
-    left_top = _top_choice(mine[0]) if one_to_one else (None, "")
-    right_top = _top_choice(yours[0]) if one_to_one else (None, "")
+    left_top = _top_choice(mine[0]) if one_to_one else (None, "", False)
+    right_top = _top_choice(yours[0]) if one_to_one else (None, "", False)
     # Both candidates have to exist for the question to have an answer. The
     # IDs establish that and nothing else: a valid special token can decode
     # to the empty string, so an empty text is a choice like any other and
@@ -246,12 +249,20 @@ def _span(left, right, here0, here1, there0, there1, index, covered) -> dict:
         "right_surprise": right_bits,
         "left_top": left_top[1],
         "left_top_id": left_top[0],
+        "left_top_determined": left_top[2],
         "right_top": right_top[1],
         "right_top_id": right_top[0],
+        "right_top_determined": right_top[2],
     }
 
 
-def _top_choice(metric: dict) -> tuple[int | None, str]:
+# What a byte-level tokenizer decodes an incomplete character to. Two
+# different half-characters both come back as this, so it says only that the
+# characters are not established yet.
+UNDETERMINED = "\ufffd"
+
+
+def _top_choice(metric: dict) -> tuple[int | None, str, bool]:
     """What this run's model would have written here, left to itself.
 
     The ID comes back with the text because the text alone cannot answer
@@ -264,7 +275,7 @@ def _top_choice(metric: dict) -> tuple[int | None, str]:
 
     candidates = metric.get("top_candidates") or ()
     if not candidates:
-        return None, ""
+        return None, "", False
     first = candidates[0]
     if isinstance(first, dict):
         token_id, text = first.get("token_id"), first.get("text", "")
@@ -276,7 +287,16 @@ def _top_choice(metric: dict) -> tuple[int | None, str]:
     # that decodes to nothing is its vocabulary label, and two models label
     # their end-of-text markers differently, so comparing the labels would
     # call two models that both chose to stop a change of mind.
-    return (None if token_id is None else int(token_id)), (text if raw is None else raw)
+    shown = text if raw is None else raw
+    # A candidate holding part of a character says nothing about what it
+    # would add: two different halves decode alike, and the same half can
+    # decode differently after another prefix. Within one vocabulary the ID
+    # still answers the question; across two there is nothing to compare.
+    return (
+        (None if token_id is None else int(token_id)),
+        shown,
+        UNDETERMINED not in shown,
+    )
 
 
 def strip(metrics, spans, side: str = "left") -> list[tuple[str, str]]:
@@ -520,6 +540,13 @@ def reading(left: dict | None, right: dict | None) -> dict:
     # the denominator as well as the numerator: counting a span with nothing
     # to compare would read as "the choice held here".
     pairable = [item for item in scored if item["comparable_choice"]]
+    if cross_model:
+        # Across two vocabularies the decoded text is the only reading, so a
+        # candidate whose characters are not established cannot take part.
+        pairable = [
+            item for item in pairable
+            if item["left_top_determined"] and item["right_top_determined"]
+        ]
     # Within one vocabulary the IDs decide it; across two there are no IDs to
     # decide it with, and the decoded text is the only reading left - the
     # empty string included, since a special token can decode to nothing and

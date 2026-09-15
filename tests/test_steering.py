@@ -763,6 +763,16 @@ class ExtractionControlTests(unittest.TestCase):
         stored = conversation.branch_sampling(forks, forks["active"])["steering"]
         self.assertEqual(steering.expand(stored), steering.expand(value))
 
+    def test_using_a_layer_warns_when_the_weights_were_read_in_again(self):
+        held_manager = self.manager()
+        with mock.patch.object(runtime, "MANAGER", held_manager):
+            extraction = controls.extract_vector("Hello world", "How are", False, "last")[0]
+            # Same name, different reading of it: the ID and width checks the
+            # runtime makes would pass a vector from the weights before last.
+            held_manager.load_count += 1
+            status = controls.use_extracted(conversation.new_forks(), extraction, 0)[-1]
+        self.assertIn("read in again", status)
+
     def test_using_a_layer_warns_when_another_model_is_now_loaded(self):
         held_manager = self.manager()
         with mock.patch.object(runtime, "MANAGER", held_manager):

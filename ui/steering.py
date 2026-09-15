@@ -309,6 +309,16 @@ def use_extracted(forks, extraction, layer):
             f" The model in memory is now {loaded}; load "
             f"{value['model_id']} again before steering with this."
         )
+    elif extraction.get("load_id") and extraction["load_id"] != runtime.MANAGER.load_id:
+        # Same name, different reading of it. A direction is a set of
+        # coordinates in one model's residual stream, and the ID and width
+        # checks the runtime makes cannot tell that stream from another's -
+        # they would pass a vector from weights that have since been replaced.
+        note = (
+            " These weights were read in again since the direction was "
+            "extracted, so it may no longer point anywhere in particular. "
+            "Extract it again to be sure."
+        )
     updates = list(controls(value))
     updates[-1] = f"{updates[-1]}{note}"
     return (store(forks, value), *updates)
