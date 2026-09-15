@@ -41,6 +41,7 @@ drove.
 - Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response, a run of prompts, or a comparison run, from anywhere on the Chat page
 - A setting for macOS's own inline text predictions, which grey in the rest of a sentence as you type, so the typing suggestions can be turned off inside ChatLab alone
 - Right-click a token to regenerate from it, choose an alternative, or type a custom replacement and continue the response
+- Right-click a prompt token to replace it and answer the message again from the edited prompt, template tokens included
 - Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
 - Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
@@ -563,7 +564,19 @@ To explore one token at a time, choose an alternative and press **Next token** b
 
 The alternatives table only offers what the model ranked highly. To put anything else at a token position, click the token, type the replacement in **Or type your own replacement**, and press **Branch with text**. The typed text is spliced in exactly as written where the clicked token was, and the model continues from there. Type the space yourself if the word needs one: the text is checked in place, after the tokens that are kept, so it reads the same whether the tokenizer keeps the word-boundary space inside the token (as BPE does) or drops it from the start of what it decodes (as SentencePiece does). It can be one word or a whole sentence. Text the tokenizer cannot reproduce exactly at that position is refused rather than approximated. The prompt and replayed response prefix together are capped at 8,192 tokens, or at the model's shorter positional limit; an oversized branch is refused without replacing the response on screen.
 
-Only a reply the model wrote can be branched. Prompt tokens, text measured in the **Score text** tab, and a message typed or edited by hand have no measured tokens to continue from. Editing a reply also takes the measurements off it and off every reply after it: those were produced from a transcript the edit replaced.
+Only a reply the model wrote can be branched. Text measured in the **Score text** tab and a message typed or edited by hand have no measured tokens to continue from. A prompt token has no continuation either, but it can be replaced; see **Editing the prompt** below. Editing a reply takes the measurements off it and off every reply after it: those were produced from a transcript the edit replaced.
+
+## Editing the prompt
+
+The prompt under **Prompt and context tokens** is the exact sequence the last reply was generated from: the system prompt, the transcript, and everything the chat template wrote around them. Right-click any of its tokens to replace that one token and answer the message again.
+
+The menu offers the alternatives the model itself ranked at that position, each with its probability, and a box for text of your own. Choosing one feeds the recorded prompt back with that single position swapped, and the reply is generated from it under the current sampling settings, replacing the reply on screen as **Retry** would. The strip redraws from the prompt that was actually fed, so the edited token is there to read, and the note above it says which position changed.
+
+Nothing is written back to the conversation. The turns still say what was asked, and the next message is prompted through the chat template as usual - so an edit is a question about one reply, not a change to the chat. The system prompt and the other prompting settings are not consulted either: the ids you edited are the ids that are fed, whatever the boxes say since the reply was generated.
+
+A template's own control tokens are as editable as the words between them, which is the reason to edit here rather than in the message box. Typed text is encoded for the position it lands in, so a word reads the same whether the tokenizer keeps its leading space or drops it, and text the tokenizer cannot place there exactly is refused rather than approximated. The replacement need not be one token: type a sentence and the prompt grows by the difference.
+
+Like a branch, an edit cannot outlive the model. The prompt's token IDs belong to the tokenizer that produced them, so reloading leaves the strip readable but uneditable, and so does anything that replaces the strip - a retry, an edit, an undo, switching conversation. Send the message again to measure a fresh prompt. The JSON export records what was replaced under `sampling.edited_prompt`; the conversation file, which stores turns rather than tokens, does not.
 
 ## The conversations pane
 
@@ -662,7 +675,7 @@ After a response finishes, open **Export full metric trace** under the conversat
 
 ## Prompt tokens and scoring text
 
-Every prompt token is measured against the distribution the model held one step earlier, during the same pass that fills the key-value cache, so it costs nothing extra to see how predictable your own prompt was. They appear under **Prompt and context tokens**; the first token has nothing before it, so it is left unscored. Turn the measurement off in **Sampling, analysis, and input controls** if you do not want it, and note that only the most recent 1,024 tokens of a very long prompt are scored.
+Every prompt token is measured against the distribution the model held one step earlier, during the same pass that fills the key-value cache, so it costs nothing extra to see how predictable your own prompt was. They appear under **Prompt and context tokens**, where right-clicking one replaces it; the first token has nothing before it, so it is left unscored and offers no alternatives to choose from. Turn the measurement off in **Sampling, analysis, and input controls** if you do not want it, and note that only the most recent 1,024 tokens of a very long prompt are scored.
 
 The **Score text** tab measures text the model did not generate. Paste it, optionally give it context first, and one forward pass reports the same numbers for every token — useful for comparing two prompts, checking how memorized a passage is, or evaluating a response that came from somewhere else. Scoring is capped at 4,096 tokens per run, or at the model's shorter positional limit. A line under the box counts what is in it against that cap as it is typed, using the same encoding the check itself uses, so a passage too large to score says so before the press rather than after it.
 

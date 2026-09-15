@@ -5767,69 +5767,11 @@ class ModelManager:
         kept_text = self._decode_ids(visible_kept)
         expected = kept_text + text
 
-        # The standalone encoding is how a BPE tokenizer with the space inside
-        # the token normally wants the text. A context-sensitive tokenizer can
-        # instead need a suffix of the joint encoding. The model may have
-        # sampled a noncanonical spelling of ``kept_text``, so the joint
-        # encoding need not begin with ``kept`` even though its boundary suffix
-        # can follow those unchanged ids exactly.
-        #
-        # Locate that suffix from the tokenizer's character offsets when they
-        # exist, or from the bounded seam search used by text scoring for a
-        # slow tokenizer. Trying every suffix looks harmless but is quadratic:
-        # each candidate decodes the whole kept prefix plus a progressively
-        # longer tail, all while the model lock is held. The seam can be off by
-        # one token when one piece crosses it, so validate the boundary and its
-        # two neighbours. If that seam was only guessed, also bisect decoded
-        # joint prefixes: a continuation token may not decode correctly by
-        # itself, but the prefix can still identify its exact start. Candidate
-        # decoding stays strictly bounded while the final exact decode remains
-        # the authority.
-        standalone = self._encode_plain(text)
-        split = split_context_and_text(
-            self.tokenizer, kept_text, text, add_special_tokens=False
-        )
-        joint = split.context_ids + split.text_ids
-        boundary = len(split.context_ids)
-
-        decoded_boundary = (
-            split.decoded_prefix_end if not split.seam_verified else None
-        )
-
-        def candidates() -> Iterator[list[int]]:
-            yield standalone
-            aligned_start: int | None = None
-            if (
-                len(joint) > len(visible_kept)
-                and joint[: len(visible_kept)] == visible_kept
-            ):
-                aligned_start = len(visible_kept)
-                aligned = joint[aligned_start:]
-                if aligned != standalone:
-                    yield aligned
-            starts = {
-                start
-                for start in (
-                    boundary - 1,
-                    boundary,
-                    boundary + 1,
-                    decoded_boundary,
-                )
-                if start is not None
-                if 0 <= start < len(joint)
-            }
-            for start in sorted(starts, reverse=True):
-                candidate = joint[start:]
-                if start != aligned_start and candidate != standalone:
-                    yield candidate
-
-        if not standalone and not joint:
-            raise ValueError("The replacement text did not produce any tokens.")
         stop_ids = self._stop_token_ids()
         hidden_ids = hidden - stop_ids
         matched_embedded_stop = False
         matched_hidden = False
-        for token_ids in candidates():
+        for token_ids in self._replacement_candidates(visible_kept, kept_text, text):
             if token_ids and self._decode_ids(visible_kept + token_ids) == expected:
                 # A terminal stop token deliberately ends the new response and
                 # stays hidden. One followed by more replacement tokens cannot
@@ -5856,6 +5798,113 @@ class ModelManager:
             "The replacement text cannot be inserted exactly at this position "
             "by this tokenizer."
         )
+
+    def _replacement_candidates(
+        self, context_ids: Sequence[int], context_text: str, text: str
+    ) -> Iterator[list[int]]:
+        """Token ids that could spell ``text`` immediately after ``context_ids``.
+
+        The standalone encoding is how a BPE tokenizer with the space inside
+        the token normally wants the text. A context-sensitive tokenizer can
+        instead need a suffix of the joint encoding. The ids in front may be a
+        noncanonical spelling of ``context_text`` - the model can sample one,
+        and a reader can leave one behind in an edited prompt - so the joint
+        encoding need not begin with them even though its boundary suffix can
+        follow them exactly.
+
+        Locate that suffix from the tokenizer's character offsets when they
+        exist, or from the bounded seam search used by text scoring for a
+        slow tokenizer. Trying every suffix looks harmless but is quadratic:
+        each candidate decodes the whole context prefix plus a progressively
+        longer tail, all while the model lock is held. The seam can be off by
+        one token when one piece crosses it, so validate the boundary and its
+        two neighbours. If that seam was only guessed, also bisect decoded
+        joint prefixes: a continuation token may not decode correctly by
+        itself, but the prefix can still identify its exact start. Candidate
+        decoding stays strictly bounded while the final exact decode remains
+        the authority, and that decode is the caller's: what disqualifies a
+        candidate differs between a response and a prompt.
+        """
+
+        assert self.tokenizer is not None
+        context = [int(value) for value in context_ids]
+        standalone = self._encode_plain(text)
+        split = split_context_and_text(
+            self.tokenizer, context_text, text, add_special_tokens=False
+        )
+        joint = split.context_ids + split.text_ids
+        boundary = len(split.context_ids)
+        decoded_boundary = (
+            split.decoded_prefix_end if not split.seam_verified else None
+        )
+        if not standalone and not joint:
+            raise ValueError("The replacement text did not produce any tokens.")
+
+        yield standalone
+        aligned_start: int | None = None
+        if len(joint) > len(context) and joint[: len(context)] == context:
+            aligned_start = len(context)
+            aligned = joint[aligned_start:]
+            if aligned != standalone:
+                yield aligned
+        starts = {
+            start
+            for start in (boundary - 1, boundary, boundary + 1, decoded_boundary)
+            if start is not None
+            if 0 <= start < len(joint)
+        }
+        for start in sorted(starts, reverse=True):
+            candidate = joint[start:]
+            if start != aligned_start and candidate != standalone:
+                yield candidate
+
+    def encode_prompt_replacement(
+        self,
+        prefix_ids: Sequence[int],
+        text: str,
+        *,
+        load_id: str | None = None,
+    ) -> list[int]:
+        """Encode text the reader typed over one token of a recorded prompt.
+
+        The boundary problem is the response version's: the ids in front plus
+        the result must decode to the text in front followed by exactly what
+        was typed, so a word reads the same whether the tokenizer keeps its
+        leading space or drops it.
+
+        Nothing is filtered out of what the result may contain. A prompt is
+        made of template control tokens as much as of words, and putting one
+        of them somewhere the template would never have written it is what
+        this edit is for; the stop and hidden-special rules that guard a
+        replayed response have no counterpart in front of the first sampled
+        token.
+
+        ``load_id`` names the load ``prefix_ids`` came from. It is compared
+        under the model lock, alongside the encoding, so a load that lands
+        between the caller's own check and this call is refused with
+        :class:`ModelChanged` rather than answered with tokens from a
+        tokenizer the prefix never met.
+        """
+
+        with self._lock:
+            if not self.loaded:
+                raise RuntimeError("Download and load a model before editing a prompt.")
+            if load_id is not None and load_id != self.load_id:
+                raise ModelChanged(
+                    "The model has been reloaded since these tokens were produced."
+                )
+            if not text:
+                raise ValueError("The replacement text did not produce any tokens.")
+            prefix = [int(value) for value in prefix_ids]
+            prefix_text = self._decode_ids(prefix)
+            expected = prefix_text + text
+            for token_ids in self._replacement_candidates(prefix, prefix_text, text):
+                if token_ids and self._decode_ids(prefix + token_ids) == expected:
+                    return token_ids
+            raise ValueError(
+                "The replacement text cannot be inserted exactly at this "
+                "position by this tokenizer."
+            )
 
     def validate_generation_prefix(
         self,
@@ -6242,6 +6291,7 @@ class ModelManager:
         analyze_prompt: bool = True,
         tools: list[dict] | None = None,
         forced_ids: Sequence[int] = (),
+        prompt_override_ids: Sequence[int] | None = None,
         answer_prefill: str = "",
         thinking_mode: str = "default",
         literal_prefill_tokens: int = 0,
@@ -6271,11 +6321,18 @@ class ModelManager:
         provenance forward so the application can keep the control boundary
         from being replaced as though it were answer text.
 
-        ``load_id`` names the load ``forced_ids`` came from (see
-        :attr:`load_id`). It is compared under the model lock, before any token
-        is fed, so a load that finished after the caller looked is refused with
-        :class:`ModelChanged` rather than replaying one model's token IDs
-        through another.
+        ``prompt_override_ids`` is a prompt the reader edited token by token.
+        It is fed exactly as it stands: the chat template is what produced
+        those ids in the first place, and rendering ``messages`` again would
+        undo the edit. ``messages`` still travels with the request because it
+        is what the conversation held, and it is what the template arguments
+        and the trace describe, but it is not what the model reads.
+
+        ``load_id`` names the load ``forced_ids`` or ``prompt_override_ids``
+        came from (see :attr:`load_id`). It is compared under the model lock,
+        before any token is fed, so a load that finished after the caller
+        looked is refused with :class:`ModelChanged` rather than feeding one
+        model's token IDs through another.
 
         ``thinking_mode`` is default/on/off for switchable Qwen3 templates.
         Default leaves template arguments untouched. Other architectures ignore
@@ -6315,6 +6372,7 @@ class ModelManager:
                 analyze_prompt=analyze_prompt,
                 tools=tools,
                 forced_ids=forced_ids,
+                prompt_override_ids=prompt_override_ids,
                 answer_prefill=answer_prefill,
                 thinking_mode=thinking_mode,
                 literal_prefill_tokens=literal_prefill_tokens,
@@ -6389,6 +6447,7 @@ class ModelManager:
         analyze_prompt: bool = True,
         tools: list[dict] | None = None,
         forced_ids: Sequence[int] = (),
+        prompt_override_ids: Sequence[int] | None = None,
         answer_prefill: str = "",
         thinking_mode: str = "default",
         literal_prefill_tokens: int = 0,
@@ -6430,7 +6489,23 @@ class ModelManager:
                 template_args = {"tools": tools} if tools is not None else {}
                 if recorded_thinking is not None:
                     template_args["thinking_mode"] = recorded_thinking
-                prompt_ids, reasoning_prefilled = self._prompt_token_ids(messages, **template_args)
+                if prompt_override_ids is None:
+                    prompt_ids, reasoning_prefilled = self._prompt_token_ids(
+                        messages, **template_args
+                    )
+                else:
+                    prompt_ids = [int(value) for value in prompt_override_ids]
+                    if not prompt_ids:
+                        raise ValueError("An edited prompt cannot be empty.")
+                    # Only the ids can now say whether the prompt ends inside a
+                    # reasoning block. Asking the template instead would answer
+                    # for the prompt it would have written, which is precisely
+                    # the prompt that is not being fed: an edit that removed
+                    # the opening marker would still be told one was there, and
+                    # the reply's first words would be filed as reasoning.
+                    reasoning_prefilled = (
+                        self._decode_ids(prompt_ids).rstrip().endswith(THINK_OPEN)
+                    )
                 # Noted here rather than left to the first update, because a run
                 # that fails in the prefill below never publishes one and prefill
                 # is where a memory failure is most likely.

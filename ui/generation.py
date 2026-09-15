@@ -55,9 +55,13 @@ from ui.panel import (
     BRANCH_MODEL_CHANGED,
     BRANCH_TEXT_EMPTY,
     BRANCH_TEXT_HINT,
+    PROMPT_EDIT_EMPTY,
+    PROMPT_EDIT_MODEL_CHANGED,
+    PROMPT_EDIT_NO_MESSAGE,
     branch_target,
     cleared_panel,
     new_metrics_generation,
+    prompt_edit_target,
     prompt_note_text,
     strip_update,
     transcript_update,
@@ -418,6 +422,7 @@ def generate_reply(
     thinking_mode: str = "default",
     *,
     forced_ids: tuple[int, ...] = (),
+    prompt_edit: dict | None = None,
     literal_prefill_tokens: int = 0,
     automatic_reasoning_close_tokens: int = 0,
     literal_text_ranges: tuple[tuple[int, int], ...] = (),
@@ -432,7 +437,15 @@ def generate_reply(
     samples anything. ``forced_ids`` is the token-level version used by a
     branch: the tokens kept from an earlier response and the alternative the
     reader picked. A branch already contains any prefix that was on the old
-    response, so it takes precedence. ``branch_note`` leads the status line.
+    response, so it takes precedence. ``branch_note`` leads the status line,
+    for a branch or for an edited prompt.
+
+    ``prompt_edit`` is one token replaced in the prompt the last reply was
+    generated from: ``ids`` is the whole edited prompt, fed in place of
+    anything the template would write, and ``position``, ``original`` and
+    ``replacement`` describe the change for the note and the export. The
+    response itself is sampled from scratch, so the sampling controls and the
+    assistant prefill apply to it exactly as they would to any new reply.
 
     ``expected_load_id`` is the model load ``forced_ids`` came from. Only a
     branch passes it: the runtime compares it under the model lock and raises
@@ -492,6 +505,7 @@ def generate_reply(
             steering_layer,
             thinking_mode,
             forced_ids=forced_ids,
+            prompt_edit=prompt_edit,
             literal_prefill_tokens=literal_prefill_tokens,
             automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
             literal_text_ranges=literal_text_ranges,
@@ -529,6 +543,7 @@ def _stream_reply(
     thinking_mode: str = "default",
     *,
     forced_ids: tuple[int, ...] = (),
+    prompt_edit: dict | None = None,
     literal_prefill_tokens: int = 0,
     automatic_reasoning_close_tokens: int = 0,
     literal_text_ranges: tuple[tuple[int, int], ...] = (),
@@ -640,11 +655,28 @@ def _stream_reply(
     # branches that is the first replay result; until then the old transcript
     # and its diagnostics remain together on screen.
     # A branch at the first token has an empty replay prefix, but must still
-    # ignore the current prefill control just like every other branch.
-    applied_prefill = bool(assistant_prefill and not forced_ids and expected_load_id is None)
+    # ignore the current prefill control just like every other branch. An
+    # edited prompt hands down a load id for the same reason a branch does -
+    # its tokens must meet the tokenizer that produced them - yet nothing of
+    # the response is replayed, so the prefill control applies as usual.
+    replaying_response = bool(forced_ids) or (
+        expected_load_id is not None and prompt_edit is None
+    )
+    applied_prefill = bool(assistant_prefill) and not replaying_response
     stream_note = branch_note or (
         "Assistant prefill applied." if applied_prefill else ""
     )
+    # Said where the edited tokens are, and said for as long as they are on
+    # screen: the strip beside it is the only place this reply's prompt
+    # differs from the one the conversation would render on its own.
+    edit_note = (
+        f"Token {prompt_edit['position']} was replaced with "
+        f"{prompt_edit['replacement']!r}; the next message is prompted from "
+        "the conversation as usual."
+        if prompt_edit
+        else ""
+    )
+
     def previous_snapshot(status, busy):
         values = list(idle_state(prompt_text, previous_turns, status, scale_name=scale_name))
         values[CHAT_OUTPUT_NAMES.index("send")], values[CHAT_OUTPUT_NAMES.index("stop")] = send_stop_buttons(busy)
@@ -687,6 +719,7 @@ def _stream_reply(
         seed=used_seed,
         analyze_prompt=bool(analyze_prompt),
         forced_ids=tuple(int(value) for value in forced_ids),
+        prompt_override_ids=prompt_edit["ids"] if prompt_edit else None,
         answer_prefill=assistant_prefill if applied_prefill else "",
         thinking_mode=(
             branch_thinking_mode if branch_thinking_mode is not None else thinking_mode
@@ -756,7 +789,13 @@ def _stream_reply(
                         strip_update(prompt_metrics, scale_name),
                         (generation, prompt_metrics),
                         prompt_note_text(
-                            len(prompt_metrics), update.prompt_note, "prompt"
+                            len(prompt_metrics),
+                            " ".join(
+                                note
+                                for note in (update.prompt_note, edit_note)
+                                if note
+                            ),
+                            "prompt",
                         ),
                     )
                     context_ids = (
@@ -856,6 +895,16 @@ def _stream_reply(
         sampling["forced_prefix_tokens"] = forced_prefix_tokens
     if applied_prefill:
         sampling["assistant_prefill"] = assistant_prefill
+    if prompt_edit:
+        # ``messages`` records the conversation this reply was given, which is
+        # no longer character for character what the model read. What the edit
+        # did belongs beside the prefill and the replayed prefix, the other two
+        # places the recorded messages are not the whole request.
+        sampling["edited_prompt"] = {
+            "position": prompt_edit["position"],
+            "original": prompt_edit["original"],
+            "replacement": prompt_edit["replacement"],
+        }
     trace = (
         build_trace(
             model_id=pending.get("model"),
@@ -1291,6 +1340,150 @@ def _branch_with_text(
         yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
     except SteeringError as error:
         yield idle_state(prompt_text, turns, failure_status("Could not branch", str(error)), clear_tokens=True)
+
+
+def answer_edited_prompt(
+    edit: dict,
+    context_state,
+    prompt_state: tuple[int, list[dict]],
+    prompt_text: str,
+    turns: list[dict] | None,
+    *settings,
+):
+    """Answer the last message again from a prompt with one token replaced.
+
+    The prompt fed is the one the reply on screen was generated from, token
+    for token, with the clicked position swapped for an alternative the model
+    ranked there or for text the reader typed. Nothing is written back to the
+    conversation: the turns still say what was asked, and the next message is
+    prompted from them through the chat template as usual. What the edit
+    changes is this one reply, and the strip beside it shows the prompt that
+    produced it.
+
+    The generation slot is taken first, as ``branch_with_text`` takes it and
+    for the same reason: the encoding waits on the model lock, and a Send that
+    slipped in ahead of it would hold that lock for a whole generation and
+    leave this handler replacing a reply that is no longer the one the prompt
+    was recorded for.
+    """
+
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        yield busy_state(held)
+        return
+
+    try:
+        yield from _answer_edited_prompt(
+            edit, context_state, prompt_state, prompt_text, turns, *settings
+        )
+    finally:
+        runtime.MANAGER.release_generation()
+
+
+def _answer_edited_prompt(
+    edit: dict,
+    context_state,
+    prompt_state: tuple[int, list[dict]],
+    prompt_text: str,
+    turns: list[dict] | None,
+    *settings,
+):
+    """The body of answer_edited_prompt(), run with the generation slot held."""
+
+    turns = copy_turns(turns)
+    if not runtime.MANAGER.loaded:
+        yield idle_state(prompt_text, turns, "Download and load a model first.")
+        return
+    found = prompt_edit_target(context_state, prompt_state, edit.get("selection"))
+    if isinstance(found, str):
+        yield idle_state(prompt_text, turns, found)
+        return
+    index, prompt_ids, expected_load, metric = found
+    # The reply is regenerated for the message it answered, so everything from
+    # that message on is replaced - exactly what Retry does, with the prompt
+    # edited rather than rebuilt.
+    position = last_user_index(turns)
+    if position is None:
+        yield idle_state(prompt_text, turns, PROMPT_EDIT_NO_MESSAGE)
+        return
+
+    try:
+        replacement_ids, replacement = _prompt_replacement(
+            edit, metric, prompt_ids, index, expected_load
+        )
+    except ModelChanged:
+        yield idle_state(
+            prompt_text, turns, PROMPT_EDIT_MODEL_CHANGED, clear_tokens=True
+        )
+        return
+    except (ValueError, RuntimeError) as error:
+        yield idle_state(prompt_text, turns, f"✏️ {error}")
+        return
+
+    note = (
+        f"Prompt token {index + 1}: {replacement!r} instead of {metric['text']!r}."
+    )
+    # The mode the replaced reply ran under, not the control as it stands now:
+    # the edited prompt already contains whatever the template wrote for that
+    # mode, and recording a mode it was never rendered for would misreport it.
+    replaced = turns[position + 1] if len(turns) > position + 1 else None
+    try:
+        yield from _stream_reply(
+            turns[: position + 1],
+            prompt_text,
+            *settings,
+            prompt_edit={
+                "ids": (*prompt_ids[:index], *replacement_ids, *prompt_ids[index + 1:]),
+                "position": index + 1,
+                "original": metric["text"],
+                "replacement": replacement,
+            },
+            branch_note=note,
+            expected_load_id=expected_load,
+            previous_turns=turns,
+            branch_thinking_mode=(
+                replaced.get("thinking_mode") if replaced else None
+            ),
+        )
+    except ModelChanged:
+        yield idle_state(
+            prompt_text, turns, PROMPT_EDIT_MODEL_CHANGED, clear_tokens=True
+        )
+    except SteeringError as error:
+        yield idle_state(
+            prompt_text,
+            turns,
+            failure_status("Could not answer again", str(error)),
+            clear_tokens=True,
+        )
+
+
+def _prompt_replacement(
+    edit: dict, metric: dict, prompt_ids: list[int], index: int, expected_load: str | None
+) -> tuple[list[int], str]:
+    """The ids to put where one prompt token was, and the text they spell.
+
+    An alternative is taken as the id the model ranked, not as its text: the
+    two are not interchangeable, since encoding that text at this position can
+    land on a different spelling of it. Typed text has no id of its own and is
+    encoded against the tokens in front of it, under the model lock.
+    """
+
+    if edit.get("kind") == "candidate":
+        try:
+            candidate = metric["top_candidates"][int(edit["index"])]
+        except (IndexError, KeyError, TypeError, ValueError):
+            raise ValueError("That alternative is not one of this token's.") from None
+        return [int(candidate["token_id"])], candidate["text"]
+    text = edit.get("text")
+    if not isinstance(text, str) or not text:
+        raise ValueError(PROMPT_EDIT_EMPTY)
+    return (
+        runtime.MANAGER.encode_prompt_replacement(
+            prompt_ids[:index], text, load_id=expected_load
+        ),
+        text,
+    )
 
 
 def branch_from(
