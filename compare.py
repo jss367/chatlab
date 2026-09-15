@@ -45,8 +45,14 @@ GAP_LABELS = (
 )
 GAP_EDGES = (0.5, 2.0, 5.0)
 SPLIT_LABEL = "After the split"
+# A token one run has and the other does not, covering no characters: an end
+# marker sampled by one reply and not the other. Neither a divergence nor a
+# comparison, so it takes the same neutral fill as a token with no
+# measurement rather than the ramp's warmest.
+TRAILING_LABEL = "Only in this run"
 GAP_COLORS = dict(zip(GAP_LABELS, SEQUENTIAL_FILLS[:4])) | {
     SPLIT_LABEL: SEQUENTIAL_FILLS[4],
+    TRAILING_LABEL: UNSCORED_FILL,
     UNSCORED_LABEL: UNSCORED_FILL,
 }
 GAP_CAPTION = (
@@ -160,10 +166,12 @@ def align(
     spans: list[dict] = []
     here = there = 0
     covered_here = covered_there = 0
+    parted = False
     while here < len(left) and there < len(right):
         start_here, start_there = here, there
         if not by_text:
             if int(left[here]["token_id"]) != int(right[there]["token_id"]):
+                parted = True
                 break
             here, there = here + 1, there + 1
         else:
@@ -196,6 +204,7 @@ def align(
                 or (ends_here[here - 1] <= covered_here
                     and (here < len(left) or there < len(right)))
             ):
+                parted = True
                 break
         end_here, end_there = ends_here[here - 1], ends_there[there - 1]
         covered = text_here[covered_here:end_here]
@@ -207,12 +216,55 @@ def align(
             # are shown at all. That disagreement is the whole reason this is
             # not an assertion - a fingerprint can only rule out the causes
             # it was told to look for, and this rules out the rest.
+            parted = True
             break
         spans.append(_span(
             left, right, start_here, here, start_there, there, len(spans) + 1, covered,
         ))
         covered_here, covered_there = end_here, end_there
+
+    if not parted:
+        # One run can finish with a token the other has no answer for and no
+        # characters to show for it: a reply that sampled its end marker
+        # against one that ran into the token limit having written exactly
+        # the same words. The walk above stops when either side runs out, so
+        # that leftover token would be painted as though the two had parted
+        # and the headline would say so, over text that never differed. It
+        # is not a divergence, and it is not comparable either - it is one
+        # run's alone, and it is drawn that way.
+        trailing_here, trailing_there = here, there
+        while trailing_here < len(left) and ends_here[trailing_here] == covered_here:
+            trailing_here += 1
+        while trailing_there < len(right) and ends_there[trailing_there] == covered_there:
+            trailing_there += 1
+        if trailing_here > here or trailing_there > there:
+            spans.append(_trailing_span(here, trailing_here, there, trailing_there, len(spans) + 1))
     return spans
+
+
+def _trailing_span(here0, here1, there0, there1, index) -> dict:
+    """Tokens one run has left over that cover no characters at all."""
+
+    return {
+        "position": index,
+        "text": "",
+        "display_text": "",
+        "left_range": (here0, here1),
+        "right_range": (there0, there1),
+        "one_to_one": False,
+        "comparable_choice": False,
+        "trailing": True,
+        "scored": False,
+        "surprise_bits": 0.0,
+        "left_surprise": None,
+        "right_surprise": None,
+        "left_top": "",
+        "left_top_id": None,
+        "left_top_determined": False,
+        "right_top": "",
+        "right_top_id": None,
+        "right_top_determined": False,
+    }
 
 
 def _token_text(metric: dict) -> str:
@@ -316,9 +368,12 @@ def strip(metrics, spans, side: str = "left") -> list[tuple[str, str]]:
     labels: dict[int, str] = {}
     for span in spans or ():
         low, high = span["left_range"] if side == "left" else span["right_range"]
-        label = (
-            gap_category(span["surprise_bits"]) if span["scored"] else UNSCORED_LABEL
-        )
+        if span.get("trailing"):
+            label = TRAILING_LABEL
+        elif span["scored"]:
+            label = gap_category(span["surprise_bits"])
+        else:
+            label = UNSCORED_LABEL
         for index in range(low, high):
             labels[index] = label
     return [

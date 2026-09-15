@@ -210,9 +210,16 @@ MAX_EXAMPLES = 64
 
 
 def parse_examples(text: str) -> list[str]:
-    """One example per line; blank lines separate nothing and are dropped."""
+    """One example per line; blank lines separate nothing and are dropped.
 
-    return [line.strip() for line in (text or "").splitlines() if line.strip()]
+    What is left of a line is left exactly as it was written. Indentation is
+    a behaviour a reader may well be steering towards - an example of four
+    spaces against an example of none is the whole contrast there - and
+    trimming every line would have made those two examples the same string
+    and the direction between them zero.
+    """
+
+    return [line for line in (text or "").splitlines() if line.strip()]
 
 
 def _pooled_deviation(here, there) -> float:

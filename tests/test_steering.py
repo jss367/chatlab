@@ -668,8 +668,12 @@ class ExtractionTests(unittest.TestCase):
                 held.extract_steering(["Hello world"], ["How are"])
         self.assertFalse(steering.decoder_layers(held.model)[0]._forward_hooks)
 
-    def test_parse_examples_takes_one_a_line(self):
-        self.assertEqual(steering.parse_examples(" a \n\n b \n"), ["a", "b"])
+    def test_parse_examples_takes_one_a_line_as_written(self):
+        # Indentation can be the whole contrast, so the lines are kept as
+        # they were typed; only blank ones go.
+        self.assertEqual(steering.parse_examples(" a \n\n b \n"), [" a ", " b "])
+        self.assertEqual(steering.parse_examples("    x\nx"), ["    x", "x"])
+        self.assertEqual(steering.parse_examples("a\n   \nb"), ["a", "b"])
         self.assertEqual(steering.parse_examples(""), [])
         self.assertEqual(steering.parse_examples(None), [])
 

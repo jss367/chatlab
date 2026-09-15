@@ -308,6 +308,48 @@ class ReadingTests(unittest.TestCase):
         painted = compare.strip(left, reading["readings"], "left")
         self.assertNotIn(compare.SPLIT_LABEL, [label for _text, label in painted])
 
+    def test_a_reply_that_ended_and_one_that_ran_on_still_share_their_text(self):
+        # A samples its end marker, B hits the token limit having written
+        # exactly the same words. The marker covers no characters, so the two
+        # replies did not part — one of them simply stopped.
+        def piece(position, token_id, text, surprise=1.0):
+            return dict(metric(position, token_id, surprise), text=text, display_text=text)
+
+        stopped = [piece(1, 1, "hello"), piece(2, 99, "")]
+        ran_on = [piece(1, 5, "hello")]
+        reading = compare.reading(
+            dict(run(stopped, model_id="a/model"), decoded="hello", token_ends=[5, 5]),
+            dict(run(ran_on, model_id="b/model"), decoded="hello", token_ends=[5]),
+        )
+        self.assertTrue(reading["complete"])
+        self.assertEqual(reading["left_shared"], 2)
+        self.assertEqual(reading["right_shared"], 1)
+        self.assertNotIn("parted", compare.headline(reading, None, None))
+        # The leftover token is neither a divergence nor a comparison.
+        painted = compare.strip(stopped, reading["readings"], "left")
+        self.assertEqual(painted[1][1], compare.TRAILING_LABEL)
+        self.assertNotEqual(painted[0][1], compare.SPLIT_LABEL)
+        # It contributes nothing to the gap figures either.
+        self.assertEqual(reading["compared"], 1)
+
+    def test_a_real_divergence_is_still_a_divergence(self):
+        # The sweep only runs when the walk ended by exhaustion; tokens after
+        # a genuine parting belong to the split, whatever they decode to.
+        def piece(position, token_id, text):
+            return dict(metric(position, token_id, 1.0), text=text, display_text=text)
+
+        left = [piece(1, 1, "hello"), piece(2, 99, "")]
+        right = [piece(1, 5, "world")]
+        reading = compare.reading(
+            dict(run(left, model_id="a/model"), decoded="hello", token_ends=[5, 5]),
+            dict(run(right, model_id="b/model"), decoded="world", token_ends=[5]),
+        )
+        self.assertEqual(reading["spans"], 0)
+        self.assertFalse(reading["complete"])
+        self.assertEqual(
+            compare.strip(left, reading["readings"], "left")[1][1], compare.SPLIT_LABEL
+        )
+
     def test_text_that_genuinely_parts_ends_the_alignment(self):
         def piece(position, token_id, text):
             return dict(metric(position, token_id, 1.0), text=text, display_text=text)
