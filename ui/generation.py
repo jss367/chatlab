@@ -338,6 +338,18 @@ def busy_status(held: str | None = None) -> str:
 NO_MODEL_STATUS = "Download and load a model first."
 
 
+# Where a few of the settings sit in the tuple the ``*settings`` handlers are
+# handed. They arrive in the order generate_reply() declares, which is the
+# order ui.layout wires the controls in, and the handlers below reach past the
+# ones they do not care about rather than naming all twelve. A control added
+# between two of them moves everything after it, so the positions are counted
+# here once instead of in each of those handlers.
+SYSTEM_PROMPT_SETTING = 0
+KEEP_REASONING_SETTING = 1
+MAX_NEW_TOKENS_SETTING = 7
+COLOR_SCALE_SETTING = 11
+
+
 def no_model_state(prompt_text: str, turns: list[dict]):
     """What to show when memory is empty: the load that emptied it, or the advice.
 
@@ -406,6 +418,7 @@ def generate_reply(
     temperature: float,
     top_p: float,
     top_k: int,
+    skip_top_below: float,
     max_new_tokens: int,
     seed,
     randomize_seed: bool,
@@ -481,6 +494,7 @@ def generate_reply(
             temperature,
             top_p,
             top_k,
+            skip_top_below,
             max_new_tokens,
             seed,
             randomize_seed,
@@ -517,6 +531,7 @@ def _stream_reply(
     temperature: float,
     top_p: float,
     top_k: int,
+    skip_top_below: float,
     max_new_tokens: int,
     seed,
     randomize_seed: bool,
@@ -683,6 +698,7 @@ def _stream_reply(
         temperature=float(temperature),
         top_p=float(top_p),
         top_k=int(top_k),
+        skip_top_below=float(skip_top_below),
         max_new_tokens=int(max_new_tokens),
         seed=used_seed,
         analyze_prompt=bool(analyze_prompt),
@@ -842,6 +858,7 @@ def _stream_reply(
         "temperature": float(temperature),
         "top_p": float(top_p),
         "top_k": int(top_k),
+        "skip_top_below": float(skip_top_below),
         "max_new_tokens": int(max_new_tokens),
         "seed": used_seed,
     }
@@ -890,6 +907,7 @@ def chat(
     temperature: float,
     top_p: float,
     top_k: int,
+    skip_top_below: float,
     max_new_tokens: int,
     seed,
     randomize_seed: bool,
@@ -929,6 +947,7 @@ def chat(
             temperature,
             top_p,
             top_k,
+            skip_top_below,
             max_new_tokens,
             seed,
             randomize_seed,
@@ -954,6 +973,7 @@ def regenerate_from(
     temperature: float,
     top_p: float,
     top_k: int,
+    skip_top_below: float,
     max_new_tokens: int,
     seed,
     randomize_seed: bool,
@@ -994,6 +1014,7 @@ def regenerate_from(
             temperature,
             top_p,
             top_k,
+            skip_top_below,
             max_new_tokens,
             seed,
             randomize_seed,
@@ -1025,9 +1046,13 @@ def retry_message(event: gr.RetryData, prompt_text, turns, *settings):
 
 
 def edit_message(event: gr.EditData, prompt_text, turns, *settings):
-    # Steering follows the eleven display/generation settings. This path
-    # clears strips itself and needs the color scale, not the vector snapshot.
-    scale_name = settings[10] if len(settings) > 10 else DEFAULT_COLOR_SCALE
+    # Steering follows the display/generation settings. This path clears
+    # strips itself and needs the color scale, not the vector snapshot.
+    scale_name = (
+        settings[COLOR_SCALE_SETTING]
+        if len(settings) > COLOR_SCALE_SETTING
+        else DEFAULT_COLOR_SCALE
+    )
     held = occupied()
     if held:
         # Not just the branch that regenerates: editing an assistant turn
@@ -1249,11 +1274,11 @@ def _branch_with_text(
         runtime.MANAGER.validate_generation_prefix(
             model_messages(
                 branch_turns,
-                system_prompt=settings[0],
-                include_reasoning=settings[1],
+                system_prompt=settings[SYSTEM_PROMPT_SETTING],
+                include_reasoning=settings[KEEP_REASONING_SETTING],
             ),
             (*kept, *replacement_ids),
-            max_new_tokens=int(settings[6]),
+            max_new_tokens=int(settings[MAX_NEW_TOKENS_SETTING]),
             load_id=expected_load,
             thinking_mode=turns[position].get("thinking_mode", "default"),
         )
@@ -1363,7 +1388,11 @@ def _branch_from(pick, prompt_text, turns, *settings, single_step=False, resampl
     else:
         note = f"Branched at token {at}: {pick['text']!r} instead of {pick['original']!r}."
     if single_step:
-        settings = (*settings[:6], 1, *settings[7:])
+        settings = (
+            *settings[:MAX_NEW_TOKENS_SETTING],
+            1,
+            *settings[MAX_NEW_TOKENS_SETTING + 1 :],
+        )
         note = (
             f"Keeping through token {at}; generating one next token."
             if unchanged else f"{note} Generating one next token."
@@ -1376,11 +1405,11 @@ def _branch_from(pick, prompt_text, turns, *settings, single_step=False, resampl
         runtime.MANAGER.validate_generation_prefix(
             model_messages(
                 turns[:position],
-                system_prompt=settings[0],
-                include_reasoning=settings[1],
+                system_prompt=settings[SYSTEM_PROMPT_SETTING],
+                include_reasoning=settings[KEEP_REASONING_SETTING],
             ),
             forced,
-            max_new_tokens=int(settings[6]),
+            max_new_tokens=int(settings[MAX_NEW_TOKENS_SETTING]),
             load_id=expected_load,
             thinking_mode=turns[position].get("thinking_mode", "default"),
         )

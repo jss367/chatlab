@@ -91,6 +91,7 @@ def fill_slot(
     temperature: float,
     top_p: float,
     top_k: int,
+    skip_top_below: float,
     max_new_tokens: int,
     seed,
     randomize_seed: bool,
@@ -176,8 +177,8 @@ def fill_slot(
                 # stream inside it holds the model lock until it is closed.
                 with contextlib.closing(_write_reply(
                     prompt, system_prompt, assistant_prefill, temperature, top_p,
-                    top_k, max_new_tokens, seed, randomize_seed, thinking_mode,
-                    vector, published,
+                    top_k, skip_top_below, max_new_tokens, seed, randomize_seed,
+                    thinking_mode, vector, published,
                 )) as writing:
                     for run, tokens in writing:
                         if run is not None:
@@ -218,7 +219,8 @@ def fill_slot(
 
 def _write_reply(
     prompt, system_prompt, assistant_prefill, temperature, top_p, top_k,
-    max_new_tokens, seed, randomize_seed, thinking_mode, vector, published,
+    skip_top_below, max_new_tokens, seed, randomize_seed, thinking_mode,
+    vector, published,
 ):
     """One reply to one prompt, in a conversation of its own.
 
@@ -239,6 +241,7 @@ def _write_reply(
         temperature=float(temperature),
         top_p=float(top_p),
         top_k=int(top_k),
+        skip_top_below=float(skip_top_below),
         max_new_tokens=int(max_new_tokens),
         seed=used_seed,
         # No panel is drawn for the prompt here, and scoring it would cost a
@@ -286,6 +289,7 @@ def _write_reply(
             "temperature": float(temperature),
             "top_p": float(top_p),
             "top_k": int(top_k),
+            "skip_top_below": float(skip_top_below),
             "max_new_tokens": int(max_new_tokens),
             "seed": used_seed,
             "thinking_mode": applied_thinking,

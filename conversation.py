@@ -79,6 +79,7 @@ SAMPLING_FIELDS = {
     "temperature": float,
     "top_p": float,
     "top_k": int,
+    "skip_top_below": float,
     "max_new_tokens": int,
 }
 

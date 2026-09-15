@@ -313,7 +313,7 @@ class BackgroundConversationTests(unittest.TestCase):
         runtime.MANAGER = self.manager
         self.release.set()
         values = {0: "hi", **dict(enumerate(SETTINGS, 2))}
-        values[8] = 1  # max_new_tokens in the existing chat input order
+        values[9] = 1  # max_new_tokens in the existing chat input order
         self.call("chat", values)
         self.finish()
         self.call("poll")
