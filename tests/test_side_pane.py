@@ -1816,14 +1816,43 @@ class ModelSearchPaneTests(unittest.TestCase):
         )
         self.assertIn("Starters first, then Hugging Face", detail)
 
-    def test_a_starter_is_not_listed_twice_when_the_hub_returns_it(self):
+    def test_a_starter_the_hub_also_returns_is_listed_once_with_both_halves(self):
+        # The catalog has the note and the download estimate; the search has
+        # the popularity and the date. The row keeps all of it.
         self.results = [
-            HubModel(model_id="allenai/Olmo-3-7B-Think", parameters=7_298_011_136), INSTRUCT
+            HubModel(
+                model_id="allenai/Olmo-3-7B-Think",
+                parameters=7_298_011_136,
+                downloads=94_210,
+                likes=712,
+                last_modified="2026-07-02",
+            ),
+            INSTRUCT,
         ]
         table, _, state, _ = app.search_models("olmo", "", order="Recommended")
         self.assertEqual(list(state), ["allenai/Olmo-3-7B-Think", INSTRUCT.model_id])
-        # The one kept is the starter, which carries the curated note.
-        self.assertIn("ChatLab", painted(table)["data"][0][0])
+        merged = state["allenai/Olmo-3-7B-Think"]
+        self.assertIn("ChatLab", merged.summary)
+        self.assertEqual(merged.download_bytes, 14_605_886_999)
+        self.assertEqual((merged.downloads, merged.likes), (94_210, 712))
+        self.assertEqual(merged.last_modified, "2026-07-02")
+        sent = painted(table)
+        self.assertEqual(
+            sent["headers"],
+            ["Model", "Params", "Download size", "Fit", "Downloads", "Likes", "Updated"],
+        )
+        self.assertEqual(sent["metadata"]["display_value"][0][2], "14.6 GB")
+        self.assertEqual(sent["metadata"]["display_value"][0][4], "94K")
+
+    def test_a_starter_the_hub_leaves_blank_keeps_the_catalogs_own_facts(self):
+        # A repository with no safetensors index has no parameter count in the
+        # search, and the hub drops a licence as readily.
+        self.results = [HubModel(model_id="allenai/Olmo-3-7B-Think", downloads=12)]
+        _, _, state, _ = app.search_models("olmo", "", order="Recommended")
+        merged = state["allenai/Olmo-3-7B-Think"]
+        self.assertEqual(merged.parameters, 7_298_011_136)
+        self.assertEqual(merged.license, "apache-2.0")
+        self.assertEqual(merged.downloads, 12)
 
     def test_recommended_falls_back_to_starters_when_the_hub_is_unreachable(self):
         self.results = ConnectionError("offline")

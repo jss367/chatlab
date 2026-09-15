@@ -7,6 +7,7 @@ import re
 import threading
 import time
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 from typing import NamedTuple
 
@@ -2174,10 +2175,13 @@ def search_models(
                     None,
                 )
             unreachable = error
-    # Starters first, and a starter's curated note says more than the same
-    # repository read from the Hub, so a duplicate is dropped, not listed twice.
+    # Starters first, and a starter the Hub also returned is listed once,
+    # wearing both sides of what is known about it; see merged_starter.
+    from_hub = {result.model_id: result for result in found}
     named = {starter.model_id for starter in starters}
-    results = starters + [result for result in found if result.model_id not in named]
+    results = [
+        merged_starter(starter, from_hub.get(starter.model_id)) for starter in starters
+    ] + [result for result in found if result.model_id not in named]
     if not results:
         described = {IMAGE_KIND: "text-to-image models", MLX_KIND: "MLX models"}.get(
             kind, "language models"
@@ -2191,6 +2195,33 @@ def search_models(
     table, detail, _ = refresh_search_results(None, state, precision, fits_only)
     ordering = search_note(order, bool(starters), searched_hub, unreachable)
     return table, f"{ordering} {detail}", state, None
+
+
+def merged_starter(starter: HubModel, live: HubModel | None) -> HubModel:
+    """A bundled starter wearing what the Hub’s own answer adds to it.
+
+    The two describe one repository from different sides. The catalog has the
+    curated note and the download estimate, which a search result never
+    carries; the search has the downloads, the likes and the date, which the
+    catalog cannot keep current. Keeping one and dropping the other would take
+    columns off the row that the same search shows for every other result, so
+    the row is both: the live answer, with the catalog filling what the Hub
+    left empty.
+    """
+
+    if live is None:
+        return starter
+    # A search result whose repository publishes no safetensors index has no
+    # parameter count, and the hub omits a tag or a license as readily; the
+    # catalog’s copy is older than the hub’s but better than none.
+    stale = {
+        name: getattr(starter, name)
+        for name in ("parameters", "pipeline_tag", "library", "license", "last_modified")
+        if getattr(live, name) is None
+    }
+    return replace(
+        live, **stale, summary=starter.summary, download_bytes=starter.download_bytes
+    )
 
 
 def search_note(
