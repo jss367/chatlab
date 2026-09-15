@@ -198,6 +198,66 @@ def summary_tiles(summary: dict, *, note: str = "") -> str:
     return f'<div class="viz-root viz-tiles">{tiles}</div>{footer}'
 
 
+def comparison_tiles(reading: dict) -> str:
+    """Headline numbers for two runs read against each other."""
+
+    if not reading:
+        return '<div class="viz-empty">Fill both slots to compare them.</div>'
+    if not reading["compared"]:
+        return (
+            '<div class="viz-empty">The two runs share no measured tokens, so '
+            "there is nothing to compare.</div>"
+        )
+    left, right = reading["left_summary"], reading["right_summary"]
+    tiles = "".join(
+        (
+            _tile(
+                f"{reading['spans']:,}",
+                "spans shared",
+                f"A ran to {reading['left_count']:,} tokens, B to {reading['right_count']:,}; "
+                f"they line up over A's first {reading['left_shared']:,} and B's first "
+                f"{reading['right_shared']:,}. A span is a stretch of characters both runs "
+                "covered, which is one token each where the two share a tokenizer.",
+            ),
+            _tile(
+                f"{reading['mean_gap_bits']:.2f}",
+                "mean gap (bits)",
+                "Average distance between the two runs' surprise over a shared span.",
+            ),
+            _tile(
+                f"{reading['widest_gap_bits']:.2f}",
+                "widest gap (bits)",
+                f"At span {reading['widest_position']:,}.",
+            ),
+            _tile(
+                (
+                    f"{reading['top_choice_changed'] / reading['choices_compared']:.0%}"
+                    if reading["choices_compared"]
+                    else "—"
+                ),
+                "top choice changed",
+                (
+                    f"{reading['top_choice_changed']:,} of the "
+                    f"{reading['choices_compared']:,} spans where both runs spent a "
+                    "single token had a different first choice. A span of several "
+                    "tokens against one has no pair of first choices to compare, so "
+                    "it is not counted either way."
+                    if reading["choices_compared"]
+                    else "No span was one token against one, so there were no first "
+                    "choices to put side by side."
+                ),
+            ),
+            _tile(
+                f"{left['perplexity']:,.1f} → {right['perplexity']:,.1f}",
+                "perplexity A → B",
+                f"Mean surprise {left['mean_surprise_bits']:.2f} → "
+                f"{right['mean_surprise_bits']:.2f} bits, over each run's whole output.",
+            ),
+        )
+    )
+    return f'<div class="viz-root viz-tiles">{tiles}</div>'
+
+
 # ------------------------------------------------------- layers and attention
 
 EMPTY_LENS = (

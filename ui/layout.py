@@ -60,9 +60,29 @@ from ui.conversations import (
     save_conversation,
     switch_fork,
 )
+from compare import (
+    CONFIGURATION_HEADERS,
+    EMPTY_SLOT as COMPARE_SLOT_EMPTY,
+    DIVERGENCE_HEADERS,
+    GAP_CAPTION,
+    GAP_COLORS,
+    MEASUREMENT,
+    REPLY,
+)
+from ui.compare import (
+    COMPARE_EMPTY,
+    clear_slots,
+    download_comparison,
+    fill_slot,
+    mode_controls,
+    render as render_comparison,
+    stop_comparison,
+)
 from ui.steering import (
-    EMPTY_STATUS, import_vector, load_with_steering, remember_steering,
-    remove_vector, steering_updates,
+    EMPTY_STATUS, EXTRACT_EMPTY, EXTRACT_HEADERS, POOL_CHOICES, choose_layer,
+    describe_layer, download_extracted, extract_vector, import_vector,
+    load_with_steering, remember_steering, remove_vector, steering_updates,
+    use_extracted,
 )
 from ui.images_page import (
     NO_ATTENTION,
@@ -278,6 +298,19 @@ def build_app() -> gr.Blocks:
         chat_metrics_state = gr.State((0, []))
         chat_context_ids_state = gr.State((0, [], None))
         steering_state = gr.State(None)
+        # What the last extraction read: one direction per decoder block, the
+        # numbers beside each, and the load they were read through. Held
+        # whole so that moving the layer control is instant - the pass that
+        # reads one layer reads them all, and re-reading to change a layer
+        # would cost another pass over every example.
+        extract_state = gr.State(None)
+        # The two comparison slots, and the document a download would write.
+        # A slot holds one whole run - its tokens, its measurements and the
+        # configuration it ran under - because the model that produced it may
+        # be gone by the time the other slot is filled, which is the point.
+        compare_a_state = gr.State(None)
+        compare_b_state = gr.State(None)
+        compare_export_state = gr.State(None)
         inspect_target = gr.State(None)
         insight_state = gr.State(None)
         # The prompts the last file gave, as it gave them. A prompt with a
@@ -565,6 +598,69 @@ def build_app() -> gr.Blocks:
                                         steering_status = gr.Textbox(
                                             value=EMPTY_STATUS, label="Vector status", interactive=False,
                                         )
+                                        with gr.Accordion("Extract from examples", open=False):
+                                            gr.Markdown(
+                                                "Read a direction out of the model instead of importing one. "
+                                                "Each example is run through the model once and every layer's "
+                                                "activation is pooled to a vector; the direction is the wanted "
+                                                "examples' mean minus the unwanted ones'. One example per line."
+                                            )
+                                            extract_positive = gr.Textbox(
+                                                label="Examples of what you want",
+                                                placeholder="One per line.",
+                                                lines=4,
+                                                elem_id="extract-positive",
+                                            )
+                                            extract_negative = gr.Textbox(
+                                                label="Examples of the opposite",
+                                                placeholder="One per line.",
+                                                lines=4,
+                                                elem_id="extract-negative",
+                                            )
+                                            extract_chat = gr.Checkbox(
+                                                value=False,
+                                                label="Read each example as a user turn",
+                                                info=(
+                                                    "Wraps every example in the model's chat template and "
+                                                    "reads it at the position a reply would start from. "
+                                                    "Models without a chat template read plain text, and say so."
+                                                ),
+                                            )
+                                            extract_pool = gr.Radio(
+                                                choices=list(POOL_CHOICES),
+                                                value="last",
+                                                label="Pool each example at",
+                                            )
+                                            extract_button = gr.Button(
+                                                "Extract direction", variant="primary"
+                                            )
+                                            extract_status = gr.Markdown(
+                                                EXTRACT_EMPTY, elem_id="extract-status"
+                                            )
+                                            extract_table = gr.Dataframe(
+                                                headers=EXTRACT_HEADERS,
+                                                datatype=["number"] * 4,
+                                                column_widths=["16%", "28%", "28%", "28%"],
+                                                interactive=False,
+                                                elem_id="extract-layers",
+                                                label="Layer by layer — click a row to choose it",
+                                            )
+                                            extract_layer = gr.Slider(
+                                                0, 0, value=0, step=1,
+                                                label="Layer to take the direction from",
+                                                interactive=False,
+                                            )
+                                            with gr.Row():
+                                                extract_apply = gr.Button(
+                                                    "Use this layer", interactive=False, min_width=110
+                                                )
+                                                gr.DownloadButton(
+                                                    "Download vector",
+                                                    value=download_extracted,
+                                                    inputs=[extract_state, extract_layer],
+                                                    size="sm",
+                                                    min_width=110,
+                                                )
                                     with gr.Row():
                                         save_button = gr.Button("Save conversation", elem_classes=icon_classes("download"))
                                         load_upload = gr.UploadButton(
@@ -721,6 +817,129 @@ def build_app() -> gr.Blocks:
                                     visible=False,
                                     interactive=False,
                                     elem_id="batch-files",
+                                )
+
+                            with gr.Tab("Compare", elem_id="compare-tab"):
+                                gr.Markdown(
+                                    "Two runs, side by side. Fill slot A, change one "
+                                    "thing — the model, the precision, a steering "
+                                    "vector, the seed — and fill slot B. Each slot "
+                                    "keeps its own model and settings, so the two can "
+                                    "be filled a model load apart. The system prompt "
+                                    "and prefill come from Settings, the sampling "
+                                    "controls and the steering vector from the Chat tab."
+                                )
+                                compare_mode = gr.Radio(
+                                    choices=[
+                                        ("Writing a reply", REPLY),
+                                        ("Measuring fixed text", MEASUREMENT),
+                                    ],
+                                    value=REPLY,
+                                    label="Fill a slot by",
+                                    info=(
+                                        "Two replies part company somewhere in the "
+                                        "answer and only their shared opening can be "
+                                        "compared. Two runs over one fixed passage "
+                                        "never part, so every token is comparable — "
+                                        "and a measurement reads the context and the "
+                                        "passage alone, so put a measurement's framing "
+                                        "in the context box rather than in the system "
+                                        "prompt."
+                                    ),
+                                )
+                                compare_prompt = gr.Textbox(
+                                    label="Prompt for both runs",
+                                    placeholder="The message both runs answer.",
+                                    lines=4,
+                                    elem_id="compare-prompt",
+                                )
+                                compare_template = gr.Checkbox(
+                                    value=False,
+                                    visible=False,
+                                    label="Read the context as a chat message",
+                                )
+                                compare_text = gr.Textbox(
+                                    label="Text to measure",
+                                    placeholder="The passage both runs read…",
+                                    lines=6,
+                                    visible=False,
+                                    elem_id="compare-text",
+                                )
+                                with gr.Row():
+                                    compare_run_a = gr.Button(
+                                        "Run into A", variant="primary", min_width=110
+                                    )
+                                    compare_run_b = gr.Button(
+                                        "Run into B", variant="primary", min_width=110
+                                    )
+                                    # Escape presses this while a slot is being
+                                    # filled; see SHORTCUT_JS.
+                                    compare_stop = gr.Button(
+                                        "Stop",
+                                        variant="stop",
+                                        visible=False,
+                                        elem_id="stop-compare",
+                                        min_width=70,
+                                    )
+                                    compare_clear = gr.Button(
+                                        "Clear both", min_width=110
+                                    )
+                                compare_status = gr.Markdown(
+                                    COMPARE_EMPTY, elem_id="compare-status"
+                                )
+                                compare_tiles = gr.HTML(
+                                    charts.comparison_tiles({}), elem_id="compare-tiles"
+                                )
+                                compare_headline = gr.Markdown(
+                                    "", elem_id="compare-headline"
+                                )
+                                compare_a_heading = gr.Markdown(f"**A** · {COMPARE_SLOT_EMPTY}")
+                                compare_a_strip = gr.HighlightedText(
+                                    label="Slot A",
+                                    color_map=GAP_COLORS,
+                                    show_legend=True,
+                                    combine_adjacent=False,
+                                    elem_id="compare-a-strip",
+                                )
+                                compare_b_heading = gr.Markdown(f"**B** · {COMPARE_SLOT_EMPTY}")
+                                compare_b_strip = gr.HighlightedText(
+                                    label="Slot B",
+                                    color_map=GAP_COLORS,
+                                    show_legend=True,
+                                    combine_adjacent=False,
+                                    elem_id="compare-b-strip",
+                                )
+                                gr.Markdown(
+                                    GAP_CAPTION, elem_classes=["scale-caption"]
+                                )
+                                compare_chart = gr.HTML(
+                                    charts.EMPTY_CHART, elem_id="compare-chart"
+                                )
+                                compare_settings = gr.Dataframe(
+                                    headers=CONFIGURATION_HEADERS,
+                                    datatype=["str", "str", "str"],
+                                    column_widths=["26%", "37%", "37%"],
+                                    wrap=True,
+                                    interactive=False,
+                                    elem_id="compare-settings",
+                                    label="What differed between the two runs",
+                                )
+                                compare_rows = gr.Dataframe(
+                                    headers=DIVERGENCE_HEADERS,
+                                    datatype=["number", "str", "number", "number",
+                                              "number", "str", "str"],
+                                    column_widths=["6%", "16%", "14%", "14%", "12%",
+                                                   "19%", "19%"],
+                                    wrap=True,
+                                    interactive=False,
+                                    elem_id="compare-divergences",
+                                    label="Where the two runs read a shared token most differently",
+                                )
+                                gr.DownloadButton(
+                                    "Download comparison JSON",
+                                    value=download_comparison,
+                                    inputs=compare_export_state,
+                                    size="sm",
                                 )
 
                     # The seam between the transcript and the readings is a
@@ -1877,6 +2096,29 @@ def build_app() -> gr.Blocks:
             remove_vector, forks_state, [forks_state, *steering_outputs],
             concurrency_id=CONVERSATION_PANE_QUEUE,
         )
+        extract_button.click(
+            extract_vector,
+            [extract_positive, extract_negative, extract_chat, extract_pool],
+            [extract_state, extract_table, extract_layer, extract_apply, extract_status],
+        )
+        extract_table.select(
+            choose_layer, extract_state, [extract_layer, extract_status]
+        )
+        # input rather than change: the extraction writes the layer control
+        # itself, with a fuller status beside it, and a change listener would
+        # fire on that write and replace the status with the shorter line.
+        extract_layer.input(
+            describe_layer,
+            [extract_state, extract_layer],
+            extract_status,
+            show_progress="hidden",
+        )
+        extract_apply.click(
+            use_extracted,
+            [forks_state, extract_state, extract_layer],
+            [forks_state, *steering_outputs],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+        )
         for control in (steering_enabled, steering_strength, steering_layer):
             control.input(
                 remember_steering,
@@ -2396,6 +2638,79 @@ def build_app() -> gr.Blocks:
         stop_prompts_button.click(
             stop_batch, batch_directory_state, batch_outputs, cancels=[batch_run]
         )
+        # ------------------------------------------------------------ Compare
+        compare_outputs = [
+            compare_a_heading,
+            compare_b_heading,
+            compare_a_strip,
+            compare_b_strip,
+            compare_tiles,
+            compare_chart,
+            compare_headline,
+            compare_settings,
+            compare_rows,
+            compare_export_state,
+        ]
+        # Everything a run reads. The sampling controls and the steering
+        # vector are the Chat tab's own, so a slot is filled under exactly
+        # the settings a reply typed by hand would have used - which is what
+        # makes changing one of them between A and B a clean experiment.
+        compare_inputs = [
+            compare_mode,
+            compare_prompt,
+            compare_text,
+            compare_template,
+            system_prompt,
+            assistant_prefill,
+            temperature,
+            top_p,
+            top_k,
+            max_new_tokens,
+            seed,
+            randomize_seed,
+            thinking_mode,
+            *steering_inputs,
+        ]
+        compare_slot_outputs = [compare_status, compare_run_a, compare_run_b, compare_stop]
+        compare_runs = []
+        for slot, button, held in (
+            ("A", compare_run_a, compare_a_state),
+            ("B", compare_run_b, compare_b_state),
+        ):
+            filling = button.click(
+                partial(fill_slot, slot),
+                compare_inputs,
+                [held, *compare_slot_outputs],
+            )
+            # Drawn after the slot is filled rather than from inside the run:
+            # the comparison needs both slots, and a run knows only its own.
+            filling.then(
+                render_comparison,
+                [compare_a_state, compare_b_state],
+                compare_outputs,
+            )
+            compare_runs.append(filling)
+        # Cancelling closes the run at its last yield, which is what gives the
+        # model lock back; this only puts the buttons right. The slot keeps
+        # whatever it held before, because half a response is not a run.
+        compare_stop.click(
+            stop_comparison, None, compare_slot_outputs, cancels=compare_runs
+        )
+        # cancels, because clearing during a run is otherwise undone by the
+        # run: its remaining frames would write over the cleared status and
+        # its last one would put the slot back. See clear_slots().
+        compare_clear.click(
+            clear_slots,
+            None,
+            [compare_a_state, compare_b_state, *compare_slot_outputs, *compare_outputs],
+            cancels=compare_runs,
+        )
+        compare_mode.change(
+            mode_controls,
+            compare_mode,
+            [compare_prompt, compare_text, compare_template],
+        )
+
         prompts_box.change(
             count_prompts,
             [prompts_box, loaded_prompts_state],

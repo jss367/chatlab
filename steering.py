@@ -203,6 +203,131 @@ def read_vector(path: str) -> dict:
     return result
 
 
+# How many examples one side of a contrast may hold. Extraction keeps every
+# example's reading of every layer until the direction is known, so this is
+# memory as much as patience: one 7B example is a row of 32 by 4096 numbers.
+MAX_EXAMPLES = 64
+
+
+def parse_examples(text: str) -> list[str]:
+    """One example per line; blank lines separate nothing and are dropped.
+
+    What is left of a line is left exactly as it was written. Indentation is
+    a behaviour a reader may well be steering towards - an example of four
+    spaces against an example of none is the whole contrast there - and
+    trimming every line would have made those two examples the same string
+    and the direction between them zero.
+    """
+
+    return [line for line in (text or "").splitlines() if line.strip()]
+
+
+def _pooled_deviation(here, there) -> float:
+    """The spread the two sets share, for an effect size across them.
+
+    Either side may hold a single example, which has no spread of its own to
+    contribute; a side of one contributes nothing rather than a NaN. With one
+    example on each side there is no spread at all and the effect size cannot
+    be formed, which is reported as a zero for the caller to refuse.
+    """
+
+    import numpy as np
+
+    degrees = len(here) + len(there) - 2
+    if degrees < 1:
+        return 0.0
+    total = 0.0
+    for values in (here, there):
+        if len(values) > 1:
+            total += (len(values) - 1) * float(np.var(values, ddof=1))
+    spread = math.sqrt(total / degrees)
+    return spread if math.isfinite(spread) and spread > 0 else 0.0
+
+
+def contrast_directions(positive, negative):
+    """Difference in means, layer by layer, with what each one separates.
+
+    Both arguments are one row per example, each row one pooled activation
+    per decoder block. The direction for a block is the mean of the positive
+    examples' activations minus the mean of the negative ones' - the
+    difference in means, which is the vector a reader is asking for when they
+    say "steer towards these and away from those".
+
+    Beside each direction go three numbers for choosing between the layers:
+    its own length, the typical length of an activation at that layer, and
+    how far apart the two sets sit along it. The last is a standardized
+    effect size - the gap between the two sets' projections divided by the
+    spread they share - so it can be read across layers whose activations
+    have very different scales, which the raw length cannot. It is measured
+    on the examples the direction was taken from, so it says how cleanly this
+    direction splits *these* examples and not how it will generalize.
+    ``None`` where there is no spread to divide by: one example on each side.
+    """
+
+    import numpy as np
+
+    positive = np.asarray(positive, dtype=np.float64)
+    negative = np.asarray(negative, dtype=np.float64)
+    if not len(positive) or not len(negative):
+        raise SteeringError("Give at least one example on each side.")
+    if positive.ndim != 3 or negative.ndim != 3 or positive.shape[1:] != negative.shape[1:]:
+        raise SteeringError("Every example must be read at the same layers and width.")
+    if not positive.shape[1] or not positive.shape[2]:
+        raise SteeringError("The model returned no layer activations to compare.")
+
+    directions = positive.mean(axis=0) - negative.mean(axis=0)
+    stats = []
+    for layer, direction in enumerate(directions):
+        norm = float(np.linalg.norm(direction))
+        lengths = np.linalg.norm(
+            np.concatenate([positive[:, layer], negative[:, layer]]), axis=1
+        )
+        separation = None
+        if norm > 0:
+            unit = direction / norm
+            here, there = positive[:, layer] @ unit, negative[:, layer] @ unit
+            spread = _pooled_deviation(here, there)
+            if spread:
+                separation = float((here.mean() - there.mean()) / spread)
+        stats.append({
+            "layer": layer,
+            "norm": norm,
+            "activation_norm": float(lengths.mean()),
+            "separation": separation,
+        })
+    return [[float(value) for value in row] for row in directions], stats
+
+
+def best_layer(stats) -> int:
+    """Which layer's direction separated the examples most cleanly.
+
+    The effect size decides it where there is one. With a single example on
+    each side there is none anywhere, and the longest direction is the only
+    thing left to go on - a weak answer, which is why the interface says how
+    it was reached.
+    """
+
+    if not stats:
+        return 0
+    ranked = [item for item in stats if item["separation"] is not None]
+    if ranked:
+        return int(max(ranked, key=lambda item: abs(item["separation"]))["layer"])
+    return int(max(stats, key=lambda item: item["norm"])["layer"])
+
+
+def vector_from(model_id: str, layer: int, values, *, strength=1.0, enabled=True) -> dict:
+    """An extracted direction in the shape an imported file would have."""
+
+    return normalize({
+        "format": FORMAT,
+        "model_id": model_id,
+        "layer": int(layer),
+        "vector": [float(value) for value in values],
+        "strength": float(strength),
+        "enabled": bool(enabled),
+    })
+
+
 def from_controls(value, enabled=None, strength=None, layer=None):
     """Snapshot visible controls without waiting for their persistence event.
 

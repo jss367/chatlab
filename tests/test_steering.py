@@ -3,7 +3,10 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
+
+import gradio as gr
 
 import numpy as np
 import torch
@@ -11,6 +14,7 @@ from transformers import GPT2Config, GPT2LMHeadModel, LlamaConfig, LlamaForCausa
 
 import conversation
 import library
+import model_runtime
 import settings_sandbox
 import steering
 from model_runtime import ModelChanged, ModelManager
@@ -538,3 +542,257 @@ class ConversationTests(unittest.TestCase):
             copied = conversation.copy_turns(frame[TURNS])
             copied[-1]["steering"]["layer"] = 999
             self.assertEqual(steering.expand(frame[TURNS][-1]["steering"]), vector())
+
+
+class ExtractionTests(unittest.TestCase):
+    """Reading a direction out of examples, and putting it back."""
+
+    def manager(self):
+        held = manager()
+        # The shipped fake tokenizer answers every prompt with one placeholder
+        # token, which would give both sides of a contrast identical
+        # activations. Extraction needs text to reach the model as itself.
+        class Greedy(FakeTokenizer):
+            def __call__(self, text, **kwargs):
+                return super().__call__(text, **dict(kwargs, add_special_tokens=False))
+
+        held.tokenizer = Greedy()
+        return held
+
+    def test_the_direction_is_the_difference_of_the_block_outputs(self):
+        held = self.manager()
+        blocks = steering.decoder_layers(held.model)
+        extraction = held.extract_steering(["Hello world"], ["How are"])
+        with torch.inference_mode():
+            wanted = held._pooled_block_outputs(held._example_ids("Hello world", False), blocks, "last")
+            unwanted = held._pooled_block_outputs(held._example_ids("How are", False), blocks, "last")
+        for layer in range(len(blocks)):
+            np.testing.assert_allclose(
+                extraction.layers[layer], wanted[layer] - unwanted[layer], rtol=1e-5, atol=1e-6
+            )
+
+    def test_adding_the_direction_moves_the_block_where_it_was_measured(self):
+        """The whole point: the vector lands on the layer it was read from."""
+
+        held = self.manager()
+        blocks = steering.decoder_layers(held.model)
+        extraction = held.extract_steering(["Hello world"], ["How are"])
+        direction = steering.vector_from(extraction.model_id, 0, extraction.layers[0])
+        ids = held._example_ids("How are", False)
+        with torch.inference_mode():
+            wanted = held._pooled_block_outputs(held._example_ids("Hello world", False), blocks, "last")
+            with steering.applied(held.model, "test/tiny", direction):
+                steered = held._pooled_block_outputs(ids, blocks, "last")
+        # Layer 0's output is now exactly what the wanted example produced
+        # there. Later layers are not, because the change propagates.
+        np.testing.assert_allclose(steered[0], wanted[0], rtol=1e-5, atol=1e-6)
+        self.assertFalse(np.allclose(steered[1], wanted[1]))
+        self.assertFalse(blocks[0]._forward_hooks)
+
+    def test_the_captured_output_is_the_one_steering_adds_to(self):
+        """A stack appends its final hidden state after the final norm."""
+
+        held = self.manager()
+        blocks = steering.decoder_layers(held.model)
+        ids = held._example_ids("Hello world", False)
+        with torch.inference_mode():
+            pooled = held._pooled_block_outputs(ids, blocks, "last")
+            output = held.model(input_ids=torch.tensor([ids]), output_hidden_states=True)
+        # Every block but the last is reported as it was captured.
+        np.testing.assert_allclose(
+            pooled[0], output.hidden_states[1][0, -1].float().numpy(), rtol=1e-5, atol=1e-6
+        )
+        # The last one is not: what is reported there has been normed, and a
+        # direction read from it would be added back in the wrong basis.
+        last = output.hidden_states[-1][0, -1].float().numpy()
+        self.assertFalse(np.allclose(pooled[-1], last))
+        with torch.inference_mode():
+            normed = held.model.model.norm(torch.tensor(pooled[-1]).unsqueeze(0)).squeeze(0)
+        np.testing.assert_allclose(normed.numpy(), last, rtol=1e-5, atol=1e-6)
+
+    def test_pooling_over_the_whole_example_differs_from_its_last_token(self):
+        held = self.manager()
+        last = held.extract_steering(["Hello world"], ["How are"], pool="last")
+        mean = held.extract_steering(["Hello world"], ["How are"], pool="mean")
+        self.assertFalse(np.allclose(last.layers[0], mean.layers[0]))
+        with self.assertRaisesRegex(ValueError, "last token or their mean"):
+            held.extract_steering(["Hello"], ["How"], pool="median")
+
+    def test_separation_needs_more_than_one_example_a_side(self):
+        held = self.manager()
+        alone = held.extract_steering(["Hello world"], ["How are"])
+        self.assertTrue(all(item["separation"] is None for item in alone.stats))
+        # With no effect size anywhere, the longest direction is all there is.
+        self.assertEqual(
+            steering.best_layer(list(alone.stats)),
+            max(alone.stats, key=lambda item: item["norm"])["layer"],
+        )
+        several = held.extract_steering(
+            ["Hello world", "Hello!"], ["How are", "How you"]
+        )
+        self.assertTrue(all(item["separation"] is not None for item in several.stats))
+        self.assertTrue(all(item["activation_norm"] > 0 for item in several.stats))
+        self.assertEqual(
+            steering.best_layer(list(several.stats)),
+            max(several.stats, key=lambda item: abs(item["separation"]))["layer"],
+        )
+
+    def test_empty_sides_and_oversized_sets_are_refused(self):
+        held = self.manager()
+        for positive, negative, message in (
+            ([], ["How are"], "each side"),
+            (["Hello"], [], "each side"),
+            (["Hello"] * (steering.MAX_EXAMPLES + 1), ["How"], "wanted examples"),
+            (["Hello"], ["How"] * (steering.MAX_EXAMPLES + 1), "unwanted examples"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                held.extract_steering(positive, negative)
+        with self.assertRaisesRegex(ValueError, "did not produce any tokens"):
+            held.extract_steering([""], ["How are"])
+
+    def test_an_example_above_the_ceiling_is_refused(self):
+        held = self.manager()
+        with mock.patch.object(model_runtime, "STEERING_EXAMPLE_TOKEN_LIMIT", 1):
+            with self.assertRaisesRegex(ValueError, "above the 1 "):
+                held.extract_steering(["Hello world"], ["How are"])
+
+    def test_a_stale_load_and_an_mlx_engine_are_refused(self):
+        held = self.manager()
+        previous = held.load_id
+        held.model_id = "other/model"
+        with self.assertRaises(ModelChanged):
+            held.extract_steering(["Hello"], ["How"], load_id=previous)
+        held.model_id = "test/tiny"
+        with mock.patch.object(held, "_engine", return_value=SimpleNamespace(backend="mlx")):
+            with self.assertRaisesRegex(ValueError, "MLX"):
+                held.extract_steering(["Hello world"], ["How are"])
+        self.assertFalse(steering.decoder_layers(held.model)[0]._forward_hooks)
+
+    def test_parse_examples_takes_one_a_line_as_written(self):
+        # Indentation can be the whole contrast, so the lines are kept as
+        # they were typed; only blank ones go.
+        self.assertEqual(steering.parse_examples(" a \n\n b \n"), [" a ", " b "])
+        self.assertEqual(steering.parse_examples("    x\nx"), ["    x", "x"])
+        self.assertEqual(steering.parse_examples("a\n   \nb"), ["a", "b"])
+        self.assertEqual(steering.parse_examples(""), [])
+        self.assertEqual(steering.parse_examples(None), [])
+
+
+class ExtractionControlTests(unittest.TestCase):
+    """The panel: extracting, choosing a layer, and applying what was chosen."""
+
+    def manager(self):
+        return ExtractionTests.manager(self)
+
+    def test_extracting_fills_the_table_and_names_the_best_layer(self):
+        with mock.patch.object(runtime, "MANAGER", self.manager()):
+            held, table, layer, apply_button, status = controls.extract_vector(
+                "Hello world\nHello!", "How are\nHow you", False, "last"
+            )
+        self.assertEqual(len(held["layers"]), 2)
+        self.assertEqual(len(table["value"]), 2)
+        self.assertEqual(table["value"][0][0], 0)
+        self.assertEqual(layer["maximum"], 1)
+        self.assertTrue(layer["interactive"])
+        self.assertTrue(apply_button["interactive"])
+        self.assertIn("Read 2 wanted and 2 unwanted examples", status)
+        self.assertIn(controls.SEPARATION_CAVEAT, status)
+        self.assertIn(f"Layer {layer['value']}", status)
+
+    def test_an_empty_side_and_a_busy_model_are_refused_without_a_pass(self):
+        with mock.patch.object(runtime, "MANAGER", self.manager()) as held:
+            result = controls.extract_vector("Hello world", "", False, "last")
+            self.assertEqual(result[0], gr.skip())
+            self.assertIn("each side", result[-1])
+            self.assertTrue(held.reserve_generation())
+            try:
+                result = controls.extract_vector("Hello world", "How are", False, "last")
+            finally:
+                held.release_generation()
+            self.assertEqual(result[0], gr.skip())
+            self.assertEqual(result[-1], controls.EXTRACT_BUSY)
+            self.assertEqual(result[1], gr.skip())
+
+    def test_a_failed_extraction_clears_the_result_it_could_not_replace(self):
+        # Download vector reads the state directly, so a cleared table with a
+        # kept state would serve a vector the page says is not there.
+        with mock.patch.object(runtime, "MANAGER", self.manager()) as held:
+            with mock.patch.object(held, "extract_steering", side_effect=ValueError("no good")):
+                result = controls.extract_vector("Hello world", "How are", False, "last")
+            self.assertIn("no good", result[-1])
+            self.assertIsNone(result[0])
+            self.assertEqual(result[1]["value"], [])
+            self.assertFalse(result[3]["interactive"])
+            self.assertFalse(held.busy)
+
+    def test_a_refusal_leaves_the_previous_extraction_where_it_is(self):
+        # Nothing ran, so the direction already on screen is still the truth
+        # and the state behind it still matches the table.
+        with mock.patch.object(runtime, "MANAGER", self.manager()) as held:
+            controls.extract_vector("Hello world", "How are", False, "last")
+            self.assertTrue(held.reserve_generation())
+            try:
+                refused = controls.extract_vector("Hello world", "How are", False, "last")
+            finally:
+                held.release_generation()
+        self.assertEqual(refused[:-1], (gr.skip(),) * 4)
+        self.assertEqual(refused[-1], controls.EXTRACT_BUSY)
+
+    def test_choosing_a_layer_moves_the_control_and_describes_it(self):
+        with mock.patch.object(runtime, "MANAGER", self.manager()):
+            held = controls.extract_vector("Hello world\nHello!", "How are\nHow you", False, "last")[0]
+        event = SimpleNamespace(index=[1, 0])
+        layer, status = controls.choose_layer(held, event)
+        self.assertEqual(layer, 1)
+        self.assertIn("Layer 1", status)
+        self.assertEqual(controls.choose_layer(None, event), (gr.skip(), gr.skip()))
+        # A row outside the table cannot name a layer that is not there.
+        self.assertEqual(controls.choose_layer(held, SimpleNamespace(index=[9, 0]))[0], 1)
+        self.assertEqual(controls.describe_layer(None, 0), controls.EXTRACT_EMPTY)
+
+    def test_using_a_layer_puts_that_layer_s_vector_on_the_conversation(self):
+        held_manager = self.manager()
+        with mock.patch.object(runtime, "MANAGER", held_manager):
+            extraction = controls.extract_vector("Hello world", "How are", False, "last")[0]
+            forks = conversation.new_forks()
+            forks, value, enabled, strength, layer, status = controls.use_extracted(
+                forks, extraction, 1
+            )
+        self.assertEqual(steering.expand(value)["vector"], list(extraction["layers"][1]))
+        self.assertEqual(value["layer"], 1)
+        self.assertEqual(layer["value"], 1)
+        self.assertEqual(strength["value"], 1.0)
+        self.assertTrue(enabled["value"])
+        self.assertIn("test/tiny", status)
+        stored = conversation.branch_sampling(forks, forks["active"])["steering"]
+        self.assertEqual(steering.expand(stored), steering.expand(value))
+
+    def test_using_a_layer_warns_when_the_weights_were_read_in_again(self):
+        held_manager = self.manager()
+        with mock.patch.object(runtime, "MANAGER", held_manager):
+            extraction = controls.extract_vector("Hello world", "How are", False, "last")[0]
+            # Same name, different reading of it: the ID and width checks the
+            # runtime makes would pass a vector from the weights before last.
+            held_manager.load_count += 1
+            status = controls.use_extracted(conversation.new_forks(), extraction, 0)[-1]
+        self.assertIn("read in again", status)
+
+    def test_using_a_layer_warns_when_another_model_is_now_loaded(self):
+        held_manager = self.manager()
+        with mock.patch.object(runtime, "MANAGER", held_manager):
+            extraction = controls.extract_vector("Hello world", "How are", False, "last")[0]
+            held_manager.model_id = "other/model"
+            status = controls.use_extracted(conversation.new_forks(), extraction, 0)[-1]
+        self.assertIn("load test/tiny again", status)
+        with self.assertRaises(gr.Error):
+            controls.use_extracted(conversation.new_forks(), None, 0)
+
+    def test_the_download_writes_the_chosen_layer_as_an_importable_file(self):
+        with mock.patch.object(runtime, "MANAGER", self.manager()):
+            extraction = controls.extract_vector("Hello world", "How are", False, "last")[0]
+        self.assertIsNone(controls.download_extracted(None, 0))
+        path = Path(controls.download_extracted(extraction, 1))
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        self.assertIn("layer1", path.name)
+        # It reads back through the ordinary import path.
+        self.assertEqual(steering.read_vector(path)["vector"], list(extraction["layers"][1]))
