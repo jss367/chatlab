@@ -81,6 +81,10 @@ IMAGE_SIZES = (384, 512, 640, 768, 896, 1024)
 TEMPERATURE_RANGE = (0.0, 2.0)
 TOP_P_RANGE = (0.05, 1.0)
 TOP_K_RANGE = (0, 200)
+# A probability rather than a count: how sure of its first choice the model
+# has to be for that choice to stand. Zero means it always stands, which is
+# ordinary sampling. See token_metrics.sampling_probabilities.
+SKIP_TOP_BELOW_RANGE = (0.0, 1.0)
 # NumPy's default generator rejects a negative seed but takes any
 # non-negative one, however large; see app.resolve_seed. So the seed has a
 # floor rather than a range: the point of locking a seed is to reproduce a
@@ -189,6 +193,7 @@ class Settings:
     temperature: float = 0.8
     top_p: float = 0.95
     top_k: int = 50
+    skip_top_below: float = 0.0
     max_new_tokens: int = 1024
     seed: int = 42
     randomize_seed: bool = True
@@ -283,6 +288,11 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
         top_k=_clamped_int(
             values.get("top_k", DEFAULTS.top_k), TOP_K_RANGE, DEFAULTS.top_k
         ),
+        skip_top_below=_clamped_float(
+            values.get("skip_top_below", DEFAULTS.skip_top_below),
+            SKIP_TOP_BELOW_RANGE,
+            DEFAULTS.skip_top_below,
+        ),
         # The response-length control shares the prefix cap, so a saved length
         # follows a cap the reader has since lowered.
         max_new_tokens=_clamped_int(
@@ -350,13 +360,19 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
     )
 
 
-# The sampling a conversation keeps of its own. These four shape the reply
+# The sampling a conversation keeps of its own. These five shape the reply
 # and are what a reader moves between one fork and the next: one branch at
 # temperature 0 beside one at 1.2 is the comparison the app is for. The seed
 # and the randomize switch are deliberately not among them - a finished reply
 # writes the seed it used into that box, so a seed kept per conversation
 # would record the app's dice rather than anybody's choice.
-CONVERSATION_SAMPLING = ("temperature", "top_p", "top_k", "max_new_tokens")
+CONVERSATION_SAMPLING = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "skip_top_below",
+    "max_new_tokens",
+)
 
 
 def sampling_defaults(chosen: Settings | None = None) -> dict[str, Any]:

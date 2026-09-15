@@ -72,12 +72,21 @@ class ReadTests(unittest.TestCase):
             self.assertEqual(settings.read(self.path), (settings.DEFAULTS, {}))
 
     def test_a_value_out_of_range_is_pulled_into_it(self):
-        self.write_file({"temperature": 40, "top_k": -5, "seed": -1})
+        self.write_file(
+            {"temperature": 40, "top_k": -5, "seed": -1, "skip_top_below": 3}
+        )
         saved, _unknown = settings.read(self.path)
 
         self.assertEqual(saved.temperature, 2.0)
         self.assertEqual(saved.top_k, 0)
         self.assertEqual(saved.seed, 0)
+        self.assertEqual(saved.skip_top_below, 1.0)
+
+    def test_the_skip_starts_switched_off(self):
+        # It changes what the model is allowed to say, so it is something a
+        # reader turns on rather than something they inherit.
+        self.assertEqual(settings.DEFAULTS.skip_top_below, 0.0)
+        self.assertIn("skip_top_below", settings.CONVERSATION_SAMPLING)
 
     def test_a_value_of_the_wrong_shape_falls_back_to_its_default(self):
         self.write_file(

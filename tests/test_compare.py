@@ -61,6 +61,7 @@ def run(metrics, *, kind=compare.REPLY, model_id="fake/model", **settings):
             "temperature": 0.0,
             "top_p": 1.0,
             "top_k": 0,
+            "skip_top_below": 0.0,
             "max_new_tokens": 8,
             "seed": 1,
             "assistant_prefill": "",
@@ -776,8 +777,8 @@ class HandlerTests(unittest.TestCase):
 
     def fill(self, slot, mode=compare.REPLY, prompt="Hello", measured=""):
         frames = list(controls.fill_slot(
-            slot, mode, prompt, measured, False, "", "", 0.0, 1.0, 0, 8, 1, False,
-            "default", None, False, 1.0, 0,
+            slot, mode, prompt, measured, False, "", "", 0.0, 1.0, 0, 0.0, 8,
+            1, False, "default", None, False, 1.0, 0,
         ))
         return frames[-1]
 

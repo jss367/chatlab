@@ -6239,6 +6239,7 @@ class ModelManager:
         top_k: int,
         max_new_tokens: int,
         seed: int,
+        skip_top_below: float = 0.0,
         analyze_prompt: bool = True,
         tools: list[dict] | None = None,
         forced_ids: Sequence[int] = (),
@@ -6270,6 +6271,11 @@ class ModelManager:
         close a template-supplied reasoning block. A later branch carries that
         provenance forward so the application can keep the control boundary
         from being replaced as though it were answer text.
+
+        ``skip_top_below`` refuses the model's first choice wherever that
+        choice holds less than the given probability; see
+        :func:`token_metrics.sampling_probabilities`. Zero, the default,
+        samples as the model proposed.
 
         ``load_id`` names the load ``forced_ids`` came from (see
         :attr:`load_id`). It is compared under the model lock, before any token
@@ -6312,6 +6318,7 @@ class ModelManager:
                 top_k=top_k,
                 max_new_tokens=max_new_tokens,
                 seed=seed,
+                skip_top_below=skip_top_below,
                 analyze_prompt=analyze_prompt,
                 tools=tools,
                 forced_ids=forced_ids,
@@ -6386,6 +6393,7 @@ class ModelManager:
         top_k: int,
         max_new_tokens: int,
         seed: int,
+        skip_top_below: float = 0.0,
         analyze_prompt: bool = True,
         tools: list[dict] | None = None,
         forced_ids: Sequence[int] = (),
@@ -6499,6 +6507,7 @@ class ModelManager:
                         temperature=float(temperature),
                         top_p=float(top_p),
                         top_k=int(top_k),
+                        skip_top_below=float(skip_top_below),
                     )
 
                 # The prompt and the replayed prefix go through the model in one

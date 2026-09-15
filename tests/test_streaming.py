@@ -185,6 +185,30 @@ class FakeModel(torch.nn.Module):
         return SimpleNamespace(logits=logits, past_key_values=None)
 
 
+class UndecidedModel(torch.nn.Module):
+    """Offers the same two near-equal choices at every position.
+
+    The scripted model above is certain of every token it emits, which is
+    the one thing a threshold on certainty cannot be tested against.
+    """
+
+    def __init__(self, probabilities, vocab_size=None, eos_id=EOS_ID):
+        super().__init__()
+        self.anchor = torch.nn.Parameter(torch.zeros(1))
+        self.vocab_size = vocab_size or len(PIECES)
+        self.row = torch.full((self.vocab_size,), -np.inf, dtype=torch.float32)
+        for token_id, probability in probabilities.items():
+            self.row[token_id] = float(np.log(probability))
+        self.generation_config = SimpleNamespace(eos_token_id=eos_id)
+
+    def forward(
+        self, input_ids=None, attention_mask=None, past_key_values=None, use_cache=True
+    ):
+        length = 1 if input_ids is None else int(input_ids.shape[-1])
+        logits = self.row.expand(1, length, self.vocab_size).clone()
+        return SimpleNamespace(logits=logits, past_key_values=None)
+
+
 def loaded_manager(script, pieces=PIECES, eos_id=EOS_ID):
     manager = ModelManager()
     manager.tokenizer = FakeTokenizer(pieces, eos_id)
@@ -1330,6 +1354,42 @@ class HiddenTokenTests(unittest.TestCase):
         manager = ModelManager()
         manager.tokenizer = tokenizer
         self.assertEqual(manager.hidden_token_ids(), {2})
+
+
+class SkipTopChoiceStreamTests(unittest.TestCase):
+    """The Sampling control reaches the tokens the model actually writes."""
+
+    def reply(self, **sampling):
+        manager = ModelManager()
+        manager.tokenizer = FakeTokenizer(PIECES, EOS_ID)
+        manager.model = UndecidedModel(
+            {0: 0.4, 1: 0.35, 2: 0.15, EOS_ID: 0.1}, vocab_size=len(PIECES)
+        )
+        manager.model_id = "fake/model"
+        updates = list(
+            manager.generate(
+                [{"role": "user", "content": "hi"}],
+                temperature=0,
+                top_p=1,
+                top_k=0,
+                max_new_tokens=3,
+                seed=1,
+                **sampling,
+            )
+        )
+        return updates[-1].text
+
+    def test_the_first_choice_is_written_when_nothing_refuses_it(self):
+        self.assertEqual(self.reply(), "HelloHelloHello")
+
+    def test_a_threshold_the_model_clears_changes_nothing(self):
+        # The first choice holds 0.4, which is all this asks of it.
+        self.assertEqual(self.reply(skip_top_below=0.3), "HelloHelloHello")
+
+    def test_an_unmet_threshold_puts_the_second_choice_in_the_reply(self):
+        # Greedy decoding with the first choice refused: the second choice
+        # every time, and still deterministic.
+        self.assertEqual(self.reply(skip_top_below=0.6), " world world world")
 
 
 if __name__ == "__main__":

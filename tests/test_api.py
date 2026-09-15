@@ -574,13 +574,20 @@ class RefusalTests(ApiTestCase):
 
 class RequestPlumbingTests(ApiTestCase):
     def test_a_field_left_out_takes_the_saved_setting(self):
-        with settings.override(temperature=0.3, top_p=0.7, top_k=13, max_new_tokens=77):
+        with settings.override(
+            temperature=0.3,
+            top_p=0.7,
+            top_k=13,
+            skip_top_below=0.4,
+            max_new_tokens=77,
+        ):
             self.post(messages=[{"role": "user", "content": "hi"}])
 
         call = self.manager.calls[0]
         self.assertEqual(call["temperature"], 0.3)
         self.assertEqual(call["top_p"], 0.7)
         self.assertEqual(call["top_k"], 13)
+        self.assertEqual(call["skip_top_below"], 0.4)
         self.assertEqual(call["max_new_tokens"], 77)
 
     def test_what_the_request_names_wins(self):
@@ -590,6 +597,7 @@ class RequestPlumbingTests(ApiTestCase):
                 temperature=1.25,
                 top_p=0.5,
                 top_k=7,
+                skip_top_below=0.55,
                 max_tokens=64,
                 seed=99,
             )
@@ -598,6 +606,7 @@ class RequestPlumbingTests(ApiTestCase):
         self.assertEqual(call["temperature"], 1.25)
         self.assertEqual(call["top_p"], 0.5)
         self.assertEqual(call["top_k"], 7)
+        self.assertEqual(call["skip_top_below"], 0.55)
         self.assertEqual(call["max_new_tokens"], 64)
         self.assertEqual(call["seed"], 99)
 

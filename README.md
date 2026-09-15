@@ -29,8 +29,9 @@ drove.
 - Full metric-trace export as JSON or CSV
 - An OpenAI-compatible HTTP API on the same port, so the measurements can be scripted
 - A system prompt, plus temperature, top-p, top-k, seed, and response-length controls
+- A **Skip top choice below** control that refuses the model's first choice at the positions it was unsure of, so a reply diverts where the model was torn and holds together everywhere else
 - Every setting saved to one JSON file you can edit by hand or share between machines
-- Temperature, top-p, top-k and response length kept per conversation, so two forks can be compared at different settings
+- Temperature, top-p, top-k, the top-choice skip and response length kept per conversation, so two forks can be compared at different settings
 - Per-conversation activation steering: import a vector, choose its layer and strength, and compare forks with steering enabled or disabled
 - Steering vectors read out of the model itself: give examples of what you want and of the opposite, and every layer's direction is taken in one pass, with a reading of how cleanly each separates the two sets
 - Optional assistant prefill text that the model must continue from
@@ -284,9 +285,9 @@ The system prompt, assistant prefill, and reasoning options; the analysis and in
 
 **Hardware** is what the memory guard reads when it decides whether a model fits: the device a load would use and the precision it would read weights as, the machine's memory and how much of it ChatLab estimates is available within its own limits, the safety reserve it keeps beside the weights, the Metal cap and the share of Metal's recommendation it comes to, what the device allocator is holding for this process, and the model in memory. It is read when the page opens, when the Settings page is opened, after every load and unload, and whenever **Refresh** is pressed - not on a timer, since reading it costs a subprocess. The same figures go to the log with every load and every reply, which is what makes a memory failure readable after the fact; the panel is how to look before one.
 
-The sampling controls are **not** here. Temperature, top-p, top-k, the response length and the seed are what gets moved between one retry and the next, so they sit under the message box on the Chat page, in a **Sampling** section that wears its own values: the summary reads without opening it.
+The sampling controls are **not** here. Temperature, top-p, top-k, **Skip top choice below**, the response length and the seed are what gets moved between one retry and the next, so they sit under the message box on the Chat page, in a **Sampling** section that wears its own values: the summary reads without opening it.
 
-Four of them belong to the conversation rather than to the app: temperature, top-p, top-k and the response length are kept per conversation, so one fork can sit at temperature 0 while another beside it sits at 1.2, and switching between them brings each one's sliders back. A fork answers the way the conversation it was forked from does, and forking pins both sides to that: a conversation carrying no sampling of its own follows the settings file, and the first slider moved on either side would rewrite the file and move the other with it, which is the one thing the fork was for. A new conversation starts from the settings file and is pinned to what it said at the time; the file is also where a control moved on any conversation is written, so a new conversation begins from the values last used. The seed and **New seed each response** are not per conversation: a finished reply leaves the seed it used in that box, so a seed kept per conversation would record the app's dice rather than a choice.
+Five of them belong to the conversation rather than to the app: temperature, top-p, top-k, the top-choice skip and the response length are kept per conversation, so one fork can sit at temperature 0 while another beside it sits at 1.2, and switching between them brings each one's sliders back. A fork answers the way the conversation it was forked from does, and forking pins both sides to that: a conversation carrying no sampling of its own follows the settings file, and the first slider moved on either side would rewrite the file and move the other with it, which is the one thing the fork was for. A new conversation starts from the settings file and is pinned to what it said at the time; the file is also where a control moved on any conversation is written, so a new conversation begins from the values last used. The seed and **New seed each response** are not per conversation: a finished reply leaves the seed it used in that box, so a seed kept per conversation would record the app's dice rather than a choice.
 
 Every setting is saved as you change it, and read back the next time the app
 starts. They live in one file:
@@ -423,6 +424,39 @@ Replies carry their own measurements, so the whole conversation is painted, not
 just the newest reply. A message you typed, a reply you edited by hand, and a
 conversation restored from the saved library have no measurements to paint and
 appear as plain text.
+
+### Skipping the model's first choice
+
+**Skip top choice below** is a threshold, not a switch. At 0 it does nothing
+and the model samples as it proposed. Above 0, ChatLab reads the probability
+the model gave its own first choice at each position, and where that
+probability falls below the threshold it takes the first choice off the table
+and samples from what is left, second choice downwards.
+
+The threshold is what makes this usable. Banning the first choice
+unconditionally also bans the correct token at the many positions where the
+model is right and certain - the rest of a word it has started, a closing
+bracket, the space after a comma - and the reply comes out broken rather than
+adventurous. A threshold of 0.6 leaves all of those alone and diverts only
+where the model was genuinely torn between two continuations.
+
+The probability is read from the distribution as the model produced it, before
+temperature reshapes anything, so one threshold means the same thing whatever
+else the sliders are set to. The skip is applied before top-k and top-p, so
+where it fires a top-k of 6 still offers six candidates: the model's second
+choice through its seventh. It never leaves nothing to sample - a position with
+only one possible token keeps its first choice however low the probability.
+
+At **Temperature** 0 the result is deterministic second-choice decoding: the
+same prompt gives the same reply every time, and that reply is not the one
+greedy decoding would have written. At a threshold of 1 the first choice is
+refused wherever the model left any doubt at all.
+
+The token panel shows where it fired. A token taken in place of a refused
+first choice reports a raw rank of 2 and the raw probability it really had,
+and its alternatives list still holds the first choice with the probability
+the model gave it. **Color tokens by · Sampling shift** paints those positions
+most clearly.
 
 ### Assistant prefill
 
@@ -650,11 +684,11 @@ By default that reasoning is **not** sent back to the model on the next turn. Th
 
 - **Raw rank** is the generated token's position in the model's unmodified distribution. Rank 1 was the model's first choice.
 - **Raw model probability** is calculated before temperature or filtering.
-- **Actual sampling probability** includes temperature, top-k, and top-p.
+- **Actual sampling probability** includes temperature, the top-choice skip, top-k, and top-p. Where the skip fired, this is the probability of the token that was actually left to take.
 - **Surprise** is `-log2(probability)`. Larger values are less expected.
 - **Distribution entropy** is the width of the whole distribution the model chose from, in bits. Surprise says how unexpected the choice was; entropy says how undecided the model was before making it.
 - **Top-1 margin** is the probability gap between the model's first and second choice.
-- **Sampling shift** is `log2(sampling probability / raw probability)`: how far your temperature, top-k, and top-p settings moved that token away from the raw model.
+- **Sampling shift** is `log2(sampling probability / raw probability)`: how far your temperature, top-k, top-p and skip settings moved that token away from the raw model.
 - **Probability mass above it** is the combined raw probability of every token ranked above the generated token.
 
 Each of these names carries its own sentence in the token detail panel, so hovering one — or reaching it with a screen reader — says what the number is without leaving the page.
@@ -799,8 +833,9 @@ a request sent at that moment would get; a load is named ahead of a response.
 in the cache and marks the loaded one.
 
 `POST /v1/chat/completions` answers a conversation. It takes `messages`,
-`temperature`, `top_p`, `top_k`, `max_tokens`, `seed`, `stream`, `logprobs`
-and `top_logprobs`, and anything left out takes the value the app is set to,
+`temperature`, `top_p`, `top_k`, `skip_top_below`, `max_tokens`, `seed`,
+`stream`, `logprobs` and `top_logprobs`, and anything left out takes the value
+the app is set to,
 so a script and the interface answer alike unless the script says otherwise. A
 value outside what ChatLab allows is refused with the nearest it would take
 rather than clamped in silence. Reasoning arrives as `reasoning_content`

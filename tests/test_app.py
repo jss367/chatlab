@@ -1352,25 +1352,35 @@ class SamplingSummaryTests(unittest.TestCase):
     """The sampling accordion wears its own values, so it reads without opening."""
 
     def test_the_summary_names_every_knob_behind_it(self):
-        summary = app.sampling_label(0.8, 0.95, 50, 1024)
+        summary = app.sampling_label(0.8, 0.95, 50, 0.6, 1024)
 
         self.assertIn("temperature 0.8", summary)
         self.assertIn("top-p 0.95", summary)
         self.assertIn("top-k 50", summary)
+        self.assertIn("skip top below 0.6", summary)
         self.assertIn("1,024 new tokens", summary)
 
     def test_a_disabled_top_k_is_left_out_rather_than_shown_as_zero(self):
         # "top-k 0" reads as a setting of zero, which is the opposite of what
         # it means: zero is the control switched off.
-        summary = app.sampling_label(1.0, 1.0, 0, 256)
+        summary = app.sampling_label(1.0, 1.0, 0, 0.0, 256)
 
         self.assertNotIn("top-k", summary)
         self.assertIn("temperature 1", summary)
 
+    def test_a_disabled_skip_is_left_out_of_the_summary_too(self):
+        # Same reasoning as top-k: "skip top below 0" would read as a
+        # threshold rather than as the control switched off, and the skip is
+        # off for every reader who has not gone looking for it.
+        self.assertNotIn("skip top", app.sampling_label(1.0, 1.0, 0, 0.0, 256))
+
     def test_the_summary_is_an_accordion_label_update(self):
         self.assertEqual(
-            app.update_sampling_label(0.8, 0.95, 50, 1024),
-            {"label": app.sampling_label(0.8, 0.95, 50, 1024), "__type__": "update"},
+            app.update_sampling_label(0.8, 0.95, 50, 0.0, 1024),
+            {
+                "label": app.sampling_label(0.8, 0.95, 50, 0.0, 1024),
+                "__type__": "update",
+            },
         )
 
 

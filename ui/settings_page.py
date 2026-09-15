@@ -136,20 +136,24 @@ def refresh_thinking_mode():
     return gr.update(visible=runtime.MANAGER.supports_thinking)
 
 
-def sampling_label(temperature, top_p, top_k, max_new_tokens) -> str:
+def sampling_label(temperature, top_p, top_k, skip_top_below, max_new_tokens) -> str:
     """The sampling accordion's own summary of what it holds."""
 
     filtering = f"top-p {float(top_p):g}"
     if int(top_k or 0):
         filtering = f"{filtering} · top-k {int(top_k)}"
+    if float(skip_top_below or 0):
+        filtering = f"{filtering} · skip top below {float(skip_top_below):g}"
     return (
         f"Sampling · temperature {float(temperature):g} · {filtering} · "
         f"up to {int(max_new_tokens):,} new tokens"
     )
 
 
-def update_sampling_label(temperature, top_p, top_k, max_new_tokens):
-    return gr.update(label=sampling_label(temperature, top_p, top_k, max_new_tokens))
+def update_sampling_label(temperature, top_p, top_k, skip_top_below, max_new_tokens):
+    return gr.update(
+        label=sampling_label(temperature, top_p, top_k, skip_top_below, max_new_tokens)
+    )
 
 
 # The settings that outlive the session, in the order the controls wired to
@@ -162,6 +166,7 @@ PERSISTED_SETTING_NAMES = (
     "temperature",
     "top_p",
     "top_k",
+    "skip_top_below",
     "max_new_tokens",
     "seed",
     "randomize_seed",

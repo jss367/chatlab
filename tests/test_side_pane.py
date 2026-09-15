@@ -3848,13 +3848,18 @@ class PageLayoutTests(unittest.TestCase):
         self.assertEqual(
             accordion.label,
             app.sampling_label(
-                saved.temperature, saved.top_p, saved.top_k, saved.max_new_tokens
+                saved.temperature,
+                saved.top_p,
+                saved.top_k,
+                saved.skip_top_below,
+                saved.max_new_tokens,
             ),
         )
         for label, value in [
             ("Temperature", saved.temperature),
             ("Top-p", saved.top_p),
             ("Top-k (0 disables)", saved.top_k),
+            ("Skip top choice below (0 disables)", saved.skip_top_below),
             ("Maximum new tokens", saved.max_new_tokens),
         ]:
             with self.subTest(control=label):
@@ -3870,7 +3875,13 @@ class PageLayoutTests(unittest.TestCase):
         # to be right once it is let go.
         sliders = [
             self.labelled(label)
-            for label in ("Temperature", "Top-p", "Top-k (0 disables)", "Maximum new tokens")
+            for label in (
+                "Temperature",
+                "Top-p",
+                "Top-k (0 disables)",
+                "Skip top choice below (0 disables)",
+                "Maximum new tokens",
+            )
         ]
         listeners = self.listeners("update_sampling_label")
         # A page load's target has no block, so look the ids up by hand.
@@ -3919,7 +3930,13 @@ class PageLayoutTests(unittest.TestCase):
         # anyone not using a pointer.
         sliders = {
             self.labelled(label)._id
-            for label in ("Temperature", "Top-p", "Top-k (0 disables)", "Maximum new tokens")
+            for label in (
+                "Temperature",
+                "Top-p",
+                "Top-k (0 disables)",
+                "Skip top choice below (0 disables)",
+                "Maximum new tokens",
+            )
         }
 
         for fn in self.listeners("update_sampling_label"):
@@ -4675,11 +4692,17 @@ class SavedSettingsTests(unittest.TestCase):
                 events.setdefault(self.demo.blocks[block_id], set()).add(event)
 
         self.assertEqual(events[self.labelled("Random seed")], {"blur", "submit"})
-        # The four sampling controls are saved on input rather than change:
+        # The five sampling controls are saved on input rather than change:
         # switching conversations sets them, and a save from that would put
         # the sampling of the conversation being looked at into the file
         # every unpinned conversation answers with.
-        for label in ("Temperature", "Top-p", "Top-k (0 disables)", "Maximum new tokens"):
+        for label in (
+            "Temperature",
+            "Top-p",
+            "Top-k (0 disables)",
+            "Skip top choice below (0 disables)",
+            "Maximum new tokens",
+        ):
             self.assertEqual(events[self.labelled(label)], {"input"}, label)
         self.assertEqual(events[self.labelled("Measure prompt tokens")], {"change"})
         # And only the seed box's own events are allowed to write it down.
@@ -4828,6 +4851,7 @@ class SavedSettingsTests(unittest.TestCase):
                         "Temperature",
                         "Top-p",
                         "Top-k (0 disables)",
+                        "Skip top choice below (0 disables)",
                         "Maximum new tokens",
                         "Random seed",
                         "New seed each response",
