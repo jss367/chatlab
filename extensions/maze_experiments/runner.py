@@ -532,6 +532,25 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
     turn = None
     autosave_error = None
 
+    def record(turn):
+        """One line for a response, wherever that response was finalized.
+
+        A turn is completed on three paths: the ordinary one, a stop caught
+        between its opening frame and generation, and the cleanup that closes
+        an unfinished turn after a failure or a viewer hanging up. The outcome
+        line below counts all three as responses, so recording only the first
+        left a reader the two cases this file is opened for - a stop and a
+        crash - with nothing between the run starting and its summary.
+
+        The duration is set here rather than read, because the two abnormal
+        paths never had one, and a turn saved without it reads as a response
+        that took no time rather than one nobody timed.
+        """
+        turn.setdefault("seconds", time.time() - turn["started_at"])
+        logger.info("Run %s response %s: %s after %s sampled tokens in %.1fs. %s",
+                    episode.run_id, len(episode.turns), turn["finish_reason"],
+                    turn.get("sampled_tokens", 0), turn["seconds"], episode.detail)
+
     def autosave():
         nonlocal autosave_error
         if not save_dir or autosave_error is not None:
@@ -579,6 +598,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             yield episode
             if episode.stop_requested:
                 finish_turn(episode, turn, set(), limit)
+                record(turn)
                 break
             stop_ids = manager.stop_token_ids
             generator = manager.generate(
@@ -609,9 +629,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
                 generator.close()
             turn["seconds"] = time.time() - turn["started_at"]
             finish_turn(episode, turn, stop_ids, limit)
-            logger.info("Run %s response %s: %s after %s sampled tokens in %.1fs. %s",
-                        episode.run_id, len(episode.turns), turn["finish_reason"],
-                        turn.get("sampled_tokens", 0), turn["seconds"], episode.detail)
+            record(turn)
             if episode.phase in TERMINAL and episode.interrupted and episode.resumed is None:
                 episode.resumed = False if episode.phase not in ("stopped", "error") else None
                 episode.first_move_progress = False if episode.resumed is False else None
@@ -641,6 +659,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             count = max(0, len(turn["metrics"]) - turn["forced_prefix_tokens"])
             episode.sampled_tokens += count
             turn.update(sampled_tokens=count, tokens_cumulative=episode.sampled_tokens, finish_reason=episode.phase)
+            # Only a turn no other path finalized reaches here, so this cannot
+            # write a second line for a response already recorded.
+            record(turn)
         with episode.lock:
             episode.busy = False
             manager.close()
