@@ -1696,3 +1696,17 @@ class DefaultModelSelectionTests(unittest.TestCase):
             [("download", settings.DEFAULT_MODEL_ID), ("load", settings.DEFAULT_MODEL_ID)],
         )
         self.assertIn("Model ready", cards[-1])
+
+
+class TelemetryTests(unittest.TestCase):
+    """The interface reaches no telemetry host on the way up.
+
+    Gradio's default is to post what components an app uses to its own
+    server, and to ask the package index whether a newer Gradio exists. A
+    local workbench that has to start with no network should do neither, and
+    the setting is easy to lose in a rebase of the Blocks arguments, so it is
+    checked rather than trusted.
+    """
+
+    def test_the_interface_is_built_with_analytics_off(self):
+        self.assertIs(app.build_app().analytics_enabled, False)

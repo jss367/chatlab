@@ -254,8 +254,20 @@ def build_app() -> gr.Blocks:
     # it, which leaves a band of empty room down each side on a wide screen.
     # The shell wants every pixel: the two side panes are a fixed width, so the
     # width the cap was holding back goes to the chat and the panel beside it.
+    # analytics_enabled=False is the only thing here that is not about the
+    # interface. Left at its default, Gradio posts to api.gradio.app twice on
+    # the way up - once when this Blocks is built, once when it is launched -
+    # with its version, the platform, and the list of component and event
+    # types this app uses, and checks the package index for a newer Gradio it
+    # can warn about. None of it carries what was said, and none of it is
+    # wanted here: this is a local workbench for local models, often run with
+    # no network at all, and its launch should not depend on reaching a host
+    # on the internet. Set on the Blocks rather than through
+    # GRADIO_ANALYTICS_ENABLED so it holds however the app is started - the
+    # desktop bundle, run.sh, or python app.py.
     with gr.Blocks(
-        title="ChatLab", css=CSS + TOKEN_MENU_CSS + extension_css(extensions), theme=THEME, fill_width=True
+        title="ChatLab", css=CSS + TOKEN_MENU_CSS + extension_css(extensions), theme=THEME, fill_width=True,
+        analytics_enabled=False,
     ) as demo:
         # The chosen theme's colors, as a stylesheet on the page. Gradio fixes
         # THEME above when the interface is built, so a theme picked later is
