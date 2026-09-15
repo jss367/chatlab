@@ -1576,6 +1576,19 @@ class ManageMyModelsTests(unittest.TestCase):
         self.assertFalse(confirm["visible"])
         self.assertEqual(self.removed, [])
 
+    def test_a_refused_removal_says_why_in_the_log(self):
+        # The card explains itself and then goes. Without these lines the
+        # trail held "Removal confirmed" and no account of why the files
+        # are still there.
+        self.manager._lock.acquire()
+        self.addCleanup(self.manager._lock.release)
+
+        with self.assertLogs("ui.models_page", level="INFO") as logged:
+            app.remove_my_model("org/partial")
+
+        self.assertIn("Removal confirmed for org/partial", logged.output[0])
+        self.assertIn("refused: the manager is busy", logged.output[1])
+
     def test_a_model_that_left_the_cache_is_reported_without_a_question(self):
         status, confirm, _, pending = app.ask_remove_my_model("gone/model")
 

@@ -624,6 +624,15 @@ def download_and_load_model(
         path = yield from stream_download(model_id, hf_token)
         claimed, held = runtime.MANAGER.claim_exclusive_load(model_id)
         if claimed is None:
+            # The download is the slow half and the claim is only taken after
+            # it, so this is where a reply started meanwhile turns the job
+            # back. Without the line the trail holds the request and a
+            # finished download and no account of the load that never ran.
+            logger.info(
+                "Load of %s after its download refused: %s has the model",
+                model_id,
+                held or "another claim",
+            )
             yield refused_load_card(
                 held,
                 f" `{model_id.strip()}` is on disk; use **Load cached** to "
@@ -1887,10 +1896,13 @@ def remove_my_model(pending: str | None):
     try:
         freed = runtime.MANAGER.remove(pending)
     except ModelLoaded:
+        logger.info("Removal of %s refused: it is loaded", pending)
         return status_card(*loaded_refusal(pending)), hidden, None
     except ModelDownloading:
+        logger.info("Removal of %s refused: it is downloading", pending)
         return status_card(*downloading_refusal(pending)), hidden, None
     except ModelBusy:
+        logger.info("Removal of %s refused: the manager is busy", pending)
         return (
             status_card(
                 "Model busy",
@@ -1901,6 +1913,7 @@ def remove_my_model(pending: str | None):
             None,
         )
     except FileNotFoundError:
+        logger.info("Removal of %s found nothing: it is no longer cached", pending)
         return (
             status_card("Nothing to remove", f"`{pending}` is no longer in the cache."),
             hidden,

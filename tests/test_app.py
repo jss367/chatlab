@@ -793,6 +793,26 @@ class DownloadCardTests(unittest.TestCase):
         self.assertIn(models_page.LOAD_WHILE_GENERATING, frames[-1])
         self.assertIn("Load cached", frames[-1])
 
+    def test_a_load_turned_back_after_its_download_says_so_in_the_log(self):
+        # The claim is only taken once the bytes are in, so this is where a
+        # reply started meanwhile stops the job. Without the line the trail
+        # holds the request and a finished download and nothing about the
+        # load that never ran.
+        class Manager(FakeDownloads):
+            def fetch(self, model_id, token, progress):
+                self.reserve_generation()
+                return Path("/cache/snap")
+
+        runtime.MANAGER = Manager()
+        self.addCleanup(runtime.MANAGER.release_generation)
+
+        with self.assertLogs("ui.models_page", level="INFO") as logged:
+            list(app.download_and_load_model("org/model", ""))
+
+        refusal = [line for line in logged.output if "refused" in line]
+        self.assertEqual(len(refusal), 1, logged.output)
+        self.assertIn("Load of org/model after its download refused", refusal[0])
+
 
 class DownloadManager(FakeDownloads):
     """Stands in for the real manager: downloads succeed without a network."""
