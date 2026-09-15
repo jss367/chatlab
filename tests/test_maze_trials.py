@@ -4,10 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import gradio as gr
 
 from extension_api import TokenInspector
+from extensions.maze_experiments import page
 from extensions.maze_experiments.page import build_page, trial_note_text
 from extensions.maze_experiments.runner import Episode, from_payload
 from extensions.maze_experiments.maze import SYSTEM, default_instruction
@@ -238,3 +240,56 @@ class TrialFileTests(unittest.TestCase):
         replayed = load.fn(str(path), Episode(MAZE, CONFIG), False, 'test-session', None)
         self.assertEqual(len(replayed), len(load.outputs))
         self.assertIn('Replaying: Clean trial', replayed[-3])
+
+    def test_a_stamp_written_elsewhere_is_named_by_whatever_it_recorded(self):
+        # A harness outside this page stamps a run with the id it scheduled and
+        # nothing else. The note names it by that, rather than refusing a run
+        # it can read everything else about.
+        live = prepare_trial(self.read(), 'clean', Episode(MAZE, CONFIG))
+        live.config['trial'] = dict(id='diagnostics-0049', replica=0, file_sha256='0' * 64)
+        self.assertIn('Running: diagnostics', trial_note_text(live))
+        self.assertNotIn(', from', trial_note_text(live))
+        # A stamp with no name in it at all is no stamp, and the pane says what
+        # it says for a run that came from no trial.
+        for stamp in ('diagnostics-0049', dict(replica=0), dict(id='  '), dict(id=7)):
+            live.config['trial'] = stamp
+            self.assertIn('Upload a trial file', trial_note_text(live))
+
+    def test_a_replay_loads_whole_however_its_trial_was_stamped(self):
+        # The note is returned with the board and the controls, so a stamp it
+        # could not read used to abandon the event and leave every output
+        # showing the episode the replay was picked to replace.
+        data = self.read()
+        context = SimpleNamespace(tokens=TokenInspector(), models=None, data_dir=Path(self.directory.name),
+                                  navigation=SimpleNamespace(open_models=lambda button, wanted=None: None))
+        with gr.Blocks() as demo:
+            build_page(context)
+        self.addCleanup(demo.close)
+        callbacks = {fn.fn.__name__: fn for fn in demo.fns.values()}
+        live = prepare_trial(data, 'clean', Episode(MAZE, CONFIG))
+        live.config['trial'] = dict(id='diagnostics-0049', replica=0, file_sha256='0' * 64)
+        path = Path(self.directory.name) / 'diagnostics-0049.json'
+        path.write_text(json.dumps(live.payload()))
+        load = callbacks['load']
+        replayed = load.fn(str(path), Episode(MAZE, CONFIG), False, 'test-session', None)
+        self.assertEqual(len(replayed), len(load.outputs))
+        self.assertTrue(replayed[0].replay_only)
+        self.assertIn('Replaying: diagnostics', replayed[-3])
+
+    def test_a_note_that_cannot_be_written_is_refused_where_a_board_is(self):
+        # The note is returned with the board, so it has to be built under the
+        # same guard. Built on the return, anything it could not read escaped
+        # the handler, and Gradio abandons an event whole: every output kept
+        # the episode the replay was picked to replace, silently.
+        context = SimpleNamespace(tokens=TokenInspector(), models=None, data_dir=Path(self.directory.name),
+                                  navigation=SimpleNamespace(open_models=lambda button, wanted=None: None))
+        with gr.Blocks() as demo:
+            build_page(context)
+        self.addCleanup(demo.close)
+        load = {fn.fn.__name__: fn for fn in demo.fns.values()}['load']
+        live = prepare_trial(self.read(), 'clean', Episode(MAZE, CONFIG))
+        path = Path(self.directory.name) / 'run.json'
+        path.write_text(json.dumps(live.payload()))
+        with mock.patch.object(page, 'trial_note_text', side_effect=KeyError('label')):
+            with self.assertRaisesRegex(gr.Error, 'Could not load run'):
+                load.fn(str(path), Episode(MAZE, CONFIG), False, 'test-session', None)
