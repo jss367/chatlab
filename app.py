@@ -371,6 +371,7 @@ from ui.scoring import (
 from ui.settings_page import (
     HARDWARE_UNREAD,
     PERSISTED_SETTING_NAMES,
+    apply_theme,
     hardware_card,
     refresh_hardware,
     remember_committed_seed,

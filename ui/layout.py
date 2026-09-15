@@ -10,6 +10,7 @@ import gradio as gr
 
 import charts
 import settings
+import themes
 from thinking import THINKING_CHOICES
 from conversation import (
     MAIN_BRANCH,
@@ -28,6 +29,7 @@ from token_metrics import (
 )
 from trace_export import write_trace_export
 from ui import runtime
+from ui.icons import icon_classes
 from ui.background import ConversationEvents, ConversationJob
 from ui.token_edit import close_token_editor, open_token_editor, save_token_edit
 from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
@@ -111,6 +113,10 @@ from ui.generation import (
 )
 from ui.inspection import (
     INSPECT_HINT,
+    INSPECTION_CONTROLS,
+    change_lens_mode,
+    change_pinned_token,
+    import_jacobian_lens,
     inspect_layers,
     remember_inspect_target,
     render_attention,
@@ -177,6 +183,7 @@ from ui.scoring import (
     score_token_count,
 )
 from ui.settings_page import (
+    apply_theme,
     hardware_card,
     refresh_hardware,
     refresh_thinking_mode,
@@ -250,6 +257,14 @@ def build_app() -> gr.Blocks:
     with gr.Blocks(
         title="ChatLab", css=CSS + TOKEN_MENU_CSS + extension_css(extensions), theme=THEME, fill_width=True
     ) as demo:
+        # The chosen theme's colors, as a stylesheet on the page. Gradio fixes
+        # THEME above when the interface is built, so a theme picked later is
+        # a set of variables written over that one rather than another Blocks;
+        # see the themes module. It is drawn first so nothing is painted in
+        # the built-in colors and then repainted.
+        theme_style = gr.HTML(
+            themes.style_tag(saved.theme), elem_id="theme-style", padding=False
+        )
         conversation_state = gr.State([])
         metrics_state = gr.State(empty_metrics())
         prompt_metrics_state = gr.State(empty_metrics())
@@ -337,16 +352,16 @@ def build_app() -> gr.Blocks:
                 with gr.Row():
                     # The pane is narrow, so the buttons give up their usual
                     # minimum width to share one row.
-                    new_button = gr.Button("➕ New", size="sm", min_width=60)
-                    fork_button = gr.Button("🌿 Fork", size="sm", min_width=60)
-                    delete_fork_button = gr.Button("🗑️ Delete", size="sm", min_width=60)
+                    new_button = gr.Button("New", size="sm", min_width=60, elem_classes=icon_classes("plus"))
+                    fork_button = gr.Button("Fork", size="sm", min_width=60, elem_classes=icon_classes("git-branch"))
+                    delete_fork_button = gr.Button("Delete", size="sm", min_width=60, elem_classes=icon_classes("trash"))
                 # Named for what it takes: this empties the conversation on
                 # screen and deletes every other one with it. It stands under
                 # the list of everything it would take rather than under one
                 # conversation's message box, where it read as a control of
                 # that conversation alone. A fourth button would not fit the
                 # row above, so it takes the pane's width on its own line.
-                clear_button = gr.Button("🗑️ Clear all", size="sm")
+                clear_button = gr.Button("Clear all", size="sm", elem_classes=icon_classes("trash"))
                 with gr.Column(
                     visible=False,
                     elem_id="clear-confirm",
@@ -462,30 +477,45 @@ def build_app() -> gr.Blocks:
                                     with gr.Row():
                                         token_edit_save = gr.Button("Save and regenerate", variant="primary")
                                         token_edit_cancel = gr.Button("Cancel")
-                                prompt = gr.Textbox(
-                                    label="Message",
-                                    show_label=False,
-                                    elem_id="message-input",
-                                    **message_box_settings(saved.enter_sends),
-                                )
-                                with gr.Row():
-                                    send_button = gr.Button("Send", variant="primary", min_width=70)
-                                    # Escape presses this; see SHORTCUT_JS,
-                                    # which finds it by this id.
-                                    stop_button = gr.Button(
-                                        "Stop",
-                                        variant="stop",
-                                        visible=False,
-                                        elem_id="stop-button",
+                                # The box and the controls that act on it are
+                                # one bordered composer, the way a message box
+                                # is drawn everywhere else: the stylesheet
+                                # takes the border off the box itself and puts
+                                # it around the pair, so the row below reads as
+                                # part of the box rather than as four loose
+                                # buttons under it.
+                                with gr.Column(elem_id="composer"):
+                                    prompt = gr.Textbox(
+                                        label="Message",
+                                        show_label=False,
+                                        elem_id="message-input",
+                                        **message_box_settings(saved.enter_sends),
                                     )
-                                    # These controls give up their usual minimum
-                                    # width to stay on Send's row. Left to
-                                    # wrap, the last of them takes a line of
-                                    # its own and reads as the widest, most
-                                    # important button under the box.
-                                    retry_button = gr.Button("🔁 Retry", min_width=80)
-                                    next_token_button = gr.Button("Next token", min_width=90)
-                                    undo_button = gr.Button("↩️ Undo last", min_width=90)
+                                    with gr.Row(elem_id="chat-actions"):
+                                        # Send is written first because it is
+                                        # the important one and a keyboard
+                                        # reaches it first; the stylesheet
+                                        # moves it to the end of the row, where
+                                        # the eye leaves the text it just
+                                        # typed.
+                                        send_button = gr.Button("Send", variant="primary", min_width=70)
+                                        # Escape presses this; see SHORTCUT_JS,
+                                        # which finds it by this id.
+                                        stop_button = gr.Button(
+                                            "Stop",
+                                            variant="stop",
+                                            visible=False,
+                                            elem_id="stop-button",
+                                        )
+                                        # The three that rework the last reply
+                                        # stand together at the left as quiet
+                                        # buttons. Each holds its own width
+                                        # rather than taking an equal share of
+                                        # the row, which had them spread across
+                                        # the page as three unrelated labels.
+                                        retry_button = gr.Button("Retry", min_width=80, elem_classes=icon_classes("rotate-ccw"))
+                                        next_token_button = gr.Button("Next token", min_width=90)
+                                        undo_button = gr.Button("Undo last", min_width=90, elem_classes=icon_classes("undo"))
 
                                 generation_status = gr.Markdown("Ready.", elem_id="generation-status")
                                 with gr.Accordion("Conversation tools", open=False, elem_id="conversation-tools"):
@@ -542,7 +572,7 @@ def build_app() -> gr.Blocks:
                                             )
                                             randomize_seed = gr.Checkbox(
                                                 value=saved.randomize_seed,
-                                                label="🎲 New seed each response",
+                                                label="New seed each response",
                                                 info="Turn off to lock the seed and reproduce a response exactly.",
                                             )
                                     with gr.Accordion("Steering vector", open=False):
@@ -632,11 +662,12 @@ def build_app() -> gr.Blocks:
                                                     min_width=110,
                                                 )
                                     with gr.Row():
-                                        save_button = gr.Button("💾 Save conversation")
+                                        save_button = gr.Button("Save conversation", elem_classes=icon_classes("download"))
                                         load_upload = gr.UploadButton(
-                                            "📂 Load conversation",
+                                            "Load conversation",
                                             file_types=[".json"],
                                             type="filepath",
+                                            elem_classes=icon_classes("folder-open"),
                                         )
                                     saved_file = gr.File(
                                         label="Saved conversation",
@@ -745,7 +776,7 @@ def build_app() -> gr.Blocks:
                                         min_width=70,
                                     )
                                     prompts_upload = gr.UploadButton(
-                                        "📂 Load prompts",
+                                        "Load prompts",
                                         # "text" is any text file, which is
                                         # what the parser's fallback reads: a
                                         # prompt set arrives as often in a
@@ -945,7 +976,7 @@ def build_app() -> gr.Blocks:
                         )
                         with gr.Accordion("Branch response", open=False, elem_classes=["inspector-section"]):
                             with gr.Row():
-                                branch_button = gr.Button("🌱 Branch from token", size="sm")
+                                branch_button = gr.Button("Branch from token", size="sm", elem_classes=icon_classes("git-branch"))
                             gr.Markdown(
                                 "For one step, choose an alternative and press **Next token** "
                                 "below the message box. Keep pressing it to extend the reply."
@@ -962,12 +993,42 @@ def build_app() -> gr.Blocks:
                                     min_width=160,
                                 )
                                 branch_text_button = gr.Button(
-                                    "✏️ Branch with text", size="sm", scale=0, min_width=160
+                                    "Branch with text", size="sm", scale=0, min_width=160,
+                                    elem_classes=icon_classes("pencil"),
                                 )
                         with gr.Accordion("Layers and attention", open=False, elem_classes=["inspector-section"]):
+                            lens_mode = gr.Radio(
+                                ["Logit", "Jacobian"], value="Logit", label="Lens",
+                                info="Logit: the prediction before a token. Jacobian: concept readouts after it.",
+                            )
+                            imported_lens = gr.State(None)
+                            inspection_session = gr.State(
+                                value=lambda: INSPECTION_CONTROLS.new_session(),
+                                delete_callback=INSPECTION_CONTROLS.forget,
+                            )
+                            with gr.Column(visible=False) as jacobian_controls:
+                                with gr.Accordion("Lens setup", open=True) as lens_setup:
+                                    gr.Markdown(
+                                        "Import a lens fitted for the exact loaded checkpoint. "
+                                        "Supports full-precision Llama, Qwen2, and Qwen3 Transformers models. "
+                                        "[Lens format and fitting instructions](https://github.com/anthropics/jacobian-lens#fit)."
+                                    )
+                                    lens_file = gr.File(label="Fitted Jacobian lens", file_types=[".pt"], type="filepath")
+                                    fitted_model_id = gr.Textbox(
+                                        label="Model ID the lens was fitted for",
+                                        placeholder="For example, Qwen/Qwen3-0.6B",
+                                    )
+                                    import_lens_button = gr.Button("Import lens", size="sm")
+                                import_lens_status = gr.Markdown("No lens imported for this session.")
+                                pinned_concept = gr.Textbox(
+                                    label="Pin a vocabulary token (optional)",
+                                    placeholder="Type a token from the readout, then inspect again",
+                                    info="Use the exact text, including any leading space. One vocabulary token at a time.",
+                                )
                             with gr.Row():
                                 inspect_button = gr.Button(
-                                    "🔬 Inspect layers", size="sm", scale=0, min_width=160
+                                    "Inspect layers", size="sm", scale=0, min_width=160,
+                                    elem_classes=icon_classes("layers"),
                                 )
                                 inspect_status = gr.Markdown(
                                     INSPECT_HINT, elem_classes=["scale-caption"]
@@ -1264,7 +1325,10 @@ def build_app() -> gr.Blocks:
                         with gr.Column(elem_id="model-search", elem_classes=["model-card"]):
                             gr.Markdown("## Discover models")
                             gr.Markdown(
-                                "Start with a recommendation, or browse Hugging Face without a model name. "
+                                "Search Hugging Face by name, or leave the box empty to browse. "
+                                "A sort reorders the results rather than narrowing what is searched. "
+                                "The exception is an empty box under Recommended, which lists the "
+                                "bundled starters without going online. "
                                 "Selecting a model shows its details before you download.",
                                 elem_classes=["scale-caption"],
                             )
@@ -1280,7 +1344,8 @@ def build_app() -> gr.Blocks:
                             with gr.Row():
                                 search_order = gr.Dropdown(
                                     choices=list(DISCOVERY_ORDERS), value="Recommended",
-                                    label="Browse", interactive=True,
+                                    label="Sort", interactive=True,
+                                    info="Recommended lists ChatLab’s starters first, then the Hub.",
                                 )
                                 fits_only = gr.Checkbox(
                                     label="Fits this computer", value=False,
@@ -1338,9 +1403,9 @@ def build_app() -> gr.Blocks:
                             "", elem_id="my-model-detail", elem_classes=["model-detail"]
                         )
                         with gr.Row():
-                            redownload_button = gr.Button("⬇️ Redownload", size="sm")
-                            remove_button = gr.Button("🗑️ Remove", size="sm")
-                            refresh_models_button = gr.Button("↻ Refresh", size="sm")
+                            redownload_button = gr.Button("Redownload", size="sm", elem_classes=icon_classes("download"))
+                            remove_button = gr.Button("Remove", size="sm", elem_classes=icon_classes("trash"))
+                            refresh_models_button = gr.Button("Refresh", size="sm", elem_classes=icon_classes("refresh"))
                         with gr.Column(
                             visible=False, elem_classes=["remove-confirm"]
                         ) as remove_confirm:
@@ -1446,6 +1511,29 @@ def build_app() -> gr.Blocks:
 
                     with gr.Column(min_width=360, elem_id="settings-machine"):
                         with gr.Column(elem_classes=["settings-card"]):
+                            gr.Markdown("## Appearance")
+                            theme_choice = gr.Dropdown(
+                                choices=themes.THEME_CHOICES,
+                                value=saved.theme,
+                                label="Color theme",
+                                info=(
+                                    "The colors the whole interface is drawn in. "
+                                    "Every one of them is drawn both light and "
+                                    "dark."
+                                ),
+                            )
+                            appearance_choice = gr.Radio(
+                                choices=themes.APPEARANCE_CHOICES,
+                                value=saved.appearance,
+                                label="Light or dark",
+                                info=(
+                                    "Which of the two the chosen theme is drawn "
+                                    "in. Following the system means the page "
+                                    "turns with it, at whatever hour it does."
+                                ),
+                            )
+
+                        with gr.Column(elem_classes=["settings-card"]):
                             gr.Markdown("## Memory")
                             prefill_token_limit = gr.Number(
                                 value=saved.prefill_token_limit,
@@ -1488,7 +1576,8 @@ def build_app() -> gr.Blocks:
                                     elem_classes=["scale-caption"],
                                 )
                                 refresh_hardware_button = gr.Button(
-                                    "↻ Refresh", size="sm", scale=0, min_width=110
+                                    "Refresh", size="sm", scale=0, min_width=110,
+                                    elem_classes=icon_classes("refresh"),
                                 )
 
                         with gr.Column(elem_classes=["settings-card"]):
@@ -1927,7 +2016,8 @@ def build_app() -> gr.Blocks:
         search_inputs = [
             search_query, hf_token, weight_precision, search_kind, search_order, fits_only
         ]
-        # The default Recommended view is bundled and does not go online.
+        # The page loads with an empty box, and Recommended answers that from
+        # the bundled starters, so the first paint does not go online.
         demo.load(search_models, search_inputs, search_outputs)
         search_button.click(search_models, search_inputs, search_outputs)
         search_query.submit(search_models, search_inputs, search_outputs)
@@ -2086,6 +2176,8 @@ def build_app() -> gr.Blocks:
             thinking_mode,
             enter_sends,
             writing_suggestions,
+            theme_choice,
+            appearance_choice,
             model_id,
             weight_precision,
         ]
@@ -2103,6 +2195,33 @@ def build_app() -> gr.Blocks:
             weight_precision,
         ):
             control.change(remember_settings, persisted_inputs, None)
+        # The theme is wired apart from the loop above because it takes two
+        # listeners rather than one: saving it, and repainting the page, which
+        # has to follow the dropdown whether the change came from the reader
+        # or from the file being read back on a reload.
+        #
+        # always_last on both, and on both for the same reason. A reader
+        # trying the themes on picks one while the one before it is still in
+        # flight, and with Gradio's default the pick behind is dropped. On one
+        # listener alone that is worse than on neither: the page would be
+        # painted in the theme last picked while the file kept an earlier one,
+        # and a reload would undo a choice that was there on screen.
+        theme_choice.change(
+            remember_settings, persisted_inputs, None, trigger_mode="always_last"
+        )
+        theme_choice.change(
+            apply_theme,
+            theme_choice,
+            theme_style,
+            trigger_mode="always_last",
+        )
+        # Light or dark is wired the same way and for the same reasons, except
+        # that the repaint is the browser's own work rather than a round trip:
+        # the class it toggles is already what every dark-mode rule reads.
+        appearance_choice.change(
+            remember_settings, persisted_inputs, None, trigger_mode="always_last"
+        )
+        appearance_choice.change(None, appearance_choice, None, js=themes.APPEARANCE_JS)
         # The four that belong to a conversation are saved on input, like the
         # write into the conversation itself. Switching conversations sets
         # them, and a save from that would put the sampling of the
@@ -2166,6 +2285,10 @@ def build_app() -> gr.Blocks:
         # startup, not as it is now.
         demo.load(
             restore_settings, None, [*persisted_inputs, prefill_token_limit]
+        ).then(
+            apply_theme, theme_choice, theme_style
+        ).then(
+            None, appearance_choice, None, js=themes.APPEARANCE_JS
         ).then(
             update_sampling_label,
             sampling_controls,
@@ -2686,13 +2809,42 @@ def build_app() -> gr.Blocks:
                 score_context_ids_state,
                 chat_metrics_state,
                 chat_context_ids_state,
+                lens_mode,
+                imported_lens,
+                pinned_concept,
+                inspection_session,
             ],
             [lens_panel, attention_panel, attention_layer, insight_state, inspect_status],
         )
         attention_layer.release(
             render_attention, [insight_state, attention_layer], attention_panel
         )
+        lens_mode.change(
+            change_lens_mode, [lens_mode, inspection_session],
+            [jacobian_controls, attention_layer, *inspection_outputs],
+            queue=False,
+        )
+        import_lens_button.click(
+            import_jacobian_lens, [lens_file, fitted_model_id], [imported_lens, import_lens_status],
+        )
+        imported_lens.change(reset_inspection, insight_state, inspection_outputs)
+        imported_lens.change(
+            lambda imported: gr.update(open=False) if imported else gr.skip(),
+            imported_lens, lens_setup,
+        )
+        pinned_concept.input(
+            change_pinned_token, [pinned_concept, inspection_session], inspection_outputs,
+            queue=False,
+        )
         # Every path that redraws the strips writes the metrics state, so this
         # is where a readout of a token that is no longer on screen goes away.
-        metrics_state.change(reset_inspection, insight_state, inspection_outputs)
+        #
+        # Streaming writes that state on every frame, and reset_inspection
+        # skips its outputs once there is nothing left to clear. Gradio marks
+        # them pending regardless, so without QUIET_TICK the inspector blinks
+        # its way through every reply: see the note above for what the two
+        # arguments each take away.
+        metrics_state.change(
+            reset_inspection, insight_state, inspection_outputs, **QUIET_TICK,
+        )
     return demo

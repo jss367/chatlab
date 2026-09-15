@@ -6,6 +6,7 @@ import gradio as gr
 
 import library
 import settings
+import themes
 from conversation import MAIN_BRANCH, branch_sampling
 from model_runtime import (
     MEMORY_HEADROOM_BYTES,
@@ -28,7 +29,7 @@ from ui.conversations import remember_branch_sampling
 # process is holding right now. They were only in the log before, which meant
 # reading a log file to find out why a load was refused.
 HARDWARE_UNREAD = (
-    "Reading the device… press **↻ Refresh** in a moment. ChatLab imports "
+    "Reading the device… press **Refresh** in a moment. ChatLab imports "
     "PyTorch in the background at startup, and the device cannot be named "
     "until that has finished."
 )
@@ -120,6 +121,17 @@ def refresh_hardware():
     return hardware_card()
 
 
+def apply_theme(name):
+    """Repaint the interface in the chosen theme.
+
+    The stylesheet is the whole of it: every color the interface draws with
+    leads back to the two ramps themes.stylesheet() rewrites, so the page
+    changes under the reader rather than waiting for a reload.
+    """
+
+    return gr.update(value=themes.style_tag(name))
+
+
 def refresh_thinking_mode():
     return gr.update(visible=runtime.MANAGER.supports_thinking)
 
@@ -158,6 +170,8 @@ PERSISTED_SETTING_NAMES = (
     "thinking_mode",
     "enter_sends",
     "writing_suggestions",
+    "theme",
+    "appearance",
     "model_id",
     "weight_precision",
 )

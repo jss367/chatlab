@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import html
+import threading
 import time
+from uuid import uuid4
 
 import gradio as gr
 
@@ -12,7 +14,7 @@ from model_runtime import (
     LOADING,
     ModelChanged,
 )
-from ui import runtime
+from ui import icons, runtime
 from ui.common import (
     NAV_ICONS,
     PAGES,
@@ -53,6 +55,49 @@ INSPECT_OUTPUT_ONLY = (
 )
 
 
+class InspectionControls:
+    """Keep live control revisions outside Gradio's queued input snapshots."""
+
+    def __init__(self):
+        self._sessions = {}
+        self._lock = threading.Lock()
+
+    def new_session(self):
+        session = uuid4().hex
+        with self._lock:
+            self._sessions[session] = (0, "Logit", "")
+        return session
+
+    def forget(self, session):
+        with self._lock:
+            self._sessions.pop(session, None)
+
+    def change(self, session, *, mode=None, pin=None):
+        with self._lock:
+            previous = self._sessions.get(session)
+            if previous is None:
+                return
+            revision, old_mode, old_pin = previous
+            self._sessions[session] = (
+                revision + 1, old_mode if mode is None else mode,
+                old_pin if pin is None else pin,
+            )
+
+    def capture(self, session, mode, pin):
+        with self._lock:
+            current = self._sessions.get(session)
+            # Also reject an old queued request that starts after the edit.
+            return current[0] if current is not None and current[1:] == (mode, pin) else None
+
+    def current(self, session, revision):
+        with self._lock:
+            current = self._sessions.get(session)
+            return current is not None and current[0] == revision
+
+
+INSPECTION_CONTROLS = InspectionControls()
+
+
 def remember_inspect_target(strip: str):
     """A select listener that keeps the clicked position for the inspector.
 
@@ -85,6 +130,10 @@ def inspect_layers(
     score_context_state: tuple | None = None,
     chat_metrics_state: tuple[int, list[dict]] | None = None,
     chat_context_state: tuple | None = None,
+    lens_mode: str = "Logit",
+    imported_lens: dict | None = None,
+    pinned_text: str = "",
+    inspection_session: str | None = None,
 ):
     """Run the logit lens and attention readout for the clicked token.
 
@@ -107,6 +156,14 @@ def inspect_layers(
 
     skip = gr.skip()
     refused = (skip, skip, skip, skip)
+    revision = INSPECTION_CONTROLS.capture(inspection_session, lens_mode, pinned_text or "")
+
+    def controls_current():
+        return inspection_session is None or INSPECTION_CONTROLS.current(inspection_session, revision)
+
+    if not controls_current():
+        yield (skip,) * 5
+        return
     if not target or target.get("generation") != current_strip_generation(target["strip"]):
         yield (*refused, INSPECT_HINT)
         return
@@ -169,25 +226,41 @@ def inspect_layers(
                 yield (*refused, INSPECT_GONE)
                 return
             index = len(context_ids) + position
-        if index == 0:
+        if index == 0 and lens_mode != "Jacobian":
             yield (*refused, INSPECT_FIRST)
             return
         sequence = context_ids + [int(metric["token_id"]) for metric in metrics]
 
         started = time.monotonic()
         try:
-            insight = runtime.MANAGER.inspect(
-                sequence, index, context_count=len(context_ids), load_id=load_id,
-                **({"steering": steering} if steering is not None else {}),
-            ).to_dict()
+            options = {"context_count": len(context_ids), "load_id": load_id}
+            if steering is not None:
+                options["steering"] = steering
+            if lens_mode == "Jacobian":
+                insight = runtime.MANAGER.inspect_jacobian(
+                    sequence, index,
+                    lens_id=(imported_lens or {}).get("import_id"),
+                    pinned_text=pinned_text or "", **options,
+                ).to_dict()
+            else:
+                insight = runtime.MANAGER.inspect(sequence, index, **options).to_dict()
         except ModelChanged:
+            if not controls_current():
+                yield (skip,) * 5
+                return
             yield (*refused, INSPECT_MODEL_CHANGED)
             return
         except Exception as error:
+            if not controls_current():
+                yield (skip,) * 5
+                return
             yield (
                 *refused,
                 failure_status("Could not inspect that token", str(error)),
             )
+            return
+        if not controls_current():
+            yield (skip,) * 5
             return
         if target["generation"] != current_strip_generation(target["strip"]):
             yield (*refused, INSPECT_GONE)
@@ -199,24 +272,40 @@ def inspect_layers(
         shown = html.escape(repr(insight["token_text"]))
         read = len(insight["layers"]) - 1
         status = (
-            f"{where} {position + 1}: `{shown}`, read through {read} "
+            f"{where} {position + 1}: <code>{shown}</code>, read through {read} "
             f"layers in {time.monotonic() - started:.1f}s."
         )
-        if not read:
+        if insight.get("kind") == "jacobian":
+            status = (
+                f"{where} {position + 1}: <code>{shown}</code>, read after processing this token "
+                f"at {len(insight['layers'])} fitted layers in {time.monotonic() - started:.1f}s."
+            )
+        elif not read:
             status = f"{status} {INSPECT_OUTPUT_ONLY}"
-        if not layer_count:
+        if not layer_count and insight.get("kind") != "jacobian":
             status = f"{status} This model did not return attention weights."
-        yield (
-            charts.logit_lens_chart(insight),
-            charts.attention_strip(insight, layer),
+        if inspection_session is not None:
+            insight["inspection_controls"] = {"session": inspection_session, "revision": revision}
+        frame = (
+            render_lens(insight),
+            render_attention(insight, layer),
             gr.update(maximum=max(layer_count, 1), value=layer),
             insight,
             status,
         )
+        if not controls_current():
+            yield (skip,) * 5
+            return
+        yield frame
         # Resumed once the browser has the frame above. If the strips were
         # replaced while it was in flight, their reset was applied first and
         # the readout now sits on top of it, so take it back down.
-        if target["generation"] != current_strip_generation(target["strip"]):
+        if not controls_current():
+            # The control reset may have arrived before this older frame.
+            # The held generation slot prevents a newer inspection result
+            # from landing before this cleanup. Empty HTML fits either mode.
+            yield ("", charts.EMPTY_ATTENTION, skip, None, INSPECT_HINT)
+        elif target["generation"] != current_strip_generation(target["strip"]):
             yield (charts.EMPTY_LENS, charts.EMPTY_ATTENTION, skip, None, INSPECT_GONE)
     finally:
         runtime.MANAGER.release_generation()
@@ -227,7 +316,54 @@ def render_attention(insight: dict | None, layer):
 
     if not insight:
         return gr.skip()
+    controls = insight.get("inspection_controls")
+    if controls and not INSPECTION_CONTROLS.current(controls["session"], controls["revision"]):
+        return gr.skip()
+    if insight.get("kind") == "jacobian":
+        return '<div class="viz-empty">Select the Logit lens to inspect attention behind a prediction.</div>'
     return charts.attention_strip(insight, int(layer or 0))
+
+
+def render_lens(insight: dict) -> str:
+    if insight.get("kind") == "jacobian":
+        return charts.jacobian_lens_chart(insight)
+    return charts.logit_lens_chart(insight)
+
+
+def import_jacobian_lens(path, fitted_model_id):
+    """Keep large lens tensors in the model manager, never in browser state."""
+    if not path:
+        return gr.skip(), "Choose a saved lens.pt file first."
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        return gr.skip(), INSPECT_LOADING if held == LOADING else INSPECT_BUSY
+    try:
+        imported = runtime.MANAGER.import_jacobian_lens(path, fitted_model_id or "")
+        return imported, (
+            f"Imported for `{html.escape(imported['model_id'])}`: "
+            f"{imported['layers']} fitted layers, {imported['n_prompts']:,} fitting prompts. "
+            "Reloading the model requires importing the lens again."
+        )
+    except Exception as error:
+        return gr.skip(), failure_status("Could not import the lens", str(error))
+    finally:
+        runtime.MANAGER.release_generation()
+
+
+def change_lens_mode(mode, inspection_session=None):
+    INSPECTION_CONTROLS.change(inspection_session, mode=mode)
+    jacobian = mode == "Jacobian"
+    return (
+        gr.update(visible=jacobian), gr.update(visible=not jacobian),
+        charts.EMPTY_JACOBIAN if jacobian else charts.EMPTY_LENS,
+        charts.EMPTY_ATTENTION, None, INSPECT_HINT,
+    )
+
+
+def change_pinned_token(text, inspection_session):
+    INSPECTION_CONTROLS.change(inspection_session, pin=text or "")
+    # Clear even when the callback's insight snapshot was still empty.
+    return "", charts.EMPTY_ATTENTION, None, INSPECT_HINT
 
 
 def reset_inspection(insight: dict | None):
@@ -241,20 +377,17 @@ def reset_inspection(insight: dict | None):
 
     if insight is None:
         return gr.skip(), gr.skip(), gr.skip(), gr.skip()
-    return charts.EMPTY_LENS, charts.EMPTY_ATTENTION, None, INSPECT_HINT
+    empty = charts.EMPTY_JACOBIAN if insight.get("kind") == "jacobian" else charts.EMPTY_LENS
+    return empty, charts.EMPTY_ATTENTION, None, INSPECT_HINT
 
 
-# One rule per tile: the icon drawn above the page's own name. Gradio stamps
-# each option's text on its label as data-testid, which is the only hook a
-# Radio gives CSS.
+# One rule per tile: which drawing goes in the box the stylesheet has already
+# opened above the page's own name. Gradio stamps each option's text on its
+# label as data-testid, which is the only hook a Radio gives CSS.
 #
-# The icon is drawn on the label, so it would otherwise join the radio's
-# accessible name and have a screen reader read "speech balloon Chat". The
-# empty string after the slash is the generated text's alternative text,
-# which keeps it out of the name and leaves the page's own name to stand for
-# the tile - the same name that is now printed under it.
+# A mask carries no text with it, so unlike the emoji these replaced there is
+# nothing here for a screen reader to read out in front of the page's name.
 NAV_TILE_CSS = "\n".join(
-    f'#nav label[data-testid="{name}-radio-label"]::before '
-    f'{{ content: "{NAV_ICONS[name]}" / ""; }}'
+    icons.mask_rule(f'#nav label[data-testid="{name}-radio-label"]::before', NAV_ICONS[name])
     for name in PAGES
 )
