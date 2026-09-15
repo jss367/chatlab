@@ -405,12 +405,12 @@ average beside a moved frame would be quietly wrong.
 
 ### Token view
 
-The transcript has two views of the same conversation, and **Token view** above
-it switches between them. Off, the chatbot renders each reply the way you would
-read it: markdown, code blocks, a collapsed reasoning block. On, the same
-messages are written out as the tokens the model actually emitted — spaces as
-`␠`, newlines as `↵`, special tokens named — each painted by whichever scale
-**Color tokens by** is set to.
+The transcript has two views of the same conversation, and **Token view**, at
+the right-hand end of the row of tabs, switches between them. Off, the chatbot
+renders each reply the way you would read it: markdown, code blocks, a
+collapsed reasoning block. On, the same messages are written out as the tokens
+the model actually emitted — spaces as `␠`, newlines as `↵`, special tokens
+named — each painted by whichever scale **Color tokens by** is set to.
 
 Click any token there and the inspector on the right describes it: its rank,
 its probabilities, its surprise, and the alternatives the model ranked highest.

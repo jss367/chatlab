@@ -437,9 +437,30 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 .model-badge[data-state="other"] .model-badge-dot {{ background: #64748b; }}
 
 /* The transcript uses the remaining height, keeping its composer in reach. */
-#conversation-tabs {{ flex: 1 0 0; min-height: 420px; display: flex; flex-direction: column; }}
-#conversation-tabs > .tab-nav {{ flex: none; }}
-#chat-tab {{ flex: 1; min-height: 0; padding: 12px 0 0; border: 0; }}
+#conversation-tabs {{
+  flex: 1 0 0; min-height: 420px; display: flex; flex-direction: column;
+  /* The room the tab row keeps free at its right-hand end for the view
+     switch, which is drawn in it. See #token-view. */
+  --token-view-width: 240px;
+}}
+#conversation-tabs > .tab-wrapper {{ flex: none; }}
+/* The tabs are laid out in what is left when the switch has taken its room,
+   so the last of them cannot run underneath it. The room is padding rather
+   than a narrower strip because the rule under the tabs is drawn across the
+   strip's padding: it stays the full width of the page, which is what it is
+   there to divide. Too narrow a window for even four tabs scrolls them
+   sideways; Gradio cuts them off instead, which puts a tab out of reach. */
+#conversation-tabs .tab-container[role="tablist"] {{
+  padding-right: var(--token-view-width);
+  overflow-x: auto; scrollbar-width: none;
+}}
+#conversation-tabs .tab-container[role="tablist"]::-webkit-scrollbar {{ display: none; }}
+/* The panel is what the switch is placed against: it starts one layout gap
+   under the foot of the tab row, which is how the switch finds the row from
+   inside the panel. Gradio draws the column within it relatively positioned,
+   which would otherwise catch the switch and hold it in the transcript. */
+#chat-tab {{ flex: 1; min-height: 0; padding: 12px 0 0; border: 0; position: relative; }}
+#chat-tab > .column {{ position: static; }}
 #conversation-tabs .tabitem > .column {{ flex-wrap: nowrap; }}
 #chat-tab > .column {{ height: 100%; min-height: 0; gap: 10px; }}
 #chat-tab > .column > * {{ flex: 0 0 auto; }}
@@ -709,10 +730,15 @@ label.{ICON_CLASS} {{ display: inline-flex; }}
    to a strip's id: naming them would leave the next strip unreadable in dark
    mode the day it is added. */
 .textspan.hl, .category-label {{ color: #0b0b0b; }}
-/* A compact, two-option switch at the upper right of the conversation. */
+/* A compact, two-option switch, drawn in the empty right-hand end of the tab
+   row. It had a line of its own, which cost the transcript forty pixels of
+   height to say one short thing. It is still written inside the Chat
+   panel, so it appears on the tab it belongs to and nowhere else, and a
+   keyboard still reaches it after the tabs and before the transcript. */
 #token-view {{
+  position: absolute; right: 0; bottom: calc(100% + var(--layout-gap)); z-index: 1;
   flex: none; width: fit-content; min-width: 0; padding: 0;
-  align-self: flex-end; margin-top: -6px; overflow: visible !important;
+  overflow: visible !important;
 }}
 #token-view .wrap:has(> label) {{
   display: flex; flex-wrap: nowrap; gap: 2px; padding: 3px;
