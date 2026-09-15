@@ -3433,6 +3433,17 @@ class GenerationUpdate:
     forced_prefix_tokens: int = 0
     """How many leading response tokens were replayed instead of sampled."""
 
+    literal_prefill_tokens: int = 0
+    """How many leading tokens were decoded as the reader's own literal text.
+
+    Text the reader supplied is shown as they wrote it, marker for marker, so
+    those tokens are decoded with the hidden special tokens made visible
+    again - a tokenizer's textual end marker typed into a prefill is prose,
+    not the model stopping. Anything rebuilding this response's text from its
+    token IDs has to make the same exception over the same prefix, or it
+    produces a different string from the one on screen.
+    """
+
     literal_prefill_text: str = ""
     """Decoded prefix whose reader-supplied portion must remain literal."""
 
@@ -6412,6 +6423,7 @@ class ModelManager:
                         reasoning_prefilled=reasoning_prefilled,
                         thinking_mode=recorded_thinking,
                         forced_prefix_tokens=len(forced),
+                        literal_prefill_tokens=literal_prefill_tokens,
                         literal_prefill_text=literal_prefill_text,
                         literal_text_spans=literal_text_spans,
                         prompt_ids=tuple(prompt_ids),
@@ -6465,6 +6477,7 @@ class ModelManager:
                             reasoning_prefilled=reasoning_prefilled,
                             thinking_mode=recorded_thinking,
                             forced_prefix_tokens=len(forced),
+                            literal_prefill_tokens=literal_prefill_tokens,
                             literal_prefill_text=literal_prefill_text,
                             literal_text_spans=literal_text_spans,
                             prompt_ids=tuple(prompt_ids),

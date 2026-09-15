@@ -213,6 +213,7 @@ def _write_reply(
     text = ""
     metrics: list[dict] = []
     prompt_ids: tuple[int, ...] = ()
+    literal_prefix = 0
     model_id = published.model_id
     stream = runtime.MANAGER.generate(
         messages,
@@ -237,11 +238,12 @@ def _write_reply(
             metrics = list(update.metrics)
             model_id = update.model_id or model_id
             prompt_ids = update.prompt_ids or prompt_ids
+            literal_prefix = update.literal_prefill_tokens or literal_prefix
             yield None, len(metrics)
     # Seeded with the prompt for the same reason a measurement is seeded with
     # its context: the first token of a reply decodes differently depending on
     # what the model had just read.
-    decoded, ends = _decoded_spans(metrics, prompt_ids, text)
+    decoded, ends = _decoded_spans(metrics, prompt_ids, text, literal_prefix)
     yield {
         "kind": compare.REPLY,
         "model_id": model_id,
@@ -310,7 +312,9 @@ def _measure_text(context, measured, use_chat_template, vector, published):
     }
 
 
-def _decoded_spans(metrics, context_ids=(), expected: str = "") -> tuple[str, list[int]]:
+def _decoded_spans(
+    metrics, context_ids=(), expected: str = "", literal_prefix: int = 0
+) -> tuple[str, list[int]]:
     """The run's text as the tokenizer really decodes it, and each token's end.
 
     Decoding is not piecewise. A byte-level tokenizer can split one character
@@ -353,6 +357,13 @@ def _decoded_spans(metrics, context_ids=(), expected: str = "") -> tuple[str, li
     and two identical replies from models that spell their stop token
     differently would part at their last character.
 
+    ``literal_prefix`` is how many leading tokens generation decoded with
+    those special tokens made visible again, because the reader wrote them.
+    A tokenizer's end marker typed into an assistant prefill is prose, and
+    hiding it here would produce a different string from the one on screen -
+    and split a cross-model comparison where one tokenizer reads that marker
+    as special and the other as ordinary text.
+
     Called with the generation slot held, so the tokenizer cannot be swapped
     out underneath it. An empty answer where there is nothing to decode with;
     the alignment falls back to standalone lengths and says so.
@@ -368,8 +379,8 @@ def _decoded_spans(metrics, context_ids=(), expected: str = "") -> tuple[str, li
         decoder.push(int(token_id))
     context_end = len(decoder.text)
     ends = []
-    for metric in metrics:
-        decoder.push(int(metric["token_id"]))
+    for index, metric in enumerate(metrics):
+        decoder.push(int(metric["token_id"]), force_visible=index < literal_prefix)
         ends.append(len(decoder.text))
     full = decoder.text
     base = (

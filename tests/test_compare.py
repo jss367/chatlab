@@ -214,6 +214,48 @@ class ReadingTests(unittest.TestCase):
         self.assertEqual(compare.token_ends(metrics, [0]), [1, 2])
         self.assertEqual(compare.token_ends(metrics, None), [1, 2])
 
+    def test_a_zero_width_token_does_not_close_an_empty_span(self):
+        # The first byte of a split character decodes to nothing, so both
+        # sides can stand level without having covered anything. Closing
+        # there would compare those tokens separately and call the two runs
+        # agreed before the bytes that follow decode differently.
+        def piece(position, token_id, surprise=1.0):
+            return metric(position, token_id, surprise)
+
+        left = [piece(1, 1, 2.0), piece(2, 2, 3.0), piece(3, 3, 1.0)]
+        right = [piece(1, 9, 4.0), piece(2, 8, 1.0)]
+        reading = compare.reading(
+            # A's first token covers nothing; both runs reach "é" together.
+            dict(run(left), decoded="é!", token_ends=[0, 1, 2]),
+            dict(run(right, model_id="other/model"), decoded="é!", token_ends=[1, 2]),
+        )
+        self.assertEqual(reading["spans"], 2)
+        spans = reading["readings"]
+        self.assertEqual(spans[0]["text"], "é")
+        self.assertEqual(spans[0]["left_range"], (0, 2))
+        self.assertAlmostEqual(spans[0]["left_surprise"], 5.0)
+        self.assertAlmostEqual(spans[0]["right_surprise"], 4.0)
+        self.assertTrue(reading["complete"])
+
+    def test_trailing_tokens_that_decode_to_nothing_stay_in_their_span(self):
+        # A hidden stop token covers no characters; it belongs to the span it
+        # trails rather than to a divergence that never happened.
+        left = [metric(1, 1, 1.0), metric(2, 2, 1.0)]
+        right = [metric(1, 9, 2.0), metric(2, 8, 1.0)]
+        reading = compare.reading(
+            dict(run(left), decoded="hi", token_ends=[2, 2]),
+            dict(run(right, model_id="other/model"), decoded="hi", token_ends=[2, 2]),
+        )
+        # They pair off as a span of their own rather than falling past the
+        # end of the alignment, which is what matters: a stop token painted
+        # as "after the split" would report a divergence that never happened.
+        self.assertEqual(reading["spans"], 2)
+        self.assertTrue(reading["complete"])
+        self.assertEqual(reading["readings"][1]["text"], "")
+        self.assertAlmostEqual(reading["readings"][1]["surprise_bits"], 0.0)
+        painted = compare.strip(left, reading["readings"], "left")
+        self.assertNotIn(compare.SPLIT_LABEL, [label for _text, label in painted])
+
     def test_text_that_genuinely_parts_ends_the_alignment(self):
         def piece(position, token_id, text):
             return dict(metric(position, token_id, 1.0), text=text, display_text=text)

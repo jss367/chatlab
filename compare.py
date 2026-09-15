@@ -166,18 +166,33 @@ def align(
         else:
             here, there = here + 1, there + 1
             # Extend whichever side has covered fewer characters until both
-            # stand at the same place. Running out on either side ends the
-            # alignment: there is no boundary left for the other to meet.
-            while ends_here[here - 1] != ends_there[there - 1]:
-                if ends_here[here - 1] < ends_there[there - 1]:
+            # stand at the same place, past where the last span ended.
+            # Standing level without having moved is not a boundary: a token
+            # can decode to nothing at all - the first byte of a split
+            # character, a hidden special token - and closing there would
+            # make an empty span, compare those tokens' surprise separately
+            # instead of through the next real character, and call the two
+            # runs agreed before the bytes that follow decode differently.
+            # Running out on both sides while level is the exception: the
+            # tokens left over decode to nothing, and they belong to the span
+            # they trail rather than to the divergence after it.
+            while True:
+                end_here, end_there = ends_here[here - 1], ends_there[there - 1]
+                if end_here == end_there and end_here > covered_here:
+                    break
+                if end_here < end_there or (end_here == end_there and here < len(left)):
                     if here >= len(left):
                         break
                     here += 1
-                else:
-                    if there >= len(right):
-                        break
+                elif there < len(right):
                     there += 1
-            if ends_here[here - 1] != ends_there[there - 1]:
+                else:
+                    break
+            if (
+                ends_here[here - 1] != ends_there[there - 1]
+                or (ends_here[here - 1] <= covered_here
+                    and (here < len(left) or there < len(right)))
+            ):
                 break
         end_here, end_there = ends_here[here - 1], ends_there[there - 1]
         covered = text_here[covered_here:end_here]
