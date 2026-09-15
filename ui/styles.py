@@ -975,6 +975,54 @@ SHORTCUT_JS = """
 """
 
 
+# A box whose text is there to be read rather than typed into is built
+# non-interactive, and Gradio draws that as a disabled textarea. A browser
+# gives a disabled control no pointer and no caret: a wheel over one scrolls
+# the page behind it instead, and the keys go nowhere. The maze workbench's
+# full response and the prompt behind it are both longer than the box that
+# holds them, so everything past the first screenful had no way to be
+# reached. Read-only is what these boxes are, and a read-only textarea
+# scrolls, takes a caret and gives its text up to a selection while refusing
+# every edit a disabled one refuses - the value still cannot be changed. So
+# each of them is turned from the one into the other.
+#
+# They arrive at any moment, which is why this watches the document rather
+# than walking it once: a page is built when the reader first opens it, an
+# extension's later still, and Gradio writes the attribute itself when a box
+# changes hands between the two states. Turning the attribute off is another
+# write to it, and the second pass over a box that is already read-only stops
+# at the first test.
+READ_ONLY_TEXT_JS = """
+() => {
+  if (window.__chatlabReadOnlyText) { return; }
+  window.__chatlabReadOnlyText = true;
+  const TEXT_BOX = 'textarea[data-testid="textbox"]';
+  const relax = (box) => {
+    if (!box.disabled) { return; }
+    box.disabled = false;
+    box.readOnly = true;
+  };
+  const scan = (node) => {
+    if (!node || node.nodeType !== 1) { return; }
+    if (node.matches(TEXT_BOX)) { relax(node); }
+    node.querySelectorAll(TEXT_BOX).forEach(relax);
+  };
+  scan(document.body);
+  new MutationObserver((records) => {
+    for (const record of records) {
+      if (record.type === 'attributes') { scan(record.target); }
+      else { record.addedNodes.forEach(scan); }
+    }
+  }).observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['disabled'],
+  });
+}
+"""
+
+
 # Each of the two workspaces has a readings pane beside it, and each seam
 # between them carries a handle: a thin flex item, drawn by Gradio between
 # the two columns, that the reader drags to give one pane the other's room.

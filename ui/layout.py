@@ -201,6 +201,7 @@ from ui.token_menu import (
 from ui.styles import (
     CSS,
     THEME,
+    READ_ONLY_TEXT_JS,
     RESIZE_JS,
     SHORTCUT_JS,
     WRITING_SUGGESTIONS_JS,
@@ -1970,6 +1971,9 @@ def build_app() -> gr.Blocks:
         # The two readings panes are dragged wider or narrower by the handle
         # on their seam, and remember the width they were left at.
         demo.load(None, None, None, js=RESIZE_JS)
+        # A box that only shows text is read-only rather than dead, so text
+        # too long for it can be scrolled to and taken out.
+        demo.load(None, None, None, js=READ_ONLY_TEXT_JS)
         # The system's own typing predictions, on or off from the first paint
         # and whenever the setting is changed after it. The change fires when
         # a reload restores the file's value as well as when it is clicked.
