@@ -2130,7 +2130,11 @@ def search_models(
 
     ``order`` sorts a search of the whole Hub rather than narrowing what is
     searched: an obscure repository comes back under Popular, Trending and New
-    alike, as long as the query matches its ID. Recommended is the same search
+    alike, as long as the query matches its ID. The one place the sort does
+    decide what is seen is a query with more matches than SEARCH_SCAN_LIMIT,
+    which is where the paging stops; each sort reaches that limit over a
+    different part of the answer, so a narrower query finds a particular
+    repository where a different sort may not. Recommended is the same search
     with ChatLab's starters pinned above it, and is the one view an empty query
     can answer offline.
 
