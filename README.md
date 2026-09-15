@@ -42,6 +42,7 @@ drove.
 - Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
 - Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
+- An optional Jacobian lens reading concepts after a token, with imported model-specific lenses and pinned-token rank traces
 - An attention view showing which earlier tokens the model looked at when predicting it
 - A hardware panel naming the device, the memory ChatLab judges a load against, the Metal cap, and what the process is holding
 - Apple Metal, NVIDIA CUDA, and CPU loading
@@ -113,7 +114,7 @@ On Apple silicon the requirements also bring in [mlx-lm](https://github.com/ml-e
 
 A repository quantized with `mlx_lm.convert`, which is what `mlx-community` publishes, keeps its weights in safetensors files under the names Transformers uses, but packed the way MLX packs them: a 4-bit matrix plus per-group scales and biases per linear layer, which `AutoModelForCausalLM` cannot read. ChatLab recognises one by the `quantization` block in its `config.json`, lists it under **My Models** marked *MLX*, and loads it through mlx-lm rather than through Transformers. It runs on the GPU through Metal at the width it was converted to, so a 7B model at four bits takes about 4 GB and the **Weight precision** radio does not apply; the badge above the chat says *Apple Metal (MLX), 4-bit weights*.
 
-Everything the Chat page measures survives the change of runtime. The model returns logits for every position, so the ranks, probabilities, surprise, entropy, alternatives and branching are read exactly as they are from a Transformers model, and **Score text** and **Prompts** work the same way. The logit lens records the residual stream between the decoder layers for the one step an inspection takes, reads each state through the model's final norm and output head, and checks that the last state read that way reproduces the model's own output before it trusts the intermediate rows, as it does for Transformers. The attention view recomputes the weights beside the fused attention kernel for the inspected query, so it shows one row per layer wherever the architecture attends the ordinary way; a model whose layers do not (state-space layers, quantized caches) shows the lens alone and says so. An unquantized MLX conversion (`-bf16`, `-fp16`) is a Transformers checkpoint under another name and loads as one.
+The standard token measurements, logit lens, and attention view survive the change of runtime. The optional Jacobian lens currently requires the Transformers backend. The model returns logits for every position, so the ranks, probabilities, surprise, entropy, alternatives and branching are read exactly as they are from a Transformers model, and **Score text** and **Prompts** work the same way. The logit lens records the residual stream between the decoder layers for the one step an inspection takes, reads each state through the model's final norm and output head, and checks that the last state read that way reproduces the model's own output before it trusts the intermediate rows, as it does for Transformers. The attention view recomputes the weights beside the fused attention kernel for the inspected query, so it shows one row per layer wherever the architecture attends the ordinary way; a model whose layers do not (state-space layers, quantized caches) shows the lens alone and says so. An unquantized MLX conversion (`-bf16`, `-fp16`) is a Transformers checkpoint under another name and loads as one.
 
 The OpenAI-compatible API lists MLX models beside the Transformers ones and answers from them the same way. GGUF files are not loaded: llama.cpp exposes no hidden states, so the logit lens could not be read, and Transformers can only dequantize them into full weights, which would lose the memory the packing buys.
 
@@ -218,6 +219,46 @@ The seam between a transcript and the panel beside it is a handle: drag it to gi
 One model is in memory at a time whichever kind it is, because the two share the device and, on Apple silicon, the machine's memory. So loading an image model unloads a text one and the other way round, and each page's badge says whether what is in memory is a model it can use: a model of the other kind is named and greyed rather than reported as nothing loaded, which would send you off to load a second one on top of it.
 
 A badge above the tabs names the model that would answer. Beside it, a dropdown lists the downloaded text models that would load on this machine at the chosen weight precision, MLX conversions among them, each at the width it was converted to; picking one loads it in place of the model in memory, and the badge follows the load: it names the model coming in, fills a bar along its bottom edge as the weights are read, and gives the percentage beside the name. Until the loader reports its first weights the bar sweeps rather than filling, which covers a load queued behind a reply and the seconds a large snapshot takes to open. A load started on the Models page shows the same way here, and so does one started in another tab. A pick during a reply is refused. Models that are still downloading, would not fit, or are not yet on disk are not offered: those go through the Models page. Until a model is loaded, **Set up the default model** opens Models with the default selected. Selecting the default does not start a download or replace a loaded model. On Models, choose **Load cached** to use local files without a network check, or **Download and load** to fetch and load the model. A full default-model download is about 15 GB; the setup guidance states this before you start. Progress and any load errors appear on the Models page.
+
+### Jacobian concept inspection
+
+In **Chat → Layers and attention**, select **Jacobian**, choose a fitted
+`lens.pt`, enter the model ID it was fitted for, and press **Import lens**.
+Click a prompt or response token, then **Inspect layers**. The readout lists
+the five highest-scoring vocabulary tokens at each fitted decoder block.
+To track a token's vocabulary rank across layers, enter its exact text in
+**Pin a vocabulary token** and inspect again. Preserve leading spaces; phrases
+that split into several tokens are rejected.
+
+The Jacobian view reads the activation **after processing the selected token**,
+including the first token of a sequence. It never reads later tokens. The
+Logit view reads the activation that predicted the selected token. Jacobian
+scores are vocabulary readouts through a fitted transformation; they are not
+generation probabilities or evidence, by themselves, that a concept caused
+the response. The rank plot puts rank 1 at the top on a logarithmic scale.
+Visible decoder blocks are numbered from 1; artifact layer indices start at 0
+and refer to block outputs before the final normalization.
+
+The initial implementation supports **Llama, Qwen2, and Qwen3 text models
+using unquantized Transformers weights**. MLX, quantized models, and other
+architectures are not supported yet. The existing logit lens remains available
+on its supported backends. A lens is kept for the current model load only;
+reloading the model or restarting ChatLab requires importing it again.
+
+Use the [reference fitting tools](https://github.com/anthropics/jacobian-lens#fit)
+outside ChatLab to fit a lens, then export it with `lens.save("lens.pt")`.
+ChatLab accepts that saved artifact directly, up to 2 GiB; a resumable fitting
+checkpoint is a different format. It expects `J`, `d_model`, `source_layers`,
+and `n_prompts`. Matrices are mapped into CPU memory and transported one layer
+at a time, so the full lens is not copied onto the accelerator.
+
+The reference artifact does **not** identify its source model: the entered
+model ID is your declaration, and matching dimensions cannot prove that the
+lens was fitted for those weights. Use the exact model checkpoint and tokenizer
+used during fitting. If an artifact also includes `model_id` or
+`model_revision`, ChatLab checks them against the loaded model and its resolved
+revision. Each inspection verifies that the final block readout reproduces
+the model's actual output before displaying results.
 
 ### Models
 

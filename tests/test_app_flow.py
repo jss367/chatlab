@@ -4939,7 +4939,7 @@ class LayerInspectionTests(unittest.TestCase):
         inspect = next(fn for fn in demo.fns.values() if fn.fn is app.inspect_layers)
         self.assertEqual(inspect.inputs[3], chat.outputs[CONTEXT_IDS])
         self.assertEqual(inspect.inputs[5:7], [score.outputs[2], score.outputs[14]])
-        self.assertEqual(inspect.inputs[7:], [chat.outputs[CHAT_METRICS], chat.outputs[CHAT_CONTEXT_IDS]])
+        self.assertEqual(inspect.inputs[7:9], [chat.outputs[CHAT_METRICS], chat.outputs[CHAT_CONTEXT_IDS]])
         self.assertNotIn(chat.outputs[CHAT_METRICS], score.outputs)
         self.assertNotIn(chat.outputs[CHAT_CONTEXT_IDS], score.outputs)
         self.assertNotIn(score.outputs[14], chat.outputs)

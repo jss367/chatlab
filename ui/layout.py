@@ -93,6 +93,10 @@ from ui.generation import (
 )
 from ui.inspection import (
     INSPECT_HINT,
+    INSPECTION_CONTROLS,
+    change_lens_mode,
+    change_pinned_token,
+    import_jacobian_lens,
     inspect_layers,
     remember_inspect_target,
     render_attention,
@@ -774,6 +778,34 @@ def build_app() -> gr.Blocks:
                                     elem_classes=icon_classes("pencil"),
                                 )
                         with gr.Accordion("Layers and attention", open=False, elem_classes=["inspector-section"]):
+                            lens_mode = gr.Radio(
+                                ["Logit", "Jacobian"], value="Logit", label="Lens",
+                                info="Logit: the prediction before a token. Jacobian: concept readouts after it.",
+                            )
+                            imported_lens = gr.State(None)
+                            inspection_session = gr.State(
+                                value=lambda: INSPECTION_CONTROLS.new_session(),
+                                delete_callback=INSPECTION_CONTROLS.forget,
+                            )
+                            with gr.Column(visible=False) as jacobian_controls:
+                                with gr.Accordion("Lens setup", open=True) as lens_setup:
+                                    gr.Markdown(
+                                        "Import a lens fitted for the exact loaded checkpoint. "
+                                        "Supports full-precision Llama, Qwen2, and Qwen3 Transformers models. "
+                                        "[Lens format and fitting instructions](https://github.com/anthropics/jacobian-lens#fit)."
+                                    )
+                                    lens_file = gr.File(label="Fitted Jacobian lens", file_types=[".pt"], type="filepath")
+                                    fitted_model_id = gr.Textbox(
+                                        label="Model ID the lens was fitted for",
+                                        placeholder="For example, Qwen/Qwen3-0.6B",
+                                    )
+                                    import_lens_button = gr.Button("Import lens", size="sm")
+                                import_lens_status = gr.Markdown("No lens imported for this session.")
+                                pinned_concept = gr.Textbox(
+                                    label="Pin a vocabulary token (optional)",
+                                    placeholder="Type a token from the readout, then inspect again",
+                                    info="Use the exact text, including any leading space. One vocabulary token at a time.",
+                                )
                             with gr.Row():
                                 inspect_button = gr.Button(
                                     "Inspect layers", size="sm", scale=0, min_width=160,
@@ -2462,11 +2494,32 @@ def build_app() -> gr.Blocks:
                 score_context_ids_state,
                 chat_metrics_state,
                 chat_context_ids_state,
+                lens_mode,
+                imported_lens,
+                pinned_concept,
+                inspection_session,
             ],
             [lens_panel, attention_panel, attention_layer, insight_state, inspect_status],
         )
         attention_layer.release(
             render_attention, [insight_state, attention_layer], attention_panel
+        )
+        lens_mode.change(
+            change_lens_mode, [lens_mode, inspection_session],
+            [jacobian_controls, attention_layer, *inspection_outputs],
+            queue=False,
+        )
+        import_lens_button.click(
+            import_jacobian_lens, [lens_file, fitted_model_id], [imported_lens, import_lens_status],
+        )
+        imported_lens.change(reset_inspection, insight_state, inspection_outputs)
+        imported_lens.change(
+            lambda imported: gr.update(open=False) if imported else gr.skip(),
+            imported_lens, lens_setup,
+        )
+        pinned_concept.input(
+            change_pinned_token, [pinned_concept, inspection_session], inspection_outputs,
+            queue=False,
         )
         # Every path that redraws the strips writes the metrics state, so this
         # is where a readout of a token that is no longer on screen goes away.

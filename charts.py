@@ -204,6 +204,10 @@ EMPTY_LENS = (
     '<div class="viz-empty">Select a token and press <b>Inspect layers</b> to '
     "see what each layer predicted and where the model looked.</div>"
 )
+EMPTY_JACOBIAN = (
+    '<div class="viz-empty">Import a fitted lens, select a token, and press '
+    '<b>Inspect layers</b> to read concepts after that token.</div>'
+)
 EMPTY_ATTENTION = ""
 
 _LENS_HEIGHT = 130.0
@@ -347,6 +351,79 @@ def logit_lens_chart(insight: dict) -> str:
         "<thead><tr><th>Layer</th><th>Would have said</th><th>Prob.</th>"
         "<th>Rank of chosen</th><th>Prob. of chosen</th><th>Entropy</th></tr></thead>"
         f"<tbody>{rows}</tbody></table></div></figure>"
+    )
+
+
+def jacobian_lens_chart(insight: dict) -> str:
+    """Ranked concept readouts after a token; scores are never probabilities."""
+    layers = insight.get("layers") or []
+    if not layers:
+        return EMPTY_JACOBIAN
+    pinned = insight.get("pinned_text")
+    chart = ""
+    if pinned is not None:
+        first, last = layers[0]["layer"], layers[-1]["layer"]
+        width = _VIEW_WIDTH - _LENS_PAD_LEFT - _PAD_RIGHT
+        height = _LENS_HEIGHT - _PAD_TOP - _LENS_PAD_BOTTOM
+        maximum = max(2, insight["vocab_size"])
+
+        def x_at(layer):
+            return _LENS_PAD_LEFT + width * (layer - first) / max(1, last - first)
+
+        def y_at(rank):
+            return _PAD_TOP + height * math.log(max(1, rank)) / math.log(maximum)
+
+        path = " ".join(
+            f"{'M' if i == 0 else 'L'}{x_at(row['layer']):.1f},{y_at(row['rank']):.1f}"
+            for i, row in enumerate(layers)
+        )
+        ticks = sorted({1, min(10, maximum), min(100, maximum), maximum})
+        grid = "".join(
+            f'<line class="viz-grid" x1="{_LENS_PAD_LEFT}" x2="{_VIEW_WIDTH - _PAD_RIGHT}" '
+            f'y1="{y_at(rank):.1f}" y2="{y_at(rank):.1f}" />'
+            f'<text class="viz-tick" x="{_LENS_PAD_LEFT - 4}" y="{y_at(rank) + 3:.1f}" '
+            f'text-anchor="end">{rank:,}</text>' for rank in ticks
+        )
+        points = "".join(
+            f'<circle cx="{x_at(row["layer"]):.1f}" cy="{y_at(row["rank"]):.1f}" r="3" '
+            f'fill="currentColor"><title>Block {row["layer"] + 1}: rank {row["rank"]:,}, '
+            f'score {row["score"]:.3f}</title></circle>' for row in layers
+        )
+        chart = (
+            f'<div class="viz-note">Pinned token: <code>{html.escape(repr(pinned))}</code>. '
+            'Vocabulary rank by layer; rank 1 is at the top, on a logarithmic scale.</div>'
+            f'<svg viewBox="0 0 {_VIEW_WIDTH:g} {_LENS_HEIGHT:g}" role="img" '
+            f'aria-label="Pinned token vocabulary rank across fitted decoder blocks">'
+            f'{grid}<path class="viz-line" d="{path}" />{points}'
+            f'<text class="viz-tick" x="{_LENS_PAD_LEFT}" y="{_LENS_HEIGHT - 5}">block {first + 1}</text>'
+            f'<text class="viz-tick" x="{_VIEW_WIDTH - _PAD_RIGHT}" y="{_LENS_HEIGHT - 5}" '
+            f'text-anchor="end">block {last + 1}</text></svg>'
+        )
+    rows = []
+    for row in layers:
+        candidates = "<br>".join(
+            f'<code>{html.escape(repr(candidate["text"]))}</code> '
+            f'<span class="viz-sub">{candidate["score"]:.3f}</span>'
+            for candidate in row["candidates"]
+        )
+        tracked = (
+            f'<td>{row["rank"]:,}</td><td>{row["score"]:.3f}</td>'
+            if pinned is not None else ""
+        )
+        rows.append(f'<tr><td>{row["layer"] + 1}</td><td>{candidates}</td>{tracked}</tr>')
+    tracked_headers = "<th>Pinned rank</th><th>Pinned score</th>" if pinned is not None else ""
+    return (
+        '<figure class="viz-root" id="jacobian-lens">'
+        f'<figcaption class="viz-title">Jacobian lens after '
+        f'<code>{html.escape(repr(insight.get("token_text", "")))}</code></figcaption>'
+        '<div class="viz-note">Vocabulary readouts of the state after processing this token. '
+        'Scores measure the fitted lens readout; they are not generation probabilities or '
+        'proof that a concept caused the answer. Blocks are numbered from 1.</div>'
+        f'{chart}<div class="viz-table-wrap"><table class="viz-table">'
+        f'<thead><tr><th>Decoder block</th><th>Top tokens · score</th>{tracked_headers}</tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table></div>'
+        f'<div class="viz-note">Lens: {html.escape(insight.get("lens_name", ""))} · '
+        f'{insight.get("n_prompts", 0):,} fitting prompts.</div></figure>'
     )
 
 
