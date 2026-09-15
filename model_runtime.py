@@ -5914,6 +5914,7 @@ class ModelManager:
         max_new_tokens: int,
         load_id: str | None = None,
         thinking_mode: str = "default",
+        prompt_override_ids: Sequence[int] | None = None,
     ) -> None:
         """Refuse an oversized generation before a stream mutates UI state.
 
@@ -5923,6 +5924,11 @@ class ModelManager:
         model's token IDs with another model's tokenizer. A learned-position
         model also needs room to feed back all but the last requested sampled
         token; the first comes from the prefill's final logits.
+
+        ``prompt_override_ids`` is the edited prompt the reply being branched
+        was given, and is measured in place of anything ``messages`` would
+        render - the same prompt the generation itself will be handed, so the
+        two agree about what fits.
         """
 
         with self._lock:
@@ -5932,7 +5938,10 @@ class ModelManager:
                 raise ModelChanged(
                     "The model has been reloaded since these tokens were produced."
                 )
-            prompt_ids, _reasoning_prefilled = self._prompt_token_ids(messages, thinking_mode=thinking_mode)
+            if prompt_override_ids is None:
+                prompt_ids, _reasoning_prefilled = self._prompt_token_ids(messages, thinking_mode=thinking_mode)
+            else:
+                prompt_ids = [int(value) for value in prompt_override_ids]
             self._validate_generation_prefix_length(
                 prompt_ids,
                 forced_ids,

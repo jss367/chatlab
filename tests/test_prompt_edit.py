@@ -9,9 +9,10 @@ import app
 import gradio as gr
 from model_runtime import ModelChanged
 from ui import runtime, token_menu
+from conversation import forget_measurements, to_json, turn_entries
 from test_app_flow import (
     CONTEXT_IDS, FIXED, METRICS, PROMPT_METRICS, PROMPT_NOTE, PROMPT_STRIP,
-    SETTINGS, STATUS, TRACE, TURNS, metrics_of, select, strip_of,
+    SETTINGS, STATUS, TRACE, TURNS, metrics_of, select, strip_of, token_span,
 )
 from test_streaming import FakeTokenizer, SentencePieceTokenizer, loaded_manager
 import settings_sandbox
@@ -245,6 +246,66 @@ class PromptEditTests(unittest.TestCase):
         final = self.replace_with_text("Hello", settings=settings)
         self.assertEqual(final[TRACE]["sampling"]["assistant_prefill"], " world")
         self.assertEqual(metrics_of(final[METRICS])[0]["token_id"], WORLD)
+
+    # ------------------------------------------- branching the edited reply
+
+    def branch(self, frame, action, index=0):
+        """Right-click a token of the reply and take the menu's branch."""
+
+        payload = json.loads(html.unescape(
+            token_menu.token_menu_payload(
+                frame[TURNS], frame[METRICS], "branch",
+                token_span(frame[TURNS], index),
+            ).split('data-token-menu="')[1].split('"')[0]
+        ))
+        runtime.MANAGER.model.step = 0
+        return settled(list(token_menu.branch_from_menu(
+            json.dumps(action | {"selection": payload["selection"]}),
+            "", frame[TURNS], *SETTINGS,
+        )))
+
+    def test_branching_the_reply_replays_the_prompt_it_was_given(self):
+        # The conversation would render the unedited prompt. Replaying the
+        # reply's tokens against that would score them under a context they
+        # never had, so the prompt the reply was given is replayed instead.
+        edited = self.replace_with_text("Hello")
+        branched = self.branch(edited, {"kind": "regenerate"})
+        self.assertEqual(self.prompt_ids(branched), self.prompt_ids(edited))
+        self.assertIn("Regenerating from token 1", branched[STATUS])
+
+    def test_a_typed_branch_of_the_reply_replays_it_too(self):
+        edited = self.replace_with_text("Hello")
+        branched = self.branch(edited, {"kind": "text", "text": " world"})
+        self.assertEqual(self.prompt_ids(branched), self.prompt_ids(edited))
+
+    def test_one_more_token_of_the_reply_replays_it_too(self):
+        edited = self.replace_with_text("Hello")
+        payload = json.loads(html.unescape(
+            token_menu.token_menu_payload(
+                edited[TURNS], edited[METRICS], "next", token_span(edited[TURNS], 0),
+            ).split('data-token-menu="')[1].split('"')[0]
+        ))
+        _detail, pick = app.choose_alternative(
+            edited[TURNS], app.empty_metrics(), edited[PROMPT_METRICS],
+            payload["selection"], select(0),
+        )
+        runtime.MANAGER.model.step = 0
+        stepped = settled(list(app.next_token(pick, "", edited[TURNS], *SETTINGS)))
+        self.assertEqual(self.prompt_ids(stepped), self.prompt_ids(edited))
+
+    def test_an_ordinary_reply_is_still_branched_against_its_template(self):
+        branched = self.branch(self.frame, {"kind": "regenerate"})
+        self.assertEqual(self.prompt_ids(branched), PROMPT_IDS)
+
+    def test_the_prompt_goes_with_the_measurements(self):
+        # It is only ever read beside them, and replaying it without them
+        # would feed a prompt for a reply nothing is left to replay.
+        edited = self.replace_with_text("Hello")
+        self.assertIn("prompt_edit", edited[TURNS][-1])
+        forgotten = forget_measurements(edited[TURNS], len(edited[TURNS]) - 1)
+        self.assertNotIn("prompt_edit", forgotten[-1])
+        self.assertNotIn("prompt_edit", json.dumps(turn_entries(edited[TURNS])))
+        self.assertNotIn("prompt_edit", to_json(edited[TURNS]))
 
     # ------------------------------------------------------------ refusals
 

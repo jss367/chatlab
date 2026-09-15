@@ -436,6 +436,7 @@ def generate_reply(
     *,
     forced_ids: tuple[int, ...] = (),
     prompt_edit: dict | None = None,
+    replaying: bool = False,
     literal_prefill_tokens: int = 0,
     automatic_reasoning_close_tokens: int = 0,
     literal_text_ranges: tuple[tuple[int, int], ...] = (),
@@ -520,6 +521,7 @@ def generate_reply(
             thinking_mode,
             forced_ids=forced_ids,
             prompt_edit=prompt_edit,
+            replaying=replaying,
             literal_prefill_tokens=literal_prefill_tokens,
             automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
             literal_text_ranges=literal_text_ranges,
@@ -559,6 +561,7 @@ def _stream_reply(
     *,
     forced_ids: tuple[int, ...] = (),
     prompt_edit: dict | None = None,
+    replaying: bool = False,
     literal_prefill_tokens: int = 0,
     automatic_reasoning_close_tokens: int = 0,
     literal_text_ranges: tuple[tuple[int, int], ...] = (),
@@ -586,6 +589,11 @@ def _stream_reply(
     if steering is not None:
         pending["steering"] = steering
     pending["reasoning_closed"] = True
+    if prompt_edit is not None:
+        # Kept on the reply so a branch taken from it later replays its tokens
+        # against the prompt it was given. Shared, never rewritten; dropped
+        # wherever the measurements are.
+        pending["prompt_edit"] = prompt_edit
     # Where this reply came from, for the conversation list. The model is
     # stamped from the first update rather than read off runtime.MANAGER here: the
     # generator does not take the model lock until it is first resumed, and
@@ -670,14 +678,13 @@ def _stream_reply(
     # branches that is the first replay result; until then the old transcript
     # and its diagnostics remain together on screen.
     # A branch at the first token has an empty replay prefix, but must still
-    # ignore the current prefill control just like every other branch. An
-    # edited prompt hands down a load id for the same reason a branch does -
-    # its tokens must meet the tokenizer that produced them - yet nothing of
-    # the response is replayed, so the prefill control applies as usual.
-    replaying_response = bool(forced_ids) or (
-        expected_load_id is not None and prompt_edit is None
-    )
-    applied_prefill = bool(assistant_prefill) and not replaying_response
+    # ignore the current prefill control just like every other branch, so the
+    # caller says outright that it is replaying a response rather than leaving
+    # it to be guessed from the arguments. An edited prompt is not a replay:
+    # it hands down a load id because its tokens must meet the tokenizer that
+    # produced them, but every token of the response is sampled fresh, so the
+    # prefill control applies as it would to any new reply.
+    applied_prefill = bool(assistant_prefill) and not replaying
     stream_note = branch_note or (
         "Assistant prefill applied." if applied_prefill else ""
     )
@@ -1310,6 +1317,10 @@ def _branch_with_text(
     # handed down and compared again under that lock, for the encoding and for
     # the replay alike; a mismatch there is ModelChanged.
     expected_load = turns[position].get("load_id")
+    # A reply generated from an edited prompt was not given the prompt this
+    # conversation renders, so replaying its tokens against that one would
+    # score them under a context they never had. Replay the prompt it had.
+    prompt_edit = turns[position].get("prompt_edit")
     literal_prefill_tokens = literal_prefill_count(metrics, len(kept))
     automatic_reasoning_close_tokens = automatic_reasoning_close_count(
         metrics, len(kept)
@@ -1335,6 +1346,7 @@ def _branch_with_text(
             max_new_tokens=int(settings[MAX_NEW_TOKENS_SETTING]),
             load_id=expected_load,
             thinking_mode=turns[position].get("thinking_mode", "default"),
+            prompt_override_ids=prompt_edit["ids"] if prompt_edit else None,
         )
     except ModelChanged:
         yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
@@ -1354,6 +1366,8 @@ def _branch_with_text(
             prompt_text,
             *settings,
             forced_ids=(*kept, *replacement_ids),
+            prompt_edit=prompt_edit,
+            replaying=True,
             literal_prefill_tokens=literal_prefill_tokens,
             automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
             literal_text_ranges=(
@@ -1599,6 +1613,9 @@ def _branch_from(pick, prompt_text, turns, *settings, single_step=False, resampl
     # As in branch_with_text(): the check above is the fast path, and the
     # runtime compares the same load again under the model lock.
     expected_load = turns[position].get("load_id")
+    # As with a typed branch: a reply given an edited prompt is replayed
+    # against that prompt, not against the one the template would write now.
+    prompt_edit = turns[position].get("prompt_edit")
     try:
         runtime.MANAGER.validate_generation_prefix(
             model_messages(
@@ -1610,6 +1627,7 @@ def _branch_from(pick, prompt_text, turns, *settings, single_step=False, resampl
             max_new_tokens=int(settings[MAX_NEW_TOKENS_SETTING]),
             load_id=expected_load,
             thinking_mode=turns[position].get("thinking_mode", "default"),
+            prompt_override_ids=prompt_edit["ids"] if prompt_edit else None,
         )
     except ModelChanged:
         yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
@@ -1624,6 +1642,8 @@ def _branch_from(pick, prompt_text, turns, *settings, single_step=False, resampl
             prompt_text,
             *settings,
             forced_ids=forced,
+            prompt_edit=prompt_edit,
+            replaying=True,
             literal_prefill_tokens=literal_prefill_tokens,
             automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
             literal_text_ranges=literal_text_ranges(
