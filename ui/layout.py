@@ -2512,7 +2512,12 @@ def build_app() -> gr.Blocks:
         import_lens_button.click(
             import_jacobian_lens, [lens_file, fitted_model_id], [imported_lens, import_lens_status],
         )
-        imported_lens.change(reset_inspection, insight_state, inspection_outputs)
+        # QUIET_TICK for the same reason as the metrics_state handler below:
+        # clearing a stale readout is instant, so the panel should not flash a
+        # spinner over itself on the way.
+        imported_lens.change(
+            reset_inspection, insight_state, inspection_outputs, **QUIET_TICK,
+        )
         imported_lens.change(
             lambda imported: gr.update(open=False) if imported else gr.skip(),
             imported_lens, lens_setup,
