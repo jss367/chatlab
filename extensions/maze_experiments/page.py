@@ -417,7 +417,14 @@ def _build_page(context):
     with gr.Row(elem_id="maze-workspace"):
         with gr.Column(elem_id="maze-scenario"):
             gr.Markdown("## Scenario")
-            gr.Markdown("Settings apply to the next episode. Loading a saved run shows the settings it used.")
+            models = gr.Button("Choose / load model", size="sm")
+            with gr.Accordion("Experiment trials", open=False):
+                trial_upload = gr.File(label="Trial definitions JSON", file_types=[".json"], type="filepath")
+                trial_picker = gr.Dropdown(choices=[], label="Trial", interactive=True,
+                                           info="Type to filter a long collection.")
+                trial_load = gr.Button("Load trial", size="sm", elem_id="maze-load-trial")
+                trial_note = gr.Markdown(trial_note_text(initial))
+            gr.Markdown("The settings below apply to the next episode. Loading a trial or a saved run shows the settings it used.")
             prepare = gr.Button("New episode · apply settings", elem_id="maze-prepare")
             with gr.Accordion("Setup prompt", open=False):
                 system_prompt = gr.Textbox(value=SYSTEM, label="System prompt", lines=2, elem_id="maze-system-prompt")
@@ -453,13 +460,6 @@ def _build_page(context):
                 recovery_attempts = gr.Number(value=RECOVERY_DEFAULTS["recovery_attempts"], precision=0, minimum=1, maximum=256,
                                               label="Recovery window · tool attempts", elem_id="maze-recovery-attempts",
                                               info="And inside this many attempted calls.")
-            models = gr.Button("Choose / load model", size="sm")
-            with gr.Accordion("Experiment trials", open=False):
-                trial_upload = gr.File(label="Trial definitions JSON", file_types=[".json"], type="filepath")
-                trial_picker = gr.Dropdown(choices=[], label="Trial", interactive=True,
-                                           info="Type to filter a long collection.")
-                trial_load = gr.Button("Load trial", size="sm", elem_id="maze-load-trial")
-                trial_note = gr.Markdown(trial_note_text(initial))
             with gr.Accordion("Saved runs", open=False):
                 save = gr.Button("Export run JSON", size="sm")
                 download = gr.File(label="Saved run", interactive=False)
