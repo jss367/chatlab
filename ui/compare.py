@@ -138,7 +138,11 @@ def fill_slot(
         if mode == compare.REPLY and not (prompt or "").strip():
             yield refuse(COMPARE_NO_PROMPT)
             return
-        if mode != compare.REPLY and not (measured or "").strip():
+        # Only a genuinely empty box is refused. Whitespace is worth
+        # measuring - how expected a paragraph break or an indent was is a
+        # real question, and score_text accepts it for exactly that reason -
+        # so a passage of nothing but newlines is an experiment, not a slip.
+        if mode != compare.REPLY and not measured:
             yield refuse(COMPARE_NO_TEXT)
             return
         try:
@@ -291,7 +295,15 @@ def _measure_text(context, measured, use_chat_template, vector, published):
     # which score_text assigns whole to the passage; decoding from the
     # context is what keeps that token's context characters out of the
     # recorded text rather than in one run's and not the other's.
-    decoded, ends = _decoded_spans(metrics, result.context_ids, measured)
+    # Every measured token is the reader's own, so every one of them is
+    # forced visible: a passage that contains a tokenizer's end marker as
+    # literal text is scored as written, and hiding it here would record
+    # less than the passage and split a comparison against a model whose
+    # tokenizer reads that marker as ordinary characters. The context's
+    # tokens are template and control text, and stay hidden-eligible.
+    decoded, ends = _decoded_spans(
+        metrics, result.context_ids, measured, literal_prefix=len(metrics)
+    )
     return {
         "kind": compare.MEASUREMENT,
         "model_id": published.model_id,

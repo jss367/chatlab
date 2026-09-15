@@ -604,6 +604,34 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(len(held["token_ends"]), len(held["metrics"]))
         self.assertEqual(held["token_ends"][-1], len(held["decoded"]))
 
+    def test_a_whitespace_passage_is_measured_rather_than_refused(self):
+        # How expected a paragraph break was is a real question, and
+        # score_text accepts whitespace for exactly that reason.
+        held, status, *_buttons = self.fill(
+            "A", mode=compare.MEASUREMENT, prompt="", measured="\n\n"
+        )
+        self.assertNotEqual(held, gr.skip())
+        self.assertIn("Slot A filled", status)
+        # A genuinely empty box is still refused.
+        held, status, *_buttons = self.fill(
+            "A", mode=compare.MEASUREMENT, prompt="", measured=""
+        )
+        self.assertEqual(held, gr.skip())
+        self.assertEqual(status, controls.COMPARE_NO_TEXT)
+
+    def test_a_measured_special_token_stays_in_the_recorded_passage(self):
+        # Every measured token is the reader's own; score_text scores a
+        # literal end marker as written, so the decode must keep it.
+        from test_streaming import EOS_ID
+
+        metrics = [metric(1, 0, 1.0), metric(2, EOS_ID, 1.0)]
+        kept, ends = controls._decoded_spans(metrics, literal_prefix=len(metrics))
+        self.assertEqual(kept, "Hello<eos>")
+        self.assertEqual(ends[-1], len(kept))
+        # A sampled stop token is still hidden.
+        hidden, _ends = controls._decoded_spans(metrics)
+        self.assertEqual(hidden, "Hello")
+
     def test_a_measurement_run_keeps_no_system_prompt_in_its_settings(self):
         held, _status, *_buttons = self.fill(
             "A", mode=compare.MEASUREMENT, prompt="", measured="Hello world"
