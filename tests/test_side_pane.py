@@ -1576,6 +1576,19 @@ class ManageMyModelsTests(unittest.TestCase):
         self.assertFalse(confirm["visible"])
         self.assertEqual(self.removed, [])
 
+    def test_a_refused_removal_says_why_in_the_log(self):
+        # The card explains itself and then goes. Without these lines the
+        # trail held "Removal confirmed" and no account of why the files
+        # are still there.
+        self.manager._lock.acquire()
+        self.addCleanup(self.manager._lock.release)
+
+        with self.assertLogs("ui.models_page", level="INFO") as logged:
+            app.remove_my_model("org/partial")
+
+        self.assertIn("Removal confirmed for org/partial", logged.output[0])
+        self.assertIn("refused: the manager is busy", logged.output[1])
+
     def test_a_model_that_left_the_cache_is_reported_without_a_question(self):
         status, confirm, _, pending = app.ask_remove_my_model("gone/model")
 
@@ -1901,6 +1914,19 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertIn("hub &lt;unreachable&gt;", detail)
         self.assertEqual(state, {})
         self.assertIsNone(selected)
+
+    def test_a_failed_search_leaves_its_traceback_in_the_log(self):
+        # The handler is broad enough to catch a mistake in the search as
+        # well as an unreachable Hub, and the card already carries the
+        # message, so a line without the stack would only repeat it.
+        self.results = ConnectionError("hub unreachable")
+
+        with self.assertLogs("ui.models_page", level="WARNING") as logged:
+            app.search_models("olmo", "")
+
+        self.assertIn("Hub search for 'olmo' failed", logged.output[0])
+        self.assertIn("Traceback", logged.output[0])
+        self.assertIn("hub unreachable", logged.output[0])
 
     def test_no_matches_is_said_plainly(self):
         self.results = []
@@ -2941,6 +2967,25 @@ class PageLayoutTests(unittest.TestCase):
                 # And the script that writes it knows the pane by the same name.
                 self.assertIn(f"'{pane_id}'", app.RESIZE_JS)
 
+    def test_a_box_that_only_shows_text_is_read_only_rather_than_dead(self):
+        # Gradio draws a non-interactive textbox as a disabled textarea, and a
+        # browser hands a disabled control no wheel and no caret, so text
+        # longer than the box - the maze workbench's full response, the prompt
+        # behind it - had nothing past its first screenful that could be
+        # reached. Read-only refuses the same edits and gives the text back.
+        self.assertTrue(
+            any(fn.js == app.READ_ONLY_TEXT_JS for fn in self.demo.fns.values())
+        )
+        self.assertIn('textarea[data-testid="textbox"]', app.READ_ONLY_TEXT_JS)
+        self.assertIn("box.disabled = false;", app.READ_ONLY_TEXT_JS)
+        self.assertIn("box.readOnly = true;", app.READ_ONLY_TEXT_JS)
+        # A page is built when the reader first opens it and an extension's
+        # page later still, so the boxes are met as they arrive rather than
+        # counted once at load.
+        self.assertIn("new MutationObserver", app.READ_ONLY_TEXT_JS)
+        self.assertIn("subtree: true", app.READ_ONLY_TEXT_JS)
+        self.assertIn("attributeFilter: ['disabled']", app.READ_ONLY_TEXT_JS)
+
     def test_the_handle_keeps_touch_gestures_off_its_strip(self):
         # A touch device wider than the stacking breakpoint still drags the
         # handle, and a browser that reads that drag as a pan or a zoom takes
@@ -3822,13 +3867,18 @@ class PageLayoutTests(unittest.TestCase):
         self.assertEqual(
             accordion.label,
             app.sampling_label(
-                saved.temperature, saved.top_p, saved.top_k, saved.max_new_tokens
+                saved.temperature,
+                saved.top_p,
+                saved.top_k,
+                saved.skip_top_below,
+                saved.max_new_tokens,
             ),
         )
         for label, value in [
             ("Temperature", saved.temperature),
             ("Top-p", saved.top_p),
             ("Top-k (0 disables)", saved.top_k),
+            ("Skip top choice below (0 disables)", saved.skip_top_below),
             ("Maximum new tokens", saved.max_new_tokens),
         ]:
             with self.subTest(control=label):
@@ -3844,7 +3894,13 @@ class PageLayoutTests(unittest.TestCase):
         # to be right once it is let go.
         sliders = [
             self.labelled(label)
-            for label in ("Temperature", "Top-p", "Top-k (0 disables)", "Maximum new tokens")
+            for label in (
+                "Temperature",
+                "Top-p",
+                "Top-k (0 disables)",
+                "Skip top choice below (0 disables)",
+                "Maximum new tokens",
+            )
         ]
         listeners = self.listeners("update_sampling_label")
         # A page load's target has no block, so look the ids up by hand.
@@ -3893,7 +3949,13 @@ class PageLayoutTests(unittest.TestCase):
         # anyone not using a pointer.
         sliders = {
             self.labelled(label)._id
-            for label in ("Temperature", "Top-p", "Top-k (0 disables)", "Maximum new tokens")
+            for label in (
+                "Temperature",
+                "Top-p",
+                "Top-k (0 disables)",
+                "Skip top choice below (0 disables)",
+                "Maximum new tokens",
+            )
         }
 
         for fn in self.listeners("update_sampling_label"):
@@ -4649,11 +4711,17 @@ class SavedSettingsTests(unittest.TestCase):
                 events.setdefault(self.demo.blocks[block_id], set()).add(event)
 
         self.assertEqual(events[self.labelled("Random seed")], {"blur", "submit"})
-        # The four sampling controls are saved on input rather than change:
+        # The five sampling controls are saved on input rather than change:
         # switching conversations sets them, and a save from that would put
         # the sampling of the conversation being looked at into the file
         # every unpinned conversation answers with.
-        for label in ("Temperature", "Top-p", "Top-k (0 disables)", "Maximum new tokens"):
+        for label in (
+            "Temperature",
+            "Top-p",
+            "Top-k (0 disables)",
+            "Skip top choice below (0 disables)",
+            "Maximum new tokens",
+        ):
             self.assertEqual(events[self.labelled(label)], {"input"}, label)
         self.assertEqual(events[self.labelled("Measure prompt tokens")], {"change"})
         # And only the seed box's own events are allowed to write it down.
@@ -4802,6 +4870,7 @@ class SavedSettingsTests(unittest.TestCase):
                         "Temperature",
                         "Top-p",
                         "Top-k (0 disables)",
+                        "Skip top choice below (0 disables)",
                         "Maximum new tokens",
                         "Random seed",
                         "New seed each response",

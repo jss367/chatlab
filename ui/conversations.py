@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -48,6 +49,12 @@ from ui.panel import (
     event_index,
     transcript_pick,
 )
+
+
+# Which conversation the reader was on, and when they moved. A bug in branch
+# or fork state reads as "the wrong messages came back", and the log had no
+# record of the sequence that led there.
+logger = logging.getLogger(__name__)
 
 
 def conversation_list_update(forks: dict, turns: list[dict] | None):
@@ -321,6 +328,7 @@ def fork_conversation(
 
     forks = copy_forks(forks)
     turns = copy_turns(turns)
+    source = forks["active"]
     if not preserve_source:
         finalize_partial(turns)
     put_branch(forks, forks["active"], turns)
@@ -353,6 +361,13 @@ def fork_conversation(
     messages, _ = display_messages(forked)
 
     truncated = len(forked) < len(turns)
+    logger.info(
+        "Forked %s into %s at %s of %s messages",
+        source,
+        name,
+        len(forked),
+        len(turns),
+    )
     if truncated:
         status = (
             f"Forked at message {found[0] + 1} into {name}. "
@@ -387,9 +402,11 @@ def switch_fork(
 
     forks = copy_forks(forks)
     if name not in forks["branches"]:
+        logger.info("Switch to %s refused: it no longer exists", name)
         return fork_refused(turns, forks, "That fork no longer exists.")
     if name == forks["active"]:
         return fork_refused(turns, forks, f"Already on {name}.")
+    logger.info("Switched from %s to %s", forks["active"], name)
 
     turns = copy_turns(turns)
     if not preserve_source:
@@ -427,6 +444,7 @@ def delete_fork(
             "The main conversation cannot be deleted. Clear all empties every conversation.",
         )
 
+    logger.info("Deleted %s (%s messages)", name, len(forks["branches"].get(name) or []))
     drop_branch(forks, name)
     forks["active"] = MAIN_BRANCH
     target = copy_turns(forks["branches"].setdefault(MAIN_BRANCH, []))
@@ -467,6 +485,7 @@ def new_conversation(
     # The names in the file count too, so a chat another page started since
     # this one loaded is not given a twin the merge would take for it.
     name = library.claim_name(forks, CHAT_PREFIX)
+    logger.info("Started %s, leaving %s", name, forks["active"])
     put_branch(forks, name, [])
     # Started from the sampling on screen, and pinned to it: a conversation
     # that went on following the settings file would be moved by a slider
@@ -552,6 +571,7 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE, *
         loaded, system_prompt = from_json(payload)
         steering = compact_steering(json.loads(payload).get("steering"))
     except (OSError, ValueError) as error:
+        logger.warning("Could not load the conversation at %s", file_path, exc_info=True)
         return keep_current(failure_status("Could not load that file", str(error)))
 
     # A successful load replaces the conversation wholesale, so whatever the

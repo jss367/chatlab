@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import logging
 import re
 import threading
 import time
@@ -76,6 +77,12 @@ from ui.common import (
     show_page,
     status_card,
 )
+
+# Every failure on this page used to end as a card in the browser and nothing
+# else, so a load that broke reached a reader as one escaped sentence with no
+# traceback behind it. The handlers below say what was asked for and what went
+# wrong, because this page is where a session's memory trouble starts.
+logger = logging.getLogger(__name__)
 
 
 class RateMeter:
@@ -448,6 +455,7 @@ def refresh_model_actions(
     try:
         cached = cache_status(cleaned) if cleaned else CacheStatus()
     except ValueError as error:
+        logger.warning("Cannot read the cache for %s: %s", cleaned, error)
         return (
             html.escape(str(error)),
             gr.update(visible=False),
@@ -456,7 +464,9 @@ def refresh_model_actions(
         )
     except OSError:
         # Keep local loading available if the cache cannot be inspected;
-        # its handler can explain the actual error when clicked.
+        # its handler can explain the actual error when clicked. The card
+        # cannot name the error, so the log is the only place it is kept.
+        logger.warning("Could not check the cache for %s", cleaned, exc_info=True)
         return (
             "Could not check downloaded files.",
             gr.update(visible=True),
@@ -531,10 +541,12 @@ def refresh_stale_model_actions(
 
 def download_model(model_id: str, hf_token: str, selected: str | None = None):
     model_id = chosen_model(model_id, selected)
+    logger.info("Download requested for %s", model_id)
     started = time.monotonic()
     try:
         before = cache_status(model_id)
     except (OSError, ValueError) as error:
+        logger.warning("Download of %s failed before it started", model_id, exc_info=True)
         yield failure_card("Download failed", html.escape(str(error)))
         return
     yield status_card(*describe_cache(model_id, before), "working")
@@ -543,6 +555,7 @@ def download_model(model_id: str, hf_token: str, selected: str | None = None):
         elapsed = time.monotonic() - started
         fetched = describe_fetched(before, cache_status(model_id), elapsed)
     except Exception as error:
+        logger.exception("Download of %s failed", model_id)
         yield failure_card("Download failed", html.escape(str(error)))
         return
 
@@ -598,10 +611,12 @@ def download_and_load_model(
     """
 
     model_id = chosen_model(model_id, selected)
+    logger.info("Download and load requested for %s at %s weights", model_id, precision)
     started = time.monotonic()
     try:
         before = cache_status(model_id)
     except (OSError, ValueError) as error:
+        logger.warning("Setup of %s failed before it started", model_id, exc_info=True)
         yield failure_card("Model setup failed", html.escape(str(error)))
         return
     yield status_card(*describe_cache(model_id, before), "working")
@@ -609,6 +624,15 @@ def download_and_load_model(
         path = yield from stream_download(model_id, hf_token)
         claimed, held = runtime.MANAGER.claim_exclusive_load(model_id)
         if claimed is None:
+            # The download is the slow half and the claim is only taken after
+            # it, so this is where a reply started meanwhile turns the job
+            # back. Without the line the trail holds the request and a
+            # finished download and no account of the load that never ran.
+            logger.info(
+                "Load of %s after its download refused: %s has the model",
+                model_id,
+                held or "another claim",
+            )
             yield refused_load_card(
                 held,
                 f" `{model_id.strip()}` is on disk; use **Load cached** to "
@@ -633,6 +657,7 @@ def download_and_load_model(
         finally:
             runtime.MANAGER.release_load(claimed[1])
     except Exception as error:
+        logger.exception("Setup of %s at %s weights failed", model_id, precision)
         yield failure_card("Model setup failed", html.escape(str(error)))
         return
 
@@ -688,15 +713,18 @@ def load_cached_model(
     """
 
     cleaned = chosen_model(model_id, selected)
+    logger.info("Cached load requested for %s at %s weights", cleaned, precision)
     if claim is not None:
         yield from _load_cached_model(cleaned, precision)
         return
     try:
         claimed, held = runtime.MANAGER.claim_exclusive_load(cleaned)
     except ValueError as error:
+        logger.warning("Cannot load %s: %s", cleaned, error)
         yield failure_card("Could not load cached model", html.escape(str(error)))
         return
     if claimed is None:
+        logger.info("Load of %s refused: %s has the model", cleaned, held or "another claim")
         yield refused_load_card(held)
         return
     try:
@@ -729,6 +757,7 @@ def _load_cached_model(cleaned: str, precision: str):
     try:
         status = cache_status(cleaned)
     except (OSError, ValueError) as error:
+        logger.warning("Cannot read the cached files for %s", cleaned, exc_info=True)
         yield failure_card("Could not load cached model", html.escape(str(error)))
         return
     if status.missing_files:
@@ -760,11 +789,13 @@ def _load_cached_model(cleaned: str, precision: str):
         started = time.monotonic()
         device = yield from stream_load(cleaned, path, precision, status.kind)
     except IncompleteSnapshotError as error:
+        logger.warning("Load of %s stopped at an unfinished download: %s", cleaned, error)
         yield failure_card(
             "Download unfinished", incomplete_snapshot_detail(cleaned, error)
         )
         return
     except Exception as error:
+        logger.exception("Load of %s at %s weights failed", cleaned, precision)
         yield failure_card("Could not load cached model", html.escape(str(error)))
         return
     yield status_card(
@@ -778,6 +809,7 @@ def _load_cached_model(cleaned: str, precision: str):
 def unload_model():
     if not runtime.MANAGER.in_memory:
         return status_card("No model loaded", "There is nothing to unload.")
+    logger.info("Unload requested for %s", runtime.MANAGER.model_id or "the loaded model")
     runtime.MANAGER.unload()
     return status_card("Model unloaded", "Model memory has been released.", "success")
 
@@ -1194,14 +1226,24 @@ def switch_model(selected: str | None, precision: str = "full"):
     if not selected or selected == current:
         yield gr.skip(), gr.skip(), gr.skip()
         return
+    logger.info(
+        "Model switch requested from %s to %s at %s weights",
+        current or "no model",
+        selected,
+        precision,
+    )
     try:
         claimed, held = runtime.MANAGER.claim_exclusive_load(selected)
     except ValueError as error:
+        logger.warning("Cannot switch to %s: %s", selected, error)
         yield gr.update(value=current), failure_card(
             "Could not load cached model", html.escape(str(error))
         ), gr.skip()
         return
     if claimed is None:
+        logger.info(
+            "Switch to %s refused: %s has the model", selected, held or "another claim"
+        )
         alarm(
             "Cannot switch models now",
             occupied_reason(held, SWITCH_LOADING, SWITCH_BUSY),
@@ -1850,13 +1892,17 @@ def remove_my_model(pending: str | None):
     hidden = gr.update(visible=False)
     if not pending:
         return status_card("Nothing to remove", NO_MODEL_TO_MANAGE), hidden, None
+    logger.info("Removal confirmed for %s", pending)
     try:
         freed = runtime.MANAGER.remove(pending)
     except ModelLoaded:
+        logger.info("Removal of %s refused: it is loaded", pending)
         return status_card(*loaded_refusal(pending)), hidden, None
     except ModelDownloading:
+        logger.info("Removal of %s refused: it is downloading", pending)
         return status_card(*downloading_refusal(pending)), hidden, None
     except ModelBusy:
+        logger.info("Removal of %s refused: the manager is busy", pending)
         return (
             status_card(
                 "Model busy",
@@ -1867,12 +1913,14 @@ def remove_my_model(pending: str | None):
             None,
         )
     except FileNotFoundError:
+        logger.info("Removal of %s found nothing: it is no longer cached", pending)
         return (
             status_card("Nothing to remove", f"`{pending}` is no longer in the cache."),
             hidden,
             None,
         )
     except (OSError, ValueError) as error:
+        logger.warning("Could not remove %s", pending, exc_info=True)
         return (
             failure_card(
                 "Could not remove model",
@@ -1881,6 +1929,7 @@ def remove_my_model(pending: str | None):
             hidden,
             None,
         )
+    logger.info("Removed %s from the cache, freeing %s", pending, format_bytes(freed))
     return (
         status_card(
             "Model removed",
@@ -2162,6 +2211,11 @@ def search_models(
         except Exception as error:
             # Starters already in hand are worth showing without the Hub. With
             # none there is nothing left to show, so the failure is the answer.
+            # With the stack, because this catches everything: a Hub that is
+            # simply unreachable, and a mistake in the search itself. The card
+            # already carries str(error), so a line without the traceback
+            # would only say again what the reader can already see.
+            logger.warning("Hub search for %r failed", cleaned, exc_info=True)
             if not starters:
                 hint = (
                     "Clear the search to see offline starters, or retry."

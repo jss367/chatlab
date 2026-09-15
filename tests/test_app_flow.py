@@ -62,6 +62,7 @@ FIXED = {
     "temperature": 0.0,
     "top_p": 1.0,
     "top_k": 0,
+    "skip_top_below": 0.0,
     "max_new_tokens": 8,
     "seed": 42,
     "randomize_seed": False,
@@ -3764,6 +3765,17 @@ class ForkTests(unittest.TestCase):
         self.assertIn("Copied", result[FORK_STATUS])
         self.assertEqual(result[FORK_PROMPT], gr.skip())
 
+    def test_the_branch_a_reader_moved_to_is_recorded(self):
+        # A fork bug reads as "the wrong messages came back". Reconstructing
+        # it needs the order the branches were made and left in, which no
+        # part of the app used to write down.
+        with self.assertLogs("ui.conversations", level="INFO") as logged:
+            forked = app.fork_conversation(self.turns(), new_forks(), None)
+            app.switch_fork(MAIN_BRANCH, forked[FORK_TURNS], forked[FORK_STATE])
+
+        self.assertIn(f"Forked {MAIN_BRANCH} into Fork 1 at 4 of 4 messages", logged.output[0])
+        self.assertIn(f"Switched from Fork 1 to {MAIN_BRANCH}", logged.output[1])
+
     def test_a_whole_copy_keeps_the_token_panel(self):
         # The last reply is unchanged, so the strip still describes it.
         result = app.fork_conversation(self.turns(), new_forks(), None)
@@ -4175,10 +4187,51 @@ class WeightPrecisionWiringTests(unittest.TestCase):
         self.assertEqual(app.PERSISTED_SETTING_NAMES[-1], "weight_precision")
 
 
+class SettingsPositionTests(unittest.TestCase):
+    """The handlers that reach into ``*settings`` by number reach the right one.
+
+    Several of them take the whole block positionally and pick one or two out
+    of it: the response length a single step overrides, the system prompt a
+    branch validates against, the color scale an edit redraws with. A control
+    added between two others moves everything after it, and nothing else in
+    the app would notice.
+    """
+
+    def positions(self):
+        from ui import generation
+
+        names = list(inspect.signature(generation.generate_reply).parameters)
+        # ``turns`` and ``prompt_text`` come before the block the handlers
+        # forward, so the tuple starts at the third parameter.
+        return {name: index for index, name in enumerate(names[2:])}
+
+    def test_the_named_positions_match_the_signature(self):
+        from ui import generation
+
+        positions = self.positions()
+
+        self.assertEqual(positions["system_prompt"], generation.SYSTEM_PROMPT_SETTING)
+        self.assertEqual(positions["keep_reasoning"], generation.KEEP_REASONING_SETTING)
+        self.assertEqual(positions["max_new_tokens"], generation.MAX_NEW_TOKENS_SETTING)
+        self.assertEqual(positions["scale_name"], generation.COLOR_SCALE_SETTING)
+
+    def test_the_test_fixture_lines_up_with_the_signature(self):
+        # Every handler test in this file passes FIXED positionally, so a
+        # control added to one and not the other would silently test the
+        # wrong thing rather than fail to call.
+        self.assertEqual(list(FIXED), list(self.positions())[: len(FIXED)])
+
+
 class ConversationSamplingTests(unittest.TestCase):
     """Each conversation answers with its own temperature, top-p, top-k and length."""
 
-    OWN = {"temperature": 0.0, "top_p": 1.0, "top_k": 0, "max_new_tokens": 256}
+    OWN = {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "top_k": 0,
+        "skip_top_below": 0.0,
+        "max_new_tokens": 256,
+    }
 
     def setUp(self):
         self.path = library.library_path()
@@ -4386,7 +4439,7 @@ class ConversationSamplingTests(unittest.TestCase):
 
         with settings.override(prefill_token_limit=8192, max_new_tokens=1024):
             _limit, length, written = app.remember_prefill_limit(
-                256, 1024, forks, 0.0, 1.0, 0, 1024
+                256, 1024, forks, 0.0, 1.0, 0, 0.0, 1024
             )
 
         # 256 is the floor the limit can be lowered to, and the length
@@ -4673,6 +4726,7 @@ class CancelWiringTests(unittest.TestCase):
                 "branch_with_text",
                 "next_token",
                 "branch_from_menu",
+                "edit_prompt_from_menu",
                 "fork_conversation",
                 "switch_fork",
                 "delete_fork",

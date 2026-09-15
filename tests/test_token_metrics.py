@@ -102,6 +102,117 @@ class TokenMetricTests(unittest.TestCase):
         self.assertTrue(metric.scored)
 
 
+class SkipTopChoiceTests(unittest.TestCase):
+    """The first choice can be refused where the model was not sure of it."""
+
+    # The model is torn: 0.4 against 0.35 against the rest.
+    UNSURE = np.log(np.array([0.4, 0.35, 0.15, 0.1]))
+    # The model has all but decided.
+    SURE = np.log(np.array([0.9, 0.06, 0.03, 0.01]))
+    # Decided enough to clear a threshold of 0.6, but not by much.
+    MOSTLY_SURE = np.log(np.array([0.7, 0.1, 0.1, 0.1]))
+
+    def test_zero_leaves_the_distribution_alone(self):
+        np.testing.assert_array_almost_equal(
+            sampling_probabilities(
+                self.UNSURE, temperature=1, top_p=1, top_k=0, skip_top_below=0.0
+            ),
+            sampling_probabilities(self.UNSURE, temperature=1, top_p=1, top_k=0),
+        )
+
+    def test_an_unsure_first_choice_is_refused(self):
+        result = sampling_probabilities(
+            self.UNSURE, temperature=1, top_p=1, top_k=0, skip_top_below=0.6
+        )
+
+        self.assertEqual(result[0], 0)
+        self.assertAlmostEqual(float(result.sum()), 1.0)
+        # The rest keep their proportions; only the missing mass is shared out.
+        self.assertAlmostEqual(result[1] / result[2], 0.35 / 0.15)
+
+    def test_a_confident_first_choice_stands(self):
+        # This is what keeps the text together: the model is sure of the rest
+        # of a word it has started, of a closing bracket, of the space after
+        # a comma, and those positions sample as they always did.
+        result = sampling_probabilities(
+            self.SURE, temperature=1, top_p=1, top_k=0, skip_top_below=0.6
+        )
+
+        self.assertAlmostEqual(result[0], 0.9)
+
+    def test_the_threshold_is_read_before_temperature_reshapes_anything(self):
+        # A high temperature flattens a distribution and a low one sharpens
+        # it, so a threshold read from the reshaped one would mean something
+        # different at every setting of the other slider. Both of these
+        # decide the other way once temperature has had its way with them:
+        # 0.7 falls to 0.47 at 1.95, and 0.4 climbs to 0.62 at 0.25.
+        kept = sampling_probabilities(
+            self.MOSTLY_SURE, temperature=1.95, top_p=1, top_k=0, skip_top_below=0.6
+        )
+        skipped = sampling_probabilities(
+            self.UNSURE, temperature=0.25, top_p=1, top_k=0, skip_top_below=0.6
+        )
+
+        self.assertGreater(kept[0], 0)
+        self.assertEqual(skipped[0], 0)
+
+    def test_a_zero_temperature_takes_the_second_choice_instead(self):
+        # Deterministic, and off the greedy path: the same prompt gives the
+        # same reply every time, and it is not the reply greedy decoding
+        # would have written.
+        result = sampling_probabilities(
+            self.UNSURE, temperature=0, top_p=1, top_k=0, skip_top_below=0.6
+        )
+
+        np.testing.assert_array_equal(result, np.array([0.0, 1.0, 0.0, 0.0]))
+
+    def test_the_skip_runs_before_top_k_so_k_candidates_remain(self):
+        # A reader who asked for two candidates gets two of them - the second
+        # and third choices - rather than one survivor of the first two.
+        result = sampling_probabilities(
+            self.UNSURE, temperature=1, top_p=1, top_k=2, skip_top_below=0.6
+        )
+
+        self.assertEqual(result[0], 0)
+        self.assertGreater(result[1], 0)
+        self.assertGreater(result[2], 0)
+        self.assertEqual(result[3], 0)
+
+    def test_a_first_choice_with_nothing_behind_it_is_kept(self):
+        # Skipping it would leave nothing to sample at all.
+        one = normalize_log_probabilities(np.array([0.0]))
+        np.testing.assert_array_equal(
+            sampling_probabilities(one, temperature=1, top_p=1, top_k=0, skip_top_below=1.0),
+            np.array([1.0]),
+        )
+        only_possible = normalize_log_probabilities(np.array([0.0, -np.inf]))
+        np.testing.assert_array_equal(
+            sampling_probabilities(
+                only_possible, temperature=1, top_p=1, top_k=0, skip_top_below=1.0
+            ),
+            np.array([1.0, 0.0]),
+        )
+
+    def test_one_refuses_a_first_choice_the_model_left_any_doubt_about(self):
+        # The top of the slider, where all that saves a first choice is the
+        # model having been certain of it.
+        result = sampling_probabilities(
+            self.SURE, temperature=1, top_p=1, top_k=0, skip_top_below=1.0
+        )
+
+        self.assertEqual(result[0], 0)
+        self.assertAlmostEqual(float(result.sum()), 1.0)
+
+    def test_a_certain_first_choice_survives_even_the_top_of_the_slider(self):
+        # Nothing was in doubt, so there was nothing for the skip to resolve.
+        certain = normalize_log_probabilities(np.array([20.0, -20.0, -20.0]))
+        result = sampling_probabilities(
+            certain, temperature=1, top_p=1, top_k=0, skip_top_below=1.0
+        )
+
+        self.assertAlmostEqual(result[0], 1.0)
+
+
 class DistributionShapeTests(unittest.TestCase):
     def test_uniform_distribution_has_log2_entropy(self):
         raw = normalize_log_probabilities(np.zeros(8))

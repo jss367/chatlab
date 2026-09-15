@@ -457,6 +457,8 @@ def _build_page(context):
                                            info="Type to filter a long collection.")
                 trial_load = gr.Button("Load trial", size="sm", elem_id="maze-load-trial")
                 trial_note = gr.Markdown(trial_note_text(initial))
+            with gr.Accordion("Load a saved run", open=False):
+                upload = gr.File(label="Saved run JSON", file_types=[".json"], type="filepath")
             gr.Markdown("The settings below apply to the next episode. Loading a trial or a saved run shows the settings it used.")
             prepare = gr.Button("New episode · apply settings", elem_id="maze-prepare")
             with gr.Accordion("Setup prompt", open=False):
@@ -493,10 +495,9 @@ def _build_page(context):
                 recovery_attempts = gr.Number(value=RECOVERY_DEFAULTS["recovery_attempts"], precision=0, minimum=1, maximum=256,
                                               label="Recovery window · tool attempts", elem_id="maze-recovery-attempts",
                                               info="And inside this many attempted calls.")
-            with gr.Accordion("Saved runs", open=False):
+            with gr.Accordion("Export the run", open=False):
                 save = gr.Button("Export run JSON", size="sm")
                 download = gr.File(label="Saved run", interactive=False)
-                upload = gr.File(label="Load a saved run", file_types=[".json"], type="filepath")
         with gr.Column(elem_id="maze-center"):
             maze_board = gr.HTML(board(initial), elem_id="maze-board")
             transport_status = gr.Markdown(transport_text(initial), elem_id="maze-transport-status")
@@ -741,8 +742,8 @@ def _build_page(context):
         # is an upload that appears to do nothing. Gradio fires upload only for
         # a file it took as new, so no line at all is itself the answer: the
         # file never reached the extension, having been dropped on the
-        # read-only Saved run box above, or re-selected while the widget
-        # already held it.
+        # read-only Saved run box under Export the run, or re-selected while
+        # the widget already held it.
         if ep.busy:
             logger.warning("Refused a replay upload while run %s was generating", ep.run_id)
             raise gr.Error("Pause or stop this episode before loading a replay.")

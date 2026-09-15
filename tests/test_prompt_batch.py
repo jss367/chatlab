@@ -51,7 +51,7 @@ STATUS, RESULTS, RUN, STOP, FILES, DIRECTORY = range(len(app.BATCH_OUTPUT_NAMES)
 
 # The sampling half of run_prompts()' arguments: greedy, short, and with the
 # seed pinned so a row's numbers are the same on every run.
-SAMPLING = (0.0, 1.0, 0, 8, 42, False)
+SAMPLING = (0.0, 1.0, 0, 0.0, 8, 42, False)
 
 
 def trace_of(update) -> dict:
@@ -160,6 +160,7 @@ def sample_trace(*, seed: int = 1, candidates: int = 1, response: str = "hello")
             "temperature": 0.8,
             "top_p": 0.95,
             "top_k": 50,
+            "skip_top_below": 0.0,
             "max_new_tokens": 100,
             "seed": seed,
         },
@@ -586,7 +587,7 @@ class RunPromptsTests(unittest.TestCase):
         runtime.MANAGER = loaded_manager([0, 1, 2, 3], PIECES, EOS_ID)
         self.addCleanup(setattr, runtime, "MANAGER", original)
 
-        run = app.run_prompts("say hello", [], "", "", 0.0, 1.0, 0, 12, 42, False)
+        run = app.run_prompts("say hello", [], "", "", 0.0, 1.0, 0, 0.0, 12, 42, False)
         opening = next(run)
         directory = Path(opening[DIRECTORY])
         next(run)
@@ -822,7 +823,7 @@ class RunPromptsTests(unittest.TestCase):
         self.addCleanup(run.close)
         next(run)
 
-        refusal = list(app.chat("hi", [], "", False, "", 0.0, 1.0, 0, 8, 42, False))[-1]
+        refusal = list(app.chat("hi", [], "", False, "", 0.0, 1.0, 0, 0.0, 8, 42, False))[-1]
 
         self.assertIn(app.BUSY_STATUS, refusal[5])
 

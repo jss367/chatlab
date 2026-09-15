@@ -62,7 +62,7 @@ with context.models.open_session() as session:
     prefix_ids = session.encode("A supplied response prefix")
     stream = session.generate(
         messages,
-        temperature=0.7, top_p=1.0, top_k=0,
+        temperature=0.7, top_p=1.0, top_k=0, skip_top_below=0.0,
         max_new_tokens=1024, seed=42,
         tools=tool_schemas,
         forced_ids=prefix_ids,

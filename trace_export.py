@@ -64,7 +64,15 @@ def trace_to_json(trace: dict) -> str:
 
 
 METADATA_COLUMNS = ["schema_version", "generated_at", "model_id"]
-SAMPLING_COLUMNS = ["temperature", "top_p", "top_k", "max_new_tokens", "seed", "thinking_mode"]
+SAMPLING_COLUMNS = [
+    "temperature",
+    "top_p",
+    "top_k",
+    "skip_top_below",
+    "max_new_tokens",
+    "seed",
+    "thinking_mode",
+]
 CANDIDATE_FIELDS = ("token_id", "text", "probability")
 
 

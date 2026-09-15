@@ -12,11 +12,19 @@ import json
 
 import gradio as gr
 
-from ui.generation import branch_from, branch_with_text, idle_state
+from ui.generation import (
+    answer_edited_prompt,
+    branch_from,
+    branch_with_text,
+    idle_state,
+)
 from ui.panel import (
     BRANCH_UNAVAILABLE,
+    PROMPT_EDIT_UNAVAILABLE,
     branch_target,
     choose_alternative,
+    event_index,
+    prompt_edit_target,
     select_transcript_token,
 )
 
@@ -91,6 +99,63 @@ def branch_from_menu(action, prompt_text, turns, *settings):
         yield idle_state(prompt_text, turns, BRANCH_UNAVAILABLE)
         return
     yield from branch_from(pick, prompt_text, turns, *settings)
+
+
+def prompt_menu_payload(prompt_state, context_state, request_id, event: gr.SelectData):
+    """One right-click in the prompt strip: what could stand in that position.
+
+    The alternatives are the model's own predictions for the token, which is
+    what makes the menu worth opening here: choosing one asks what the answer
+    would have been had the prompt said the word the model expected.
+    """
+
+    index = event_index(event)
+    generation, _metrics = prompt_state
+    selection = {"source": "prompt", "generation": generation, "index": index}
+    found = prompt_edit_target(context_state, prompt_state, selection)
+    payload = {"request": request_id, "selection": selection, "error": ""}
+    if isinstance(found, str):
+        payload.update(selection=None, error=found)
+    else:
+        _index, _ids, _load_id, metric = found
+        payload.update(
+            text=metric["text"],
+            candidates=metric["top_candidates"],
+            verb="Replace",
+            actions=[],
+            label="Your own replacement",
+            submit="Answer again with this text",
+        )
+    return menu_markup(payload)
+
+
+def edit_prompt_from_menu(
+    action, context_state, prompt_state, prompt_text, turns, *settings
+):
+    """Resolve the clicked replacement against the prompt that opened the menu."""
+
+    try:
+        data = json.loads(action)
+        selection = data["selection"]
+        kind = data["kind"]
+        if not isinstance(selection, dict):
+            raise ValueError("Missing selection")
+        if kind == "text":
+            if not isinstance(data["text"], str):
+                raise ValueError("Invalid replacement")
+        elif kind == "candidate":
+            index = data["index"]
+            if not isinstance(index, int) or index < 0:
+                raise ValueError("Invalid candidate")
+        else:
+            raise ValueError("Unknown action")
+    except (ValueError, KeyError, TypeError):
+        yield idle_state(prompt_text, turns, PROMPT_EDIT_UNAVAILABLE)
+        return
+
+    yield from answer_edited_prompt(
+        data, context_state, prompt_state, prompt_text, turns, *settings
+    )
 
 
 TOKEN_MENU_CSS = """

@@ -196,11 +196,13 @@ from ui.settings_page import (
 )
 from ui.token_menu import (
     MENU_BRIDGE_CLASS, MENU_STRIP_CLASS, TOKEN_MENU_CSS, TOKEN_MENU_JS,
-    branch_from_menu, menu_bridge_ids, token_menu_payload,
+    branch_from_menu, edit_prompt_from_menu, menu_bridge_ids,
+    prompt_menu_payload, token_menu_payload,
 )
 from ui.styles import (
     CSS,
     THEME,
+    READ_ONLY_TEXT_JS,
     RESIZE_JS,
     SHORTCUT_JS,
     WRITING_SUGGESTIONS_JS,
@@ -295,6 +297,12 @@ def build_app() -> gr.Blocks:
         menu_request = gr.Textbox(elem_id=request_id, elem_classes=[MENU_BRIDGE_CLASS])
         menu_response = gr.HTML(elem_id=response_id, elem_classes=[MENU_BRIDGE_CLASS])
         menu_action = gr.Textbox(elem_id=action_id, elem_classes=[MENU_BRIDGE_CLASS])
+        # The prompt strip carries its own three: the same menu, offering what
+        # could have stood in a prompt position rather than a reply's.
+        request_id, response_id, action_id = menu_bridge_ids("prompt-strip")
+        prompt_menu_request = gr.Textbox(elem_id=request_id, elem_classes=[MENU_BRIDGE_CLASS])
+        prompt_menu_response = gr.HTML(elem_id=response_id, elem_classes=[MENU_BRIDGE_CLASS])
+        prompt_menu_action = gr.Textbox(elem_id=action_id, elem_classes=[MENU_BRIDGE_CLASS])
         selected_token = gr.State(None)
         branch_pick = gr.State(None)
         # Forking: the other transcripts, and the chatbot message last clicked.
@@ -537,6 +545,7 @@ def build_app() -> gr.Blocks:
                                             saved.temperature,
                                             saved.top_p,
                                             saved.top_k,
+                                            saved.skip_top_below,
                                             saved.max_new_tokens,
                                         ),
                                         open=False,
@@ -573,6 +582,24 @@ def build_app() -> gr.Blocks:
                                                 value=saved.max_new_tokens,
                                                 step=1,
                                                 label="Maximum new tokens",
+                                            )
+                                        with gr.Row():
+                                            # Alone on its row because it is
+                                            # the one control here that needs
+                                            # a sentence saying what it is
+                                            # for, and that sentence needs
+                                            # the width.
+                                            skip_top_below = gr.Slider(
+                                                0,
+                                                1,
+                                                value=saved.skip_top_below,
+                                                step=0.05,
+                                                label="Skip top choice below (0 disables)",
+                                                info=(
+                                                    "Take the model's second choice wherever its "
+                                                    "first holds less than this probability. Where "
+                                                    "it is more certain than this, its choice stands."
+                                                ),
                                             )
                                         with gr.Row():
                                             seed = gr.Number(
@@ -1061,11 +1088,12 @@ def build_app() -> gr.Blocks:
                         with gr.Accordion("Prompt and context tokens", open=False, elem_classes=["inspector-section"]):
                             prompt_note = gr.Markdown("", elem_classes=["scale-caption"])
                             prompt_strip = gr.HighlightedText(
-                                label="Prompt tokens — click one",
+                                label="Prompt tokens — click one, right-click to replace it",
                                 color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
                                 show_legend=True,
                                 combine_adjacent=False,
                                 elem_id="prompt-strip",
+                                elem_classes=[MENU_STRIP_CLASS],
                             )
 
             extension_pages = []
@@ -1951,6 +1979,9 @@ def build_app() -> gr.Blocks:
         # The two readings panes are dragged wider or narrower by the handle
         # on their seam, and remember the width they were left at.
         demo.load(None, None, None, js=RESIZE_JS)
+        # A box that only shows text is read-only rather than dead, so text
+        # too long for it can be scrolled to and taken out.
+        demo.load(None, None, None, js=READ_ONLY_TEXT_JS)
         # The system's own typing predictions, on or off from the first paint
         # and whenever the setting is changed after it. The change fires when
         # a reload restores the file's value as well as when it is clicked.
@@ -2069,7 +2100,7 @@ def build_app() -> gr.Blocks:
         # settings as they were. always_last is what makes change affordable
         # instead: a drag's worth of them collapses to the one that matters,
         # and the label only has to be right once the slider stops.
-        sampling_controls = [temperature, top_p, top_k, max_new_tokens]
+        sampling_controls = [temperature, top_p, top_k, skip_top_below, max_new_tokens]
         for control in sampling_controls:
             control.change(
                 update_sampling_label,
@@ -2171,6 +2202,7 @@ def build_app() -> gr.Blocks:
             temperature,
             top_p,
             top_k,
+            skip_top_below,
             max_new_tokens,
             seed,
             randomize_seed,
@@ -2372,6 +2404,11 @@ def build_app() -> gr.Blocks:
         start_response = partial(conversation_events.bind, generation=True)
         navigate = partial(conversation_events.bind, navigation=True)
         start_response(menu_action.input, branch_from_menu, [menu_action, *chat_inputs], chat_outputs)
+        start_response(
+            prompt_menu_action.input, edit_prompt_from_menu,
+            [prompt_menu_action, context_ids_state, prompt_metrics_state, *chat_inputs],
+            chat_outputs,
+        )
         start_response(send_button.click, chat, chat_inputs, chat_outputs)
         start_response(prompt.submit, chat, chat_inputs, chat_outputs)
         start_response(retry_button.click, retry_last, chat_inputs, chat_outputs)
@@ -2634,6 +2671,7 @@ def build_app() -> gr.Blocks:
                 temperature,
                 top_p,
                 top_k,
+                skip_top_below,
                 max_new_tokens,
                 seed,
                 randomize_seed,
@@ -2677,6 +2715,7 @@ def build_app() -> gr.Blocks:
             temperature,
             top_p,
             top_k,
+            skip_top_below,
             max_new_tokens,
             seed,
             randomize_seed,
@@ -2803,6 +2842,15 @@ def build_app() -> gr.Blocks:
                 [selected_token, branch_pick],
             )
             strip.select(remember_inspect_target(where), strip_metrics, inspect_target)
+        # Only the prompt strip's tokens can be replaced: they are the ones a
+        # reply was actually generated from, and the ids behind them are kept.
+        prompt_strip.select(
+            prompt_menu_payload,
+            [prompt_metrics_state, context_ids_state, prompt_menu_request],
+            prompt_menu_response,
+            show_progress="hidden",
+            queue=False,
+        )
         alternatives.select(
             choose_alternative,
             [conversation_state, score_metrics_state, prompt_metrics_state, selected_token],

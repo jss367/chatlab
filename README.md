@@ -29,8 +29,9 @@ drove.
 - Full metric-trace export as JSON or CSV
 - An OpenAI-compatible HTTP API on the same port, so the measurements can be scripted
 - A system prompt, plus temperature, top-p, top-k, seed, and response-length controls
+- A **Skip top choice below** control that refuses the model's first choice at the positions it was unsure of, so a reply diverts where the model was torn and holds together everywhere else
 - Every setting saved to one JSON file you can edit by hand or share between machines
-- Temperature, top-p, top-k and response length kept per conversation, so two forks can be compared at different settings
+- Temperature, top-p, top-k, the top-choice skip and response length kept per conversation, so two forks can be compared at different settings
 - Per-conversation activation steering: import a vector, choose its layer and strength, and compare forks with steering enabled or disabled
 - Steering vectors read out of the model itself: give examples of what you want and of the opposite, and every layer's direction is taken in one pass, with a reading of how cleanly each separates the two sets
 - Optional assistant prefill text that the model must continue from
@@ -41,6 +42,7 @@ drove.
 - Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response, a run of prompts, or a comparison run, from anywhere on the Chat page
 - A setting for macOS's own inline text predictions, which grey in the rest of a sentence as you type, so the typing suggestions can be turned off inside ChatLab alone
 - Right-click a token to regenerate from it, choose an alternative, or type a custom replacement and continue the response
+- Right-click a prompt token to replace it and answer the message again from the edited prompt, template tokens included
 - Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
 - Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
@@ -284,9 +286,9 @@ The system prompt, assistant prefill, and reasoning options; the analysis and in
 
 **Hardware** is what the memory guard reads when it decides whether a model fits: the device a load would use and the precision it would read weights as, the machine's memory and how much of it ChatLab estimates is available within its own limits, the safety reserve it keeps beside the weights, the Metal cap and the share of Metal's recommendation it comes to, what the device allocator is holding for this process, and the model in memory. It is read when the page opens, when the Settings page is opened, after every load and unload, and whenever **Refresh** is pressed - not on a timer, since reading it costs a subprocess. The same figures go to the log with every load and every reply, which is what makes a memory failure readable after the fact; the panel is how to look before one.
 
-The sampling controls are **not** here. Temperature, top-p, top-k, the response length and the seed are what gets moved between one retry and the next, so they sit under the message box on the Chat page, in a **Sampling** section that wears its own values: the summary reads without opening it.
+The sampling controls are **not** here. Temperature, top-p, top-k, **Skip top choice below**, the response length and the seed are what gets moved between one retry and the next, so they sit under the message box on the Chat page, in a **Sampling** section that wears its own values: the summary reads without opening it.
 
-Four of them belong to the conversation rather than to the app: temperature, top-p, top-k and the response length are kept per conversation, so one fork can sit at temperature 0 while another beside it sits at 1.2, and switching between them brings each one's sliders back. A fork answers the way the conversation it was forked from does, and forking pins both sides to that: a conversation carrying no sampling of its own follows the settings file, and the first slider moved on either side would rewrite the file and move the other with it, which is the one thing the fork was for. A new conversation starts from the settings file and is pinned to what it said at the time; the file is also where a control moved on any conversation is written, so a new conversation begins from the values last used. The seed and **New seed each response** are not per conversation: a finished reply leaves the seed it used in that box, so a seed kept per conversation would record the app's dice rather than a choice.
+Five of them belong to the conversation rather than to the app: temperature, top-p, top-k, the top-choice skip and the response length are kept per conversation, so one fork can sit at temperature 0 while another beside it sits at 1.2, and switching between them brings each one's sliders back. A fork answers the way the conversation it was forked from does, and forking pins both sides to that: a conversation carrying no sampling of its own follows the settings file, and the first slider moved on either side would rewrite the file and move the other with it, which is the one thing the fork was for. A new conversation starts from the settings file and is pinned to what it said at the time; the file is also where a control moved on any conversation is written, so a new conversation begins from the values last used. The seed and **New seed each response** are not per conversation: a finished reply leaves the seed it used in that box, so a seed kept per conversation would record the app's dice rather than a choice.
 
 Every setting is saved as you change it, and read back the next time the app
 starts. They live in one file:
@@ -423,6 +425,39 @@ Replies carry their own measurements, so the whole conversation is painted, not
 just the newest reply. A message you typed, a reply you edited by hand, and a
 conversation restored from the saved library have no measurements to paint and
 appear as plain text.
+
+### Skipping the model's first choice
+
+**Skip top choice below** is a threshold, not a switch. At 0 it does nothing
+and the model samples as it proposed. Above 0, ChatLab reads the probability
+the model gave its own first choice at each position, and where that
+probability falls below the threshold it takes the first choice off the table
+and samples from what is left, second choice downwards.
+
+The threshold is what makes this usable. Banning the first choice
+unconditionally also bans the correct token at the many positions where the
+model is right and certain - the rest of a word it has started, a closing
+bracket, the space after a comma - and the reply comes out broken rather than
+adventurous. A threshold of 0.6 leaves all of those alone and diverts only
+where the model was genuinely torn between two continuations.
+
+The probability is read from the distribution as the model produced it, before
+temperature reshapes anything, so one threshold means the same thing whatever
+else the sliders are set to. The skip is applied before top-k and top-p, so
+where it fires a top-k of 6 still offers six candidates: the model's second
+choice through its seventh. It never leaves nothing to sample - a position with
+only one possible token keeps its first choice however low the probability.
+
+At **Temperature** 0 the result is deterministic second-choice decoding: the
+same prompt gives the same reply every time, and that reply is not the one
+greedy decoding would have written. At a threshold of 1 the first choice is
+refused wherever the model left any doubt at all.
+
+The token panel shows where it fired. A token taken in place of a refused
+first choice reports a raw rank of 2 and the raw probability it really had,
+and its alternatives list still holds the first choice with the probability
+the model gave it. **Color tokens by · Sampling shift** paints those positions
+most clearly.
 
 ### Assistant prefill
 
@@ -568,7 +603,21 @@ To explore one token at a time, choose an alternative and press **Next token** b
 
 The alternatives table only offers what the model ranked highly. To put anything else at a token position, click the token, type the replacement in **Or type your own replacement**, and press **Branch with text**. The typed text is spliced in exactly as written where the clicked token was, and the model continues from there. Type the space yourself if the word needs one: the text is checked in place, after the tokens that are kept, so it reads the same whether the tokenizer keeps the word-boundary space inside the token (as BPE does) or drops it from the start of what it decodes (as SentencePiece does). It can be one word or a whole sentence. Text the tokenizer cannot reproduce exactly at that position is refused rather than approximated. The prompt and replayed response prefix together are capped at 8,192 tokens, or at the model's shorter positional limit; an oversized branch is refused without replacing the response on screen.
 
-Only a reply the model wrote can be branched. Prompt tokens, text measured in the **Score text** tab, and a message typed or edited by hand have no measured tokens to continue from. Editing a reply also takes the measurements off it and off every reply after it: those were produced from a transcript the edit replaced.
+Only a reply the model wrote can be branched. Text measured in the **Score text** tab and a message typed or edited by hand have no measured tokens to continue from. A prompt token has no continuation either, but it can be replaced; see **Editing the prompt** below. Editing a reply takes the measurements off it and off every reply after it: those were produced from a transcript the edit replaced.
+
+## Editing the prompt
+
+The prompt under **Prompt and context tokens** is the exact sequence the last reply was generated from: the system prompt, the transcript, and everything the chat template wrote around them. Right-click any of its tokens to replace that one token and answer the message again.
+
+The menu offers the alternatives the model itself ranked at that position, each with its probability, and a box for text of your own. Choosing one feeds the recorded prompt back with that single position swapped, and the reply is generated from it under the current sampling settings, replacing the reply on screen as **Retry** would. The strip redraws from the prompt that was actually fed, so the edited token is there to read, and the note above it says which position changed.
+
+Nothing is written back to the conversation. The turns still say what was asked, and the next message is prompted through the chat template as usual - so an edit is a question about one reply, not a change to the chat. The system prompt and the other prompting settings are not consulted either: the ids you edited are the ids that are fed, whatever the boxes say since the reply was generated.
+
+A template's own control tokens are as editable as the words between them, which is the reason to edit here rather than in the message box. Typed text is encoded for the position it lands in, so a word reads the same whether the tokenizer keeps its leading space or drops it, and text the tokenizer cannot place there exactly is refused rather than approximated. The replacement need not be one token: type a sentence and the prompt grows by the difference.
+
+A reply generated this way can be branched like any other, and the branch replays it against the prompt it was actually given rather than the one the conversation would render - the tokens being replayed were scored under the edited prompt, and scoring them under another would quietly describe a reply the model never gave. That prompt is kept beside the reply's measurements and goes wherever they go: editing the message, undoing, or loading the conversation from a file leaves the reply readable and unbranchable, as it already does.
+
+Like a branch, an edit cannot outlive the model. The prompt's token IDs belong to the tokenizer that produced them, so reloading leaves the strip readable but uneditable, and so does anything that replaces the strip - a retry, an edit, an undo, switching conversation. Send the message again to measure a fresh prompt. The JSON export records the edit under `sampling.edited_prompt`: the position and the two texts, and `prompt_token_ids`, the whole prompt as it was fed. The ids are what makes the export exact - the `messages` beside them are the conversation, which the template would render differently under settings that have since moved - and they read back through the tokenizer of the model the trace names. The conversation file, which stores turns rather than tokens, records nothing of the edit.
 
 ## The conversations pane
 
@@ -650,11 +699,11 @@ By default that reasoning is **not** sent back to the model on the next turn. Th
 
 - **Raw rank** is the generated token's position in the model's unmodified distribution. Rank 1 was the model's first choice.
 - **Raw model probability** is calculated before temperature or filtering.
-- **Actual sampling probability** includes temperature, top-k, and top-p.
+- **Actual sampling probability** includes temperature, the top-choice skip, top-k, and top-p. Where the skip fired, this is the probability of the token that was actually left to take.
 - **Surprise** is `-log2(probability)`. Larger values are less expected.
 - **Distribution entropy** is the width of the whole distribution the model chose from, in bits. Surprise says how unexpected the choice was; entropy says how undecided the model was before making it.
 - **Top-1 margin** is the probability gap between the model's first and second choice.
-- **Sampling shift** is `log2(sampling probability / raw probability)`: how far your temperature, top-k, and top-p settings moved that token away from the raw model.
+- **Sampling shift** is `log2(sampling probability / raw probability)`: how far your temperature, top-k, top-p and skip settings moved that token away from the raw model.
 - **Probability mass above it** is the combined raw probability of every token ranked above the generated token.
 
 Each of these names carries its own sentence in the token detail panel, so hovering one — or reaching it with a screen reader — says what the number is without leaving the page.
@@ -667,7 +716,7 @@ After a response finishes, open **Export full metric trace** under the conversat
 
 ## Prompt tokens and scoring text
 
-Every prompt token is measured against the distribution the model held one step earlier, during the same pass that fills the key-value cache, so it costs nothing extra to see how predictable your own prompt was. They appear under **Prompt and context tokens**; the first token has nothing before it, so it is left unscored. Turn the measurement off in **Sampling, analysis, and input controls** if you do not want it, and note that only the most recent 1,024 tokens of a very long prompt are scored.
+Every prompt token is measured against the distribution the model held one step earlier, during the same pass that fills the key-value cache, so it costs nothing extra to see how predictable your own prompt was. They appear under **Prompt and context tokens**, where right-clicking one replaces it; the first token has nothing before it, so it is left unscored and offers no alternatives to choose from. Turn the measurement off in **Sampling, analysis, and input controls** if you do not want it, and note that only the most recent 1,024 tokens of a very long prompt are scored.
 
 The **Score text** tab measures text the model did not generate. Paste it, optionally give it context first, and one forward pass reports the same numbers for every token — useful for comparing two prompts, checking how memorized a passage is, or evaluating a response that came from somewhere else. Scoring is capped at 4,096 tokens per run, or at the model's shorter positional limit. A line under the box counts what is in it against that cap as it is typed, using the same encoding the check itself uses, so a passage too large to score says so before the press rather than after it.
 
@@ -799,8 +848,9 @@ a request sent at that moment would get; a load is named ahead of a response.
 in the cache and marks the loaded one.
 
 `POST /v1/chat/completions` answers a conversation. It takes `messages`,
-`temperature`, `top_p`, `top_k`, `max_tokens`, `seed`, `stream`, `logprobs`
-and `top_logprobs`, and anything left out takes the value the app is set to,
+`temperature`, `top_p`, `top_k`, `skip_top_below`, `max_tokens`, `seed`,
+`stream`, `logprobs` and `top_logprobs`, and anything left out takes the value
+the app is set to,
 so a script and the interface answer alike unless the script says otherwise. A
 value outside what ChatLab allows is refused with the nearest it would take
 rather than clamped in silence. Reasoning arrives as `reasoning_content`
