@@ -942,6 +942,7 @@ class MazeTests(unittest.TestCase):
             try:
                 callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
                 forward, back = callbacks['step_forward'].fn, callbacks['step_back'].fn
+                begin = callbacks['step_first'].fn
                 selected = lambda frame: frame[8]['value']
                 # Stepping reads the episode, so repeated clicks advance even
                 # when the dropdown the browser sent has not caught up.
@@ -973,8 +974,14 @@ class MazeTests(unittest.TestCase):
                 self.assertFalse(replay.playing)
                 replay.viewing = 9
                 self.assertEqual(selected(back(replay, False, session)), 0)
+                # First returns to the initial history from anywhere, and from
+                # there it is a no-op rather than an error.
+                self.assertEqual([selected(begin(replay, False, session)) for _ in range(2)], [-1, -1])
+                replay.viewing = 1
+                self.assertEqual(selected(begin(replay, False, session)), -1)
                 replay.busy = True
                 for call in (lambda: list(forward(replay, False, session)), lambda: back(replay, False, session),
+                             lambda: begin(replay, False, session),
                              lambda: list(playback.fn(replay, False, session, .4))):
                     with self.assertRaisesRegex(gr.Error, 'Pause'):
                         call()
@@ -1359,6 +1366,10 @@ class MazeTests(unittest.TestCase):
                 callbacks = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}
                 loaded = callbacks['load'](str(ep.export()), Episode(MAZE, CONFIG), False, session, None)
                 self.assertTrue(loaded[0].replay_only)
+                # A saved run opens at its initial history, so Play replays it
+                # whole rather than starting where it has nothing left to show.
+                self.assertEqual(loaded[0].viewing, -1)
+                self.assertEqual(loaded[9]['value'], -1)
                 self.assertEqual(loaded[-2]['value'], 'Load test/model')
                 self.assertEqual(loaded[-1], 'test/model')
                 values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10, 700, 5,
