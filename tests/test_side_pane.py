@@ -2967,6 +2967,25 @@ class PageLayoutTests(unittest.TestCase):
                 # And the script that writes it knows the pane by the same name.
                 self.assertIn(f"'{pane_id}'", app.RESIZE_JS)
 
+    def test_a_box_that_only_shows_text_is_read_only_rather_than_dead(self):
+        # Gradio draws a non-interactive textbox as a disabled textarea, and a
+        # browser hands a disabled control no wheel and no caret, so text
+        # longer than the box - the maze workbench's full response, the prompt
+        # behind it - had nothing past its first screenful that could be
+        # reached. Read-only refuses the same edits and gives the text back.
+        self.assertTrue(
+            any(fn.js == app.READ_ONLY_TEXT_JS for fn in self.demo.fns.values())
+        )
+        self.assertIn('textarea[data-testid="textbox"]', app.READ_ONLY_TEXT_JS)
+        self.assertIn("box.disabled = false;", app.READ_ONLY_TEXT_JS)
+        self.assertIn("box.readOnly = true;", app.READ_ONLY_TEXT_JS)
+        # A page is built when the reader first opens it and an extension's
+        # page later still, so the boxes are met as they arrive rather than
+        # counted once at load.
+        self.assertIn("new MutationObserver", app.READ_ONLY_TEXT_JS)
+        self.assertIn("subtree: true", app.READ_ONLY_TEXT_JS)
+        self.assertIn("attributeFilter: ['disabled']", app.READ_ONLY_TEXT_JS)
+
     def test_the_handle_keeps_touch_gestures_off_its_strip(self):
         # A touch device wider than the stacking breakpoint still drags the
         # handle, and a browser that reads that drag as a pan or a zoom takes
