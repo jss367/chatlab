@@ -330,16 +330,23 @@ def run_desktop() -> int:
             private_mode=False,
             storage_path=str(support_directory / "WebKit"),
             menu=[
+                # "__app__" is pywebview's name for the ChatLab menu, where macOS
+                # apps keep Check for Updates — just under About.
                 Menu(
-                    "Help",
+                    "__app__",
                     [
                         MenuAction(
                             "Check for Updates…",
                             lambda: flow.check_in_background(interactive=True),
                         ),
+                    ],
+                ),
+                Menu(
+                    "Help",
+                    [
                         MenuAction("ChatLab Releases", lambda: webbrowser.open(updater.RELEASES_PAGE_URL)),
                     ],
-                )
+                ),
             ],
         )
     finally:

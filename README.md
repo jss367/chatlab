@@ -70,7 +70,7 @@ local server when you quit. The app bundle contains Python and its runtime
 dependencies, so it does not need a separate Python installation.
 
 The app checks GitHub Releases for a newer version when it starts, and
-**Help → Check for Updates…** does the same on demand. Accepting an update
+**ChatLab → Check for Updates…** does the same on demand. Accepting an update
 downloads the new bundle, swaps it into place, and relaunches ChatLab.
 
 Model weights are intentionally not included in the application. Models are
