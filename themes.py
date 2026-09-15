@@ -12,6 +12,10 @@ switching is a stylesheet swapped on the page rather than a restart.
 Three of them are the app's own mark read as a palette: the speech bubble's
 electric indigo (Aurora), the violet layers behind it (Nebula), and the gold
 nodes threading through them (Ember).
+
+Whether a theme is drawn light or dark is the other half of the page's look
+and a choice of its own, since every theme has both. It is a class on the
+body rather than a stylesheet; see APPEARANCE_JS.
 """
 
 from __future__ import annotations
@@ -154,6 +158,46 @@ DEFAULT_THEME = "aurora"
 THEME_NAMES = tuple(THEMES)
 # Label against name, which is what a Dropdown's choices are.
 THEME_CHOICES = [(theme.label, name) for name, theme in THEMES.items()]
+
+# Whether a theme is drawn light or dark is a separate choice from which
+# theme it is: every one of them has both. Gradio decides it once at startup
+# from the system setting, so these are the two overrides plus the setting
+# itself.
+APPEARANCES = {
+    "system": "Follow system",
+    "light": "Light",
+    "dark": "Dark",
+}
+DEFAULT_APPEARANCE = "system"
+APPEARANCE_NAMES = tuple(APPEARANCES)
+APPEARANCE_CHOICES = [(label, name) for name, label in APPEARANCES.items()]
+
+# Light or dark is a class on the body: Gradio writes every dark-mode value
+# under ``.dark``, and the app's own stylesheet follows it. So the choice is
+# that class added or removed, which is a repaint rather than a reload.
+#
+# The listener is what makes "Follow system" a standing arrangement rather
+# than a reading taken once. Gradio registers one of its own at startup that
+# does the same thing, and a forced light page would otherwise turn dark the
+# moment the system did; this one is added after it and so has the last word.
+# The choice is parked on the window because the listener outlives the call
+# that installed it and has to know what the reader has picked since.
+APPEARANCE_JS = """
+(mode) => {
+  const query = window.matchMedia('(prefers-color-scheme: dark)');
+  const paint = () => {
+    const chosen = window.__chatlabAppearance;
+    const dark = chosen === 'dark' || (chosen !== 'light' && query.matches);
+    document.body.classList.toggle('dark', dark);
+  };
+  window.__chatlabAppearance = mode;
+  if (!window.__chatlabAppearanceWatched) {
+    window.__chatlabAppearanceWatched = true;
+    query.addEventListener('change', paint);
+  }
+  paint();
+}
+"""
 
 
 def resolve(name: str | None) -> Theme:

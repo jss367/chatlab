@@ -124,6 +124,49 @@ class RampTests(unittest.TestCase):
                 self.assertIn(name, themes.THEMES)
 
 
+class AppearanceTests(unittest.TestCase):
+    """The light-or-dark choice that sits beside the theme."""
+
+    def test_it_offers_the_system_and_the_two_overrides(self):
+        self.assertEqual(
+            list(themes.APPEARANCE_NAMES), ["system", "light", "dark"]
+        )
+        self.assertEqual(
+            themes.APPEARANCE_CHOICES,
+            [(label, name) for name, label in themes.APPEARANCES.items()],
+        )
+
+    def test_a_new_install_follows_the_system(self):
+        self.assertEqual(themes.DEFAULT_APPEARANCE, "system")
+        self.assertEqual(settings.DEFAULTS.appearance, "system")
+
+    def test_a_chosen_one_is_kept(self):
+        for value in themes.APPEARANCE_NAMES:
+            with self.subTest(value=value):
+                self.assertEqual(
+                    settings.sanitize({"appearance": value}).appearance, value
+                )
+
+    def test_anything_else_falls_back_to_the_system(self):
+        for value in ("sepia", 7, None, ["dark"]):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    settings.sanitize({"appearance": value}).appearance,
+                    themes.DEFAULT_APPEARANCE,
+                )
+
+    def test_the_script_toggles_the_class_every_dark_rule_reads(self):
+        self.assertIn("classList.toggle('dark'", themes.APPEARANCE_JS)
+        self.assertIn("prefers-color-scheme: dark", themes.APPEARANCE_JS)
+
+    def test_the_script_keeps_watching_the_system_once_only(self):
+        # Following the system is a standing arrangement rather than a reading
+        # taken once, and the watch is guarded so that trying the three on in
+        # turn does not leave three listeners behind.
+        self.assertIn("addEventListener('change', paint)", themes.APPEARANCE_JS)
+        self.assertIn("if (!window.__chatlabAppearanceWatched)", themes.APPEARANCE_JS)
+
+
 class ResolveTests(unittest.TestCase):
     def test_a_known_name_gives_its_theme(self):
         self.assertIs(themes.resolve("ember"), themes.THEMES["ember"])
@@ -199,7 +242,9 @@ class ThemeControlTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        settings.write(settings.sanitize({"theme": "ember"}))
+        settings.write(
+            settings.sanitize({"theme": "ember", "appearance": "dark"})
+        )
         settings.load()
         cls.demo = app.build_app()
 
@@ -297,6 +342,50 @@ class ThemeControlTests(unittest.TestCase):
             self.block("theme-style"),
             [output for fn in self.listeners("apply_theme") for output in fn.outputs],
         )
+
+    def test_the_radio_offers_the_three_and_starts_on_the_saved_one(self):
+        radio = self.labelled("Light or dark")
+        self.assertEqual(
+            [value for _label, value in radio.choices],
+            list(themes.APPEARANCE_NAMES),
+        )
+        self.assertEqual(radio.value, "dark")
+
+    def test_choosing_one_repaints_in_the_browser_and_saves_it(self):
+        # The repaint is a class on the body rather than a round trip, so the
+        # listener that does it carries the script and no handler at all.
+        radio = self.labelled("Light or dark")
+        listening = [
+            fn
+            for fn in self.demo.fns.values()
+            if radio in fn.inputs
+            and radio
+            in [
+                self.demo.blocks[block_id]
+                for block_id, _ in fn.targets
+                if block_id is not None
+            ]
+        ]
+        painting = [fn for fn in listening if fn.fn is None]
+        self.assertEqual(len(painting), 1)
+        self.assertEqual(painting[0].js, themes.APPEARANCE_JS)
+        saving = [fn for fn in listening if getattr(fn.fn, "__name__", None) == "remember_settings"]
+        self.assertEqual(len(saving), 1)
+        self.assertEqual(saving[0].trigger_mode, "always_last")
+
+    def test_a_reload_draws_the_side_the_file_now_names(self):
+        radio = self.labelled("Light or dark")
+        restoring = self.listeners("restore_settings")
+        self.assertIn(radio, restoring[0].outputs)
+        loading = [
+            fn
+            for fn in self.demo.fns.values()
+            if fn.fn is None
+            and fn.js == themes.APPEARANCE_JS
+            and radio in fn.inputs
+            and not [block_id for block_id, _ in fn.targets if block_id is not None]
+        ]
+        self.assertEqual(len(loading), 1, "a page load does not apply the choice")
 
     def test_the_handler_gives_back_the_stylesheet_and_the_caption(self):
         style, caption = app.apply_theme("lagoon")
