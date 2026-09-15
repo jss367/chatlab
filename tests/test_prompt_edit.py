@@ -194,10 +194,20 @@ class PromptEditTests(unittest.TestCase):
 
     def test_the_reply_records_what_was_replaced(self):
         final = self.replace_with_text("Hello")
+        expected = list(PROMPT_IDS)
+        expected[MESSAGE_AT] = HELLO
+        # The ids are the exact record: the messages beside them would be
+        # rendered by the template, which is what the edit stepped around.
         self.assertEqual(
             final[TRACE]["sampling"]["edited_prompt"],
-            {"position": MESSAGE_AT + 1, "original": "hi", "replacement": "Hello"},
+            {
+                "position": MESSAGE_AT + 1,
+                "original": "hi",
+                "replacement": "Hello",
+                "prompt_token_ids": expected,
+            },
         )
+        self.assertEqual(self.prompt_ids(final), expected)
         self.assertIn("was replaced with 'Hello'", final[PROMPT_NOTE])
         self.assertIn("Prompt token 3: 'Hello' instead of 'hi'", final[STATUS])
 

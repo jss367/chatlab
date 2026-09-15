@@ -897,13 +897,18 @@ def _stream_reply(
         sampling["assistant_prefill"] = assistant_prefill
     if prompt_edit:
         # ``messages`` records the conversation this reply was given, which is
-        # no longer character for character what the model read. What the edit
-        # did belongs beside the prefill and the replayed prefix, the other two
-        # places the recorded messages are not the whole request.
+        # no longer what the model read: the recorded turns would be rendered
+        # by the template as it stands now, under prompting settings that may
+        # have moved since. The ids are therefore what is kept, and they are
+        # the whole prompt rather than the edit alone - the only exact record
+        # of the request, readable back through the tokenizer of the model
+        # named above. The position and the two texts stay for a reader, who
+        # should not have to decode a thousand numbers to see what changed.
         sampling["edited_prompt"] = {
             "position": prompt_edit["position"],
             "original": prompt_edit["original"],
             "replacement": prompt_edit["replacement"],
+            "prompt_token_ids": [int(value) for value in prompt_edit["ids"]],
         }
     trace = (
         build_trace(
