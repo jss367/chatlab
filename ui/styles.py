@@ -8,6 +8,12 @@ from ui.common import (
     CONVERSATION_PANE_WIDTH,
     NAV_PANE_WIDTH,
 )
+from ui.icons import (
+    ICON_CLASS,
+    ICON_CSS,
+    TRAILING_CLASS,
+    mask,
+)
 from ui.inspection import (
     NAV_TILE_CSS,
 )
@@ -50,6 +56,11 @@ THEME = gr.themes.Base(
 )
 
 
+# The one icon the stylesheet draws outside a control of its own: the mark
+# in front of a failure line.
+ALERT_MASK = mask("alert")
+
+
 CSS = f"""
 /* A viewport-sized shell gives every pane its own scroll boundary. */
 html, body {{ height: 100%; overflow: hidden; }}
@@ -64,6 +75,15 @@ html, body {{ height: 100%; overflow: hidden; }}
    A style element applies wherever it lands in the document, so the block
    holding it takes no room in the layout. */
 #theme-style {{ display: none !important; }}
+/* The token menu's bridge controls are hidden, but Gradio wraps each of them
+   in a form of its own, and a hidden child inside a shown wrapper is still a
+   flex item: the column they share with the shell was spending a gap on each
+   one, pushing the shell down by the two gaps together and hanging the same
+   distance off the bottom of the window. The pane at the far left is the one
+   that showed it, because the tile it pins to its bottom edge - Settings -
+   was the part that fell off the screen. An element that is not displayed is
+   not a flex item at all, so hiding the wrappers costs no gap. */
+.form:has(> .token-menu-bridge) {{ display: none !important; }}
 #shell {{
   height: 100dvh; min-height: 0; gap: 0; flex-wrap: nowrap;
   align-items: stretch; overflow: hidden;
@@ -168,7 +188,17 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 /* Models and Settings are form-heavy pages: give sections and controls
    visible edges without adding chrome to the conversation or inspector.
    Both are built from the same card, so a reader moving between them is
-   reading one page design rather than two. */
+   reading one page design rather than two.
+
+   A card was a border, a fill and a tinted page all at once, which is three
+   ways of saying one thing and left every surface at the same depth. It is
+   lifted off the page instead: the page keeps its tint, the card keeps its
+   fill, and a soft shadow does the separating. A shadow over a dark page is
+   invisible - there is nothing darker for it to be - so dark mode keeps the
+   hairline and drops the shadow. */
+:root {{
+  --card-shadow: 0 1px 2px rgb(16 18 27 / 4%), 0 4px 14px rgb(16 18 27 / 5%);
+}}
 #models-page, #settings-page {{
   background: var(--background-fill-secondary);
 }}
@@ -176,8 +206,12 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 #model-controls {{ gap: 24px; }}
 #models-page .model-card, #settings-page .settings-card {{
   min-width: 0; padding: 20px; gap: 16px;
-  border: 1px solid var(--border-color-primary); border-radius: 12px;
+  border: 1px solid transparent; border-radius: 14px;
   background: var(--block-background-fill);
+  box-shadow: var(--card-shadow);
+}}
+.dark #models-page .model-card, .dark #settings-page .settings-card {{
+  border-color: var(--border-color-primary); box-shadow: none;
 }}
 #models-page .model-card > *, #settings-page .settings-card > * {{ flex-shrink: 0; }}
 #models-page .model-card h2, #settings-page .settings-card h2 {{
@@ -243,7 +277,7 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 /* The page's own button border (above) would box every column heading. */
 #model-search-results button {{ border-width: 0; }}
 #models-page .model-list {{ padding: 0; border: 0; }}
-#models-page .model-list label {{ padding: 12px; border-width: 1px; border-radius: 8px; }}
+#models-page .model-list label {{ padding: 12px 12px 12px 18px; border-width: 1px; border-radius: 8px; }}
 #models-page .block.model-detail, #settings-page .block.model-detail {{
   padding: 12px 14px; border: 1px solid var(--border-color-primary);
   border-width: 1px !important;
@@ -308,7 +342,21 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 #hero {{ padding: 0; }}
 #hero h1 {{ font-size: 18px; line-height: 26px; font-weight: 600; margin: 0; }}
 #models-hero, #settings-hero {{ padding: 0 0 12px; }}
-#models-hero h1, #settings-hero h1 {{ font-size: 24px; margin-bottom: 6px; }}
+#models-hero h1, #settings-hero h1 {{
+  font-size: 24px; line-height: 30px; letter-spacing: -0.015em; margin-bottom: 6px;
+}}
+/* Anywhere a figure is read or compared: token counts, sizes on disk, the
+   memory panel, the tables. Proportional digits are drawn at the width each
+   digit wants, so a 1 is narrower than a 0 and a column of counts arrives
+   ragged and a figure that ticks up during a response jitters under the eye.
+   Tabular digits are all one width, which is what a figure meant to be read
+   against another figure needs. */
+#generation-status, #token-budget, .token-budget, #image-status,
+#models-page .model-detail, #settings-page .model-detail,
+#settings-page .hardware-panel, #model-search-results table,
+#token-alternatives table, #my-models-summary, .model-badge {{
+  font-variant-numeric: tabular-nums;
+}}
 #images-hero {{ padding: 0; }}
 #images-hero h1 {{ font-size: 18px; line-height: 26px; font-weight: 600; margin: 0; }}
 #images-hero p {{ font-size: 12px; color: var(--body-text-color-subdued); margin: 2px 0 0; }}
@@ -397,9 +445,83 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 #chat-tab > .column > * {{ flex: 0 0 auto; }}
 #chat-tab > .column > .form {{ background: transparent; }}
 #conversation {{ flex: 1 1 0 !important; height: auto !important; min-height: 180px; border: 0; background: var(--body-background-fill); }}
-#message-input {{ border: 1px solid var(--border-color-primary); border-radius: 12px !important; padding: 4px; border-width: 1px !important; }}
+
+/* The transcript. A reply arrived inside a bordered card, which held a
+   bordered reasoning box, which held the text - three edges deep for one
+   answer, and the disclosure drawn heavier than the answer under it. The
+   reply is set on the page itself now and separated from the turn above it
+   by space alone, which is what carries a transcript everywhere a transcript
+   is read. Your own message keeps its bubble: it is the short one, it is the
+   one being replied to, and with the reply unboxed it is the only edge left
+   to tell the two apart. */
+#conversation .message.bot {{
+  background: transparent !important;
+  border-color: transparent !important;
+  padding-left: 0; padding-right: 0;
+}}
+#conversation .message.user {{
+  border-radius: 14px 14px 4px 14px;
+  padding: 8px 14px;
+}}
+#conversation .message-row.bubble {{ margin: 6px 0 14px; }}
+#conversation .message-row.bot-row {{ max-width: 100%; }}
+/* The reasoning block. It is an aside to the answer, so it is drawn as one:
+   no card, a rule down its left edge, and its text one step back from the
+   answer's. */
+#conversation .thought-group {{
+  background: transparent; border: 0;
+  border-left: 2px solid var(--border-color-primary);
+  border-radius: 0; margin: 2px 0 10px; padding: 0 0 0 12px;
+}}
+#conversation .thought-group .title {{ color: var(--body-text-color-subdued); }}
+#conversation .thought-group .content {{ opacity: 0.85; }}
+
+/* The composer: the message box and the controls that act on it, drawn as
+   one bordered field. The border belongs to the pair rather than to the box,
+   so the buttons read as part of the thing being typed in - the row used to
+   be four buttons of equal width spread across the page under it. */
+/* Gradio gives every column a flex-grow of its own, in a rule the pinning
+   above cannot reach, so the composer would take the height the transcript
+   wants and stand as a field several times taller than the text in it. */
+#composer {{
+  flex: 0 0 auto !important;
+  gap: 0; padding: 6px 6px 6px 8px;
+  border: 1px solid var(--border-color-primary); border-radius: 14px;
+  background: var(--input-background-fill);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}}
+#composer:focus-within {{
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 15%, transparent);
+}}
+#composer > * {{ flex: 0 0 auto; }}
+#message-input {{ border: 0 !important; background: transparent; padding: 0; }}
 #message-input textarea {{ border: 0; box-shadow: none; background: transparent; }}
-#generation-status {{ font-size: 12px; color: var(--body-text-color-subdued); }}
+#chat-actions {{ gap: 4px; align-items: center; margin: 0; flex-wrap: wrap; }}
+/* Each control holds its own width instead of taking an equal share of the
+   row, which is what had three of them stretched across the page as unrelated
+   labels. Send is written first, for the keyboard; it is moved to the end,
+   for the eye. */
+#chat-actions button {{ flex: 0 0 auto !important; min-width: 0 !important; }}
+#chat-actions button.primary, #chat-actions #stop-button {{
+  order: 2; margin-left: auto; border-radius: 9px; padding: 6px 18px;
+}}
+/* The three that rework the last reply are quiet: no fill and no edge until
+   the pointer is on them, so the one filled button in the composer is the
+   one that sends. */
+#chat-actions button.secondary {{
+  background: transparent; border-color: transparent;
+  color: var(--body-text-color-subdued);
+  padding: 6px 10px; border-radius: 9px; font-size: 13px;
+  transition: background 120ms ease, color 120ms ease;
+}}
+#chat-actions button.secondary:hover {{
+  background: var(--background-fill-secondary); color: var(--body-text-color);
+}}
+#generation-status {{
+  font-size: 12px; color: var(--body-text-color-subdued);
+  font-variant-numeric: tabular-nums;
+}}
 #conversation-tools {{ max-height: 40vh; overflow-y: auto; overscroll-behavior-y: contain; }}
 #inspector-pane .block {{ background: transparent; }}
 #inspector-pane input, #inspector-pane textarea {{ background: var(--input-background-fill); }}
@@ -411,8 +533,35 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 #inspector-pane .label-wrap, #conversation-tools > .label-wrap {{
   padding: 12px 0; border-top: 1px solid var(--border-color-primary);
 }}
+/* A control that carries an icon. The drawing is a mask painted in the
+   control's own text colour, so it dims with a disabled button, brightens
+   with a hover and turns white inside a primary one without a second copy of
+   the file; see ui/icons.py. Two classes do the work: this one opens the box
+   and colours it, and icon-<name> below says which drawing goes in it. */
+.{ICON_CLASS} {{
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+}}
+.{ICON_CLASS}::before {{
+  content: ""; flex: none; width: 15px; height: 15px;
+  background-color: currentColor;
+}}
+/* An upload button is a label with the control inside it rather than a
+   button element, so the flex box above has to be asked for again here. */
+label.{ICON_CLASS} {{ display: inline-flex; }}
+/* A control pointing onward reads with its mark after the word, not before
+   it. The mark is still generated as ::before, so the row is reversed rather
+   than the drawing moved. */
+.{TRAILING_CLASS} {{ flex-direction: row-reverse; }}
+{ICON_CSS}
 #shell button {{ box-shadow: none; }}
 #conversation-pane button {{ font-size: 12px; padding: 6px; white-space: nowrap; }}
+/* New, Fork and Delete share one row in a pane 248px wide, and an icon in
+   front of each label is three more icons than the row was measured for. The
+   drawings are set a size smaller here and the buttons give up the minimum
+   width they ask for, which is what keeps the three on one line. */
+#conversation-pane .{ICON_CLASS} {{ gap: 4px; padding: 6px 4px; }}
+#conversation-pane .{ICON_CLASS}::before {{ width: 13px; height: 13px; }}
+#conversation-pane .row button {{ min-width: 0 !important; }}
 #chat-tab button {{ font-size: 13px; }}
 #shell button:focus-visible {{ outline: 2px solid var(--color-accent); outline-offset: 2px; }}
 
@@ -458,15 +607,28 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
      transparent so picking a page does not nudge the icons. */
   border: 1px solid transparent;
 }}
-#nav label::before {{ font-size: 1.3rem; line-height: 1.1; }}
+/* The box each tile's drawing is masked into. A mask paints the box in the
+   colour the tile already has, so an unselected tile's icon is as quiet as
+   its name and the selected one's sharpens with it - no second drawing, and
+   nothing to keep in step with a theme change. NAV_TILE_CSS below says only
+   which drawing goes in the box. */
+#nav label::before {{
+  content: ""; display: block; width: 21px; height: 21px;
+  background-color: currentColor;
+  opacity: 0.75; transition: opacity 120ms ease;
+}}
+#nav label.selected::before {{ opacity: 1; }}
 /* The label's own text, which is also what a screen reader reads for it. */
 #nav label span {{ font-size: 0.7rem; font-weight: 500; }}
 {NAV_TILE_CSS}
 #nav label:hover {{ background: var(--background-fill-secondary); }}
+#nav label:hover::before {{ opacity: 1; }}
 #nav label.selected {{
-  background: var(--block-background-fill); color: var(--body-text-color); font-weight: 600;
+  background: var(--block-background-fill); color: var(--color-accent); font-weight: 600;
   border: 1px solid var(--border-color-primary);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 5%);
 }}
+#nav label.selected span {{ color: var(--color-accent); }}
 #nav label:last-child {{ margin-top: auto; }}
 /* The radio inputs stay in the tab order, just out of sight, and the tile
    they belong to shows the keyboard focus ring. */
@@ -477,29 +639,44 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
   outline: 2px solid var(--color-accent); outline-offset: 2px;
 }}
 .model-list .wrap {{ flex-direction: column; align-items: stretch; gap: 0.2rem; }}
-.model-list label {{ font-size: 0.82rem; line-height: 1.3; word-break: break-word; }}
-/* Gradio stamps each option's text on its label as data-testid, which is the
-   only hook a Radio gives CSS. An incomplete model's label ends in
-   "· incomplete", so it is tinted amber in both themes. */
-.model-list label[data-testid*="· incomplete"] {{ border-color: #d97706; }}
-.model-list label[data-testid*="· incomplete"]:not(.selected) {{
-  background: rgba(217, 119, 6, 0.09);
+.model-list label {{
+  position: relative;
+  font-size: 0.82rem; line-height: 1.3; word-break: break-word;
+  font-variant-numeric: tabular-nums;
+  transition: background 120ms ease, border-color 120ms ease;
 }}
-.model-list label[data-testid*="· incomplete"] span {{ color: #b45309; }}
-.dark .model-list label[data-testid*="· incomplete"] span {{ color: #fbbf24; }}
-/* The fit verdicts are read off the same label. A model that cannot fit is
-   greyed rather than reddened: it is not an error, and the reader may be
-   looking at it to find that out. A model in a format ChatLab cannot load
-   is greyed for the same reason and by the same rule: both words mean the
-   row will not load, so both rows look alike. Rows that fit are left plain,
-   as they are most of the list and tinting them would leave nothing to
-   stand out. */
+/* Gradio stamps each option's text on its label as data-testid, which is the
+   only hook a Radio gives CSS - and the whole row is one span, so there is no
+   element around the verdict at the end of it to make into a chip. The row
+   wears its verdict as a bar down its left edge instead. That leaves the
+   model's name in the text colour every other name is in: a row used to turn
+   amber from end to end because its last word was "tight", which read as a
+   warning about the name rather than about the memory. */
+.model-list label::before {{
+  content: ""; position: absolute; left: 5px; top: 9px; bottom: 9px; width: 3px;
+  border-radius: 2px; background: transparent;
+}}
+.model-list label[data-testid*="· tight"]::before,
+.model-list label[data-testid*="· incomplete"]::before {{ background: var(--fit-tight); }}
+.model-list label[data-testid*="· won't fit"]::before,
+.model-list label[data-testid*="· unsupported"]::before {{
+  background: var(--border-color-primary);
+}}
+.model-list label[data-testid*="· loaded"]::before {{ background: var(--color-accent); }}
+/* An incomplete model is the one state that is a problem rather than a
+   measurement - files are missing and a load would go and fetch them - so it
+   keeps a tint behind the row as well as the bar. */
+.model-list label[data-testid*="· incomplete"]:not(.selected) {{
+  background: rgba(217, 119, 6, 0.08);
+}}
+/* A model that cannot fit is greyed rather than reddened: it is not an error,
+   and the reader may be looking at it to find that out. A model in a format
+   ChatLab cannot load is greyed for the same reason and by the same rule:
+   both words mean the row will not load, so both rows look alike. */
 .model-list label[data-testid*="· won't fit"]:not(.selected) span,
 .model-list label[data-testid*="· unsupported"]:not(.selected) span {{
   color: var(--body-text-color-subdued);
 }}
-.model-list label[data-testid*="· tight"] span {{ color: #b45309; }}
-.dark .model-list label[data-testid*="· tight"] span {{ color: #fbbf24; }}
 .model-sort label span {{ font-size: 0.8rem; }}
 .remove-confirm {{
   border: 1px solid #d97706; border-radius: 8px; padding: 0.4rem 0.6rem;
@@ -589,9 +766,15 @@ abbr[title] {{ text-decoration: underline dotted; cursor: help; }}
   background: var(--error-background-fill);
   color: var(--color-red-600); font-weight: 600;
 }}
-/* The mark is decoration; the line already says what failed, so the empty
-   alternative text keeps a screen reader from reading the glyph out. */
-.failure::before {{ content: "⚠ " / ""; }}
+/* The mark is decoration; the line already says what failed. Drawn as a mask
+   rather than a glyph, it takes the red the line is already set in, and it
+   generates no text for a screen reader to read out in front of that line. */
+.failure::before {{
+  content: ""; display: inline-block; vertical-align: -2px;
+  width: 15px; height: 15px; margin-right: 6px;
+  background-color: currentColor;
+  {ALERT_MASK}
+}}
 .failure-text {{ color: var(--color-red-600); }}
 .dark .failure, .dark .failure-text {{ color: var(--color-red-400); }}
 
@@ -621,17 +804,39 @@ abbr[title] {{ text-decoration: underline dotted; cursor: help; }}
 /* The conversation list is a Radio whose labels carry a line break: the
    name and title on the first line, the model and token count on the
    second. Stack the entries and let the break through. */
-#conversation-list .wrap {{ flex-direction: column; align-items: stretch; gap: 0.4rem; }}
+#conversation-list .wrap {{ flex-direction: column; align-items: stretch; gap: 0.3rem; }}
 #conversation-list {{ background: transparent; padding: 0; }}
+/* Gradio wraps a radio in a form with a fill of its own. In light mode that
+   fill is near enough to the page to have gone unnoticed; in dark mode it is
+   several steps lighter than the pane, so the list arrived as one pale slab
+   with the selected conversation somewhere inside it - which is exactly the
+   contrast the tint below is trying to carry. */
+#conversation-pane .form {{ background: transparent; border: 0; }}
 #conversation-list label {{
+  position: relative; overflow: hidden;
   align-items: flex-start; background: transparent; border: 1px solid transparent;
-  border-radius: 8px; padding: 10px; box-shadow: none;
+  border-radius: 8px; padding: 10px 10px 10px 13px; box-shadow: none;
+  transition: background 120ms ease;
 }}
+#conversation-list label:hover {{ background: var(--block-background-fill); }}
+/* The conversation being read was a filled block of the primary colour, which
+   in a pane of two or three of them was the loudest thing on the screen and
+   said far more than "this is the one you are in". It is a tint of that
+   colour now, with the accent as a bar down its edge: the same signal at the
+   weight the signal is worth, and the title stays in the text colour every
+   other title on the page is in. */
 #conversation-list label.selected {{
-  background: var(--button-primary-background-fill);
+  background: var(--primary-50);
   border-color: transparent;
 }}
-#conversation-list label.selected span {{ color: white; }}
+.dark #conversation-list label.selected {{ background: var(--neutral-800); }}
+#conversation-list label.selected::before {{
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--color-accent);
+}}
+#conversation-list label.selected span {{
+  color: var(--body-text-color); font-weight: 600;
+}}
 #conversation-list label:has(input:focus-visible) {{
   outline: 2px solid var(--color-accent); outline-offset: 2px;
 }}
@@ -639,6 +844,7 @@ abbr[title] {{ text-decoration: underline dotted; cursor: help; }}
 #conversation-list label input {{ margin-top: 0.3rem; }}
 #conversation-list label span {{
   white-space: pre-line; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
 }}
 
 .viz-root {{

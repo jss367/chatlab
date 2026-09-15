@@ -3,6 +3,7 @@
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,7 @@ from unittest import mock
 import gradio as gr
 
 import app
-from ui import models_page, runtime
+from ui import icons, models_page, runtime
 import model_runtime
 import settings
 from model_runtime import (
@@ -2763,7 +2764,7 @@ class PageLayoutTests(unittest.TestCase):
         "Top-k (0 disables)",
         "Maximum new tokens",
         "Random seed",
-        "🎲 New seed each response",
+        "New seed each response",
     ]
 
     def setUp(self):
@@ -2829,14 +2830,23 @@ class PageLayoutTests(unittest.TestCase):
         for page in app.PAGES:
             with self.subTest(page=page):
                 tile = f'#nav label[data-testid="{page}-radio-label"]'
-                # The empty alternative text keeps the icon out of what a
-                # screen reader reads; the label's own text stands for the
-                # tile, and is now printed under the icon rather than hidden.
+                # The icon is a mask over the tile rather than a glyph in it,
+                # so it generates no text for a screen reader to read out and
+                # the label's own name - printed under it - stands for the
+                # tile on its own.
                 self.assertIn(
-                    f'{tile}::before {{ content: "{app.NAV_ICONS[page]}" / ""; }}',
+                    icons.mask_rule(f"{tile}::before", app.NAV_ICONS[page]),
                     app.CSS,
                 )
         self.assertIn("#nav label span { font-size:", app.CSS)
+
+    def test_no_nav_tile_is_drawn_with_an_emoji(self):
+        # Emoji are a different typeface per glyph: the weights, the colours
+        # and the optical sizes never agreed, and one of them arrived as an
+        # empty box on a machine without the font.
+        for page, icon in app.NAV_ICONS.items():
+            with self.subTest(page=page):
+                self.assertIn(icon, icons.ICONS)
 
     def test_a_compact_window_stacks_the_images_panes_too(self):
         # Its two panes want about 620px between them, so in a narrow window
@@ -2915,6 +2925,116 @@ class PageLayoutTests(unittest.TestCase):
         stacked = "(max-width: 850px)"
         self.assertIn(f"@media {stacked}", app.CSS)
         self.assertIn(f"matchMedia('{stacked}')", app.RESIZE_JS)
+
+    def test_the_shell_is_not_pushed_off_the_bottom_of_the_window(self):
+        # The shell is a window tall, so anything that takes room above it
+        # hangs the same distance off the bottom - and what falls off is the
+        # tile the nav pins to its own bottom edge, Settings. The token
+        # menu's bridge controls are hidden, but Gradio wraps each in a form
+        # that is not, and a shown wrapper is still a flex item earning a gap
+        # in the column it shares with the shell.
+        self.assertIn(".form:has(> .token-menu-bridge) { display: none", app.CSS)
+        self.assertIn("#shell {\n  height: 100dvh;", app.CSS)
+
+    def test_every_icon_in_the_interface_comes_from_the_one_set(self):
+        # Emoji are a different typeface per glyph, so a row of them agreed on
+        # neither weight nor colour nor optical size, and some machines drew a
+        # box instead. Every mark the interface draws is now one stroke set at
+        # one weight, masked in the colour it lands in.
+        emoji = re.compile("[\U0001F300-\U0001FAFF\u2190-\u27BF\uFE0F]")
+        labelled = [
+            block
+            for block in self.demo.blocks.values()
+            if isinstance(getattr(block, "value", None), str)
+            and isinstance(block, gr.Button)
+        ]
+        self.assertTrue(labelled)
+        for block in labelled:
+            with self.subTest(label=block.value):
+                self.assertIsNone(emoji.search(block.value))
+
+    def test_an_icon_follows_the_colour_of_whatever_it_sits_in(self):
+        # A mask is painted in the element's own colour, so one drawing
+        # serves a quiet button, a primary one, dark mode and every theme.
+        # An image would hold whatever colour it was exported at.
+        self.assertIn(f".{icons.ICON_CLASS}::before", app.CSS)
+        self.assertIn("background-color: currentColor;", app.CSS)
+        for name in icons.ICONS:
+            with self.subTest(icon=name):
+                self.assertIn(icons.mask_rule(f".icon-{name}::before", name), app.CSS)
+
+    def test_the_message_box_and_its_controls_are_one_composer(self):
+        # The border belongs to the pair, so the row reads as part of the box
+        # rather than as four loose buttons under it, and Send is moved to the
+        # end of that row where the eye leaves the text it just typed.
+        composer = self.by_id("composer")
+        # Gradio puts a form of its own around a lone textbox, so the box is a
+        # grandchild of the column it was written into.
+        inside = [
+            block
+            for child in composer.children
+            for block in (child, *getattr(child, "children", ()))
+        ]
+        self.assertIn(self.by_id("message-input"), inside)
+        self.assertIn(self.by_id("chat-actions"), inside)
+        self.assertIn("#composer {", app.CSS)
+        self.assertIn("#chat-actions button.primary, #chat-actions #stop-button {", app.CSS)
+        self.assertIn("order: 2; margin-left: auto;", app.CSS)
+
+    def test_send_is_written_before_the_buttons_it_is_drawn_after(self):
+        # Keyboard order is the written order, so Send stays first there; only
+        # the drawing moves.
+        actions = self.by_id("chat-actions")
+        labels = [
+            child.value for child in actions.children if isinstance(child, gr.Button)
+        ]
+        self.assertEqual(labels[0], "Send")
+        self.assertEqual(labels[-3:], ["Retry", "Next token", "Undo last"])
+
+    def test_the_conversation_being_read_is_tinted_rather_than_filled(self):
+        # A filled block of the primary colour was the loudest thing in a pane
+        # of two or three conversations, and said far more than "this is the
+        # one you are in".
+        rules = app.CSS[app.CSS.index("#conversation-list label.selected {") :]
+        rules = rules[: rules.index("\n}")]
+
+        self.assertIn("var(--primary-50)", rules)
+        self.assertNotIn("var(--button-primary-background-fill)", rules)
+        self.assertIn(
+            "#conversation-list label.selected span {\n  color: var(--body-text-color)",
+            app.CSS,
+        )
+
+    def test_a_model_wears_its_verdict_on_its_edge_not_across_its_name(self):
+        # A row turned amber from end to end because its last word was
+        # "tight", which read as a warning about the name rather than about
+        # the memory.
+        self.assertNotIn('.model-list label[data-testid*="· tight"] span', app.CSS)
+        self.assertIn(
+            '.model-list label[data-testid*="· tight"]::before,', app.CSS
+        )
+        self.assertIn("background: var(--fit-tight);", app.CSS)
+
+    def test_a_reply_is_not_drawn_inside_a_box(self):
+        # It arrived inside a bordered card holding a bordered reasoning box
+        # holding the text: three edges deep for one answer. Space separates
+        # the turns now, and your own message keeps the only bubble.
+        self.assertIn("#conversation .message.bot {", app.CSS)
+        self.assertIn("#conversation .message.user {", app.CSS)
+        bot = app.CSS[app.CSS.index("#conversation .message.bot {") :]
+        bot = bot[: bot.index("\n}")]
+        self.assertIn("background: transparent !important;", bot)
+        self.assertIn("border-color: transparent !important;", bot)
+
+    def test_figures_meant_to_be_compared_are_set_in_one_digit_width(self):
+        # Proportional digits are drawn at the width each digit wants, so a
+        # column of token counts arrives ragged and a count ticking up during
+        # a response jitters under the eye.
+        self.assertIn("font-variant-numeric: tabular-nums;", app.CSS)
+        for selector in ("#generation-status", "#conversation-list label span"):
+            with self.subTest(selector=selector):
+                rules = app.CSS[app.CSS.index(f"{selector} {{") :]
+                self.assertIn("tabular-nums", rules[: rules.index("\n}")])
 
     def test_the_nav_names_are_on_screen_rather_than_a_hover_away(self):
         # Four pages is not a number worth hiding. Nothing clips the name
@@ -3320,7 +3440,7 @@ class PageLayoutTests(unittest.TestCase):
             for fn in (ask, remove)
             for block_id, _ in fn.targets
         }
-        self.assertIs(buttons["🗑️ Remove"], ask)
+        self.assertIs(buttons["Remove"], ask)
         self.assertIs(buttons["Remove from disk"], remove)
         self.assertEqual(len(self.listeners("hide_remove_confirm")), 3)
 
@@ -3352,7 +3472,7 @@ class PageLayoutTests(unittest.TestCase):
             for fn in (ask, clear, cancel)
             for block_id, _ in fn.targets
         }
-        self.assertIs(buttons["🗑️ Clear all"], ask)
+        self.assertIs(buttons["Clear all"], ask)
         self.assertIs(buttons["Clear everything"], clear)
         self.assertIs(buttons["Cancel"], cancel)
         # Cancelling is recorded against the target rather than the handler,
@@ -3373,7 +3493,7 @@ class PageLayoutTests(unittest.TestCase):
             if isinstance(self.demo.blocks[block_id], gr.Button)
         }
 
-        self.assertEqual(buttons, {"Cancel", "➕ New", "🌿 Fork", "🗑️ Delete"})
+        self.assertEqual(buttons, {"Cancel", "New", "Fork", "Delete"})
         # Switching conversations counts too, and it is the list itself.
         self.assertIn(self.by_id("conversation-list")._id, triggered_by)
         for fn in withdrawals:
@@ -3385,7 +3505,7 @@ class PageLayoutTests(unittest.TestCase):
         (ask,) = self.listeners("ask_clear_chat")
         ((block_id, _),) = ask.targets
 
-        self.assertEqual(self.demo.blocks[block_id].value, "🗑️ Clear all")
+        self.assertEqual(self.demo.blocks[block_id].value, "Clear all")
 
     def test_clear_stands_under_the_list_of_what_it_takes(self):
         # Under the message box it sat among Retry, Undo and Send, all of
@@ -3576,7 +3696,7 @@ class PageLayoutTests(unittest.TestCase):
         upload = next(
             block
             for block in self.demo.blocks.values()
-            if getattr(block, "label", None) == "\U0001f4c2 Load prompts"
+            if getattr(block, "label", None) == "Load prompts"
         )
 
         self.assertIn("text", upload.file_types)
@@ -4362,7 +4482,7 @@ class SavedSettingsTests(unittest.TestCase):
             ("Top-k (0 disables)", 7),
             ("Maximum new tokens", 64),
             ("Random seed", 99),
-            ("🎲 New seed each response", False),
+            ("New seed each response", False),
             ("Measure prompt tokens", False),
             ("Color tokens by", "Surprise"),
             ("Context limit (tokens)", 2048),
@@ -4436,7 +4556,7 @@ class SavedSettingsTests(unittest.TestCase):
             "Top-k (0 disables)",
             "Maximum new tokens",
             "Random seed",
-            "🎲 New seed each response",
+            "New seed each response",
             "Measure prompt tokens",
             "Color tokens by",
             "Thinking mode",
@@ -4615,7 +4735,7 @@ class SavedSettingsTests(unittest.TestCase):
                         "Top-k (0 disables)",
                         "Maximum new tokens",
                         "Random seed",
-                        "🎲 New seed each response",
+                        "New seed each response",
                         "Measure prompt tokens",
                         "Color tokens by",
                         "Thinking mode",

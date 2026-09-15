@@ -232,7 +232,7 @@ The system prompt, assistant prefill, and reasoning options; the analysis and in
 
 **Color theme** picks the colors the whole interface is drawn in, and the page repaints as you choose rather than waiting for a reload. **Graphite** is indigo on neutral gray, the look ChatLab has always had and the one a new install starts on. Three are read off the app's own mark: **Aurora**, the speech bubble's electric indigo over the blue-black it sits on; **Nebula**, the violet layers behind it; and **Ember**, the gold nodes threading through them, whose buttons darken to burnt amber so their text stays readable. **Lagoon** is the cyan along the bubble's edge over cool slate, and **Moss** is a deep green that has nothing to do with the logo. Each one is a pair of color ramps rather than a fixed light or dark look, so every theme follows the system's light and dark setting. The choice is saved as `theme`; a name the running version has never heard of falls back to Graphite rather than refusing to start.
 
-**Hardware** is what the memory guard reads when it decides whether a model fits: the device a load would use and the precision it would read weights as, the machine's memory and how much of it ChatLab estimates is available within its own limits, the safety reserve it keeps beside the weights, the Metal cap and the share of Metal's recommendation it comes to, what the device allocator is holding for this process, and the model in memory. It is read when the page opens, when the Settings page is opened, after every load and unload, and whenever **↻ Refresh** is pressed - not on a timer, since reading it costs a subprocess. The same figures go to the log with every load and every reply, which is what makes a memory failure readable after the fact; the panel is how to look before one.
+**Hardware** is what the memory guard reads when it decides whether a model fits: the device a load would use and the precision it would read weights as, the machine's memory and how much of it ChatLab estimates is available within its own limits, the safety reserve it keeps beside the weights, the Metal cap and the share of Metal's recommendation it comes to, what the device allocator is holding for this process, and the model in memory. It is read when the page opens, when the Settings page is opened, after every load and unload, and whenever **Refresh** is pressed - not on a timer, since reading it costs a subprocess. The same figures go to the log with every load and every reply, which is what makes a memory failure readable after the fact; the panel is how to look before one.
 
 The sampling controls are **not** here. Temperature, top-p, top-k, the response length and the seed are what gets moved between one retry and the next, so they sit under the message box on the Chat page, in a **Sampling** section that wears its own values: the summary reads without opening it.
 
@@ -347,9 +347,9 @@ average beside a moved frame would be quietly wrong.
 - Switching conversations, starting a new chat, or forking a conversation keeps the original response generating in the background. Its entry shows **Generating…**, and its response is saved as it progresses. Return to that conversation to see its latest text and token measurements.
 - **Stop** names the running conversation and works even while you are viewing another chat. It stops at the next generation update and keeps whatever was produced so far.
 - One response generates at a time. You can browse and draft messages elsewhere while it runs; wait for it to finish or press **Stop** before sending another message. Stop a running response before editing, undoing, loading into, or deleting its conversation, or clearing all conversations.
-- **Retry** regenerates the last reply. Because **🎲 New seed each response** is on by default, a retry actually explores a different sample; turn it off to lock the seed and reproduce a response exactly. The seed field always shows the seed that produced the response on screen.
-- Hovering a message in the transcript gives per-message retry, edit, and undo. Editing one of your messages truncates the conversation there and generates a new reply; editing a reply just corrects it in place. **↩️ Undo last** removes the last exchange and puts your message back in the input box.
-- **💾 Save conversation** writes a JSON file containing every turn, its reasoning block, and the system prompt, along with the model and token counts behind each reply. **📂 Load conversation** restores it.
+- **Retry** regenerates the last reply. Because **New seed each response** is on by default, a retry actually explores a different sample; turn it off to lock the seed and reproduce a response exactly. The seed field always shows the seed that produced the response on screen.
+- Hovering a message in the transcript gives per-message retry, edit, and undo. Editing one of your messages truncates the conversation there and generates a new reply; editing a reply just corrects it in place. **Undo last** removes the last exchange and puts your message back in the input box.
+- **Save conversation** writes a JSON file containing every turn, its reasoning block, and the system prompt, along with the model and token counts behind each reply. **Load conversation** restores it.
 
 ### Token view
 
@@ -461,7 +461,7 @@ Every response token comes with the alternatives the model ranked highest. Branc
 
 1. Tick **Token view** and click the token in the conversation.
 2. Click a row in **Most likely alternatives**. The detail panel confirms what the branch will do.
-3. Press **🌱 Branch from token**.
+3. Press **Branch from token**.
 
 The reply is kept up to the token before the one you clicked, the alternative is put in its place, and the model continues from there under the current sampling settings. The branch replaces the reply it was taken from and every message after it, so it is a different continuation of the conversation rather than an edit buried in the middle of one; **Retry** and **Undo** then work on it as usual. Choosing the token the model already picked resamples the rest of the reply from that point, which is a way to see how much of what followed was chance.
 
@@ -473,7 +473,7 @@ To explore one token at a time, choose an alternative and press **Next token** b
 
 ### Branching with your own text
 
-The alternatives table only offers what the model ranked highly. To put anything else at a token position, click the token, type the replacement in **Or type your own replacement**, and press **✏️ Branch with text**. The typed text is spliced in exactly as written where the clicked token was, and the model continues from there. Type the space yourself if the word needs one: the text is checked in place, after the tokens that are kept, so it reads the same whether the tokenizer keeps the word-boundary space inside the token (as BPE does) or drops it from the start of what it decodes (as SentencePiece does). It can be one word or a whole sentence. Text the tokenizer cannot reproduce exactly at that position is refused rather than approximated. The prompt and replayed response prefix together are capped at 8,192 tokens, or at the model's shorter positional limit; an oversized branch is refused without replacing the response on screen.
+The alternatives table only offers what the model ranked highly. To put anything else at a token position, click the token, type the replacement in **Or type your own replacement**, and press **Branch with text**. The typed text is spliced in exactly as written where the clicked token was, and the model continues from there. Type the space yourself if the word needs one: the text is checked in place, after the tokens that are kept, so it reads the same whether the tokenizer keeps the word-boundary space inside the token (as BPE does) or drops it from the start of what it decodes (as SentencePiece does). It can be one word or a whole sentence. Text the tokenizer cannot reproduce exactly at that position is refused rather than approximated. The prompt and replayed response prefix together are capped at 8,192 tokens, or at the model's shorter positional limit; an oversized branch is refused without replacing the response on screen.
 
 Only a reply the model wrote can be branched. Prompt tokens, text measured in the **Score text** tab, and a message typed or edited by hand have no measured tokens to continue from. Editing a reply also takes the measurements off it and off every reply after it: those were produced from a transcript the edit replaced.
 
@@ -483,11 +483,11 @@ On the Chat page, the pane beside the nav lists every conversation. Each entry s
 
 The token count is the size of the conversation as the model last saw it: every token in the prompt behind the latest reply - system prompt, transcript, and chat template - plus every token of the reply, reasoning included. It updates as a reply streams, so a reply that is stopped part way shows how far it got. The count belongs to the reply the model generated, and a conversation loaded from an older file, or whose only replies were typed in by hand, says so instead of showing a number. A conversation answered by more than one model names each of them, most recent first.
 
-**➕ New** puts the conversation on screen away and starts an empty one. **🌿 Fork** copies the conversation into a new fork and switches to it, so you can ask something different without losing the original. **🗑️ Delete** removes the conversation on screen and returns to the main one, which cannot be deleted; **🗑️ Clear all**, under the list, empties it and removes every other conversation with it, which is why it asks first and names how many it would take.
+**New** puts the conversation on screen away and starts an empty one. **Fork** copies the conversation into a new fork and switches to it, so you can ask something different without losing the original. **Delete** removes the conversation on screen and returns to the main one, which cannot be deleted; **Clear all**, under the list, empties it and removes every other conversation with it, which is why it asks first and names how many it would take.
 
 Click a message before pressing Fork to fork at that point. Forking at a reply keeps the conversation through that reply, ready for a different next question. Forking at one of your own messages keeps what came before it and puts the message back in the input box so it can be reworded, the same shape **Undo** gives.
 
-Each conversation carries its own token view, since the measurements live on the replies themselves; what switching conversations does clear is the prompt strip, the charts and the export, which describe one reply at a time. **💾 Save conversation** writes the conversation on screen.
+Each conversation carries its own token view, since the measurements live on the replies themselves; what switching conversations does clear is the prompt strip, the charts and the export, which describe one reply at a time. **Save conversation** writes the conversation on screen.
 
 Every conversation in the pane is kept between sessions, its own sampling
 included, and the two are kept apart when two windows disagree: a window
@@ -515,8 +515,8 @@ and swapped into place, so a crash mid-write leaves the previous copy rather
 than half of a new one. The token measurements are not in it: the file is rewritten on
 every streaming frame, and a few hundred numbers per token would make that a
 multi-megabyte write per token. A restored conversation therefore comes back
-as plain text in the token view, and measured again from its next reply on. **💾 Save conversation** is still
-the way to hand one conversation to someone else, and **📂 Load conversation**
+as plain text in the token view, and measured again from its next reply on. **Save conversation** is still
+the way to hand one conversation to someone else, and **Load conversation**
 brings such a file in.
 
 ## Layers and attention
@@ -524,7 +524,7 @@ brings such a file in.
 The token panel says how likely a token was. **Layers and attention** says how the model got there.
 
 1. Click a token in the conversation's **Token view**, or in **Prompt and context tokens**.
-2. Open **Layers and attention** and press **🔬 Inspect layers**.
+2. Open **Layers and attention** and press **Inspect layers**.
 
 The readout is offered for the reply on screen and the prompt behind it. An earlier reply's prompt is no longer on screen to rebuild the pass from, so clicking one of its tokens reports its numbers without offering the layers.
 

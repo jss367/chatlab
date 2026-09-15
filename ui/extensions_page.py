@@ -8,6 +8,10 @@ import gradio as gr
 
 import settings
 from extensions.registry import CATALOGUE
+from ui import icons
+
+# What an extension naming an icon this build has never heard of gets.
+DEFAULT_EXTENSION_ICON = "box"
 
 SHELL_CSS = """
 .extension-page {min-width:0 !important; min-height:0; height:100%; flex-wrap:nowrap; overflow:hidden;}
@@ -15,12 +19,22 @@ SHELL_CSS = """
 
 
 def extension_css(extensions):
-    icons = "\n".join(
-        f'#nav label[data-testid={json.dumps(ext.spec.page_label + "-radio-label")} ]::before '
-        f'{{content: {json.dumps(ext.spec.icon, ensure_ascii=False)} / "";}}'
+    """The shell rules, each extension's nav icon, and each extension's CSS.
+
+    An extension names an icon in ui.icons rather than supplying a drawing,
+    so its tile is stroked at the same weight as the pages it sits between.
+    A name this build does not have falls back to the default rather than
+    emitting a rule that masks the tile away to nothing.
+    """
+
+    tiles = "\n".join(
+        icons.mask_rule(
+            f'#nav label[data-testid={json.dumps(ext.spec.page_label + "-radio-label")}]::before',
+            ext.spec.icon if ext.spec.icon in icons.ICONS else DEFAULT_EXTENSION_ICON,
+        )
         for ext in extensions
     )
-    return SHELL_CSS + icons + "\n".join(ext.css for ext in extensions)
+    return SHELL_CSS + tiles + "\n" + "\n".join(ext.css for ext in extensions)
 
 
 def data_directory(extension_id):

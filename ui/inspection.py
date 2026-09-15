@@ -12,7 +12,7 @@ from model_runtime import (
     LOADING,
     ModelChanged,
 )
-from ui import runtime
+from ui import icons, runtime
 from ui.common import (
     NAV_ICONS,
     PAGES,
@@ -244,17 +244,13 @@ def reset_inspection(insight: dict | None):
     return charts.EMPTY_LENS, charts.EMPTY_ATTENTION, None, INSPECT_HINT
 
 
-# One rule per tile: the icon drawn above the page's own name. Gradio stamps
-# each option's text on its label as data-testid, which is the only hook a
-# Radio gives CSS.
+# One rule per tile: which drawing goes in the box the stylesheet has already
+# opened above the page's own name. Gradio stamps each option's text on its
+# label as data-testid, which is the only hook a Radio gives CSS.
 #
-# The icon is drawn on the label, so it would otherwise join the radio's
-# accessible name and have a screen reader read "speech balloon Chat". The
-# empty string after the slash is the generated text's alternative text,
-# which keeps it out of the name and leaves the page's own name to stand for
-# the tile - the same name that is now printed under it.
+# A mask carries no text with it, so unlike the emoji these replaced there is
+# nothing here for a screen reader to read out in front of the page's name.
 NAV_TILE_CSS = "\n".join(
-    f'#nav label[data-testid="{name}-radio-label"]::before '
-    f'{{ content: "{NAV_ICONS[name]}" / ""; }}'
+    icons.mask_rule(f'#nav label[data-testid="{name}-radio-label"]::before', NAV_ICONS[name])
     for name in PAGES
 )

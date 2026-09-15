@@ -29,6 +29,7 @@ from token_metrics import (
 )
 from trace_export import write_trace_export
 from ui import runtime
+from ui.icons import icon_classes
 from ui.background import ConversationEvents, ConversationJob
 from ui.token_edit import close_token_editor, open_token_editor, save_token_edit
 from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
@@ -314,16 +315,16 @@ def build_app() -> gr.Blocks:
                 with gr.Row():
                     # The pane is narrow, so the buttons give up their usual
                     # minimum width to share one row.
-                    new_button = gr.Button("➕ New", size="sm", min_width=60)
-                    fork_button = gr.Button("🌿 Fork", size="sm", min_width=60)
-                    delete_fork_button = gr.Button("🗑️ Delete", size="sm", min_width=60)
+                    new_button = gr.Button("New", size="sm", min_width=60, elem_classes=icon_classes("plus"))
+                    fork_button = gr.Button("Fork", size="sm", min_width=60, elem_classes=icon_classes("git-branch"))
+                    delete_fork_button = gr.Button("Delete", size="sm", min_width=60, elem_classes=icon_classes("trash"))
                 # Named for what it takes: this empties the conversation on
                 # screen and deletes every other one with it. It stands under
                 # the list of everything it would take rather than under one
                 # conversation's message box, where it read as a control of
                 # that conversation alone. A fourth button would not fit the
                 # row above, so it takes the pane's width on its own line.
-                clear_button = gr.Button("🗑️ Clear all", size="sm")
+                clear_button = gr.Button("Clear all", size="sm", elem_classes=icon_classes("trash"))
                 with gr.Column(
                     visible=False,
                     elem_id="clear-confirm",
@@ -439,30 +440,45 @@ def build_app() -> gr.Blocks:
                                     with gr.Row():
                                         token_edit_save = gr.Button("Save and regenerate", variant="primary")
                                         token_edit_cancel = gr.Button("Cancel")
-                                prompt = gr.Textbox(
-                                    label="Message",
-                                    show_label=False,
-                                    elem_id="message-input",
-                                    **message_box_settings(saved.enter_sends),
-                                )
-                                with gr.Row():
-                                    send_button = gr.Button("Send", variant="primary", min_width=70)
-                                    # Escape presses this; see SHORTCUT_JS,
-                                    # which finds it by this id.
-                                    stop_button = gr.Button(
-                                        "Stop",
-                                        variant="stop",
-                                        visible=False,
-                                        elem_id="stop-button",
+                                # The box and the controls that act on it are
+                                # one bordered composer, the way a message box
+                                # is drawn everywhere else: the stylesheet
+                                # takes the border off the box itself and puts
+                                # it around the pair, so the row below reads as
+                                # part of the box rather than as four loose
+                                # buttons under it.
+                                with gr.Column(elem_id="composer"):
+                                    prompt = gr.Textbox(
+                                        label="Message",
+                                        show_label=False,
+                                        elem_id="message-input",
+                                        **message_box_settings(saved.enter_sends),
                                     )
-                                    # These controls give up their usual minimum
-                                    # width to stay on Send's row. Left to
-                                    # wrap, the last of them takes a line of
-                                    # its own and reads as the widest, most
-                                    # important button under the box.
-                                    retry_button = gr.Button("🔁 Retry", min_width=80)
-                                    next_token_button = gr.Button("Next token", min_width=90)
-                                    undo_button = gr.Button("↩️ Undo last", min_width=90)
+                                    with gr.Row(elem_id="chat-actions"):
+                                        # Send is written first because it is
+                                        # the important one and a keyboard
+                                        # reaches it first; the stylesheet
+                                        # moves it to the end of the row, where
+                                        # the eye leaves the text it just
+                                        # typed.
+                                        send_button = gr.Button("Send", variant="primary", min_width=70)
+                                        # Escape presses this; see SHORTCUT_JS,
+                                        # which finds it by this id.
+                                        stop_button = gr.Button(
+                                            "Stop",
+                                            variant="stop",
+                                            visible=False,
+                                            elem_id="stop-button",
+                                        )
+                                        # The three that rework the last reply
+                                        # stand together at the left as quiet
+                                        # buttons. Each holds its own width
+                                        # rather than taking an equal share of
+                                        # the row, which had them spread across
+                                        # the page as three unrelated labels.
+                                        retry_button = gr.Button("Retry", min_width=80, elem_classes=icon_classes("rotate-ccw"))
+                                        next_token_button = gr.Button("Next token", min_width=90)
+                                        undo_button = gr.Button("Undo last", min_width=90, elem_classes=icon_classes("undo"))
 
                                 generation_status = gr.Markdown("Ready.", elem_id="generation-status")
                                 with gr.Accordion("Conversation tools", open=False, elem_id="conversation-tools"):
@@ -519,7 +535,7 @@ def build_app() -> gr.Blocks:
                                             )
                                             randomize_seed = gr.Checkbox(
                                                 value=saved.randomize_seed,
-                                                label="🎲 New seed each response",
+                                                label="New seed each response",
                                                 info="Turn off to lock the seed and reproduce a response exactly.",
                                             )
                                     with gr.Accordion("Steering vector", open=False):
@@ -546,11 +562,12 @@ def build_app() -> gr.Blocks:
                                             value=EMPTY_STATUS, label="Vector status", interactive=False,
                                         )
                                     with gr.Row():
-                                        save_button = gr.Button("💾 Save conversation")
+                                        save_button = gr.Button("Save conversation", elem_classes=icon_classes("download"))
                                         load_upload = gr.UploadButton(
-                                            "📂 Load conversation",
+                                            "Load conversation",
                                             file_types=[".json"],
                                             type="filepath",
+                                            elem_classes=icon_classes("folder-open"),
                                         )
                                     saved_file = gr.File(
                                         label="Saved conversation",
@@ -659,7 +676,7 @@ def build_app() -> gr.Blocks:
                                         min_width=70,
                                     )
                                     prompts_upload = gr.UploadButton(
-                                        "📂 Load prompts",
+                                        "Load prompts",
                                         # "text" is any text file, which is
                                         # what the parser's fallback reads: a
                                         # prompt set arrives as often in a
@@ -736,7 +753,7 @@ def build_app() -> gr.Blocks:
                         )
                         with gr.Accordion("Branch response", open=False, elem_classes=["inspector-section"]):
                             with gr.Row():
-                                branch_button = gr.Button("🌱 Branch from token", size="sm")
+                                branch_button = gr.Button("Branch from token", size="sm", elem_classes=icon_classes("git-branch"))
                             gr.Markdown(
                                 "For one step, choose an alternative and press **Next token** "
                                 "below the message box. Keep pressing it to extend the reply."
@@ -753,12 +770,14 @@ def build_app() -> gr.Blocks:
                                     min_width=160,
                                 )
                                 branch_text_button = gr.Button(
-                                    "✏️ Branch with text", size="sm", scale=0, min_width=160
+                                    "Branch with text", size="sm", scale=0, min_width=160,
+                                    elem_classes=icon_classes("pencil"),
                                 )
                         with gr.Accordion("Layers and attention", open=False, elem_classes=["inspector-section"]):
                             with gr.Row():
                                 inspect_button = gr.Button(
-                                    "🔬 Inspect layers", size="sm", scale=0, min_width=160
+                                    "Inspect layers", size="sm", scale=0, min_width=160,
+                                    elem_classes=icon_classes("layers"),
                                 )
                                 inspect_status = gr.Markdown(
                                     INSPECT_HINT, elem_classes=["scale-caption"]
@@ -1129,9 +1148,9 @@ def build_app() -> gr.Blocks:
                             "", elem_id="my-model-detail", elem_classes=["model-detail"]
                         )
                         with gr.Row():
-                            redownload_button = gr.Button("⬇️ Redownload", size="sm")
-                            remove_button = gr.Button("🗑️ Remove", size="sm")
-                            refresh_models_button = gr.Button("↻ Refresh", size="sm")
+                            redownload_button = gr.Button("Redownload", size="sm", elem_classes=icon_classes("download"))
+                            remove_button = gr.Button("Remove", size="sm", elem_classes=icon_classes("trash"))
+                            refresh_models_button = gr.Button("Refresh", size="sm", elem_classes=icon_classes("refresh"))
                         with gr.Column(
                             visible=False, elem_classes=["remove-confirm"]
                         ) as remove_confirm:
@@ -1296,7 +1315,8 @@ def build_app() -> gr.Blocks:
                                     elem_classes=["scale-caption"],
                                 )
                                 refresh_hardware_button = gr.Button(
-                                    "↻ Refresh", size="sm", scale=0, min_width=110
+                                    "Refresh", size="sm", scale=0, min_width=110,
+                                    elem_classes=icon_classes("refresh"),
                                 )
 
                         with gr.Column(elem_classes=["settings-card"]):
