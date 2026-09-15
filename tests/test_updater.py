@@ -66,7 +66,9 @@ class ReleaseSelectionTests(unittest.TestCase):
             self.assertEqual(updater.check_for_update("0.2.0").version, "0.3.0")
 
 
-class BundleTests(unittest.TestCase):
+class BundleFixture(unittest.TestCase):
+    """A scratch directory plus a factory for minimal ChatLab.app bundles."""
+
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, True)
@@ -85,6 +87,8 @@ class BundleTests(unittest.TestCase):
             )
         return bundle
 
+
+class BundleTests(BundleFixture):
     RELEASE = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", None, "u")
 
     def test_verify_bundle_accepts_matching_and_rejects_others(self):
@@ -329,6 +333,85 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(seen, [(5, 10), "swap"])
         self.assertEqual((current / "Contents" / "MacOS" / "ChatLab").read_text(), "new")
         self.assertFalse(work.exists())
+
+
+class LaunchServicesTests(BundleFixture):
+    """The updater keeps Launch Services pointed at the bundle that exists."""
+
+    def test_helpers_shell_out_and_survive_a_missing_lsregister(self):
+        with mock.patch.object(updater.subprocess, "run") as run:
+            updater.register_bundle(Path("/Applications/ChatLab.app"))
+            updater.unregister_bundle(Path("/tmp/staged/ChatLab.app"))
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                [updater.LSREGISTER, "-f", "/Applications/ChatLab.app"],
+                [updater.LSREGISTER, "-u", "/tmp/staged/ChatLab.app"],
+            ],
+        )
+        self.assertTrue(all(call.kwargs["check"] is False for call in run.call_args_list))
+
+        for boom in (FileNotFoundError, subprocess.TimeoutExpired("lsregister", 1)):
+            with mock.patch.object(updater.subprocess, "run", side_effect=boom):
+                updater.register_bundle(Path("/Applications/ChatLab.app"))
+
+    def test_install_update_registers_the_installed_bundle_and_drops_the_staging_path(self):
+        current = self.make_bundle("ChatLab.app", "old")
+        release = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", None, "u")
+        work = self.root / "work"
+        staged = self.root / "work" / updater.UNPACK_DIR_NAME / "ChatLab.app"
+
+        with mock.patch.object(updater, "download_asset", side_effect=lambda *a, **k: work / "x.zip"), mock.patch.object(
+            updater, "extract_bundle", side_effect=lambda *a, **k: self.make_bundle("work/unpacked/ChatLab.app", "new")
+        ), mock.patch.object(updater, "_lsregister") as lsregister:
+            updater.install_update(release, current, work_dir=work)
+
+        self.assertEqual(
+            lsregister.call_args_list,
+            [mock.call("-f", str(current)), mock.call("-u", str(staged))],
+        )
+
+    def test_a_failed_install_still_drops_the_staging_path(self):
+        current = self.make_bundle("ChatLab.app", "old")
+        release = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", None, "u")
+        work = self.root / "work"
+        staged = self.root / "work" / updater.UNPACK_DIR_NAME / "ChatLab.app"
+
+        with mock.patch.object(updater, "download_asset", side_effect=lambda *a, **k: work / "x.zip"), mock.patch.object(
+            updater, "extract_bundle", side_effect=lambda *a, **k: self.make_bundle("work/unpacked/ChatLab.app", "new")
+        ), mock.patch.object(updater, "_lsregister") as lsregister:
+            with self.assertRaises(updater.UpdateCancelled):
+                updater.install_update(release, current, work_dir=work, begin_swap=lambda: False)
+
+        self.assertEqual(lsregister.call_args_list, [mock.call("-u", str(staged))])
+
+    def test_nothing_is_retracted_when_the_download_never_unpacked(self):
+        current = self.make_bundle("ChatLab.app", "old")
+        release = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", None, "u")
+
+        with mock.patch.object(
+            updater, "download_asset", side_effect=updater.UpdateError("no network")
+        ), mock.patch.object(updater, "_lsregister") as lsregister:
+            with self.assertRaises(updater.UpdateError):
+                updater.install_update(release, current, work_dir=self.root / "work")
+
+        lsregister.assert_not_called()
+
+    def test_sweeping_an_abandoned_work_dir_retracts_what_it_unpacked(self):
+        current = self.make_bundle("ChatLab.app", "old")
+        dead = self.root / f"{updater.WORK_DIR_PREFIX}a"
+        (dead / updater.UNPACK_DIR_NAME).mkdir(parents=True)
+        staged = dead / updater.UNPACK_DIR_NAME / "ChatLab.app"
+        staged.mkdir()
+        (dead / updater.WORK_DIR_OWNER_FILE).write_text(str(2**22 - 7))
+
+        with mock.patch.object(updater.tempfile, "gettempdir", return_value=str(self.root / "tmp")), mock.patch.object(
+            updater, "_lsregister"
+        ) as lsregister:
+            updater.remove_stale_work_dirs(current)
+
+        lsregister.assert_called_once_with("-u", str(staged))
+        self.assertFalse(dead.exists())
 
 
 if __name__ == "__main__":
