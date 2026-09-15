@@ -3208,6 +3208,20 @@ class PageLayoutTests(unittest.TestCase):
             with self.subTest(handler=getattr(fn.fn, "__name__", fn)):
                 self.assertEqual(fn.show_progress_on, [])
 
+    def test_the_inspector_does_not_blink_while_a_reply_streams(self):
+        # The same fade, from the other direction. Streaming writes the
+        # response metrics on every frame, and the handler that empties the
+        # inspector rides that state, so during a reply it fires several times
+        # a second. It skips its outputs once there is nothing left to clear,
+        # but Gradio marks them pending either way, which puts a spinner and a
+        # queue counter over the panel that is already saying to wait.
+        resets = self.listeners("reset_inspection")
+        self.assertTrue(resets)
+        for fn in resets:
+            with self.subTest(handler=fn):
+                self.assertEqual(fn.show_progress, "hidden")
+                self.assertEqual(fn.show_progress_on, [])
+
     def test_the_badge_buttons_send_the_nav_to_the_models_page(self):
         # One on Images: its badge says a model it can use is missing, and
         # offers the way to load one. The Chat page's badge has the switcher

@@ -2449,5 +2449,13 @@ def build_app() -> gr.Blocks:
         )
         # Every path that redraws the strips writes the metrics state, so this
         # is where a readout of a token that is no longer on screen goes away.
-        metrics_state.change(reset_inspection, insight_state, inspection_outputs)
+        #
+        # Streaming writes that state on every frame, and reset_inspection
+        # skips its outputs once there is nothing left to clear. Gradio marks
+        # them pending regardless, so without QUIET_TICK the inspector blinks
+        # its way through every reply: see the note above for what the two
+        # arguments each take away.
+        metrics_state.change(
+            reset_inspection, insight_state, inspection_outputs, **QUIET_TICK,
+        )
     return demo
