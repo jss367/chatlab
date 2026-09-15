@@ -397,6 +397,27 @@ class LaunchServicesTests(BundleFixture):
 
         lsregister.assert_not_called()
 
+    def test_a_failed_extraction_still_drops_what_it_half_unpacked(self):
+        """ditto can leave an .app behind after a cancel or an error."""
+
+        current = self.make_bundle("ChatLab.app", "old")
+        release = updater.ReleaseInfo("0.3.0", "ChatLab-macos-arm64.zip", "https://x/arm.zip", None, "u")
+        work = self.root / "work"
+        partial = work / updater.UNPACK_DIR_NAME / "ChatLab.app"
+
+        def half_extract(archive, dest, cancelled=None):
+            (dest / "ChatLab.app").mkdir(parents=True)
+            raise updater.UpdateCancelled("Update cancelled during extraction.")
+
+        with mock.patch.object(updater, "download_asset", side_effect=lambda *a, **k: work / "x.zip"), mock.patch.object(
+            updater, "extract_bundle", side_effect=half_extract
+        ), mock.patch.object(updater, "_lsregister") as lsregister:
+            with self.assertRaises(updater.UpdateCancelled):
+                updater.install_update(release, current, work_dir=work)
+
+        self.assertEqual(lsregister.call_args_list, [mock.call("-u", str(partial))])
+        self.assertFalse(work.exists())
+
     def test_sweeping_an_abandoned_work_dir_retracts_what_it_unpacked(self):
         current = self.make_bundle("ChatLab.app", "old")
         dead = self.root / f"{updater.WORK_DIR_PREFIX}a"

@@ -358,6 +358,23 @@ def unregister_bundle(bundle: Path) -> None:
     _lsregister("-u", str(bundle))
 
 
+def unregister_staged_bundles(work_dir: Path, installed_from: Path | None = None) -> None:
+    """Retract from Launch Services every app that staged in ``work_dir``.
+
+    The unpack directory is swept rather than trusting the one path
+    ``extract_bundle`` returned, because a cancelled or failed extraction can
+    leave a partly written ``.app`` that Launch Services has already seen.
+    ``installed_from`` covers the opposite case: a successful swap moved that
+    bundle out of the directory, so the sweep no longer finds it.
+    """
+
+    staged = set((work_dir / UNPACK_DIR_NAME).glob("*.app"))
+    if installed_from is not None:
+        staged.add(installed_from)
+    for bundle in sorted(staged):
+        unregister_bundle(bundle)
+
+
 def is_parked_bundle(path: Path, bundle: Path) -> bool:
     """Whether ``path`` has the exact ``<bundle>.previous-<unix timestamp>`` shape."""
 
@@ -411,8 +428,7 @@ def remove_stale_work_dirs(bundle: Path) -> None:
     for parent in {bundle.parent, Path(tempfile.gettempdir())}:
         for candidate in parent.glob(f"{WORK_DIR_PREFIX}*"):
             if is_abandoned_work_dir(candidate):
-                for staged in (candidate / UNPACK_DIR_NAME).glob("*.app"):
-                    unregister_bundle(staged)
+                unregister_staged_bundles(candidate)
                 shutil.rmtree(candidate, ignore_errors=True)
 
 
@@ -469,9 +485,10 @@ def install_update(
     holding off shutdown for the few seconds the swap takes) or report that
     the update was cancelled (returning False). Nothing is checked after it.
 
-    Launch Services is pointed at the installed bundle afterwards and the
-    staging path is retracted from it either way, so launchers show the new
-    version rather than the replaced one or a deleted staging copy.
+    Launch Services is pointed at the installed bundle afterwards, and
+    anything that staged under ``work_dir`` is retracted from it however this
+    ends, so launchers show the new version rather than the replaced one or a
+    deleted staging copy.
     """
 
     if work_dir is None:
@@ -494,6 +511,5 @@ def install_update(
         register_bundle(bundle)
         logger.info("Installed ChatLab %s over %s (previous bundle at %s)", release.version, bundle, parked)
     finally:
-        if replacement is not None:
-            unregister_bundle(replacement)
+        unregister_staged_bundles(work_dir, replacement)
         shutil.rmtree(work_dir, ignore_errors=True)
