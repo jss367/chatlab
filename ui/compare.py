@@ -372,12 +372,17 @@ def _tokenizer_identity() -> str:
     nothing the sample happens to cover and may not move ``vocab_size``
     either, since that can go on reporting the base vocabulary alone.
 
-    The model ID goes into the hash rather than standing as a fallback around
-    it, so two repositories can never fingerprint alike however little can be
-    read from their tokenizers. Where the mapping cannot be read at all, one
-    probe encoding and whatever size is available stand in for it; where even
-    that fails, the ID and the tokenizer's class are the whole fingerprint,
-    which is no worse than the comparison by model ID it replaces.
+    Where the mapping can be read it is the whole fingerprint, and the
+    repository ID is deliberately left out of it: two repositories that ship
+    the same tokenizer - a fine-tune and the model it was tuned from, which
+    is most of them - do share a vocabulary, and a fingerprint that separated
+    them would throw away the token-ID comparison that sharing earns.
+
+    The ID belongs to the other path. Where the mapping cannot be read, one
+    probe encoding and whatever size is available stand in for it, and the ID
+    goes in beside them so that two repositories cannot fingerprint alike on
+    the strength of a guess. The two paths are tagged apart so a fallback
+    reading can never collide with a real one.
     """
 
     import hashlib
@@ -385,20 +390,20 @@ def _tokenizer_identity() -> str:
     tokenizer = runtime.MANAGER.tokenizer
     if tokenizer is None:
         return ""
-    digest = hashlib.sha256()
-    for part in (runtime.MANAGER.model_id or "", type(tokenizer).__name__):
-        digest.update(f"{part}\x1e".encode())
-
     mapping = None
     try:
         mapping = tokenizer.get_vocab()
     except Exception:
         mapping = None
     if isinstance(mapping, dict) and mapping:
+        digest = hashlib.sha256(b"vocabulary\x1e")
         for piece, token_id in sorted(mapping.items(), key=lambda item: (item[1], item[0])):
             digest.update(f"{token_id}\x1f{piece}\x1e".encode("utf-8", "replace"))
         return digest.hexdigest()[:16]
 
+    digest = hashlib.sha256(b"unread\x1e")
+    for part in (runtime.MANAGER.model_id or "", type(tokenizer).__name__):
+        digest.update(f"{part}\x1e".encode())
     try:
         encoded = runtime.MANAGER._encode_plain(TOKENIZER_PROBE)
         digest.update(",".join(str(value) for value in encoded).encode())

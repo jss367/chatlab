@@ -763,6 +763,15 @@ class HandlerTests(unittest.TestCase):
         # The same tokenizer fingerprints the same way, whatever else moved.
         self.assertEqual(held["tokenizer"], other["tokenizer"])
 
+    def test_two_repositories_sharing_a_vocabulary_fingerprint_alike(self):
+        # A fine-tune and the model it was tuned from ship one tokenizer, and
+        # separating them would throw away the token-ID comparison that
+        # sharing a vocabulary earns.
+        runtime.MANAGER.tokenizer.get_vocab = lambda: {"a": 0, "b": 1}
+        base = controls._tokenizer_identity()
+        runtime.MANAGER.model_id = "someone/fine-tune"
+        self.assertEqual(controls._tokenizer_identity(), base)
+
     def test_a_token_added_to_the_vocabulary_changes_the_fingerprint(self):
         # The likeliest way a refreshed repository differs is a token added
         # at the end, which shifts nothing a sampled encoding would cover.
@@ -773,9 +782,10 @@ class HandlerTests(unittest.TestCase):
         after = controls._tokenizer_identity()
         self.assertTrue(before and after)
         self.assertNotEqual(before, after)
-        # And one repository is never mistaken for another.
+        # The mapping is the whole reading, so the repository name is not in
+        # it: what separates two runs is what their vocabularies say.
         runtime.MANAGER.model_id = "other/model"
-        self.assertNotEqual(controls._tokenizer_identity(), after)
+        self.assertEqual(controls._tokenizer_identity(), after)
 
     def test_an_unreadable_vocabulary_still_separates_two_repositories(self):
         def refuse():
@@ -785,6 +795,11 @@ class HandlerTests(unittest.TestCase):
         first = controls._tokenizer_identity()
         runtime.MANAGER.model_id = "other/model"
         self.assertTrue(first)
+        # Nothing was established, so the ID goes in rather than a guess
+        # being allowed to pass two repositories off as one.
+        self.assertNotEqual(controls._tokenizer_identity(), first)
+        # And a guess never collides with a reading of the real mapping.
+        runtime.MANAGER.tokenizer.get_vocab = lambda: {"a": 0}
         self.assertNotEqual(controls._tokenizer_identity(), first)
 
     def test_a_busy_model_refuses_without_touching_the_slot_or_the_buttons(self):
