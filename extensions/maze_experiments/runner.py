@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 import threading
 import tempfile
@@ -13,6 +14,12 @@ from uuid import uuid4
 
 from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call
 from extension_api import write_private_text
+
+# One line for each response and each episode outcome, so a run read in
+# ChatLab.log afterwards says what it did rather than only that a model was
+# asked for tokens. The token counts are here because the memory report beside
+# them is read against them.
+logger = logging.getLogger(__name__)
 
 FORMAT = "chatlab-maze-run-1"
 TERMINAL = {"arrived", "abandoned", "budget", "stopped", "error"}
@@ -147,6 +154,7 @@ class Episode:
                     self.warn_autosave(str(exc))
 
     def warn_autosave(self, error):
+        logger.warning("Autosave of run %s failed: %s", self.run_id, error)
         self.detail += (f" Autosave failed: {error}. Latest changes remain in memory. "
                         "Use Export run JSON to download them, and check the run directory or free disk space.")
 
@@ -518,8 +526,30 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
         episode.phase = "running"
         episode.model_id = episode.model_id or manager.model_id
         episode.load_id = episode.load_id or manager.load_id
+    logger.info("Run %s generating with %s: %s responses so far, %s sampled tokens, %s moves, %s",
+                episode.run_id, episode.model_id, len(episode.turns), episode.sampled_tokens,
+                episode.moves, "one response" if single_step else "until it ends")
     turn = None
     autosave_error = None
+
+    def record(turn):
+        """One line for a response, wherever that response was finalized.
+
+        A turn is completed on three paths: the ordinary one, a stop caught
+        between its opening frame and generation, and the cleanup that closes
+        an unfinished turn after a failure or a viewer hanging up. The outcome
+        line below counts all three as responses, so recording only the first
+        left a reader the two cases this file is opened for - a stop and a
+        crash - with nothing between the run starting and its summary.
+
+        The duration is set here rather than read, because the two abnormal
+        paths never had one, and a turn saved without it reads as a response
+        that took no time rather than one nobody timed.
+        """
+        turn.setdefault("seconds", time.time() - turn["started_at"])
+        logger.info("Run %s response %s: %s after %s sampled tokens in %.1fs. %s",
+                    episode.run_id, len(episode.turns), turn["finish_reason"],
+                    turn.get("sampled_tokens", 0), turn["seconds"], episode.detail)
 
     def autosave():
         nonlocal autosave_error
@@ -568,6 +598,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             yield episode
             if episode.stop_requested:
                 finish_turn(episode, turn, set(), limit)
+                record(turn)
                 break
             stop_ids = manager.stop_token_ids
             generator = manager.generate(
@@ -598,6 +629,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
                 generator.close()
             turn["seconds"] = time.time() - turn["started_at"]
             finish_turn(episode, turn, stop_ids, limit)
+            record(turn)
             if episode.phase in TERMINAL and episode.interrupted and episode.resumed is None:
                 episode.resumed = False if episode.phase not in ("stopped", "error") else None
                 episode.first_move_progress = False if episode.resumed is False else None
@@ -617,18 +649,28 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             episode.phase, episode.detail = "stopped", "Viewer stopped streaming. The partial response was retained."
         raise
     except Exception as exc:
+        # The panel says this too, but the panel is gone by the time anyone
+        # asks, and a failure inside generation is what a log read after a
+        # memory kill is looking for.
+        logger.exception("Run %s failed while generating", episode.run_id)
         episode.phase, episode.detail = "error", f"{type(exc).__name__}: {exc}"
     finally:
         if turn is not None and turn.get("finish_reason") is None:
             count = max(0, len(turn["metrics"]) - turn["forced_prefix_tokens"])
             episode.sampled_tokens += count
             turn.update(sampled_tokens=count, tokens_cumulative=episode.sampled_tokens, finish_reason=episode.phase)
+            # Only a turn no other path finalized reaches here, so this cannot
+            # write a second line for a response already recorded.
+            record(turn)
         with episode.lock:
             episode.busy = False
             manager.close()
             autosave()
             if autosave_error is not None:
                 episode.warn_autosave(autosave_error)
+        logger.info("Run %s %s after %s responses and %s sampled tokens, %s moves: %s",
+                    episode.run_id, episode.phase, len(episode.turns), episode.sampled_tokens,
+                    episode.moves, episode.detail)
     yield episode
 
 

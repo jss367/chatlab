@@ -183,7 +183,13 @@ class RoundTripTests(unittest.TestCase):
 class SamplingFileTests(unittest.TestCase):
     """A conversation's own sampling, through the file and through a merge."""
 
-    SAMPLING = {"temperature": 0.0, "top_p": 1.0, "top_k": 0, "max_new_tokens": 256}
+    SAMPLING = {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "top_k": 0,
+        "skip_top_below": 0.0,
+        "max_new_tokens": 256,
+    }
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

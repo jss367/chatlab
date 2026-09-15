@@ -391,7 +391,13 @@ class ForkTests(unittest.TestCase):
 class BranchSamplingTests(unittest.TestCase):
     """The sampling a conversation carries of its own."""
 
-    SAMPLING = {"temperature": 0.0, "top_p": 1.0, "top_k": 0, "max_new_tokens": 256}
+    SAMPLING = {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "top_k": 0,
+        "skip_top_below": 0.0,
+        "max_new_tokens": 256,
+    }
 
     def test_a_branch_carries_none_until_it_is_given_some(self):
         forks = new_forks()

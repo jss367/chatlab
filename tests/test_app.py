@@ -793,6 +793,26 @@ class DownloadCardTests(unittest.TestCase):
         self.assertIn(models_page.LOAD_WHILE_GENERATING, frames[-1])
         self.assertIn("Load cached", frames[-1])
 
+    def test_a_load_turned_back_after_its_download_says_so_in_the_log(self):
+        # The claim is only taken once the bytes are in, so this is where a
+        # reply started meanwhile stops the job. Without the line the trail
+        # holds the request and a finished download and nothing about the
+        # load that never ran.
+        class Manager(FakeDownloads):
+            def fetch(self, model_id, token, progress):
+                self.reserve_generation()
+                return Path("/cache/snap")
+
+        runtime.MANAGER = Manager()
+        self.addCleanup(runtime.MANAGER.release_generation)
+
+        with self.assertLogs("ui.models_page", level="INFO") as logged:
+            list(app.download_and_load_model("org/model", ""))
+
+        refusal = [line for line in logged.output if "refused" in line]
+        self.assertEqual(len(refusal), 1, logged.output)
+        self.assertIn("Load of org/model after its download refused", refusal[0])
+
 
 class DownloadManager(FakeDownloads):
     """Stands in for the real manager: downloads succeed without a network."""
@@ -960,6 +980,38 @@ class LoadCardTests(unittest.TestCase):
 
         self.assertIn("Could not load cached model", frames[-1])
         self.assertIn("Metal ran out of memory", frames[-1])
+
+    def test_a_failed_load_leaves_its_traceback_in_the_log(self):
+        # The card reaches a reader as one escaped sentence in a screenshot.
+        # Whoever is asked to explain the failure afterwards has the log and
+        # nothing else, so the model, the precision and the stack go in it.
+        def work(progress):
+            raise RuntimeError("Metal ran out of memory")
+
+        runtime.MANAGER = self.Manager(work)
+
+        with self.assertLogs("ui.models_page", level="INFO") as logged:
+            list(app.load_cached_model(self.MODEL, precision="4-bit"))
+
+        failure = [line for line in logged.output if "ERROR" in line]
+        self.assertEqual(len(failure), 1, logged.output)
+        self.assertIn(self.MODEL, failure[0])
+        self.assertIn("4-bit", failure[0])
+        self.assertIn("Traceback", failure[0])
+        self.assertIn("Metal ran out of memory", failure[0])
+
+    def test_a_load_records_what_was_asked_for_before_it_runs(self):
+        # A log that starts at the failure cannot say which model and which
+        # precision the reader chose to get there.
+        runtime.MANAGER = self.Manager(lambda progress: "Apple Metal (MPS)")
+
+        with self.assertLogs("ui.models_page", level="INFO") as logged:
+            list(app.load_cached_model(self.MODEL, precision="8-bit"))
+
+        self.assertIn(
+            f"Cached load requested for {self.MODEL} at 8-bit weights",
+            logged.output[0],
+        )
 
     def test_the_load_is_claimed_before_its_worker_starts(self):
         # Between the click and the worker's first instruction the manager
@@ -1300,25 +1352,35 @@ class SamplingSummaryTests(unittest.TestCase):
     """The sampling accordion wears its own values, so it reads without opening."""
 
     def test_the_summary_names_every_knob_behind_it(self):
-        summary = app.sampling_label(0.8, 0.95, 50, 1024)
+        summary = app.sampling_label(0.8, 0.95, 50, 0.6, 1024)
 
         self.assertIn("temperature 0.8", summary)
         self.assertIn("top-p 0.95", summary)
         self.assertIn("top-k 50", summary)
+        self.assertIn("skip top below 0.6", summary)
         self.assertIn("1,024 new tokens", summary)
 
     def test_a_disabled_top_k_is_left_out_rather_than_shown_as_zero(self):
         # "top-k 0" reads as a setting of zero, which is the opposite of what
         # it means: zero is the control switched off.
-        summary = app.sampling_label(1.0, 1.0, 0, 256)
+        summary = app.sampling_label(1.0, 1.0, 0, 0.0, 256)
 
         self.assertNotIn("top-k", summary)
         self.assertIn("temperature 1", summary)
 
+    def test_a_disabled_skip_is_left_out_of_the_summary_too(self):
+        # Same reasoning as top-k: "skip top below 0" would read as a
+        # threshold rather than as the control switched off, and the skip is
+        # off for every reader who has not gone looking for it.
+        self.assertNotIn("skip top", app.sampling_label(1.0, 1.0, 0, 0.0, 256))
+
     def test_the_summary_is_an_accordion_label_update(self):
         self.assertEqual(
-            app.update_sampling_label(0.8, 0.95, 50, 1024),
-            {"label": app.sampling_label(0.8, 0.95, 50, 1024), "__type__": "update"},
+            app.update_sampling_label(0.8, 0.95, 50, 0.0, 1024),
+            {
+                "label": app.sampling_label(0.8, 0.95, 50, 0.0, 1024),
+                "__type__": "update",
+            },
         )
 
 

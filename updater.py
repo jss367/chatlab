@@ -36,6 +36,12 @@ USER_AGENT = f"ChatLab/{__version__} (+{RELEASES_PAGE_URL})"
 PREVIOUS_BUNDLE_MARKER = ".previous-"
 WORK_DIR_PREFIX = "chatlab-update-"
 WORK_DIR_OWNER_FILE = "owner.pid"
+UNPACK_DIR_NAME = "unpacked"
+LSREGISTER = (
+    "/System/Library/Frameworks/CoreServices.framework/Frameworks"
+    "/LaunchServices.framework/Support/lsregister"
+)
+LSREGISTER_TIMEOUT_SECONDS = 10
 REQUEST_TIMEOUT_SECONDS = 15
 DOWNLOAD_CHUNK_BYTES = 1 << 20
 
@@ -310,6 +316,65 @@ def swap_bundle(current: Path, replacement: Path) -> Path:
     return parked
 
 
+def _lsregister(*arguments: str) -> None:
+    """Run ``lsregister`` and ignore whatever it says.
+
+    Launch Services is what Spotlight, the Dock and launchers read an app's
+    name, version and icon from. Keeping it current is a courtesy, so a
+    missing or unhappy ``lsregister`` must never fail an update.
+    """
+
+    try:
+        subprocess.run(
+            [LSREGISTER, *arguments],
+            capture_output=True,
+            check=False,
+            timeout=LSREGISTER_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.debug("lsregister %s failed: %s", " ".join(arguments), error)
+
+
+def register_bundle(bundle: Path) -> None:
+    """Tell Launch Services to re-read ``bundle``.
+
+    ``swap_bundle`` renames a new app into the old one's path, which Launch
+    Services does not notice on its own; without this it keeps serving the
+    replaced version's icon and version string.
+    """
+
+    _lsregister("-f", str(bundle))
+
+
+def unregister_bundle(bundle: Path) -> None:
+    """Drop ``bundle`` from Launch Services.
+
+    Staging happens beside the app, which on an installed copy is a directory
+    Launch Services scans, so an update briefly publishes a second ChatLab.
+    Deleting the staging directory does not retract that: the entry lingers as
+    a dead path that launchers can still offer.
+    """
+
+    _lsregister("-u", str(bundle))
+
+
+def unregister_staged_bundles(work_dir: Path, installed_from: Path | None = None) -> None:
+    """Retract from Launch Services every app that staged in ``work_dir``.
+
+    The unpack directory is swept rather than trusting the one path
+    ``extract_bundle`` returned, because a cancelled or failed extraction can
+    leave a partly written ``.app`` that Launch Services has already seen.
+    ``installed_from`` covers the opposite case: a successful swap moved that
+    bundle out of the directory, so the sweep no longer finds it.
+    """
+
+    staged = set((work_dir / UNPACK_DIR_NAME).glob("*.app"))
+    if installed_from is not None:
+        staged.add(installed_from)
+    for bundle in sorted(staged):
+        unregister_bundle(bundle)
+
+
 def is_parked_bundle(path: Path, bundle: Path) -> bool:
     """Whether ``path`` has the exact ``<bundle>.previous-<unix timestamp>`` shape."""
 
@@ -356,12 +421,14 @@ def remove_stale_work_dirs(bundle: Path) -> None:
     ``install_update`` stages beside the app when it can and in the system
     temporary directory otherwise, so both are swept. Only directories whose
     recorded owner process is no longer running are removed, so a second
-    ChatLab instance mid-update keeps its files.
+    ChatLab instance mid-update keeps its files. Any app the interrupted run
+    had already unpacked is retracted from Launch Services on the way out.
     """
 
     for parent in {bundle.parent, Path(tempfile.gettempdir())}:
         for candidate in parent.glob(f"{WORK_DIR_PREFIX}*"):
             if is_abandoned_work_dir(candidate):
+                unregister_staged_bundles(candidate)
                 shutil.rmtree(candidate, ignore_errors=True)
 
 
@@ -417,6 +484,11 @@ def install_update(
     unpacked and verified; it must atomically decide whether to proceed (returning True and
     holding off shutdown for the few seconds the swap takes) or report that
     the update was cancelled (returning False). Nothing is checked after it.
+
+    Launch Services is pointed at the installed bundle afterwards, and
+    anything that staged under ``work_dir`` is retracted from it however this
+    ends, so launchers show the new version rather than the replaced one or a
+    deleted staging copy.
     """
 
     if work_dir is None:
@@ -424,10 +496,11 @@ def install_update(
             work_dir = Path(tempfile.mkdtemp(prefix=WORK_DIR_PREFIX, dir=bundle.parent))
         except OSError:
             work_dir = Path(tempfile.mkdtemp(prefix=WORK_DIR_PREFIX))
+    replacement: Path | None = None
     try:
         claim_work_dir(work_dir)
         archive = download_asset(release, work_dir, progress, cancelled)
-        replacement = extract_bundle(archive, work_dir / "unpacked", cancelled)
+        replacement = extract_bundle(archive, work_dir / UNPACK_DIR_NAME, cancelled)
         verify_bundle(replacement, release)
         if begin_swap is not None:
             if not begin_swap():
@@ -435,6 +508,8 @@ def install_update(
         elif cancelled is not None and cancelled():
             raise UpdateCancelled("Update cancelled before installation.")
         parked = swap_bundle(bundle, replacement)
+        register_bundle(bundle)
         logger.info("Installed ChatLab %s over %s (previous bundle at %s)", release.version, bundle, parked)
     finally:
+        unregister_staged_bundles(work_dir, replacement)
         shutil.rmtree(work_dir, ignore_errors=True)

@@ -223,17 +223,45 @@ def normalize_log_probabilities(values: np.ndarray) -> np.ndarray:
     return shifted - math.log(float(np.exp(shifted).sum()))
 
 
+def _skipped_first_choice(raw: np.ndarray, threshold: float) -> int | None:
+    """The model's first choice, where the reader has asked to skip it.
+
+    The test is against the probability the model itself gave that token,
+    read before temperature reshapes anything, so one threshold means the
+    same thing at every temperature setting. A distribution with nothing
+    else to offer keeps its first choice: skipping it would leave nothing
+    to sample.
+    """
+
+    if threshold <= 0:
+        return None
+    if int(np.isfinite(raw).sum()) < 2:
+        return None
+    first = int(np.argmax(raw))
+    probability = 1.0 / float(np.exp(raw - raw[first]).sum())
+    return first if probability < threshold else None
+
+
 def sampling_probabilities(
     raw_log_probabilities: np.ndarray,
     *,
     temperature: float,
     top_p: float,
     top_k: int,
+    skip_top_below: float = 0.0,
 ) -> np.ndarray:
     """Build the distribution actually used to select the next token.
 
-    Processing order is temperature, top-k, then top-p. A zero temperature
-    produces a one-hot greedy distribution.
+    Processing order is the first-choice skip, temperature, top-k, then
+    top-p. A zero temperature produces a one-hot greedy distribution.
+
+    ``skip_top_below`` refuses the model's first choice at the positions
+    where it holds less than that probability, leaving the second choice to
+    be taken instead. Where the model is sure - the rest of a word it has
+    started, a closing bracket, the space after a comma - its choice stands
+    and the text still holds together; only the genuinely undecided
+    positions divert. Zero disables the skip; one refuses the first choice
+    wherever the model left any doubt about it.
     """
 
     raw = np.asarray(raw_log_probabilities, dtype=np.float64).reshape(-1)
@@ -242,12 +270,24 @@ def sampling_probabilities(
             "Log probabilities must contain at least one finite value and no NaNs or positive infinity."
         )
 
+    skipped = _skipped_first_choice(raw, float(skip_top_below))
+
     if temperature <= 0:
         result = np.zeros_like(raw)
-        result[int(np.argmax(raw))] = 1.0
+        greedy = raw
+        if skipped is not None:
+            greedy = raw.copy()
+            greedy[skipped] = -np.inf
+        result[int(np.argmax(greedy))] = 1.0
         return result
 
     scores = raw / temperature
+
+    # Before the two filters rather than after, so a reader who asked for six
+    # candidates gets six of them: top-k picks its k from what is left, which
+    # is the model's second choice onwards.
+    if skipped is not None:
+        scores[skipped] = -np.inf
 
     if 0 < top_k < scores.size:
         kept = np.argpartition(scores, -top_k)[-top_k:]

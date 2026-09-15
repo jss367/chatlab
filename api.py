@@ -327,6 +327,7 @@ SAMPLING_FIELDS = {
     "temperature": "temperature",
     "top_p": "top_p",
     "top_k": "top_k",
+    "skip_top_below": "skip_top_below",
     "max_tokens": "max_new_tokens",
     "max_completion_tokens": "max_new_tokens",
 }
@@ -374,6 +375,7 @@ def sampling_from(body: dict) -> dict:
         "temperature": checked.temperature,
         "top_p": checked.top_p,
         "top_k": checked.top_k,
+        "skip_top_below": checked.skip_top_below,
         "max_new_tokens": checked.max_new_tokens,
         "seed": int(seed)
         if seed is not None
@@ -665,6 +667,7 @@ def build_router() -> APIRouter:
                 temperature=sampling["temperature"],
                 top_p=sampling["top_p"],
                 top_k=sampling["top_k"],
+                skip_top_below=sampling["skip_top_below"],
                 max_new_tokens=sampling["max_new_tokens"],
                 seed=sampling["seed"],
                 analyze_prompt=prompt_logprobs,

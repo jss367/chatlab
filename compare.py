@@ -483,6 +483,7 @@ def configuration(run: dict | None) -> dict:
             "Temperature": f"{float(settings.get('temperature', 0)):g}",
             "Top-p": f"{float(settings.get('top_p', 1)):g}",
             "Top-k": f"{int(settings.get('top_k', 0))}",
+            "Skip top choice below": f"{float(settings.get('skip_top_below', 0)):g}",
             "Maximum new tokens": f"{int(settings.get('max_new_tokens', 0))}",
             "Seed": f"{int(settings.get('seed', 0))}",
             "Assistant prefill": settings.get("assistant_prefill") or "—",

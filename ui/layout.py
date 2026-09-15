@@ -544,6 +544,7 @@ def build_app() -> gr.Blocks:
                                             saved.temperature,
                                             saved.top_p,
                                             saved.top_k,
+                                            saved.skip_top_below,
                                             saved.max_new_tokens,
                                         ),
                                         open=False,
@@ -580,6 +581,24 @@ def build_app() -> gr.Blocks:
                                                 value=saved.max_new_tokens,
                                                 step=1,
                                                 label="Maximum new tokens",
+                                            )
+                                        with gr.Row():
+                                            # Alone on its row because it is
+                                            # the one control here that needs
+                                            # a sentence saying what it is
+                                            # for, and that sentence needs
+                                            # the width.
+                                            skip_top_below = gr.Slider(
+                                                0,
+                                                1,
+                                                value=saved.skip_top_below,
+                                                step=0.05,
+                                                label="Skip top choice below (0 disables)",
+                                                info=(
+                                                    "Take the model's second choice wherever its "
+                                                    "first holds less than this probability. Where "
+                                                    "it is more certain than this, its choice stands."
+                                                ),
                                             )
                                         with gr.Row():
                                             seed = gr.Number(
@@ -2077,7 +2096,7 @@ def build_app() -> gr.Blocks:
         # settings as they were. always_last is what makes change affordable
         # instead: a drag's worth of them collapses to the one that matters,
         # and the label only has to be right once the slider stops.
-        sampling_controls = [temperature, top_p, top_k, max_new_tokens]
+        sampling_controls = [temperature, top_p, top_k, skip_top_below, max_new_tokens]
         for control in sampling_controls:
             control.change(
                 update_sampling_label,
@@ -2179,6 +2198,7 @@ def build_app() -> gr.Blocks:
             temperature,
             top_p,
             top_k,
+            skip_top_below,
             max_new_tokens,
             seed,
             randomize_seed,
@@ -2647,6 +2667,7 @@ def build_app() -> gr.Blocks:
                 temperature,
                 top_p,
                 top_k,
+                skip_top_below,
                 max_new_tokens,
                 seed,
                 randomize_seed,
@@ -2690,6 +2711,7 @@ def build_app() -> gr.Blocks:
             temperature,
             top_p,
             top_k,
+            skip_top_below,
             max_new_tokens,
             seed,
             randomize_seed,

@@ -72,12 +72,21 @@ class ReadTests(unittest.TestCase):
             self.assertEqual(settings.read(self.path), (settings.DEFAULTS, {}))
 
     def test_a_value_out_of_range_is_pulled_into_it(self):
-        self.write_file({"temperature": 40, "top_k": -5, "seed": -1})
+        self.write_file(
+            {"temperature": 40, "top_k": -5, "seed": -1, "skip_top_below": 3}
+        )
         saved, _unknown = settings.read(self.path)
 
         self.assertEqual(saved.temperature, 2.0)
         self.assertEqual(saved.top_k, 0)
         self.assertEqual(saved.seed, 0)
+        self.assertEqual(saved.skip_top_below, 1.0)
+
+    def test_the_skip_starts_switched_off(self):
+        # It changes what the model is allowed to say, so it is something a
+        # reader turns on rather than something they inherit.
+        self.assertEqual(settings.DEFAULTS.skip_top_below, 0.0)
+        self.assertIn("skip_top_below", settings.CONVERSATION_SAMPLING)
 
     def test_a_value_of_the_wrong_shape_falls_back_to_its_default(self):
         self.write_file(
@@ -492,6 +501,73 @@ class SeedFloorTests(unittest.TestCase):
                 self.assertEqual(
                     settings.sanitize({"seed": value}).seed, settings.DEFAULTS.seed
                 )
+
+
+class SettingsLogTests(unittest.TestCase):
+    """What a settings change leaves in the log, which is read after a crash."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / "settings.json"
+        self.addCleanup(settings.load)
+        patch = mock.patch.dict(
+            os.environ, {settings.SETTINGS_PATH_ENV: str(self.path)}
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        settings.load()
+
+    def test_a_change_names_the_setting_and_both_values(self):
+        # Startup records the whole set once. Without this line, a load that
+        # ran at 4 bits reads in the log as the precision the app opened with.
+        with self.assertLogs(settings.logger, level="INFO") as logged:
+            settings.update(weight_precision="4-bit")
+
+        self.assertIn("weight_precision 'full' to '4-bit'", logged.output[0])
+
+    def test_only_the_settings_that_moved_are_named(self):
+        settings.update(weight_precision="4-bit")
+        with self.assertLogs(settings.logger, level="INFO") as logged:
+            settings.update(weight_precision="4-bit", temperature=0.2)
+
+        self.assertIn("temperature", logged.output[0])
+        self.assertNotIn("weight_precision", logged.output[0])
+
+    def test_a_change_that_changes_nothing_writes_no_line(self):
+        # Controls report their value on every frame, so a slider drag would
+        # otherwise cost a line per pixel.
+        settings.update(temperature=0.2)
+        with self.assertNoLogs(settings.logger, level="INFO"):
+            settings.update(temperature=0.2)
+
+    def test_a_change_that_could_not_be_saved_is_not_claimed(self):
+        # A required save that cannot write raises and publishes nothing, so
+        # a line saying the setting moved would leave the one record of the
+        # session disagreeing with the session.
+        settings.update(temperature=0.2)
+        with mock.patch("settings.write", return_value=None):
+            with self.assertNoLogs(settings.logger, level="INFO"):
+                with self.assertRaises(OSError):
+                    settings.update(require_saved=True, temperature=0.4)
+
+    def test_a_change_the_file_refused_is_still_a_change_to_the_session(self):
+        # The ordinary path publishes whether or not the file takes it, and
+        # write() logs its own failure beside this line.
+        with mock.patch("settings.write", return_value=None):
+            with self.assertLogs(settings.logger, level="INFO") as logged:
+                settings.update(temperature=0.4)
+
+        self.assertIn("temperature", logged.output[0])
+        self.assertEqual(settings.current().temperature, 0.4)
+
+    def test_what_the_reader_typed_is_counted_rather_than_quoted(self):
+        # The log is a file someone is asked to send to a stranger.
+        with self.assertLogs(settings.logger, level="INFO") as logged:
+            settings.update(system_prompt="Never mention the acquisition.")
+
+        self.assertNotIn("acquisition", logged.output[0])
+        self.assertIn("system_prompt empty to 30 characters", logged.output[0])
 
 
 if __name__ == "__main__":

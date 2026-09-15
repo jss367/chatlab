@@ -170,7 +170,8 @@ class GenerationSession:
         return set(self._manager.hidden_token_ids())
 
     def generate(self, messages, *, temperature, top_p, top_k, max_new_tokens, seed,
-                 tools=None, forced_ids=(), literal_prefill_tokens=0, analyze_prompt=False):
+                 skip_top_below=0.0, tools=None, forced_ids=(),
+                 literal_prefill_tokens=0, analyze_prompt=False):
         self._check()
         if self._generating:
             raise ValueError("This model session is already streaming.")
@@ -181,7 +182,8 @@ class GenerationSession:
         try:
             generator = self._manager.generate(
                 messages, temperature=temperature, top_p=top_p, top_k=top_k,
-                max_new_tokens=max_new_tokens, seed=seed, tools=tools,
+                skip_top_below=skip_top_below, max_new_tokens=max_new_tokens,
+                seed=seed, tools=tools,
                 forced_ids=forced_ids, literal_prefill_tokens=literal_prefill_tokens,
                 analyze_prompt=analyze_prompt, load_id=self.load_id,
             )
