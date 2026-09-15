@@ -1928,6 +1928,74 @@ class LoadingReportTests(unittest.TestCase):
         self.assertIs(caught.exception, original)
 
 
+class TokenizerSupportTests(unittest.TestCase):
+    """What a repository whose tokenizer cannot be built is told."""
+
+    # Transformers' own words, which name every way a tokenizer could have
+    # been built and no package that would have built one.
+    FAILURE = ValueError(
+        "Couldn't instantiate the backend tokenizer from one of: \n"
+        "(1) a `tokenizers` library serialization file, \n"
+        "(2) a slow tokenizer instance to convert or \n"
+        "(3) an equivalent slow tokenizer class to instantiate and convert. \n"
+        "You need to have sentencepiece or tiktoken installed to convert a "
+        "slow tokenizer to a fast one."
+    )
+
+    def test_an_absent_converter_is_named_with_the_command_that_installs_it(self):
+        real = model_runtime.importlib.util.find_spec
+
+        def absent(name, *args, **kwargs):
+            return None if name == "tiktoken" else real(name, *args, **kwargs)
+
+        with mock.patch("model_runtime.importlib.util.find_spec", side_effect=absent):
+            self.assertEqual(model_runtime.missing_tokenizer_packages(), ("tiktoken",))
+            message = model_runtime.tokenizer_support_message(self.FAILURE)
+        self.assertIn("pip install tiktoken", message)
+        self.assertNotIn("sentencepiece", message)
+
+    def test_a_repository_with_no_tokenizer_is_not_told_to_install_anything(self):
+        with mock.patch("model_runtime.missing_tokenizer_packages", return_value=()):
+            message = model_runtime.tokenizer_support_message(self.FAILURE)
+        self.assertIn("no tokenizer.json", message)
+        self.assertNotIn("pip install", message)
+
+    def test_another_value_error_is_not_answered(self):
+        self.assertIsNone(model_runtime.tokenizer_support_message(ValueError("nope")))
+        original = ValueError("nope")
+        with self.assertRaises(ValueError) as caught:
+            with model_runtime._explaining_tokenizer_failure():
+                raise original
+        self.assertIs(caught.exception, original)
+
+    def test_the_load_logs_the_failure_and_hands_the_advice_to_the_caller(self):
+        manager = model_runtime.ModelManager()
+
+        def fail(*args, **kwargs):
+            raise self.FAILURE
+
+        import torch
+
+        with (
+            mock.patch("model_runtime.detect_backend", return_value="mps"),
+            mock.patch("model_runtime.missing_tokenizer_packages", return_value=("tiktoken",)),
+            mock.patch.object(manager, "_unload_locked"),
+            mock.patch.object(manager, "_cap_mps_memory", return_value=None),
+            mock.patch.object(manager, "_check_memory", return_value=(None, None)),
+            mock.patch.object(manager, "_release_device_cache"),
+            mock.patch("model_runtime.allocated_bytes", return_value=None),
+            mock.patch("model_runtime.reserved_bytes", return_value=None),
+            mock.patch("model_runtime._read_text_model", side_effect=fail),
+            self.assertLogs("model_runtime", level="WARNING") as logs,
+            self.assertRaises(RuntimeError) as caught,
+        ):
+            manager._load_locked("org/model", Path("/snap"), torch, precision="full")
+
+        self.assertIn("pip install tiktoken", str(caught.exception))
+        self.assertTrue(any("Load of org/model" in line for line in logs.output))
+        self.assertFalse(manager.loaded)
+
+
 class QuantizedLoadTests(unittest.TestCase):
     """What the loader asks transformers for, per device and precision."""
 

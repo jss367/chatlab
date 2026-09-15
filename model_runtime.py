@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import gc
+import importlib.util
 import json
 import logging
 import os
@@ -2226,6 +2227,67 @@ def out_of_memory_message(error: BaseException, kind: str = TEXT_KIND) -> str:
     )
 
 
+# Transformers builds a tokenizer straight from a repo's ``tokenizer.json``,
+# and from anything else - a SentencePiece vocabulary, a tiktoken one - only
+# by converting it, which it does through packages it does not itself
+# require. Each name here is the package to install; the module beside it is
+# what Transformers looks for, which is not the same string for protobuf.
+# SentencePiece conversion reads the vocabulary through sentencepiece and its
+# wrapper through protobuf, so that path wants both.
+TOKENIZER_CONVERSION_PACKAGES = {
+    "sentencepiece": "sentencepiece",
+    "protobuf": "google.protobuf",
+    "tiktoken": "tiktoken",
+}
+
+# The opening of the failure Transformers raises when it could build no
+# tokenizer at all. Its own message lists the three ways one could have been
+# built and leaves the reader to work out which package would have helped.
+TOKENIZER_BACKEND_FAILURE = "Couldn't instantiate the backend tokenizer"
+
+
+def missing_tokenizer_packages() -> tuple[str, ...]:
+    """The tokenizer-conversion packages this installation is without."""
+
+    absent = []
+    for package, module in TOKENIZER_CONVERSION_PACKAGES.items():
+        try:
+            found = importlib.util.find_spec(module) is not None
+        except (ImportError, ValueError):
+            found = False
+        if not found:
+            absent.append(package)
+    return tuple(absent)
+
+
+def tokenizer_support_message(error: BaseException) -> str | None:
+    """What to say about a backend-tokenizer failure, or ``None`` for another.
+
+    The same failure has two causes and the reader can act on only one of
+    them: a repository whose tokenizer needs converting and an installation
+    that cannot convert it, or a repository holding no tokenizer worth the
+    name. Naming a package to install is advice for the second reader to
+    follow into a second failure, so the answer depends on what is installed
+    here rather than on the message alone.
+    """
+
+    if TOKENIZER_BACKEND_FAILURE not in str(error):
+        return None
+    missing = missing_tokenizer_packages()
+    if missing:
+        return (
+            "This model ships no tokenizer.json, and building its tokenizer "
+            f"from what it does ship needs {', '.join(missing)}: run `pip "
+            f"install {' '.join(missing)}` and load again."
+        )
+    return (
+        "This model's tokenizer could not be built: the repository holds no "
+        "tokenizer.json, and no SentencePiece or tiktoken vocabulary to "
+        "convert into one. Its tokenizer files are missing or in a format "
+        f"Transformers cannot read. ({first_line(error)})"
+    )
+
+
 def _reraise_out_of_memory(error: BaseException, kind: str = TEXT_KIND) -> None:
     """Re-raise a backend failure, as :class:`OutOfMemoryError` when that is what it was."""
 
@@ -4009,6 +4071,25 @@ def _capture_loading_report() -> Iterator[None]:
         handler.close()
 
 
+@contextlib.contextmanager
+def _explaining_tokenizer_failure() -> Iterator[None]:
+    """Answer a backend-tokenizer failure with something to do about it.
+
+    Passed on as a ``RuntimeError`` rather than the ``ValueError`` it arrives
+    as, because the load's own handler watches for ``RuntimeError`` and
+    ``MemoryError``: as a ``ValueError`` this failure reached the card
+    without the log ever recording that a load had been attempted.
+    """
+
+    try:
+        yield
+    except ValueError as error:
+        message = tokenizer_support_message(error)
+        if message is None:
+            raise
+        raise RuntimeError(message) from error
+
+
 def _read_text_model(
     local_path: Path, torch, backend: str, dtype, bits: int | None, precision: str
 ) -> ReadWeights:
@@ -5099,7 +5180,7 @@ class ModelManager:
         if allocated_bytes(backend, torch) is not None:
             progress.measure_bytes(estimated, lambda: allocated_bytes(backend, torch))
         try:
-            with progress.watch(), _capture_loading_report():
+            with progress.watch(), _capture_loading_report(), _explaining_tokenizer_failure():
                 read = _reader(kind)
                 model, tokenizer, pipeline, device_name = read(
                     local_path, torch, backend, dtype, bits, precision
