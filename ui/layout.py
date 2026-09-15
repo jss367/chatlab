@@ -1075,7 +1075,9 @@ def build_app() -> gr.Blocks:
                             gr.Markdown("## Discover models")
                             gr.Markdown(
                                 "Search Hugging Face by name, or leave the box empty to browse. "
-                                "Sorting only reorders the results; every sort searches the whole Hub. "
+                                "A sort reorders the results rather than narrowing what is searched. "
+                                "The exception is an empty box under Recommended, which lists the "
+                                "bundled starters without going online. "
                                 "Selecting a model shows its details before you download.",
                                 elem_classes=["scale-caption"],
                             )
