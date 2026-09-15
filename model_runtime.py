@@ -2260,31 +2260,74 @@ def missing_tokenizer_packages() -> tuple[str, ...]:
     return tuple(absent)
 
 
-def tokenizer_support_message(error: BaseException) -> str | None:
+# A vocabulary this name is read as a tiktoken one outright. Any other
+# ``.model`` file is tried as SentencePiece, and a tiktoken vocabulary under
+# another name is reached by that attempt failing - which is a different
+# failure with its own message naming tiktoken, not the one answered here.
+TIKTOKEN_VOCABULARY = "tiktoken.model"
+
+
+def tokenizer_vocabularies(snapshot: Path | None) -> tuple[Path, ...]:
+    """The vocabulary files a snapshot ships in place of a ``tokenizer.json``.
+
+    A pipeline keeps each of its tokenizers in a folder of its own, so one
+    level down counts as well as the top.
+    """
+
+    if snapshot is None:
+        return ()
+    try:
+        found = sorted({*snapshot.glob("*.model"), *snapshot.glob("*/*.model")})
+    except OSError:
+        return ()
+    return tuple(path for path in found if path.is_file())
+
+
+def tokenizer_packages_for(vocabularies: Iterable[Path]) -> tuple[str, ...]:
+    """The packages that would convert these vocabularies, in install order."""
+
+    needed: list[str] = []
+    for path in vocabularies:
+        wanted = ("tiktoken",) if path.name == TIKTOKEN_VOCABULARY else ("sentencepiece", "protobuf")
+        needed += [package for package in wanted if package not in needed]
+    return tuple(package for package in TOKENIZER_CONVERSION_PACKAGES if package in needed)
+
+
+def tokenizer_support_message(error: BaseException, snapshot: Path | None = None) -> str | None:
     """What to say about a backend-tokenizer failure, or ``None`` for another.
 
     The same failure has two causes and the reader can act on only one of
-    them: a repository whose tokenizer needs converting and an installation
+    them: a repository whose vocabulary needs converting and an installation
     that cannot convert it, or a repository holding no tokenizer worth the
-    name. Naming a package to install is advice for the second reader to
-    follow into a second failure, so the answer depends on what is installed
-    here rather than on the message alone.
+    name. Which one this is comes from the snapshot rather than from the
+    message, because they read alike, and because a package absent here that
+    nothing in the snapshot would have read is not what went wrong: advising
+    its installation sends a reader into the same failure a second time.
     """
 
     if TOKENIZER_BACKEND_FAILURE not in str(error):
         return None
-    missing = missing_tokenizer_packages()
+    vocabularies = tokenizer_vocabularies(snapshot)
+    needed = tokenizer_packages_for(vocabularies)
+    missing = tuple(package for package in missing_tokenizer_packages() if package in needed)
+    named = ", ".join(sorted({path.name for path in vocabularies}))
     if missing:
         return (
-            "This model ships no tokenizer.json, and building its tokenizer "
-            f"from what it does ship needs {', '.join(missing)}: run `pip "
-            f"install {' '.join(missing)}` and load again."
+            f"This model ships no tokenizer.json, and converting the {named} "
+            f"it ships instead needs {', '.join(missing)}: run `pip install "
+            f"{' '.join(missing)}` and load again."
+        )
+    if not vocabularies:
+        return (
+            "This model's tokenizer could not be built: the repository holds "
+            "no tokenizer.json, and no vocabulary to convert into one. Its "
+            "tokenizer files are missing, or under names Transformers does "
+            f"not read. ({first_line(error)})"
         )
     return (
-        "This model's tokenizer could not be built: the repository holds no "
-        "tokenizer.json, and no SentencePiece or tiktoken vocabulary to "
-        "convert into one. Its tokenizer files are missing or in a format "
-        f"Transformers cannot read. ({first_line(error)})"
+        f"This model's tokenizer could not be built from {named}, the "
+        "vocabulary it ships in place of a tokenizer.json. The file is "
+        f"incomplete, or not in the format its name implies. ({first_line(error)})"
     )
 
 
@@ -4072,7 +4115,7 @@ def _capture_loading_report() -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def _explaining_tokenizer_failure() -> Iterator[None]:
+def _explaining_tokenizer_failure(snapshot: Path | None) -> Iterator[None]:
     """Answer a backend-tokenizer failure with something to do about it.
 
     Passed on as a ``RuntimeError`` rather than the ``ValueError`` it arrives
@@ -4084,7 +4127,7 @@ def _explaining_tokenizer_failure() -> Iterator[None]:
     try:
         yield
     except ValueError as error:
-        message = tokenizer_support_message(error)
+        message = tokenizer_support_message(error, snapshot)
         if message is None:
             raise
         raise RuntimeError(message) from error
@@ -5180,7 +5223,11 @@ class ModelManager:
         if allocated_bytes(backend, torch) is not None:
             progress.measure_bytes(estimated, lambda: allocated_bytes(backend, torch))
         try:
-            with progress.watch(), _capture_loading_report(), _explaining_tokenizer_failure():
+            with (
+                progress.watch(),
+                _capture_loading_report(),
+                _explaining_tokenizer_failure(local_path),
+            ):
                 read = _reader(kind)
                 model, tokenizer, pipeline, device_name = read(
                     local_path, torch, backend, dtype, bits, precision
