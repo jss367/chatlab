@@ -208,6 +208,11 @@ finished. Between those, a line whenever the memory picture moves by a
 quarter of a gigabyte, and one every ten minutes regardless, so a kill always
 has a recent reading in front of it.
 
+An enabled extension writes there too. The maze workbench records each run it
+loads, prepares, generates or forks, each response with its outcome, and each
+refusal that otherwise reaches the reader as a toast and is gone, so a report
+of an episode that appeared to do nothing can be read against something.
+
 `CHATLAB_LOG_LEVEL=debug` turns the detail up without a rebuild and lets the
 libraries' own logging through, which is otherwise held at warnings so
 ChatLab's lines are findable. `CHATLAB_LOG_PATH` writes somewhere else.
