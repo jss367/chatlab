@@ -41,7 +41,6 @@ class Theme:
     """One palette: what it is called, and the colors it draws with."""
 
     label: str
-    caption: str
     # Lightest to darkest, one per entry in STEPS.
     primary: tuple[str, ...]
     neutral: tuple[str, ...]
@@ -58,10 +57,6 @@ class Theme:
 THEMES: dict[str, Theme] = {
     "aurora": Theme(
         label="Aurora",
-        caption=(
-            "The logo's speech bubble: electric indigo over the blue-black "
-            "the mark sits on. What ChatLab starts from."
-        ),
         primary=(
             "#eef3ff", "#dde6ff", "#c2d1ff", "#9bb1ff", "#6f86fb", "#4f5bf0",
             "#3b3fdc", "#3231b4", "#2b2c90", "#272873", "#191a4a",
@@ -74,10 +69,6 @@ THEMES: dict[str, Theme] = {
     ),
     "graphite": Theme(
         label="Graphite",
-        caption=(
-            "Indigo on a neutral gray. The look ChatLab had before it had "
-            "themes."
-        ),
         primary=(
             "#eef2ff", "#e0e7ff", "#c7d2fe", "#a5b4fc", "#818cf8", "#6366f1",
             "#4f46e5", "#4338ca", "#3730a3", "#312e81", "#2b2c5e",
@@ -90,10 +81,6 @@ THEMES: dict[str, Theme] = {
     ),
     "nebula": Theme(
         label="Nebula",
-        caption=(
-            "The violet layers behind the bubble, on a plum-tinted gray. The "
-            "warmest of the three drawn from the mark."
-        ),
         primary=(
             "#faf5ff", "#f3e8ff", "#e9d5ff", "#d8b4fe", "#c084fc", "#a855f7",
             "#8b28d8", "#7620b8", "#621d96", "#4f1a78", "#33104e",
@@ -106,10 +93,6 @@ THEMES: dict[str, Theme] = {
     ),
     "ember": Theme(
         label="Ember",
-        caption=(
-            "The gold nodes threading through the layers, over warm gray. "
-            "Its buttons darken to burnt amber so their text stays readable."
-        ),
         primary=(
             "#fffbeb", "#fef3c7", "#fde68a", "#fcd34d", "#fbbf24", "#d97706",
             "#b45309", "#92400e", "#78350f", "#633008", "#431f05",
@@ -122,7 +105,6 @@ THEMES: dict[str, Theme] = {
     ),
     "lagoon": Theme(
         label="Lagoon",
-        caption="The cyan highlight along the bubble's edge, over cool slate.",
         primary=(
             "#ecfeff", "#cffafe", "#a5f3fc", "#67e8f9", "#22d3ee", "#0891b2",
             "#0e7490", "#155e75", "#164e63", "#123f51", "#082f3d",
@@ -135,10 +117,6 @@ THEMES: dict[str, Theme] = {
     ),
     "moss": Theme(
         label="Moss",
-        caption=(
-            "Deep green on a gray with the same cast. Nothing to do with the "
-            "logo - the quiet one."
-        ),
         primary=(
             "#ecfdf5", "#d1fae5", "#a7f3d0", "#6ee7b7", "#34d399", "#059669",
             "#047857", "#065f46", "#064e3b", "#053e30", "#022c22",
@@ -204,12 +182,6 @@ def resolve(name: str | None) -> Theme:
     """The named theme, or the default where the name is not one of them."""
 
     return THEMES.get(name or "", THEMES[DEFAULT_THEME])
-
-
-def caption(name: str | None) -> str:
-    """The chosen theme's one-line description, for the control's caption."""
-
-    return resolve(name).caption
 
 
 def stylesheet(name: str | None) -> str:

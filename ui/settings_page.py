@@ -122,16 +122,14 @@ def refresh_hardware():
 
 
 def apply_theme(name):
-    """Repaint the interface in the chosen theme, and say what it is.
+    """Repaint the interface in the chosen theme.
 
     The stylesheet is the whole of it: every color the interface draws with
     leads back to the two ramps themes.stylesheet() rewrites, so the page
     changes under the reader rather than waiting for a reload.
     """
 
-    return gr.update(value=themes.style_tag(name)), gr.update(
-        value=themes.caption(name)
-    )
+    return gr.update(value=themes.style_tag(name))
 
 
 def refresh_thinking_mode():

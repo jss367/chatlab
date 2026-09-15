@@ -1271,10 +1271,6 @@ def build_app() -> gr.Blocks:
                                     "dark."
                                 ),
                             )
-                            theme_caption = gr.Markdown(
-                                themes.caption(saved.theme),
-                                elem_classes=["scale-caption"],
-                            )
                             appearance_choice = gr.Radio(
                                 choices=themes.APPEARANCE_CHOICES,
                                 value=saved.appearance,
@@ -1942,7 +1938,7 @@ def build_app() -> gr.Blocks:
         theme_choice.change(
             apply_theme,
             theme_choice,
-            [theme_style, theme_caption],
+            theme_style,
             trigger_mode="always_last",
         )
         # Light or dark is wired the same way and for the same reasons, except
@@ -2016,7 +2012,7 @@ def build_app() -> gr.Blocks:
         demo.load(
             restore_settings, None, [*persisted_inputs, prefill_token_limit]
         ).then(
-            apply_theme, theme_choice, [theme_style, theme_caption]
+            apply_theme, theme_choice, theme_style
         ).then(
             None, appearance_choice, None, js=themes.APPEARANCE_JS
         ).then(
