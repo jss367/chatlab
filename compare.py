@@ -369,6 +369,12 @@ def configuration(run: dict | None) -> dict:
     reading = {
         "Filled by": "Writing a reply" if run["kind"] == REPLY else "Measuring fixed text",
         "Model": run.get("model_id") or "—",
+        # Which reading of those weights this was. The runtime numbers its
+        # loads because one repository ID can be two snapshots: re-downloaded
+        # between the runs, the weights can differ with every other setting
+        # identical, and a table reporting no difference would hand the
+        # reader a gap that came from somewhere it says nothing about.
+        "Weights load": run.get("load_id") or "—",
         "Device": run.get("device_name") or "—",
         "Weights": run.get("precision") or "—",
         "Steering": steered,
@@ -397,7 +403,7 @@ def configuration(run: dict | None) -> dict:
             "Maximum new tokens": f"{int(settings.get('max_new_tokens', 0))}",
             "Seed": f"{int(settings.get('seed', 0))}",
             "Assistant prefill": settings.get("assistant_prefill") or "—",
-            "Thinking mode": settings.get("thinking_mode") or "model default",
+            "Thinking mode": thinking_mode(settings),
         }
     else:
         # What the pass did, not what the box asked for. A model with no chat
@@ -407,6 +413,24 @@ def configuration(run: dict | None) -> dict:
         # run received.
         reading |= {"Context read as": context_framing(run)}
     return reading
+
+
+def thinking_mode(settings: dict) -> str:
+    """The reasoning mode a reply really ran under.
+
+    A checkpoint that cannot switch reports none, whatever the control said,
+    so a table showing the request would claim two runs thought alike when
+    one of them ignored the setting. Where a mode was asked for and none came
+    back, that is what the row says.
+    """
+
+    applied = settings.get("thinking_mode")
+    if applied:
+        return str(applied)
+    asked = settings.get("requested_thinking_mode") or "default"
+    if asked != "default":
+        return f"{asked} requested; this model cannot switch"
+    return "model default"
 
 
 def context_framing(run: dict | None) -> str:

@@ -232,6 +232,7 @@ def _write_reply(
     metrics: list[dict] = []
     prompt_ids: tuple[int, ...] = ()
     literal_prefix = 0
+    applied_thinking: str | None = None
     model_id = published.model_id
     stream = runtime.MANAGER.generate(
         messages,
@@ -257,6 +258,11 @@ def _write_reply(
             model_id = update.model_id or model_id
             prompt_ids = update.prompt_ids or prompt_ids
             literal_prefix = update.literal_prefill_tokens or literal_prefix
+            # What the model did with the mode, not what was asked of it: a
+            # checkpoint that cannot switch reports None however the control
+            # was set, and recording the request would have the table claim
+            # both runs thought alike when one ignored the setting.
+            applied_thinking = update.thinking_mode
             yield None, len(metrics)
     # Seeded with the prompt for the same reason a measurement is seeded with
     # its context: the first token of a reply decodes differently depending on
@@ -282,7 +288,8 @@ def _write_reply(
             "top_k": int(top_k),
             "max_new_tokens": int(max_new_tokens),
             "seed": used_seed,
-            "thinking_mode": thinking_mode or "default",
+            "thinking_mode": applied_thinking,
+            "requested_thinking_mode": thinking_mode or "default",
             "steering": vector,
         },
     }, len(metrics)
@@ -356,11 +363,21 @@ def _tokenizer_identity() -> str:
     runtime numbers its loads rather than trusting the ID. The load number
     will not do either - it changes when the same weights are re-read at a
     different precision, and those runs do share a tokenizer and should still
-    be matched on IDs. What matters is the vocabulary itself, so that is what
-    is recorded: its size, and what it makes of one fixed string.
+    be matched on IDs.
 
-    Empty where there is nothing to fingerprint; the comparison falls back to
-    the model ID, which is what runs recorded before this existed carry.
+    So the vocabulary itself is what is hashed: every token and the ID it
+    holds, added tokens included, read once when a slot is filled. Sampling a
+    few encodings instead would miss the most likely way a refreshed
+    repository changes - a special token added at the end, which shifts
+    nothing the sample happens to cover and may not move ``vocab_size``
+    either, since that can go on reporting the base vocabulary alone.
+
+    The model ID goes into the hash rather than standing as a fallback around
+    it, so two repositories can never fingerprint alike however little can be
+    read from their tokenizers. Where the mapping cannot be read at all, one
+    probe encoding and whatever size is available stand in for it; where even
+    that fails, the ID and the tokenizer's class are the whole fingerprint,
+    which is no worse than the comparison by model ID it replaces.
     """
 
     import hashlib
@@ -368,24 +385,33 @@ def _tokenizer_identity() -> str:
     tokenizer = runtime.MANAGER.tokenizer
     if tokenizer is None:
         return ""
-    # The model ID is part of the fingerprint, not a fallback for it, so two
-    # repositories can never fingerprint alike however little else can be
-    # read from their tokenizers. What the probe and the size add is the
-    # other direction: one repository whose vocabulary changed underneath
-    # its name.
-    parts = [runtime.MANAGER.model_id or "", type(tokenizer).__name__]
+    digest = hashlib.sha256()
+    for part in (runtime.MANAGER.model_id or "", type(tokenizer).__name__):
+        digest.update(f"{part}\x1e".encode())
+
+    mapping = None
     try:
-        parts.append(",".join(str(value) for value in runtime.MANAGER._encode_plain(TOKENIZER_PROBE)))
+        mapping = tokenizer.get_vocab()
     except Exception:
-        parts.append("")
+        mapping = None
+    if isinstance(mapping, dict) and mapping:
+        for piece, token_id in sorted(mapping.items(), key=lambda item: (item[1], item[0])):
+            digest.update(f"{token_id}\x1f{piece}\x1e".encode("utf-8", "replace"))
+        return digest.hexdigest()[:16]
+
+    try:
+        encoded = runtime.MANAGER._encode_plain(TOKENIZER_PROBE)
+        digest.update(",".join(str(value) for value in encoded).encode())
+    except Exception:
+        pass
     size = getattr(tokenizer, "vocab_size", None)
     if size is None:
         try:
             size = len(tokenizer)
         except TypeError:
             size = ""
-    parts.append(str(size))
-    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+    digest.update(f"\x1e{size}".encode())
+    return digest.hexdigest()[:16]
 
 
 def _decoded_spans(

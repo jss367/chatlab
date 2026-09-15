@@ -449,6 +449,32 @@ class ReadingTests(unittest.TestCase):
             compare.same_vocabulary(run([]), run([], model_id="other/model"))
         )
 
+    def test_two_readings_of_one_repository_are_named_in_the_table(self):
+        # Same ID, same device, same settings, different snapshot: a table
+        # reporting no difference would hand the reader a gap it says
+        # nothing about.
+        left = run([metric(1, 5, 1.0)])
+        right = dict(run([metric(1, 5, 2.0)]), load_id="fake/model#2")
+        rows = compare.configuration_rows(left, right)
+        self.assertEqual([row[0] for row in rows], ["Weights load"])
+        self.assertEqual(rows[0][2], "fake/model#2")
+
+    def test_the_thinking_row_says_what_the_model_did(self):
+        asked = run([metric(1, 5, 1.0)], thinking_mode="on")
+        self.assertEqual(compare.configuration(asked)["Thinking mode"], "on")
+        # A checkpoint that cannot switch reports none, whatever was asked.
+        ignored = run(
+            [metric(1, 5, 1.0)], thinking_mode=None, requested_thinking_mode="on"
+        )
+        self.assertIn("cannot switch", compare.configuration(ignored)["Thinking mode"])
+        # The two must not read alike: one of them ignored the setting.
+        rows = compare.configuration_rows(asked, ignored)
+        self.assertIn("Thinking mode", [row[0] for row in rows])
+        plain = run([metric(1, 5, 1.0)], thinking_mode=None)
+        self.assertEqual(
+            compare.configuration(plain)["Thinking mode"], "model default"
+        )
+
     def test_configuration_rows_name_only_what_differed(self):
         left = run([metric(1, 5, 1.0)], seed=1)
         right = run([metric(1, 5, 1.0)], seed=2, temperature=0.7)
@@ -680,6 +706,30 @@ class HandlerTests(unittest.TestCase):
         other, _status, *_buttons = self.fill("B")
         # The same tokenizer fingerprints the same way, whatever else moved.
         self.assertEqual(held["tokenizer"], other["tokenizer"])
+
+    def test_a_token_added_to_the_vocabulary_changes_the_fingerprint(self):
+        # The likeliest way a refreshed repository differs is a token added
+        # at the end, which shifts nothing a sampled encoding would cover.
+        vocabulary = {"a": 0, "b": 1}
+        runtime.MANAGER.tokenizer.get_vocab = lambda: dict(vocabulary)
+        before = controls._tokenizer_identity()
+        vocabulary["<|extra|>"] = 2
+        after = controls._tokenizer_identity()
+        self.assertTrue(before and after)
+        self.assertNotEqual(before, after)
+        # And one repository is never mistaken for another.
+        runtime.MANAGER.model_id = "other/model"
+        self.assertNotEqual(controls._tokenizer_identity(), after)
+
+    def test_an_unreadable_vocabulary_still_separates_two_repositories(self):
+        def refuse():
+            raise RuntimeError("no vocabulary here")
+
+        runtime.MANAGER.tokenizer.get_vocab = refuse
+        first = controls._tokenizer_identity()
+        runtime.MANAGER.model_id = "other/model"
+        self.assertTrue(first)
+        self.assertNotEqual(controls._tokenizer_identity(), first)
 
     def test_a_busy_model_refuses_without_touching_the_slot_or_the_buttons(self):
         self.assertTrue(runtime.MANAGER.reserve_generation())
