@@ -47,6 +47,41 @@ class ForkTreeTests(unittest.TestCase):
         self.assertEqual(merged['origins'], original['origins'])
         self.assertEqual(merged['branches']['Fork 1'][0]['content'], 'Edited')
 
+    def test_wire_origin_survives_dropping_fields_unknown_to_older_releases(self):
+        forks = example()
+        payload = json.loads(library.dump(forks))
+        # Pre-tree releases keep unknown sampling keys, but rebuild each
+        # branch without its origin and each turn without generation settings.
+        for branch in payload['branches']:
+            branch.pop('origin', None)
+            for turn in branch['turns']:
+                turn.pop('generation_settings', None)
+        restored = library.parse(json.dumps(payload))
+        self.assertEqual(restored['origins'], forks['origins'])
+        self.assertEqual(restored['sampling'], {})
+        self.assertNotIn(library.ORIGIN_COMPAT_KEY, tree_html(restored, {}))
+        self.assertEqual(library.parse(library.dump(restored))['origins'], forks['origins'])
+
+    def test_legacy_sampling_copy_does_not_assign_parent_origin_to_a_new_fork(self):
+        payload = json.loads(library.dump(example()))
+        parent = payload['branches'][1]
+        payload['branches'].append({
+            'name': 'Fork 2', 'turns': parent['turns'], 'sampling': parent['sampling'],
+        })
+        for branch in payload['branches']:
+            branch.pop('origin', None)
+        restored = library.parse(json.dumps(payload))
+        self.assertIn('Fork 1', restored['origins'])
+        self.assertNotIn('Fork 2', restored['origins'])
+        self.assertNotIn('Fork 2', restored['sampling'])
+
+    def test_explicit_origin_wins_over_an_older_compatibility_copy(self):
+        payload = json.loads(library.dump(example()))
+        branch = payload['branches'][1]
+        branch['origin']['replacement'] = ' fox'
+        restored = library.parse(json.dumps(payload))
+        self.assertEqual(restored['origins']['Fork 1']['replacement'], ' fox')
+
     def test_deleted_parent_keeps_child_and_origin_visible(self):
         forks = example()
         drop_branch(forks, 'Main')
