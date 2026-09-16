@@ -100,6 +100,8 @@ def fill_slot(
     steering_enabled: bool,
     steering_strength: float,
     steering_layer,
+    *,
+    expected_load_id=None,
 ):
     """Run the model once and keep the result, its measurements and its settings.
 
@@ -147,6 +149,9 @@ def fill_slot(
             yield idle(COMPARE_NO_MODEL)
             return
         published = runtime.MANAGER.loaded_model()
+        if expected_load_id is not None and published.load_id != expected_load_id:
+            yield idle("The model changed before this condition started. Run the comparison again.")
+            return
         if published.load_id is None:
             yield idle(COMPARE_NO_MODEL)
             return
@@ -221,6 +226,7 @@ def _write_reply(
     prompt, system_prompt, assistant_prefill, temperature, top_p, top_k,
     skip_top_below, max_new_tokens, seed, randomize_seed, thinking_mode,
     vector, published,
+    *, messages_override=None, prompt_override_ids=None, forced_ids=None, replay_options=None,
 ):
     """One reply to one prompt, in a conversation of its own.
 
@@ -229,7 +235,8 @@ def _write_reply(
     """
 
     used_seed = resolve_seed(seed, randomize_seed)
-    messages = model_messages([make_turn("user", prompt)], system_prompt=system_prompt)
+    messages = messages_override if messages_override is not None else model_messages(
+        [make_turn("user", prompt)], system_prompt=system_prompt)
     text = ""
     metrics: list[dict] = []
     prompt_ids: tuple[int, ...] = ()
@@ -251,6 +258,9 @@ def _write_reply(
         thinking_mode=thinking_mode or "default",
         load_id=published.load_id,
         steering=vector,
+        **({"prompt_override_ids": prompt_override_ids} if prompt_override_ids is not None else {}),
+        **({"forced_ids": forced_ids} if forced_ids is not None else {}),
+        **(replay_options or {}),
     )
     # closing() gives the model lock back the moment this generator is closed,
     # which is what a Stop in the caller does.
@@ -283,6 +293,8 @@ def _write_reply(
         "decoded": decoded,
         "token_ends": ends,
         "tokenizer": _tokenizer_identity(),
+        "context_ids": list(prompt_ids),
+        "messages": messages,
         "settings": {
             "system_prompt": system_prompt or "",
             "assistant_prefill": assistant_prefill or "",
@@ -342,6 +354,7 @@ def _measure_text(context, measured, use_chat_template, vector, published):
         "decoded": decoded,
         "token_ends": ends,
         "tokenizer": _tokenizer_identity(),
+        "context_ids": list(result.context_ids),
         "settings": {
             "use_chat_template": bool(use_chat_template),
             "seam_verified": result.seam_verified,

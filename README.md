@@ -818,6 +818,49 @@ separate from the passage, or a chat framing the model had no template for. **St
 where it stands and leaves the slot as it was: half a response is not a
 measurement of anything.
 
+## Saved experiments and automatic comparisons
+
+The **Experiments** tab keeps runs independently of the conversation library.
+Open **Save a run**, name the experiment, and save the latest chat response or
+either comparison slot. Every saved run retains its token measurements,
+inputs, configuration, and recorded tokenizer information. Search by name,
+model, prompt, response, or bookmark note, then reopen a run without loading
+any weights. Experiments are individual JSON files in an `experiments`
+directory beside `conversations.json`, so `CHATLAB_LIBRARY_PATH` and
+`XDG_DATA_HOME` move them along with the conversation library.
+
+Click a saved token to see its measurements and alternatives. **Next matching
+token** visits tokens in order of highest surprise or closest top two
+alternatives, skipping unscored positions, and wraps back to the start.
+**Save bookmark** keeps the selected token and its note; the **Bookmarks**
+filter revisits those selections. A token number can also be entered directly.
+In Compare, **Next largest difference** visits comparable spans in order of
+their surprise gap, with each side's measurements and token positions.
+After inspecting a response token in Chat, save that response as an experiment
+and use **Save current response inspection** to preserve the layer readout and
+attention data. Only an inspection from that exact response can be attached.
+Recorded inspections remain viewable after restarting or unloading the model.
+
+**Use as comparison A/B** puts a saved run into the corresponding Compare slot.
+**Rerun with loaded model** uses the saved messages or measured passage and
+settings, then saves a new experiment. Load the matching model first. The
+recorded device and precision describe the original run; the rerun records
+what is actually loaded. A model repository can change, and identical seeds
+across different hardware or model revisions do not guarantee identical output.
+Edited prompts and replayed token prefixes additionally require a matching
+tokenizer fingerprint.
+
+In **Compare → Set up both runs**, configure the model, precision,
+temperature, seed, and steering for each condition before pressing **Run
+comparison**. Presets cover two seeds, steering disabled versus enabled, and
+full precision versus 4-bit. The runner loads downloaded models sequentially
+and saves each completed condition to Experiments. MLX models use the precision
+stored in their repository: choose **Current**, or compare two conversions.
+Sampling changes affect reply generation; fixed-text measurements compare the
+model and steering applied to the same passage. **Stop** keeps completed
+conditions and discards the unfinished condition. A weight load already in
+progress finishes safely, but stopping prevents the next generation from starting.
+
 ## The local API
 
 Everything ChatLab does to the model in memory is addressable from a script.
