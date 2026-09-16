@@ -7338,26 +7338,34 @@ class ModelManager:
         import activation_patching
 
         with self._lock:
-            plan = activation_patching.experiment(donor, recipient, target_index, donor_count, width)
-            if not self.loaded or self.load_id != plan["load_id"] or self.model_id != plan["model_id"]:
-                raise ModelChanged("The model has been reloaded. Fill both Compare slots again.")
-            if getattr(self._engine(), "backend", "torch") != "torch":
-                raise ValueError("Activation patching requires a Transformers model; MLX is not supported yet.")
-            activation_patching.model_layers(self.model)
+            try:
+                plan = activation_patching.experiment(donor, recipient, target_index, donor_count, width)
+                if not self.loaded or self.load_id != plan["load_id"] or self.model_id != plan["model_id"]:
+                    raise ModelChanged("The model has been reloaded. Fill both Compare slots again.")
+                if getattr(self._engine(), "backend", "torch") != "torch":
+                    raise ValueError("Activation patching requires a Transformers model; MLX is not supported yet.")
+                activation_patching.model_layers(self.model)
 
-            def label(token):
-                return self._decode_token(token) or self._token_fallback(token)
+                def label(token):
+                    return self._decode_token(token) or self._token_fallback(token)
 
-            plan["target_text"] = label(plan["target_id"])
-            for pair in plan["pairs"]:
-                pair["donor_text"] = label(plan["donor_ids"][pair["donor_position"]])
-                pair["recipient_text"] = label(plan["recipient_ids"][pair["recipient_position"]])
-            self._drop_inspect_cache()
-            logger.info("Activation patching: %s, target %s, %d token pairs", self.model_id,
-                        plan["target_id"], len(plan["pairs"]))
-            with contextlib.closing(activation_patching.measure(self.model, plan)) as readings:
-                for reading in readings:
-                    yield plan, reading
+                plan["target_text"] = label(plan["target_id"])
+                for pair in plan["pairs"]:
+                    pair["donor_text"] = label(plan["donor_ids"][pair["donor_position"]])
+                    pair["recipient_text"] = label(plan["recipient_ids"][pair["recipient_position"]])
+                self._drop_inspect_cache()
+                logger.info("Activation patching: %s, target %s, %d token pairs", self.model_id,
+                            plan["target_id"], len(plan["pairs"]))
+                with contextlib.closing(activation_patching.measure(self.model, plan)) as readings:
+                    for reading in readings:
+                        yield plan, reading
+            except (RuntimeError, MemoryError) as error:
+                _reraise_out_of_memory(error)
+            finally:
+                # The inner iterator closes first, removing hooks and dropping
+                # its tensors before allocator blocks are returned. This also
+                # runs on GeneratorExit when Stop closes the outer iterator.
+                self._release_device_cache()
 
     def _lens_row(self, layer: int, logits: np.ndarray, token_id: int) -> dict:
         log_probs = normalize_log_probabilities(np.asarray(logits, dtype=np.float32))

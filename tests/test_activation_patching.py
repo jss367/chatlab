@@ -8,7 +8,7 @@ from unittest import mock
 import torch
 
 import activation_patching as patching
-from model_runtime import ModelChanged, ModelManager
+from model_runtime import ModelChanged, ModelManager, OutOfMemoryError
 from test_streaming import FakeTokenizer, PIECES
 from ui import activation_patching as controls
 
@@ -142,6 +142,48 @@ class PatchingTests(unittest.TestCase):
         self.manager.load_count += 1
         with self.assertRaises(ModelChanged):
             list(self.manager.patch_activations(self.donor, self.recipient, 0, 0, 2))
+
+    def test_device_cache_released_after_completion_failure_and_cancellation(self):
+        for outcome in ("complete", "cancel_baseline", "cancel_cell", "capture_failure", "patch_failure"):
+            with self.subTest(outcome=outcome):
+                manager = manager_with()
+                donor = recorded(manager, [1, 2, 2])
+                recipient = recorded(manager, [1, 4, 4])
+                released = []
+
+                def release():
+                    self.assertTrue(manager._lock.locked())
+                    self.assertTrue(all(not b._forward_hooks for b in manager.model.model.layers))
+                    released.append(True)
+
+                with mock.patch.object(manager, "_release_device_cache", side_effect=release):
+                    stream = manager.patch_activations(donor, recipient, 0, 0, 2)
+                    if outcome == "complete":
+                        list(stream)
+                    elif outcome.startswith("cancel"):
+                        next(stream)
+                        if outcome == "cancel_cell":
+                            next(stream)
+                        self.assertEqual(released, [])
+                        stream.close()
+                    else:
+                        manager.model.fail_at = 1 if outcome == "capture_failure" else 3
+                        with self.assertRaisesRegex(RuntimeError, "injected forward failure"):
+                            list(stream)
+                    self.assertEqual(released, [True])
+                    self.assertFalse(manager._lock.locked())
+
+    def test_runtime_out_of_memory_is_translated_and_cache_released(self):
+        for error in (RuntimeError("CUDA out of memory"),
+                      RuntimeError("MPS backend out of memory"), MemoryError()):
+            with self.subTest(error=repr(error)), \
+                    mock.patch.object(self.manager.model, "forward", side_effect=error), \
+                    mock.patch.object(self.manager, "_release_device_cache") as release:
+                with self.assertRaises(OutOfMemoryError):
+                    list(self.manager.patch_activations(self.donor, self.recipient, 0, 0, 2))
+                release.assert_called_once_with()
+                self.assertFalse(self.manager._lock.locked())
+                self.assertTrue(all(not b._forward_hooks for b in self.manager.model.model.layers))
 
     def test_bounds_and_backend_refusals(self):
         for target, source_count, width in ((-1, 0, 1), (2, 0, 1), (0, 3, 1),
