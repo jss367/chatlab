@@ -741,6 +741,7 @@ def _stream_reply(
     metrics: list[dict] = []
     status = "The model produced no tokens."
     first = True
+    recorded_context = None
     forced_prefix_tokens = 0
     literal_prefill = ""
     literal_spans: tuple[tuple[int, int], ...] = ()
@@ -840,6 +841,7 @@ def _stream_reply(
                         update.load_id,
                         *([steering] if steering is not None else []),
                     )
+                    recorded_context = context_ids
                 yield snapshot(
                     metrics,
                     status,
@@ -920,6 +922,7 @@ def _stream_reply(
         "skip_top_below": float(skip_top_below),
         "max_new_tokens": int(max_new_tokens),
         "seed": used_seed,
+        "requested_thinking_mode": thinking_mode or "default",
     }
     if pending.get("thinking_mode") is not None:
         sampling["thinking_mode"] = pending["thinking_mode"]
@@ -959,6 +962,26 @@ def _stream_reply(
         else {}
     )
     if trace:
+        # Keep provenance with the trace, so saving it after a model switch
+        # never borrows metadata from the model that happens to be loaded.
+        from ui.compare import _decoded_spans, _tokenizer_identity
+        from experiment_runs import SESSION_ID
+        published = runtime.MANAGER.loaded_model()
+        decoded, token_ends = _decoded_spans(
+            metrics, recorded_context[1] if recorded_context else (), raw_text,
+            update.literal_prefill_tokens,
+        )
+        trace["run_context"] = {
+            "session_id": SESSION_ID,
+            "load_id": pending.get("load_id"),
+            "metrics_generation": generation,
+            "context_ids": list(recorded_context[1]) if recorded_context else [],
+            "tokenizer": _tokenizer_identity(),
+            "device_name": published.device_name,
+            "precision": published.precision,
+            "decoded": decoded,
+            "token_ends": token_ends,
+        }
         status = f"{status} Exports are ready."
     yield snapshot(
         metrics,

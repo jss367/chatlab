@@ -31,6 +31,7 @@ from token_metrics import (
 )
 from trace_export import write_trace_export
 from ui import runtime
+from ui import experiments, experiment_compare
 from ui.icons import icon_classes
 from ui.background import ConversationEvents, ConversationJob
 from ui.token_edit import close_token_editor, open_token_editor, save_token_edit
@@ -454,7 +455,7 @@ def build_app() -> gr.Blocks:
                         # for it. See BADGE_REFRESH_SECONDS.
                         badge_timer = gr.Timer(BADGE_REFRESH_SECONDS)
 
-                        with gr.Tabs(elem_id="conversation-tabs"):
+                        with gr.Tabs(elem_id="conversation-tabs") as conversation_tabs:
                             with gr.Tab("Chat", elem_id="chat-tab"):
                                 # Two views of one conversation, one at a
                                 # time. The chatbot renders the reply as the
@@ -889,6 +890,7 @@ def build_app() -> gr.Blocks:
                                     "and prefill come from Settings, the sampling "
                                     "controls and the steering vector from the Chat tab."
                                 )
+                                pair_conditions, pair_button, pair_load_status = experiment_compare.build()
                                 compare_mode = gr.Radio(
                                     choices=[
                                         ("Writing a reply", REPLY),
@@ -995,6 +997,9 @@ def build_app() -> gr.Blocks:
                                     elem_id="compare-divergences",
                                     label="Where the two runs read a shared token most differently",
                                 )
+                                difference_position = gr.State(None)
+                                next_difference = gr.Button("Next largest difference", size="sm")
+                                difference_detail = gr.Markdown("")
                                 gr.DownloadButton(
                                     "Download comparison JSON",
                                     value=download_comparison,
@@ -1002,17 +1007,19 @@ def build_app() -> gr.Blocks:
                                     size="sm",
                                 )
 
+                            experiments_view = experiments.build()
+
                     # The seam between the transcript and the readings is a
                     # handle: drag it to give either pane the other's room.
                     # See RESIZE_JS.
-                    gr.HTML(
+                    inspector_resizer = gr.HTML(
                         pane_handle("inspector-pane"),
                         elem_id="inspector-resizer",
                         container=False,
                         padding=False,
                     )
 
-                    with gr.Column(scale=2, min_width=300, elem_id="inspector-pane"):
+                    with gr.Column(scale=2, min_width=300, elem_id="inspector-pane") as inspector_pane:
                         gr.Markdown("## Under the hood", elem_id="inspector-heading")
                         color_scale = gr.Dropdown(
                             choices=list(COLOR_SCALES),
@@ -2777,12 +2784,28 @@ def build_app() -> gr.Blocks:
                 compare_outputs,
             )
             compare_runs.append(filling)
+        paired = pair_button.click(
+            experiment_compare.run_pair, [*pair_conditions, *compare_inputs],
+            [compare_a_state, compare_b_state, *compare_slot_outputs, pair_button, pair_load_status],
+        )
+        compare_runs.append(paired)
+        next_difference.click(experiment_compare.next_difference,
+                              [compare_export_state, difference_position],
+                              [difference_position, difference_detail])
+        compare_export_state.change(lambda: (None, ""), None, [difference_position, difference_detail],
+                                    show_progress="hidden")
+        experiments.wire(experiments_view, demo, trace_state, chat_context_ids_state,
+                         compare_a_state, compare_b_state, insight_state, inspect_target)
+        conversation_tabs.select(experiments.inspector_visibility, None, [inspector_pane, inspector_resizer],
+                                 show_progress="hidden", queue=False)
+        for held in (compare_a_state, compare_b_state):
+            held.change(render_comparison, [compare_a_state, compare_b_state], compare_outputs)
         # Cancelling closes the run at its last yield, which is what gives the
         # model lock back; this only puts the buttons right. The slot keeps
         # whatever it held before, because half a response is not a run.
         compare_stop.click(
             stop_comparison, None, compare_slot_outputs, cancels=compare_runs
-        )
+        ).then(lambda: gr.update(interactive=True), None, pair_button)
         # cancels, because clearing during a run is otherwise undone by the
         # run: its remaining frames would write over the cleared status and
         # its last one would put the slot back. See clear_slots().
@@ -2791,7 +2814,7 @@ def build_app() -> gr.Blocks:
             None,
             [compare_a_state, compare_b_state, *compare_slot_outputs, *compare_outputs],
             cancels=compare_runs,
-        )
+        ).then(lambda: gr.update(interactive=True), None, pair_button)
         compare_mode.change(
             mode_controls,
             compare_mode,
