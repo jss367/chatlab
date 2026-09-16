@@ -348,6 +348,32 @@ ones, so an image load takes its weights whole and says so in the log rather
 than quantizing part of it and reporting a precision that held for the text
 encoder alone.
 
+**Test a prompt word** keeps the finished image as an original. Click a word
+in its prompt, then **Remove word and redraw**: selecting “red” in “a red
+bicycle” draws “a bicycle” with the original seed, negative prompt, dimensions,
+guidance, step count, and attention-recording setting. Each click removes only
+that occurrence, even when a word repeats or encodes as several model tokens.
+The preview shows the exact edited prompt before drawing. Removing the only
+word is allowed and compares against an empty prompt.
+
+The two images, denoising previews, and guidance/movement traces appear side by
+side. **Comparison denoising step** scrubs both runs together. Select an
+attention token on each side to compare its maps: positions can shift after
+removal, and the removed word has no map in the second prompt. Charts and maps
+share visual scales. Maps are available only when the original recorded them
+and the pipeline supports capture; the images and trajectories still work
+without maps. Stop keeps partial steps, and a new original clears the previous
+comparison. Reloading or changing the model requires a new original so a
+comparison cannot silently use a different model load. Pipelines that cannot
+accept a seeded generator cannot run this comparison. A fixed seed controls
+the starting randomness, but does not guarantee deterministic device kernels.
+
+This implements the fixed-seed word-removal experiment described in
+[Mechanistic Interpretability of Text-to-Image Diffusion Models via
+Cross-Attention Interventions](https://aclanthology.org/2026.findings-acl.1265/).
+ChatLab's maps average recorded heads and layers; this feature does not compute
+the paper's head-level intervention scores.
+
 Three readings sit beside the picture, and none of them needs the pipeline to
 be rewritten — whichever pipeline the repo ships is the one that runs, prompt
 encoding and scheduler and all.

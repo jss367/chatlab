@@ -614,13 +614,16 @@ def _step_series(readings: Sequence, name: str) -> list[tuple[int, float]]:
     ]
 
 
-def denoising_chart(readings: Sequence) -> str:
+def denoising_chart(readings: Sequence, *, ceiling: float = 0.0, last_step: int = 0) -> str:
     """Guidance pull and latent movement per denoising step, on one axis.
 
     ``readings`` are :class:`image_runtime.StepReading` objects. Both series
     are dimensionless ratios of the same kind - a length divided by a length -
     so one axis serves both, and a reader can see directly that the prompt
     stops pulling around the same time the picture stops moving.
+
+    ``ceiling`` and ``last_step`` let paired runs share axis ranges, including
+    when one run was stopped early. Neither can clip a run's own readings.
     """
 
     guidance = _step_series(readings, "guidance_share")
@@ -630,8 +633,10 @@ def denoising_chart(readings: Sequence) -> str:
 
     steps = [int(reading.step) for reading in readings]
     first, last = min(steps), max(steps)
+    last = max(last, last_step)
     ceiling = max(
         0.05,
+        ceiling,
         max((value for _step, value in guidance + movement), default=0.0),
     )
     plot_width = _VIEW_WIDTH - _PAD_LEFT - _PAD_RIGHT

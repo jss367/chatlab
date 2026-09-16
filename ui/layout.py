@@ -99,6 +99,7 @@ from ui.images_page import (
     select_token,
     stop_drawing,
 )
+from ui.image_words import build_word_comparison
 from ui.generation import (
     ask_clear_chat,
     branch_from,
@@ -1146,6 +1147,7 @@ def build_app() -> gr.Blocks:
             with gr.Column(
                 scale=1, visible=False, elem_id="images-page"
             ) as images_page:
+                image_run_state = gr.State(None)
                 with gr.Row(equal_height=True, elem_id="images-columns"):
                     with gr.Column(scale=3, min_width=320, elem_id="images-workspace"):
                         gr.Markdown(
@@ -1260,6 +1262,8 @@ def build_app() -> gr.Blocks:
                                 ),
                             )
 
+                        build_word_comparison(image_run_state)
+
                     # The Images page carries the same handle on its own seam.
                     gr.HTML(
                         pane_handle("image-inspector"),
@@ -1271,7 +1275,6 @@ def build_app() -> gr.Blocks:
                     with gr.Column(scale=2, min_width=300, elem_id="image-inspector"):
                         # Which run the readouts belong to, the step being
                         # looked at, and the prompt token last clicked.
-                        image_run_state = gr.State(None)
                         image_token_state = gr.State(None)
                         with gr.Accordion(
                             "Denoising trajectory",
@@ -1790,7 +1793,7 @@ def build_app() -> gr.Blocks:
             image_randomize,
             image_record_attention,
         ]
-        draw_button.click(draw, image_inputs, image_outputs)
+        draw_button.click(draw, image_inputs, image_outputs, concurrency_id="image-drawing")
         # Stop is not a cancel. The pipeline runs on its own thread and would
         # keep running with the generator gone, so the button sets the event
         # the run checks between steps and the generator publishes the

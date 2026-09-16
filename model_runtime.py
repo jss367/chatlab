@@ -6828,7 +6828,7 @@ class ModelManager:
         cancel.set()
         return True
 
-    def generate_image(self, request, *, on_step=None, cancel=None):
+    def generate_image(self, request, *, on_step=None, cancel=None, expected_load_id=None):
         """Draw ``request`` with the pipeline in memory, and report what happened.
 
         Blocks until the picture is finished; ``on_step`` is called with each
@@ -6857,6 +6857,10 @@ class ModelManager:
 
         The run is stamped with the load that drew it, so a maps-and-steps
         readout can be told apart from one the next load produced.
+
+        ``expected_load_id`` pins a word-removal comparison to its original
+        model load and requires a pipeline that accepts a seeded generator.
+        Both checks happen under the model lock before inference begins.
         """
 
         import image_runtime
@@ -6869,6 +6873,18 @@ class ModelManager:
             with self._lock:
                 if self.pipeline is None:
                     raise RuntimeError("No image model is loaded.")
+                if expected_load_id is not None:
+                    if self.load_id != expected_load_id:
+                        raise image_runtime.Unwatchable(
+                            "The loaded model changed. Draw a new original before testing a word."
+                        )
+                    if "generator" not in image_runtime._call_arguments(
+                        self.pipeline, request, None, None
+                    ):
+                        raise image_runtime.Unwatchable(
+                            "This pipeline cannot accept a fixed seed, so word comparisons "
+                            "are unavailable."
+                        )
                 run = image_runtime.run(
                     self.pipeline,
                     request,
