@@ -630,6 +630,25 @@ materialize every layer's full sequence at once.
 Extraction needs a PyTorch model, for the same reason steering does: an MLX
 checkpoint is not a `torch.nn.Module` and has nowhere to put the hook.
 
+## Conversation fork tree
+
+Open **Fork tree** beside the Chat tab to see conversations connected to their
+parents. Each fork shows its starting message and, for token forks, the token
+position and original → replacement text. Expand a node’s settings differences
+to see how it differs from its parent.
+
+Choose **Compare as A** and **Compare as B** directly on two nodes. The comparison
+below shows changed settings and both transcripts, with added and removed words
+highlighted and reasoning available in expandable sections. Current branch settings
+are listed separately from the settings recorded for each branch’s latest reply.
+No model needs to be loaded to compare saved conversations.
+
+Message forks, token replacements, and prompt-token edits retain their origins
+when the app reopens. Earlier saved conversations without recorded ancestry appear
+as separate roots. Deleting a parent leaves its children and their origin labels
+available. Continuing the latest reply with **Next token** stays on that branch;
+choosing a different token or an earlier branch point creates a new fork.
+
 ## Branching from a token
 
 Every response token comes with the alternatives the model ranked highest. Branching lets you take one of them instead and see where the model goes from there.
@@ -638,7 +657,7 @@ Every response token comes with the alternatives the model ranked highest. Branc
 2. Click a row in **Most likely alternatives**. The detail panel confirms what the branch will do.
 3. Press **Branch from token**.
 
-The reply is kept up to the token before the one you clicked, the alternative is put in its place, and the model continues from there under the current sampling settings. The branch replaces the reply it was taken from and every message after it, so it is a different continuation of the conversation rather than an edit buried in the middle of one; **Retry** and **Undo** then work on it as usual. Choosing the token the model already picked resamples the rest of the reply from that point, which is a way to see how much of what followed was chance.
+The reply is kept up to the token before the one you clicked, the alternative is put in its place, and the model continues from there under the current sampling settings. Once replay succeeds, the continuation opens in a new fork and the original conversation stays available. The new fork keeps the messages before the selected reply and continues from the chosen token; **Retry** and **Undo** then work on it as usual. Choosing the token the model already picked resamples the rest of the reply from that point, which is a way to see how much of what followed was chance.
 
 Any reply in the conversation can be branched, not only the newest one, because each carries the tokens it was made of. What it cannot outlive is the model: a reply's token IDs belong to the tokenizer that produced them, so loading another model - or reloading the same one - leaves the older replies readable but unbranchable, and the detail panel says so when you click one.
 
@@ -664,7 +683,7 @@ A template's own control tokens are as editable as the words between them, which
 
 A reply generated this way can be branched like any other, and the branch replays it against the prompt it was actually given rather than the one the conversation would render - the tokens being replayed were scored under the edited prompt, and scoring them under another would quietly describe a reply the model never gave. That prompt is kept beside the reply's measurements and goes wherever they go: editing the message, undoing, or loading the conversation from a file leaves the reply readable and unbranchable, as it already does.
 
-Like a branch, an edit cannot outlive the model. The prompt's token IDs belong to the tokenizer that produced them, so reloading leaves the strip readable but uneditable, and so does anything that replaces the strip - a retry, an edit, an undo, switching conversation. Send the message again to measure a fresh prompt. The JSON export records the edit under `sampling.edited_prompt`: the position and the two texts, and `prompt_token_ids`, the whole prompt as it was fed. The ids are what makes the export exact - the `messages` beside them are the conversation, which the template would render differently under settings that have since moved - and they read back through the tokenizer of the model the trace names. The conversation file, which stores turns rather than tokens, records nothing of the edit.
+Like a branch, an edit cannot outlive the model. The prompt's token IDs belong to the tokenizer that produced them, so reloading leaves the strip readable but uneditable, and so does anything that replaces the strip - a retry, an edit, an undo, switching conversation. Send the message again to measure a fresh prompt. The JSON export records the edit under `sampling.edited_prompt`: the position and the two texts, and `prompt_token_ids`, the whole prompt as it was fed. The ids are what makes the export exact - the `messages` beside them are the conversation, which the template would render differently under settings that have since moved - and they read back through the tokenizer of the model the trace names. The conversation library records the fork’s prompt-token position and replacement text. The full edited prompt IDs remain in the token trace export.
 
 ## The conversations pane
 
@@ -864,6 +883,49 @@ differ, and says the same about a context the tokenizer could not cleanly
 separate from the passage, or a chat framing the model had no template for. **Stop** — or Escape — closes a run
 where it stands and leaves the slot as it was: half a response is not a
 measurement of anything.
+
+## Saved experiments and automatic comparisons
+
+The **Experiments** tab keeps runs independently of the conversation library.
+Open **Save a run**, name the experiment, and save the latest chat response or
+either comparison slot. Every saved run retains its token measurements,
+inputs, configuration, and recorded tokenizer information. Search by name,
+model, prompt, response, or bookmark note, then reopen a run without loading
+any weights. Experiments are individual JSON files in an `experiments`
+directory beside `conversations.json`, so `CHATLAB_LIBRARY_PATH` and
+`XDG_DATA_HOME` move them along with the conversation library.
+
+Click a saved token to see its measurements and alternatives. **Next matching
+token** visits tokens in order of highest surprise or closest top two
+alternatives, skipping unscored positions, and wraps back to the start.
+**Save bookmark** keeps the selected token and its note; the **Bookmarks**
+filter revisits those selections. A token number can also be entered directly.
+In Compare, **Next largest difference** visits comparable spans in order of
+their surprise gap, with each side's measurements and token positions.
+After inspecting a response token in Chat, save that response as an experiment
+and use **Save current response inspection** to preserve the layer readout and
+attention data. Only an inspection from that exact response can be attached.
+Recorded inspections remain viewable after restarting or unloading the model.
+
+**Use as comparison A/B** puts a saved run into the corresponding Compare slot.
+**Rerun with loaded model** uses the saved messages or measured passage and
+settings, then saves a new experiment. Load the matching model first. The
+recorded device and precision describe the original run; the rerun records
+what is actually loaded. A model repository can change, and identical seeds
+across different hardware or model revisions do not guarantee identical output.
+Edited prompts and replayed token prefixes additionally require a matching
+tokenizer fingerprint.
+
+In **Compare → Set up both runs**, configure the model, precision,
+temperature, seed, and steering for each condition before pressing **Run
+comparison**. Presets cover two seeds, steering disabled versus enabled, and
+full precision versus 4-bit. The runner loads downloaded models sequentially
+and saves each completed condition to Experiments. MLX models use the precision
+stored in their repository: choose **Current**, or compare two conversions.
+Sampling changes affect reply generation; fixed-text measurements compare the
+model and steering applied to the same passage. **Stop** keeps completed
+conditions and discards the unfinished condition. A weight load already in
+progress finishes safely, but stopping prevents the next generation from starting.
 
 ## The local API
 

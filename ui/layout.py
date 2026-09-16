@@ -8,6 +8,8 @@ from functools import partial
 
 import gradio as gr
 
+from ui.fork_tree import TREE_CSS, TREE_JS, render_fork_tree, select_tree_branch
+
 import charts
 import settings
 import themes
@@ -29,6 +31,7 @@ from token_metrics import (
 )
 from trace_export import write_trace_export
 from ui import runtime
+from ui import experiments, experiment_compare
 from ui.icons import icon_classes
 from ui.background import ConversationEvents, ConversationJob
 from ui.token_edit import close_token_editor, open_token_editor, save_token_edit
@@ -269,7 +272,7 @@ def build_app() -> gr.Blocks:
     # GRADIO_ANALYTICS_ENABLED so it holds however the app is started - the
     # desktop bundle, run.sh, or python app.py.
     with gr.Blocks(
-        title="ChatLab", css=CSS + TOKEN_MENU_CSS + extension_css(extensions), theme=THEME, fill_width=True,
+        title="ChatLab", css=CSS + TOKEN_MENU_CSS + TREE_CSS + extension_css(extensions), theme=THEME, fill_width=True,
         analytics_enabled=False,
     ) as demo:
         # The chosen theme's colors, as a stylesheet on the page. Gradio fixes
@@ -308,6 +311,7 @@ def build_app() -> gr.Blocks:
         branch_pick = gr.State(None)
         # Forking: the other transcripts, and the chatbot message last clicked.
         forks_state = gr.State(new_forks())
+        tree_selection = gr.State({})
         selected_message = gr.State(None)
         token_edit_target = gr.State(None)
         # Layer inspection: the prompt ids behind the strips, the strip
@@ -452,7 +456,7 @@ def build_app() -> gr.Blocks:
                         # for it. See BADGE_REFRESH_SECONDS.
                         badge_timer = gr.Timer(BADGE_REFRESH_SECONDS)
 
-                        with gr.Tabs(elem_id="conversation-tabs"):
+                        with gr.Tabs(elem_id="conversation-tabs") as conversation_tabs:
                             with gr.Tab("Chat", elem_id="chat-tab"):
                                 # Two views of one conversation, one at a
                                 # time. The chatbot renders the reply as the
@@ -859,6 +863,24 @@ def build_app() -> gr.Blocks:
                                     elem_id="batch-files",
                                 )
 
+                            with gr.Tab("Fork tree", elem_id="fork-tree-tab"):
+                                gr.Markdown(
+                                    "### Conversation forks\n"
+                                    "Follow each fork back to its message or token. "
+                                    "Choose **A** and **B** on two branches to compare them below."
+                                )
+                                tree_action = gr.Textbox(
+                                    elem_id="fork-tree-action", elem_classes=[MENU_BRIDGE_CLASS]
+                                )
+                                tree_view = gr.HTML(
+                                    render_fork_tree([], new_forks(), {})[0],
+                                    elem_id="fork-tree-view",
+                                )
+                                tree_comparison = gr.HTML(
+                                    render_fork_tree([], new_forks(), {})[1],
+                                    elem_id="fork-tree-comparison",
+                                )
+
                             with gr.Tab("Compare", elem_id="compare-tab"):
                                 gr.Markdown(
                                     "Two runs, side by side. Fill slot A, change one "
@@ -869,6 +891,7 @@ def build_app() -> gr.Blocks:
                                     "and prefill come from Settings, the sampling "
                                     "controls and the steering vector from the Chat tab."
                                 )
+                                pair_conditions, pair_button, pair_load_status = experiment_compare.build()
                                 compare_mode = gr.Radio(
                                     choices=[
                                         ("Writing a reply", REPLY),
@@ -975,6 +998,9 @@ def build_app() -> gr.Blocks:
                                     elem_id="compare-divergences",
                                     label="Where the two runs read a shared token most differently",
                                 )
+                                difference_position = gr.State(None)
+                                next_difference = gr.Button("Next largest difference", size="sm")
+                                difference_detail = gr.Markdown("")
                                 gr.DownloadButton(
                                     "Download comparison JSON",
                                     value=download_comparison,
@@ -983,17 +1009,19 @@ def build_app() -> gr.Blocks:
                                 )
                                 build_activation_patching(compare_a_state, compare_b_state)
 
+                            experiments_view = experiments.build()
+
                     # The seam between the transcript and the readings is a
                     # handle: drag it to give either pane the other's room.
                     # See RESIZE_JS.
-                    gr.HTML(
+                    inspector_resizer = gr.HTML(
                         pane_handle("inspector-pane"),
                         elem_id="inspector-resizer",
                         container=False,
                         padding=False,
                     )
 
-                    with gr.Column(scale=2, min_width=300, elem_id="inspector-pane"):
+                    with gr.Column(scale=2, min_width=300, elem_id="inspector-pane") as inspector_pane:
                         gr.Markdown("## Under the hood", elem_id="inspector-heading")
                         color_scale = gr.Dropdown(
                             choices=list(COLOR_SCALES),
@@ -1976,6 +2004,21 @@ def build_app() -> gr.Blocks:
         )
         # The menu handles Escape before the global generation shortcut.
         demo.load(None, None, None, js=TOKEN_MENU_JS)
+        demo.load(None, None, None, js=TREE_JS)
+        tree_action.input(
+            select_tree_branch,
+            [tree_action, conversation_state, forks_state, tree_selection],
+            [tree_selection, tree_view, tree_comparison],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+            trigger_mode="always_last",
+        )
+        forks_state.change(
+            render_fork_tree,
+            [conversation_state, forks_state, tree_selection],
+            [tree_view, tree_comparison],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+            trigger_mode="always_last",
+        )
         # Escape stops a running generation, from anywhere on the page.
         demo.load(None, None, None, js=SHORTCUT_JS)
         # The two readings panes are dragged wider or narrower by the handle
@@ -2743,12 +2786,28 @@ def build_app() -> gr.Blocks:
                 compare_outputs,
             )
             compare_runs.append(filling)
+        paired = pair_button.click(
+            experiment_compare.run_pair, [*pair_conditions, *compare_inputs],
+            [compare_a_state, compare_b_state, *compare_slot_outputs, pair_button, pair_load_status],
+        )
+        compare_runs.append(paired)
+        next_difference.click(experiment_compare.next_difference,
+                              [compare_export_state, difference_position],
+                              [difference_position, difference_detail])
+        compare_export_state.change(lambda: (None, ""), None, [difference_position, difference_detail],
+                                    show_progress="hidden")
+        experiments.wire(experiments_view, demo, trace_state, chat_context_ids_state,
+                         compare_a_state, compare_b_state, insight_state, inspect_target)
+        conversation_tabs.select(experiments.inspector_visibility, None, [inspector_pane, inspector_resizer],
+                                 show_progress="hidden", queue=False)
+        for held in (compare_a_state, compare_b_state):
+            held.change(render_comparison, [compare_a_state, compare_b_state], compare_outputs)
         # Cancelling closes the run at its last yield, which is what gives the
         # model lock back; this only puts the buttons right. The slot keeps
         # whatever it held before, because half a response is not a run.
         compare_stop.click(
             stop_comparison, None, compare_slot_outputs, cancels=compare_runs
-        )
+        ).then(lambda: gr.update(interactive=True), None, pair_button)
         # cancels, because clearing during a run is otherwise undone by the
         # run: its remaining frames would write over the cleared status and
         # its last one would put the slot back. See clear_slots().
@@ -2757,7 +2816,7 @@ def build_app() -> gr.Blocks:
             None,
             [compare_a_state, compare_b_state, *compare_slot_outputs, *compare_outputs],
             cancels=compare_runs,
-        )
+        ).then(lambda: gr.update(interactive=True), None, pair_button)
         compare_mode.change(
             mode_controls,
             compare_mode,

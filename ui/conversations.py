@@ -339,6 +339,13 @@ def fork_conversation(
     forked, box_text = fork_at(turns, found)
     name = library.claim_name(forks, FORK_PREFIX)
     put_branch(forks, name, forked)
+    forks["origins"][name] = {
+        "parent": source,
+        "kind": "message" if found else "copy",
+        "turn": found[0] if found else max(len(turns) - 1, 0),
+        "part": found[1] if found else "content",
+        "message_count": len(forked),
+    }
     # A fork is the same conversation taken somewhere else, so it answers the
     # way its parent does until it is changed - and both sides are pinned to
     # that, the parent included. Forking is where a comparison is set up, and

@@ -18,7 +18,11 @@ import typing
 import gradio as gr
 
 import library
-from conversation import branch_choices, copy_forks, copy_turns, display_messages, put_branch
+import settings
+from conversation import (
+    FORK_PREFIX, SAMPLING_FIELDS, branch_choices, copy_forks, copy_turns,
+    display_messages, put_branch, put_branch_sampling,
+)
 from ui.common import finalize_partial
 from ui.generation import CHAT_OUTPUT_NAMES
 from ui.panel import restore_chat_metrics_generation, transcript_update
@@ -60,6 +64,8 @@ class ConversationJob:
         self.pending = {}
         self.version = 0
         self.rendered = None
+        self.fork_created = False
+        self.new_branch = None
 
     def __deepcopy__(self, memo):
         return type(self)()
@@ -68,6 +74,33 @@ class ConversationJob:
         with self.lock:
             changed = {i: value for i, value in enumerate(frame) if not skipped(value)}
             snapshot = copy_frame(changed)
+            turns = snapshot.get(NAMES["turns"])
+            origin = turns[-1].pop("_fork_origin", None) if turns else None
+            if origin and not self.fork_created:
+                parent = self.owner
+                self.owner = library.claim_name(self.saved, FORK_PREFIX)
+                self.saved["origins"][self.owner] = dict(origin, parent=parent)
+                inherited = dict(self.saved["sampling"].get(parent) or {})
+                if not inherited:
+                    source = self.saved["branches"][parent]
+                    recorded = next((t.get("generation_settings") for t in reversed(source)
+                                     if t.get("generation_settings")), None)
+                    inherited = settings.sampling_values(recorded)
+                    put_branch_sampling(self.saved, parent, inherited)
+                held = turns[-1].get("generation_settings", {})
+                put_branch_sampling(self.saved, self.owner, inherited | {
+                    key: held[key] for key in SAMPLING_FIELDS if key in held
+                    and not (key == "max_new_tokens" and origin.get("single_step"))
+                })
+                self.fork_created = True
+                self.new_branch = parent
+            if origin and self.fork_created and origin.get("replacement") is None:
+                at = origin.get("token", 0) - 1
+                metrics = turns[-1].get("tokens") or []
+                if 0 <= at < len(metrics):
+                    recorded = self.saved["origins"][self.owner]
+                    recorded["replacement"] = metrics[at]["text"]
+                    recorded["replacement_ids"] = [int(metrics[at]["token_id"])]
             # These dictionaries only replace snapshot entries. Consumers get
             # independent containers from render(), so one snapshot serves both.
             self.frame.update(snapshot)
@@ -93,6 +126,8 @@ class ConversationJob:
             self.cancel = threading.Event()
             self.running = True
             self.rendered = None
+            self.fork_created = False
+            self.new_branch = None
             self._publish(first)
         context = contextvars.copy_context()
         self.worker = threading.Thread(
@@ -151,10 +186,25 @@ class ConversationJob:
         """Bring the source transcript up to date without claiming another branch."""
         forks = copy_forks(forks)
         with self.lock:
+            if self.new_branch is not None:
+                parent = self.new_branch
+                self.new_branch = None
+                # Import once: future polls must not resurrect a deleted fork
+                # or pull the reader back after they navigate elsewhere.
+                put_branch(forks, self.owner, self.saved["branches"][self.owner])
+                forks["updated"][self.owner] = self.saved["updated"][self.owner]
+                forks["origins"][self.owner] = copy.deepcopy(self.saved["origins"][self.owner])
+                for name in (parent, self.owner):
+                    if name == self.owner or not forks["sampling"].get(name):
+                        put_branch_sampling(forks, name, self.saved["sampling"][name])
+                if forks["active"] == parent:
+                    forks["active"] = self.owner
             if self.saved is not None and self.owner in forks["branches"]:
                 stamp = self.saved["updated"].get(self.owner, "")
                 if stamp >= forks["updated"].get(self.owner, ""):
                     forks["branches"][self.owner] = copy_turns(self.saved["branches"][self.owner])
+                    if self.owner in self.saved["origins"]:
+                        forks["origins"][self.owner] = copy.deepcopy(self.saved["origins"][self.owner])
                     if stamp:
                         forks["updated"][self.owner] = stamp
                     if forks["active"] == self.owner:

@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import json
 import threading
 import unittest
 from unittest import mock
@@ -325,6 +326,152 @@ class BackgroundConversationTests(unittest.TestCase):
         self.assertEqual(reply["generated_tokens"], 2)
         self.assertTrue(reply["token_step_paused"])
         self.assertFalse(self.manager.busy)
+
+    def token_pick(self):
+        turns = self.state[self.turns._id]
+        turn = turns[-1]
+        metric = turn["tokens"][0]
+        return {
+            "source": "turn", "turn": len(turns) - 1, "index": 0,
+            "at_generation": turn["metrics_generation"],
+            "at_token_id": metric["token_id"],
+            "token_id": 3, "text": " world", "original_id": metric["token_id"],
+            "original": metric["text"],
+        }
+
+    def test_token_forks_preserve_original_and_nested_ancestry(self):
+        self.start()
+        self.finish()
+        self.call("poll")
+        original = copy.deepcopy(self.state[self.turns._id])
+        for parent, child in (("Main", "Fork 1"), ("Fork 1", "Fork 2")):
+            fn = self.named("branch_from")
+            self.state[fn.inputs[0]._id] = self.token_pick()
+            self.call("branch_from", dict(enumerate(SETTINGS, 3)))
+            self.finish()
+            self.call("poll")
+            forks = self.state[self.forks._id]
+            self.assertEqual(forks["active"], child)
+            self.assertEqual(forks["origins"][child]["parent"], parent)
+            self.assertEqual(forks["origins"][child]["token"], 1)
+            self.assertEqual(forks["origins"][child]["replacement"], " world")
+            self.assertEqual(forks["branches"]["Main"], original)
+            self.assertNotIn("_fork_origin", forks["branches"][child][-1])
+        saved = library.read()
+        self.assertEqual(saved["origins"]["Fork 2"]["parent"], "Fork 1")
+        self.assertEqual(saved["branches"]["Main"][-1]["content"], "Hello world")
+        # Ordinary continuation must not fork again from a leftover request.
+        self.call("chat", {0: "More", **dict(enumerate(SETTINGS, 2))})
+        self.finish()
+        self.call("poll")
+        self.assertEqual(self.state[self.forks._id]["active"], "Fork 2")
+        self.assertNotIn("Fork 3", self.state[self.forks._id]["branches"])
+
+    def test_typed_replacement_and_resample_menu_record_real_token_changes(self):
+        self.start()
+        self.finish()
+        self.call("poll")
+        fn = self.named("branch_with_text")
+        self.state[fn.inputs[0]._id] = self.token_pick()
+        self.call("branch_with_text", {1: " world", **dict(enumerate(SETTINGS, 4))})
+        self.finish()
+        self.call("poll")
+        first = self.state[self.forks._id]["origins"]["Fork 1"]
+        self.assertEqual(first["replacement"], " world")
+        self.assertEqual(first["original"], "Hello")
+        action = json.dumps({"kind": "regenerate", "selection": self.token_pick()})
+        self.call("branch_from_menu", {0: action, **dict(enumerate(SETTINGS, 3))})
+        self.finish()
+        self.call("poll")
+        forks = self.state[self.forks._id]
+        origin = forks["origins"]["Fork 2"]
+        token = forks["branches"]["Fork 2"][-1]["tokens"][0]
+        self.assertEqual(origin["replacement"], token["text"])
+        self.assertEqual(origin["replacement_ids"], [token["token_id"]])
+
+    def test_tree_selection_uses_the_browser_event_and_keeps_active_conversation(self):
+        self.start()
+        self.finish()
+        self.call("poll")
+        self.call("fork_conversation")
+        forks = self.state[self.forks._id]
+        self.assertEqual(forks["origins"]["Fork 1"]["parent"], "Main")
+        self.call("select_tree_branch", {0: json.dumps({"slot": "A", "name": "Main"})})
+        self.call("select_tree_branch", {0: json.dumps({"slot": "B", "name": "Fork 1"})})
+        fn = self.named("select_tree_branch")
+        self.assertEqual(self.state[fn.outputs[0]._id], {"A": "Main", "B": "Fork 1"})
+        self.assertIn("compared with", self.view[fn.outputs[2]._id])
+        self.assertEqual(self.state[self.forks._id]["active"], "Fork 1")
+
+    def test_stepping_from_an_earlier_unchanged_token_forks_without_changing_length_control(self):
+        self.start()
+        self.finish()
+        self.call("poll")
+        pick = self.token_pick()
+        pick["token_id"], pick["text"] = pick["original_id"], pick["original"]
+        fn = self.named("next_token")
+        self.state[fn.inputs[0]._id] = pick
+        self.call("next_token", dict(enumerate(SETTINGS, 3)))
+        self.finish()
+        self.call("poll")
+        forks = self.state[self.forks._id]
+        self.assertEqual(forks["active"], "Fork 1")
+        self.assertEqual(forks["sampling"]["Fork 1"]["max_new_tokens"], 8)
+        self.assertEqual(forks["branches"]["Main"][-1]["content"], "Hello world")
+        self.assertEqual(forks["branches"]["Fork 1"][-1]["generation_settings"]["max_new_tokens"], 1)
+
+    def test_failed_token_replay_does_not_create_a_fork(self):
+        self.start()
+        self.finish()
+        self.call("poll")
+        original = copy.deepcopy(self.state[self.turns._id])
+        fn = self.named("branch_from")
+        self.state[fn.inputs[0]._id] = self.token_pick()
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("Replay failed")
+            yield
+
+        self.manager.generate = broken
+        self.call("branch_from", dict(enumerate(SETTINGS, 3)))
+        self.finish()
+        self.call("poll")
+        self.assertEqual(self.state[self.turns._id], original)
+        self.assertEqual(self.state[self.forks._id]["origins"], {})
+        self.assertEqual(self.state[self.forks._id]["active"], "Main")
+
+    def test_navigation_during_replay_does_not_switch_back_when_fork_arrives(self):
+        self.start()
+        self.finish()
+        self.call("poll")
+        self.release.clear()
+        self.entered.clear()
+        fn = self.named("branch_from")
+        self.state[fn.inputs[0]._id] = self.token_pick()
+        self.call("branch_from", dict(enumerate(SETTINGS, 3)))
+        self.assertTrue(self.entered.wait(2))
+        self.switch("Chat 1")
+        self.finish()
+        self.call("poll")
+        forks = self.state[self.forks._id]
+        self.assertEqual(forks["active"], "Chat 1")
+        self.assertEqual(self.state[self.turns._id][0]["content"], "Another conversation")
+        self.assertEqual(forks["origins"]["Fork 1"]["parent"], "Main")
+        self.assertEqual(forks["branches"]["Main"][-1]["content"], "Hello world")
+
+    def test_deleted_token_fork_is_not_resurrected_by_poll(self):
+        self.start()
+        self.finish()
+        self.call("poll")
+        fn = self.named("branch_from")
+        self.state[fn.inputs[0]._id] = self.token_pick()
+        self.call("branch_from", dict(enumerate(SETTINGS, 3)))
+        self.finish()
+        self.call("poll")
+        self.call("delete_fork")
+        self.call("poll")
+        self.assertNotIn("Fork 1", self.state[self.forks._id]["branches"])
+        self.assertNotIn("Fork 1", library.read()["branches"])
 
 
 class BackgroundSnapshotTests(unittest.TestCase):

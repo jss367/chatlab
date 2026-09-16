@@ -286,6 +286,9 @@ def inspect_layers(
             status = f"{status} This model did not return attention weights."
         if inspection_session is not None:
             insight["inspection_controls"] = {"session": inspection_session, "revision": revision}
+        insight["saved_target"] = dict(target)
+        from experiment_runs import SESSION_ID
+        insight["saved_session"] = SESSION_ID
         frame = (
             render_lens(insight),
             render_attention(insight, layer),

@@ -569,6 +569,7 @@ def _stream_reply(
     expected_load_id: str | None = None,
     single_step: bool = False,
     previous_turns: list[dict] | None = None,
+    fork_origin: dict | None = None,
     branch_thinking_mode: str | None = None,
 ):
     """The body of generate_reply(), run with the generation slot held."""
@@ -586,6 +587,18 @@ def _stream_reply(
 
     steering = compact_steering(steering_from_controls(steering, steering_enabled, steering_strength, steering_layer))
     pending = make_turn("assistant", "", "")
+    pending["generation_settings"] = {
+        "temperature": float(temperature), "top_p": float(top_p),
+        "top_k": int(top_k), "skip_top_below": float(skip_top_below),
+        "max_new_tokens": int(max_new_tokens), "seed": used_seed,
+        "system_prompt": system_prompt, "keep_reasoning": bool(keep_reasoning),
+        "assistant_prefill": "" if replaying else assistant_prefill,
+        "thinking_mode": branch_thinking_mode if branch_thinking_mode is not None else thinking_mode,
+    }
+    if fork_origin is not None:
+        # The job consumes this only when a successful replay becomes visible.
+        # It is memory-only; the durable origin belongs to the branch.
+        pending["_fork_origin"] = fork_origin
     if steering is not None:
         pending["steering"] = steering
     pending["reasoning_closed"] = True
@@ -728,6 +741,7 @@ def _stream_reply(
     metrics: list[dict] = []
     status = "The model produced no tokens."
     first = True
+    recorded_context = None
     forced_prefix_tokens = 0
     literal_prefill = ""
     literal_spans: tuple[tuple[int, int], ...] = ()
@@ -827,6 +841,7 @@ def _stream_reply(
                         update.load_id,
                         *([steering] if steering is not None else []),
                     )
+                    recorded_context = context_ids
                 yield snapshot(
                     metrics,
                     status,
@@ -907,6 +922,7 @@ def _stream_reply(
         "skip_top_below": float(skip_top_below),
         "max_new_tokens": int(max_new_tokens),
         "seed": used_seed,
+        "requested_thinking_mode": thinking_mode or "default",
     }
     if pending.get("thinking_mode") is not None:
         sampling["thinking_mode"] = pending["thinking_mode"]
@@ -946,6 +962,26 @@ def _stream_reply(
         else {}
     )
     if trace:
+        # Keep provenance with the trace, so saving it after a model switch
+        # never borrows metadata from the model that happens to be loaded.
+        from ui.compare import _decoded_spans, _tokenizer_identity
+        from experiment_runs import SESSION_ID
+        published = runtime.MANAGER.loaded_model()
+        decoded, token_ends = _decoded_spans(
+            metrics, recorded_context[1] if recorded_context else (), raw_text,
+            update.literal_prefill_tokens,
+        )
+        trace["run_context"] = {
+            "session_id": SESSION_ID,
+            "load_id": pending.get("load_id"),
+            "metrics_generation": generation,
+            "context_ids": list(recorded_context[1]) if recorded_context else [],
+            "tokenizer": _tokenizer_identity(),
+            "device_name": published.device_name,
+            "precision": published.precision,
+            "decoded": decoded,
+            "token_ends": token_ends,
+        }
         status = f"{status} Exports are ready."
     yield snapshot(
         metrics,
@@ -1375,6 +1411,11 @@ def _branch_with_text(
                 (replacement_start, replacement_start + len(replacement_ids)),
             ),
             branch_note=note,
+            fork_origin={
+                "kind": "token", "turn": position, "token": at,
+                "original": metric["text"], "original_id": int(metric["token_id"]),
+                "replacement": replacement, "replacement_ids": list(replacement_ids),
+            },
             expected_load_id=expected_load,
             previous_turns=turns,
             branch_thinking_mode=turns[position].get("thinking_mode", "default"),
@@ -1483,6 +1524,11 @@ def _answer_edited_prompt(
                 "replacement": replacement,
             },
             branch_note=note,
+            fork_origin={
+                "kind": "prompt", "turn": position + 1, "token": index + 1,
+                "original": metric["text"], "original_id": int(metric["token_id"]),
+                "replacement": replacement, "replacement_ids": list(replacement_ids),
+            },
             expected_load_id=expected_load,
             previous_turns=turns,
             branch_thinking_mode=(
@@ -1650,6 +1696,13 @@ def _branch_from(pick, prompt_text, turns, *settings, single_step=False, resampl
                 metrics, len(forced) if unchanged else len(kept)
             ),
             branch_note=note,
+            fork_origin=(None if single_step and unchanged and position == len(turns) - 1 and at == len(metrics) else {
+                "kind": "token", "turn": position, "token": at,
+                "single_step": single_step,
+                "original": _metric["text"], "original_id": int(_metric["token_id"]),
+                "replacement": None if resample else pick["text"],
+                "replacement_ids": [] if resample else [int(pick["token_id"])],
+            }),
             expected_load_id=expected_load,
             single_step=single_step,
             previous_turns=turns,

@@ -71,6 +71,11 @@ LIBRARY_PATH_ENV = "CHATLAB_LIBRARY_PATH"
 XDG_DATA_ENV = "XDG_DATA_HOME"
 LIBRARY_DIRECTORY = "chatlab"
 LIBRARY_FILENAME = "conversations.json"
+# Older releases preserve unknown sampling keys but discard unknown branch
+# fields. Keep a wire-only copy here so their read/save cycle retains ancestry.
+# Bind it to its branch name: an older release can also copy sampling to a
+# brand-new fork, which must not inherit its parent's own origin record.
+ORIGIN_COMPAT_KEY = "_chatlab_fork_origin"
 
 # Held across the whole of write(): read the file, merge, stage, replace. The
 # two listeners in app.py that save both run on Gradio's worker threads, and
@@ -145,7 +150,12 @@ def dump(forks: dict | None) -> str:
     branches = []
     for name, turns in forks["branches"].items():
         entry = {"name": name, "turns": turn_entries(turns)}
+        if name in forks["origins"]:
+            entry["origin"] = forks["origins"][name]
         sampling = sampling_entry(forks["sampling"].get(name))
+        sampling.pop(ORIGIN_COMPAT_KEY, None)
+        if name in forks["origins"]:
+            sampling[ORIGIN_COMPAT_KEY] = {"branch": name, "origin": forks["origins"][name]}
         if sampling:
             entry["sampling"] = sampling
         # Written whether or not there is sampling beside it: a stamp on its
@@ -184,6 +194,7 @@ def parse(payload: str) -> dict:
         raise ValueError("The conversations file has no list of branches.")
 
     branches: dict[str, list[dict]] = {}
+    origins: dict[str, dict] = {}
     sampling: dict[str, dict] = {}
     sampling_updated: dict[str, str] = {}
     updated: dict[str, str] = {}
@@ -195,6 +206,10 @@ def parse(payload: str) -> dict:
             raise ValueError("Every branch needs a name.")
         if name in branches:
             raise ValueError(f"The branch {name!r} appears twice.")
+        origin = entry.get("origin")
+        if origin is not None:
+            from fork_tree import validate_origin
+            origins[name] = validate_origin(origin)
         stamp = entry.get("updated")
         if stamp is not None:
             if not isinstance(stamp, str):
@@ -208,6 +223,11 @@ def parse(payload: str) -> dict:
             # saved setting when the conversation is answered, the same way
             # a hand-edited settings file does.
             kept = sampling_entry(held)
+            legacy_origin = kept.pop(ORIGIN_COMPAT_KEY, None)
+            if (origin is None and isinstance(legacy_origin, dict)
+                    and legacy_origin.get("branch") == name):
+                from fork_tree import validate_origin
+                origins[name] = validate_origin(legacy_origin.get("origin"))
             if kept:
                 sampling[name] = kept
         # Read whether or not any sampling came with it: on its own it says
@@ -250,6 +270,7 @@ def parse(payload: str) -> dict:
     return {
         "active": active,
         "branches": branches,
+        "origins": origins,
         "sampling": sampling,
         "sampling_updated": sampling_updated,
         "updated": updated,
@@ -280,6 +301,7 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
         names += [name for name in held if name not in names]
 
     branches: dict[str, list[dict]] = {}
+    origins: dict[str, dict] = {}
     sampling: dict[str, dict] = {}
     sampling_updated: dict[str, str] = {}
     updated: dict[str, str] = {}
@@ -299,6 +321,11 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
         winner = newer(name, "updated")
         if name in winner["branches"]:
             branches[name] = winner["branches"][name]
+            # Origins are immutable once created. Older writers can update a
+            # transcript without understanding (and erasing) its ancestry.
+            origin = winner["origins"].get(name) or mine["origins"].get(name) or theirs["origins"].get(name)
+            if origin:
+                origins[name] = origin
             # The sampling is merged on its own stamp rather than the
             # branch's. A page that moves a slider may be a reply behind the
             # page that made it: it must not win the transcript, and the
@@ -323,6 +350,7 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
     return {
         "active": active,
         "branches": branches,
+        "origins": origins,
         "sampling": sampling,
         "sampling_updated": sampling_updated,
         "updated": updated,
