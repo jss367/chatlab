@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
+from .dynamic_maze import (FORMAT as CHANGING_FORMAT, ChangingMaze, check_closure, load_maze,
+                           maze_at_turn, validate_updates)
 from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call
 from extension_api import write_private_text
 
@@ -54,6 +56,10 @@ class Episode:
     latency: int | None = None
     manual_intervention: bool = False
     interrupt_next: bool = False
+    # A cell queued to close before the next response, and every queued closure
+    # that could not happen by the time its response came round.
+    close_next: tuple = ()
+    dropped_closures: list = field(default_factory=list)
     pause_requested: bool = False
     stop_requested: bool = False
     busy: bool = False
@@ -108,8 +114,24 @@ class Episode:
             system=self.config["system_prompt"], instruction=self.config["instruction"])
         self.supplied_moves = supplied
 
+    @property
+    def current_maze(self):
+        """The map as it stands now: the original plus every closure recorded so far.
+
+        Rebuilt from the original and the record rather than kept as state of
+        its own, so the map the simulator moves on is the same one a replay of
+        this run reconstructs and neither can drift from the other.
+        """
+        return maze_at_turn(self.maze, self.config.get("map_updates", ()), None)
+
+    @property
+    def map_changes(self):
+        """Whether this run's walls can close while it is running."""
+        return isinstance(self.maze, ChangingMaze)
+
     def model_state(self, error=None):
-        return self.maze.state(self.position, error, goal_mode=self.config["goal_mode"], goal_hint=self.config["goal_hint"])
+        return self.current_maze.state(self.position, error, goal_mode=self.config["goal_mode"],
+                                       goal_hint=self.config["goal_hint"])
 
     @property
     def moves(self):
@@ -119,8 +141,8 @@ class Episode:
         keys = ("run_id", "phase", "detail", "messages", "events", "turns", "position", "model_id", "load_id",
                 "sampled_tokens", "tool_attempts", "supplied_moves", "interrupted", "intervention_turn",
                 "intervention_tokens", "intervention_attempts", "resumed", "first_move_progress", "latency",
-                "manual_intervention", "created_at", "token_edit", "pending_edit")
-        return {"format": FORMAT, "maze": self.maze.to_dict(), "config": self.config,
+                "manual_intervention", "created_at", "token_edit", "pending_edit", "dropped_closures")
+        return {"format": CHANGING_FORMAT if self.map_changes else FORMAT, "maze": self.maze.to_dict(), "config": self.config,
                 "exploratory": True, "tokenizer_note": "Every turn records its actual prompt IDs. Later turns are templated from the complete prior response text, including reasoning.",
                 **{k: getattr(self, k) for k in keys}}
 
@@ -166,6 +188,49 @@ class Episode:
         if not self.config.get("interruption_text", "").strip():
             raise ValueError("Choose interruption text before starting this episode.")
         self.interrupt_next, self.manual_intervention = True, True
+
+    def request_closure(self, cell):
+        """Queue one cell to be walled off before the next generated response.
+
+        Checked here against the map and the position as they stand, so a cell
+        that cannot be closed is refused where it was asked for. It is checked
+        again when it lands, because the character moves in between.
+        """
+        if not self.map_changes:
+            raise ValueError("This episode's map is fixed. Start an episode with a changing map to close cells during a run.")
+        if self.phase in TERMINAL or self.replay_only:
+            raise ValueError("Start a new episode to change the map. This episode is finished or is a saved replay.")
+        check_closure(self.current_maze, self.position, cell)
+        self.close_next, self.manual_intervention = tuple(cell), True
+
+
+def apply_closure(episode):
+    """Wall off the queued cell, if there is one, and record what the map became.
+
+    The character has moved since the closure was queued, so the same rules are
+    asked again here. One that has become impossible is dropped and recorded as
+    dropped: the run went on under a map the reader asked to change and which
+    did not change, and anything scoring the run needs to know that rather than
+    read an unchanged map as an unchanged intention.
+    """
+    if not episode.close_next:
+        return
+    cell, episode.close_next = tuple(episode.close_next), ()
+    boundary = len(episode.turns)
+    try:
+        changed = check_closure(episode.current_maze, episode.position, cell)
+    except ValueError as exc:
+        episode.dropped_closures.append(dict(before_turn=boundary, cell=list(cell), reason=str(exc)))
+        episode.detail = f"The queued closure at row {cell[0]}, column {cell[1]} was dropped. {exc}"
+        logger.warning("Run %s dropped the closure at %s before response %s: %s",
+                       episode.run_id, cell, boundary + 1, exc)
+        return
+    episode.config.setdefault("map_updates", []).append(
+        dict(before_turn=boundary, position=list(episode.position),
+             closed_cell=list(cell), grid=list(changed.grid)))
+    episode.detail = f"The map changed: row {cell[0]}, column {cell[1]} is now a wall."
+    logger.info("Run %s closed %s before response %s, leaving %s moves to the destination",
+                episode.run_id, cell, boundary + 1, len(changed.route(episode.position)) - 1)
 
 
 def context_messages(episode, index):
@@ -421,7 +486,15 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
             raise ValueError("Enter replacement text or choose a token alternative.")
         if any(t in stop_ids for t in replacement_ids[:-1]):
             raise ValueError("A stop token can only appear at the end of the replacement.")
-        result = Episode(episode.maze, episode.config)
+        # The fork rebuilds the run one response at a time, so the closures it
+        # keeps are replayed at their own boundaries below rather than being in
+        # force from the start. Closures after the edited response are left
+        # behind with the responses that followed them.
+        carried, config = [], copy.deepcopy(episode.config)
+        if episode.map_changes:
+            carried = [u for u in config.get("map_updates", []) if u["before_turn"] <= turn_index]
+            config["map_updates"] = []
+        result = Episode(episode.maze, config)
         # The fork continues under the weights in memory now, not the ones that
         # produced the original; token_edit keeps the original stamp.
         result.model_id, result.load_id = manager.model_id, manager.load_id
@@ -429,6 +502,8 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
         # Rebuild history and recovery counters through the same simulator path
         # used during generation, excluding the edited response and its future.
         for i, previous in enumerate(episode.turns[:turn_index]):
+            if carried:
+                result.config["map_updates"].extend(u for u in carried if u["before_turn"] == i)
             turn = copy.deepcopy(previous)
             result.turns.append(turn)
             if episode.interrupted and episode.intervention_turn == i:
@@ -438,6 +513,8 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
                 result.intervention_attempts = result.tool_attempts
             result.phase = "running"
             finish_turn(result, turn, stop_ids, result.config["per_turn_tokens"])
+        if carried:
+            result.config["map_updates"].extend(u for u in carried if u["before_turn"] == turn_index)
         prefix = kept_ids + replacement_ids
         result.token_edit = dict(parent_run_id=episode.run_id, turn=turn_index,
                                  token_index=token_index, original_token_id=metrics[token_index]["token_id"],
@@ -487,7 +564,7 @@ def finish_turn(episode, turn, stop_ids, max_tokens):
         event = {"accepted": False, "before": list(episode.position), "after": list(episode.position),
                  "error": error, "arrived": False, "progress": False}
     else:
-        event = apply_call(episode.maze, episode.position, args, goal_mode=episode.config["goal_mode"])
+        event = apply_call(episode.current_maze, episode.position, args, goal_mode=episode.config["goal_mode"])
     event.update(source="model", turn=len(episode.turns) - 1)
     episode.events.append(event)
     turn["event"] = event
@@ -574,6 +651,13 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
                 break
             if manager.load_id != episode.load_id:
                 raise ValueError("The model changed during this episode. Start a new episode with the selected model.")
+            # Before the response is generated, so its call is judged against
+            # the map as changed. The response's own prompt still shows the map
+            # it was given, because the history is already written: the model
+            # meets the change in the simulator's reply to whatever it does
+            # next, which carries the current grid whether the call was
+            # accepted or refused.
+            apply_closure(episode)
             edit = episode.pending_edit
             forced = edit["forced_ids"] if edit else interrupted_prefix(episode, manager)
             inserts_interruption = edit["interruption_here"] if edit else bool(forced)
@@ -675,16 +759,28 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
 
 
 def from_payload(data):
-    if not isinstance(data, dict) or data.get("format") != FORMAT:
+    if not isinstance(data, dict) or data.get("format") not in (FORMAT, CHANGING_FORMAT):
         raise ValueError("Choose a ChatLab maze run JSON file.")
     if not re.fullmatch(r"[a-f0-9]{32}", str(data.get("run_id", ""))):
         raise ValueError("Invalid run identifier.")
-    maze = Maze.from_dict(data["maze"])
+    if not isinstance(data.get("maze"), dict) or not isinstance(data.get("config"), dict):
+        raise ValueError("The run is missing its map or its configuration.")
+    changing = data["format"] == CHANGING_FORMAT
+    # A fixed-map run carrying closures would replay as the map it started
+    # from, which is not the map its responses were answering.
+    if not changing and data["config"].get("map_updates"):
+        raise ValueError(f"A run whose map changes has to be recorded as {CHANGING_FORMAT}.")
+    maze = load_maze(data["maze"]) if changing else Maze.from_dict(data["maze"])
     result = Episode(maze, data["config"])
     allowed = result.payload().keys() - {"format", "maze", "config", "exploratory", "tokenizer_note"}
     for key in allowed:
         if key in data:
             setattr(result, key, data[key])
+    if changing:
+        updates = result.config.get("map_updates", [])
+        if not isinstance(updates, list):
+            raise ValueError("A run's map changes must be a list.")
+        validate_updates(maze, updates, result.turns, result.events)
     # Reconstruct the visible path from real transitions, never trust claimed positions.
     position = maze.start
     for event in result.events:
@@ -692,7 +788,8 @@ def from_payload(data):
             raise ValueError("The saved path contains a position mismatch.")
         if event["accepted"]:
             mode = result.config["goal_mode"]
-            actual = apply_call(maze, position, {"maze_id": maze.tool_id(mode), "direction": event["direction"]}, goal_mode=mode)
+            current = maze_at_turn(maze, result.config.get("map_updates", []), event.get("turn", -1)) if changing else maze
+            actual = apply_call(current, position, {"maze_id": current.tool_id(mode), "direction": event["direction"]}, goal_mode=mode)
             if not actual["accepted"] or actual["after"] != event["after"]:
                 raise ValueError("The saved path contains an invalid transition.")
             position = tuple(event["after"])

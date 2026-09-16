@@ -10,6 +10,7 @@ from pathlib import Path
 
 import gradio as gr
 
+from .dynamic_maze import ChangingMaze, changing, maze_at_turn
 from .maze import GOAL_MODES, PASSAGES, SYSTEM, TOOLS, default_instruction, generate
 from .runner import RECOVERY_DEFAULTS, TERMINAL, Episode, context_messages, fork_token_edit, from_payload, stream_episode
 from .trials import prepare_trial, read_trials
@@ -92,7 +93,10 @@ def export_run(ep, directory):
 
 
 def board(ep, index=None, reveal=False, animate=False):
-    maze = ep.maze
+    updates = [u for u in ep.config.get("map_updates", ())
+               if index is None or u["before_turn"] <= index]
+    maze = maze_at_turn(ep.maze, updates, None)
+    closed = {tuple(u["closed_cell"]) for u in updates}
     events = [e for e in ep.events if e.get("turn", -1) <= index] if index is not None else ep.events
     accepted = [e for e in events if e["accepted"]]
     position = tuple(accepted[-1]["after"]) if accepted else maze.start
@@ -106,12 +110,17 @@ def board(ep, index=None, reveal=False, animate=False):
     parts = [f'<svg viewBox="0 0 {total} {total}" role="img" aria-label="{size} by {size} maze. Character at row {position[0]}, column {position[1]}.">']
     for r, row in enumerate(maze.grid):
         for c, value in enumerate(row):
-            parts.append(f'<rect x="{pad+c*cell+2}" y="{pad+r*cell+2}" width="52" height="52" rx="7" fill="{"#27344a" if value == "#" else "#fff"}"/>')
+            fill = "#78350f" if (r, c) in closed else "#27344a" if value == "#" else "#fff"
+            parts.append(f'<rect x="{pad+c*cell+2}" y="{pad+r*cell+2}" width="52" height="52" rx="7" fill="{fill}"/>')
     for i in range(size):
         parts.append(f'<text x="{pad+(i+.5)*cell}" y="17" text-anchor="middle" fill="#7b8598" font-size="12">{i}</text>')
         parts.append(f'<text x="12" y="{pad+(i+.5)*cell+4}" text-anchor="middle" fill="#7b8598" font-size="12">{i}</text>')
     if reveal:
-        parts.append(f'<polyline points="{points(maze.route())}" fill="none" stroke="#b4bdcc" stroke-width="4" stroke-dasharray="3 8"/>')
+        # A changing map is drawn from where the character stands, because a
+        # closure behind it can leave the route it began on no longer the one
+        # in front of it.
+        route = maze.route(position) if isinstance(maze, ChangingMaze) else maze.route()
+        parts.append(f'<polyline points="{points(route)}" fill="none" stroke="#b4bdcc" stroke-width="4" stroke-dasharray="3 8"/>')
     for e in accepted:
         supplied = e["source"] == "supplied"
         dash = 'stroke-dasharray="5 6"' if supplied else ''
@@ -132,7 +141,11 @@ def board(ep, index=None, reveal=False, animate=False):
         px, py = center(accepted[-1]["before"])
         motion = f'<animateTransform attributeName="transform" type="translate" from="{px} {py}" to="{x} {y}" dur="0.3s" fill="freeze"/>'
     parts.append(f'<g transform="translate({x} {y})">{motion}<circle r="17" fill="#4f46e5" stroke="white" stroke-width="3"/><circle cx="-5" cy="-2" r="2.5" fill="white"/><circle cx="5" cy="-2" r="2.5" fill="white"/><path d="M -5 6 Q 0 10 5 6" stroke="white" fill="none" stroke-width="2"/></g></svg>')
-    parts.append('<div class="maze-legend"><span>● Character / model path</span><span>┄ Supplied moves</span><span>★ Destination</span><span style="color:#b77906">○ Interruption</span></div>')
+    legend = ['<span>● Character / model path</span>', '<span>┄ Supplied moves</span>', '<span>★ Destination</span>',
+              '<span style="color:#b77906">○ Interruption</span>']
+    if ep.map_changes:
+        legend.append('<span style="color:#78350f">▪ Closed during the run</span>')
+    parts.append('<div class="maze-legend">' + "".join(legend) + '</div>')
     return "".join(parts)
 
 
@@ -151,7 +164,7 @@ def scenario_values(ep):
             config.get("per_turn_tokens", 1024), config.get("token_budget", 8192), config.get("attempt_budget", 32),
             config["recovery_tokens"], config["recovery_attempts"],
             mode, gr.update(value=config["goal_hint"], visible=mode == "hint"),
-            config["system_prompt"], config["instruction"],
+            config["system_prompt"], config["instruction"], ep.map_changes,
             "None" if not text else named or "Custom")
 
 
@@ -209,7 +222,23 @@ def status(ep):
             f"**Setup prompt:** {'Edited' if edited_prompt(ep.config) else 'Default'}"
             f"{'' if 'openness' in ep.config else ' · **Open cells:** Unrecorded, so the slider beside this run is not its own'}\n\n"
             f"**Recovery:** {recovery} · **Recovery window:** {window} · "
-            f"**Model:** {html.escape(ep.model_id or 'load one on the Models page')}")
+            f"**Model:** {html.escape(ep.model_id or 'load one on the Models page')}"
+            f"{map_line(ep)}")
+
+
+def map_line(ep):
+    """How this run's map changed, said only by a run whose map could change.
+
+    A dropped closure is reported here because it is the one thing about a
+    changing map that leaves no mark on the board: the run went on under a map
+    the reader asked to change and which did not change.
+    """
+    if not ep.map_changes:
+        return ""
+    closures = len(ep.config.get("map_updates", ()))
+    dropped = len(ep.dropped_closures)
+    return (f"\n\n**Map:** Changing · {closures} cell{'' if closures == 1 else 's'} closed"
+            + (f" · {dropped} closure{'' if dropped == 1 else 's'} dropped, listed in the run JSON" if dropped else ""))
 
 
 def timeline(ep):
@@ -247,6 +276,8 @@ def transport_text(ep):
     else:
         end = "Live end · Next generates" if index == len(ep.turns) - 1 else "Play continues at live end"
     queued = " · **Interruption queued**" if ep.interrupt_next and not ep.interrupted else ""
+    if ep.close_next:
+        queued += f" · **Closing ({ep.close_next[0]}, {ep.close_next[1]})**"
     return f"**{mode}** · {selected} · ({position[0]}, {position[1]}){queued}\n\n{end}"
 
 
@@ -466,6 +497,8 @@ def _build_page(context):
                 instruction = gr.Textbox(value=default_instruction("coordinates"), label="Task instruction", lines=6,
                                          elem_id="maze-instruction",
                                          info="Sent verbatim ahead of the JSON state. Changing Goal information rewrites this unless you have edited it.")
+            changing_map = gr.Checkbox(value=False, label="Map can change during the run", elem_id="maze-changing",
+                                       info="Fixes one identifier for the maze, so closing a cell mid-run does not rename it to the model. Saved as a chatlab-maze-run-2 file.")
             with gr.Row():
                 size = gr.Slider(3, 15, value=5, step=1, label="Maze size")
                 distance = gr.Number(value=10, precision=0, minimum=1, maximum=224, label="Shortest route length")
@@ -515,6 +548,15 @@ def _build_page(context):
                 interrupt = gr.Button("Interrupt", size="sm", elem_id="maze-interrupt")
             turn_picker = gr.Dropdown(choices=[("Initial / supplied history", -1)], value=-1,
                                       label="Selected response", interactive=True)
+            with gr.Accordion("Change the map", open=False):
+                with gr.Row():
+                    close_row = gr.Number(value=0, precision=0, minimum=0, maximum=14, label="Row", elem_id="maze-close-row")
+                    close_column = gr.Number(value=0, precision=0, minimum=0, maximum=14, label="Column", elem_id="maze-close-column")
+                close_cell_button = gr.Button("Close this cell", size="sm", elem_id="maze-close-cell")
+                gr.Markdown("Available in an episode started with **Map can change during the run**. The cell becomes a wall "
+                            "before the next generated response, and the model meets the change in the simulator's next reply. "
+                            "The start, the destination, the cell the character is standing in, and any closure that would cut "
+                            "the destination off from the character or from the start are refused.")
             with gr.Accordion("Playback & view", open=False):
                 pace = gr.Slider(.1, 4, value=1., step=.1, label="Seconds per recorded response")
                 reveal = gr.Checkbox(label="Show shortest route (viewer only)", value=False)
@@ -562,26 +604,30 @@ def _build_page(context):
                 gr.update(visible=False) if frame[9] != gr.skip() else gr.skip())
 
     controls = [size, seed, distance, openness, supplied, after, text, prefix, temperature, sampling_seed, per_turn,
-                budget, attempts, recovery_tokens, recovery_attempts, goal_mode, goal_hint, system_prompt, instruction]
+                budget, attempts, recovery_tokens, recovery_attempts, goal_mode, goal_hint, system_prompt, instruction,
+                changing_map]
 
     def prepare_episode(ep, show, session_id, data, *values):
         if ep.busy:
             raise gr.Error("Stop or pause this episode before starting another.")
         (n, s, d, o, supplied_n, trigger, passage_text, count, temp, sample_seed, per, total, tries,
-         window_tokens, window_attempts, mode, hint, system_text, instruction_text) = values
+         window_tokens, window_attempts, mode, hint, system_text, instruction_text, map_changes) = values
         try:
-            new = Episode(generate(n, s, d, o), dict(supplied_moves=int(supplied_n), interrupt_after=int(trigger),
-                          interruption_text=passage_text, prefix_tokens=int(count), temperature=float(temp), openness=float(o),
-                          sampling_seed=int(sample_seed), per_turn_tokens=int(per), token_budget=int(total), attempt_budget=int(tries),
-                          recovery_tokens=int(window_tokens), recovery_attempts=int(window_attempts),
-                          goal_mode=mode, goal_hint=hint, system_prompt=system_text, instruction=instruction_text))
+            drawn = generate(n, s, d, o)
+            new = Episode(changing(drawn) if map_changes else drawn,
+                          dict(supplied_moves=int(supplied_n), interrupt_after=int(trigger),
+                               interruption_text=passage_text, prefix_tokens=int(count), temperature=float(temp),
+                               openness=float(o), sampling_seed=int(sample_seed), per_turn_tokens=int(per),
+                               token_budget=int(total), attempt_budget=int(tries),
+                               recovery_tokens=int(window_tokens), recovery_attempts=int(window_attempts),
+                               goal_mode=mode, goal_hint=hint, system_prompt=system_text, instruction=instruction_text))
         except (ValueError, TypeError) as exc:
             logger.warning("Refused the scenario settings for a new episode: %s", exc)
             raise gr.Error(str(exc)) from exc
         interruption = str(new.config.get("interruption_text") or "").strip()
-        logger.info("New episode %s: %s x %s maze, seed %s, %s goal, %s supplied moves, interruption %s",
-                    new.run_id, new.maze.size, new.maze.size, new.maze.seed, new.config["goal_mode"],
-                    new.supplied_moves,
+        logger.info("New episode %s: %s x %s %s maze, seed %s, %s goal, %s supplied moves, interruption %s",
+                    new.run_id, new.maze.size, new.maze.size, "changing" if new.map_changes else "fixed",
+                    new.maze.seed, new.config["goal_mode"], new.supplied_moves,
                     f"after {new.config['interrupt_after']} moves" if interruption else "off")
         stop_replay(ep)
         return (new, *render(new, show, session_id), trial_note_text(new, data), None, *model_button(new))
@@ -651,6 +697,20 @@ def _build_page(context):
             raise gr.Error(str(exc)) from exc
         logger.info("Run %s: %s requested while %s", ep.run_id, kind, ep.phase)
         gr.Info({"pause": "Pausing after the current response." if ep.busy else "Playback paused.", "stop": "Stopping; partial actions will not execute.", "interrupt": "Interruption queued for the next response."}[kind])
+        return status(ep), transport_text(ep), *transport_buttons(ep)
+
+    def close_map_cell(ep, row, column):
+        try:
+            if row is None or column is None:
+                raise ValueError("Enter the row and the column of the cell to close.")
+            cell = (int(row), int(column))
+            ep.request_closure(cell)
+        except (TypeError, ValueError) as exc:
+            logger.warning("Run %s refused to close row %s, column %s: %s", ep.run_id, row, column, exc)
+            raise gr.Error(str(exc)) from exc
+        logger.info("Run %s: row %s, column %s closes before response %s",
+                    ep.run_id, cell[0], cell[1], len(ep.turns) + 1)
+        gr.Info("The cell closes before the next generated response.")
         return status(ep), transport_text(ep), *transport_buttons(ep)
 
     def inspect(ep, show, i, session_id):
@@ -935,6 +995,7 @@ def _build_page(context):
     pause.click(lambda ep: command(ep, "pause"), episode, command_outputs, queue=False)
     stop.click(lambda ep: command(ep, "stop"), episode, command_outputs, queue=False)
     interrupt.click(lambda ep: command(ep, "interrupt"), episode, command_outputs, queue=False)
+    close_cell_button.click(close_map_cell, [episode, close_row, close_column], command_outputs, queue=False)
     passage.input(lambda name: "" if name == "None" else PASSAGES.get(name, ""), passage, text, queue=False)
     def change_goal_mode(mode, wording):
         # A mode's stock instruction describes that mode, so switching rewrites

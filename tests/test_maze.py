@@ -1323,7 +1323,7 @@ class MazeTests(unittest.TestCase):
                 self.assertEqual(change('hidden', 'Find the star yourself.')[2], gr.skip())
                 ep = Episode(MAZE, CONFIG)
                 values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10, 700, 5,
-                          'coordinates', '', 'Be brief.', 'Reach the star.')
+                          'coordinates', '', 'Be brief.', 'Reach the star.', False)
                 new = callbacks['prepare_episode'](ep, False, session, None, *values)[0]
                 self.assertEqual(new.messages[0]['content'], 'Be brief.')
                 self.assertTrue(new.messages[1]['content'].startswith('Reach the star.\n{'))
@@ -1332,10 +1332,10 @@ class MazeTests(unittest.TestCase):
                 # The pane describes the run on screen, so every control follows
                 # it, ahead of the trial note, the model button and the ID it
                 # hands over.
-                filled = loaded[-23:-3]
+                filled = loaded[-24:-3]
                 self.assertEqual(filled[:16], values[:16])
                 self.assertEqual((filled[16]['value'], filled[16]['visible']), ('', False))
-                self.assertEqual(filled[17:], ('Be brief.', 'Reach the star.', 'Custom'))
+                self.assertEqual(filled[17:], ('Be brief.', 'Reach the star.', False, 'Custom'))
             finally:
                 demo.close()
 
@@ -1373,7 +1373,7 @@ class MazeTests(unittest.TestCase):
                 self.assertEqual(loaded[-2]['value'], 'Load test/model')
                 self.assertEqual(loaded[-1], 'test/model')
                 values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10, 700, 5,
-                          'coordinates', '', 'Be brief.', 'Reach the star.')
+                          'coordinates', '', 'Be brief.', 'Reach the star.', False)
                 fresh = callbacks['prepare_episode'](loaded[0], False, session, None, *values)
                 self.assertEqual(fresh[-2]['value'], 'Choose / load model')
                 self.assertEqual(fresh[-1], '')
