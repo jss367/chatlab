@@ -21,6 +21,10 @@ that was typed, rewritten by hand, loaded from an older file, or never
 finished measuring may carry none of these, and the list says so rather than
 guessing.
 
+``generation_settings`` retains the small settings snapshot used for each
+reply, including its seed and system prompt. Unlike token measurements, it
+is saved so fork comparisons still describe the actual run after a reload.
+
 A reply also carries the measurements behind every token it is made of, which
 is what lets the conversation itself be painted by rank or surprise and
 branched at any token in it rather than only in the newest reply:
@@ -350,6 +354,10 @@ def new_forks() -> dict:
     way ``updated`` stamps the turns, and separately: a page that changes
     only the temperature must not thereby claim a transcript it may be a
     reply behind on.
+
+    ``origins`` records each fork's parent and message/token coordinates.
+    It survives deletion of the parent, so a surviving child still explains
+    where it came from. Older conversations have no recorded origin.
     """
 
     return {
@@ -357,6 +365,7 @@ def new_forks() -> dict:
         "branches": {MAIN_BRANCH: []},
         "sampling": {},
         "sampling_updated": {},
+        "origins": {},
         "updated": {},
     }
 
@@ -374,6 +383,7 @@ def copy_forks(forks: dict | None) -> dict:
             for name, values in (forks.get("sampling") or {}).items()
         },
         "sampling_updated": dict(forks.get("sampling_updated") or {}),
+        "origins": copy.deepcopy(forks.get("origins") or {}),
         "updated": dict(forks.get("updated") or {}),
     }
 
@@ -409,6 +419,7 @@ def drop_branch(forks: dict, name: str) -> None:
     del forks["branches"][name]
     forks.setdefault("sampling", {}).pop(name, None)
     forks.setdefault("sampling_updated", {}).pop(name, None)
+    forks.setdefault("origins", {}).pop(name, None)
     forks["updated"][name] = branch_stamp()
 
 
@@ -670,6 +681,8 @@ def turn_entries(turns: list[dict] | None) -> list[dict]:
                 entry[key] = value
         if turn.get("steering") is not None:
             entry["steering"] = compact_steering(turn["steering"])
+        if isinstance(turn.get("generation_settings"), dict):
+            entry["generation_settings"] = copy.deepcopy(turn["generation_settings"])
         entries.append(entry)
     return entries
 
@@ -708,6 +721,8 @@ def turns_from_entries(raw_turns) -> list[dict]:
             turn[key] = value
         if entry.get("steering") is not None:
             turn["steering"] = compact_steering(entry["steering"])
+        if isinstance(entry.get("generation_settings"), dict):
+            turn["generation_settings"] = copy.deepcopy(entry["generation_settings"])
         turns.append(turn)
     return turns
 

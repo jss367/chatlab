@@ -1605,7 +1605,7 @@ class TokenViewTests(unittest.TestCase):
             [sorted(entry) for entry in entries],
             [
                 ["content", "reasoning", "role"],
-                sorted(["content", "reasoning", "role", "model", "prompt_tokens", "generated_tokens"]),
+                sorted(["content", "reasoning", "role", "model", "prompt_tokens", "generated_tokens", "generation_settings"]),
             ],
         )
 
