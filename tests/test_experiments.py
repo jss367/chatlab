@@ -321,6 +321,27 @@ class AutomatedComparisonTests(unittest.TestCase):
         self.assertFalse(self.manager.busy)
         self.assertEqual(len(runs.search()), 1)
 
+    def test_saved_branch_rerun_keeps_applied_thinking_mode_and_prompt(self):
+        from test_thinking import manager_for_thinking
+        from ui.compare import _write_reply
+        manager = manager_for_thinking()
+        manager._loaded = LoadedModel("fake/model", "CPU", "full", manager.load_id)
+        with mock.patch.object(runtime, "MANAGER", manager):
+            for applied, requested in (("off", "on"), ("on", "off")):
+                with self.subTest(applied=applied, requested=requested):
+                    original = list(_write_reply("Hello", "", "", 0, 1, 0, 0, 3, 1, False,
+                                                applied, None, manager.loaded_model()))[-1][0]
+                    original["settings"].update(forced_prefix_tokens=1, requested_thinking_mode=requested)
+                    item = runs.save(original)
+                    frames = list(experiments.rerun_saved(item, item["id"]))
+                    self.assertIn("Rerun saved", frames[-1][1])
+                    result = runs.read(frames[-1][0]["value"])["run"]
+                    self.assertEqual(result["settings"]["thinking_mode"], applied)
+                    self.assertEqual(result["context_ids"], original["context_ids"])
+                    self.assertEqual(result["metrics"][0]["token_id"], original["metrics"][0]["token_id"])
+                    self.assertEqual(result["settings"]["forced_prefix_tokens"], 1)
+                    self.assertFalse(manager.busy)
+
     def test_saved_documents_are_plain_json(self):
         list(experiment_compare.run_pair(*self.conditions, *self.shared))
         for path in runs.directory().glob("*.json"):

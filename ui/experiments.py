@@ -270,12 +270,16 @@ def rerun_saved(document, expected_identifier):
             forced = int(config.get("forced_prefix_tokens", 0))
             if (edited or forced) and run.get("tokenizer") != _tokenizer_identity():
                 raise ValueError("This edited or branched run needs its original tokenizer to replay token IDs.")
+            # Branches keep the original turn's mode even if the Chat control
+            # changed afterward; replay their tokens with that same template.
+            thinking_mode = (config.get("thinking_mode", "default") if forced else
+                             config.get("requested_thinking_mode", config.get("thinking_mode", "default")))
             with contextlib.closing(_write_reply(
                 run.get("prompt", ""), config.get("system_prompt", ""), "" if forced else config.get("assistant_prefill", ""),
                 config.get("temperature", 0.7), config.get("top_p", 1), config.get("top_k", 0),
                 config.get("skip_top_below", 0), config.get("max_new_tokens", 256),
                 config.get("seed", 42), False,
-                config.get("requested_thinking_mode", config.get("thinking_mode", "default")),
+                thinking_mode,
                 config.get("steering"), published, messages_override=run.get("messages"),
                 prompt_override_ids=edited.get("prompt_token_ids") if edited else None,
                 forced_ids=[m["token_id"] for m in run["metrics"][:forced]] if forced else None,
