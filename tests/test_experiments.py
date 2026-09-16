@@ -143,6 +143,23 @@ class AutomatedComparisonTests(unittest.TestCase):
         self.assertTrue(any(isinstance(frame[0], dict) and frame[0].get("metrics") for frame in frames))
         self.assertTrue(any(isinstance(frame[1], dict) and frame[1].get("metrics") for frame in frames))
 
+    def test_cleared_comparison_seeds_use_the_normal_zero_fallback(self):
+        for seed_a, seed_b in ((None, 13), (12, None), (None, None)):
+            with self.subTest(seed_a=seed_a, seed_b=seed_b):
+                conditions = list(self.conditions)
+                conditions[3], conditions[9] = seed_a, seed_b
+                previous = {item["id"] for item in runs.search()}
+                frames = list(experiment_compare.run_pair(*conditions, *self.shared))
+                self.assertIn("Comparison complete", frames[-1][2])
+                saved = [item for item in runs.search() if item["id"] not in previous]
+                self.assertEqual(len(saved), 2)
+                self.assertEqual(
+                    {item["run"]["slot"]: item["run"]["settings"]["seed"] for item in saved},
+                    {"A": seed_a or 0, "B": seed_b or 0},
+                )
+                self.assertIsNone(self.manager.occupant)
+                self.assertFalse(experiment_compare._PAIR_LOCK.locked())
+
     def test_cancel_releases_generation_and_pair_lock(self):
         generator = experiment_compare.run_pair(*self.conditions, *self.shared)
         next(generator)

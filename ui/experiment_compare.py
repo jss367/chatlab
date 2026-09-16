@@ -13,6 +13,7 @@ from model_runtime import MLX_KIND, TEXT_KIND, cache_status
 from ui import runtime
 from ui.common import failure_status
 from ui.compare import fill_slot
+from ui.generation import resolve_seed
 from ui.models_page import stream_load
 from ui.panel import as_plain_text
 
@@ -103,8 +104,7 @@ def run_pair(*values):
                 raise ValueError("Choose a model for both conditions or load one first.")
             if condition[4] and not shared[14]:
                 raise ValueError("Import a steering vector in Chat before running this preset.")
-            if int(condition[3]) < 0:
-                raise ValueError("Seeds must be zero or greater.")
+            condition[3] = resolve_seed(condition[3], False)
             status = cache_status(condition[0])
             if not status.present or status.missing_files or status.unsupported or status.kind not in (TEXT_KIND, MLX_KIND):
                 raise ValueError(f"Download a supported text model first: {condition[0]}.")
