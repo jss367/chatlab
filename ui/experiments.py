@@ -200,8 +200,10 @@ def inspection_view(document, index, layer):
     return render_lens(insight), charts.attention_strip(insight, int(layer or 0))
 
 
-def attach_inspection(document, insight, target, context):
+def attach_inspection(document, insight, target, context, expected_identifier):
     try:
+        if not document or document["id"] != expected_identifier:
+            raise ValueError("Wait for the selected experiment to open before saving an inspection.")
         item = runs.save_inspection((document or {}).get("id"), insight, target, context)
         return item, gr.update(choices=[(f"Token {record['token_index'] + 1} · inspection {i + 1}", i)
                                         for i, record in enumerate(item["inspections"])],
@@ -232,7 +234,7 @@ def wire(view, demo, trace, context, left, right, insight, target):
                      [view.held, view.marks, view.status])
     view.send_a.click(comparison_slot, [view.held, view.picker], left)
     view.send_b.click(comparison_slot, [view.held, view.picker], right)
-    view.attach.click(attach_inspection, [view.held, insight, target, context],
+    view.attach.click(attach_inspection, [view.held, insight, target, context, view.picker],
                       [view.held, view.inspection_picker, view.status])
     for control in (view.inspection_picker, view.layer):
         control.change(inspection_view, [view.held, view.inspection_picker, view.layer],

@@ -104,6 +104,26 @@ class SavedRunsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runs.save_inspection(item["id"], insight, target, context)
 
+    def test_attaching_inspection_rejects_a_changed_or_cleared_picker(self):
+        self.run.update(context_ids=[2], metrics_generation=4, session_id=runs.SESSION_ID)
+        item = runs.save(self.run)
+        other = runs.save(self.run)
+        target = {"strip": "response", "index": 0, "generation": 4}
+        insight = {"saved_target": target, "saved_session": runs.SESSION_ID, "layers": [], "attention": []}
+        context = (4, [2], self.run["load_id"])
+        for selection in (other["id"], None):
+            with self.subTest(selection=selection):
+                held, picker, status = experiments.attach_inspection(item, insight, target, context, selection)
+                self.assertEqual(held, {"__type__": "update"})
+                self.assertEqual(picker, {"__type__": "update"})
+                self.assertIn("Wait for the selected experiment", status)
+                self.assertEqual(runs.read(item["id"]), item)
+                self.assertEqual(runs.read(other["id"]), other)
+        saved, picker, status = experiments.attach_inspection(item, insight, target, context, item["id"])
+        self.assertEqual(len(saved["inspections"]), 1)
+        self.assertEqual(picker["value"], 0)
+        self.assertEqual(status, "Inspection saved.")
+
     def test_chat_trace_keeps_its_own_provenance_after_a_model_switch(self):
         trace = {"tokens": self.run["metrics"], "model_id": "original/model", "response": "hello",
                  "messages": [{"role": "system", "content": "Saved system prompt"}],
