@@ -80,6 +80,26 @@ class SavedRunsTests(unittest.TestCase):
         self.run["metrics"][1]["top1_margin"] = 0.001
         self.assertEqual(runs.ranked_tokens(self.run, "Closest alternatives"), [1, 0])
 
+    def test_bookmark_and_comparison_reject_changed_or_cleared_picker(self):
+        item = runs.save(self.run)
+        item = runs.bookmark(item["id"], 0, "Keep this")
+        other = runs.save(self.run)
+        for selection in (other["id"], None):
+            with self.subTest(selection=selection):
+                for remove in (False, True):
+                    held, marks, status = experiments.annotate(item, 0, "Changed", selection, remove=remove)
+                    self.assertEqual(held, {"__type__": "update"})
+                    self.assertEqual(marks, {"__type__": "update"})
+                    self.assertIn("Wait for the selected experiment", status)
+                    self.assertEqual(runs.read(item["id"]), item)
+                    self.assertEqual(runs.read(other["id"]), other)
+                with mock.patch.object(experiments.gr, "Warning"):
+                    self.assertEqual(experiments.comparison_slot(item, selection), {"__type__": "update"})
+        self.assertEqual(experiments.comparison_slot(item, item["id"]), item["run"])
+        saved, _, status = experiments.annotate(item, 0, "Changed", item["id"])
+        self.assertEqual(saved["bookmarks"]["0"], "Changed")
+        self.assertEqual(status, "Bookmark saved.")
+
     def test_difference_navigation_uses_only_comparable_spans(self):
         left = run([metric(1, 0, 1), metric(2, 1, 2), metric(3, 2, 90)])
         right = run([metric(1, 0, 2), metric(2, 1, 9), metric(3, 5, 0)])
@@ -258,7 +278,7 @@ class AutomatedComparisonTests(unittest.TestCase):
                                 {"role": "assistant", "content": "Earlier answer"},
                                 {"role": "user", "content": "Follow-up"}]
         item = runs.save(original, "Conversation experiment")
-        frames = list(experiments.rerun_saved(item))
+        frames = list(experiments.rerun_saved(item, item["id"]))
         self.assertIn("Rerun saved", frames[-1][1])
         stored = runs.search("Rerun:")[0]
         self.assertEqual(stored["run"]["messages"], original["messages"])
@@ -266,13 +286,26 @@ class AutomatedComparisonTests(unittest.TestCase):
         self.assertEqual(runs.read(item["id"])["run"], original)
         self.assertFalse(self.manager.busy)
 
+    def test_rerun_rejects_a_changed_or_cleared_picker_without_generating(self):
+        item = runs.save(run([metric(1, 0, 1)]))
+        other = runs.save(item["run"])
+        for selection in (other["id"], None):
+            with self.subTest(selection=selection), mock.patch("ui.compare._write_reply") as writing:
+                frames = list(experiments.rerun_saved(item, selection))
+                self.assertEqual(len(frames), 1)
+                self.assertIn("Wait for the selected experiment", frames[0][1])
+                writing.assert_not_called()
+                self.assertEqual(len(runs.search()), 2)
+                self.assertEqual(runs.read(item["id"]), item)
+                self.assertFalse(self.manager.busy)
+
     def test_rerun_preserves_literal_prefix_provenance(self):
         from ui.compare import _write_reply
         original = list(_write_reply("Hello", "", "Hello", 0, 1, 0, 0, 8, 1, False,
                                     "default", None, self.manager.loaded_model()))[-1][0]
         original["settings"]["forced_prefix_tokens"] = 1
         item = runs.save(original, "Literal prefix")
-        frames = list(experiments.rerun_saved(item))
+        frames = list(experiments.rerun_saved(item, item["id"]))
         self.assertIn("Rerun saved", frames[-1][1])
         result = runs.search("Rerun:")[0]["run"]
         self.assertEqual(result["metrics"][0]["token_id"], original["metrics"][0]["token_id"])
@@ -281,7 +314,7 @@ class AutomatedComparisonTests(unittest.TestCase):
 
     def test_rerun_cancellation_keeps_original_and_releases_model(self):
         item = runs.save(run([metric(1, 0, 1)]))
-        generator = experiments.rerun_saved(item)
+        generator = experiments.rerun_saved(item, item["id"])
         next(generator)
         next(generator)
         generator.close()

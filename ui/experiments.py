@@ -174,11 +174,11 @@ def navigate(document, selected, mode, scale=DEFAULT_COLOR_SCALE):
     return select_token(document, indexes[offset % len(indexes)], scale)
 
 
-def annotate(document, selected, note, expected_identifier=None, *, remove=False):
+def annotate(document, selected, note, expected_identifier, *, remove=False):
     try:
         if not document or selected is None:
             raise ValueError("Select a saved token first.")
-        if expected_identifier is not None and document["id"] != expected_identifier:
+        if document["id"] != expected_identifier:
             raise ValueError("Wait for the selected experiment to open before adding a bookmark.")
         item = runs.bookmark(document["id"], int(selected), note, remove=remove)
         return item, bookmark_rows(item), "Bookmark removed." if remove else "Bookmark saved."
@@ -186,8 +186,8 @@ def annotate(document, selected, note, expected_identifier=None, *, remove=False
         return gr.skip(), gr.skip(), failure_status("Could not update bookmark", str(error))
 
 
-def comparison_slot(document, expected_identifier=None):
-    if document and expected_identifier is not None and document["id"] != expected_identifier:
+def comparison_slot(document, expected_identifier):
+    if document and document["id"] != expected_identifier:
         gr.Warning("Wait for the selected experiment to open before comparing it.")
         return gr.skip()
     return document["run"] if document else gr.skip()
@@ -245,7 +245,7 @@ def wire(view, demo, trace, context, left, right, insight, target):
                     None, [view.status, view.rerun, view.stop], cancels=[rerunning])
 
 
-def rerun_saved(document, expected_identifier=None):
+def rerun_saved(document, expected_identifier):
     from ui.compare import _measure_text, _tokenizer_identity, _write_reply
     from ui.generation import automatic_reasoning_close_count, literal_prefill_count, literal_text_ranges
     from compare import REPLY
@@ -257,7 +257,7 @@ def rerun_saved(document, expected_identifier=None):
     try:
         if not document:
             raise ValueError("Select a saved experiment first.")
-        if expected_identifier is not None and document["id"] != expected_identifier:
+        if document["id"] != expected_identifier:
             raise ValueError("Wait for the selected experiment to open before rerunning it.")
         run = document["run"]
         published = runtime.MANAGER.loaded_model()
