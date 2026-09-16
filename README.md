@@ -25,6 +25,7 @@ drove.
 - A **Score text** tab for measuring text the model did not write
 - A **Prompts** tab that runs a list of prompts, each in a conversation of its own, and writes one trace per prompt plus a table of every token
 - A **Compare** tab holding two runs side by side — two models, two precisions, a vector on and off, two seeds — with the tokens aligned, colored by how far the two runs' measurements sat apart, and the settings that differed named
+- **Activation patching** in Compare: transplant a residual activation between two runs and inspect a layer-by-token heatmap of the change in an answer token's probability
 - Perplexity, mean surprise, and a surprise trace for each response
 - Full metric-trace export as JSON or CSV
 - An OpenAI-compatible HTTP API on the same port, so the measurements can be scripted
@@ -228,6 +229,52 @@ The seam between a transcript and the panel beside it is a handle: drag it to gi
 One model is in memory at a time whichever kind it is, because the two share the device and, on Apple silicon, the machine's memory. So loading an image model unloads a text one and the other way round, and each page's badge says whether what is in memory is a model it can use: a model of the other kind is named and greyed rather than reported as nothing loaded, which would send you off to load a second one on top of it.
 
 A badge above the tabs names the model that would answer. Beside it, a dropdown lists the downloaded text models that would load on this machine at the chosen weight precision, MLX conversions among them, each at the width it was converted to; picking one loads it in place of the model in memory, and the badge follows the load: it names the model coming in, fills a bar along its bottom edge as the weights are read, and gives the percentage beside the name. Until the loader reports its first weights the bar sweeps rather than filling, which covers a load queued behind a reply and the seconds a large snapshot takes to open. A load started on the Models page shows the same way here, and so does one started in another tab. A pick during a reply is refused. Models that are still downloading, would not fit, or are not yet on disk are not offered: those go through the Models page. Until a model is loaded, **Set up the default model** opens Models with the default selected. Selecting the default does not start a download or replace a loaded model. On Models, choose **Load cached** to use local files without a network check, or **Download and load** to fetch and load the model. A full default-model download is about 15 GB; the setup guidance states this before you start. Progress and any load errors appear on the Models page.
+
+### Activation patching
+
+In **Chat → Compare**, fill A and B using the same loaded Transformers model,
+with steering disabled. Change the prompt between slots to compare two
+contexts, or fill them identically as a control. Open **Activation patching**,
+choose the source and recipient, then choose an answer token from the
+recipient run. Both generated replies and measured text can supply runs.
+
+**Source output tokens to include** controls the source prefix: zero uses
+only its recorded prompt/context; a positive number includes that many output
+tokens. The recipient always reads only the tokens before the selected answer
+token. **Token pairs to patch** chooses a window of 1–32 tokens at the end of
+each prefix. Tokens pair by distance from the prefix end, even when the
+prefix lengths differ; this is an explicit positional correspondence, not an
+automatic match of meanings. Inspect the source and recipient positions in
+the cell tooltips or exact-measurements table.
+
+Press **Patch activations**. Each cell is a separate experiment: replace the
+recipient's residual vector after one decoder block at one token position
+with the source vector, then measure the selected answer token's raw
+probability. The other cells' changes are not carried forward. Blue increases
+the probability, orange decreases it, and numbers show the change in
+percentage points from the unpatched recipient. The color scale is symmetric
+around zero and adjusts to the largest measured effect; a dash is unmeasured.
+**Download patching JSON** saves the exact prefixes, model/load identifiers,
+run identifiers, token pairing, baseline and intervention measurements,
+including log probabilities. An export taken during a run is marked incomplete.
+Stop or Escape ends the experiment and clears its partial display. Changing
+the slots or patching controls invalidates old measurements.
+
+The first version supports Transformers **Llama, Qwen2, and OLMo 3** models.
+Both runs must belong to the current model load; reloading requires filling
+both slots again. MLX and actively steered runs are refused. Prefixes are
+limited to 2,048 tokens (or the model's smaller context window), with at most
+2,048 interventions. Nothing is silently truncated. Each cell costs a fresh
+recipient forward pass; only the selected source activations are retained
+on CPU, and no key-value cache is reused between interventions.
+
+The result measures a particular intervention's effect on one next token,
+not the probability of a whole answer or a complete explanation of the
+model's reasoning. This is the residual-stream starting point inspired by
+[Sequential Activation Patching](https://arxiv.org/abs/2608.22332), not a
+reproduction of that paper's attention-head or sequential interventions.
+Tests use a deterministic causal network and tiny, randomly initialized
+Transformers models for all three supported architectures, without downloads.
 
 ### Jacobian concept inspection
 

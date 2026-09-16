@@ -991,7 +991,7 @@ SHORTCUT_JS = """
     // being drawn. Never more than one, because they
     // contend for the same generation slot and the losers refuse.
     const stop = document.querySelector(
-      '#stop-button, #stop-batch-button, #stop-compare, #stop-drawing'
+      '#stop-button, #stop-batch-button, #stop-compare, #stop-patching, #stop-drawing'
     );
     if (!stop) { return; }
     event.preventDefault();
