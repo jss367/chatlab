@@ -236,13 +236,48 @@ class WordComparisonTests(unittest.TestCase):
         self.assertIsNone(values["right_token"])
         self.assertEqual(values["right_strip"], [])
 
+    def test_begin_drawing_disarms_the_previous_experiment(self):
+        values = image_words.begin_original()
+        self.assertEqual(values[0], [])
+        self.assertIsNone(values[1])
+        state = dict(zip(image_words.OUTPUT_NAMES, values[3:]))
+        self.assertEqual(state["pair"], (None, None))
+        self.assertFalse(state["draw"]["interactive"])
+        final = list(image_words.compare_word(state["pair"], 2))[-1]
+        self.assertIn("Draw a finished original", final[ROW["status"]])
+
+    def test_stale_comparison_is_refused_while_a_new_original_is_drawing(self):
+        release, entered = threading.Event(), threading.Event()
+        def wait(step):
+            entered.set()
+            release.wait(5)
+        self.manager.pipeline.watcher = wait
+        drawing = images_page.draw("a blue bicycle", "", 3, 4.5, 32, 7, False, True)
+        next(drawing)
+        try:
+            self.assertTrue(entered.wait(5))
+            stale = self.compare()[-1]
+            self.assertIn("busy", stale[ROW["status"]])
+            self.assertEqual(stale[ROW["pair"]], gr.skip())
+        finally:
+            release.set()
+            frames = list(drawing)
+        new_original = frames[-1][images_page.IMAGE_OUTPUT_NAMES.index("run")]
+        self.assertEqual(new_original.request.prompt, "a blue bicycle")
+        self.assertFalse(self.manager.busy)
+
     def test_gradio_wiring_and_postprocessing_preserve_both_runs(self):
         demo = app.build_app()
         listeners = {fn.fn: fn for fn in demo.fns.values() if fn.fn is not None}
         compare = listeners[image_words.compare_word]
         setup = listeners[image_words.start_original]
         draw = listeners[images_page.draw]
-        self.assertEqual(compare.concurrency_id, draw.concurrency_id)
+        begin = listeners[image_words.begin_original]
+        self.assertFalse(begin.queue)
+        self.assertEqual(draw.trigger_after, begin._id)
+        self.assertEqual(setup.trigger_after, draw._id)
+        self.assertEqual(begin.outputs, setup.outputs)
+        self.assertNotEqual(compare.concurrency_id, draw.concurrency_id)
         self.assertEqual(len(compare.outputs), len(image_words.OUTPUT_NAMES))
         self.assertEqual(setup.inputs, [draw.outputs[images_page.IMAGE_OUTPUT_NAMES.index("run")]])
         frames = self.compare()

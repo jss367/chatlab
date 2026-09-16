@@ -140,6 +140,13 @@ def start_original(run):
     )
 
 
+def begin_original():
+    """Disarm the old experiment before a main-page draw can be queued."""
+    values = list(start_original(None))
+    values[3] = "Drawing a new original; word comparisons will be available when it finishes."
+    return tuple(values)
+
+
 def compare_word(pair, index):
     """Stream a rerun without replacing the original or reading current controls."""
     original = pair[0] if pair else None
@@ -174,7 +181,7 @@ def compare_word(pair, index):
         frames.close()
 
 
-def build_word_comparison(original_state):
+def build_word_comparison():
     """Build the experiment inside the Images workspace and wire its events."""
     with gr.Accordion("Test a prompt word", open=True, elem_id="image-word-test"):
         gr.Markdown(
@@ -220,12 +227,14 @@ def build_word_comparison(original_state):
                 right = gr.HTML(PENDING, elem_id="image-word-removed")
         outputs = [status, draw, stop, pair, step, left, right,
                    left_strip, right_strip, left_token, right_token]
-        original_state.change(start_original, original_state, [words, selected, preview, *outputs])
         words.select(select_word, pair, [selected, preview, draw])
-        draw.click(compare_word, [pair, selected], outputs, concurrency_id="image-drawing")
+        # Separate queues let the manager refuse an overlapping stale click
+        # immediately, rather than running it after a new original finishes.
+        draw.click(compare_word, [pair, selected], outputs)
         stop.click(images_page.stop_drawing, None, status, queue=False)
         read_inputs = [pair, step, left_token, right_token]
         read_outputs = [left, right, left_strip, right_strip]
         step.release(read_pair, read_inputs, read_outputs)
         for strip, token in ((left_strip, left_token), (right_strip, right_token)):
             strip.select(images_page.remember_token, None, token).then(read_pair, read_inputs, read_outputs)
+    return [words, selected, preview, *outputs]

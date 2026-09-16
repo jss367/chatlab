@@ -99,7 +99,7 @@ from ui.images_page import (
     select_token,
     stop_drawing,
 )
-from ui.image_words import build_word_comparison
+from ui.image_words import begin_original, build_word_comparison, start_original
 from ui.generation import (
     ask_clear_chat,
     branch_from,
@@ -1262,7 +1262,7 @@ def build_app() -> gr.Blocks:
                                 ),
                             )
 
-                        build_word_comparison(image_run_state)
+                        image_word_outputs = build_word_comparison()
 
                     # The Images page carries the same handle on its own seam.
                     gr.HTML(
@@ -1793,7 +1793,13 @@ def build_app() -> gr.Blocks:
             image_randomize,
             image_record_attention,
         ]
-        draw_button.click(draw, image_inputs, image_outputs, concurrency_id="image-drawing")
+        # Clear the previous experiment before inference, including its selected
+        # word, so it cannot enqueue an obsolete comparison during a new draw.
+        # Restore from the run state after completion or refusal; a refused draw
+        # keeps the last original available for a fresh word selection.
+        draw_button.click(begin_original, None, image_word_outputs, queue=False).then(
+            draw, image_inputs, image_outputs,
+        ).then(start_original, image_run_state, image_word_outputs)
         # Stop is not a cancel. The pipeline runs on its own thread and would
         # keep running with the generator gone, so the button sets the event
         # the run checks between steps and the generator publishes the
