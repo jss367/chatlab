@@ -569,6 +569,7 @@ def _stream_reply(
     expected_load_id: str | None = None,
     single_step: bool = False,
     previous_turns: list[dict] | None = None,
+    fork_origin: dict | None = None,
     branch_thinking_mode: str | None = None,
 ):
     """The body of generate_reply(), run with the generation slot held."""
@@ -586,6 +587,18 @@ def _stream_reply(
 
     steering = compact_steering(steering_from_controls(steering, steering_enabled, steering_strength, steering_layer))
     pending = make_turn("assistant", "", "")
+    pending["generation_settings"] = {
+        "temperature": float(temperature), "top_p": float(top_p),
+        "top_k": int(top_k), "skip_top_below": float(skip_top_below),
+        "max_new_tokens": int(max_new_tokens), "seed": used_seed,
+        "system_prompt": system_prompt, "keep_reasoning": bool(keep_reasoning),
+        "assistant_prefill": "" if replaying else assistant_prefill,
+        "thinking_mode": branch_thinking_mode if branch_thinking_mode is not None else thinking_mode,
+    }
+    if fork_origin is not None:
+        # The job consumes this only when a successful replay becomes visible.
+        # It is memory-only; the durable origin belongs to the branch.
+        pending["_fork_origin"] = fork_origin
     if steering is not None:
         pending["steering"] = steering
     pending["reasoning_closed"] = True
@@ -1375,6 +1388,11 @@ def _branch_with_text(
                 (replacement_start, replacement_start + len(replacement_ids)),
             ),
             branch_note=note,
+            fork_origin={
+                "kind": "token", "turn": position, "token": at,
+                "original": metric["text"], "original_id": int(metric["token_id"]),
+                "replacement": replacement, "replacement_ids": list(replacement_ids),
+            },
             expected_load_id=expected_load,
             previous_turns=turns,
             branch_thinking_mode=turns[position].get("thinking_mode", "default"),
@@ -1483,6 +1501,11 @@ def _answer_edited_prompt(
                 "replacement": replacement,
             },
             branch_note=note,
+            fork_origin={
+                "kind": "prompt", "turn": position + 1, "token": index + 1,
+                "original": metric["text"], "original_id": int(metric["token_id"]),
+                "replacement": replacement, "replacement_ids": list(replacement_ids),
+            },
             expected_load_id=expected_load,
             previous_turns=turns,
             branch_thinking_mode=(
@@ -1650,6 +1673,13 @@ def _branch_from(pick, prompt_text, turns, *settings, single_step=False, resampl
                 metrics, len(forced) if unchanged else len(kept)
             ),
             branch_note=note,
+            fork_origin=(None if single_step and unchanged and position == len(turns) - 1 and at == len(metrics) else {
+                "kind": "token", "turn": position, "token": at,
+                "single_step": single_step,
+                "original": _metric["text"], "original_id": int(_metric["token_id"]),
+                "replacement": None if resample else pick["text"],
+                "replacement_ids": [] if resample else [int(pick["token_id"])],
+            }),
             expected_load_id=expected_load,
             single_step=single_step,
             previous_turns=turns,

@@ -583,6 +583,25 @@ materialize every layer's full sequence at once.
 Extraction needs a PyTorch model, for the same reason steering does: an MLX
 checkpoint is not a `torch.nn.Module` and has nowhere to put the hook.
 
+## Conversation fork tree
+
+Open **Fork tree** beside the Chat tab to see conversations connected to their
+parents. Each fork shows its starting message and, for token forks, the token
+position and original → replacement text. Expand a node’s settings differences
+to see how it differs from its parent.
+
+Choose **Compare as A** and **Compare as B** directly on two nodes. The comparison
+below shows changed settings and both transcripts, with added and removed words
+highlighted and reasoning available in expandable sections. Current branch settings
+are listed separately from the settings recorded for each branch’s latest reply.
+No model needs to be loaded to compare saved conversations.
+
+Message forks, token replacements, and prompt-token edits retain their origins
+when the app reopens. Earlier saved conversations without recorded ancestry appear
+as separate roots. Deleting a parent leaves its children and their origin labels
+available. Continuing the latest reply with **Next token** stays on that branch;
+choosing a different token or an earlier branch point creates a new fork.
+
 ## Branching from a token
 
 Every response token comes with the alternatives the model ranked highest. Branching lets you take one of them instead and see where the model goes from there.
@@ -591,7 +610,7 @@ Every response token comes with the alternatives the model ranked highest. Branc
 2. Click a row in **Most likely alternatives**. The detail panel confirms what the branch will do.
 3. Press **Branch from token**.
 
-The reply is kept up to the token before the one you clicked, the alternative is put in its place, and the model continues from there under the current sampling settings. The branch replaces the reply it was taken from and every message after it, so it is a different continuation of the conversation rather than an edit buried in the middle of one; **Retry** and **Undo** then work on it as usual. Choosing the token the model already picked resamples the rest of the reply from that point, which is a way to see how much of what followed was chance.
+The reply is kept up to the token before the one you clicked, the alternative is put in its place, and the model continues from there under the current sampling settings. Once replay succeeds, the continuation opens in a new fork and the original conversation stays available. The new fork keeps the messages before the selected reply and continues from the chosen token; **Retry** and **Undo** then work on it as usual. Choosing the token the model already picked resamples the rest of the reply from that point, which is a way to see how much of what followed was chance.
 
 Any reply in the conversation can be branched, not only the newest one, because each carries the tokens it was made of. What it cannot outlive is the model: a reply's token IDs belong to the tokenizer that produced them, so loading another model - or reloading the same one - leaves the older replies readable but unbranchable, and the detail panel says so when you click one.
 
@@ -617,7 +636,7 @@ A template's own control tokens are as editable as the words between them, which
 
 A reply generated this way can be branched like any other, and the branch replays it against the prompt it was actually given rather than the one the conversation would render - the tokens being replayed were scored under the edited prompt, and scoring them under another would quietly describe a reply the model never gave. That prompt is kept beside the reply's measurements and goes wherever they go: editing the message, undoing, or loading the conversation from a file leaves the reply readable and unbranchable, as it already does.
 
-Like a branch, an edit cannot outlive the model. The prompt's token IDs belong to the tokenizer that produced them, so reloading leaves the strip readable but uneditable, and so does anything that replaces the strip - a retry, an edit, an undo, switching conversation. Send the message again to measure a fresh prompt. The JSON export records the edit under `sampling.edited_prompt`: the position and the two texts, and `prompt_token_ids`, the whole prompt as it was fed. The ids are what makes the export exact - the `messages` beside them are the conversation, which the template would render differently under settings that have since moved - and they read back through the tokenizer of the model the trace names. The conversation file, which stores turns rather than tokens, records nothing of the edit.
+Like a branch, an edit cannot outlive the model. The prompt's token IDs belong to the tokenizer that produced them, so reloading leaves the strip readable but uneditable, and so does anything that replaces the strip - a retry, an edit, an undo, switching conversation. Send the message again to measure a fresh prompt. The JSON export records the edit under `sampling.edited_prompt`: the position and the two texts, and `prompt_token_ids`, the whole prompt as it was fed. The ids are what makes the export exact - the `messages` beside them are the conversation, which the template would render differently under settings that have since moved - and they read back through the tokenizer of the model the trace names. The conversation library records the fork’s prompt-token position and replacement text. The full edited prompt IDs remain in the token trace export.
 
 ## The conversations pane
 

@@ -8,6 +8,8 @@ from functools import partial
 
 import gradio as gr
 
+from ui.fork_tree import TREE_CSS, TREE_JS, render_fork_tree, select_tree_branch
+
 import charts
 import settings
 import themes
@@ -268,7 +270,7 @@ def build_app() -> gr.Blocks:
     # GRADIO_ANALYTICS_ENABLED so it holds however the app is started - the
     # desktop bundle, run.sh, or python app.py.
     with gr.Blocks(
-        title="ChatLab", css=CSS + TOKEN_MENU_CSS + extension_css(extensions), theme=THEME, fill_width=True,
+        title="ChatLab", css=CSS + TOKEN_MENU_CSS + TREE_CSS + extension_css(extensions), theme=THEME, fill_width=True,
         analytics_enabled=False,
     ) as demo:
         # The chosen theme's colors, as a stylesheet on the page. Gradio fixes
@@ -307,6 +309,7 @@ def build_app() -> gr.Blocks:
         branch_pick = gr.State(None)
         # Forking: the other transcripts, and the chatbot message last clicked.
         forks_state = gr.State(new_forks())
+        tree_selection = gr.State({})
         selected_message = gr.State(None)
         token_edit_target = gr.State(None)
         # Layer inspection: the prompt ids behind the strips, the strip
@@ -856,6 +859,24 @@ def build_app() -> gr.Blocks:
                                     visible=False,
                                     interactive=False,
                                     elem_id="batch-files",
+                                )
+
+                            with gr.Tab("Fork tree", elem_id="fork-tree-tab"):
+                                gr.Markdown(
+                                    "### Conversation forks\n"
+                                    "Follow each fork back to its message or token. "
+                                    "Choose **A** and **B** on two branches to compare them below."
+                                )
+                                tree_action = gr.Textbox(
+                                    elem_id="fork-tree-action", elem_classes=[MENU_BRIDGE_CLASS]
+                                )
+                                tree_view = gr.HTML(
+                                    render_fork_tree([], new_forks(), {})[0],
+                                    elem_id="fork-tree-view",
+                                )
+                                tree_comparison = gr.HTML(
+                                    render_fork_tree([], new_forks(), {})[1],
+                                    elem_id="fork-tree-comparison",
                                 )
 
                             with gr.Tab("Compare", elem_id="compare-tab"):
@@ -1974,6 +1995,21 @@ def build_app() -> gr.Blocks:
         )
         # The menu handles Escape before the global generation shortcut.
         demo.load(None, None, None, js=TOKEN_MENU_JS)
+        demo.load(None, None, None, js=TREE_JS)
+        tree_action.input(
+            select_tree_branch,
+            [tree_action, conversation_state, forks_state, tree_selection],
+            [tree_selection, tree_view, tree_comparison],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+            trigger_mode="always_last",
+        )
+        forks_state.change(
+            render_fork_tree,
+            [conversation_state, forks_state, tree_selection],
+            [tree_view, tree_comparison],
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+            trigger_mode="always_last",
+        )
         # Escape stops a running generation, from anywhere on the page.
         demo.load(None, None, None, js=SHORTCUT_JS)
         # The two readings panes are dragged wider or narrower by the handle
