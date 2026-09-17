@@ -14,12 +14,21 @@ MAX_TRAJECTORY_LINES = 10_000
 MAX_TRAJECTORY_WARNINGS = 20
 
 
+def resolve_path(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except RuntimeError as exc:
+        # Python 3.12 reports symlink cycles as RuntimeError, while newer
+        # pathlib versions use OSError. Keep artifact failures on one boundary.
+        raise ValueError(f'Could not resolve {path}: {exc}') from exc
+
+
 def local_file(directory: Path, name: str) -> Path:
     """Artifacts may only refer to files inside their own task directory."""
     if not isinstance(name, str) or not name or Path(name).is_absolute():
         raise ValueError('Expected a relative artifact filename.')
-    path = (directory / name).resolve()
-    if not path.is_relative_to(directory.resolve()):
+    path = resolve_path(directory / name)
+    if not path.is_relative_to(resolve_path(directory)):
         raise ValueError('Artifact path leaves the task directory.')
     return path
 
@@ -63,7 +72,7 @@ class Task:
 def category_index(folder: str) -> dict:
     if not folder.strip():
         return {}
-    root = Path(folder).expanduser().resolve()
+    root = resolve_path(Path(folder).expanduser())
     if (root / 'evaluation_examples').is_dir():
         root /= 'evaluation_examples'
     if not root.is_dir():
@@ -183,7 +192,7 @@ def load_task(directory, root, label, category, index):
 def import_results(folder: str, label='', category='Automatic', definitions=''):
     if not folder.strip():
         raise ValueError('Enter an OS-Harm results directory.')
-    root = Path(folder).expanduser().resolve()
+    root = resolve_path(Path(folder).expanduser())
     if root.is_file() and root.name == 'better_log.json':
         root = root.parent
     if not root.is_dir():
@@ -197,7 +206,7 @@ def import_results(folder: str, label='', category='Automatic', definitions=''):
     tasks, warnings = [], []
     for path in paths:
         try:
-            if not path.resolve().is_relative_to(root):
+            if not resolve_path(path).is_relative_to(root):
                 raise ValueError('Result symlink leaves the selected directory.')
             task = load_task(path.parent, root, label.strip() or root.name, category, index)
             tasks.append(task)

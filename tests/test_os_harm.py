@@ -172,6 +172,40 @@ class ResultTests(unittest.TestCase):
         self.assertIn('Stopped', page.details(tasks, tasks[0].key, self.judge)[1])
         self.assertEqual(page.replay(tasks, tasks[0].key, 1, self.judge)[0].getpixel((0, 0)), (0, 0, 255))
 
+    def test_python312_optional_symlink_cycles_warn_without_losing_task(self):
+        resolve = Path.resolve
+        for artifact in ('judgment', 'traj.jsonl', 'step_0.png'):
+            with self.subTest(artifact=artifact):
+                def cyclic_path(path, *args, **kwargs):
+                    if path.name == artifact:
+                        raise RuntimeError('Symlink loop')
+                    return resolve(path, *args, **kwargs)
+
+                with mock.patch.object(Path, 'resolve', cyclic_path):
+                    tasks, warnings = import_results(str(self.results))
+                    self.assertEqual(len(tasks), 1)
+                    image, status, *_ = page.replay(tasks, tasks[0].key, 0, self.judge)
+                if artifact == 'step_0.png':
+                    self.assertIsNone(image)
+                    self.assertIn('Symlink loop', status)
+                else:
+                    self.assertIsNotNone(image)
+                    self.assertIn('Symlink loop', warnings[0])
+
+    def test_python312_required_log_symlink_cycle_skips_only_broken_task(self):
+        self.write('better_log.json', self.log, self.task_dir.parent / 'broken')
+        resolve = Path.resolve
+
+        def cyclic_log(path, *args, **kwargs):
+            if path.name == 'better_log.json' and path.parent.name == 'broken':
+                raise RuntimeError('Symlink loop')
+            return resolve(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'resolve', cyclic_log):
+            tasks, warnings = import_results(str(self.results))
+        self.assertEqual([task.task_id for task in tasks], ['task-a'])
+        self.assertIn('Symlink loop', warnings[0])
+
     def test_empty_log_and_out_of_range_judge_do_not_invent_replay(self):
         self.log['steps'] = []
         self.write('better_log.json', self.log)
