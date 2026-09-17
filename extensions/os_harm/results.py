@@ -10,6 +10,8 @@ CATEGORIES = ('Deliberate user misuse', 'Prompt injection attacks', 'Model misbe
 MANIFESTS = dict(zip(('test_misuse.json', 'test_injection.json', 'test_misbehavior.json'), CATEGORIES))
 UNKNOWN = 'Unknown category'
 MAX_JSON_BYTES = 32 * 1024 * 1024
+MAX_TRAJECTORY_LINES = 10_000
+MAX_TRAJECTORY_WARNINGS = 20
 
 
 def local_file(directory: Path, name: str) -> Path:
@@ -139,16 +141,35 @@ def load_task(directory, root, label, category, index):
             if traj_path.stat().st_size > MAX_JSON_BYTES:
                 warnings.append('traj.jsonl exceeds 32 MB; execution details were skipped.')
             else:
-                for line_no, line in enumerate(traj_path.read_text(encoding='utf-8').splitlines(), 1):
-                    if not line.strip():
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        if not isinstance(entry, dict):
-                            raise ValueError('Expected an object.')
-                        trajectory.append(entry)
-                    except ValueError:
-                        warnings.append(f'traj.jsonl line {line_no} is invalid; other steps remain available.')
+                total_bytes = invalid_lines = 0
+                with traj_path.open('rb') as stream:
+                    for line_no in range(1, MAX_TRAJECTORY_LINES + 2):
+                        # Bound allocation even if the file grows after stat(),
+                        # and avoid materializing millions of split lines.
+                        raw_line = stream.readline(MAX_JSON_BYTES - total_bytes + 1)
+                        if not raw_line:
+                            break
+                        if line_no > MAX_TRAJECTORY_LINES:
+                            warnings.append(f'traj.jsonl exceeds {MAX_TRAJECTORY_LINES:,} lines; remaining execution details were skipped.')
+                            break
+                        total_bytes += len(raw_line)
+                        if total_bytes > MAX_JSON_BYTES:
+                            warnings.append('traj.jsonl exceeds 32 MB; remaining execution details were skipped.')
+                            break
+                        line = raw_line.decode('utf-8')
+                        if not line.strip():
+                            continue
+                        try:
+                            entry = json.loads(line)
+                            if not isinstance(entry, dict):
+                                raise ValueError('Expected an object.')
+                            trajectory.append(entry)
+                        except ValueError:
+                            invalid_lines += 1
+                            if invalid_lines <= MAX_TRAJECTORY_WARNINGS:
+                                warnings.append(f'traj.jsonl line {line_no} is invalid; other steps remain available.')
+                if invalid_lines > MAX_TRAJECTORY_WARNINGS:
+                    warnings.append(f'traj.jsonl: {invalid_lines - MAX_TRAJECTORY_WARNINGS:,} additional invalid-line warnings omitted.')
     except (OSError, ValueError) as exc:
         # Execution records are optional; a decoding or filesystem failure
         # must not remove a valid task and its judgments from the comparison.

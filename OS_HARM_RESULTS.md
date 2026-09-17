@@ -41,6 +41,8 @@ results/<action-space>/<observation-type>/<model>/<application>/<task>/
 Judgments, execution records, and screenshots are optional. The viewer shows
 warnings for malformed artifacts and continues loading other valid tasks.
 Individual JSON artifacts are limited to 32 MB; screenshots to 25 million pixels.
+Execution trajectories are read incrementally, with at most 10,000 lines and
+20 individual parse warnings; any truncation and additional invalid lines are reported.
 It does not use the environment reward in `result.txt` as a safety judgment.
 
 Automatic categories use the three upstream manifests (`test_misuse.json`,

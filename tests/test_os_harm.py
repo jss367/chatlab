@@ -12,6 +12,7 @@ import gradio as gr
 from PIL import Image
 
 from extensions.os_harm import page
+from extensions.os_harm import results
 from extensions.os_harm.results import CATEGORIES, UNKNOWN, filtered, import_results, summaries
 
 
@@ -163,19 +164,44 @@ class ResultTests(unittest.TestCase):
 
     def test_trajectory_read_failure_keeps_valid_task(self):
         self.trajectory([{'step_num': 1}])
-        read_text = Path.read_text
+        open_file = Path.open
 
         def unreadable_trajectory(path, *args, **kwargs):
             if path.name == 'traj.jsonl':
                 raise PermissionError('Trajectory is not readable')
-            return read_text(path, *args, **kwargs)
+            return open_file(path, *args, **kwargs)
 
-        with mock.patch.object(Path, 'read_text', unreadable_trajectory):
+        with mock.patch.object(Path, 'open', unreadable_trajectory):
             tasks, warnings = import_results(str(self.results))
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0].trajectory, [])
         self.assertIn('Trajectory is not readable', warnings[0])
         self.assertEqual(summaries(tasks, self.judge)[0]['unsafe'], 1)
+
+    def test_trajectory_line_limit_bounds_records_and_blank_lines(self):
+        for line in ('{}\n', '\n'):
+            with self.subTest(line=line):
+                (self.task_dir / 'traj.jsonl').write_text(line * 6)
+                with mock.patch.object(results, 'MAX_TRAJECTORY_LINES', 5):
+                    tasks, warnings = import_results(str(self.results))
+                self.assertEqual(len(tasks[0].trajectory), 5 if line.strip() else 0)
+                self.assertTrue(any('exceeds 5 lines' in warning for warning in warnings))
+                self.assertEqual(summaries(tasks, self.judge)[0]['unsafe'], 1)
+
+    def test_many_invalid_lines_have_bounded_warnings_and_keep_valid_records(self):
+        (self.task_dir / 'traj.jsonl').write_text('x\n' * 9 + '{"step_num": 1}\n')
+        with mock.patch.object(results, 'MAX_TRAJECTORY_WARNINGS', 2):
+            tasks, warnings = import_results(str(self.results))
+        self.assertEqual(tasks[0].trajectory, [{'step_num': 1}])
+        self.assertEqual(len(warnings), 3)
+        self.assertIn('7 additional invalid-line warnings omitted', warnings[-1])
+
+    def test_trajectory_exact_line_limit_does_not_claim_truncation(self):
+        (self.task_dir / 'traj.jsonl').write_text('{}\n' * 5)
+        with mock.patch.object(results, 'MAX_TRAJECTORY_LINES', 5):
+            tasks, warnings = import_results(str(self.results))
+        self.assertEqual(len(tasks[0].trajectory), 5)
+        self.assertEqual(warnings, [])
 
     def test_html_is_escaped_and_judgments_do_not_execute_actions(self):
         self.log['params']['model'] = '<img src=x onerror=alert(1)>'
