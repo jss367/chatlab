@@ -314,6 +314,12 @@ def progress_bar(fraction: float, width: int = DOWNLOAD_BAR_WIDTH) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+# The chat Stop button says the same thing wherever it is drawn from. A
+# background run names its branch in the status line instead, so the label
+# does not have to carry "Chat 10" for a reader who never left that branch.
+STOP_LABEL = "Stop Chat"
+
+
 def send_stop_buttons(busy: bool):
     """Swap the Send and Stop buttons for each other."""
 

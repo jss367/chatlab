@@ -44,6 +44,7 @@ from ui.common import (
     NAV_PANE_WIDTH,
     NO_TOKEN_SELECTED,
     PAGES,
+    STOP_LABEL,
     TRANSCRIPT_LABEL,
     show_page,
 )
@@ -526,7 +527,7 @@ def build_app() -> gr.Blocks:
                                         # Escape presses this; see SHORTCUT_JS,
                                         # which finds it by this id.
                                         stop_button = gr.Button(
-                                            "Stop",
+                                            STOP_LABEL,
                                             variant="stop",
                                             visible=False,
                                             elem_id="stop-button",

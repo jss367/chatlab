@@ -17,7 +17,7 @@ from unittest import mock
 import gradio as gr
 
 import app
-from ui import icons, models_page, runtime
+from ui import common, icons, models_page, runtime
 import model_runtime
 import settings
 from model_runtime import (
@@ -3821,7 +3821,7 @@ class PageLayoutTests(unittest.TestCase):
         stops = [
             block
             for block in self.demo.blocks.values()
-            if getattr(block, "value", None) == "Stop"
+            if getattr(block, "value", None) in ("Stop", common.STOP_LABEL)
         ]
 
         # One stops a reply, one a batch of prompts, one a comparison slot

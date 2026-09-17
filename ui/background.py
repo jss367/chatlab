@@ -23,7 +23,7 @@ from conversation import (
     FORK_PREFIX, SAMPLING_FIELDS, branch_choices, copy_forks, copy_turns,
     display_messages, put_branch, put_branch_sampling,
 )
-from ui.common import finalize_partial
+from ui.common import STOP_LABEL, finalize_partial
 from ui.generation import CHAT_OUTPUT_NAMES
 from ui.panel import restore_chat_metrics_generation, transcript_update
 
@@ -215,9 +215,9 @@ class ConversationJob:
         with self.lock:
             if not self.running:
                 return gr.update(visible=True, interactive=True), gr.update(
-                    visible=False, value="Stop"
+                    visible=False, value=STOP_LABEL
                 )
-            label = "Stopping…" if self.cancel.is_set() else f"Stop {self.owner}"
+            label = "Stopping…" if self.cancel.is_set() else STOP_LABEL
             return gr.update(visible=True, interactive=False), gr.update(
                 visible=True,
                 interactive=not self.cancel.is_set(),
