@@ -1064,6 +1064,71 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertEqual([v for _, v in by_size["choices"]], ["b/big", "org/partial", "a/small"])
         self.assertEqual([v for _, v in smallest["choices"]], ["a/small", "org/partial", "b/big"])
 
+    def test_the_kind_filter_narrows_the_list_to_one_kind(self):
+        self.entries = [cached(OLMO), PIPELINE, MLX]
+
+        every, _, all_summary = app.refresh_my_models(None, "Name", None, app.ALL_KINDS)
+        images, _, image_summary = app.refresh_my_models(
+            None, "Name", None, model_runtime.IMAGE_KIND
+        )
+        texts, _, _ = app.refresh_my_models(None, "Name", None, model_runtime.TEXT_KIND)
+        mlx, _, _ = app.refresh_my_models(None, "Name", None, model_runtime.MLX_KIND)
+
+        self.assertEqual(len(every["choices"]), 3)
+        self.assertEqual([v for _, v in images["choices"]], [PIPELINE.model_id])
+        self.assertEqual([v for _, v in texts["choices"]], [OLMO])
+        self.assertEqual([v for _, v in mlx["choices"]], [MLX.model_id])
+        # The count and the size stay about the cache; only the lead says
+        # what is on screen, because the disk figure is about the folder.
+        self.assertNotIn("Showing", all_summary)
+        self.assertIn("3 models", all_summary)
+        self.assertIn("Showing 1 image", image_summary)
+        self.assertIn("3 models", image_summary)
+
+    def test_a_kind_with_nothing_downloaded_says_where_to_find_one(self):
+        # What a reader who pressed Choose an image model with no pipeline in
+        # the cache sees: the reason the list is empty, and the way out.
+        self.entries = [cached(OLMO)]
+
+        radio, detail, summary = app.refresh_my_models(
+            None, "Name", None, model_runtime.IMAGE_KIND
+        )
+
+        self.assertEqual(radio["choices"], [])
+        self.assertEqual(detail, "")
+        self.assertIn("No image models", summary)
+        self.assertIn("**Discover models**", summary)
+
+    def test_a_filter_that_hides_the_selected_row_drops_the_selection(self):
+        self.entries = [cached(OLMO), PIPELINE]
+
+        radio, detail, _ = app.refresh_my_models(
+            OLMO, "Name", None, model_runtime.IMAGE_KIND
+        )
+
+        self.assertIsNone(radio["value"])
+        self.assertEqual(detail, app.NO_CACHED_MODEL_SELECTED)
+
+    def test_a_model_of_no_kind_is_listed_under_all_kinds_only(self):
+        # An unsupported snapshot wears no kind, so no kind claims it; the
+        # unfiltered list still has to show it, since it is on disk.
+        self.entries = [UNSUPPORTED]
+
+        every, _, _ = app.refresh_my_models(None, "Name", None, app.ALL_KINDS)
+        texts, _, _ = app.refresh_my_models(None, "Name", None, model_runtime.TEXT_KIND)
+
+        self.assertEqual([v for _, v in every["choices"]], [UNSUPPORTED.model_id])
+        self.assertEqual(texts["choices"], [])
+
+    def test_the_unfiltered_list_is_what_no_kind_at_all_gives(self):
+        # demo.load and the tests that predate the filter pass no kind.
+        self.entries = [cached(OLMO), PIPELINE]
+
+        default, _, _ = app.refresh_my_models(None, "Name")
+        every, _, _ = app.refresh_my_models(None, "Name", None, app.ALL_KINDS)
+
+        self.assertEqual(default["choices"], every["choices"])
+
     def test_an_incomplete_label_ends_in_the_word_the_stylesheet_looks_for(self):
         # The CSS tints options whose label carries "· incomplete", the only
         # hook Gradio's Radio gives a stylesheet.
@@ -1327,7 +1392,9 @@ class ModelFitTests(unittest.TestCase):
         self.addCleanup(lambda: setattr(models_page, "imported_torch", original))
 
         _radio, _detail, _summary, results, _search, _selected, known = (
-            app.refresh_after_device(False, None, "Name", "full", None, None, held)
+            app.refresh_after_device(
+                False, None, "Name", "full", app.ALL_KINDS, None, None, held
+            )
         )
 
         self.assertTrue(known)
@@ -3332,16 +3399,13 @@ class PageLayoutTests(unittest.TestCase):
             self.by_id("models-page"),
             self.by_id("settings-page"),
         ]
-        buttons = {"image-load-model"}
-        found = set()
-        for listener in self.listeners("go_to_models"):
-            ((block_id, event),) = listener.targets
-            self.assertEqual(event, "click")
-            found.add(self.demo.blocks[block_id].elem_id)
-            # The button switches the pages itself: a Radio set by a handler
-            # reports no change, so the nav's own handler would not run.
-            self.assertEqual(listener.outputs, panes)
-        self.assertEqual(found, buttons)
+        (listener,) = self.listeners("go_to_image_models")
+        ((block_id, event),) = listener.targets
+        self.assertEqual(event, "click")
+        self.assertEqual(self.demo.blocks[block_id].elem_id, "image-load-model")
+        # The button switches the pages itself: a Radio set by a handler
+        # reports no change, so the nav's own handler would not run.
+        self.assertEqual(listener.outputs[: len(panes)], panes)
 
         page, *updates = app.go_to_models()
         self.assertEqual(page, "Models")
@@ -3350,12 +3414,27 @@ class PageLayoutTests(unittest.TestCase):
             [False, False, False, True, False],
         )
 
+    def test_the_images_button_scopes_both_model_lists_to_image_models(self):
+        # The list it lands on is the whole cache, where the kind is a word
+        # mid-row and the majority of rows do not carry it at all. Both kind
+        # controls are set on the way in, and both lists repainted from them.
+        (listener,) = self.listeners("go_to_image_models")
+        kind_filter = self.labelled("Kind")
+        search_kind = self.by_id("search-kind")
+        self.assertIn(kind_filter, listener.inputs)
+        self.assertIn(search_kind, listener.inputs)
+        self.assertIn(kind_filter, listener.outputs)
+        self.assertIn(search_kind, listener.outputs)
+        self.assertIn(self.labelled("Downloaded models"), listener.outputs)
+        self.assertIn(self.by_id("model-search-results"), listener.outputs)
+
     def test_every_model_change_rescans_the_cache(self):
         # Download, download-and-load, load cached, unload, redownload,
-        # confirmed removal, the refresh button, a new sort order, a new
-        # weight precision, the page load and a pick in the chat page's
-        # switcher each rescan. Selecting the default only navigates.
-        self.assertEqual(len(self.listeners("refresh_my_models")), 11)
+        # confirmed removal, the refresh button, a new sort order, a new kind
+        # filter, a new weight precision, the page load and a pick in the chat
+        # page's switcher each rescan. Selecting the default only navigates,
+        # and the Images page's button rescans inside go_to_image_models.
+        self.assertEqual(len(self.listeners("refresh_my_models")), 12)
 
     def test_model_actions_follow_selections_and_cache_refreshes(self):
         listeners = self.listeners("refresh_model_actions")
@@ -3987,10 +4066,10 @@ class PageLayoutTests(unittest.TestCase):
         # different model has its own limit, so every handler that changes
         # what is loaded recomputes the count rather than leaving the old
         # model's answer under the box.
-        # Four of the rescans change neither: the refresh button, a new sort
-        # order, a new weight precision, and the page load.
+        # Five of the rescans change neither: the refresh button, a new sort
+        # order, a new kind filter, a new weight precision, and the page load.
         self.assertEqual(
-            len(listeners) - len(typed), len(self.listeners("refresh_my_models")) - 4
+            len(listeners) - len(typed), len(self.listeners("refresh_my_models")) - 5
         )
 
     def test_choosing_a_model_writes_the_id_box(self):
