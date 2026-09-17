@@ -249,26 +249,33 @@ def apply_closure(episode):
     dropped: the run went on under a map the reader asked to change and which
     did not change, and anything scoring the run needs to know that rather than
     read an unchanged map as an unchanged intention.
+
+    Taking the cell, reading the map and writing the change are one operation,
+    because emptying the queue ahead of recording the closure would leave a
+    moment when request_closure sees a free queue beside a map that has not
+    changed yet, and takes the same cell again. The run would then record
+    closing a wall, which is a closure no map ever allowed and which the reader
+    of that run would refuse.
     """
     with episode.lock:
         if not episode.close_next:
             return
         cell, episode.close_next = tuple(episode.close_next), ()
-    boundary = len(episode.turns)
-    try:
-        changed = check_closure(episode.current_maze, episode.position, cell)
-    except ValueError as exc:
-        episode.dropped_closures.append(dict(before_turn=boundary, cell=list(cell), reason=str(exc)))
-        episode.detail = f"The queued closure at row {cell[0]}, column {cell[1]} was dropped. {exc}"
-        logger.warning("Run %s dropped the closure at %s before response %s: %s",
-                       episode.run_id, cell, boundary + 1, exc)
-        return
-    episode.config.setdefault("map_updates", []).append(
-        dict(before_turn=boundary, position=list(episode.position),
-             closed_cell=list(cell), grid=list(changed.grid)))
-    episode.detail = f"The map changed: row {cell[0]}, column {cell[1]} is now a wall."
-    logger.info("Run %s closed %s before response %s, leaving %s moves to the destination",
-                episode.run_id, cell, boundary + 1, len(changed.route(episode.position)) - 1)
+        boundary = len(episode.turns)
+        try:
+            changed = check_closure(episode.current_maze, episode.position, cell)
+        except ValueError as exc:
+            episode.dropped_closures.append(dict(before_turn=boundary, cell=list(cell), reason=str(exc)))
+            episode.detail = f"The queued closure at row {cell[0]}, column {cell[1]} was dropped. {exc}"
+            logger.warning("Run %s dropped the closure at %s before response %s: %s",
+                           episode.run_id, cell, boundary + 1, exc)
+            return
+        episode.config.setdefault("map_updates", []).append(
+            dict(before_turn=boundary, position=list(episode.position),
+                 closed_cell=list(cell), grid=list(changed.grid)))
+        episode.detail = f"The map changed: row {cell[0]}, column {cell[1]} is now a wall."
+        logger.info("Run %s closed %s before response %s, leaving %s moves to the destination",
+                    episode.run_id, cell, boundary + 1, len(changed.route(episode.position)) - 1)
 
 
 def context_messages(episode, index):

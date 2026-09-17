@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import gradio as gr
 
@@ -12,6 +13,7 @@ from extensions.maze_experiments.dynamic_maze import (FORMAT, ChangingMaze, chan
                                                       close_cell, environment_id, load_maze)
 from extensions.maze_experiments.maze import GOAL_MODES, Maze, call_text
 from extensions.maze_experiments.page import board, build_page, scenario_values, status
+from extensions.maze_experiments import runner
 from extensions.maze_experiments.runner import Episode, fork_token_edit, from_payload, stream_episode
 from extension_api import TokenInspector
 
@@ -281,6 +283,52 @@ class ChangingMapTests(unittest.TestCase):
         waiting.join(2)
         self.assertEqual(finished, [True])
         self.assertEqual(episode.close_next, (0, 1))
+
+    def test_taking_a_closure_and_recording_it_are_one_operation(self):
+        # A queue emptied ahead of the record would leave a moment when a
+        # second click sees a free queue beside a map that has not changed
+        # yet, takes the same cell, and has the run record closing a wall.
+        maze = changing(OPEN)
+        episode = Episode(maze, CHANGING_CONFIG)
+        episode.request_closure((0, 2))
+        entered, release, outcome = threading.Event(), threading.Event(), []
+        real, calls = runner.check_closure, []
+
+        def slow(*arguments, **named):
+            # Only the closure being applied waits, so a second request that
+            # reached the map would be answered at once and show up as queued.
+            calls.append(1)
+            if len(calls) == 1:
+                entered.set()
+                release.wait(2)
+            return real(*arguments, **named)
+
+        def request():
+            try:
+                episode.request_closure((0, 2))
+                outcome.append("queued")
+            except ValueError as exc:
+                outcome.append(str(exc))
+
+        with mock.patch.object(runner, "check_closure", slow):
+            applying = threading.Thread(target=lambda: runner.apply_closure(episode))
+            applying.start()
+            self.assertTrue(entered.wait(2))
+            second = threading.Thread(target=request)
+            second.start()
+            second.join(.3)
+            self.assertEqual(outcome, [])
+            release.set()
+            applying.join(2)
+            second.join(2)
+        # The second click waited for the map it was asking about, and met the
+        # wall the first one made rather than an empty queue beside an old map.
+        self.assertEqual(outcome, ["Only an open cell inside the maze can be closed."])
+        self.assertEqual(len(episode.config["map_updates"]), 1)
+        self.assertEqual(episode.close_next, ())
+        self.assertEqual(episode.dropped_closures, [])
+        self.assertEqual(from_payload(json.loads(json.dumps(episode.payload()))).current_maze.grid,
+                         close_cell(maze, (0, 2)).grid)
 
     def test_a_run_saved_with_a_closure_queued_says_so_and_ending_drops_it(self):
         maze = changing(OPEN)
