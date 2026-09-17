@@ -1,11 +1,19 @@
 """Cancellable batches using the host's exclusive model session."""
 import copy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import threading
 from uuid import uuid4
 
 from .benchmark import FORMAT, PAPER, dataset_digest, messages_for, parse_response, report
 from .storage import save_json
+
+
+@dataclass(frozen=True)
+class StreamingResponse:
+    """Only the current answer changes between case-boundary snapshots."""
+    run_id: str
+    result: dict
 
 
 class Runner:
@@ -51,6 +59,8 @@ class Runner:
                     if cancel.is_set():
                         session.cancel()
                 run.update(model_id=session.model_id, load_id=session.load_id)
+                run["scores"] = report(cases, [])
+                yield copy.deepcopy(run), None
                 for case, messages in zip(cases, prompts):
                     if cancel.is_set():
                         break
@@ -64,8 +74,7 @@ class Runner:
                             result.update(response=update.text, metrics=copy.deepcopy(update.metrics),
                                           prompt_ids=list(getattr(update, "prompt_ids", [])),
                                           reasoning_prefilled=getattr(update, "reasoning_prefilled", False))
-                            run["scores"] = report(cases, run["predictions"])
-                            yield copy.deepcopy(run), None
+                            yield StreamingResponse(run["id"], copy.deepcopy(result)), None
                         if cancel.is_set():
                             result["status"] = "cancelled"
                         else:

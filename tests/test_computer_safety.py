@@ -18,7 +18,7 @@ from extensions.osguard.benchmark import (
     execution_scores, messages_for, parse_response, predictions_from, read_json, report,
 )
 from extensions.osguard.page import build_page
-from extensions.osguard.runner import Runner
+from extensions.osguard.runner import Runner, StreamingResponse
 from test_extensions import FakeManager
 
 
@@ -81,6 +81,23 @@ class BenchmarkTests(unittest.TestCase):
         scores = action_scores(cases, predictions)
         self.assertEqual((scores["total"], scores["completed"], scores["scored"]), (3, 1, 0))
         self.assertIsNone(scores["accuracy"])
+
+    def test_many_sources_do_not_rescan_cases_and_predictions_for_each_source(self):
+        class CountedList(list):
+            visits = 0
+
+            def __iter__(self):
+                for item in super().__iter__():
+                    self.visits += 1
+                    yield item
+
+        cases = CountedList(dict(demo_cases()[0], id=str(i), source=str(i)) for i in range(500))
+        predictions = CountedList(dict(id=str(i), prediction="allowed") for i in range(500))
+        scores = report(cases, predictions)
+        self.assertEqual(scores["accuracy"], 1)
+        self.assertEqual(len(scores["by_source"]), 500)
+        self.assertLessEqual(cases.visits, 2 * len(cases))
+        self.assertEqual(predictions.visits, len(predictions))
 
     def test_external_predictions_validate_ids_and_strip_untrusted_metrics(self):
         result = predictions_from([dict(id="demo-safe", prediction="allowed", metrics=[{}])], demo_cases())
@@ -147,10 +164,39 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(self.manager.closed_streams, 3)
         self.assertEqual(self.manager.releases, 1)
         self.assertFalse(self.manager.busy)
-        self.assertEqual(frames[0][0]["predictions"][0]["response"], '{"label":')
+        live_frames = [frame for frame, _ in frames if isinstance(frame, StreamingResponse)]
+        self.assertEqual(live_frames[0].result["response"], '{"label":')
+
+    def test_streaming_does_not_rescore_or_copy_prior_results(self):
+        from extensions.osguard import runner as module
+
+        with mock.patch.object(module, "report", wraps=report) as scoring:
+            stream = self.runner.run("owner", demo_cases())
+            next(stream)  # Initial empty batch snapshot.
+            next(stream)  # First response update.
+            next(stream)  # Second response update.
+            self.assertEqual(scoring.call_count, 1)
+            finished, _ = next(stream)
+            self.assertEqual(finished["scores"]["completed"], 1)
+            calls_after_completion = scoring.call_count
+            real_copy = copy.deepcopy
+            copied = []
+
+            def recording_copy(value, *args, **kwargs):
+                copied.append(value)
+                return real_copy(value, *args, **kwargs)
+
+            with mock.patch.object(module.copy, "deepcopy", side_effect=recording_copy):
+                live, _ = next(stream)
+            self.assertIsInstance(live, StreamingResponse)
+            self.assertEqual(live.result["id"], demo_cases()[1]["id"])
+            self.assertFalse(any(isinstance(value, dict) and "cases" in value for value in copied))
+            self.assertEqual(scoring.call_count, calls_after_completion)
+            stream.close()
 
     def test_cancel_keeps_partial_response_without_scoring_it(self):
         stream = self.runner.run("owner", demo_cases())
+        next(stream)
         next(stream)
         self.runner.cancel("other-owner")
         self.assertTrue(self.manager.busy)
@@ -164,6 +210,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_disconnected_generator_releases_model_and_saves(self):
         stream = self.runner.run("owner", demo_cases())
+        next(stream)
         next(stream)
         stream.close()
         self.assertFalse(self.manager.busy)
@@ -203,6 +250,11 @@ class PageTests(unittest.TestCase):
             self.assertEqual(len(loaded), 13)
             frames = list(functions["evaluate"](loaded[0], "owner", 256, 42))
             self.assertEqual(len(frames[-1]), 12)
+            self.assertIn('**Completed:** 0/3', frames[0][2])
+            for index in range(5):
+                self.assertEqual(frames[1][index], gr.skip())
+                self.assertEqual(frames[2][index], gr.skip())
+            self.assertNotEqual(frames[3][0], gr.skip())  # Completed case updates batch state.
             exported = functions["export_run"](frames[-1][0])
             replay = functions["load_cases"](exported, "owner")
             self.assertEqual(len(replay[1]["predictions"]), 3)

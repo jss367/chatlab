@@ -7,7 +7,7 @@ from .benchmark import (
     FORMAT, PAPER, cases_from, dataset_digest, demo_cases, execution_results_from,
     execution_scores, predictions_from, read_json, report,
 )
-from .runner import Runner
+from .runner import Runner, StreamingResponse
 from .storage import save_json
 
 CSS = """
@@ -165,13 +165,25 @@ def build_page(context):
 
     def evaluate(cases, session_id, token_limit, random_seed):
         try:
+            by_id = {case["id"]: case for case in cases}
             stream = runner.run(session_id, cases, max_new_tokens=token_limit, seed=random_seed)
             try:
                 for run, path in stream:
+                    if isinstance(run, StreamingResponse):
+                        last = run.result
+                        metrics = last["metrics"]
+                        payload, changed = selections.view(session_id, (run.run_id, last["id"]), metrics)
+                        # Leave batch state, tables, scores and downloads alone
+                        # until a case completes; only stream the current answer.
+                        yield (gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), payload,
+                               context.tokens.strip(metrics), by_id[last["id"]] if changed else gr.skip(),
+                               last["response"], "Select a generated token." if changed else gr.skip(),
+                               [] if changed else gr.skip(), gr.skip())
+                        continue
                     last = run["predictions"][-1] if run["predictions"] else {}
                     metrics = last.get("metrics", [])
                     payload, changed = selections.view(session_id, (run["id"], last.get("id")), metrics)
-                    case = next((case for case in cases if case["id"] == last.get("id")), None)
+                    case = by_id.get(last.get("id"))
                     yield (run, result_rows(cases, run["predictions"]), summary(run["scores"]), run["scores"],
                            path, payload, context.tokens.strip(metrics), case, last.get("response", ""),
                            "Select a generated token." if changed else gr.skip(), [] if changed else gr.skip(),

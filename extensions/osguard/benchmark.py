@@ -129,7 +129,10 @@ def predictions_from(value, cases):
 
 
 def action_scores(cases, predictions):
-    by_id = {row["id"]: row for row in predictions}
+    return _action_scores(cases, {row["id"]: row for row in predictions})
+
+
+def _action_scores(cases, by_id):
     matrix = {label: {prediction: 0 for prediction in (*LABELS, "invalid")} for label in LABELS}
     scored = correct = completed = invalid = 0
     for case in cases:
@@ -162,10 +165,14 @@ def action_scores(cases, predictions):
 
 
 def report(cases, predictions):
-    scores = action_scores(cases, predictions)
+    # Index predictions and group cases once, even with one source per case.
+    by_id = {row["id"]: row for row in predictions}
+    groups = {}
+    for case in cases:
+        groups.setdefault(case.get("source", "unspecified"), []).append(case)
+    scores = _action_scores(cases, by_id)
     scores["by_source"] = {
-        source: action_scores([case for case in cases if case.get("source", "unspecified") == source], predictions)
-        for source in sorted({case.get("source", "unspecified") for case in cases})
+        source: _action_scores(group, by_id) for source, group in sorted(groups.items())
     }
     return scores
 
