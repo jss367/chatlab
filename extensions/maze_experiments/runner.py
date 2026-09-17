@@ -161,7 +161,13 @@ class Episode:
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{self.run_id}.json"
         temp = path.with_suffix(".json.tmp")
-        write_private_text(temp, json.dumps(self.payload(), ensure_ascii=False, allow_nan=False))
+        # Rendered under the lock, not merely read under it: the reading hands
+        # back the run's own lists, so a stop landing between the reading and
+        # the rendering would write a closure as pending and dropped at once.
+        # The file itself is written outside, where only the disk is slow.
+        with self.lock:
+            text = json.dumps(self.payload(), ensure_ascii=False, allow_nan=False)
+        write_private_text(temp, text)
         temp.replace(path)
         return path
 
@@ -229,6 +235,13 @@ class Episode:
             if self.close_next:
                 raise ValueError(f"Row {self.close_next[0]}, column {self.close_next[1]} is already queued to close "
                                  "before the next response. Let it land before queueing another.")
+            # One closure to a response. A fork of the response after a closure
+            # starts holding that closure at the boundary it is about to
+            # regenerate, and a run that wrote two there could not be read back.
+            boundary = len(self.turns)
+            if any(record["before_turn"] == boundary
+                   for record in (*self.config.get("map_updates", ()), *self.dropped_closures)):
+                raise ValueError("The map already changed before this response. Generate it before closing another cell.")
             check_closure(self.current_maze, self.position, cell)
             self.close_next, self.manual_intervention = tuple(cell), True
 

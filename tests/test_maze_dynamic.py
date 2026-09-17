@@ -322,8 +322,8 @@ class ChangingMapTests(unittest.TestCase):
             applying.join(2)
             second.join(2)
         # The second click waited for the map it was asking about, and met the
-        # wall the first one made rather than an empty queue beside an old map.
-        self.assertEqual(outcome, ["Only an open cell inside the maze can be closed."])
+        # closure the first one made rather than an empty queue beside an old map.
+        self.assertEqual(outcome, ["The map already changed before this response. Generate it before closing another cell."])
         self.assertEqual(len(episode.config["map_updates"]), 1)
         self.assertEqual(episode.close_next, ())
         self.assertEqual(episode.dropped_closures, [])
@@ -351,6 +351,40 @@ class ChangingMapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with episode.lock:
                 self.assertTrue(episode.save(Path(directory)).exists())
+
+    def test_a_run_is_rendered_under_the_lock_not_merely_read_under_it(self):
+        # The reading hands back the run's own lists, so a stop landing between
+        # the reading and the rendering would write the same closure as pending
+        # and dropped at once. Nothing else may hold the run while it renders.
+        episode = Episode(changing(OPEN), CHANGING_CONFIG)
+        episode.request_closure((0, 1))
+        entered, release = threading.Event(), threading.Event()
+        real = runner.json.dumps
+
+        def slow(value, *arguments, **named):
+            # Only the run itself, not the maze identifier's own hashing, which
+            # is rendered inside the reading and so always holds the lock.
+            if isinstance(value, dict) and "format" in value:
+                entered.set()
+                release.wait(2)
+            return real(value, *arguments, **named)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(runner.json, "dumps", slow):
+                saving = threading.Thread(target=lambda: episode.save(Path(directory)))
+                saving.start()
+                self.assertTrue(entered.wait(2))
+                # From this thread, not the one rendering, so the reentrant
+                # lock answers for the run rather than for the caller.
+                taken = episode.lock.acquire(blocking=False)
+                if taken:
+                    episode.lock.release()
+                release.set()
+                saving.join(2)
+            self.assertFalse(taken, "the run was rendered without its lock held")
+            written = json.loads((Path(directory) / f"{episode.run_id}.json").read_text())
+        self.assertEqual(written["close_next"], [0, 1])
+        self.assertEqual(written["dropped_closures"], [])
 
     def test_a_run_saved_with_a_closure_queued_says_so_and_ending_drops_it(self):
         maze = changing(OPEN)
@@ -450,6 +484,26 @@ class ChangingMapTests(unittest.TestCase):
         self.assertEqual(forked.events[-1]["error"], "blocked_move")
         self.assertEqual(forked.position, (0, 1))
         self.assertEqual(episode.config["map_updates"][0]["before_turn"], 1)
+
+    def test_a_fork_holding_a_closure_at_its_next_boundary_refuses_another(self):
+        episode, manager = self.episode_with_a_closure()
+        original = episode.turns[1]["text"]
+        with manager.open_session() as session:
+            forked = fork_token_edit(episode, 1, original.index("east"), "west", session)
+        # The carried closure sits at the boundary this fork is about to
+        # regenerate, and a run recording two closures there could not be read
+        # back, so the fork refuses one until that response exists.
+        self.assertEqual(forked.config["map_updates"][0]["before_turn"], len(forked.turns))
+        with self.assertRaisesRegex(ValueError, "map already changed before this response"):
+            forked.request_closure((0, 1))
+        self.assertEqual(forked.close_next, ())
+        suffix = original[original.index("east") + len("east"):]
+        manager.replies = iter([(suffix, list(suffix.encode()) + [0])])
+        list(stream_episode(forked, manager, single_step=True))
+        # Once the response exists, the next boundary is free again.
+        forked.request_closure((0, 1))
+        self.assertEqual(forked.close_next, (0, 1))
+        self.assertEqual(from_payload(json.loads(json.dumps(forked.payload()))).close_next, [0, 1])
 
     def test_a_fork_before_a_closure_leaves_that_closure_behind(self):
         episode, manager = self.episode_with_a_closure()
