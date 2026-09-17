@@ -50,6 +50,17 @@ CSS = """
 #maze-tokens {max-height:32vh; min-height:110px; overflow:auto;}
 #maze-token-editor {border:1px solid #c7d2fe; border-radius:12px; padding:12px;}
 #maze-history {font-size:12px;}
+/* The inspector column is as tall as the window and nothing in it grows, so a
+   history of a fixed height left the rest of that height empty between the
+   table and the panels below it. The table takes the spare height instead, and
+   gives it back when the panels open. What scrolls is the table element, whose
+   max-height resolves only if every wrapper Gradio puts between it and the
+   block, the virtual-table viewport included, has a height to measure. */
+#maze-page #maze-history {flex:1 1 auto !important; min-height:120px;}
+#maze-history .table-container, #maze-history .table-wrap, #maze-history button,
+#maze-history svelte-virtual-table-viewport, #maze-history svelte-virtual-table-viewport > div {height:100%; min-height:0;}
+#maze-history svelte-virtual-table-viewport {display:block;}
+#maze-history table {max-height:100% !important;}
 #maze-history td, #maze-history th {font:12px/1.5 system-ui;}
 #maze-history td {cursor:pointer;}
 #maze-raw textarea, #maze-context textarea {font-family:ui-monospace,monospace; font-size:12px;}
@@ -583,7 +594,7 @@ def _build_page(context):
                                                 label="Click a row to branch this response into that token")
             gr.Markdown("## Movement history\nSelect a row to show its position and response.")
             events = gr.Dataframe(value=timeline(initial), headers=["Response", "Position", "Direction", "Result"],
-                                  interactive=False, wrap=True, max_height=260, elem_id="maze-history")
+                                  interactive=False, wrap=True, elem_id="maze-history")
             with gr.Accordion("Supplied text & full response", open=False):
                 prefix_note = gr.Markdown("No supplied interruption in this response.")
                 prefix_text = gr.Textbox(label="Supplied prefix", interactive=False, lines=2)
