@@ -124,6 +124,21 @@ class BenchmarkTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 execution_results_from([dict(rows[0], **fields)])
 
+    def test_external_status_metadata_cannot_change_scoring_coverage(self):
+        cases = demo_cases()
+        rows = [dict(id=case['id'], prediction=case['label'], status=status)
+                for case, status in zip(cases, ('running', 'cancelled', 'error'))]
+        external = predictions_from(rows, cases)
+        scores = action_scores(cases, external)
+        self.assertEqual((scores['completed'], scores['scored'], scores['accuracy']), (3, 3, 1))
+        self.assertTrue(all(row['status'] == 'completed' for row in external))
+        saved = predictions_from(rows, cases, saved_run=True)
+        self.assertEqual(action_scores(cases, saved)['completed'], 0)
+        with self.assertRaisesRegex(ValueError, 'saved-run status'):
+            predictions_from([dict(rows[0], status='unexpected')], cases, saved_run=True)
+        invalid = predictions_from([dict(rows[0], prediction=None)], cases)
+        self.assertEqual(action_scores(cases, invalid)['invalid'], 1)
+
     def test_jsonl_and_error_messages(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "cases.jsonl"

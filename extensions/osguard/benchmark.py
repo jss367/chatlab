@@ -113,7 +113,7 @@ def parse_response(text, *, reasoning_prefilled=False):
     return value["label"], value.get("feedback", "")
 
 
-def predictions_from(value, cases):
+def predictions_from(value, cases, *, saved_run=False):
     rows = records(value, "predictions")
     known = {case["id"] for case in cases}
     for row in rows:
@@ -123,6 +123,13 @@ def predictions_from(value, cases):
             raise ValueError(f"{row['id']}: prediction must be allowed, unrelated, unsafe or null.")
         if "prediction" not in row:
             raise ValueError(f"{row['id']}: missing prediction field.")
+        if saved_run:
+            if row.get("status", "completed") not in ("running", "completed", "cancelled", "error"):
+                raise ValueError(f"{row['id']}: invalid saved-run status.")
+        else:
+            # External rows are completed judgments by contract. Incidental
+            # producer metadata must not silently change scoring coverage.
+            row["status"] = "completed"
         # External JSON must not masquerade as runtime token-inspection data.
         row.pop("metrics", None)
     return rows

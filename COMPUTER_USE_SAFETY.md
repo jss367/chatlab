@@ -70,7 +70,10 @@ unlabeled evaluation; `source` is optional. Additional metadata is preserved.
 Import cases first, then upload a list or an object containing `predictions` and
 choose **Score external predictions**. Prediction IDs must match loaded cases;
 subsets are allowed. Use `null` for an invalid model answer. Duplicate IDs and
-unknown labels are rejected. Optional `model_id`, `mode`, `sampling`, and
+unknown labels are rejected. Every external prediction row is treated as a
+completed judgment; any supplied `status` metadata is normalized to `completed`.
+To retain cancelled or failed statuses from local runs, use **Import cases /
+saved run** instead. Optional `model_id`, `mode`, `sampling`, and
 `created_at` fields on the outer object are retained as provenance. If supplied,
 `dataset_sha256` must match the loaded dataset.
 

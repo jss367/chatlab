@@ -122,7 +122,7 @@ def build_page(context):
             if isinstance(value, dict) and value.get("format") == FORMAT:
                 if value.get("dataset_sha256") != dataset_digest(cases):
                     raise ValueError("Saved run dataset fingerprint does not match its cases.")
-                predictions = predictions_from(value, cases) if value.get("predictions") else []
+                predictions = predictions_from(value, cases, saved_run=True) if value.get("predictions") else []
             run = dict(format=FORMAT, paper=PAPER, cases=cases, predictions=predictions,
                        dataset_sha256=dataset_digest(cases), mode="imported" if predictions else "not_run")
             if isinstance(value, dict):
