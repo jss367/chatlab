@@ -31,6 +31,9 @@ CATALOGUE = (
     ExtensionSpec("os_harm", "OS-Harm results",
                   "Compare computer-use safety evaluations and replay recorded screenshots, responses and actions.",
                   "OS-Harm", "extensions.os_harm", icon="image"),
+    ExtensionSpec("osguard", "Computer-use safety benchmark",
+                  "Evaluate OSGuard action judgments, inspect tokens and review desktop safety results.",
+                  "Safety", "extensions.osguard", icon="box"),
 )
 
 

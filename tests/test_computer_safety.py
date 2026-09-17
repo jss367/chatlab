@@ -1,0 +1,229 @@
+"""Benchmark semantics, cancellation/checkpoints, and extension page wiring."""
+import copy
+import json
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest import mock
+
+import gradio as gr
+
+import app
+import settings
+import settings_sandbox
+from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
+from extensions.osguard.benchmark import (
+    action_scores, cases_from, dataset_digest, demo_cases, execution_results_from,
+    execution_scores, messages_for, parse_response, predictions_from, read_json, report,
+)
+from extensions.osguard.page import build_page
+from extensions.osguard.runner import Runner
+from test_extensions import FakeManager
+
+
+def setUpModule():
+    settings_sandbox.start()
+
+
+def tearDownModule():
+    settings_sandbox.stop()
+
+
+class BenchmarkTests(unittest.TestCase):
+    def test_prompt_has_only_original_task_state_and_action(self):
+        case = dict(demo_cases()[0], label="unsafe", proposer_instruction="LEAK", trajectory=["LEAK"], screenshot="LEAK")
+        prompt = messages_for(case)
+        self.assertNotIn("LEAK", json.dumps(prompt))
+        self.assertEqual(set(json.loads(prompt[1]["content"])), {"instruction", "state_text", "candidate_action"})
+        with self.assertRaisesRegex(ValueError, "Screenshot-only"):
+            messages_for(dict(case, state_text=""))
+
+    def test_import_validates_duplicates_labels_and_preserves_audit_metadata(self):
+        cases = demo_cases()
+        cases[0]["screenshot"] = "reference.png"
+        self.assertEqual(cases_from({"cases": cases}), cases)
+        for value in ([], [cases[0], cases[0]], [dict(cases[0], label="safe")], [dict(cases[0], candidate_action={})]):
+            with self.assertRaises(ValueError):
+                cases_from(value)
+        self.assertEqual(dataset_digest(cases), dataset_digest(copy.deepcopy(cases)))
+        self.assertNotEqual(dataset_digest(cases), dataset_digest(cases[1:]))
+
+    def test_strict_final_judgments(self):
+        for text in ('unsafe', '{"label":"unsafe","feedback":"Overwrite"}',
+                     '```json\n{"label":"unsafe"}\n```', '<think>allowed?</think>{"label":"unsafe"}',
+                     'Reasoning from a template prefill.</think>unsafe'):
+            self.assertEqual(parse_response(text)[0], "unsafe")
+        for text in ('not unsafe', 'allowed or unsafe', '{"label":"safe"}',
+                     '<think>unsafe', '{"label":"unsafe"', '["unsafe"]', '{"label":"unsafe","feedback":0}'):
+            self.assertIsNone(parse_response(text)[0])
+        self.assertIsNone(parse_response('unsafe', reasoning_prefilled=True)[0])
+        self.assertEqual(parse_response('reasoning</think>unsafe', reasoning_prefilled=True)[0], 'unsafe')
+
+    def test_invalid_predictions_are_not_dropped_from_denominator(self):
+        cases = demo_cases()
+        predictions = [{"id": cases[0]["id"], "prediction": "allowed"},
+                       {"id": cases[1]["id"], "prediction": "allowed"},
+                       {"id": cases[2]["id"], "prediction": None}]
+        scores = report(cases, predictions)
+        self.assertEqual(scores["accuracy"], 1 / 3)
+        self.assertAlmostEqual(scores["macro_f1"], (2 / 3) / 3)
+        self.assertEqual(scores["invalid"], 1)
+        self.assertEqual(scores["confusion"]["unsafe"]["invalid"], 1)
+        self.assertEqual(scores["per_label"]["allowed"]["precision"], .5)
+        self.assertEqual(len(scores["by_source"]), 1)
+
+    def test_pending_cancelled_and_unlabeled_coverage(self):
+        cases = demo_cases()
+        cases[0].pop("label")
+        predictions = [dict(id=cases[0]["id"], prediction="unsafe"),
+                       dict(id=cases[1]["id"], prediction=None, status="cancelled")]
+        scores = action_scores(cases, predictions)
+        self.assertEqual((scores["total"], scores["completed"], scores["scored"]), (3, 1, 0))
+        self.assertIsNone(scores["accuracy"])
+
+    def test_external_predictions_validate_ids_and_strip_untrusted_metrics(self):
+        result = predictions_from([dict(id="demo-safe", prediction="allowed", metrics=[{}])], demo_cases())
+        self.assertNotIn("metrics", result[0])
+        for row in (dict(id="unknown", prediction="unsafe"), dict(id="demo-safe"),
+                    dict(id="demo-safe", prediction="invalid")):
+            with self.assertRaises(ValueError):
+                predictions_from([row], demo_cases())
+
+    def test_execution_outcomes_do_not_conflate_success_with_safety(self):
+        rows = execution_results_from([
+            dict(id="safe", condition="guarded", task_success=True, retry_terminated=False, invariants={"file": True}),
+            dict(id="unsafe", condition="unguarded", task_success=True, retry_terminated=False, invariants={"file": False}),
+            dict(id="stopped", condition="guarded", task_success=False, retry_terminated=True, invariants={"file": True}),
+            dict(id="failed", condition="guarded", task_success=False, retry_terminated=False, invariants={"file": False}),
+        ])
+        self.assertEqual([r["outcome"] for r in rows], ["safe_success", "unsafe_completion", "unsuccessful", "unsuccessful"])
+        scores = execution_scores(rows)
+        self.assertEqual(scores["guarded"]["safe_success_rate"], 1 / 3)
+        self.assertEqual(scores["guarded"]["safety_violation_rate"], 1 / 3)
+        self.assertEqual(scores["unguarded"]["unsafe_completion_rate"], 1)
+        for fields in (dict(invariants={}), dict(invariants={"file": "false"}),
+                       dict(task_success="false"), dict(task_success=True, retry_terminated=True)):
+            with self.assertRaises(ValueError):
+                execution_results_from([dict(rows[0], **fields)])
+
+    def test_jsonl_and_error_messages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.jsonl"
+            path.write_text("\n".join(json.dumps(case) for case in demo_cases()))
+            self.assertEqual(cases_from(read_json(path)), demo_cases())
+            path.write_text("{broken}")
+            with self.assertRaisesRegex(ValueError, "valid JSON"):
+                read_json(path)
+
+
+class JudgmentManager(FakeManager):
+    def generate(self, messages, **options):
+        self.options = options
+        try:
+            yield SimpleNamespace(text='{"label":', metrics=[], prompt_ids=[1, 2])
+            yield SimpleNamespace(text='{"label":"allowed"}', metrics=[], prompt_ids=[1, 2])
+        finally:
+            self.closed_streams += 1
+
+
+class RunnerTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.manager = JudgmentManager()
+        self.runner = Runner(ModelService(lambda: self.manager), Path(self.directory.name) / "new" / "extension")
+
+    def test_batch_saves_reproducible_private_checkpoint_and_releases_model(self):
+        frames = list(self.runner.run("owner", demo_cases()))
+        final, path = frames[-1]
+        self.assertEqual(final["status"], "completed")
+        self.assertEqual(final["scores"]["completed"], 3)
+        self.assertEqual(final["model_id"], "test/model")
+        self.assertEqual(final["mode"], "text_only_adaptation")
+        self.assertEqual(final["predictions"][0]["messages"], messages_for(demo_cases()[0]))
+        self.assertEqual(json.loads(Path(path).read_text()), final)
+        self.assertEqual(Path(path).stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.manager.closed_streams, 3)
+        self.assertEqual(self.manager.releases, 1)
+        self.assertFalse(self.manager.busy)
+        self.assertEqual(frames[0][0]["predictions"][0]["response"], '{"label":')
+
+    def test_cancel_keeps_partial_response_without_scoring_it(self):
+        stream = self.runner.run("owner", demo_cases())
+        next(stream)
+        self.runner.cancel("other-owner")
+        self.assertTrue(self.manager.busy)
+        self.runner.cancel("owner")
+        run, _ = list(stream)[-1]
+        self.assertEqual(run["status"], "cancelled")
+        self.assertEqual(run["predictions"][0]["status"], "cancelled")
+        self.assertEqual(run["scores"]["completed"], 0)
+        self.assertEqual(len(run["predictions"]), 1)
+        self.assertFalse(self.manager.busy)
+
+    def test_disconnected_generator_releases_model_and_saves(self):
+        stream = self.runner.run("owner", demo_cases())
+        next(stream)
+        stream.close()
+        self.assertFalse(self.manager.busy)
+        saved = json.loads(next(self.runner.data_dir.glob("*.json")).read_text())
+        self.assertEqual(saved["status"], "cancelled")
+        self.assertEqual(saved["predictions"][0]["status"], "cancelled")
+
+    def test_generation_error_releases_lease_and_records_failed_case(self):
+        with mock.patch.object(self.manager, "generate", side_effect=RuntimeError("generation failed")):
+            with self.assertRaisesRegex(RuntimeError, "generation failed"):
+                list(self.runner.run("owner", demo_cases()))
+        self.assertFalse(self.manager.busy)
+        saved = json.loads(next(self.runner.data_dir.glob("*.json")).read_text())
+        self.assertEqual(saved["status"], "error")
+        self.assertEqual(saved["predictions"][0]["status"], "error")
+        self.assertEqual(saved["scores"]["completed"], 0)
+
+    def test_screenshot_only_case_fails_before_claiming_model(self):
+        with self.assertRaises(ValueError):
+            list(self.runner.run("owner", [dict(demo_cases()[0], state_text="")]))
+        self.assertEqual(self.manager.releases, 0)
+
+
+class PageTests(unittest.TestCase):
+    def test_page_load_evaluate_export_and_execution_callbacks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = JudgmentManager()
+            context = ExtensionContext(ModelService(lambda: manager), TokenInspector(),
+                                       Path(directory) / "extension", NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            self.addCleanup(demo.close)
+            functions = {function.fn.__name__: function.fn for function in demo.fns.values() if function.fn}
+            case_path = Path(directory) / "cases.json"
+            case_path.write_text(json.dumps(demo_cases()))
+            loaded = functions["load_cases"](str(case_path), "owner")
+            self.assertEqual(len(loaded), 13)
+            frames = list(functions["evaluate"](loaded[0], "owner", 256, 42))
+            self.assertEqual(len(frames[-1]), 12)
+            exported = functions["export_run"](frames[-1][0])
+            replay = functions["load_cases"](exported, "owner")
+            self.assertEqual(len(replay[1]["predictions"]), 3)
+            self.assertEqual(replay[1]["imported_provenance"]["model_id"], "test/model")
+            self.assertNotIn("metrics", replay[1]["predictions"][0])
+            scored = functions["score_external"](exported, loaded[0], "owner")
+            self.assertEqual(len(scored), 11)
+            execution_path = Path(directory) / "execution.json"
+            execution_path.write_text(json.dumps([dict(id="one", task_success=True, retry_terminated=False, invariants={"preserved": False})]))
+            reviewed = functions["review_executions"](str(execution_path))
+            self.assertEqual(reviewed[0][0][2], "unsafe_completion")
+            self.assertTrue(Path(reviewed[2]).is_file())
+
+    def test_app_registers_safety_alongside_other_safety_extension(self):
+        settings.update(enabled_extensions=["osguard", "os_harm"])
+        try:
+            demo = app.build_app()
+            self.addCleanup(demo.close)
+            nav = next(b for b in demo.blocks.values() if getattr(b, "elem_id", None) == "nav")
+            self.assertIn("Safety", [value for _, value in nav.choices])
+            self.assertIn("OS-Harm", [value for _, value in nav.choices])
+            self.assertTrue(any(getattr(b, "elem_id", None) == "computer-safety-page" for b in demo.blocks.values()))
+        finally:
+            settings.update(enabled_extensions=[])
