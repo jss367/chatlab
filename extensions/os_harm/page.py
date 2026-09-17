@@ -236,10 +236,12 @@ def build_page(context):
             details, [tasks, selection, judge], detail_outputs).then(replay, replay_inputs, replay_outputs)
 
     render_chain(load.click(load_source, [tasks, folder, label, source_category, definitions, judge],
-                            [tasks, judge, import_note]).success(
+                            [tasks, judge, import_note], concurrency_id='os-harm-results', concurrency_limit=1).success(
                                 lambda: gr.update(open=False), [], import_panel))
+    # Both actions replace the session's task list. Queue Clear behind any
+    # active import so a late import cannot repopulate cleared results.
     render_chain(clear.click(lambda: ([], gr.update(choices=[], value=None), 'Loaded results cleared.'),
-                             [], [tasks, judge, import_note]))
+                             [], [tasks, judge, import_note], concurrency_id='os-harm-results', concurrency_limit=1))
     for control in (judge, category, outcome, query):
         render_chain(control.input(lambda: None, [], []))
     selection.input(details, [tasks, selection, judge], detail_outputs).then(replay, replay_inputs, replay_outputs)

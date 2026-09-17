@@ -312,6 +312,13 @@ class ExtensionIntegrationTests(unittest.TestCase):
             self.assertIn(('OS-Harm', 'OS-Harm'), nav.choices)
             self.assertTrue(any(getattr(b, 'elem_id', None) == 'os-harm-page' for b in demo.blocks.values()))
             self.assertTrue(any(fn.fn is page.load_source for fn in demo.fns.values()))
+            # The two listeners that replace imported task state must share
+            # a serial queue; otherwise a late load can undo a user's Clear.
+            load = next(fn for fn in demo.fns.values() if fn.fn is page.load_source)
+            writers = [fn for fn in demo.fns.values() if load.outputs[0] in fn.outputs]
+            self.assertEqual(len(writers), 2)
+            self.assertEqual({fn.concurrency_id for fn in writers}, {load.concurrency_id})
+            self.assertEqual({fn.concurrency_limit for fn in writers}, {1})
         finally:
             demo.close()
 
