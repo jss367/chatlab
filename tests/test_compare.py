@@ -863,6 +863,8 @@ class HandlerTests(unittest.TestCase):
 
     def test_a_reply_records_where_each_token_ends_in_its_own_text(self):
         held, _status, *_buttons = self.fill("A")
+        self.assertTrue(held["run_id"])
+        self.assertTrue(held["context_ids"])
         self.assertEqual(len(held["token_ends"]), len(held["metrics"]))
         self.assertEqual(held["token_ends"][-1], len(held["decoded"]))
 
@@ -899,6 +901,8 @@ class HandlerTests(unittest.TestCase):
             "A", mode=compare.MEASUREMENT, prompt="", measured="Hello world"
         )
         self.assertEqual(held["kind"], compare.MEASUREMENT)
+        self.assertTrue(held["run_id"])
+        self.assertIn("context_ids", held)
         self.assertNotIn("system_prompt", held["settings"])
 
     def test_a_reply_fills_its_slot_with_the_settings_it_ran_under(self):

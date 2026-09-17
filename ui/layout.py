@@ -73,6 +73,7 @@ from compare import (
     MEASUREMENT,
     REPLY,
 )
+from ui.activation_patching import build as build_activation_patching
 from ui.compare import (
     COMPARE_EMPTY,
     clear_slots,
@@ -1008,6 +1009,7 @@ def build_app() -> gr.Blocks:
                                     inputs=compare_export_state,
                                     size="sm",
                                 )
+                                build_activation_patching(compare_a_state, compare_b_state)
 
                             experiments_view = experiments.build()
 
