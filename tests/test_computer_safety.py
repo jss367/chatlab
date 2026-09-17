@@ -165,6 +165,25 @@ class BenchmarkTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "valid JSON"):
                 read_json(path)
 
+    def test_saved_run_size_allowance_does_not_relax_other_import_limits(self):
+        from extensions.osguard import benchmark
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(benchmark, 'MAX_FILE_BYTES', 100), \
+                mock.patch.object(benchmark, 'MAX_SAVED_RUN_BYTES', 1000):
+            path = Path(directory) / 'run.json'
+            value = dict(format=benchmark.FORMAT, trace='x' * 200)
+            path.write_text(json.dumps(value))
+            self.assertEqual(read_json(path, allow_saved_run=True), value)
+            with self.assertRaisesRegex(ValueError, '32 MB'):
+                read_json(path)
+            path.write_text(json.dumps(dict(cases=[{'metadata': 'x' * 200}])))
+            with self.assertRaisesRegex(ValueError, 'Only saved-run'):
+                read_json(path, allow_saved_run=True)
+            path.write_text(json.dumps(dict(value, trace='x' * 1000)))
+            with self.assertRaisesRegex(ValueError, '512 MB'):
+                read_json(path, allow_saved_run=True)
+
 
 class JudgmentManager(FakeManager):
     def generate(self, messages, **options):
@@ -303,7 +322,10 @@ class PageTests(unittest.TestCase):
                 self.assertEqual(frames[2][index], gr.skip())
             self.assertNotEqual(frames[3][0], gr.skip())  # Completed case updates batch state.
             exported = functions["export_run"](frames[-1][0])
-            replay = functions["load_cases"](exported, "owner")
+            # The checkpoint includes prompts and traces beyond the ordinary
+            # dataset size. Reopen through the real saved-run callback.
+            with mock.patch('extensions.osguard.benchmark.MAX_FILE_BYTES', 100):
+                replay = functions["load_cases"](exported, "owner")
             self.assertEqual(len(replay[1]["predictions"]), 3)
             self.assertEqual(replay[1]["imported_provenance"]["model_id"], "test/model")
             self.assertNotIn("metrics", replay[1]["predictions"][0])

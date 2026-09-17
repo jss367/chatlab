@@ -116,7 +116,7 @@ def build_page(context):
 
     def load_cases(path, session_id, synthetic=False):
         try:
-            value = demo_cases() if synthetic else read_json(path)
+            value = demo_cases() if synthetic else read_json(path, allow_saved_run=True)
             cases = cases_from(value)
             predictions = []
             if isinstance(value, dict) and value.get("format") == FORMAT:

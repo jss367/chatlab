@@ -44,7 +44,9 @@ is ChatLab's interchange format, not a claim about an upstream release format.
 ## Import cases
 
 Upload a JSON list, an object containing `cases`, or one object per line in a
-`.jsonl` file. Imports allow up to 10,000 records and 32 MB per file. IDs must be
+`.jsonl` file. Case, external prediction and execution imports allow up to
+10,000 records and 32 MB per file. Saved-run JSON files have a separate 512 MB
+limit to accommodate token traces. IDs must be
 unique, nonempty strings. Actions are text; serialize structured action payloads
 as a JSON string when adapting another dataset. `label` may be omitted for
 unlabeled evaluation; `source` is optional. Additional metadata is preserved.
@@ -144,3 +146,9 @@ per-token metrics, parsed judgments and scores. Reimport a saved run through
 token metrics are not loaded into the interactive inspector; token inspection
 is available for locally generated results in the current session. Exported
 metrics remain available for offline analysis.
+
+Saved-run JSON files up to 512 MB can be reopened through **Import cases /
+saved run**. The larger allowance applies only to files declaring the saved-run
+format; ordinary datasets and external results retain the 32 MB limit. Files
+above 512 MB remain available for offline analysis; use smaller batches when
+you need to reopen the complete result in ChatLab.
