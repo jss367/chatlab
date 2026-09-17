@@ -156,6 +156,33 @@ def update_sampling_label(temperature, top_p, top_k, skip_top_below, max_new_tok
     )
 
 
+def reset_sampling(built_limit: int):
+    """The five sampling controls, back at the values the app ships with.
+
+    Worked out when the button is pressed rather than read off the values the
+    sliders were built with, which is what Gradio's own reset button does and
+    why it is turned off here: the sliders are built holding the saved
+    settings, and the settings file follows every move of them, so that
+    button restored the number already on screen.
+
+    The response length is held to two ceilings. The context limit is the one
+    a reader can see - a response cannot be longer than a prompt is allowed to
+    be - and it is read now, so lowering the limit lowers what this restores.
+    ``built_limit`` is the other: the slider refuses a value above the maximum
+    it was built with, whatever its maximum has been set to since, so a
+    session that came up under a lower limit keeps that as its ceiling until
+    the page is loaded again.
+    """
+
+    values = settings.sanitize(
+        settings.DEFAULTS.to_mapping()
+        | {"prefill_token_limit": min(settings.current().prefill_token_limit, built_limit)}
+    )
+    return tuple(
+        gr.update(value=getattr(values, name)) for name in settings.CONVERSATION_SAMPLING
+    )
+
+
 # The settings that outlive the session, in the order the controls wired to
 # remember_settings publish them. The Hugging Face token is not among them on
 # purpose: see the settings module.

@@ -193,6 +193,7 @@ from ui.settings_page import (
     remember_committed_seed,
     remember_prefill_limit,
     remember_settings,
+    reset_sampling,
     restore_settings,
     sampling_label,
     update_sampling_label,
@@ -544,15 +545,6 @@ def build_app() -> gr.Blocks:
                                 generation_status = gr.Markdown("Ready.", elem_id="generation-status")
                                 with gr.Accordion("Conversation tools", open=False, elem_id="conversation-tools"):
                                     # Sampling and file controls are available on demand.
-                                    #
-                                    # The summary is built from the saved
-                                    # values while the sliders under it are
-                                    # built from the defaults. It is the one
-                                    # of the two a reader can see with the
-                                    # accordion shut, so it is the one that
-                                    # has to be right before the page has
-                                    # finished loading; the load then puts the
-                                    # same numbers on both.
                                     with gr.Accordion(
                                         sampling_label(
                                             saved.temperature,
@@ -563,72 +555,62 @@ def build_app() -> gr.Blocks:
                                         ),
                                         open=False,
                                     ) as sampling_accordion:
-                                        # These five are built with the
-                                        # defaults rather than the saved
-                                        # values, which is what makes the
-                                        # small ↺ beside each of them worth
-                                        # pressing: Gradio's reset button puts
-                                        # back the value its slider was built
-                                        # with, so built from the file it
-                                        # restores the number already on
-                                        # screen and a reader who presses it
-                                        # sees nothing happen. Built from the
-                                        # defaults it is a way back to 0.8
-                                        # from an experiment, which is what it
-                                        # looks like it is for. The reset
-                                        # reaches the app as an ordinary move
-                                        # of the slider, so it is written into
-                                        # the conversation and the settings
-                                        # file like any other.
-                                        #
-                                        # Nothing is lost by not building them
-                                        # from the file: a page load reads it
-                                        # onto them through restore_settings,
-                                        # and the conversation that comes back
-                                        # with the page writes its own
-                                        # sampling over that. The build-time
-                                        # value was never what a reader ended
-                                        # up looking at - it is whatever the
-                                        # file held when the app started
-                                        # rather than what it holds now, which
-                                        # is why that load exists.
+                                        # show_reset_button=False on all five,
+                                        # and Reset to defaults below them
+                                        # instead. Gradio's own ↺ restores the
+                                        # value its slider was built with,
+                                        # which is the saved setting - and the
+                                        # file follows every move of these
+                                        # sliders, so it restored the number
+                                        # already on screen and did nothing
+                                        # whatever it was pressed. Building
+                                        # them with the defaults to give it
+                                        # somewhere to go would put the
+                                        # defaults in the page a reader is
+                                        # answered from until the load lands,
+                                        # and would freeze the length it
+                                        # restores at whatever the context
+                                        # limit was at startup. The button
+                                        # below works out what to restore when
+                                        # it is pressed, which has neither
+                                        # problem. Gradio 6 spells this
+                                        # buttons=["reset"].
                                         with gr.Row():
                                             temperature = gr.Slider(
                                                 0,
                                                 2,
-                                                value=settings.DEFAULTS.temperature,
+                                                value=saved.temperature,
                                                 step=0.05,
                                                 label="Temperature",
+                                                show_reset_button=False,
                                             )
                                             top_p = gr.Slider(
                                                 0.05,
                                                 1,
-                                                value=settings.DEFAULTS.top_p,
+                                                value=saved.top_p,
                                                 step=0.01,
                                                 label="Top-p",
+                                                show_reset_button=False,
                                             )
                                         with gr.Row():
                                             top_k = gr.Slider(
                                                 0,
                                                 200,
-                                                value=settings.DEFAULTS.top_k,
+                                                value=saved.top_k,
                                                 step=1,
                                                 label="Top-k (0 disables)",
+                                                show_reset_button=False,
                                             )
                                             # The ceiling is the context limit: a
                                             # response cannot be longer than a
-                                            # prompt is allowed to be, and the
-                                            # length reset to cannot outrun it
-                                            # either.
+                                            # prompt is allowed to be.
                                             max_new_tokens = gr.Slider(
                                                 1,
                                                 saved.prefill_token_limit,
-                                                value=min(
-                                                    settings.DEFAULTS.max_new_tokens,
-                                                    saved.prefill_token_limit,
-                                                ),
+                                                value=saved.max_new_tokens,
                                                 step=1,
                                                 label="Maximum new tokens",
+                                                show_reset_button=False,
                                             )
                                         with gr.Row():
                                             # Alone on its row because it is
@@ -639,9 +621,10 @@ def build_app() -> gr.Blocks:
                                             skip_top_below = gr.Slider(
                                                 0,
                                                 1,
-                                                value=settings.DEFAULTS.skip_top_below,
+                                                value=saved.skip_top_below,
                                                 step=0.05,
                                                 label="Skip top choice below (0 disables)",
+                                                show_reset_button=False,
                                                 info=(
                                                     "Take the model's second choice wherever its "
                                                     "first holds less than this probability. Where "
@@ -661,6 +644,20 @@ def build_app() -> gr.Blocks:
                                                 label="New seed each response",
                                                 info="Turn off to lock the seed and reproduce a response exactly.",
                                             )
+                                        # The way back from an experiment. It
+                                        # moves the five the conversation
+                                        # keeps and leaves the seed alone: the
+                                        # seed is not a setting that is right
+                                        # or wrong to be away from, and a
+                                        # reader holding one to reproduce a
+                                        # reply would not thank us for
+                                        # throwing it away with the rest.
+                                        reset_sampling_button = gr.Button(
+                                            "Reset to defaults",
+                                            min_width=130,
+                                            elem_id="reset-sampling",
+                                            elem_classes=icon_classes("rotate-ccw"),
+                                        )
                                     with gr.Accordion("Steering vector", open=False):
                                         gr.Markdown(
                                             "Add a vector to a model layer during this conversation. "
@@ -2376,6 +2373,35 @@ def build_app() -> gr.Blocks:
                 trigger_mode="always_last",
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
+        # Reset to defaults writes itself down the way a hand on a slider
+        # does, and in the same order: the controls first, then the
+        # conversation and the file from what they now hold, then the
+        # summary. The handlers are the ones the sliders already use, so a
+        # reset is stored, pinned and described exactly as five moves by hand
+        # would have been - there is nothing about it for them to tell apart.
+        reset_sampling_button.click(
+            partial(reset_sampling, saved.prefill_token_limit),
+            None,
+            sampling_controls,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+        ).then(
+            remember_branch_sampling,
+            [forks_state, *sampling_controls],
+            forks_state,
+            show_progress="hidden",
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+        ).then(
+            remember_settings,
+            persisted_inputs,
+            None,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+        ).then(
+            update_sampling_label,
+            sampling_controls,
+            sampling_accordion,
+            show_progress="hidden",
+            concurrency_id=SAMPLING_LABEL_QUEUE,
+        )
         # The seed box is the one control the app writes to itself: a finished
         # response leaves the seed that produced it there, and saving that
         # would overwrite the seed the reader chose. Blur and submit are the

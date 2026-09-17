@@ -3852,11 +3852,10 @@ class PageLayoutTests(unittest.TestCase):
         )
 
     def test_the_sampling_accordion_starts_showing_the_saved_values(self):
-        # The summary is the one part of this a reader sees with the accordion
-        # shut, which makes it the part that has to be right before the page
-        # has finished loading - the sliders it describes are read back from
-        # the file a moment later, and start at their defaults so that the
-        # reset button beside each of them has somewhere to go.
+        # The summary is only worth having if it is right before anything is
+        # touched, which means the label and the sliders read one set of
+        # numbers - and that set is the saved settings, not a second copy of
+        # the defaults that could drift from them.
         accordion = next(
             block
             for block in self.demo.blocks.values()
@@ -3875,14 +3874,15 @@ class PageLayoutTests(unittest.TestCase):
                 saved.max_new_tokens,
             ),
         )
-        for label in [
-            "Temperature",
-            "Top-p",
-            "Top-k (0 disables)",
-            "Skip top choice below (0 disables)",
-            "Maximum new tokens",
+        for label, value in [
+            ("Temperature", saved.temperature),
+            ("Top-p", saved.top_p),
+            ("Top-k (0 disables)", saved.top_k),
+            ("Skip top choice below (0 disables)", saved.skip_top_below),
+            ("Maximum new tokens", saved.max_new_tokens),
         ]:
             with self.subTest(control=label):
+                self.assertEqual(self.labelled(label).value, value)
                 self.assertTrue(self.within(self.labelled(label), accordion))
         # The response length cannot outrun the context limit.
         self.assertEqual(
@@ -3910,14 +3910,14 @@ class PageLayoutTests(unittest.TestCase):
         self.assertEqual([by_id[fn.targets[0][0]] for fn in moved], sliders)
         for fn in listeners:
             self.assertEqual(fn.inputs, sliders)
-        # The others are the paths that move a slider without anyone touching
-        # it: the settings file read back on load, the context limit
-        # committed, which can pull the response length down with it, and the
-        # six that change which conversation is on screen - forking, starting
-        # one, switching, deleting, clearing, and the page load that brings
-        # the saved conversations back - each of which brings that
+        # The others are the paths that move a slider without a hand on it:
+        # the settings file read back on load, the context limit committed,
+        # which can pull the response length down with it, Reset to defaults,
+        # and the six that change which conversation is on screen - forking,
+        # starting one, switching, deleting, clearing, and the page load that
+        # brings the saved conversations back - each of which brings that
         # conversation's own sampling onto the sliders.
-        self.assertEqual(len(listeners) - len(moved), 9)
+        self.assertEqual(len(listeners) - len(moved), 10)
 
     def test_everything_that_writes_the_summary_shares_one_queue(self):
         # always_last coalesces each slider's own requests; across four
@@ -4587,9 +4587,6 @@ class SavedSettingsTests(unittest.TestCase):
         ]
 
     def test_every_control_starts_from_the_saved_file(self):
-        # Every control but the five sampling sliders, which are built at
-        # their defaults and given the file on load; see
-        # test_a_sampling_slider_starts_at_the_default_it_resets_to.
         self.build_with(
             model_id="org/other-model",
             system_prompt="Be brief.",
@@ -4611,6 +4608,10 @@ class SavedSettingsTests(unittest.TestCase):
             ("System prompt", "Be brief."),
             ("Assistant prefill (optional)", "Well,"),
             ("Send previous reasoning back to the model", True),
+            ("Temperature", 0.25),
+            ("Top-p", 0.5),
+            ("Top-k (0 disables)", 7),
+            ("Maximum new tokens", 64),
             ("Random seed", 99),
             ("New seed each response", False),
             ("Measure prompt tokens", False),
@@ -4619,37 +4620,6 @@ class SavedSettingsTests(unittest.TestCase):
         ]:
             with self.subTest(label=label):
                 self.assertEqual(self.labelled(label).value, value)
-
-    def test_a_sampling_slider_starts_at_the_default_it_resets_to(self):
-        # Gradio's reset button restores the value its slider was built with.
-        # Built with the saved value it would restore the number already on
-        # screen, which is a button that does nothing; built with the default
-        # it is the way back from an experiment. The saved values are not lost
-        # by this - the page load reads them onto the sliders, which is where
-        # they have always come from once the file has changed since startup.
-        self.build_with(
-            temperature=0.25, top_p=0.5, top_k=7, skip_top_below=0.3, max_new_tokens=64
-        )
-
-        for label, default in [
-            ("Temperature", settings.DEFAULTS.temperature),
-            ("Top-p", settings.DEFAULTS.top_p),
-            ("Top-k (0 disables)", settings.DEFAULTS.top_k),
-            ("Skip top choice below (0 disables)", settings.DEFAULTS.skip_top_below),
-            ("Maximum new tokens", settings.DEFAULTS.max_new_tokens),
-        ]:
-            with self.subTest(label=label):
-                self.assertEqual(self.labelled(label).value, default)
-        published = dict(zip(app.PERSISTED_SETTING_NAMES, app.restore_settings()))
-        self.assertEqual(published["temperature"]["value"], 0.25)
-        self.assertEqual(published["skip_top_below"]["value"], 0.3)
-
-    def test_the_length_reset_to_cannot_outrun_the_context_limit(self):
-        # The slider's own maximum, so a reset within the range the control
-        # offers rather than above the top of it.
-        self.build_with(prefill_token_limit=512)
-
-        self.assertEqual(self.labelled("Maximum new tokens").value, 512)
 
     def test_the_message_box_keys_start_from_the_saved_file(self):
         self.build_with(enter_sends=False)
@@ -4699,6 +4669,18 @@ class SavedSettingsTests(unittest.TestCase):
             "remember_committed_seed"
         )
 
+    @staticmethod
+    def triggered_by(fn):
+        """The blocks whose events reach ``fn``.
+
+        A handler run from the end of a chain - Reset to defaults saves the
+        settings after it has moved the sliders - is triggered by the step
+        before it rather than by a block, and Gradio writes that down as a
+        target with no block at all.
+        """
+
+        return [block_id for block_id, _event in fn.targets if block_id is not None]
+
     def test_changing_any_setting_saves_them_all(self):
         self.build_with()
         saved = self.saving_listeners()
@@ -4706,6 +4688,7 @@ class SavedSettingsTests(unittest.TestCase):
             self.demo.blocks[block_id]: event
             for fn in saved
             for block_id, event in fn.targets
+            if block_id is not None
         }
 
         for label in [
@@ -4738,6 +4721,8 @@ class SavedSettingsTests(unittest.TestCase):
         events = {}
         for fn in self.saving_listeners():
             for block_id, event in fn.targets:
+                if block_id is None:
+                    continue
                 events.setdefault(self.demo.blocks[block_id], set()).add(event)
 
         self.assertEqual(events[self.labelled("Random seed")], {"blur", "submit"})
@@ -4767,7 +4752,10 @@ class SavedSettingsTests(unittest.TestCase):
 
         for fn in self.saving_listeners():
             self.assertNotIn(token_box, fn.inputs)
-            self.assertNotIn(token_box, [self.demo.blocks[i] for i, _ in fn.targets])
+            self.assertNotIn(
+                token_box,
+                [self.demo.blocks[i] for i in self.triggered_by(fn)],
+            )
 
     def test_the_settings_page_says_where_the_file_is(self):
         self.build_with()
@@ -4871,6 +4859,117 @@ class SavedSettingsTests(unittest.TestCase):
         app.remember_settings(*(values[name] for name in app.PERSISTED_SETTING_NAMES))
 
         self.assertEqual(settings.current().seed, 1234567)
+
+    def test_reset_to_defaults_puts_the_five_sampling_controls_back(self):
+        # Worked out when the button is pressed, not read off the values the
+        # sliders were built with: the sliders come up holding the saved
+        # settings and the file follows every move of them, so a reset to
+        # what they were built with would restore the number already there.
+        self.build_with(
+            temperature=1.6, top_p=1.0, top_k=200, skip_top_below=0.75, max_new_tokens=64
+        )
+
+        updates = app.reset_sampling(settings.DEFAULTS.prefill_token_limit)
+
+        self.assertEqual(
+            [update["value"] for update in updates],
+            [
+                settings.DEFAULTS.temperature,
+                settings.DEFAULTS.top_p,
+                settings.DEFAULTS.top_k,
+                settings.DEFAULTS.skip_top_below,
+                settings.DEFAULTS.max_new_tokens,
+            ],
+        )
+
+    def test_the_length_reset_to_follows_the_context_limit(self):
+        # Read now rather than when the page was built, so a limit lowered
+        # since lowers what the button restores.
+        self.build_with(prefill_token_limit=8192)
+        settings.update(prefill_token_limit=512)
+
+        updates = app.reset_sampling(8192)
+
+        self.assertEqual(updates[-1]["value"], 512)
+
+    def test_the_length_reset_to_stays_under_the_limit_the_page_was_built_with(self):
+        # A slider refuses a value above the maximum it was built with,
+        # whatever its maximum has been set to since, so a page that came up
+        # under a lower limit keeps that ceiling until it is loaded again.
+        self.build_with(prefill_token_limit=512)
+        settings.update(prefill_token_limit=8192)
+
+        updates = app.reset_sampling(512)
+
+        self.assertEqual(updates[-1]["value"], 512)
+
+    def test_reset_to_defaults_is_stored_the_way_a_slider_moved_by_hand_is(self):
+        self.build_with()
+        button = next(
+            block
+            for block in self.demo.blocks.values()
+            if getattr(block, "elem_id", None) == "reset-sampling"
+        )
+        sliders = [
+            self.labelled(label)
+            for label in (
+                "Temperature",
+                "Top-p",
+                "Top-k (0 disables)",
+                "Skip top choice below (0 disables)",
+                "Maximum new tokens",
+            )
+        ]
+        # The press and everything chained behind it, which Gradio records as
+        # the id of the step each one waits for. reset_sampling is partial'd
+        # over the ceiling the page was built with, so it answers to its name
+        # through that.
+        def name_of(fn):
+            return getattr(fn.fn, "__name__", None) or getattr(
+                getattr(fn.fn, "func", None), "__name__", None
+            )
+
+        chain = {}
+        waiting = {button._id}
+        while waiting:
+            step = waiting.pop()
+            for fn in self.demo.fns.values():
+                reached = any(block_id == step for block_id, _event in fn.targets)
+                if reached or getattr(fn, "trigger_after", None) == step:
+                    if fn._id not in [held._id for held in chain.values()]:
+                        chain[name_of(fn)] = fn
+                        waiting.add(fn._id)
+        by_name = chain
+
+        # The controls first, then the conversation and the file from what
+        # they hold, then the summary.
+        self.assertEqual(by_name["reset_sampling"].outputs, sliders)
+        self.assertEqual(by_name["remember_branch_sampling"].inputs[-5:], sliders)
+        self.assertEqual(
+            by_name["remember_settings"].inputs,
+            self.listeners("remember_settings")[0].inputs,
+        )
+        for slider in sliders:
+            self.assertIn(slider, by_name["remember_settings"].inputs)
+        self.assertEqual(by_name["update_sampling_label"].inputs, sliders)
+        # The seed is not among them: one being held to reproduce a reply is
+        # not a setting to be put back.
+        self.assertNotIn(self.labelled("Random seed"), by_name["reset_sampling"].outputs)
+
+    def test_gradios_own_reset_button_is_off_on_the_sampling_sliders(self):
+        # It restores the value its slider was built with, which here is the
+        # saved setting the slider is already showing.
+        self.build_with()
+
+        for label in (
+            "Temperature",
+            "Top-p",
+            "Top-k (0 disables)",
+            "Skip top choice below (0 disables)",
+            "Maximum new tokens",
+        ):
+            with self.subTest(label=label):
+                self.assertFalse(self.labelled(label).show_reset_button)
 
     def test_lowering_the_context_limit_pulls_the_response_length_under_it(self):
         self.build_with(prefill_token_limit=8192, max_new_tokens=4096)

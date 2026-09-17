@@ -383,6 +383,7 @@ from ui.settings_page import (
     remember_committed_seed,
     remember_prefill_limit,
     remember_settings,
+    reset_sampling,
     restore_settings,
     sampling_label,
     update_sampling_label,
