@@ -14,7 +14,7 @@ from extensions.maze_experiments.dynamic_maze import (FORMAT, ChangingMaze, chan
 from extensions.maze_experiments.maze import GOAL_MODES, Maze, call_text
 from extensions.maze_experiments.page import board, build_page, scenario_values, status
 from extensions.maze_experiments import runner
-from extensions.maze_experiments.runner import Episode, fork_token_edit, from_payload, stream_episode
+from extensions.maze_experiments.runner import TERMINAL, Episode, fork_token_edit, from_payload, stream_episode
 from extension_api import TokenInspector
 
 from test_maze import CONFIG, Manager
@@ -459,6 +459,33 @@ class ChangingMapTests(unittest.TestCase):
         self.assertEqual(episode.dropped_closures,
                          [dict(before_turn=1, cell=[0, 1],
                                reason="The episode ended before the closure could land.")])
+
+    def test_the_autosave_of_a_finishing_response_drops_its_queued_closure(self):
+        # The file written when a response ends the episode is the whole record
+        # if the process is killed at the yield after it, so it has to be one
+        # this reader accepts rather than one the cleanup would have fixed.
+        maze = changing(OPEN)
+        manager = Manager([("no call here", list(b"no call here") + [0])])
+        episode = Episode(maze, CHANGING_CONFIG)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / f"{episode.run_id}.json"
+            frames = stream_episode(episode, manager, save_dir=Path(directory))
+            next(frames)
+            episode.request_closure((0, 1))
+            archived = None
+            for _ in frames:
+                if path.exists():
+                    snapshot = json.loads(path.read_text())
+                    if snapshot["phase"] in TERMINAL:
+                        archived = snapshot
+                        break
+        self.assertIsNotNone(archived)
+        self.assertEqual(archived["phase"], "abandoned")
+        self.assertEqual(archived["close_next"], [])
+        self.assertEqual(archived["dropped_closures"],
+                         [dict(before_turn=1, cell=[0, 1],
+                               reason="The episode ended before the closure could land.")])
+        self.assertEqual(from_payload(archived).dropped_closures, archived["dropped_closures"])
 
     def test_a_fork_carries_the_closures_the_map_refused_as_well_as_the_ones_it_took(self):
         maze = changing(OPEN)

@@ -791,6 +791,14 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             if episode.phase in TERMINAL and episode.interrupted and episode.resumed is None:
                 episode.resumed = False if episode.phase not in ("stopped", "error") else None
                 episode.first_move_progress = False if episode.resumed is False else None
+            # Before this autosave rather than only in the cleanup below. A
+            # response that ends the episode can be the one a closure was
+            # queued during, and the file written here is the whole record if
+            # the process is killed at the yield: a finished run still holding
+            # a queue is one this file's own reader refuses.
+            if episode.phase in TERMINAL:
+                with episode.lock:
+                    abandon_closure(episode)
             autosave()
             yield episode
             if episode.phase in TERMINAL:
