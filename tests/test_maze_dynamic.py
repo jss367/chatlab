@@ -497,6 +497,7 @@ class ChangingMapTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "map already changed before this response"):
             forked.request_closure((0, 1))
         self.assertEqual(forked.close_next, ())
+        waiting = json.loads(json.dumps(forked.payload()))
         suffix = original[original.index("east") + len("east"):]
         manager.replies = iter([(suffix, list(suffix.encode()) + [0])])
         list(stream_episode(forked, manager, single_step=True))
@@ -504,6 +505,11 @@ class ChangingMapTests(unittest.TestCase):
         forked.request_closure((0, 1))
         self.assertEqual(forked.close_next, (0, 1))
         self.assertEqual(from_payload(json.loads(json.dumps(forked.payload()))).close_next, [0, 1])
+        # And a file claiming what the run refuses to do is refused in turn.
+        claiming = json.loads(json.dumps(waiting))
+        claiming["close_next"] = [0, 1]
+        with self.assertRaisesRegex(ValueError, "response whose map already changed"):
+            from_payload(claiming)
 
     def test_a_fork_before_a_closure_leaves_that_closure_behind(self):
         episode, manager = self.episode_with_a_closure()

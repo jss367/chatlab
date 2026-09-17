@@ -114,20 +114,26 @@ def maze_at_turn(maze, updates, index):
     return maze
 
 
-def validate_pending(maze, cell, updates):
+def validate_pending(maze, cell, updates, drops, turns):
     """Check a closure a saved run was still waiting to apply.
 
     The cell is read against the map as it stands, because a queued closure
     blocks another until it lands and so meets the same map it was queued
-    against. Where the character is standing is not asked: an autosave written
-    between a response and the next one carries a cell the character has since
-    moved onto, which is a closure about to be dropped rather than a file that
-    could not have been written.
+    against. It waits for a response that has not changed its map yet, for the
+    same reason a run only queues one closure to a response.
+
+    Where the character is standing is not asked: an autosave written between a
+    response and the next one carries a cell the character has since moved
+    onto, which is a closure about to be dropped rather than a file that could
+    not have been written.
     """
     if not cell:
         return
     if not isinstance(cell, (list, tuple)) or len(cell) != 2 or any(type(x) is not int for x in cell):
         raise ValueError("A pending closure names one cell as a row and a column.")
+    boundary = len(turns)
+    if any(record["before_turn"] == boundary for record in (*updates, *drops)):
+        raise ValueError("A run cannot be waiting to close a cell before a response whose map already changed.")
     close_cell(maze_at_turn(maze, updates, None), cell)
 
 

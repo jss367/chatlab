@@ -868,7 +868,7 @@ def from_payload(data):
         # one still waiting to close a cell is a state no run reaches.
         if result.close_next and result.phase in TERMINAL:
             raise ValueError("A run that has ended cannot still be waiting to close a cell.")
-        validate_pending(maze, result.close_next, updates)
+        validate_pending(maze, result.close_next, updates, result.dropped_closures, result.turns)
     # Reconstruct the visible path from real transitions, never trust claimed positions.
     position = maze.start
     for event in result.events:
