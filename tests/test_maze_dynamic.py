@@ -1,5 +1,6 @@
 import copy
 import json
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -213,6 +214,60 @@ class ChangingMapTests(unittest.TestCase):
         self.assertEqual(len(episode.config["map_updates"]), 1)
         episode.request_closure((0, 2))
         self.assertEqual(episode.close_next, (0, 2))
+
+    def test_queueing_a_closure_is_one_operation_under_the_lock(self):
+        # The page registers the close button off the queue, so two clicks run
+        # as two callbacks at once and the test of an empty queue has to be
+        # part of the same operation as filling it.
+        episode = Episode(changing(OPEN), CHANGING_CONFIG)
+        episode.lock.acquire()
+        finished = []
+        waiting = threading.Thread(target=lambda: (episode.request_closure((0, 1)), finished.append(True)))
+        waiting.start()
+        waiting.join(.3)
+        self.assertEqual(finished, [])
+        self.assertEqual(episode.close_next, ())
+        episode.lock.release()
+        waiting.join(2)
+        self.assertEqual(finished, [True])
+        self.assertEqual(episode.close_next, (0, 1))
+
+    def test_a_run_saved_with_a_closure_queued_says_so_and_ending_drops_it(self):
+        maze = changing(OPEN)
+        manager = Manager([reply(maze, "east")])
+        episode = Episode(maze, CHANGING_CONFIG)
+        list(stream_episode(episode, manager, single_step=True))
+        episode.request_closure((0, 2))
+        # Paused with a cell queued: the run can still reach it, so the export
+        # carries it rather than reporting a closure nobody asked for.
+        self.assertEqual(json.loads(json.dumps(episode.payload()))["close_next"], [0, 2])
+        self.assertEqual(from_payload(json.loads(json.dumps(episode.payload()))).close_next, [0, 2])
+        self.assertEqual(episode.dropped_closures, [])
+        # Stopping ends the run before any response can apply it, so the cell
+        # the reader was told would close is recorded as one that never did.
+        episode.request_stop()
+        self.assertEqual(episode.close_next, ())
+        self.assertEqual(episode.dropped_closures,
+                         [dict(before_turn=1, cell=[0, 2],
+                               reason="The episode ended before the closure could land.")])
+        self.assertIn("1 closure dropped", status(episode))
+
+    def test_a_closure_queued_as_the_episode_ends_is_dropped_by_the_stream(self):
+        maze = changing(OPEN)
+        # A response with no call in it ends the episode as abandonment, so the
+        # cell queued while it was generating has no response left to land in.
+        manager = Manager([("no call here", list(b"no call here") + [0])])
+        episode = Episode(maze, CHANGING_CONFIG)
+        frames = stream_episode(episode, manager)
+        next(frames)
+        episode.request_closure((0, 1))
+        list(frames)
+        self.assertEqual(episode.phase, "abandoned")
+        self.assertEqual(episode.config.get("map_updates", []), [])
+        self.assertEqual(episode.close_next, ())
+        self.assertEqual(episode.dropped_closures,
+                         [dict(before_turn=1, cell=[0, 1],
+                               reason="The episode ended before the closure could land.")])
 
     def test_a_fork_carries_the_closures_the_map_refused_as_well_as_the_ones_it_took(self):
         maze = changing(OPEN)

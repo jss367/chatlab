@@ -141,7 +141,8 @@ class Episode:
         keys = ("run_id", "phase", "detail", "messages", "events", "turns", "position", "model_id", "load_id",
                 "sampled_tokens", "tool_attempts", "supplied_moves", "interrupted", "intervention_turn",
                 "intervention_tokens", "intervention_attempts", "resumed", "first_move_progress", "latency",
-                "manual_intervention", "created_at", "token_edit", "pending_edit", "dropped_closures")
+                "manual_intervention", "created_at", "token_edit", "pending_edit", "dropped_closures",
+                "close_next")
         return {"format": CHANGING_FORMAT if self.map_changes else FORMAT, "maze": self.maze.to_dict(), "config": self.config,
                 "exploratory": True, "tokenizer_note": "Every turn records its actual prompt IDs. Later turns are templated from the complete prior response text, including reasoning.",
                 **{k: getattr(self, k) for k in keys}}
@@ -169,6 +170,7 @@ class Episode:
             if self.busy:
                 return  # The active stream owns cleanup and persistence.
             self.phase, self.detail = "stopped", "Stopped by you. This is not scored as model abandonment."
+            abandon_closure(self)
             if save_dir:
                 try:
                     self.save(save_dir)
@@ -201,16 +203,42 @@ class Episode:
         one it replaced would leave no mark anywhere: never applied, so not in
         map_updates, and never refused by the map, so not among the closures
         this run reports dropping.
+
+        The whole check and the assignment are under the episode's lock, unlike
+        the interruption's. The page registers the close button off the queue,
+        so two clicks run as two callbacks at once, and an interruption is a
+        flag both of them can set to the same True while a queued cell is a
+        cell: read and written apart, the second click's test of an empty queue
+        would pass against the first click's and one of them would go missing.
         """
-        if not self.map_changes:
-            raise ValueError("This episode's map is fixed. Start an episode with a changing map to close cells during a run.")
-        if self.phase in TERMINAL or self.replay_only:
-            raise ValueError("Start a new episode to change the map. This episode is finished or is a saved replay.")
-        if self.close_next:
-            raise ValueError(f"Row {self.close_next[0]}, column {self.close_next[1]} is already queued to close "
-                             "before the next response. Let it land before queueing another.")
-        check_closure(self.current_maze, self.position, cell)
-        self.close_next, self.manual_intervention = tuple(cell), True
+        with self.lock:
+            if not self.map_changes:
+                raise ValueError("This episode's map is fixed. Start an episode with a changing map to close cells during a run.")
+            if self.phase in TERMINAL or self.replay_only:
+                raise ValueError("Start a new episode to change the map. This episode is finished or is a saved replay.")
+            if self.close_next:
+                raise ValueError(f"Row {self.close_next[0]}, column {self.close_next[1]} is already queued to close "
+                                 "before the next response. Let it land before queueing another.")
+            check_closure(self.current_maze, self.position, cell)
+            self.close_next, self.manual_intervention = tuple(cell), True
+
+
+def abandon_closure(episode):
+    """Record a queued closure the run will never reach. The caller holds the lock.
+
+    A queued cell is applied by the next response, so an episode that ends
+    without one leaves the reader told a closure would happen and the run
+    showing no sign that anything was asked. That is the same silence
+    dropped_closures was added to break, so it is broken the same way.
+    """
+    if not episode.close_next:
+        return
+    cell, episode.close_next = tuple(episode.close_next), ()
+    episode.dropped_closures.append(dict(
+        before_turn=len(episode.turns), cell=list(cell),
+        reason="The episode ended before the closure could land."))
+    logger.warning("Run %s ended %s with the closure at %s still queued",
+                   episode.run_id, episode.phase, cell)
 
 
 def apply_closure(episode):
@@ -222,9 +250,10 @@ def apply_closure(episode):
     did not change, and anything scoring the run needs to know that rather than
     read an unchanged map as an unchanged intention.
     """
-    if not episode.close_next:
-        return
-    cell, episode.close_next = tuple(episode.close_next), ()
+    with episode.lock:
+        if not episode.close_next:
+            return
+        cell, episode.close_next = tuple(episode.close_next), ()
     boundary = len(episode.turns)
     try:
         changed = check_closure(episode.current_maze, episode.position, cell)
@@ -763,6 +792,10 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             record(turn)
         with episode.lock:
             episode.busy = False
+            # Before the autosave, so the file records the closure this run
+            # will now never reach rather than a queue it emptied silently.
+            if episode.phase in TERMINAL:
+                abandon_closure(episode)
             manager.close()
             autosave()
             if autosave_error is not None:
