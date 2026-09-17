@@ -544,6 +544,15 @@ def build_app() -> gr.Blocks:
                                 generation_status = gr.Markdown("Ready.", elem_id="generation-status")
                                 with gr.Accordion("Conversation tools", open=False, elem_id="conversation-tools"):
                                     # Sampling and file controls are available on demand.
+                                    #
+                                    # The summary is built from the saved
+                                    # values while the sliders under it are
+                                    # built from the defaults. It is the one
+                                    # of the two a reader can see with the
+                                    # accordion shut, so it is the one that
+                                    # has to be right before the page has
+                                    # finished loading; the load then puts the
+                                    # same numbers on both.
                                     with gr.Accordion(
                                         sampling_label(
                                             saved.temperature,
@@ -554,18 +563,47 @@ def build_app() -> gr.Blocks:
                                         ),
                                         open=False,
                                     ) as sampling_accordion:
+                                        # These five are built with the
+                                        # defaults rather than the saved
+                                        # values, which is what makes the
+                                        # small ↺ beside each of them worth
+                                        # pressing: Gradio's reset button puts
+                                        # back the value its slider was built
+                                        # with, so built from the file it
+                                        # restores the number already on
+                                        # screen and a reader who presses it
+                                        # sees nothing happen. Built from the
+                                        # defaults it is a way back to 0.8
+                                        # from an experiment, which is what it
+                                        # looks like it is for. The reset
+                                        # reaches the app as an ordinary move
+                                        # of the slider, so it is written into
+                                        # the conversation and the settings
+                                        # file like any other.
+                                        #
+                                        # Nothing is lost by not building them
+                                        # from the file: a page load reads it
+                                        # onto them through restore_settings,
+                                        # and the conversation that comes back
+                                        # with the page writes its own
+                                        # sampling over that. The build-time
+                                        # value was never what a reader ended
+                                        # up looking at - it is whatever the
+                                        # file held when the app started
+                                        # rather than what it holds now, which
+                                        # is why that load exists.
                                         with gr.Row():
                                             temperature = gr.Slider(
                                                 0,
                                                 2,
-                                                value=saved.temperature,
+                                                value=settings.DEFAULTS.temperature,
                                                 step=0.05,
                                                 label="Temperature",
                                             )
                                             top_p = gr.Slider(
                                                 0.05,
                                                 1,
-                                                value=saved.top_p,
+                                                value=settings.DEFAULTS.top_p,
                                                 step=0.01,
                                                 label="Top-p",
                                             )
@@ -573,17 +611,22 @@ def build_app() -> gr.Blocks:
                                             top_k = gr.Slider(
                                                 0,
                                                 200,
-                                                value=saved.top_k,
+                                                value=settings.DEFAULTS.top_k,
                                                 step=1,
                                                 label="Top-k (0 disables)",
                                             )
                                             # The ceiling is the context limit: a
                                             # response cannot be longer than a
-                                            # prompt is allowed to be.
+                                            # prompt is allowed to be, and the
+                                            # length reset to cannot outrun it
+                                            # either.
                                             max_new_tokens = gr.Slider(
                                                 1,
                                                 saved.prefill_token_limit,
-                                                value=saved.max_new_tokens,
+                                                value=min(
+                                                    settings.DEFAULTS.max_new_tokens,
+                                                    saved.prefill_token_limit,
+                                                ),
                                                 step=1,
                                                 label="Maximum new tokens",
                                             )
@@ -596,7 +639,7 @@ def build_app() -> gr.Blocks:
                                             skip_top_below = gr.Slider(
                                                 0,
                                                 1,
-                                                value=saved.skip_top_below,
+                                                value=settings.DEFAULTS.skip_top_below,
                                                 step=0.05,
                                                 label="Skip top choice below (0 disables)",
                                                 info=(

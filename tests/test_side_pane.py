@@ -3852,10 +3852,11 @@ class PageLayoutTests(unittest.TestCase):
         )
 
     def test_the_sampling_accordion_starts_showing_the_saved_values(self):
-        # The summary is only worth having if it is right before anything is
-        # touched, which means the label and the sliders read one set of
-        # numbers - and that set is the saved settings, not a second copy of
-        # the defaults that could drift from them.
+        # The summary is the one part of this a reader sees with the accordion
+        # shut, which makes it the part that has to be right before the page
+        # has finished loading - the sliders it describes are read back from
+        # the file a moment later, and start at their defaults so that the
+        # reset button beside each of them has somewhere to go.
         accordion = next(
             block
             for block in self.demo.blocks.values()
@@ -3874,15 +3875,14 @@ class PageLayoutTests(unittest.TestCase):
                 saved.max_new_tokens,
             ),
         )
-        for label, value in [
-            ("Temperature", saved.temperature),
-            ("Top-p", saved.top_p),
-            ("Top-k (0 disables)", saved.top_k),
-            ("Skip top choice below (0 disables)", saved.skip_top_below),
-            ("Maximum new tokens", saved.max_new_tokens),
+        for label in [
+            "Temperature",
+            "Top-p",
+            "Top-k (0 disables)",
+            "Skip top choice below (0 disables)",
+            "Maximum new tokens",
         ]:
             with self.subTest(control=label):
-                self.assertEqual(self.labelled(label).value, value)
                 self.assertTrue(self.within(self.labelled(label), accordion))
         # The response length cannot outrun the context limit.
         self.assertEqual(
@@ -4587,6 +4587,9 @@ class SavedSettingsTests(unittest.TestCase):
         ]
 
     def test_every_control_starts_from_the_saved_file(self):
+        # Every control but the five sampling sliders, which are built at
+        # their defaults and given the file on load; see
+        # test_a_sampling_slider_starts_at_the_default_it_resets_to.
         self.build_with(
             model_id="org/other-model",
             system_prompt="Be brief.",
@@ -4608,10 +4611,6 @@ class SavedSettingsTests(unittest.TestCase):
             ("System prompt", "Be brief."),
             ("Assistant prefill (optional)", "Well,"),
             ("Send previous reasoning back to the model", True),
-            ("Temperature", 0.25),
-            ("Top-p", 0.5),
-            ("Top-k (0 disables)", 7),
-            ("Maximum new tokens", 64),
             ("Random seed", 99),
             ("New seed each response", False),
             ("Measure prompt tokens", False),
@@ -4620,6 +4619,37 @@ class SavedSettingsTests(unittest.TestCase):
         ]:
             with self.subTest(label=label):
                 self.assertEqual(self.labelled(label).value, value)
+
+    def test_a_sampling_slider_starts_at_the_default_it_resets_to(self):
+        # Gradio's reset button restores the value its slider was built with.
+        # Built with the saved value it would restore the number already on
+        # screen, which is a button that does nothing; built with the default
+        # it is the way back from an experiment. The saved values are not lost
+        # by this - the page load reads them onto the sliders, which is where
+        # they have always come from once the file has changed since startup.
+        self.build_with(
+            temperature=0.25, top_p=0.5, top_k=7, skip_top_below=0.3, max_new_tokens=64
+        )
+
+        for label, default in [
+            ("Temperature", settings.DEFAULTS.temperature),
+            ("Top-p", settings.DEFAULTS.top_p),
+            ("Top-k (0 disables)", settings.DEFAULTS.top_k),
+            ("Skip top choice below (0 disables)", settings.DEFAULTS.skip_top_below),
+            ("Maximum new tokens", settings.DEFAULTS.max_new_tokens),
+        ]:
+            with self.subTest(label=label):
+                self.assertEqual(self.labelled(label).value, default)
+        published = dict(zip(app.PERSISTED_SETTING_NAMES, app.restore_settings()))
+        self.assertEqual(published["temperature"]["value"], 0.25)
+        self.assertEqual(published["skip_top_below"]["value"], 0.3)
+
+    def test_the_length_reset_to_cannot_outrun_the_context_limit(self):
+        # The slider's own maximum, so a reset within the range the control
+        # offers rather than above the top of it.
+        self.build_with(prefill_token_limit=512)
+
+        self.assertEqual(self.labelled("Maximum new tokens").value, 512)
 
     def test_the_message_box_keys_start_from_the_saved_file(self):
         self.build_with(enter_sends=False)
