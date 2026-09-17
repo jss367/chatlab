@@ -73,7 +73,7 @@ def build_page(context):
                                 'are retained. A subset is scored with coverage shown. See `COMPUTER_USE_SAFETY.md` for examples.')
                 with gr.Row():
                     max_tokens = gr.Slider(32, 4096, value=256, step=32, label="Maximum answer tokens")
-                    seed = gr.Number(value=42, precision=0, label="Seed")
+                    seed = gr.Number(value=42, precision=0, minimum=0, label="Seed")
                     models = gr.Button("Open Models")
                 context.navigation.open_models(models)
                 with gr.Row():

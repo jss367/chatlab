@@ -34,6 +34,22 @@ class Runner:
     def run(self, owner, cases, *, max_new_tokens=256, seed=42):
         if not cases:
             raise ValueError("Import cases or load the demonstration first.")
+        # Validate before registering the batch or claiming the model. Invalid
+        # numeric inputs must not leave a stuck owner entry after conversion.
+        try:
+            integer_seed = int(seed)
+            valid_seed = not isinstance(seed, bool) and integer_seed == seed and integer_seed >= 0
+        except (TypeError, ValueError, OverflowError):
+            valid_seed = False
+        if not valid_seed:
+            raise ValueError("Seed must be a nonnegative whole number.")
+        try:
+            token_limit = int(max_new_tokens)
+            valid_limit = not isinstance(max_new_tokens, bool) and token_limit == max_new_tokens and 1 <= token_limit <= 4096
+        except (TypeError, ValueError, OverflowError):
+            valid_limit = False
+        if not valid_limit:
+            raise ValueError("Maximum answer tokens must be a whole number between 1 and 4096.")
         prompts = [messages_for(case) for case in cases]
         cancel = threading.Event()
         with self._lock:
@@ -45,7 +61,7 @@ class Runner:
                    mode="text_only_adaptation", dataset_sha256=dataset_digest(cases),
                    cases=copy.deepcopy(cases), predictions=[], status="running",
                    sampling=dict(temperature=0.0, top_p=1.0, top_k=0,
-                                 max_new_tokens=int(max_new_tokens), seed=int(seed)))
+                                 max_new_tokens=token_limit, seed=integer_seed))
         path = self.data_dir / f"{run['id']}.json"
 
         def save():

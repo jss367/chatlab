@@ -233,6 +233,19 @@ class RunnerTests(unittest.TestCase):
             list(self.runner.run("owner", [dict(demo_cases()[0], state_text="")]))
         self.assertEqual(self.manager.releases, 0)
 
+    def test_invalid_sampling_inputs_do_not_claim_model_or_block_the_next_run(self):
+        for value in (-1, None, float('nan'), float('inf'), .5, True, '7'):
+            with self.subTest(seed=value), self.assertRaisesRegex(ValueError, "Seed must"):
+                list(self.runner.run("owner", demo_cases(), seed=value))
+        for value in (-1, 0, None, float('nan'), float('inf'), 1.5, True, 4097):
+            with self.subTest(token_limit=value), self.assertRaisesRegex(ValueError, "Maximum answer tokens"):
+                list(self.runner.run("owner", demo_cases(), max_new_tokens=value))
+        self.assertEqual(self.manager.releases, 0)
+        self.assertFalse(self.runner.data_dir.exists())
+        run, _ = list(self.runner.run("owner", demo_cases(), seed=0))[-1]
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["sampling"]["seed"], 0)
+
 
 class PageTests(unittest.TestCase):
     def test_page_load_evaluate_export_and_execution_callbacks(self):
@@ -243,6 +256,8 @@ class PageTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             self.addCleanup(demo.close)
+            seed_control = next(block for block in demo.blocks.values() if getattr(block, 'label', None) == 'Seed')
+            self.assertEqual(seed_control.minimum, 0)
             functions = {function.fn.__name__: function.fn for function in demo.fns.values() if function.fn}
             case_path = Path(directory) / "cases.json"
             case_path.write_text(json.dumps(demo_cases()))
