@@ -1303,6 +1303,42 @@ def go_to_models():
     return MODELS_PAGE, *show_page(MODELS_PAGE)
 
 
+def go_to_image_models(
+    selected: str | None,
+    order: str | None,
+    precision: str | None,
+    _kind: str | None,
+    model_id: str | None,
+    query: str | None,
+    hf_token: str,
+    _search_precision: str | None,
+    _search_kind: str | None,
+    search_order: str,
+    fits_only: bool,
+):
+    """Open Models with both lists scoped to image models.
+
+    The **Choose an image model** button on the Images page asks a narrower
+    question than the Models tile does, and a cache of seventeen models in
+    which two can draw does not answer it: the kind is a word mid-row, and
+    the row it is missing from is the majority. So the filter and the search
+    are set to image here, and both lists are repainted from that rather
+    than left to a listener - the controls are written by this handler, and
+    a control a handler writes reports no change of its own.
+
+    The two kind choices the page is already showing are taken and ignored,
+    which keeps the wiring the same input lists the two lists take.
+    """
+
+    return (
+        *go_to_models(),
+        gr.update(value=IMAGE_KIND),
+        *refresh_my_models(selected, order, precision, IMAGE_KIND, model_id),
+        gr.update(value=IMAGE_KIND),
+        *search_models(query, hf_token, precision, IMAGE_KIND, search_order, fits_only),
+    )
+
+
 def select_model_to_load(model_id, title="Model selected", note=""):
     """Put ``model_id`` in the ID box and open Models; loading stays a click away.
 
@@ -1346,6 +1382,21 @@ def select_default_model():
 
 # The side pane's model lists.
 NO_CACHED_MODEL_SELECTED = "Select a model to see its details and put it in the model ID box."
+
+# The My Models filter. The list is built from the whole cache, so a reader
+# who never touches this sees every downloaded model; the other choices
+# narrow it to the word the matching rows already wear. A snapshot ChatLab
+# cannot load wears no kind, so it is only ever under All kinds.
+ALL_KINDS = "all"
+MODEL_KIND_FILTERS = (
+    ("All kinds", ALL_KINDS),
+    ("Text", TEXT_KIND),
+    ("Image", IMAGE_KIND),
+    ("MLX", MLX_KIND),
+)
+# How the summary line names a narrowed list. KIND_NAMES words the same
+# kinds for a single model on the detail card, where the noun is singular.
+KIND_FILTER_NAMES = {TEXT_KIND: "text", IMAGE_KIND: "image", MLX_KIND: "MLX"}
 
 
 # The search is scoped to one kind at a time, because the hub files them
@@ -1694,7 +1745,33 @@ def describe_cached_model(entry: CachedModel, fit: Fit | None = None) -> str:
     return f"{verdict}\n\n{rows}"
 
 
-def my_models_summary(models: list[CachedModel]) -> str:
+def cached_models_of_kind(models: list[CachedModel], kind: str | None) -> list[CachedModel]:
+    """``models`` narrowed to one kind; All kinds and an unknown choice keep all.
+
+    A snapshot ChatLab cannot load has no kind, so it is kept only by All
+    kinds - the same rule the list's own labels follow, where an unsupported
+    row says so instead of naming a kind.
+    """
+
+    if not kind or kind == ALL_KINDS:
+        return list(models)
+    return [entry for entry in models if entry.status.kind == kind]
+
+
+def my_models_summary(
+    models: list[CachedModel],
+    shown: list[CachedModel] | None = None,
+    kind: str | None = None,
+) -> str:
+    """The line above the list: what the cache holds, and what the filter hides.
+
+    The count and the size stay about the whole cache even while a kind is
+    chosen, because the disk figure is about the folder rather than about
+    what is on screen. A filter that matches nothing says so, and says where
+    to go instead: that is the answer a reader who came from the Images page
+    with no image model downloaded needs.
+    """
+
     root = f"`{cache_root()}`"
     if not models:
         return (
@@ -1703,13 +1780,23 @@ def my_models_summary(models: list[CachedModel]) -> str:
         )
     total = format_bytes(sum(entry.size_bytes for entry in models))
     count = f"{len(models)} model{'s' if len(models) != 1 else ''}"
-    return f"{count} · {total} on disk in {root}"
+    line = f"{count} · {total} on disk in {root}"
+    if shown is None or len(shown) == len(models):
+        return line
+    named = KIND_FILTER_NAMES.get(kind, "matching")
+    if not shown:
+        return (
+            f"No {named} models among the {line}. "
+            "Find one under **Discover models**."
+        )
+    return f"Showing {len(shown)} {named} · {line}"
 
 
 def refresh_my_models(
     selected: str | None,
     order: str | None = DEFAULT_MODEL_SORT,
     precision: str | None = None,
+    kind: str | None = ALL_KINDS,
     model_id: str | None = None,
 ):
     """Rescan the cache; keep the selected row or typed ID, or the loaded model.
@@ -1718,9 +1805,14 @@ def refresh_my_models(
     model would take in memory and so whether it fits. The list is repainted
     when that choice changes, which is what makes the radio the first thing
     to try when a model will not load.
+
+    ``kind`` is the **Kind** choice, which narrows the rows to text, image or
+    MLX models. A row the filter hides cannot stay selected, so a selection
+    it hides is dropped the same way one removed from disk is.
     """
 
-    models = sort_cached_models(list_cached_models(), order)
+    everything = sort_cached_models(list_cached_models(), order)
+    models = cached_models_of_kind(everything, kind)
     fits = cached_fits(models, precision)
     ids = [entry.model_id for entry in models]
     if selected not in ids:
@@ -1735,7 +1827,11 @@ def refresh_my_models(
     else:
         entry = next(entry for entry in models if entry.model_id == selected)
         detail = describe_cached_model(entry, fits.get(selected))
-    return gr.update(choices=choices, value=selected), detail, my_models_summary(models)
+    return (
+        gr.update(choices=choices, value=selected),
+        detail,
+        my_models_summary(everything, models, kind),
+    )
 
 
 def select_my_model(selected: str | None, precision: str | None = None):
@@ -2145,6 +2241,7 @@ def refresh_after_device(
     selected: str | None,
     order: str | None = DEFAULT_MODEL_SORT,
     precision: str | None = None,
+    kind: str | None = ALL_KINDS,
     model_id: str | None = None,
     result: str | None = None,
     results: dict | None = None,
@@ -2166,7 +2263,7 @@ def refresh_after_device(
     if known or imported_torch() is None:
         return (gr.skip(),) * 7
     return (
-        *refresh_my_models(selected, order, precision, model_id),
+        *refresh_my_models(selected, order, precision, kind, model_id),
         *refresh_search_results(result, results or {}, precision, fits_only),
         True,
     )

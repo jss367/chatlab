@@ -131,13 +131,16 @@ from ui.inspection import (
 from model_discovery import DISCOVERY_ORDERS
 from ui.model_repository import UNCHECKED, check_model_repository, repository_view
 from ui.models_page import (
+    ALL_KINDS,
     BADGE_REFRESH_SECONDS,
+    MODEL_KIND_FILTERS,
     SEARCH_HINT,
     SEARCH_KINDS,
     ask_remove_my_model,
     clear_my_model_selection,
     download_and_load_model,
     download_model,
+    go_to_image_models,
     go_to_models,
     hide_remove_confirm,
     load_cached_model,
@@ -1501,12 +1504,28 @@ def build_app() -> gr.Blocks:
                     with gr.Column(min_width=320, elem_classes=["model-card"]):
                         gr.Markdown("## My Models")
                         my_models_summary = gr.Markdown("", elem_classes=["scale-caption"])
-                        sort_models = gr.Dropdown(
-                            choices=list(MODEL_SORT_ORDERS),
-                            value=DEFAULT_MODEL_SORT,
-                            label="Sort by",
-                            elem_classes=["model-sort"],
-                        )
+                        with gr.Row():
+                            sort_models = gr.Dropdown(
+                                choices=list(MODEL_SORT_ORDERS),
+                                value=DEFAULT_MODEL_SORT,
+                                label="Sort by",
+                                min_width=120,
+                                elem_classes=["model-sort"],
+                            )
+                            # Beside the sort rather than above the list,
+                            # because the two do the same job: they decide
+                            # what the reader is looking at rather than what
+                            # is on disk. Image models are the ones worth
+                            # finding this way - they are the minority, they
+                            # are the kind a row has to say out loud, and the
+                            # Images page sends a reader here for one.
+                            kind_filter = gr.Dropdown(
+                                choices=list(MODEL_KIND_FILTERS),
+                                value=ALL_KINDS,
+                                label="Kind",
+                                min_width=120,
+                                elem_classes=["model-sort", "model-kind"],
+                            )
                         my_models = gr.Radio(
                             choices=[],
                             label="Downloaded models",
@@ -1802,12 +1821,6 @@ def build_app() -> gr.Blocks:
             concurrency_id=SCORE_BUDGET_QUEUE,
             **QUIET_TICK,
         )
-        image_load_button.click(
-            go_to_models,
-            None,
-            [nav, conversation_pane, chat_page, images_page, models_page, settings_page],
-        )
-
         # ------------------------------------------------------------- Images
         # Every image handler publishes in this order; see IMAGE_OUTPUT_NAMES.
         image_outputs = [
@@ -1900,7 +1913,7 @@ def build_app() -> gr.Blocks:
         # The typed ID stays last: the model-actions listeners assert it is
         # the input the refresh is given, and a new argument goes before it
         # rather than displacing it.
-        models_inputs = [my_models, sort_models, weight_precision, model_id]
+        models_inputs = [my_models, sort_models, weight_precision, kind_filter, model_id]
         models_outputs = [my_models, my_model_detail, my_models_summary]
         action_inputs = [model_id, my_models, repository_result, hf_token]
         action_outputs = [
@@ -2033,13 +2046,14 @@ def build_app() -> gr.Blocks:
                 [model_switch, model_status, model_badge_view],
             )
         )
-        # A manual refresh and a new sort order reorder a list; neither
-        # changes what is on disk or in memory, which is all the badge and the
-        # count ask about.
+        # A manual refresh, a new sort order and a new kind filter reorder or
+        # narrow a list; none of them changes what is on disk or in memory,
+        # which is all the badge and the count ask about.
         refresh_actions(
             refresh_models_button.click(refresh_my_models, models_inputs, models_outputs)
         )
         sort_models.input(refresh_my_models, models_inputs, models_outputs)
+        kind_filter.input(refresh_my_models, models_inputs, models_outputs)
         # Before the reader chooses an ID, startup can highlight the loaded model.
         refresh_actions(demo.load(refresh_my_models, [my_models, sort_models], models_outputs))
         # The badge's timer corrects the fit verdicts once torch has finished
@@ -2160,6 +2174,19 @@ def build_app() -> gr.Blocks:
         search_button.click(search_models, search_inputs, search_outputs)
         search_query.submit(search_models, search_inputs, search_outputs)
         search_kind.input(search_models, search_inputs, search_outputs)
+        # The Images page's own way in. It is wired here rather than beside
+        # the button because it sets both of this page's kind controls and
+        # repaints both lists from them, which needs the two input lists
+        # above; see go_to_image_models.
+        image_load_button.click(
+            go_to_image_models,
+            [*models_inputs, *search_inputs],
+            [
+                nav, conversation_pane, chat_page, images_page, models_page,
+                settings_page, kind_filter, *models_outputs, search_kind,
+                *search_outputs,
+            ],
+        )
         search_order.input(search_models, search_inputs, search_outputs)
         fits_only.input(
             refresh_search_results,
