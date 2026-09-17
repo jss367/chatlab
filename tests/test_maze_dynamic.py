@@ -330,6 +330,28 @@ class ChangingMapTests(unittest.TestCase):
         self.assertEqual(from_payload(json.loads(json.dumps(episode.payload()))).current_maze.grid,
                          close_cell(maze, (0, 2)).grid)
 
+    def test_a_run_is_written_down_as_one_reading(self):
+        # Queueing a closure marks the run as intervened in and fills its queue
+        # together, and the close button runs off Gradio's queue, so a snapshot
+        # taken field by field could catch the two apart.
+        episode = Episode(changing(OPEN), CHANGING_CONFIG)
+        written = []
+        with episode.lock:
+            snapshot = threading.Thread(target=lambda: written.append(episode.payload()))
+            snapshot.start()
+            snapshot.join(.3)
+            self.assertEqual(written, [])
+            episode.request_closure((0, 1))
+        snapshot.join(2)
+        self.assertEqual(len(written), 1)
+        self.assertEqual(written[0]["close_next"], (0, 1))
+        self.assertTrue(written[0]["manual_intervention"])
+        # The lock is reentrant, because stopping and autosaving write the run
+        # down while already holding it.
+        with tempfile.TemporaryDirectory() as directory:
+            with episode.lock:
+                self.assertTrue(episode.save(Path(directory)).exists())
+
     def test_a_run_saved_with_a_closure_queued_says_so_and_ending_drops_it(self):
         maze = changing(OPEN)
         manager = Manager([reply(maze, "east")])

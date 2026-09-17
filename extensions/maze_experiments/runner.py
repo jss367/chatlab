@@ -82,14 +82,18 @@ class Episode:
         result = object.__new__(type(self))
         memo[id(self)] = result
         for key, value in self.__dict__.items():
-            setattr(result, key, threading.Lock() if key == "lock" else copy.deepcopy(value, memo))
+            setattr(result, key, threading.RLock() if key == "lock" else copy.deepcopy(value, memo))
         if result.phase == "ready" and not result.turns:
             result.run_id = uuid4().hex
             result.created_at = time.time()
         return result
 
     def __post_init__(self):
-        self.lock = threading.Lock()
+        # Reentrant, because a run is written down on two paths: one that
+        # already holds the lock, as stopping and autosaving do, and one that
+        # does not, as the export button does. Both have to read the run as it
+        # stands at one moment rather than field by field.
+        self.lock = threading.RLock()
         self.config = copy.deepcopy(self.config)
         self.config.setdefault("goal_mode", "coordinates")
         self.config.setdefault("goal_hint", "")
@@ -143,9 +147,15 @@ class Episode:
                 "intervention_tokens", "intervention_attempts", "resumed", "first_move_progress", "latency",
                 "manual_intervention", "created_at", "token_edit", "pending_edit", "dropped_closures",
                 "close_next")
-        return {"format": CHANGING_FORMAT if self.map_changes else FORMAT, "maze": self.maze.to_dict(), "config": self.config,
-                "exploratory": True, "tokenizer_note": "Every turn records its actual prompt IDs. Later turns are templated from the complete prior response text, including reasoning.",
-                **{k: getattr(self, k) for k in keys}}
+        # One reading, not one per field. Queueing a closure marks the run as
+        # intervened in and fills its queue together, and the close button runs
+        # off Gradio's queue, so a snapshot taken field by field could catch the
+        # two apart and write a run carrying an intervention while saying none
+        # was made.
+        with self.lock:
+            return {"format": CHANGING_FORMAT if self.map_changes else FORMAT, "maze": self.maze.to_dict(), "config": self.config,
+                    "exploratory": True, "tokenizer_note": "Every turn records its actual prompt IDs. Later turns are templated from the complete prior response text, including reasoning.",
+                    **{k: getattr(self, k) for k in keys}}
 
     def save(self, directory: Path):
         directory.mkdir(parents=True, exist_ok=True)
