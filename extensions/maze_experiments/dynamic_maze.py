@@ -114,6 +114,36 @@ def maze_at_turn(maze, updates, index):
     return maze
 
 
+def validate_drops(drops, updates, turns):
+    """Check a run's record of the closures that never happened.
+
+    Only the shape and the place in the run are checked, not the reason. A
+    dropped closure is one the map never took, so there is no version of the
+    map that holds its consequences the way an applied one holds its grid; and
+    the reason may be about the run rather than the map at all, as it is for a
+    closure an episode ended under. What is checkable is that the record could
+    have come from a run: one closure is queued at a time, so no two land on
+    one response boundary and none shares a boundary with a closure the map
+    accepted, and no boundary lies past the responses the file records.
+    """
+    if not isinstance(drops, list):
+        raise ValueError("A run's dropped closures must be a list.")
+    taken = {update["before_turn"] for update in updates}
+    previous = -1
+    for drop in drops:
+        if not isinstance(drop, dict):
+            raise ValueError("Each dropped closure must be an object.")
+        boundary = drop.get("before_turn")
+        if type(boundary) is not int or not previous < boundary <= len(turns) or boundary in taken:
+            raise ValueError("Each dropped closure names one free response boundary, in order.")
+        previous = boundary
+        cell = drop.get("cell")
+        if not isinstance(cell, list) or len(cell) != 2 or any(type(x) is not int for x in cell):
+            raise ValueError("A dropped closure names one cell as a row and a column.")
+        if not isinstance(drop.get("reason"), str) or not drop["reason"].strip():
+            raise ValueError("A dropped closure records why it was dropped.")
+
+
 def validate_updates(maze, updates, turns, events):
     """Check a recorded run of closures against the path the run recorded.
 

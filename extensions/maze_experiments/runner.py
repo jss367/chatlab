@@ -13,7 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .dynamic_maze import (FORMAT as CHANGING_FORMAT, ChangingMaze, check_closure, load_maze,
-                           maze_at_turn, validate_updates)
+                           maze_at_turn, validate_drops, validate_updates)
 from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call
 from extension_api import write_private_text
 
@@ -816,7 +816,7 @@ def from_payload(data):
     changing = data["format"] == CHANGING_FORMAT
     # A fixed-map run carrying closures would replay as the map it started
     # from, which is not the map its responses were answering.
-    if not changing and data["config"].get("map_updates"):
+    if not changing and (data["config"].get("map_updates") or data.get("dropped_closures")):
         raise ValueError(f"A run whose map changes has to be recorded as {CHANGING_FORMAT}.")
     maze = load_maze(data["maze"]) if changing else Maze.from_dict(data["maze"])
     result = Episode(maze, data["config"])
@@ -829,6 +829,10 @@ def from_payload(data):
         if not isinstance(updates, list):
             raise ValueError("A run's map changes must be a list.")
         validate_updates(maze, updates, result.turns, result.events)
+        # The closures a run reports dropping are read as provenance by Run
+        # details and carried into every fork, so they are checked like the
+        # ones it reports taking rather than taken as written.
+        validate_drops(result.dropped_closures, updates, result.turns)
     # Reconstruct the visible path from real transitions, never trust claimed positions.
     position = maze.start
     for event in result.events:

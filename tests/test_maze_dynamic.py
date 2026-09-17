@@ -162,6 +162,42 @@ class ChangingMapTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     from_payload(broken)
 
+    def test_a_replay_is_refused_when_its_record_of_a_dropped_closure_cannot_hold(self):
+        maze = changing(OPEN)
+        manager = Manager([reply(maze, "east"), reply(maze, "east"), reply(maze, "west")])
+        episode = Episode(maze, CHANGING_CONFIG)
+        list(stream_episode(episode, manager, single_step=True))
+        frames = stream_episode(episode, manager, single_step=True)
+        next(frames)
+        episode.request_closure((0, 2))
+        list(frames)
+        list(stream_episode(episode, manager, single_step=True))
+        payload = json.loads(json.dumps(episode.payload()))
+        self.assertEqual(len(payload["dropped_closures"]), 1)
+        self.assertEqual(from_payload(payload).dropped_closures, episode.dropped_closures)
+        for value, message in (("garbage", "must be a list"),
+                               (["nope"], "must be an object"),
+                               ([dict(before_turn=99, cell=[0, 1], reason="x")], "free response boundary"),
+                               ([dict(before_turn=-1, cell=[0, 1], reason="x")], "free response boundary"),
+                               ([dict(cell=[0, 1], reason="x")], "free response boundary"),
+                               ([dict(before_turn=0, cell=[0, 1], reason="x")] * 2, "free response boundary"),
+                               ([dict(before_turn=0, cell="0,1", reason="x")], "row and a column"),
+                               ([dict(before_turn=0, cell=[0, 1], reason=" ")], "records why it was dropped")):
+            with self.subTest(dropped=value):
+                broken = copy.deepcopy(payload)
+                broken["dropped_closures"] = value
+                with self.assertRaisesRegex(ValueError, message):
+                    from_payload(broken)
+        # One closure queues at a time, so no boundary holds a drop and a
+        # closure the map took.
+        clash = copy.deepcopy(payload)
+        clash["dropped_closures"] = [dict(before_turn=1, cell=[0, 1], reason="x")]
+        clash["config"]["map_updates"] = [dict(
+            before_turn=1, position=[0, 1], closed_cell=[0, 2],
+            grid=list(close_cell(maze, (0, 2)).grid))]
+        with self.assertRaisesRegex(ValueError, "free response boundary"):
+            from_payload(clash)
+
     def test_a_fixed_map_run_neither_carries_closures_nor_makes_them(self):
         episode, _ = self.episode_with_a_closure()
         payload = json.loads(json.dumps(episode.payload()))
@@ -172,6 +208,11 @@ class ChangingMapTests(unittest.TestCase):
         self.assertEqual(fixed.payload()["format"], "chatlab-maze-run-1")
         self.assertNotIn("environment_id", fixed.payload()["maze"])
         self.assertNotIn("map_updates", fixed.payload()["config"])
+        self.assertEqual(fixed.payload()["dropped_closures"], [])
+        claiming = json.loads(json.dumps(fixed.payload()))
+        claiming["dropped_closures"] = [dict(before_turn=0, cell=[0, 1], reason="x")]
+        with self.assertRaisesRegex(ValueError, "chatlab-maze-run-2"):
+            from_payload(claiming)
         with self.assertRaisesRegex(ValueError, "map is fixed"):
             fixed.request_closure((0, 1))
         self.assertEqual(from_payload(json.loads(json.dumps(fixed.payload()))).current_maze, OPEN)
