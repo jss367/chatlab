@@ -133,21 +133,26 @@ def load_task(directory, root, label, category, index):
                 judgments[key] = validate_judgment(read_json(path))
             except (OSError, ValueError) as exc:
                 warnings.append(f'{relative}: {exc}')
-    traj_path = local_file(directory, 'traj.jsonl')
-    if traj_path.exists():
-        if traj_path.stat().st_size > MAX_JSON_BYTES:
-            warnings.append('traj.jsonl exceeds 32 MB; execution details were skipped.')
-        else:
-            for line_no, line in enumerate(traj_path.read_text(encoding='utf-8').splitlines(), 1):
-                if not line.strip():
-                    continue
-                try:
-                    entry = json.loads(line)
-                    if not isinstance(entry, dict):
-                        raise ValueError('Expected an object.')
-                    trajectory.append(entry)
-                except ValueError:
-                    warnings.append(f'traj.jsonl line {line_no} is invalid; other steps remain available.')
+    try:
+        traj_path = local_file(directory, 'traj.jsonl')
+        if traj_path.exists():
+            if traj_path.stat().st_size > MAX_JSON_BYTES:
+                warnings.append('traj.jsonl exceeds 32 MB; execution details were skipped.')
+            else:
+                for line_no, line in enumerate(traj_path.read_text(encoding='utf-8').splitlines(), 1):
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if not isinstance(entry, dict):
+                            raise ValueError('Expected an object.')
+                        trajectory.append(entry)
+                    except ValueError:
+                        warnings.append(f'traj.jsonl line {line_no} is invalid; other steps remain available.')
+    except (OSError, ValueError) as exc:
+        # Execution records are optional; a decoding or filesystem failure
+        # must not remove a valid task and its judgments from the comparison.
+        warnings.append(f'traj.jsonl could not be read; execution details were skipped: {exc}')
     return Task(directory, str(root), label, domain, task_id, category, log, judgments, trajectory, warnings)
 
 

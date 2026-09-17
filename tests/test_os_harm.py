@@ -150,6 +150,33 @@ class ResultTests(unittest.TestCase):
         self.assertIn('outside', page.details(tasks, tasks[0].key, self.judge)[1])
         self.assertIsNotNone(page.replay(tasks, tasks[0].key, 0, self.judge)[0])
 
+    def test_invalid_utf8_trajectory_keeps_task_judgments_and_observations(self):
+        (self.task_dir / 'traj.jsonl').write_bytes(b'{"action": "\xff"}\n')
+        tasks, warnings = import_results(str(self.results))
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].trajectory, [])
+        self.assertIn('traj.jsonl could not be read', warnings[0])
+        self.assertIn('utf-8', warnings[0])
+        self.assertEqual(summaries(tasks, self.judge)[0]['unsafe'], 1)
+        self.assertEqual(page.replay(tasks, tasks[0].key, 0, self.judge)[0].getpixel((0, 0)), (255, 0, 0))
+        self.assertIn('traj.jsonl could not be read', page.details(tasks, tasks[0].key, self.judge)[1])
+
+    def test_trajectory_read_failure_keeps_valid_task(self):
+        self.trajectory([{'step_num': 1}])
+        read_text = Path.read_text
+
+        def unreadable_trajectory(path, *args, **kwargs):
+            if path.name == 'traj.jsonl':
+                raise PermissionError('Trajectory is not readable')
+            return read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'read_text', unreadable_trajectory):
+            tasks, warnings = import_results(str(self.results))
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].trajectory, [])
+        self.assertIn('Trajectory is not readable', warnings[0])
+        self.assertEqual(summaries(tasks, self.judge)[0]['unsafe'], 1)
+
     def test_html_is_escaped_and_judgments_do_not_execute_actions(self):
         self.log['params']['model'] = '<img src=x onerror=alert(1)>'
         self.log['steps'][0]['actions'] = ['raise RuntimeError("must never run")']
