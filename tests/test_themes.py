@@ -301,7 +301,14 @@ class ThemeControlTests(unittest.TestCase):
         self.assertTrue(triggering, "the dropdown is not one of the saved settings")
         self.assertIn(
             dropdown,
-            [self.demo.blocks[block_id] for fn in saving for block_id, _ in fn.targets],
+            [
+                self.demo.blocks[block_id]
+                for fn in saving
+                for block_id, _ in fn.targets
+                # Reset to defaults saves the settings from the end of a
+                # chain, which Gradio writes down as a target with no block.
+                if block_id is not None
+            ],
         )
 
     def test_saving_and_repainting_keep_the_same_last_pick(self):
