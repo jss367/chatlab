@@ -1,14 +1,17 @@
 # Optional extensions for ChatLab
 
-Extensions add specialized pages while sharing ChatLab's model runtime and token inspection. The first bundled extension is **Maze experiments**. Fresh installations start with all extensions disabled.
+Extensions add specialized pages while sharing ChatLab's model runtime and token inspection. Bundled extensions include **Maze experiments** and **OS-Harm results**. Fresh installations start with all extensions disabled.
 
 ## Enable or disable an extension
 
-Open **Settings → Extensions**, check or uncheck **Maze experiments**, and restart ChatLab. The choice saves immediately, survives browser refreshes, and takes effect when the server/app next starts. Refreshing the browser alone does not restart the server. Current pages and running trials remain available until that restart.
+Open **Settings → Extensions**, check or uncheck an extension, and restart ChatLab. The choice saves immediately, survives browser refreshes, and takes effect when the server/app next starts. Refreshing the browser alone does not restart the server. Current pages and running trials remain available until that restart.
 
-When enabled, **Maze** appears in the sidebar. When disabled, its Python module and stylesheet are not loaded, its page and callbacks are not registered, and existing saved trials remain on disk. The rest of ChatLab works without it. Import or API-version failures appear in Settings and do not prevent the core app from starting.
+When enabled, **Maze** or **OS-Harm** appears in the sidebar. When disabled, an extension's Python module and stylesheet are not loaded, its page and callbacks are not registered, and existing saved results remain on disk. The rest of ChatLab works without it. Import or API-version failures appear in Settings and do not prevent the core app from starting.
 
-This first version provides **bundled, optional modules**. It does not yet install external packages. The explicit catalogue and versioned service boundary give us a place to add external distribution later, after another extension exercises the interface. Extensions are trusted Python code running in ChatLab's process, not sandboxed programs.
+This version provides **bundled, optional modules**. It does not yet install external packages. The explicit catalogue and versioned service boundary give us a place to add external distribution later. Extensions are trusted Python code running in ChatLab's process, not sandboxed programs.
+
+For importing computer-use safety evaluations, comparing recorded judgments,
+and replaying screenshots in **OS-Harm**, see the [results viewer guide](OS_HARM_RESULTS.md).
 
 ## Ownership
 
