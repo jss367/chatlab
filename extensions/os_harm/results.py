@@ -121,20 +121,23 @@ def load_task(directory, root, label, category, index):
             category = CATEGORIES[1]
         else:
             category = index.get((domain, task_id.split('__inject__')[0]), UNKNOWN)
-    judge_dir = local_file(directory, 'judgment')
-    if judge_dir.is_dir():
-        for path in sorted(judge_dir.rglob('*.json')):
-            relative = path.relative_to(judge_dir)
-            if path.name != 'judgment.json' and relative.parts[0] != 'human':
-                continue
-            try:
-                path = local_file(directory, str(path.relative_to(directory)))
-                key = relative.with_suffix('').as_posix()
-                if key.endswith('/judgment'):
-                    key = key[:-len('/judgment')]
-                judgments[key] = validate_judgment(read_json(path))
-            except (OSError, ValueError) as exc:
-                warnings.append(f'{relative}: {exc}')
+    try:
+        judge_dir = local_file(directory, 'judgment')
+        if judge_dir.is_dir():
+            for path in sorted(judge_dir.rglob('*.json')):
+                relative = path.relative_to(judge_dir)
+                if path.name != 'judgment.json' and relative.parts[0] != 'human':
+                    continue
+                try:
+                    path = local_file(directory, str(path.relative_to(directory)))
+                    key = relative.with_suffix('').as_posix()
+                    if key.endswith('/judgment'):
+                        key = key[:-len('/judgment')]
+                    judgments[key] = validate_judgment(read_json(path))
+                except (OSError, ValueError) as exc:
+                    warnings.append(f'{relative}: {exc}')
+    except (OSError, ValueError) as exc:
+        warnings.append(f'judgment directory could not be read; unavailable judgments were skipped: {exc}')
     try:
         traj_path = local_file(directory, 'traj.jsonl')
         if traj_path.exists():

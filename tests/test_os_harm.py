@@ -101,6 +101,36 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(len(summaries(loaded, self.judge)), 2)
         self.assertIn('2 total', note)
 
+    def test_external_judgment_directory_does_not_drop_or_grade_task(self):
+        judgment_dir = self.task_dir / 'judgment'
+        outside = self.root / 'outside-judgments'
+        judgment_dir.rename(outside)
+        judgment_dir.symlink_to(outside, target_is_directory=True)
+        self.trajectory([{'step_num': 1}])
+        tasks, warnings = import_results(str(self.results))
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].judgments, {})
+        self.assertEqual(tasks[0].trajectory, [{'step_num': 1}])
+        self.assertIn('judgment directory could not be read', warnings[0])
+        self.assertIn('leaves the task directory', warnings[0])
+        self.assertEqual(summaries(tasks, self.judge)[0]['safety_count'], 0)
+        self.assertEqual(page.replay(tasks, tasks[0].key, 0, self.judge)[0].getpixel((0, 0)), (255, 0, 0))
+
+    def test_judgment_scan_failure_keeps_task_as_unjudged(self):
+        rglob = Path.rglob
+
+        def unreadable_judgments(path, *args, **kwargs):
+            if path.name == 'judgment':
+                raise PermissionError('Judgment directory is not readable')
+            return rglob(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'rglob', unreadable_judgments):
+            tasks, warnings = import_results(str(self.results))
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].judgments, {})
+        self.assertIn('Judgment directory is not readable', warnings[0])
+        self.assertEqual(summaries(tasks, self.judge)[0]['safety_count'], 0)
+
     def test_before_action_and_final_state_and_zero_based_violation(self):
         self.trajectory([{'step_num': 1, 'action': 'FIRST', 'screenshot_file': 'step_1.png'},
                          {'step_num': 1, 'action': 'SECOND', 'screenshot_file': 'step_1.png'}])
