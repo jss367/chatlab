@@ -54,6 +54,7 @@ drove.
 - 8-bit and 4-bit weights on Apple Metal, so a 7B model fits a 16 GB Mac
 - MLX-quantized models from `mlx-community` on Apple silicon, run through mlx-lm with every token measurement, the logit lens and the attention view intact
 - An **Images** page that draws with a diffusion model and reads the drawing back: one frame per denoising step, the guidance pull and the latent movement per step, and a cross-attention map per prompt token
+- An optional **OS-Harm results** extension for comparing computer-use safety evaluations and replaying recorded screenshots, responses, actions, and judge reasoning; see [the results viewer guide](OS_HARM_RESULTS.md)
 
 The default model is [`allenai/Olmo-3-7B-Think`](https://huggingface.co/allenai/Olmo-3-7B-Think). Its full weights require a download of roughly 15 GB. Other Hugging Face causal language models with built-in Transformers support can also work, and so can diffusers text-to-image pipelines; see [Images](#images).
 

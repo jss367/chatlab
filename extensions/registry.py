@@ -28,6 +28,9 @@ CATALOGUE = (
     ExtensionSpec("maze_experiments", "Maze experiments",
                   "Run navigation trials, insert interruptions, inspect tokens and replay saved runs.",
                   "Maze", "extensions.maze_experiments", icon="route"),
+    ExtensionSpec("os_harm", "OS-Harm results",
+                  "Compare computer-use safety evaluations and replay recorded screenshots, responses and actions.",
+                  "OS-Harm", "extensions.os_harm", icon="image"),
 )
 
 
