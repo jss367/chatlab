@@ -869,6 +869,11 @@ def from_payload(data):
         if result.close_next and result.phase in TERMINAL:
             raise ValueError("A run that has ended cannot still be waiting to close a cell.")
         validate_pending(maze, result.close_next, updates, result.dropped_closures, result.turns)
+        # Every closure begins as a request from the reader, and requesting one
+        # marks the run. A file carrying a closure while reporting an untouched
+        # run would be read as a clean control by anything scoring it.
+        if (updates or result.dropped_closures or result.close_next) and not result.manual_intervention:
+            raise ValueError("A run carrying a closure cannot report that nobody intervened in it.")
     # Reconstruct the visible path from real transitions, never trust claimed positions.
     position = maze.start
     for event in result.events:

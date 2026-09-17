@@ -203,6 +203,26 @@ class ChangingMapTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "free response boundary"):
             from_payload(clash)
 
+    def test_a_run_carrying_a_closure_has_to_report_the_intervention(self):
+        episode, _ = self.episode_with_a_closure()
+        applied = json.loads(json.dumps(episode.payload()))
+        self.assertTrue(applied["manual_intervention"])
+        # Applied, dropped and still pending each begin as a request from the
+        # reader, so each of them contradicts an untouched run.
+        pending = Episode(changing(OPEN), CHANGING_CONFIG)
+        pending.request_closure((0, 1))
+        pending = json.loads(json.dumps(pending.payload()))
+        dropped = copy.deepcopy(applied)
+        dropped["config"]["map_updates"] = []
+        dropped["dropped_closures"] = [dict(before_turn=1, cell=[0, 2], reason="x")]
+        for name, payload in (("applied", applied), ("pending", pending), ("dropped", dropped)):
+            with self.subTest(closure=name):
+                self.assertIsNotNone(from_payload(copy.deepcopy(payload)))
+                claiming = copy.deepcopy(payload)
+                claiming["manual_intervention"] = False
+                with self.assertRaisesRegex(ValueError, "cannot report that nobody intervened"):
+                    from_payload(claiming)
+
     def test_a_fixed_map_run_neither_carries_closures_nor_makes_them(self):
         episode, _ = self.episode_with_a_closure()
         payload = json.loads(json.dumps(episode.payload()))
