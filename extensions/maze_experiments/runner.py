@@ -195,11 +195,20 @@ class Episode:
         Checked here against the map and the position as they stand, so a cell
         that cannot be closed is refused where it was asked for. It is checked
         again when it lands, because the character moves in between.
+
+        One at a time, as an interruption is. A second request would replace a
+        queued cell that the reader has already been told will close, and the
+        one it replaced would leave no mark anywhere: never applied, so not in
+        map_updates, and never refused by the map, so not among the closures
+        this run reports dropping.
         """
         if not self.map_changes:
             raise ValueError("This episode's map is fixed. Start an episode with a changing map to close cells during a run.")
         if self.phase in TERMINAL or self.replay_only:
             raise ValueError("Start a new episode to change the map. This episode is finished or is a saved replay.")
+        if self.close_next:
+            raise ValueError(f"Row {self.close_next[0]}, column {self.close_next[1]} is already queued to close "
+                             "before the next response. Let it land before queueing another.")
         check_closure(self.current_maze, self.position, cell)
         self.close_next, self.manual_intervention = tuple(cell), True
 
@@ -499,6 +508,12 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
         # produced the original; token_edit keeps the original stamp.
         result.model_id, result.load_id = manager.model_id, manager.load_id
         result.manual_intervention = True
+        # Closures the map refused are carried on the same rule as the ones it
+        # accepted. The fork keeps the responses that were generated after a
+        # failed intervention, so a fork reporting none would say those
+        # responses ran under a map nobody had asked to change.
+        result.dropped_closures = copy.deepcopy(
+            [d for d in episode.dropped_closures if d["before_turn"] <= turn_index])
         # Rebuild history and recovery counters through the same simulator path
         # used during generation, excluding the edited response and its future.
         for i, previous in enumerate(episode.turns[:turn_index]):

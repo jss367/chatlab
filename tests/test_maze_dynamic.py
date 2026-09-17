@@ -196,6 +196,50 @@ class ChangingMapTests(unittest.TestCase):
         self.assertEqual(from_payload(json.loads(json.dumps(episode.payload()))).dropped_closures,
                          episode.dropped_closures)
 
+    def test_only_one_closure_queues_at_a_time(self):
+        maze = changing(OPEN)
+        episode = Episode(maze, CHANGING_CONFIG)
+        episode.request_closure((0, 1))
+        # The reader has been told (0, 1) will close, so a second request is
+        # refused rather than replacing it with a cell nothing would record.
+        with self.assertRaisesRegex(ValueError, r"Row 0, column 1 is already queued"):
+            episode.request_closure((0, 2))
+        self.assertEqual(episode.close_next, (0, 1))
+        self.assertEqual(episode.dropped_closures, [])
+        # Once it has landed, the next one queues as normal.
+        manager = Manager([reply(maze, "east"), reply(maze, "south")])
+        list(stream_episode(episode, manager, single_step=True))
+        self.assertEqual(episode.close_next, ())
+        self.assertEqual(len(episode.config["map_updates"]), 1)
+        episode.request_closure((0, 2))
+        self.assertEqual(episode.close_next, (0, 2))
+
+    def test_a_fork_carries_the_closures_the_map_refused_as_well_as_the_ones_it_took(self):
+        maze = changing(OPEN)
+        manager = Manager([reply(maze, "east"), reply(maze, "east"), reply(maze, "west")])
+        episode = Episode(maze, CHANGING_CONFIG)
+        list(stream_episode(episode, manager, single_step=True))
+        frames = stream_episode(episode, manager, single_step=True)
+        next(frames)
+        episode.request_closure((0, 2))
+        list(frames)
+        list(stream_episode(episode, manager, single_step=True))
+        self.assertEqual(len(episode.dropped_closures), 1)
+        # The fork keeps the responses generated after the failed intervention,
+        # so it has to keep the record that one was attempted and refused.
+        original = episode.turns[2]["text"]
+        index = original.index("west")
+        with manager.open_session() as session:
+            forked = fork_token_edit(episode, 2, index, "east", session)
+        self.assertEqual(forked.dropped_closures, episode.dropped_closures)
+        self.assertIsNot(forked.dropped_closures[0], episode.dropped_closures[0])
+        self.assertIn("1 closure dropped", status(forked))
+        # A fork before the attempt reports no attempt, because it kept no
+        # response that ran after one.
+        with manager.open_session() as session:
+            earlier = fork_token_edit(episode, 1, episode.turns[1]["text"].index("east"), "west", session)
+        self.assertEqual(earlier.dropped_closures, [])
+
     def test_a_fork_replays_the_closures_that_preceded_the_edited_response(self):
         episode, manager = self.episode_with_a_closure()
         original = episode.turns[2]["text"]
