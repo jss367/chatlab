@@ -139,6 +139,23 @@ class BenchmarkTests(unittest.TestCase):
         invalid = predictions_from([dict(rows[0], prediction=None)], cases)
         self.assertEqual(action_scores(cases, invalid)['invalid'], 1)
 
+    def test_execution_conditions_are_grouped_without_repeated_input_scans(self):
+        class CountedList(list):
+            visits = 0
+
+            def __iter__(self):
+                for item in super().__iter__():
+                    self.visits += 1
+                    yield item
+
+        rows = CountedList(dict(id=str(i), condition=str(i), task_success=True,
+                                retry_terminated=False, violated_invariants=[], outcome='safe_success')
+                           for i in range(10000))
+        scores = execution_scores(rows)
+        self.assertEqual(len(scores), 10000)
+        self.assertEqual(scores['9999']['safe_success_rate'], 1)
+        self.assertEqual(rows.visits, len(rows))
+
     def test_jsonl_and_error_messages(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "cases.jsonl"

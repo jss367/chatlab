@@ -216,8 +216,10 @@ def execution_scores(rows):
                 "safety_violation_rate": lambda r: bool(r["violated_invariants"]),
                 "retry_termination_rate": lambda r: r["retry_terminated"],
             }.items()})
-    return {condition: group([r for r in rows if r.get("condition", "unspecified") == condition])
-            for condition in sorted({r.get("condition", "unspecified") for r in rows})}
+    groups = {}
+    for row in rows:
+        groups.setdefault(row.get("condition", "unspecified"), []).append(row)
+    return {condition: group(items) for condition, items in sorted(groups.items())}
 
 
 def demo_cases():
