@@ -13,7 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .dynamic_maze import (FORMAT as CHANGING_FORMAT, ChangingMaze, check_closure, load_maze,
-                           maze_at_turn, validate_drops, validate_updates)
+                           maze_at_turn, validate_drops, validate_pending, validate_updates)
 from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call
 from extension_api import write_private_text
 
@@ -816,7 +816,8 @@ def from_payload(data):
     changing = data["format"] == CHANGING_FORMAT
     # A fixed-map run carrying closures would replay as the map it started
     # from, which is not the map its responses were answering.
-    if not changing and (data["config"].get("map_updates") or data.get("dropped_closures")):
+    if not changing and (data["config"].get("map_updates") or data.get("dropped_closures")
+                         or data.get("close_next")):
         raise ValueError(f"A run whose map changes has to be recorded as {CHANGING_FORMAT}.")
     maze = load_maze(data["maze"]) if changing else Maze.from_dict(data["maze"])
     result = Episode(maze, data["config"])
@@ -832,7 +833,12 @@ def from_payload(data):
         # The closures a run reports dropping are read as provenance by Run
         # details and carried into every fork, so they are checked like the
         # ones it reports taking rather than taken as written.
-        validate_drops(result.dropped_closures, updates, result.turns)
+        validate_drops(maze, result.dropped_closures, updates, result.turns)
+        # A run that has ended clears its queue on the way out, so a finished
+        # one still waiting to close a cell is a state no run reaches.
+        if result.close_next and result.phase in TERMINAL:
+            raise ValueError("A run that has ended cannot still be waiting to close a cell.")
+        validate_pending(maze, result.close_next, updates)
     # Reconstruct the visible path from real transitions, never trust claimed positions.
     position = maze.start
     for event in result.events:

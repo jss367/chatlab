@@ -182,6 +182,9 @@ class ChangingMapTests(unittest.TestCase):
                                ([dict(cell=[0, 1], reason="x")], "free response boundary"),
                                ([dict(before_turn=0, cell=[0, 1], reason="x")] * 2, "free response boundary"),
                                ([dict(before_turn=0, cell="0,1", reason="x")], "row and a column"),
+                               ([dict(before_turn=0, cell=[99, 99], reason="x")], "open cell inside the maze"),
+                               ([dict(before_turn=0, cell=[1, 1], reason="x")], "open cell inside the maze"),
+                               ([dict(before_turn=0, cell=[0, 0], reason="x")], "start and the destination"),
                                ([dict(before_turn=0, cell=[0, 1], reason=" ")], "records why it was dropped")):
             with self.subTest(dropped=value):
                 broken = copy.deepcopy(payload)
@@ -229,6 +232,12 @@ class ChangingMapTests(unittest.TestCase):
         episode.request_closure((0, 2))
         list(frames)
         self.assertEqual(episode.position, (0, 2))
+        # The autosave written here carries a cell the character has just moved
+        # onto. That is a closure about to be dropped, not a file no run could
+        # have written, so the pending cell is read without asking the position.
+        waiting = json.loads(json.dumps(episode.payload()))
+        self.assertEqual(waiting["close_next"], [0, 2])
+        self.assertEqual(from_payload(waiting).close_next, [0, 2])
         list(stream_episode(episode, manager, single_step=True))
         self.assertEqual(episode.config.get("map_updates", []), [])
         self.assertEqual(episode.dropped_closures,
@@ -284,6 +293,23 @@ class ChangingMapTests(unittest.TestCase):
         self.assertEqual(json.loads(json.dumps(episode.payload()))["close_next"], [0, 2])
         self.assertEqual(from_payload(json.loads(json.dumps(episode.payload()))).close_next, [0, 2])
         self.assertEqual(episode.dropped_closures, [])
+        # A pending cell has to be one the run could have queued, and no run
+        # that has ended is still waiting to close one.
+        for value, message in (([0], "row and a column"), ([99, 99], "open cell inside the maze"),
+                               ([0, 3], "start and the destination")):
+            with self.subTest(pending=value):
+                broken = json.loads(json.dumps(episode.payload()))
+                broken["close_next"] = value
+                with self.assertRaisesRegex(ValueError, message):
+                    from_payload(broken)
+        ended = json.loads(json.dumps(episode.payload()))
+        ended["phase"] = "arrived"
+        with self.assertRaisesRegex(ValueError, "still be waiting to close"):
+            from_payload(ended)
+        fixed = json.loads(json.dumps(Episode(OPEN, CHANGING_CONFIG).payload()))
+        fixed["close_next"] = [0, 1]
+        with self.assertRaisesRegex(ValueError, "chatlab-maze-run-2"):
+            from_payload(fixed)
         # Stopping ends the run before any response can apply it, so the cell
         # the reader was told would close is recorded as one that never did.
         episode.request_stop()

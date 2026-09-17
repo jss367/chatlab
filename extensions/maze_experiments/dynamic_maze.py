@@ -114,17 +114,38 @@ def maze_at_turn(maze, updates, index):
     return maze
 
 
-def validate_drops(drops, updates, turns):
+def validate_pending(maze, cell, updates):
+    """Check a closure a saved run was still waiting to apply.
+
+    The cell is read against the map as it stands, because a queued closure
+    blocks another until it lands and so meets the same map it was queued
+    against. Where the character is standing is not asked: an autosave written
+    between a response and the next one carries a cell the character has since
+    moved onto, which is a closure about to be dropped rather than a file that
+    could not have been written.
+    """
+    if not cell:
+        return
+    if not isinstance(cell, (list, tuple)) or len(cell) != 2 or any(type(x) is not int for x in cell):
+        raise ValueError("A pending closure names one cell as a row and a column.")
+    close_cell(maze_at_turn(maze, updates, None), cell)
+
+
+def validate_drops(maze, drops, updates, turns):
     """Check a run's record of the closures that never happened.
 
-    Only the shape and the place in the run are checked, not the reason. A
-    dropped closure is one the map never took, so there is no version of the
-    map that holds its consequences the way an applied one holds its grid; and
-    the reason may be about the run rather than the map at all, as it is for a
-    closure an episode ended under. What is checkable is that the record could
-    have come from a run: one closure is queued at a time, so no two land on
-    one response boundary and none shares a boundary with a closure the map
-    accepted, and no boundary lies past the responses the file records.
+    The reason is not checked. A dropped closure is one the map never took, so
+    there is no version of the map holding its consequences the way an applied
+    one holds its grid, and the reason may be about the run rather than the map
+    at all, as it is for a closure an episode ended under.
+
+    Everything else is. One closure is queued at a time, so no two drops land
+    on one response boundary, none shares a boundary with a closure the map
+    accepted, and none lies past the responses the file records. And each cell
+    has to be one the run could have queued: a queued closure blocks another
+    until it lands, so the map at its boundary is the map it was queued
+    against, and an open cell that is neither the start nor the destination is
+    what queueing one required.
     """
     if not isinstance(drops, list):
         raise ValueError("A run's dropped closures must be a list.")
@@ -140,6 +161,7 @@ def validate_drops(drops, updates, turns):
         cell = drop.get("cell")
         if not isinstance(cell, list) or len(cell) != 2 or any(type(x) is not int for x in cell):
             raise ValueError("A dropped closure names one cell as a row and a column.")
+        close_cell(maze_at_turn(maze, updates, boundary - 1), cell)
         if not isinstance(drop.get("reason"), str) or not drop["reason"].strip():
             raise ValueError("A dropped closure records why it was dropped.")
 
