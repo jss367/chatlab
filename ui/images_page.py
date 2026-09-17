@@ -196,7 +196,7 @@ def attention_note(run, step: int = 0) -> str:
     )
 
 
-def attention_overlay(run, token: int | None, step: int = 0) -> str:
+def attention_overlay(run, token: int | None, step: int = 0, *, ceiling=None) -> str:
     """One token's attention map laid over the picture it drew.
 
     Two images stacked by the stylesheet rather than one composed here, so
@@ -229,7 +229,7 @@ def attention_overlay(run, token: int | None, step: int = 0) -> str:
         '<div class="attention-stack">'
         f'<img src="{image_runtime.data_uri(image, quality=image_runtime.PREVIEW_QUALITY)}" '
         f'alt="The finished picture" />'
-        f'<img src="{image_runtime.heat_overlay(weights, width, height)}" '
+        f'<img src="{image_runtime.heat_overlay(weights, width, height, ceiling=ceiling)}" '
         f'alt="Cross-attention for {html.escape(text)}" />'
         "</div>"
         '<div class="viz-note">Brighter is more of that cell\'s attention. '
@@ -363,6 +363,13 @@ def draw(
         yield _idle(BAD_DRAW_SETTINGS, seed=chosen)
         return
 
+    yield from draw_request(request)
+
+
+def draw_request(request: ImageRequest, *, expected_load_id: str | None = None):
+    """Draw an already resolved request, optionally pinned to an existing load."""
+
+    chosen = request.seed
     # Reserved before the pipeline is looked for, not after it. A load empties
     # memory before it reads the new weights, so for the whole of that phase
     # there is no pipeline and the check below would tell the reader to load
@@ -406,7 +413,8 @@ def draw(
         def work() -> None:
             try:
                 outcome["run"] = runtime.MANAGER.generate_image(
-                    request, on_step=readings.append, cancel=cancel
+                    request, on_step=readings.append, cancel=cancel,
+                    expected_load_id=expected_load_id,
                 )
             except BaseException as error:  # noqa: BLE001 - reported on the page
                 outcome["error"] = error
@@ -645,4 +653,3 @@ def remember_committed_image_seed(
         image_randomize_seed=randomize,
         image_record_attention=record_attention,
     )
-

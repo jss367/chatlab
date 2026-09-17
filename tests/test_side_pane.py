@@ -3762,7 +3762,8 @@ class PageLayoutTests(unittest.TestCase):
         # generator gone, taking every recorded step with it. So Stop sets an
         # event the run checks between steps, and the generator itself
         # publishes the stopped run.
-        (stop,) = self.listeners("stop_drawing")
+        (stop,) = [listener for listener in self.listeners("stop_drawing")
+                   if listener.targets == [(self.by_id("stop-drawing")._id, "click")]]
         ((block_id, event),) = stop.targets
 
         self.assertEqual(event, "click")
@@ -3791,7 +3792,8 @@ class PageLayoutTests(unittest.TestCase):
     def test_clicking_a_prompt_token_is_remembered_before_the_map_is_drawn(self):
         # The click's index has to land in the state the map reads, so the
         # map follows the step slider afterwards without another click.
-        (remember,) = self.listeners("remember_token")
+        (remember,) = [listener for listener in self.listeners("remember_token")
+                       if listener.targets == [(self.by_id("image-prompt-strip")._id, "select")]]
         (token_state,) = remember.outputs
         (paint,) = self.listeners("select_token")
 
