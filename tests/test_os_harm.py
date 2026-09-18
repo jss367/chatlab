@@ -13,11 +13,15 @@ from PIL import Image
 
 from extensions.os_harm import page
 from extensions.os_harm import results
-from extensions.os_harm.results import CATEGORIES, UNKNOWN, filtered, import_results, summaries
+from extensions.os_harm.results import (
+    CATEGORIES, UNKNOWN, cohen_kappa, compare_runs, filtered, import_results, judge_agreement, summaries,
+)
 
 
 class ResultTests(unittest.TestCase):
     def setUp(self):
+        results._cache.clear()
+        self.addCleanup(results._cache.clear)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -46,6 +50,12 @@ class ResultTests(unittest.TestCase):
 
     def trajectory(self, entries):
         (self.task_dir / 'traj.jsonl').write_text('\n'.join(json.dumps(e) for e in entries))
+
+    def second_run(self, label='Second', **judgment):
+        directory = self.root / 'second' / 'chrome' / 'task-a'
+        self.write('better_log.json', self.log, directory)
+        self.write('judgment/test-judge/aer/v3/judgment.json', judgment, directory)
+        return import_results(str(self.root / 'second'), label=label)[0]
 
     def test_upstream_log_and_both_judge_layouts(self):
         self.write('judgment/human/reviewer.json', {'safety': True, 'success': False})
@@ -110,7 +120,7 @@ class ResultTests(unittest.TestCase):
         tasks, warnings = import_results(str(self.results))
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0].judgments, {})
-        self.assertEqual(tasks[0].trajectory, [{'step_num': 1}])
+        self.assertEqual(tasks[0].execution()[0], [{'step_num': 1}])
         self.assertIn('judgment directory could not be read', warnings[0])
         self.assertIn('leaves the task directory', warnings[0])
         self.assertEqual(summaries(tasks, self.judge)[0]['safety_count'], 0)
@@ -167,7 +177,7 @@ class ResultTests(unittest.TestCase):
         with (self.task_dir / 'traj.jsonl').open('a') as file:
             file.write('\n{"incomplete":')
         tasks = self.load()
-        self.assertEqual(len(tasks[0].trajectory), 2)
+        self.assertEqual(len(tasks[0].execution()[0]), 2)
         self.assertIn('invalid', tasks[0].warnings[0])
         self.assertIn('Stopped', page.details(tasks, tasks[0].key, self.judge)[1])
         self.assertEqual(page.replay(tasks, tasks[0].key, 1, self.judge)[0].getpixel((0, 0)), (0, 0, 255))
@@ -219,7 +229,7 @@ class ResultTests(unittest.TestCase):
         (self.task_dir / 'traj.jsonl').write_bytes(b'{"action": "\xff"}\n')
         tasks, warnings = import_results(str(self.results))
         self.assertEqual(len(tasks), 1)
-        self.assertEqual(tasks[0].trajectory, [])
+        self.assertEqual(tasks[0].execution()[0], [])
         self.assertIn('traj.jsonl could not be read', warnings[0])
         self.assertIn('utf-8', warnings[0])
         self.assertEqual(summaries(tasks, self.judge)[0]['unsafe'], 1)
@@ -237,8 +247,8 @@ class ResultTests(unittest.TestCase):
 
         with mock.patch.object(Path, 'open', unreadable_trajectory):
             tasks, warnings = import_results(str(self.results))
+            self.assertEqual(tasks[0].execution()[0], [])
         self.assertEqual(len(tasks), 1)
-        self.assertEqual(tasks[0].trajectory, [])
         self.assertIn('Trajectory is not readable', warnings[0])
         self.assertEqual(summaries(tasks, self.judge)[0]['unsafe'], 1)
 
@@ -248,7 +258,7 @@ class ResultTests(unittest.TestCase):
                 (self.task_dir / 'traj.jsonl').write_text(line * 6)
                 with mock.patch.object(results, 'MAX_TRAJECTORY_LINES', 5):
                     tasks, warnings = import_results(str(self.results))
-                self.assertEqual(len(tasks[0].trajectory), 5 if line.strip() else 0)
+                    self.assertEqual(len(tasks[0].execution()[0]), 5 if line.strip() else 0)
                 self.assertTrue(any('exceeds 5 lines' in warning for warning in warnings))
                 self.assertEqual(summaries(tasks, self.judge)[0]['unsafe'], 1)
 
@@ -256,7 +266,7 @@ class ResultTests(unittest.TestCase):
         (self.task_dir / 'traj.jsonl').write_text('x\n' * 9 + '{"step_num": 1}\n')
         with mock.patch.object(results, 'MAX_TRAJECTORY_WARNINGS', 2):
             tasks, warnings = import_results(str(self.results))
-        self.assertEqual(tasks[0].trajectory, [{'step_num': 1}])
+            self.assertEqual(tasks[0].execution()[0], [{'step_num': 1}])
         self.assertEqual(len(warnings), 3)
         self.assertIn('7 additional invalid-line warnings omitted', warnings[-1])
 
@@ -264,7 +274,7 @@ class ResultTests(unittest.TestCase):
         (self.task_dir / 'traj.jsonl').write_text('{}\n' * 5)
         with mock.patch.object(results, 'MAX_TRAJECTORY_LINES', 5):
             tasks, warnings = import_results(str(self.results))
-        self.assertEqual(len(tasks[0].trajectory), 5)
+            self.assertEqual(len(tasks[0].execution()[0]), 5)
         self.assertEqual(warnings, [])
 
     def test_html_is_escaped_and_judgments_do_not_execute_actions(self):
@@ -288,10 +298,129 @@ class ResultTests(unittest.TestCase):
         with self.assertRaises(gr.Error):
             page.load_source([], '', '', 'Automatic', '', None)
 
+    def test_recorded_observations_are_read_on_demand(self):
+        self.trajectory([{'step_num': 1, 'screenshot_file': 'step_1.png'}])
+        task = self.load()[0]
+        held = json.dumps(vars(task), default=str)
+        self.assertNotIn('Document menu', held)
+        self.assertNotIn('step_num', held)
+        self.assertEqual(task.step_count, 1)
+        self.assertEqual(page.replay([task], task.key, 0, self.judge)[4], 'Document menu')
+        self.assertEqual(task.execution()[0], [{'step_num': 1, 'screenshot_file': 'step_1.png'}])
+
+    def test_replayed_artifacts_are_cached_until_the_file_changes(self):
+        task = self.load()[0]
+        with mock.patch.object(results, 'read_json', wraps=results.read_json) as reader:
+            for _ in range(3):
+                page.replay([task], task.key, 0, self.judge)
+            self.assertEqual(reader.call_count, 1)
+        self.log['steps'][0]['a11y_tree'] = 'A rewritten accessibility tree'
+        self.write('better_log.json', self.log)
+        self.assertEqual(page.replay([task], task.key, 0, self.judge)[4], 'A rewritten accessibility tree')
+
+    def test_unreadable_steps_report_themselves_instead_of_replaying(self):
+        task = self.load()[0]
+        (self.task_dir / 'better_log.json').write_text('{ not json')
+        image, status, *rest = page.replay([task], task.key, 0, self.judge)
+        self.assertIsNone(image)
+        self.assertIn('Recorded steps unavailable', status)
+        self.assertEqual(rest[:3], ['', '', ''])
+
+    def test_matched_comparison_pairs_only_the_tasks_both_runs_attempted(self):
+        self.write('better_log.json', self.log, self.task_dir.parent / 'task-b')
+        baseline = self.load(label='First')
+        later = self.second_run(safety=True, success=False)
+        tasks = baseline + later
+        diff = compare_runs(tasks, self.judge, baseline[0].run, later[0].run)
+        self.assertEqual((diff['shared'], diff['baseline_only'], diff['comparison_only']), (1, 1, 0))
+        narrowed = compare_runs(tasks, self.judge, baseline[0].run, later[0].run,
+                                lambda task: task.task_id == 'task-b')
+        self.assertEqual((narrowed['shared'], narrowed['baseline_only'], narrowed['comparison_only']), (0, 1, 0))
+        self.assertEqual(narrowed['rows'], [])
+        self.assertEqual((diff['improvements'], diff['regressions'], diff['unjudged']), (1, 0, 0))
+        self.assertEqual(diff['keys'], [later[0].key])
+        row, = diff['rows']
+        self.assertIn('Unsafe → Safe', row)
+        self.assertIn('Completed → Not completed', row)
+
+    def test_comparison_needs_two_runs_and_ignores_the_safety_filter(self):
+        baseline = self.load(label='First')
+        later = self.second_run(safety=True, success=True)
+        tasks = baseline + later
+        note, rows, keys = page.comparison_panel(tasks, self.judge, baseline[0].run, later[0].run, 'All categories', '')
+        self.assertIn('1 paired task ·', note)
+        self.assertIn('1 became safe', note)
+        self.assertEqual((len(rows), keys), (1, [later[0].key]))
+        # Safe and Unsafe cannot both survive a safety filter, yet the pair is the comparison.
+        self.assertEqual(len(filtered(tasks, self.judge, safety='Safe')), 1)
+        self.assertIn('share no task', page.comparison_panel(tasks, self.judge, baseline[0].run, later[0].run,
+                                                             'All categories', 'absent')[0])
+        # A search naming one run must not delete the other side of every pair.
+        for query in ('First', 'Second', 'task-a'):
+            with self.subTest(query=query):
+                self.assertIn('1 paired task ·', page.comparison_panel(tasks, self.judge, baseline[0].run,
+                                                                       later[0].run, 'All categories', query)[0])
+        self.assertIn('two different runs', page.comparison_panel(tasks, self.judge, baseline[0].run,
+                                                                  baseline[0].run, 'All categories', '')[0])
+
+    def test_repeated_task_ids_within_a_run_are_reported_not_pooled(self):
+        duplicate = self.results / 'pyautogui' / 'other' / 'test-model' / 'chrome' / 'task-a'
+        self.write('better_log.json', self.log, duplicate)
+        self.write('judgment/test-judge/aer/v3/judgment.json', {'safety': True, 'success': True}, duplicate)
+        baseline = self.load(label='First')
+        diff = compare_runs(baseline + self.second_run(safety=True, success=True), self.judge,
+                            baseline[0].run, 'Second · test-model · pyautogui / screenshot_a11y_tree')
+        self.assertEqual((diff['shared'], diff['duplicates']), (1, 1))
+        self.assertIn('1 repeated task IDs ignored', page.comparison_note(diff, 'a', 'b'))
+
+    def test_judge_agreement_counts_only_tasks_both_judged(self):
+        self.write('judgment/human/reviewer.json', {'safety': True, 'success': True})
+        agreed = self.task_dir.parent / 'task-b'
+        self.write('better_log.json', self.log, agreed)
+        self.write('judgment/test-judge/aer/v3/judgment.json', {'safety': True, 'success': True}, agreed)
+        self.write('judgment/human/reviewer.json', {'safety': True, 'success': None}, agreed)
+        tasks = self.load()
+        result = judge_agreement(tasks, self.judge, 'human/reviewer')
+        self.assertEqual(result['stats']['safety'], dict(judged=2, agree=1, kappa=0.0))
+        self.assertEqual(result['stats']['success'], dict(judged=1, agree=1, kappa=None))
+        self.assertEqual(result['keys'], [t.key for t in tasks if t.task_id == 'task-a'])
+        row, = result['rows']
+        self.assertIn('Unsafe / Safe', row)
+        note = page.agreement_note(result, self.judge, 'human/reviewer')
+        self.assertIn('Safety: 1/2 agree (50.0%) · κ 0.00', note)
+        self.assertIn('Completion: 1/1 agree (100.0%) · κ not defined', note)
+        self.assertIn('two different judges', page.agreement_note(result, self.judge, self.judge))
+
+    def test_kappa_corrects_for_chance_and_declines_to_guess(self):
+        self.assertIsNone(cohen_kappa([]))
+        self.assertIsNone(cohen_kappa([(True, True), (True, True)]))
+        self.assertEqual(cohen_kappa([(True, True), (False, False)]), 1.0)
+        self.assertEqual(cohen_kappa([(True, False), (False, True)]), -1.0)
+
+    def test_a_result_row_opens_its_task_even_when_a_filter_hides_it(self):
+        tasks = self.load()
+        event = gr.SelectData(None, {'index': [0, 1], 'value': 'x'})
+        self.assertEqual(page.inspect_visible([tasks[0].key], event), tasks[0].key)
+        self.assertEqual(page.inspect_visible([], event), gr.skip())
+        update = page.inspect_compared(tasks, [tasks[0].key], self.judge, event)
+        self.assertEqual(update['value'], tasks[0].key)
+        self.assertEqual([choice[1] for choice in update['choices']], [tasks[0].key])
+        self.assertEqual(page.inspect_compared(tasks, [], self.judge, event), gr.skip())
+
+    def test_panel_selectors_follow_what_is_loaded(self):
+        tasks = self.load() + self.second_run(safety=True, success=True)
+        baseline, comparison, first, second = page.panel_choices(tasks, None, None, None, None)
+        options = sorted({t.run for t in tasks})
+        self.assertEqual((baseline['value'], comparison['value']), (options[0], options[1]))
+        self.assertEqual(len(options), 2)
+        self.assertEqual((first['value'], second['value']), (self.judge, None))
+        self.assertEqual(page.panel_choices([], 'gone', 'gone', 'gone', 'gone')[0]['value'], None)
+
     def test_filtering_and_selection_clear_the_previous_task(self):
         tasks = self.load()
         self.assertEqual(len(filtered(tasks, self.judge, query='BLANK')), 1)
-        chart, table, choice = page.browse(tasks, self.judge, 'All categories', 'Safe', '')
+        chart, table, choice, keys = page.browse(tasks, self.judge, 'All categories', 'Safe', '')
+        self.assertEqual(keys, [])
         self.assertEqual(table, [])
         self.assertIsNone(choice['value'])
         self.assertIn('No tasks', chart)
@@ -312,6 +441,8 @@ class ExtensionIntegrationTests(unittest.TestCase):
             self.assertIn(('OS-Harm', 'OS-Harm'), nav.choices)
             self.assertTrue(any(getattr(b, 'elem_id', None) == 'os-harm-page' for b in demo.blocks.values()))
             self.assertTrue(any(fn.fn is page.load_source for fn in demo.fns.values()))
+            for handler in (page.comparison_panel, page.agreement_panel, page.inspect_visible, page.inspect_compared):
+                self.assertTrue(any(fn.fn is handler for fn in demo.fns.values()), handler.__name__)
             # The two listeners that replace imported task state must share
             # a serial queue; otherwise a late load can undo a user's Clear.
             load = next(fn for fn in demo.fns.values() if fn.fn is page.load_source)
