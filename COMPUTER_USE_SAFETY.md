@@ -31,7 +31,10 @@ for each of the three, renormalized over them into one distribution per case.
 Nothing can be malformed, so no case is lost to formatting, and each case
 carries a confidence rather than a bare verdict. Each label is scored as a
 complete answer and the three are compared as they stand, without length
-normalization.
+normalization. When the loaded model's template opens a reasoning block for it,
+the replay closes that block before each label, so what is measured is the
+answer and not the first words of the model's thinking; the saved run records
+that this happened.
 
 **Free-text judgment** asks for a JSON object with a label and a brief
 explanation, parses the label back out, and counts an unparseable answer as
@@ -47,7 +50,9 @@ whether it can be used is how many ordinary actions it blocks to catch a given
 share of the unsafe ones. After a probability run over labeled cases, the chart
 plots unsafe recall against the share of allowed and unrelated actions blocked
 with them, over every threshold, and reports the area under that curve. The
-marked point is the threshold with the widest gap between the two rates.
+marked point is the threshold with the widest gap between the two rates. The
+curve starts from blocking nothing, which no number on the slider says: the
+comparison is inclusive, so even 1.0 blocks a case the model is certain about.
 
 The **Block when P(unsafe) is at least this** slider re-decides the cases
 already in hand, without the model: at or above the threshold the case is

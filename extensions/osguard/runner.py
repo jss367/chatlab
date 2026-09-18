@@ -8,8 +8,8 @@ import time
 from uuid import uuid4
 
 from .benchmark import (
-    FORMAT, LABELS, MODES, PAPER, dataset_digest, label_distribution, messages_for,
-    parse_response, report,
+    FORMAT, LABELS, MODES, PAPER, THINK_CLOSE, dataset_digest, label_distribution,
+    messages_for, parse_response, report,
 )
 from .storage import save_json
 
@@ -19,6 +19,10 @@ from .storage import save_json
 # batch however large the traces grow, and the final save always runs.
 CHECKPOINT_SECONDS = 2.0
 CHECKPOINT_SHARE = 4.0
+# What a replayed answer has to say first when the template already opened a
+# reasoning block for the model. This is the same lead the runtime replays in
+# front of a reader's own prefill, so the label lands where an answer goes.
+REASONING_LEAD = f"{THINK_CLOSE}\n\n"
 
 
 @dataclass(frozen=True)
@@ -105,7 +109,11 @@ class Runner:
                     if cancel.is_set():
                         session.cancel()
                 run.update(model_id=session.model_id, load_id=session.load_id)
-                label_ids = _label_tokens(session) if mode == "probability" else {}
+                label_ids, lead_tokens = {}, 0
+                if mode == "probability":
+                    prefilled = _asks_for_reasoning(session, cases, mode, sampling)
+                    run["reasoning_prefilled"] = prefilled
+                    label_ids, lead_tokens = _label_tokens(session, prefilled)
                 run["scores"] = report(cases, [])
                 yield copy.deepcopy(run), None
                 for case in cases:
@@ -120,9 +128,11 @@ class Runner:
                         save(force=False)
                         yield copy.deepcopy(run), checkpoint()
                         continue
-                    result = _result(case, messages)
+                    result = _result(case, messages,
+                                     reasoning_prefilled=run.get("reasoning_prefilled", False))
                     run["predictions"].append(result)
-                    answer = (_score_labels(session, messages, label_ids, sampling, result, cancel)
+                    answer = (_score_labels(session, messages, label_ids, lead_tokens,
+                                            sampling, result, cancel)
                               if mode == "probability"
                               else _judge(session, messages, sampling, result, cancel))
                     try:
@@ -152,10 +162,10 @@ class Runner:
         yield copy.deepcopy(run), checkpoint()
 
 
-def _result(case, messages, *, status="running", feedback=""):
+def _result(case, messages, *, status="running", feedback="", reasoning_prefilled=False):
     return dict(id=case["id"], prediction=None, feedback=feedback, response="",
                 metrics=[], prompt_ids=[], messages=messages,
-                reasoning_prefilled=False, status=status)
+                reasoning_prefilled=reasoning_prefilled, status=status)
 
 
 def _judge(session, messages, sampling, result, cancel):
@@ -177,25 +187,57 @@ def _judge(session, messages, sampling, result, cancel):
         stream.close()
 
 
-def _label_tokens(session):
+def _asks_for_reasoning(session, cases, mode, sampling):
+    """Ask the loaded model, once, whether its prompt already opens a thinking block.
+
+    The runtime answers this on every update, so one throwaway generation over
+    a prompt this batch will really send settles it for the whole run. Reading
+    the rendered prompt text instead would be a guess about a template the
+    extension cannot see, and the answer decides what every replayed label is
+    measured against, so a guess is not good enough.
+    """
+    for case in cases:
+        try:
+            messages = messages_for(case, mode)
+        except ValueError:
+            continue
+        stream = session.generate(messages, **dict(sampling, max_new_tokens=1))
+        try:
+            return bool(getattr(next(iter(stream), None), "reasoning_prefilled", False))
+        finally:
+            stream.close()
+    return False
+
+
+def _label_tokens(session, reasoning_prefilled):
     """Tokenize each label as the model would read it at the start of its answer.
 
     ``encode_replacement`` is what settles the word-boundary question: a
     sentencepiece vocabulary spells a leading word with a space inside its
     first token, and encoding the bare string would score an answer the model
     was never going to write.
+
+    A thinking template hands the model an open reasoning block, and a bare
+    label replayed into it would be the first words of the model's thinking
+    rather than its judgment. Closing the block first puts the label where an
+    answer goes. Returns the lead length with the ids: the lead is identical
+    across the three labels, so leaving it out of the score keeps the
+    comparison fair and makes each number P(label | prompt and closed block).
     """
-    return {label: session.encode_replacement([], label) for label in LABELS}
+    lead = session.encode_replacement([], REASONING_LEAD) if reasoning_prefilled else []
+    return {label: lead + session.encode_replacement(lead, label) for label in LABELS}, len(lead)
 
 
-def _score_labels(session, messages, label_ids, sampling, result, cancel):
+def _score_labels(session, messages, label_ids, lead_tokens, sampling, result, cancel):
     """Replay each label as the answer and read the probability the model gave it.
 
     Three prefills and no sampled token: the forced answer is measured against
     the model's own distribution on the way through, so what comes back is
     log P(label | prompt) for each of the three, exactly and in one pass each.
     A malformed answer is not possible here, which is the point - a free-text
-    judgment scores formatting as much as safety.
+    judgment scores formatting as much as safety. ``lead_tokens`` counts the
+    reasoning-close tokens in front of every label, which are replayed so the
+    label is an answer but never scored as part of one.
     """
     logprobs, traces = {}, {}
     for label, forced in label_ids.items():
@@ -210,19 +252,20 @@ def _score_labels(session, messages, label_ids, sampling, result, cancel):
                    if metric.get("segment", "response") == "response"][:len(forced)]
         if len(metrics) != len(forced) or not all(metric.get("scored", True) for metric in metrics):
             raise ValueError(f"The model did not measure the replayed answer '{label}'.")
+        scored = metrics[lead_tokens:]
         logprobs[label] = sum(math.log(max(float(metric["raw_probability"]), 1e-300))
-                              for metric in metrics)
-        traces[label] = metrics
+                              for metric in scored)
+        traces[label] = scored
         result.update(prompt_ids=list(getattr(update, "prompt_ids", [])),
                       response="\n".join(f"{name}: log-probability {value:.3f}"
                                          for name, value in logprobs.items()),
-                      metrics=copy.deepcopy(metrics))
+                      metrics=copy.deepcopy(scored))
         yield copy.deepcopy(result)
     probabilities = label_distribution(logprobs)
     prediction = max(LABELS, key=lambda label: logprobs[label])
     result.update(prediction=prediction, probabilities=probabilities, logprobs=logprobs,
                   confidence=probabilities[prediction],
-                  answer_tokens={label: len(ids) for label, ids in label_ids.items()},
+                  answer_tokens={label: len(ids) - lead_tokens for label, ids in label_ids.items()},
                   response=prediction, metrics=copy.deepcopy(traces[prediction]),
                   feedback="", status="completed")
 

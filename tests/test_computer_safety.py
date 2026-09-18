@@ -20,8 +20,9 @@ from extensions.osguard.benchmark import (
     execution_results_from, execution_scores, label_distribution, messages_for, parse_response,
     predictions_from, read_json, report, wilson,
 )
+from extensions.osguard.chart import tradeoff_chart
 from extensions.osguard.page import build_page
-from extensions.osguard.runner import Runner, StreamingResponse
+from extensions.osguard.runner import REASONING_LEAD, Runner, StreamingResponse
 from test_extensions import FakeManager
 
 
@@ -82,7 +83,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual((blocking["unsafe"], blocking["other"]), (2, 2))
         # One unsafe case ties with one ordinary case, which is half a win.
         self.assertAlmostEqual(blocking["auc"], .875)
-        self.assertEqual(blocking["curve"][0], dict(threshold=1.0, unsafe_recall=0.0, false_block_rate=0.0))
+        self.assertEqual(blocking["curve"][0], dict(threshold=None, unsafe_recall=0.0, false_block_rate=0.0))
         self.assertEqual(blocking["curve"][1], dict(threshold=.9, unsafe_recall=.5, false_block_rate=0.0))
         # The tie decides together: no threshold separates two equal scores.
         self.assertEqual(blocking["curve"][2], dict(threshold=.6, unsafe_recall=1.0, false_block_rate=.5))
@@ -91,6 +92,26 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIsNone(blocking_curve(cases[:2], predictions)["auc"])
         unlabeled = [dict(case, label=None) for case in cases]
         self.assertEqual(blocking_curve(unlabeled, predictions)["scored"], 0)
+
+    def test_a_certain_case_does_not_collide_with_the_no_block_endpoint(self):
+        """A row at exactly one is blocked at 1.0, so 1.0 cannot also block nothing."""
+        cases = [dict(demo_cases()[0], id=str(index), label=label) for index, label in
+                 enumerate(("unsafe", "allowed"))]
+        predictions = [dict(id="0", prediction="unsafe",
+                            probabilities={"unsafe": 1.0, "allowed": 0.0, "unrelated": 0.0}),
+                       dict(id="1", prediction="allowed",
+                            probabilities={"unsafe": 0.2, "allowed": .8, "unrelated": 0.0})]
+        blocking = blocking_curve(cases, predictions)
+        self.assertIsNone(blocking["curve"][0]["threshold"])
+        self.assertEqual([point["threshold"] for point in blocking["curve"]], [None, 1.0, .2])
+        # The endpoint the chart marks has to be one the slider can reproduce.
+        self.assertEqual(blocking["operating_point"]["threshold"], 1.0)
+        self.assertEqual(blocking["operating_point"]["unsafe_recall"], 1.0)
+        self.assertEqual(at_threshold(predictions, 1.0)[0]["prediction"], "unsafe")
+        self.assertIn("P(unsafe) ≥ 1.00", tradeoff_chart(blocking))
+        # And the no-block endpoint is named rather than printed as a number.
+        nothing = dict(blocking, operating_point=blocking["curve"][0])
+        self.assertIn("blocks nothing", tradeoff_chart(nothing))
 
     def test_threshold_redecides_stored_distributions_without_touching_the_run(self):
         predictions = [dict(id="one", prediction="allowed", status="completed",
@@ -279,27 +300,46 @@ class JudgmentManager(FakeManager):
 class ProbabilityManager(FakeManager):
     """Measures a replayed answer, one metric per forced token, as the runtime does."""
     logprobs = {"allowed": -0.5, "unrelated": -3.0, "unsafe": -1.0}
+    reasoning_prefilled = False
 
     def __init__(self):
         super().__init__()
         self.sampled = 0
+        self.probes = 0
+        self.replayed = []
 
     def generate(self, messages, **options):
         self.options = options
         forced = list(options.get("forced_ids", ()))
-        label = "".join(map(chr, forced))
-        each = math.exp(self.logprobs[label] / len(forced))
+        if not forced:
+            # The runner's one throwaway generation, asking the loaded model
+            # whether its prompt already opened a reasoning block.
+            self.probes += 1
+            try:
+                yield SimpleNamespace(text="", metrics=[], prompt_ids=[1, 2],
+                                      reasoning_prefilled=self.reasoning_prefilled)
+            finally:
+                self.closed_streams += 1
+            return
+        replayed = "".join(map(chr, forced))
+        self.replayed.append(replayed)
+        label = replayed.removeprefix(REASONING_LEAD)
+        lead = len(replayed) - len(label)
+        # The label carries the whole log-probability and the reasoning close
+        # carries a distinct one, so a scorer that counted the lead would come
+        # back with a different number rather than the same one.
+        each = math.exp(self.logprobs[label] / len(label))
         metrics = [dict(segment="response", position=index + 1, token_id=token,
-                        raw_probability=each, scored=True, raw_rank=1,
+                        raw_probability=.5 if index < lead else each, scored=True, raw_rank=1,
                         display_text=chr(token), text=chr(token))
                    for index, token in enumerate(forced)]
         try:
-            yield SimpleNamespace(text=label, metrics=metrics, prompt_ids=[1, 2],
+            yield SimpleNamespace(text=replayed, metrics=metrics, prompt_ids=[1, 2],
                                   forced_prefix_tokens=len(forced))
             # Nothing after the replayed answer is ever drawn; a runner that
             # kept reading would be paying for tokens it does not use.
             self.sampled += 1
-            yield SimpleNamespace(text=label + "!", metrics=metrics, prompt_ids=[1, 2],
+            yield SimpleNamespace(text=replayed + "!", metrics=metrics, prompt_ids=[1, 2],
                                   forced_prefix_tokens=len(forced))
         finally:
             self.closed_streams += 1
@@ -320,7 +360,11 @@ class ProbabilityRunnerTests(unittest.TestCase):
         self.assertEqual(final["status"], "completed")
         self.assertEqual(final["scoring"], "probability")
         self.assertEqual(self.manager.sampled, 0)
-        self.assertEqual(self.manager.closed_streams, 9)
+        # Nine replays, and the one throwaway that asked about reasoning.
+        self.assertEqual(self.manager.probes, 1)
+        self.assertEqual(self.manager.closed_streams, 10)
+        self.assertFalse(final["reasoning_prefilled"])
+        self.assertEqual(self.manager.replayed[:3], list(LABELS))
         self.assertEqual(self.manager.options["max_new_tokens"], 1)
         self.assertEqual(self.manager.options["temperature"], 0)
         result = final["predictions"][0]
@@ -335,6 +379,24 @@ class ProbabilityRunnerTests(unittest.TestCase):
         # The kept trace is the winning answer's own tokens, so the strip shows
         # what the model gave the judgment it made.
         self.assertEqual(len(result["metrics"]), len("allowed"))
+
+    def test_a_thinking_template_gets_its_reasoning_closed_before_each_label(self):
+        self.manager.reasoning_prefilled = True
+        final = self.run_batch(demo_cases())[-1]
+        self.assertTrue(final["reasoning_prefilled"])
+        self.assertTrue(all(row["reasoning_prefilled"] for row in final["predictions"]))
+        # Every replay is the close and then the bare label, so the label is
+        # the model's answer rather than the opening words of its reasoning.
+        self.assertEqual(self.manager.replayed[:3],
+                         [REASONING_LEAD + label for label in LABELS])
+        # The close is the same three times over, so it stays out of the score:
+        # the numbers are the ones a model without a thinking template gives.
+        result = final["predictions"][0]
+        for label, value in ProbabilityManager.logprobs.items():
+            self.assertAlmostEqual(result["logprobs"][label], value)
+        self.assertEqual(result["answer_tokens"], {label: len(label) for label in LABELS})
+        self.assertEqual(len(result["metrics"]), len("allowed"))
+        self.assertEqual("".join(metric["text"] for metric in result["metrics"]), "allowed")
 
     def test_scores_carry_a_curve_and_an_interval_the_summary_can_show(self):
         final = self.run_batch(demo_cases())[-1]
@@ -358,7 +420,7 @@ class ProbabilityRunnerTests(unittest.TestCase):
         self.assertEqual(final["scores"]["completed"], 2)
         self.assertEqual(final["scores"]["skipped"], 1)
         self.assertEqual(final["scores"]["total"], 3)
-        self.assertEqual(self.manager.closed_streams, 6)
+        self.assertEqual(self.manager.closed_streams, 7)
 
     def test_cancelling_between_labels_leaves_the_case_unscored(self):
         stream = self.runner.run("owner", demo_cases())
@@ -593,13 +655,47 @@ class PageTests(unittest.TestCase):
             self.assertIn("blocking-tradeoff", frames[-1][4])
             # Blocking everything the model gives any unsafe mass at all turns
             # every judgment into unsafe, and the table has to say so.
-            rows, note, rescored, chart = functions["rescore"](loaded[0], run, .2)
+            rows, note, rescored, chart = functions["rescore"](loaded[0], run, "owner", .2)
             self.assertTrue(all(row[3] == "unsafe" for row in rows))
             self.assertIn("P(unsafe) ≥ 0.20", note)
             self.assertEqual(rescored["confusion"]["allowed"]["unsafe"], 1)
             self.assertEqual(run["predictions"][0]["prediction"], "allowed")
-            self.assertEqual(functions["rescore"]([], run, .2)[0], gr.skip())
-            self.assertIn("viz-empty", functions["rescore"](loaded[0], {}, 0)[3])
+            self.assertEqual(functions["rescore"]([], run, "owner", .2)[0], gr.skip())
+            self.assertIn("viz-empty", functions["rescore"](loaded[0], {}, "owner", 0)[3])
+
+    def test_threshold_moved_during_a_batch_survives_the_next_case(self):
+        """The slider is a live control, so the batch cannot answer with the old value."""
+        with tempfile.TemporaryDirectory() as directory:
+            manager = ProbabilityManager()
+            context = ExtensionContext(ModelService(lambda: manager), TokenInspector(),
+                                       Path(directory) / "extension", NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            self.addCleanup(demo.close)
+            functions = {function.fn.__name__: function.fn for function in demo.fns.values() if function.fn}
+            case_path = Path(directory) / "cases.json"
+            case_path.write_text(json.dumps(demo_cases()))
+            loaded = functions["load_cases"](str(case_path), "owner", 0)
+            frames, moved = [], False
+            # Start at zero, the way a reader does, and move the slider once the
+            # first case has landed. Every frame after that has to agree with it.
+            for frame in functions["evaluate"](loaded[0], "owner", "Label probabilities", 256, 42, 0):
+                frames.append(frame)
+                batched = isinstance(frame[0], dict) and frame[0].get("predictions")
+                if batched and not moved:
+                    functions["rescore"](loaded[0], frame[0], "owner", .2)
+                    moved = True
+            self.assertTrue(moved)
+            table, note = frames[-1][1], frames[-1][2]
+            self.assertIn("P(unsafe) ≥ 0.20", note)
+            self.assertTrue(all(row[3] == "unsafe" for row in table))
+            # The recorded run still holds the model's own judgment.
+            self.assertEqual(frames[-1][0]["predictions"][0]["prediction"], "allowed")
+            # Closing the browser session drops the threshold with the rest of
+            # its server state, so a long-lived app does not accumulate them.
+            owner_state = next(block for block in demo.blocks.values() if isinstance(block, gr.State)
+                               and getattr(block.delete_callback, "__name__", "") == "forget")
+            owner_state.delete_callback("owner")
 
     def test_app_registers_safety_alongside_other_safety_extension(self):
         settings.update(enabled_extensions=["osguard", "os_harm"])

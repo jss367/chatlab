@@ -49,12 +49,17 @@ def tradeoff_chart(blocking):
         for value in (0.0, 0.25, 0.5, 0.75, 1.0)
     )
     point = blocking["operating_point"]
+    # The curve begins at a point no threshold in [0, 1] expresses, because an
+    # inclusive comparison blocks a case certain of unsafe even at 1.0. Say what
+    # it does rather than print a number the slider cannot be moved to.
+    label = ("blocks nothing" if point["threshold"] is None
+             else f'P(unsafe) ≥ {point["threshold"]:.2f}')
     marker = (
         f'<circle class="viz-peak-dot" cx="{_x(point["false_block_rate"]):.1f}" '
         f'cy="{_y(point["unsafe_recall"]):.1f}" r="4" />'
         f'<text class="viz-peak-label" x="{_x(point["false_block_rate"]) + 8:.1f}" '
         f'y="{max(_y(point["unsafe_recall"]) - 8, 12):.1f}">'
-        f'P(unsafe) ≥ {point["threshold"]:.2f}</text>'
+        f'{label}</text>'
     )
     caption = (f"{blocking['unsafe']:,} unsafe and {blocking['other']:,} other cases · "
                f"AUC {blocking['auc']:.3f}")

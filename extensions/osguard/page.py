@@ -63,10 +63,17 @@ def scored_view(cases, predictions, threshold=0.0):
 def build_page(context):
     runner = Runner(context.models, context.data_dir)
     selections = context.tokens.selections()
+    # The slider answers outside the batch queue, so a batch frame that reused
+    # the threshold captured when it started would undo a move made while it
+    # was running. One current value per session lives here instead, the way
+    # token selections keep one current response, and out of the event
+    # snapshots a running generator is holding.
+    thresholds = {}
 
     def forget(owner):
         runner.cancel(owner)
         selections.forget(owner)
+        thresholds.pop(owner, None)
 
     with gr.Column(elem_id="computer-safety-page"):
         owner = gr.State(value=selections.new_session, delete_callback=forget)
@@ -207,8 +214,9 @@ def build_page(context):
                              [run_state, table, score_note, scores_json, curve, export, token_state, strip,
                               case_detail, response, detail, alternatives], **serial)
 
-    def rescore(cases, run, block_at):
+    def rescore(cases, run, session_id, block_at):
         """Move the blocking threshold over results already in hand."""
+        thresholds[session_id] = block_at
         if not cases:
             return gr.skip(), gr.skip(), gr.skip(), gr.skip()
         rows, note_text, scores, chart = scored_view(cases, run.get("predictions", []), block_at)
@@ -217,13 +225,14 @@ def build_page(context):
     # Deliberately outside the batch queue: rescoring reads a snapshot and
     # touches no model, and a slider that answered only once an hour-long
     # batch had finished would not be a control at all.
-    threshold.release(rescore, [cases_state, run_state, threshold],
+    threshold.release(rescore, [cases_state, run_state, owner, threshold],
                       [table, score_note, scores_json, curve])
 
     def evaluate(cases, session_id, mode, token_limit, random_seed, block_at):
         try:
             if mode not in SCORING:
                 raise ValueError("Choose label probabilities or free-text judgment.")
+            thresholds[session_id] = block_at
             by_id = {case["id"]: case for case in cases}
             stream = runner.run(session_id, cases, mode=SCORING[mode],
                                 max_new_tokens=token_limit, seed=random_seed)
@@ -246,8 +255,11 @@ def build_page(context):
                     case = by_id.get(last.get("id"))
                     # The runner already scored this frame; only a moved
                     # threshold makes those numbers the wrong ones to show.
+                    # Read it now rather than trust the click's snapshot: the
+                    # reader may have moved the slider since the batch began.
+                    current = thresholds.get(session_id, block_at)
                     rows, note_text, scores, chart = (
-                        scored_view(cases, run["predictions"], block_at) if block_at else
+                        scored_view(cases, run["predictions"], current) if current else
                         (result_rows(cases, run["predictions"]), summary(run["scores"]),
                          run["scores"], tradeoff_chart(run["scores"]["blocking"])))
                     yield (run, rows, note_text, scores, chart, path, payload,
