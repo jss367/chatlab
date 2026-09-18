@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import socket
+import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 from urllib.request import urlopen
 
+import desktop
 import desktop_launcher
 import logs
+import model_runtime
+import updater
 from desktop_launcher import (
     DESKTOP_PORT,
     LOOPBACK_ADDRESS,
@@ -104,3 +110,71 @@ class LaunchRecordTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     desktop_launcher.main([])
         self.assertIn("ChatLab failed to start", "\n".join(caught.output))
+
+
+class RestartOfferTests(unittest.TestCase):
+    """The restart Settings offers is the window's, and only the app has one.
+
+    A run from a checkout has no bundle to reopen, so it registers nothing
+    and the button stays off the page; see the extension tests for what the
+    page does with the answer.
+    """
+
+    def setUp(self):
+        self.addCleanup(desktop.offer_restart, None)
+
+    def open_window(self, bundle):
+        """Run the launcher against a fake window, restarting once it is up."""
+
+        window = mock.MagicMock()
+        seen = {}
+
+        def started(**_kwargs):
+            seen["offered"] = desktop.restart_offered()
+            seen["restarted"] = desktop.restart()
+
+        webview = SimpleNamespace(create_window=mock.Mock(return_value=window), start=started)
+        menu = SimpleNamespace(Menu=mock.Mock(), MenuAction=mock.Mock())
+        with tempfile.TemporaryDirectory() as support, \
+                mock.patch.dict(sys.modules, {"webview": webview, "webview.menu": menu}), \
+                mock.patch.object(desktop_launcher, "app_support_directory", return_value=Path(support)), \
+                mock.patch.object(desktop_launcher, "start_local_server", return_value=(mock.Mock(), "http://127.0.0.1:47890/")), \
+                mock.patch.object(model_runtime, "watch_memory"), \
+                mock.patch.object(updater, "running_app_bundle", return_value=bundle), \
+                mock.patch.object(updater, "remove_previous_bundles"), \
+                mock.patch.object(updater, "remove_stale_work_dirs"), \
+                mock.patch.object(updater, "relaunch") as relaunch:
+            self.assertEqual(desktop_launcher.run_desktop(), 0)
+        return seen, window, relaunch
+
+    def test_the_app_reopens_itself_and_closes_the_window_behind_it(self):
+        bundle = Path("/Applications/ChatLab.app")
+        seen, window, relaunch = self.open_window(bundle)
+
+        self.assertTrue(seen["offered"])
+        self.assertTrue(seen["restarted"])
+        relaunch.assert_called_once_with(bundle)
+        window.destroy.assert_called_once_with()
+
+    def test_a_window_the_user_already_closed_costs_the_restart_nothing(self):
+        window = mock.MagicMock()
+        window.destroy.side_effect = RuntimeError("window is gone")
+        with mock.patch.object(desktop_launcher, "updater") as patched:
+            patched.running_app_bundle.return_value = Path("/Applications/ChatLab.app")
+            with mock.patch.dict(sys.modules, {
+                "webview": SimpleNamespace(create_window=mock.Mock(return_value=window), start=lambda **_: None),
+                "webview.menu": SimpleNamespace(Menu=mock.Mock(), MenuAction=mock.Mock()),
+            }), tempfile.TemporaryDirectory() as support, \
+                    mock.patch.object(desktop_launcher, "app_support_directory", return_value=Path(support)), \
+                    mock.patch.object(desktop_launcher, "start_local_server", return_value=(mock.Mock(), "http://127.0.0.1:47890/")), \
+                    mock.patch.object(model_runtime, "watch_memory"):
+                self.assertEqual(desktop_launcher.run_desktop(), 0)
+            self.assertTrue(desktop.restart())
+        patched.relaunch.assert_called_once_with(Path("/Applications/ChatLab.app"))
+
+    def test_a_run_from_a_checkout_offers_nothing_to_restart(self):
+        seen, _, relaunch = self.open_window(None)
+
+        self.assertFalse(seen["offered"])
+        self.assertFalse(seen["restarted"])
+        relaunch.assert_not_called()

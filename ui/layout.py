@@ -1739,7 +1739,7 @@ def build_app() -> gr.Blocks:
                                 )
 
                         with gr.Column(elem_classes=["settings-card"]):
-                            extensions_control, extensions_note, active_extensions = build_extension_settings([ext.spec.id for ext in extensions], extension_errors)
+                            extension_settings, active_extensions = build_extension_settings([ext.spec.id for ext in extensions], extension_errors)
 
         nav.change(
             show_page,
@@ -1751,7 +1751,7 @@ def build_app() -> gr.Blocks:
         nav.change(refresh_hardware, None, hardware_view)
         demo.load(refresh_hardware, None, hardware_view)
         refresh_hardware_button.click(refresh_hardware, None, hardware_view)
-        demo.load(restore_extensions, active_extensions, [extensions_control, extensions_note])
+        demo.load(restore_extensions, active_extensions, extension_settings)
         for label, extension_page in extension_pages:
             def show_extension(page, expected=label):
                 return gr.update(visible=page == expected)

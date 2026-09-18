@@ -14,6 +14,7 @@ from urllib.request import urlopen
 
 import api
 import branding
+import desktop
 import logs
 import model_runtime
 import updater
@@ -295,6 +296,27 @@ def run_desktop() -> int:
     support_directory = app_support_directory()
     support_directory.mkdir(parents=True, exist_ok=True)
     bundle = updater.running_app_bundle()
+    window = None
+
+    def restart() -> None:
+        """Quit and open a fresh copy, which Settings asks for after a change.
+
+        Ordered the way the update flow orders it: the replacement is started
+        first and the window closed behind it, so what is on screen is
+        replaced rather than vanishing ahead of a launch that may not come.
+        """
+
+        logging.info("Restarting ChatLab %s at the reader's request", __version__)
+        updater.relaunch(bundle)
+        try:
+            window.destroy()
+        except Exception as error:  # noqa: BLE001 - window is gone; log and carry on
+            logging.info("Window close skipped: %s", error)
+
+    # A run that is not from a bundle has nothing to reopen, so Settings
+    # leaves the button off the page rather than quitting into nothing.
+    if bundle is not None:
+        desktop.offer_restart(restart)
     demo, local_url = start_local_server()
     logging.info("Started ChatLab %s at %s", __version__, local_url)
     # Only once the window is really opening. A smoke test runs for seconds
