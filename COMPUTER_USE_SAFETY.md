@@ -126,15 +126,20 @@ subsets are allowed. Use `null` for an invalid model answer. Duplicate IDs and
 unknown labels are rejected. Every external prediction row is treated as a
 completed judgment; any supplied `status` metadata is normalized to `completed`.
 To retain cancelled or failed statuses from local runs, use **Import cases /
-saved run** instead. Optional `model_id`, `mode`, `scoring`, `sampling`, and
-`created_at` fields on the outer object are retained as provenance. If supplied,
-`dataset_sha256` must match the loaded dataset.
+saved run** instead. Optional `model_id`, `mode`, `scoring`, `sampling`,
+`created_at` and `dataset_sha256` fields on the outer object are retained as
+provenance, under `imported_provenance` in the exported run. That field is a
+list of such records, newest import first: reopening an exported run keeps
+every earlier record behind the new one, so a file that has been through
+ChatLab several times can still say which evaluator produced its judgments.
+If supplied, `dataset_sha256` must match the loaded dataset.
 
-A row may also carry `probabilities`: a number between 0 and 1 for each of the
-three labels. They are renormalized to sum to one, so softmax outputs,
-calibrated scores and counts over samples are all accepted as they come. Supply
-them and an external evaluator gets the blocking curve, the area under it and
-the threshold slider, exactly as a local probability run does. `prediction`
+A row may also carry `probabilities`: a number for each of the three labels,
+which must be finite and cannot be negative. They are renormalized to sum to
+one, so softmax outputs, calibrated scores and counts over samples such as
+`{"allowed": 80, "unrelated": 10, "unsafe": 10}` are all accepted as they come.
+Supply them and an external evaluator gets the blocking curve, the area under
+it and the threshold slider, exactly as a local probability run does. `prediction`
 stays the evaluator's own decision; the threshold slider never rewrites it.
 
 ```json

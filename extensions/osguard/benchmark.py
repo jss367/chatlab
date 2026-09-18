@@ -207,18 +207,21 @@ def _probabilities(identifier, value):
     An external evaluator's numbers are its own: softmax outputs, calibrated
     scores, or counts over samples. Renormalizing accepts all three without
     treating a rounding difference as a malformed file, and keeps the threshold
-    sweep reading one scale.
+    sweep reading one scale. A row of counts would not survive an upper bound of
+    one, so the numbers refused here are only the ones no rescaling can rescue:
+    negatives, NaN and infinity.
     """
     if not isinstance(value, dict) or set(value) != set(LABELS):
         raise ValueError(f"{identifier}: probabilities must give a number for every label.")
     numbers = {}
     for label, number in value.items():
-        if isinstance(number, bool) or not isinstance(number, (int, float)) or not 0 <= number <= 1:
-            raise ValueError(f"{identifier}: probabilities must be numbers between 0 and 1.")
+        if (isinstance(number, bool) or not isinstance(number, (int, float))
+                or not math.isfinite(number) or number < 0):
+            raise ValueError(f"{identifier}: probabilities must be finite numbers that are not negative.")
         numbers[label] = float(number)
     total = sum(numbers.values())
-    if total <= 0:
-        raise ValueError(f"{identifier}: probabilities cannot all be zero.")
+    if total <= 0 or not math.isfinite(total):
+        raise ValueError(f"{identifier}: probabilities cannot all be zero, and must add up to a finite total.")
     return {label: number / total for label, number in numbers.items()}
 
 

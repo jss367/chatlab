@@ -24,8 +24,26 @@ CSS = """
 """
 
 
-def provenance(value):
-    return {key: value[key] for key in PROVENANCE if key in value}
+def provenance_chain(value):
+    """Describe where an imported file's judgments came from, newest first.
+
+    A run exported from ChatLab carries this field itself, and its outer object
+    speaks for the export rather than for the evaluator that produced the
+    judgments. Reading a single flat record would therefore let one export and
+    reopen erase the evaluator's own model and scoring mode for good, so every
+    earlier record is kept behind the new one. Each entry is flattened to the
+    known keys, and an import that says nothing the newest entry does not
+    already say adds nothing, so reopening a file repeatedly leaves the chain
+    where it is instead of growing it.
+    """
+    entry = {key: value[key] for key in PROVENANCE if key in value}
+    carried = value.get("imported_provenance")
+    earlier = [carried] if isinstance(carried, dict) else carried if isinstance(carried, list) else []
+    chain = [flat for flat in ({key: item[key] for key in PROVENANCE if key in item}
+                               for item in earlier if isinstance(item, dict)) if flat]
+    if entry and entry != (chain[0] if chain else None):
+        chain.insert(0, entry)
+    return chain
 
 
 def percent(value):
@@ -196,7 +214,7 @@ def build_page(context):
             run = dict(format=FORMAT, paper=PAPER, cases=cases, predictions=predictions,
                        dataset_sha256=dataset_digest(cases), mode="imported" if predictions else "not_run")
             if isinstance(value, dict):
-                run["imported_provenance"] = provenance(value)
+                run["imported_provenance"] = provenance_chain(value)
             rows, note_text, scores, chart = scored_view(
                 cases, predictions, blocking_threshold(block_on, block_at))
             message = ("Loaded synthetic demonstration — not official benchmark data." if synthetic else
@@ -228,7 +246,7 @@ def build_page(context):
             run = dict(format=FORMAT, paper=PAPER, cases=cases, predictions=predictions,
                        dataset_sha256=dataset_digest(cases), mode="external_predictions")
             if isinstance(value, dict):
-                run["imported_provenance"] = provenance(value)
+                run["imported_provenance"] = provenance_chain(value)
             rows, note_text, scores, chart = scored_view(
                 cases, predictions, blocking_threshold(block_on, block_at))
             return (run, rows, note_text, scores, chart, None, *clear_view(session_id))

@@ -218,8 +218,16 @@ class BenchmarkTests(unittest.TestCase):
         self.assertAlmostEqual(scored["probabilities"]["unsafe"], .5)
         self.assertAlmostEqual(sum(scored["probabilities"].values()), 1)
         self.assertEqual(scored["prediction"], "unsafe")
+        # Counts over samples are documented as acceptable input, and they are
+        # only a distribution once renormalized.
+        counted = predictions_from([dict(row, probabilities={"allowed": 80, "unrelated": 10, "unsafe": 10})],
+                                   demo_cases())[0]
+        self.assertAlmostEqual(counted["probabilities"]["allowed"], .8)
+        self.assertAlmostEqual(sum(counted["probabilities"].values()), 1)
         for probabilities in ({"allowed": .5, "unsafe": .5}, {"allowed": 0, "unrelated": 0, "unsafe": 0},
-                              {"allowed": .5, "unrelated": .5, "unsafe": 2},
+                              {"allowed": .5, "unrelated": .5, "unsafe": -1},
+                              {"allowed": .5, "unrelated": .5, "unsafe": float("inf")},
+                              {"allowed": .5, "unrelated": .5, "unsafe": float("nan")},
                               {"allowed": .5, "unrelated": .5, "unsafe": "1"},
                               {"allowed": .5, "unrelated": .5, "unsafe": True}, "unsafe"):
             with self.assertRaisesRegex(ValueError, "probabilities"):
@@ -633,20 +641,55 @@ class PageTests(unittest.TestCase):
             with mock.patch('extensions.osguard.benchmark.MAX_FILE_BYTES', 100):
                 replay = functions["load_cases"](exported, "owner", False, 0.5)
             self.assertEqual(len(replay[1]["predictions"]), 3)
-            self.assertEqual(replay[1]["imported_provenance"]["model_id"], "test/model")
-            self.assertEqual(replay[1]["imported_provenance"]["scoring"], "judgment")
+            self.assertEqual(replay[1]["imported_provenance"][0]["model_id"], "test/model")
+            self.assertEqual(replay[1]["imported_provenance"][0]["scoring"], "judgment")
             self.assertNotIn("metrics", replay[1]["predictions"][0])
             scored = functions["score_external"](exported, loaded[0], "owner", False, 0.5)
             self.assertEqual(len(scored), 12)
             # An external file that says how its judgments were produced keeps
             # saying so once the run is re-exported from it.
-            self.assertEqual(scored[0]["imported_provenance"]["scoring"], "judgment")
-            self.assertEqual(scored[0]["imported_provenance"]["model_id"], "test/model")
+            self.assertEqual(scored[0]["imported_provenance"][0]["scoring"], "judgment")
+            self.assertEqual(scored[0]["imported_provenance"][0]["model_id"], "test/model")
             execution_path = Path(directory) / "execution.json"
             execution_path.write_text(json.dumps([dict(id="one", task_success=True, retry_terminated=False, invariants={"preserved": False})]))
             reviewed = functions["review_executions"](str(execution_path))
             self.assertEqual(reviewed[0][0][2], "unsafe_completion")
             self.assertTrue(Path(reviewed[2]).is_file())
+
+    def test_external_provenance_survives_repeated_export_and_reimport(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = JudgmentManager()
+            context = ExtensionContext(ModelService(lambda: manager), TokenInspector(),
+                                       Path(directory) / "extension", NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            self.addCleanup(demo.close)
+            functions = {function.fn.__name__: function.fn for function in demo.fns.values() if function.fn}
+            case_path = Path(directory) / "cases.json"
+            case_path.write_text(json.dumps(demo_cases()))
+            loaded = functions["load_cases"](str(case_path), "owner", False, 0.5)
+            prediction_path = Path(directory) / "external.json"
+            prediction_path.write_text(json.dumps(dict(
+                model_id="outside/guardrail", scoring="probability", mode="external_multimodal",
+                predictions=[dict(id=case["id"], prediction="allowed") for case in demo_cases()])))
+            scored = functions["score_external"](str(prediction_path), loaded[0], "owner", False, 0.5)
+            # An export names the export, not the evaluator, so reopening one
+            # must add to what the file already says rather than speak over it.
+            first = functions["export_run"](scored[0])
+            reopened = functions["load_cases"](first, "owner", False, 0.5)
+            second = functions["export_run"](reopened[1])
+            chain = json.loads(Path(second).read_text())["imported_provenance"]
+            self.assertEqual(chain[-1]["model_id"], "outside/guardrail")
+            self.assertEqual(chain[-1]["scoring"], "probability")
+            self.assertEqual(chain[-1]["mode"], "external_multimodal")
+            self.assertTrue(all(isinstance(entry, dict) for entry in chain))
+            # Round trips through a saved run say the same thing every time, so
+            # repeating one stops adding entries instead of growing the chain.
+            third = functions["export_run"](functions["load_cases"](second, "owner", False, 0.5)[1])
+            fourth = functions["export_run"](functions["load_cases"](third, "owner", False, 0.5)[1])
+            settled = json.loads(Path(third).read_text())["imported_provenance"]
+            self.assertEqual(json.loads(Path(fourth).read_text())["imported_provenance"], settled)
+            self.assertEqual(settled[-1]["model_id"], "outside/guardrail")
 
     def test_probability_run_fills_the_curve_and_the_threshold_rescores_it(self):
         with tempfile.TemporaryDirectory() as directory:
