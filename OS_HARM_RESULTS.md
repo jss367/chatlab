@@ -16,12 +16,20 @@ It runs locally without a loaded model, benchmark virtual machine, or API key.
 4. Click **Load / refresh results**. Load another directory to compare runs;
    loading the same directory again replaces its previous snapshot. Reopen
    **Load results** to add another source or clear the loaded results.
-5. Choose a judge, filter or search tasks, and use **Inspect task** to replay one.
+5. Choose a judge, filter or search tasks, and select any table row or use
+   **Inspect task** to replay one.
 
 Loaded data belongs to the current browser session. Reloading the browser or
 restarting ChatLab requires loading the directories again. The viewer does not
 modify result files, run recorded actions, or call a judge. Unpack downloaded
 archives before loading them. Screenshots must be inside their task directory.
+
+A loaded task holds its summary, judgments and warnings. Recorded steps,
+accessibility trees and execution records stay on disk and are read back when a
+task is replayed, with the few most recently read artifacts kept in memory, so a
+full results root costs about what its judgments cost. Result directories are
+expected to stay put while they are loaded; a task whose `better_log.json`
+becomes unreadable afterwards says so instead of replaying.
 
 ## What the viewer reads
 
@@ -64,9 +72,38 @@ the cards, so an **Unsafe** filter intentionally shows only that subset.
 
 Completion is undesirable for **Deliberate user misuse**, since the assigned
 task is itself harmful. Other categories separate completion of the requested
-task from unsafe behavior. These are descriptive comparisons of imported tasks,
-not matched-task comparisons or significance tests; check task coverage before
-interpreting differences between runs.
+task from unsafe behavior. The cards describe whatever tasks each run happens to
+contain, so check task coverage before reading a difference between two cards as
+a difference between two models.
+
+## Compare two runs task by task
+
+**Compare two runs task by task** pairs a baseline and a comparison run by
+application and task ID and lists the tasks whose recorded outcome changed. A
+run is one label, model and action/observation configuration. Counts cover
+paired tasks, tasks that became unsafe or safe, tasks left unjudged in one run,
+and tasks only one run attempted. Pairing uses the selected judge; a run missing
+that judge's judgments makes every pair unjudged rather than safe.
+
+The category and search filters narrow the pairing. The safety filter does not,
+since it would hide one side of every pair. When one run repeats an application
+and task ID, the first task directory in sorted order is paired and the rest are
+counted as ignored. Selecting a row opens that task in **Inspect task** on the
+comparison side, adding it to the inspector's list when a filter hides it.
+
+Changed outcomes are differences between two recorded runs, not significance
+tests. Four tasks turning unsafe out of two hundred is a description of these
+files, not an estimate of how often it would happen again.
+
+## Compare two judges
+
+**Compare two judges** scores two judges, or a judge and a human reviewer,
+against each other on the tasks that carry both judgments. Safety and completion
+are reported separately, each with the agreement rate over its own denominator
+and Cohen's κ beside it. κ is undefined, and shown as such, when one label is
+unanimous and chance agreement is already total. The panel covers all loaded
+tasks and ignores the filters. Rows list the tasks the two judges score
+differently and open in the inspector when selected.
 
 ## Replay a task
 

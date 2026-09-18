@@ -1,10 +1,11 @@
 """Read OS-Harm artifacts without importing or executing the benchmark harness."""
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import threading
 
 CATEGORIES = ('Deliberate user misuse', 'Prompt injection attacks', 'Model misbehavior')
 MANIFESTS = dict(zip(('test_misuse.json', 'test_injection.json', 'test_misbehavior.json'), CATEGORIES))
@@ -12,6 +13,37 @@ UNKNOWN = 'Unknown category'
 MAX_JSON_BYTES = 32 * 1024 * 1024
 MAX_TRAJECTORY_LINES = 10_000
 MAX_TRAJECTORY_WARNINGS = 20
+MAX_CACHED_ARTIFACTS = 8
+
+_cache = OrderedDict()
+_cache_lock = threading.Lock()
+
+
+def cached(kind, path, read):
+    """Hold a few tasks' bulky artifacts, keyed by file identity.
+
+    Recorded steps and execution records dwarf everything else a result
+    directory holds, so loaded tasks keep only their summary and read these
+    back when a reader actually replays them.
+    """
+    try:
+        stat = path.stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        stamp = None
+    key = (kind, str(path))
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry is not None and entry[0] == stamp:
+            _cache.move_to_end(key)
+            return entry[1]
+    value = read()
+    with _cache_lock:
+        _cache[key] = (stamp, value)
+        _cache.move_to_end(key)
+        while len(_cache) > MAX_CACHED_ARTIFACTS:
+            _cache.popitem(last=False)
+    return value
 
 
 def resolve_path(path: Path) -> Path:
@@ -47,9 +79,11 @@ class Task:
     domain: str
     task_id: str
     category: str
-    log: dict
+    params: dict
+    info: dict
+    step_count: int
     judgments: dict
-    trajectory: list
+    errors: list
     warnings: list
 
     @property
@@ -58,15 +92,33 @@ class Task:
 
     @property
     def model(self):
-        return str(self.log['params'].get('model', 'Unknown model'))
+        return str(self.params.get('model', 'Unknown model'))
 
     @property
     def configuration(self):
-        params = self.log['params']
-        return ' / '.join(str(params.get(k, 'Unknown')) for k in ('action_space', 'observation_type'))
+        return ' / '.join(str(self.params.get(k, 'Unknown')) for k in ('action_space', 'observation_type'))
+
+    @property
+    def run(self):
+        """One label, model and configuration: what a task-by-task diff pairs."""
+        return ' · '.join((self.label, self.model, self.configuration))
+
+    @property
+    def instruction(self):
+        return str(self.info.get('instruction', ''))
 
     def judgment(self, judge):
         return self.judgments.get(judge, {})
+
+    def steps(self):
+        def read():
+            return validate_log(read_json(local_file(self.directory, 'better_log.json')))['steps']
+
+        return cached('steps', self.directory / 'better_log.json', read)
+
+    def execution(self):
+        """Returns the execution records and any warnings from reading them."""
+        return cached('trajectory', self.directory / 'traj.jsonl', lambda: read_trajectory(self.directory))
 
 
 def category_index(folder: str) -> dict:
@@ -121,32 +173,8 @@ def validate_judgment(data):
     return data
 
 
-def load_task(directory, root, label, category, index):
-    warnings, judgments, trajectory = [], {}, []
-    log = validate_log(read_json(local_file(directory, 'better_log.json')))
-    domain, task_id = directory.parent.name, directory.name
-    if category == 'Automatic':
-        if log['task'].get('injection'):
-            category = CATEGORIES[1]
-        else:
-            category = index.get((domain, task_id.split('__inject__')[0]), UNKNOWN)
-    try:
-        judge_dir = local_file(directory, 'judgment')
-        if judge_dir.is_dir():
-            for path in sorted(judge_dir.rglob('*.json')):
-                relative = path.relative_to(judge_dir)
-                if path.name != 'judgment.json' and relative.parts[0] != 'human':
-                    continue
-                try:
-                    path = local_file(directory, str(path.relative_to(directory)))
-                    key = relative.with_suffix('').as_posix()
-                    if key.endswith('/judgment'):
-                        key = key[:-len('/judgment')]
-                    judgments[key] = validate_judgment(read_json(path))
-                except (OSError, ValueError) as exc:
-                    warnings.append(f'{relative}: {exc}')
-    except (OSError, ValueError) as exc:
-        warnings.append(f'judgment directory could not be read; unavailable judgments were skipped: {exc}')
+def read_trajectory(directory):
+    entries, warnings = [], []
     try:
         traj_path = local_file(directory, 'traj.jsonl')
         if traj_path.exists():
@@ -175,7 +203,7 @@ def load_task(directory, root, label, category, index):
                             entry = json.loads(line)
                             if not isinstance(entry, dict):
                                 raise ValueError('Expected an object.')
-                            trajectory.append(entry)
+                            entries.append(entry)
                         except ValueError:
                             invalid_lines += 1
                             if invalid_lines <= MAX_TRAJECTORY_WARNINGS:
@@ -186,7 +214,45 @@ def load_task(directory, root, label, category, index):
         # Execution records are optional; a decoding or filesystem failure
         # must not remove a valid task and its judgments from the comparison.
         warnings.append(f'traj.jsonl could not be read; execution details were skipped: {exc}')
-    return Task(directory, str(root), label, domain, task_id, category, log, judgments, trajectory, warnings)
+    return entries, warnings
+
+
+def load_task(directory, root, label, category, index):
+    warnings, judgments = [], {}
+    log = validate_log(read_json(local_file(directory, 'better_log.json')))
+    domain, task_id = directory.parent.name, directory.name
+    if category == 'Automatic':
+        if log['task'].get('injection'):
+            category = CATEGORIES[1]
+        else:
+            category = index.get((domain, task_id.split('__inject__')[0]), UNKNOWN)
+    try:
+        judge_dir = local_file(directory, 'judgment')
+        if judge_dir.is_dir():
+            for path in sorted(judge_dir.rglob('*.json')):
+                relative = path.relative_to(judge_dir)
+                if path.name != 'judgment.json' and relative.parts[0] != 'human':
+                    continue
+                try:
+                    path = local_file(directory, str(path.relative_to(directory)))
+                    key = relative.with_suffix('').as_posix()
+                    if key.endswith('/judgment'):
+                        key = key[:-len('/judgment')]
+                    judgments[key] = validate_judgment(read_json(path))
+                except (OSError, ValueError) as exc:
+                    warnings.append(f'{relative}: {exc}')
+    except (OSError, ValueError) as exc:
+        warnings.append(f'judgment directory could not be read; unavailable judgments were skipped: {exc}')
+    # Read the execution records for their warnings and reported errors, then
+    # let them go: a replayed task reads its own artifacts back on demand.
+    entries, traj_warnings = read_trajectory(directory)
+    warnings.extend(traj_warnings)
+    errors = [str(entry['Error']) for entry in entries if 'Error' in entry]
+    if len(errors) > MAX_TRAJECTORY_WARNINGS:
+        errors = errors[:MAX_TRAJECTORY_WARNINGS]
+        errors.append('Further execution errors are listed in the execution records.')
+    return Task(directory, str(root), label, domain, task_id, category, log['params'], log['task'],
+                len(log['steps']), judgments, errors, warnings)
 
 
 def import_results(folder: str, label='', category='Automatic', definitions=''):
@@ -222,15 +288,24 @@ def judge_choices(tasks):
     return sorted({judge for task in tasks for judge in task.judgments})
 
 
+def run_choices(tasks):
+    return sorted({task.run for task in tasks})
+
+
 def safety_label(task, judge):
     value = task.judgment(judge).get('safety')
     return 'Safe' if value is True else 'Unsafe' if value is False else 'Unjudged'
 
 
+def completion_label(task, judge):
+    value = task.judgment(judge).get('success')
+    return 'Completed' if value is True else 'Not completed' if value is False else 'Unjudged'
+
+
 def filtered(tasks, judge, category='All categories', safety='All outcomes', query=''):
     return [t for t in tasks if (category == 'All categories' or t.category == category)
             and (safety == 'All outcomes' or safety_label(t, judge) == safety)
-            and query.casefold() in ' '.join((t.label, t.model, t.task_id, t.domain, t.log['task']['instruction'])).casefold()]
+            and query.casefold() in ' '.join((t.label, t.model, t.task_id, t.domain, t.instruction)).casefold()]
 
 
 def summaries(tasks, judge):
@@ -247,3 +322,88 @@ def summaries(tasks, judge):
                          tasks=len(items), safety_count=len(safety), unsafe=sum(v is False for v in safety),
                          success_count=len(success), completed=sum(success)))
     return rows
+
+
+def by_task(tasks, run):
+    """Index one run's tasks by application and task ID."""
+    index, duplicates = {}, 0
+    for task in sorted(tasks, key=lambda t: t.key):
+        if task.run != run:
+            continue
+        if (task.domain, task.task_id) in index:
+            duplicates += 1
+        else:
+            index[(task.domain, task.task_id)] = task
+    return index, duplicates
+
+
+EMPTY_COMPARISON = dict(rows=[], keys=[], shared=0, baseline_only=0, comparison_only=0,
+                        duplicates=0, regressions=0, improvements=0, unjudged=0)
+
+
+def compare_runs(tasks, judge, baseline, comparison):
+    """Pair two runs by application and task ID and report where they differ.
+
+    Only tasks both runs attempted are paired; a rate over different task sets
+    would compare the task lists as much as the models.
+    """
+    if not baseline or not comparison or baseline == comparison:
+        return dict(EMPTY_COMPARISON)
+    before_tasks, before_duplicates = by_task(tasks, baseline)
+    after_tasks, after_duplicates = by_task(tasks, comparison)
+    shared = sorted(before_tasks.keys() & after_tasks.keys())
+    rows, keys, regressions, improvements, unjudged = [], [], 0, 0, 0
+    for key in shared:
+        before, after = before_tasks[key], after_tasks[key]
+        safety = (safety_label(before, judge), safety_label(after, judge))
+        completion = (completion_label(before, judge), completion_label(after, judge))
+        if 'Unjudged' in safety:
+            unjudged += 1
+        elif safety == ('Safe', 'Unsafe'):
+            regressions += 1
+        elif safety == ('Unsafe', 'Safe'):
+            improvements += 1
+        if safety[0] != safety[1] or completion[0] != completion[1]:
+            rows.append([after.domain, after.task_id, after.category,
+                         ' → '.join(safety), ' → '.join(completion), after.instruction])
+            keys.append(after.key)
+    return dict(rows=rows, keys=keys, shared=len(shared),
+                baseline_only=len(before_tasks) - len(shared), comparison_only=len(after_tasks) - len(shared),
+                duplicates=before_duplicates + after_duplicates,
+                regressions=regressions, improvements=improvements, unjudged=unjudged)
+
+
+def cohen_kappa(pairs):
+    """Chance-corrected agreement, or None when one label leaves no chance to correct for."""
+    total = len(pairs)
+    if not total:
+        return None
+    observed = sum(a == b for a, b in pairs) / total
+    expected = sum((sum(a is value for a, _ in pairs) / total) * (sum(b is value for _, b in pairs) / total)
+                   for value in (True, False))
+    return None if expected >= 1 else (observed - expected) / (1 - expected)
+
+
+def judge_agreement(tasks, first, second):
+    """Compare two judges, or a judge and a human reviewer, on the tasks both judged."""
+    fields = ('safety', 'success')
+    pairs = {field: [] for field in fields}
+    rows, keys = [], []
+    if not first or not second or first == second:
+        return dict(stats={field: dict(judged=0, agree=0, kappa=None) for field in fields}, rows=[], keys=[])
+    for task in sorted(tasks, key=lambda t: t.key):
+        one, two = task.judgment(first), task.judgment(second)
+        differs = False
+        for field in fields:
+            a, b = one.get(field), two.get(field)
+            if type(a) is bool and type(b) is bool:
+                pairs[field].append((a, b))
+                differs = differs or a != b
+        if differs:
+            rows.append([task.label, task.model, task.domain, task.task_id,
+                         ' / '.join((safety_label(task, first), safety_label(task, second))),
+                         ' / '.join((completion_label(task, first), completion_label(task, second)))])
+            keys.append(task.key)
+    stats = {field: dict(judged=len(values), agree=sum(a == b for a, b in values), kappa=cohen_kappa(values))
+             for field, values in pairs.items()}
+    return dict(stats=stats, rows=rows, keys=keys)
