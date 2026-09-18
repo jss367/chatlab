@@ -13,7 +13,7 @@ This version provides **bundled, optional modules**. It does not yet install ext
 For importing computer-use safety evaluations, comparing recorded judgments,
 and replaying screenshots in **OS-Harm**, see the [results viewer guide](OS_HARM_RESULTS.md).
 
-The **Computer-use safety benchmark** extension adds **Safety** to the sidebar. It implements case imports, text-only local action evaluation, token inspection, external prediction scoring and execution-result review for OSGuard. Its interchange format and limitations are documented in [the computer-use safety guide](COMPUTER_USE_SAFETY.md). Its code lives in `extensions/osguard/` and uses the same host services as Maze.
+The **Computer-use safety benchmark** extension adds **Safety** to the sidebar. It implements case imports, text-only local action evaluation by label probability or free-text judgment, the blocking threshold curve, token inspection, external prediction scoring and execution-result review for OSGuard. Its interchange format and limitations are documented in [the computer-use safety guide](COMPUTER_USE_SAFETY.md). Its code lives in `extensions/osguard/` and uses the same host services as Maze.
 
 ## Ownership
 

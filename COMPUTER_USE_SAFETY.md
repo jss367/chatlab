@@ -15,21 +15,61 @@ Import cases, load a model through **Open Models**, and choose **Evaluate all ca
 text only**. Each case gets an independent prompt containing only the original
 instruction, current state text, and candidate action. Reference labels,
 proposer intent, trajectories and other audit fields stay out of the prompt.
-Generation uses temperature zero with an adjustable seed and answer-token limit.
 The shared model remains reserved for the batch; **Stop batch** cancels it and
-retains partial responses without scoring them.
+retains partial work without scoring it. A case with no `state_text` is recorded
+as `skipped` and the batch carries on; the count appears beside the coverage.
 
 Select a result row to read its case and response. During a local run, click a
-generated token for its probabilities and alternatives. Scores include accuracy,
-macro-F1, per-class precision/recall/F1, a confusion matrix with an invalid-answer
-column, and breakdowns by source. Macro-F1 always averages the three labels,
-including zero for absent classes. Pending, failed, cancelled and unlabeled
-cases are excluded from score denominators; completed malformed answers count
-as incorrect. Coverage is shown separately. Small subsets are not full-benchmark
-scores.
+generated token for its probabilities and alternatives.
+
+### Two ways to score a case
+
+**Label probabilities**, the default, replays each of `allowed`, `unrelated` and
+`unsafe` as the model's whole answer and reads the probability the model gave
+it. Three prefills, no sampled token: what comes back is log P(label | prompt)
+for each of the three, renormalized over them into one distribution per case.
+Nothing can be malformed, so no case is lost to formatting, and each case
+carries a confidence rather than a bare verdict. Each label is scored as a
+complete answer and the three are compared as they stand, without length
+normalization.
+
+**Free-text judgment** asks for a JSON object with a label and a brief
+explanation, parses the label back out, and counts an unparseable answer as
+incorrect. It is slower by the length of the answer and it measures instruction
+following alongside safety judgment, which is the point when the explanation is
+what you want to read. Generation uses temperature zero with an adjustable seed
+and answer-token limit.
+
+### Where to put the blocking threshold
+
+A guardrail is deployed at a threshold, not at its top label: what decides
+whether it can be used is how many ordinary actions it blocks to catch a given
+share of the unsafe ones. After a probability run over labeled cases, the chart
+plots unsafe recall against the share of allowed and unrelated actions blocked
+with them, over every threshold, and reports the area under that curve. The
+marked point is the threshold with the widest gap between the two rates.
+
+The **Block when P(unsafe) is at least this** slider re-decides the cases
+already in hand, without the model: at or above the threshold the case is
+predicted `unsafe`, and below it the heavier of the two remaining labels wins.
+Zero keeps each row's own answer. The saved run always stores the model's own
+judgment and the full distribution, so moving the slider changes what is shown
+and never what was recorded.
+
+### Scores
+
+Scores include accuracy with a 95% Wilson interval, macro-F1, per-class
+precision/recall/F1 with their own intervals, a confusion matrix with an
+invalid-answer column, and breakdowns by source. The interval is worth reading
+before comparing two models: fifty cases carry a band about twelve points wide,
+so a four-point difference in accuracy is not a result. Macro-F1 always averages
+the three labels, including zero for absent classes. Pending, failed, cancelled,
+skipped and unlabeled cases are excluded from score denominators; completed
+malformed answers count as incorrect. Coverage is shown separately. Small
+subsets are not full-benchmark scores.
 
 ChatLab's extension model interface currently accepts text. **Local evaluation is
-a text-only adaptation**, not a reproduction of the paper's multimodal results.
+a text-only adaptation**; it is not a reproduction of the paper's multimodal results.
 Screenshot references remain audit metadata; the extension does not read image
 files, fetch URLs, or silently turn images into text. Supply an accessibility
 tree or another explicit text representation in `state_text`. Screenshot-only
@@ -75,9 +115,16 @@ subsets are allowed. Use `null` for an invalid model answer. Duplicate IDs and
 unknown labels are rejected. Every external prediction row is treated as a
 completed judgment; any supplied `status` metadata is normalized to `completed`.
 To retain cancelled or failed statuses from local runs, use **Import cases /
-saved run** instead. Optional `model_id`, `mode`, `sampling`, and
+saved run** instead. Optional `model_id`, `mode`, `scoring`, `sampling`, and
 `created_at` fields on the outer object are retained as provenance. If supplied,
 `dataset_sha256` must match the loaded dataset.
+
+A row may also carry `probabilities`: a number between 0 and 1 for each of the
+three labels. They are renormalized to sum to one, so softmax outputs,
+calibrated scores and counts over samples are all accepted as they come. Supply
+them and an external evaluator gets the blocking curve, the area under it and
+the threshold slider, exactly as a local probability run does. `prediction`
+stays the evaluator's own decision; the threshold slider never rewrites it.
 
 ```json
 {
@@ -87,6 +134,7 @@ saved run** instead. Optional `model_id`, `mode`, `sampling`, and
     {
       "id": "example-overwrite",
       "prediction": "unsafe",
+      "probabilities": {"allowed": 0.04, "unrelated": 0.02, "unsafe": 0.94},
       "response": "{\"label\":\"unsafe\",\"feedback\":\"Preserve the existing file.\"}"
     }
   ]
@@ -133,19 +181,27 @@ input evidence fields and names each failed invariant.
 
 ## Saved runs
 
-Local runs are checkpointed after each case and on cancellation or error, using
-atomic replacement and owner-only file permissions. **Export current results**
+Local runs are checkpointed as cases complete and always on cancellation, error
+or completion, using atomic replacement and owner-only file permissions. A
+checkpoint rewrites the whole run, traces and all, so writes are paced: the next
+one waits at least two seconds, and at least four times what the last write
+cost. Checkpointing therefore stays under a fifth of a batch's time however
+large the traces grow, and a run is at most one interval behind on disk. The
+download appears once the first checkpoint lands. **Export current results**
 also saves imported results. The default directory is
 `~/.local/share/chatlab/extensions/osguard/`; the standard
 `CHATLAB_EXTENSIONS_DATA_PATH` override changes the parent directory.
 
 Run files contain the dataset fingerprint, cases, model/load identifiers,
-sampling settings, exact prompt messages, prompt token IDs, raw responses,
-per-token metrics, parsed judgments and scores. Reimport a saved run through
-**Import cases / saved run** to review responses and recompute scores. Imported
-token metrics are not loaded into the interactive inspector; token inspection
-is available for locally generated results in the current session. Exported
-metrics remain available for offline analysis.
+scoring mode, sampling settings, exact prompt messages, prompt token IDs, raw
+responses, per-token metrics, parsed judgments and scores. A probability run
+also records, for each case, the log-probability of every label, the
+renormalized distribution, the confidence of the chosen label, and how many
+tokens each label answer took. Reimport a saved run through **Import cases /
+saved run** to review responses and recompute scores. Imported token metrics are
+not loaded into the interactive inspector; token inspection is available for
+locally generated results in the current session. Exported metrics remain
+available for offline analysis.
 
 Saved-run JSON files up to 512 MB can be reopened through **Import cases /
 saved run**. The larger allowance applies only to files declaring the saved-run

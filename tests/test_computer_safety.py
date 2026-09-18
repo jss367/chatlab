@@ -1,6 +1,8 @@
 """Benchmark semantics, cancellation/checkpoints, and extension page wiring."""
 import copy
 import json
+from functools import partial
+import math
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -14,8 +16,9 @@ import settings
 import settings_sandbox
 from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from extensions.osguard.benchmark import (
-    action_scores, cases_from, dataset_digest, demo_cases, execution_results_from,
-    execution_scores, messages_for, parse_response, predictions_from, read_json, report,
+    LABELS, action_scores, at_threshold, blocking_curve, cases_from, dataset_digest, demo_cases,
+    execution_results_from, execution_scores, label_distribution, messages_for, parse_response,
+    predictions_from, read_json, report, wilson,
 )
 from extensions.osguard.page import build_page
 from extensions.osguard.runner import Runner, StreamingResponse
@@ -33,11 +36,73 @@ def tearDownModule():
 class BenchmarkTests(unittest.TestCase):
     def test_prompt_has_only_original_task_state_and_action(self):
         case = dict(demo_cases()[0], label="unsafe", proposer_instruction="LEAK", trajectory=["LEAK"], screenshot="LEAK")
-        prompt = messages_for(case)
-        self.assertNotIn("LEAK", json.dumps(prompt))
-        self.assertEqual(set(json.loads(prompt[1]["content"])), {"instruction", "state_text", "candidate_action"})
-        with self.assertRaisesRegex(ValueError, "Screenshot-only"):
-            messages_for(dict(case, state_text=""))
+        for mode in ("judgment", "probability"):
+            prompt = messages_for(case, mode)
+            self.assertNotIn("LEAK", json.dumps(prompt))
+            self.assertEqual(set(json.loads(prompt[1]["content"])), {"instruction", "state_text", "candidate_action"})
+            with self.assertRaisesRegex(ValueError, "Screenshot-only"):
+                messages_for(dict(case, state_text=""), mode)
+        self.assertIn("one word", messages_for(case, "probability")[0]["content"])
+        self.assertIn("JSON object", messages_for(case, "judgment")[0]["content"])
+        with self.assertRaisesRegex(ValueError, "Unknown scoring mode"):
+            messages_for(case, "vision")
+
+    def test_label_distribution_renormalizes_over_the_three_answers(self):
+        distribution = label_distribution({"allowed": -1.0, "unrelated": -2.0, "unsafe": -0.5})
+        self.assertAlmostEqual(sum(distribution.values()), 1)
+        self.assertEqual(max(distribution, key=distribution.get), "unsafe")
+        # Only the differences matter: a prompt the model finds unlikely as a
+        # whole must not read as a different judgment.
+        shifted = label_distribution({label: value - 40 for label, value in
+                                      {"allowed": -1.0, "unrelated": -2.0, "unsafe": -0.5}.items()})
+        for label in LABELS:
+            self.assertAlmostEqual(distribution[label], shifted[label])
+        with self.assertRaises(ValueError):
+            label_distribution({"allowed": -1.0, "unsafe": -0.5})
+
+    def test_wilson_interval_covers_the_rate_and_stays_inside_the_unit(self):
+        self.assertIsNone(wilson(0, 0))
+        low, high = wilson(36, 50)
+        self.assertLess(low, .72)
+        self.assertGreater(high, .72)
+        self.assertGreater(high - low, .2)
+        self.assertEqual(wilson(3, 3)[1], 1.0)
+        self.assertAlmostEqual(wilson(0, 3)[0], 0.0)
+        # Ten times the cases, a much narrower claim about the same rate.
+        self.assertLess(wilson(360, 500)[1] - wilson(360, 500)[0], (high - low) / 2)
+
+    def test_blocking_curve_ranks_unsafe_cases_and_prices_each_threshold(self):
+        cases = [dict(demo_cases()[0], id=str(index), label=label) for index, label in
+                 enumerate(("unsafe", "unsafe", "allowed", "unrelated"))]
+        scores = (.9, .6, .6, .1)
+        predictions = [dict(id=str(index), prediction="allowed",
+                            probabilities={"unsafe": score, "allowed": 1 - score, "unrelated": 0.0})
+                       for index, score in enumerate(scores)]
+        blocking = blocking_curve(cases, predictions)
+        self.assertEqual((blocking["unsafe"], blocking["other"]), (2, 2))
+        # One unsafe case ties with one ordinary case, which is half a win.
+        self.assertAlmostEqual(blocking["auc"], .875)
+        self.assertEqual(blocking["curve"][0], dict(threshold=1.0, unsafe_recall=0.0, false_block_rate=0.0))
+        self.assertEqual(blocking["curve"][1], dict(threshold=.9, unsafe_recall=.5, false_block_rate=0.0))
+        # The tie decides together: no threshold separates two equal scores.
+        self.assertEqual(blocking["curve"][2], dict(threshold=.6, unsafe_recall=1.0, false_block_rate=.5))
+        self.assertEqual(blocking["operating_point"]["threshold"], .9)
+        self.assertIsNone(blocking_curve(cases, [])["auc"])
+        self.assertIsNone(blocking_curve(cases[:2], predictions)["auc"])
+        unlabeled = [dict(case, label=None) for case in cases]
+        self.assertEqual(blocking_curve(unlabeled, predictions)["scored"], 0)
+
+    def test_threshold_redecides_stored_distributions_without_touching_the_run(self):
+        predictions = [dict(id="one", prediction="allowed", status="completed",
+                            probabilities={"allowed": .5, "unrelated": .2, "unsafe": .3}),
+                       dict(id="two", prediction="unrelated", status="completed"),
+                       dict(id="three", prediction=None, status="cancelled",
+                            probabilities={"allowed": .1, "unrelated": .1, "unsafe": .8})]
+        self.assertIs(at_threshold(predictions, 0), predictions)
+        blocked = at_threshold(predictions, .3)
+        self.assertEqual([row["prediction"] for row in blocked], ["unsafe", "unrelated", None])
+        self.assertEqual(at_threshold(predictions, .31)[0]["prediction"], "allowed")
+        self.assertEqual(predictions[0]["prediction"], "allowed")
 
     def test_import_validates_duplicates_labels_and_preserves_audit_metadata(self):
         cases = demo_cases()
@@ -106,6 +171,22 @@ class BenchmarkTests(unittest.TestCase):
                     dict(id="demo-safe", prediction="invalid")):
             with self.assertRaises(ValueError):
                 predictions_from([row], demo_cases())
+
+    def test_external_probabilities_are_renormalized_or_refused(self):
+        row = dict(id="demo-safe", prediction="unsafe",
+                   probabilities={"allowed": .2, "unrelated": .2, "unsafe": .4})
+        scored = predictions_from([row], demo_cases())[0]
+        # An evaluator's own scale is its own: what the curve needs is the
+        # ordering, and one scale to read it on.
+        self.assertAlmostEqual(scored["probabilities"]["unsafe"], .5)
+        self.assertAlmostEqual(sum(scored["probabilities"].values()), 1)
+        self.assertEqual(scored["prediction"], "unsafe")
+        for probabilities in ({"allowed": .5, "unsafe": .5}, {"allowed": 0, "unrelated": 0, "unsafe": 0},
+                              {"allowed": .5, "unrelated": .5, "unsafe": 2},
+                              {"allowed": .5, "unrelated": .5, "unsafe": "1"},
+                              {"allowed": .5, "unrelated": .5, "unsafe": True}, "unsafe"):
+            with self.assertRaisesRegex(ValueError, "probabilities"):
+                predictions_from([dict(row, probabilities=probabilities)], demo_cases())
 
     def test_execution_outcomes_do_not_conflate_success_with_safety(self):
         rows = execution_results_from([
@@ -195,15 +276,132 @@ class JudgmentManager(FakeManager):
             self.closed_streams += 1
 
 
+class ProbabilityManager(FakeManager):
+    """Measures a replayed answer, one metric per forced token, as the runtime does."""
+    logprobs = {"allowed": -0.5, "unrelated": -3.0, "unsafe": -1.0}
+
+    def __init__(self):
+        super().__init__()
+        self.sampled = 0
+
+    def generate(self, messages, **options):
+        self.options = options
+        forced = list(options.get("forced_ids", ()))
+        label = "".join(map(chr, forced))
+        each = math.exp(self.logprobs[label] / len(forced))
+        metrics = [dict(segment="response", position=index + 1, token_id=token,
+                        raw_probability=each, scored=True, raw_rank=1,
+                        display_text=chr(token), text=chr(token))
+                   for index, token in enumerate(forced)]
+        try:
+            yield SimpleNamespace(text=label, metrics=metrics, prompt_ids=[1, 2],
+                                  forced_prefix_tokens=len(forced))
+            # Nothing after the replayed answer is ever drawn; a runner that
+            # kept reading would be paying for tokens it does not use.
+            self.sampled += 1
+            yield SimpleNamespace(text=label + "!", metrics=metrics, prompt_ids=[1, 2],
+                                  forced_prefix_tokens=len(forced))
+        finally:
+            self.closed_streams += 1
+
+
+class ProbabilityRunnerTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.manager = ProbabilityManager()
+        self.runner = Runner(ModelService(lambda: self.manager), Path(self.directory.name) / "extension")
+
+    def run_batch(self, cases, **options):
+        return [frame for frame, _ in self.runner.run("owner", cases, **options)]
+
+    def test_each_label_is_replayed_and_scored_without_sampling_a_token(self):
+        final = self.run_batch(demo_cases())[-1]
+        self.assertEqual(final["status"], "completed")
+        self.assertEqual(final["scoring"], "probability")
+        self.assertEqual(self.manager.sampled, 0)
+        self.assertEqual(self.manager.closed_streams, 9)
+        self.assertEqual(self.manager.options["max_new_tokens"], 1)
+        self.assertEqual(self.manager.options["temperature"], 0)
+        result = final["predictions"][0]
+        self.assertEqual(result["prediction"], "allowed")
+        self.assertAlmostEqual(sum(result["probabilities"].values()), 1)
+        expected = label_distribution(ProbabilityManager.logprobs)
+        for label in LABELS:
+            self.assertAlmostEqual(result["probabilities"][label], expected[label])
+        self.assertAlmostEqual(result["confidence"], result["probabilities"]["allowed"])
+        for label, value in ProbabilityManager.logprobs.items():
+            self.assertAlmostEqual(result["logprobs"][label], value)
+        # The kept trace is the winning answer's own tokens, so the strip shows
+        # what the model gave the judgment it made.
+        self.assertEqual(len(result["metrics"]), len("allowed"))
+
+    def test_scores_carry_a_curve_and_an_interval_the_summary_can_show(self):
+        final = self.run_batch(demo_cases())[-1]
+        scores = final["scores"]
+        self.assertEqual(scores["accuracy"], 1 / 3)
+        self.assertEqual(len(scores["accuracy_interval"]), 2)
+        self.assertLess(scores["accuracy_interval"][0], 1 / 3)
+        # Every case gets the same distribution here, so no threshold separates
+        # the unsafe one: a curve that claimed otherwise would be wrong.
+        self.assertEqual(scores["blocking"]["auc"], .5)
+        self.assertEqual(scores["blocking"]["unsafe"], 1)
+
+    def test_a_case_without_state_text_is_skipped_and_the_rest_still_run(self):
+        cases = demo_cases()
+        cases[1] = dict(cases[1], state_text="")
+        final = self.run_batch(cases)[-1]
+        self.assertEqual(final["status"], "completed")
+        self.assertEqual([row["status"] for row in final["predictions"]],
+                         ["completed", "skipped", "completed"])
+        self.assertIn("state_text", final["predictions"][1]["feedback"])
+        self.assertEqual(final["scores"]["completed"], 2)
+        self.assertEqual(final["scores"]["skipped"], 1)
+        self.assertEqual(final["scores"]["total"], 3)
+        self.assertEqual(self.manager.closed_streams, 6)
+
+    def test_cancelling_between_labels_leaves_the_case_unscored(self):
+        stream = self.runner.run("owner", demo_cases())
+        next(stream)
+        next(stream)
+        self.runner.cancel("owner")
+        run = [frame for frame, _ in stream][-1]
+        self.assertEqual(run["status"], "cancelled")
+        self.assertEqual(run["predictions"][0]["status"], "cancelled")
+        self.assertIsNone(run["predictions"][0]["prediction"])
+        self.assertEqual(run["scores"]["completed"], 0)
+        self.assertFalse(self.manager.busy)
+
+    def test_an_unmeasured_replay_is_an_error_rather_than_a_confident_guess(self):
+        def unmeasured(self, messages, **options):
+            yield SimpleNamespace(text="", metrics=[], prompt_ids=[])
+
+        with mock.patch.object(ProbabilityManager, "generate", unmeasured):
+            with self.assertRaisesRegex(ValueError, "did not measure"):
+                self.run_batch(demo_cases())
+        self.assertFalse(self.manager.busy)
+
+    def test_an_unknown_mode_never_claims_the_model(self):
+        with self.assertRaisesRegex(ValueError, "probability or judgment"):
+            self.run_batch(demo_cases(), mode="multimodal")
+        self.assertEqual(self.manager.releases, 0)
+
+
 class RunnerTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.manager = JudgmentManager()
         self.runner = Runner(ModelService(lambda: self.manager), Path(self.directory.name) / "new" / "extension")
+        self.batch = partial(self.runner.run, mode="judgment")
+
+    @staticmethod
+    def case_paths(frames):
+        """The checkpoint offered at each case boundary, ignoring token updates."""
+        return [path for frame, path in frames if not isinstance(frame, StreamingResponse)]
 
     def test_batch_saves_reproducible_private_checkpoint_and_releases_model(self):
-        frames = list(self.runner.run("owner", demo_cases()))
+        frames = list(self.batch("owner", demo_cases()))
         final, path = frames[-1]
         self.assertEqual(final["status"], "completed")
         self.assertEqual(final["scores"]["completed"], 3)
@@ -222,7 +420,7 @@ class RunnerTests(unittest.TestCase):
         from extensions.osguard import runner as module
 
         with mock.patch.object(module, "report", wraps=report) as scoring:
-            stream = self.runner.run("owner", demo_cases())
+            stream = self.batch("owner", demo_cases())
             next(stream)  # Initial empty batch snapshot.
             next(stream)  # First response update.
             next(stream)  # Second response update.
@@ -245,8 +443,28 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(scoring.call_count, calls_after_completion)
             stream.close()
 
+    def test_checkpoints_are_paced_by_what_they_cost_to_write(self):
+        from extensions.osguard import runner as module
+
+        # A checkpoint rewrites the run, traces and all. Three cases inside one
+        # interval are worth one write, not three.
+        with mock.patch.object(module, "save_json", wraps=module.save_json) as writing:
+            frames = list(self.batch("owner", demo_cases()))
+        self.assertEqual(writing.call_count, 1)
+        final, path = frames[-1]
+        self.assertEqual(json.loads(Path(path).read_text())["predictions"][0]["prediction"], "allowed")
+        # Until that write lands there is no file, and the view must not offer
+        # one: the download is the checkpoint itself.
+        self.assertEqual(self.case_paths(frames), [None, None, None, None, path])
+        with mock.patch.object(module, "CHECKPOINT_SECONDS", 0), \
+                mock.patch.object(module, "CHECKPOINT_SHARE", 0), \
+                mock.patch.object(module, "save_json", wraps=module.save_json) as eager:
+            frames = list(self.batch("owner", demo_cases()))
+        self.assertEqual(eager.call_count, 4)  # One per case, then the final one.
+        self.assertEqual(self.case_paths(frames).count(None), 1)
+
     def test_cancel_keeps_partial_response_without_scoring_it(self):
-        stream = self.runner.run("owner", demo_cases())
+        stream = self.batch("owner", demo_cases())
         next(stream)
         next(stream)
         self.runner.cancel("other-owner")
@@ -260,7 +478,7 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(self.manager.busy)
 
     def test_disconnected_generator_releases_model_and_saves(self):
-        stream = self.runner.run("owner", demo_cases())
+        stream = self.batch("owner", demo_cases())
         next(stream)
         next(stream)
         stream.close()
@@ -272,28 +490,33 @@ class RunnerTests(unittest.TestCase):
     def test_generation_error_releases_lease_and_records_failed_case(self):
         with mock.patch.object(self.manager, "generate", side_effect=RuntimeError("generation failed")):
             with self.assertRaisesRegex(RuntimeError, "generation failed"):
-                list(self.runner.run("owner", demo_cases()))
+                list(self.batch("owner", demo_cases()))
         self.assertFalse(self.manager.busy)
         saved = json.loads(next(self.runner.data_dir.glob("*.json")).read_text())
         self.assertEqual(saved["status"], "error")
         self.assertEqual(saved["predictions"][0]["status"], "error")
         self.assertEqual(saved["scores"]["completed"], 0)
 
-    def test_screenshot_only_case_fails_before_claiming_model(self):
-        with self.assertRaises(ValueError):
-            list(self.runner.run("owner", [dict(demo_cases()[0], state_text="")]))
-        self.assertEqual(self.manager.releases, 0)
+    def test_screenshot_only_case_is_recorded_as_skipped(self):
+        run, path = list(self.batch("owner", [dict(demo_cases()[0], state_text="")]))[-1]
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["predictions"][0]["status"], "skipped")
+        self.assertEqual(run["scores"]["skipped"], 1)
+        self.assertEqual(run["scores"]["completed"], 0)
+        self.assertIsNone(run["scores"]["accuracy"])
+        self.assertEqual(self.manager.closed_streams, 0)
+        self.assertEqual(json.loads(Path(path).read_text())["predictions"][0]["status"], "skipped")
 
     def test_invalid_sampling_inputs_do_not_claim_model_or_block_the_next_run(self):
         for value in (-1, None, float('nan'), float('inf'), .5, True, '7'):
             with self.subTest(seed=value), self.assertRaisesRegex(ValueError, "Seed must"):
-                list(self.runner.run("owner", demo_cases(), seed=value))
+                list(self.batch("owner", demo_cases(), seed=value))
         for value in (-1, 0, None, float('nan'), float('inf'), 1.5, True, 4097):
             with self.subTest(token_limit=value), self.assertRaisesRegex(ValueError, "Maximum answer tokens"):
-                list(self.runner.run("owner", demo_cases(), max_new_tokens=value))
+                list(self.batch("owner", demo_cases(), max_new_tokens=value))
         self.assertEqual(self.manager.releases, 0)
         self.assertFalse(self.runner.data_dir.exists())
-        run, _ = list(self.runner.run("owner", demo_cases(), seed=0))[-1]
+        run, _ = list(self.batch("owner", demo_cases(), seed=0))[-1]
         self.assertEqual(run["status"], "completed")
         self.assertEqual(run["sampling"]["seed"], 0)
 
@@ -312,12 +535,12 @@ class PageTests(unittest.TestCase):
             functions = {function.fn.__name__: function.fn for function in demo.fns.values() if function.fn}
             case_path = Path(directory) / "cases.json"
             case_path.write_text(json.dumps(demo_cases()))
-            loaded = functions["load_cases"](str(case_path), "owner")
-            self.assertEqual(len(loaded), 13)
-            frames = list(functions["evaluate"](loaded[0], "owner", 256, 42))
-            self.assertEqual(len(frames[-1]), 12)
+            loaded = functions["load_cases"](str(case_path), "owner", 0)
+            self.assertEqual(len(loaded), 14)
+            frames = list(functions["evaluate"](loaded[0], "owner", "Free-text judgment", 256, 42, 0))
+            self.assertEqual(len(frames[-1]), 13)
             self.assertIn('**Completed:** 0/3', frames[0][2])
-            for index in range(5):
+            for index in range(6):
                 self.assertEqual(frames[1][index], gr.skip())
                 self.assertEqual(frames[2][index], gr.skip())
             self.assertNotEqual(frames[3][0], gr.skip())  # Completed case updates batch state.
@@ -325,17 +548,58 @@ class PageTests(unittest.TestCase):
             # The checkpoint includes prompts and traces beyond the ordinary
             # dataset size. Reopen through the real saved-run callback.
             with mock.patch('extensions.osguard.benchmark.MAX_FILE_BYTES', 100):
-                replay = functions["load_cases"](exported, "owner")
+                replay = functions["load_cases"](exported, "owner", 0)
             self.assertEqual(len(replay[1]["predictions"]), 3)
             self.assertEqual(replay[1]["imported_provenance"]["model_id"], "test/model")
+            self.assertEqual(replay[1]["imported_provenance"]["scoring"], "judgment")
             self.assertNotIn("metrics", replay[1]["predictions"][0])
-            scored = functions["score_external"](exported, loaded[0], "owner")
-            self.assertEqual(len(scored), 11)
+            scored = functions["score_external"](exported, loaded[0], "owner", 0)
+            self.assertEqual(len(scored), 12)
             execution_path = Path(directory) / "execution.json"
             execution_path.write_text(json.dumps([dict(id="one", task_success=True, retry_terminated=False, invariants={"preserved": False})]))
             reviewed = functions["review_executions"](str(execution_path))
             self.assertEqual(reviewed[0][0][2], "unsafe_completion")
             self.assertTrue(Path(reviewed[2]).is_file())
+
+    def test_probability_run_fills_the_curve_and_the_threshold_rescores_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = ProbabilityManager()
+            context = ExtensionContext(ModelService(lambda: manager), TokenInspector(),
+                                       Path(directory) / "extension", NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            self.addCleanup(demo.close)
+            functions = {function.fn.__name__: function.fn for function in demo.fns.values() if function.fn}
+            case_path = Path(directory) / "cases.json"
+            # One unsafe case the model is sure about, one it is not, and one
+            # ordinary case: enough for a curve with somewhere to put a line.
+            cases = [dict(demo_cases()[2], id="clear", label="unsafe"),
+                     dict(demo_cases()[2], id="faint", label="unsafe"),
+                     dict(demo_cases()[0], id="ordinary", label="allowed")]
+            case_path.write_text(json.dumps(cases))
+            loaded = functions["load_cases"](str(case_path), "owner", 0)
+            # Every case is scored against the same fake distribution, so the
+            # ordering that matters here is the one the page draws, not the
+            # model's: check the wiring, not the numbers.
+            frames = list(functions["evaluate"](loaded[0], "owner", "Label probabilities", 256, 42, 0))
+            run = frames[-1][0]
+            self.assertEqual(run["scoring"], "probability")
+            self.assertEqual(len(run["predictions"]), 3)
+            self.assertTrue(all("probabilities" in row for row in run["predictions"]))
+            table = frames[-1][1]
+            self.assertEqual(len(table[0]), 6)
+            self.assertEqual(table[0][4], "35.9%")  # The unsafe column, not the winner's.
+            self.assertIn("95% CI", frames[-1][2])
+            self.assertIn("blocking-tradeoff", frames[-1][4])
+            # Blocking everything the model gives any unsafe mass at all turns
+            # every judgment into unsafe, and the table has to say so.
+            rows, note, rescored, chart = functions["rescore"](loaded[0], run, .2)
+            self.assertTrue(all(row[3] == "unsafe" for row in rows))
+            self.assertIn("P(unsafe) ≥ 0.20", note)
+            self.assertEqual(rescored["confusion"]["allowed"]["unsafe"], 1)
+            self.assertEqual(run["predictions"][0]["prediction"], "allowed")
+            self.assertEqual(functions["rescore"]([], run, .2)[0], gr.skip())
+            self.assertIn("viz-empty", functions["rescore"](loaded[0], {}, 0)[3])
 
     def test_app_registers_safety_alongside_other_safety_extension(self):
         settings.update(enabled_extensions=["osguard", "os_harm"])
