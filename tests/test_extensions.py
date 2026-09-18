@@ -12,13 +12,14 @@ from unittest import mock
 import gradio as gr
 
 import app
+import desktop
 import settings
 import settings_sandbox
 from extension_api import ModelService, NavigationService, TokenInspector
 from model_runtime import GENERATING, LOADING
 from extensions.maze_experiments.maze import default_instruction
 from extensions.registry import ExtensionSpec, LoadedExtension, load_enabled
-from ui.extensions_page import save_extensions
+from ui.extensions_page import restart_now, restore_extensions, save_extensions
 
 
 def setUpModule():
@@ -392,7 +393,7 @@ class ExtensionSettingsTests(unittest.TestCase):
             demo.close()
 
     def test_settings_survive_other_changes_and_restart(self):
-        note = save_extensions(['maze_experiments'], [])
+        note, _, _ = save_extensions(['maze_experiments'], [])
         self.assertIn('Restart ChatLab', note)
         settings.update(temperature=.2)
         self.assertEqual(settings.load().enabled_extensions, ('maze_experiments',))
@@ -452,3 +453,98 @@ class ExtensionSettingsTests(unittest.TestCase):
         settings.update(top_k=20)
         self.assertEqual(settings.load().enabled_extensions, ('maze_experiments',))
         self.assertEqual(settings.current().top_k, 20)
+
+
+class RestartButtonTests(unittest.TestCase):
+    """The offer to restart that goes with the note about restarting.
+
+    The button is only ever an offer: it appears where a restart is a thing
+    ChatLab can perform (the app, not a browser pointed at ``app.py``), only
+    while the saved choice differs from the pages on screen, and it asks
+    before it acts, because a restart unloads the model and ends whatever is
+    running.
+    """
+
+    def setUp(self):
+        settings.update(enabled_extensions=[])
+        settings.ensure_file()
+        self.addCleanup(desktop.offer_restart, None)
+
+    def test_the_button_follows_the_note_when_a_restart_is_on_offer(self):
+        desktop.offer_restart(lambda: None)
+        note, button, confirm = save_extensions(['maze_experiments'], [])
+        self.assertIn('Restart ChatLab', note)
+        self.assertTrue(button['visible'])
+        self.assertFalse(confirm['visible'])
+
+        note, button, confirm = save_extensions([], [])
+        self.assertIn('No restart needed', note)
+        self.assertFalse(button['visible'])
+        self.assertFalse(confirm['visible'])
+
+    def test_a_browser_gets_the_note_without_a_button_it_cannot_honour(self):
+        # Nothing registered an offer, which is what ``python app.py`` looks
+        # like: the server would have to be restarted by hand.
+        note, button, _ = save_extensions(['maze_experiments'], [])
+        self.assertIn('Restart ChatLab', note)
+        self.assertFalse(button['visible'])
+        with self.assertRaisesRegex(gr.Error, 'Quit and reopen'):
+            restart_now()
+
+    def test_a_restart_the_window_declines_says_so_instead_of_claiming_it_ran(self):
+        # An update installing right now owns the bundle and reopens the app
+        # when it is done, so the handler stands down with a sentence to show.
+        desktop.offer_restart(lambda: 'ChatLab is installing an update.')
+        with self.assertRaisesRegex(gr.Error, 'installing an update'):
+            restart_now()
+
+    def test_the_restored_choice_brings_its_button_back_with_it(self):
+        desktop.offer_restart(lambda: None)
+        save_extensions(['maze_experiments'], [])
+        selected, note, button, confirm = restore_extensions([])
+        self.assertEqual(selected, ['maze_experiments'])
+        self.assertIn('Restart ChatLab', note)
+        self.assertTrue(button['visible'])
+        self.assertFalse(confirm['visible'])
+        # The same saved choice, already on screen, asks for nothing.
+        self.assertFalse(restore_extensions(['maze_experiments'])[2]['visible'])
+
+    def test_asking_first_and_then_restarting(self):
+        restarts = []
+        desktop.offer_restart(lambda: restarts.append('restarted'))
+        demo = app.build_app()
+        try:
+            button = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'restart-chatlab')
+            ask = next(fn for fn in demo.fns.values() if fn.targets == [(button._id, 'click')])
+            hidden, question = dict(zip(ask.outputs, ask.fn(), strict=True)).values()
+            self.assertFalse(hidden['visible'])
+            self.assertTrue(question['visible'])
+            confirm = next(b for b in ask.outputs if getattr(b, 'elem_classes', None) == ['restart-confirm'])
+            answers = [b for b in confirm.children[1].children if isinstance(b, gr.Button)]
+            self.assertEqual([b.value for b in answers], ['Restart now', 'Cancel'])
+            cancel = next(fn for fn in demo.fns.values() if fn.targets == [(answers[1]._id, 'click')])
+            shown, closed = cancel.fn()
+            self.assertTrue(shown['visible'])
+            self.assertFalse(closed['visible'])
+            self.assertEqual(restarts, [])
+
+            press = next(fn for fn in demo.fns.values() if fn.targets == [(answers[0]._id, 'click')])
+            note, gone, dismissed = press.fn()
+            self.assertEqual(restarts, ['restarted'])
+            self.assertIn('Restarting', note)
+            self.assertFalse(gone['visible'])
+            self.assertFalse(dismissed['visible'])
+        finally:
+            demo.close()
+
+    def test_changing_the_choice_closes_a_question_asked_about_the_old_one(self):
+        desktop.offer_restart(lambda: None)
+        demo = app.build_app()
+        try:
+            checkboxes = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'enabled-extensions')
+            save = next(fn for fn in demo.fns.values() if fn.targets == [(checkboxes._id, 'input')])
+            confirm = next(b for b in save.outputs if getattr(b, 'elem_classes', None) == ['restart-confirm'])
+            self.assertIs(save.outputs[-1], confirm)
+            self.assertFalse(save.fn(['maze_experiments'], [])[2]['visible'])
+        finally:
+            demo.close()

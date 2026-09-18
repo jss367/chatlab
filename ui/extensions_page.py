@@ -6,9 +6,11 @@ from pathlib import Path
 
 import gradio as gr
 
+import desktop
 import settings
 from extensions.registry import CATALOGUE
 from ui import icons
+from ui.icons import icon_classes
 
 # What an extension naming an icon this build has never heard of gets.
 DEFAULT_EXTENSION_ICON = "box"
@@ -57,15 +59,47 @@ def save_extensions(selected, active_ids):
 
 
 def pending_note(selected, active_ids):
-    if set(selected) == set(active_ids):
-        return "Extension choices are saved. No restart needed."
-    return "**Saved. Restart ChatLab to apply this change.** Current pages and running experiments remain available until restart."
+    """The note about the saved choice, the restart button, and the question.
+
+    The button is the note's offer to act, so it comes and goes with the
+    sentence asking for a restart, and only where a restart is something
+    ChatLab can perform. Any change to the choice closes an open question:
+    it was asked about the set of extensions that was saved a moment ago.
+    """
+
+    settled = set(selected) == set(active_ids)
+    note = (
+        "Extension choices are saved. No restart needed." if settled else
+        "**Saved. Restart ChatLab to apply this change.** Current pages and running experiments remain available until restart."
+    )
+    return note, gr.update(visible=not settled and desktop.restart_offered()), gr.update(visible=False)
+
+
+def restart_now():
+    """Quit and reopen the app so the saved choice takes effect.
+
+    A restart can be declined - an update installing right now restarts the app
+    itself when it is done - and what comes back is the sentence to show.
+    """
+
+    declined = desktop.restart()
+    if declined is not None:
+        raise gr.Error(declined)
+    return "Restarting ChatLab…", gr.update(visible=False), gr.update(visible=False)
+
+
+def ask_restart():
+    return gr.update(visible=False), gr.update(visible=True)
+
+
+def cancel_restart():
+    return gr.update(visible=True), gr.update(visible=False)
 
 
 def restore_extensions(active_ids):
     saved = settings.load()
     selected = [spec.id for spec in CATALOGUE if spec.id in saved.enabled_extensions]
-    return selected, pending_note(selected, active_ids)
+    return selected, *pending_note(selected, active_ids)
 
 
 def build_extension_settings(active_ids, errors):
@@ -87,9 +121,28 @@ def build_extension_settings(active_ids, errors):
         info="Each one adds a page of its own to the sidebar.",
     )
     note = gr.Markdown("Bundled extensions are optional and disabled by default.", elem_id="extensions-status")
+    with gr.Row():
+        restart_button = gr.Button(
+            "Restart ChatLab", size="sm", scale=0, min_width=160, visible=False,
+            elem_id="restart-chatlab", elem_classes=icon_classes("rotate-ccw"),
+        )
+    # Restarting unloads the model and ends anything running, so the button
+    # asks before it acts, in the amber panel removing a model asks in.
+    with gr.Column(visible=False, elem_classes=["restart-confirm"]) as restart_confirm:
+        gr.Markdown(
+            "Restarting unloads the current model and stops running experiments.",
+            elem_classes=["model-detail"],
+        )
+        with gr.Row():
+            confirm_restart_button = gr.Button("Restart now", variant="stop", size="sm")
+            cancel_restart_button = gr.Button("Cancel", size="sm")
     if errors:
         gr.Markdown("Could not load these extensions:\n\n" + "\n\n".join(html.escape(error) for error in errors))
     active = gr.State(list(active_ids))
-    enabled.input(save_extensions, [enabled, active], note, show_progress="hidden")
+    saved_outputs = [note, restart_button, restart_confirm]
+    enabled.input(save_extensions, [enabled, active], saved_outputs, show_progress="hidden")
+    restart_button.click(ask_restart, None, [restart_button, restart_confirm])
+    cancel_restart_button.click(cancel_restart, None, [restart_button, restart_confirm])
+    confirm_restart_button.click(restart_now, None, saved_outputs)
 
-    return enabled, note, active
+    return [enabled, *saved_outputs], active

@@ -6,6 +6,8 @@ Extensions add specialized pages while sharing ChatLab's model runtime and token
 
 Open **Settings → Extensions**, check or uncheck an extension, and restart ChatLab. The choice saves immediately, survives browser refreshes, and takes effect when the server/app next starts. Refreshing the browser alone does not restart the server. Current pages and running trials remain available until that restart.
 
+In the macOS app, **Restart ChatLab** appears beside that note while the saved choice differs from the pages on screen. It asks first, because restarting unloads the model and stops anything running; answering **Restart now** closes the window and opens a fresh copy. A ChatLab served to a browser by `python app.py` has no window to reopen, so it shows the note without the button and the server is restarted by hand.
+
 When enabled, **Maze**, **OS-Harm** or **Safety** appears in the sidebar. When disabled, an extension's Python module and stylesheet are not loaded, its page and callbacks are not registered, and existing saved results remain on disk. The rest of ChatLab works without it. Import or API-version failures appear in Settings and do not prevent the core app from starting.
 
 This version provides **bundled, optional modules**. It does not yet install external packages. The explicit catalogue and versioned service boundary give us a place to add external distribution later. Extensions are trusted Python code running in ChatLab's process, not sandboxed programs.

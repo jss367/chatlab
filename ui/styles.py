@@ -716,10 +716,13 @@ label.{ICON_CLASS} {{ display: inline-flex; }}
   color: var(--body-text-color-subdued);
 }}
 .model-sort label span {{ font-size: 0.8rem; }}
-.remove-confirm {{
+/* Restarting to apply an extension change costs the loaded model and any
+   running experiment, so it asks in the same amber panel. */
+.remove-confirm, .restart-confirm {{
   border: 1px solid #d97706; border-radius: 8px; padding: 0.4rem 0.6rem;
   background: rgba(217, 119, 6, 0.09);
 }}
+.restart-confirm {{ flex-grow: 0; gap: 0.4rem; }}
 /* Clear deletes every conversation, so it asks first, in the same amber
    panel the model removal uses. It stands in the conversations pane, which
    is narrow, so the question is set smaller than body text and the two
