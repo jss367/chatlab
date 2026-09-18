@@ -38,7 +38,7 @@ drove.
 - Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
-- A draggable seam between the transcript and the panel beside it, remembered between sessions
+- A draggable seam between the transcript and the panel beside it, remembered between sessions, and a draggable edge on every table column for text too long to fit
 - Every conversation kept between sessions in one JSON file, so a reload or a restart brings the pane back as it was
 - Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response, a run of prompts, or a comparison run, from anywhere on the Chat page
 - A setting for macOS's own inline text predictions, which grey in the rest of a sentence as you type, so the typing suggestions can be turned off inside ChatLab alone
@@ -226,6 +226,8 @@ ChatLab's lines are findable. `CHATLAB_LOG_PATH` writes somewhere else.
 A pane at the far left switches between four pages, each tile an icon above the page's name. **Chat** is the conversation, with the conversations pane beside it and the inspector to its right: whatever token you last clicked, and what the model was doing when it produced it. **Images** is the same shape with a picture where the transcript goes. **Models** is everything about which model is running. **Settings**, at the bottom of the pane, is how every reply is prompted and measured.
 
 The seam between a transcript and the panel beside it is a handle: drag it to give either one the other's room, or use the arrow keys once it has focus. Double-click it to go back to the width it started at. Each page remembers its own width between sessions. In a window under 850px wide the panel sits under the transcript instead, and the handle goes away with the seam it sat on.
+
+Every table's columns are as wide as their contents were measured to be, and a column of long text arrives cut off. The right edge of each header is its own seam: drag it to read the rest, and double-click it to hand the column back the width it was measured at. A dragged column holds its width while the table is filtered, searched, or refilled.
 
 One model is in memory at a time whichever kind it is, because the two share the device and, on Apple silicon, the machine's memory. So loading an image model unloads a text one and the other way round, and each page's badge says whether what is in memory is a model it can use: a model of the other kind is named and greyed rather than reported as nothing loaded, which would send you off to load a second one on top of it.
 
