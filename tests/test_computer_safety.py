@@ -119,11 +119,27 @@ class BenchmarkTests(unittest.TestCase):
                        dict(id="two", prediction="unrelated", status="completed"),
                        dict(id="three", prediction=None, status="cancelled",
                             probabilities={"allowed": .1, "unrelated": .1, "unsafe": .8})]
-        self.assertIs(at_threshold(predictions, 0), predictions)
+        self.assertIs(at_threshold(predictions, None), predictions)
         blocked = at_threshold(predictions, .3)
         self.assertEqual([row["prediction"] for row in blocked], ["unsafe", "unrelated", None])
         self.assertEqual(at_threshold(predictions, .31)[0]["prediction"], "allowed")
         self.assertEqual(predictions[0]["prediction"], "allowed")
+
+    def test_the_block_everything_end_of_the_curve_is_a_threshold_that_can_be_set(self):
+        """Zero is a real threshold, and keeping each row's own answer is not a number."""
+        cases = [dict(demo_cases()[0], id=str(index), label=label) for index, label in
+                 enumerate(("unsafe", "allowed"))]
+        predictions = [dict(id="0", prediction="unsafe",
+                            probabilities={"unsafe": .4, "allowed": .6, "unrelated": 0.0}),
+                       dict(id="1", prediction="allowed",
+                            probabilities={"unsafe": 0.0, "allowed": 1.0, "unrelated": 0.0})]
+        end = blocking_curve(cases, predictions)["curve"][-1]
+        self.assertEqual(end, dict(threshold=0.0, unsafe_recall=1.0, false_block_rate=1.0))
+        # The comparison is inclusive, so the row carrying no unsafe mass is
+        # blocked there too and the endpoint is somewhere the slider can go.
+        self.assertEqual([row["prediction"] for row in at_threshold(predictions, end["threshold"])],
+                         ["unsafe", "unsafe"])
+        self.assertIs(at_threshold(predictions, None), predictions)
 
     def test_import_validates_duplicates_labels_and_preserves_audit_metadata(self):
         cases = demo_cases()
@@ -343,6 +359,11 @@ class ProbabilityManager(FakeManager):
                                   forced_prefix_tokens=len(forced))
         finally:
             self.closed_streams += 1
+
+
+class UnsafeWinsManager(ProbabilityManager):
+    """The winning label is the one replayed last, so its trace is the one on screen."""
+    logprobs = {"allowed": -3.0, "unrelated": -2.0, "unsafe": -0.5}
 
 
 class ProbabilityRunnerTests(unittest.TestCase):
@@ -597,9 +618,9 @@ class PageTests(unittest.TestCase):
             functions = {function.fn.__name__: function.fn for function in demo.fns.values() if function.fn}
             case_path = Path(directory) / "cases.json"
             case_path.write_text(json.dumps(demo_cases()))
-            loaded = functions["load_cases"](str(case_path), "owner", 0)
+            loaded = functions["load_cases"](str(case_path), "owner", False, 0.5)
             self.assertEqual(len(loaded), 14)
-            frames = list(functions["evaluate"](loaded[0], "owner", "Free-text judgment", 256, 42, 0))
+            frames = list(functions["evaluate"](loaded[0], "owner", "Free-text judgment", 256, 42, False, 0.5))
             self.assertEqual(len(frames[-1]), 13)
             self.assertIn('**Completed:** 0/3', frames[0][2])
             for index in range(6):
@@ -610,13 +631,17 @@ class PageTests(unittest.TestCase):
             # The checkpoint includes prompts and traces beyond the ordinary
             # dataset size. Reopen through the real saved-run callback.
             with mock.patch('extensions.osguard.benchmark.MAX_FILE_BYTES', 100):
-                replay = functions["load_cases"](exported, "owner", 0)
+                replay = functions["load_cases"](exported, "owner", False, 0.5)
             self.assertEqual(len(replay[1]["predictions"]), 3)
             self.assertEqual(replay[1]["imported_provenance"]["model_id"], "test/model")
             self.assertEqual(replay[1]["imported_provenance"]["scoring"], "judgment")
             self.assertNotIn("metrics", replay[1]["predictions"][0])
-            scored = functions["score_external"](exported, loaded[0], "owner", 0)
+            scored = functions["score_external"](exported, loaded[0], "owner", False, 0.5)
             self.assertEqual(len(scored), 12)
+            # An external file that says how its judgments were produced keeps
+            # saying so once the run is re-exported from it.
+            self.assertEqual(scored[0]["imported_provenance"]["scoring"], "judgment")
+            self.assertEqual(scored[0]["imported_provenance"]["model_id"], "test/model")
             execution_path = Path(directory) / "execution.json"
             execution_path.write_text(json.dumps([dict(id="one", task_success=True, retry_terminated=False, invariants={"preserved": False})]))
             reviewed = functions["review_executions"](str(execution_path))
@@ -639,11 +664,11 @@ class PageTests(unittest.TestCase):
                      dict(demo_cases()[2], id="faint", label="unsafe"),
                      dict(demo_cases()[0], id="ordinary", label="allowed")]
             case_path.write_text(json.dumps(cases))
-            loaded = functions["load_cases"](str(case_path), "owner", 0)
+            loaded = functions["load_cases"](str(case_path), "owner", False, 0.5)
             # Every case is scored against the same fake distribution, so the
             # ordering that matters here is the one the page draws, not the
             # model's: check the wiring, not the numbers.
-            frames = list(functions["evaluate"](loaded[0], "owner", "Label probabilities", 256, 42, 0))
+            frames = list(functions["evaluate"](loaded[0], "owner", "Label probabilities", 256, 42, False, 0.5))
             run = frames[-1][0]
             self.assertEqual(run["scoring"], "probability")
             self.assertEqual(len(run["predictions"]), 3)
@@ -655,13 +680,22 @@ class PageTests(unittest.TestCase):
             self.assertIn("blocking-tradeoff", frames[-1][4])
             # Blocking everything the model gives any unsafe mass at all turns
             # every judgment into unsafe, and the table has to say so.
-            rows, note, rescored, chart = functions["rescore"](loaded[0], run, "owner", .2)
+            rows, note, rescored, chart = functions["rescore"](loaded[0], run, "owner", True, .2)
             self.assertTrue(all(row[3] == "unsafe" for row in rows))
             self.assertIn("P(unsafe) ≥ 0.20", note)
             self.assertEqual(rescored["confusion"]["allowed"]["unsafe"], 1)
             self.assertEqual(run["predictions"][0]["prediction"], "allowed")
-            self.assertEqual(functions["rescore"]([], run, "owner", .2)[0], gr.skip())
-            self.assertIn("viz-empty", functions["rescore"](loaded[0], {}, "owner", 0)[3])
+            self.assertEqual(functions["rescore"]([], run, "owner", True, .2)[0], gr.skip())
+            self.assertIn("viz-empty", functions["rescore"](loaded[0], {}, "owner", False, 0.5)[3])
+            # Zero is a threshold like any other, and the one the curve's
+            # block-everything end sits at. Switching blocking off is what asks
+            # for each row's own answer, and no number says that.
+            rows, note, _, _ = functions["rescore"](loaded[0], run, "owner", True, 0)
+            self.assertTrue(all(row[3] == "unsafe" for row in rows))
+            self.assertIn("P(unsafe) \u2265 0.00", note)
+            rows, note, _, _ = functions["rescore"](loaded[0], run, "owner", False, 0)
+            self.assertTrue(all(row[3] == "allowed" for row in rows))
+            self.assertIn("model's own top label", note)
 
     def test_threshold_moved_during_a_batch_survives_the_next_case(self):
         """The slider is a live control, so the batch cannot answer with the old value."""
@@ -675,15 +709,15 @@ class PageTests(unittest.TestCase):
             functions = {function.fn.__name__: function.fn for function in demo.fns.values() if function.fn}
             case_path = Path(directory) / "cases.json"
             case_path.write_text(json.dumps(demo_cases()))
-            loaded = functions["load_cases"](str(case_path), "owner", 0)
+            loaded = functions["load_cases"](str(case_path), "owner", False, 0.5)
             frames, moved = [], False
             # Start at zero, the way a reader does, and move the slider once the
             # first case has landed. Every frame after that has to agree with it.
-            for frame in functions["evaluate"](loaded[0], "owner", "Label probabilities", 256, 42, 0):
+            for frame in functions["evaluate"](loaded[0], "owner", "Label probabilities", 256, 42, False, 0.5):
                 frames.append(frame)
                 batched = isinstance(frame[0], dict) and frame[0].get("predictions")
                 if batched and not moved:
-                    functions["rescore"](loaded[0], frame[0], "owner", .2)
+                    functions["rescore"](loaded[0], frame[0], "owner", True, .2)
                     moved = True
             self.assertTrue(moved)
             table, note = frames[-1][1], frames[-1][2]
@@ -696,6 +730,47 @@ class PageTests(unittest.TestCase):
             owner_state = next(block for block in demo.blocks.values() if isinstance(block, gr.State)
                                and getattr(block.delete_callback, "__name__", "") == "forget")
             owner_state.delete_callback("owner")
+
+    def replaced_label_traces(self, manager):
+        """Frames from a one-case probability batch, with the page wired to manager."""
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(ModelService(lambda: manager), TokenInspector(),
+                                       Path(directory) / "extension", NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            self.addCleanup(demo.close)
+            functions = {function.fn.__name__: function.fn for function in demo.fns.values() if function.fn}
+            case_path = Path(directory) / "cases.json"
+            case_path.write_text(json.dumps(demo_cases()[:1]))
+            loaded = functions["load_cases"](str(case_path), "owner", False, 0.5)
+            return list(functions["evaluate"](loaded[0], "owner", "Label probabilities", 256, 42, False, 0.5))
+
+    def test_a_replaced_label_trace_drops_the_token_chosen_from_the_last_one(self):
+        """Each replay is a different answer's tokens, not more of the same answer."""
+        frames = self.replaced_label_traces(ProbabilityManager())
+        # One opening frame, one streamed frame per label, then the completed
+        # case and the finished batch.
+        streamed = frames[1:1 + len(LABELS)]
+        self.assertEqual(len(frames), len(LABELS) + 3)
+        for frame in streamed:
+            self.assertEqual(frame[10], "Select a generated token.")
+            self.assertEqual(frame[11], [])
+        # "allowed" wins and "unsafe" was replayed last, so the completed case
+        # puts a fourth strip on screen and has to clear the panel again.
+        completed = frames[len(LABELS) + 1]
+        self.assertEqual(completed[0]["predictions"][0]["scored_label"], "allowed")
+        self.assertEqual(completed[10], "Select a generated token.")
+        self.assertEqual(completed[11], [])
+
+    def test_a_winning_label_already_on_screen_keeps_the_token_selected_from_it(self):
+        """Clearing the panel is for a strip that changed, not for every frame."""
+        frames = self.replaced_label_traces(UnsafeWinsManager())
+        completed = frames[len(LABELS) + 1]
+        # The winner is the label replayed last, so the strip the reader is
+        # looking at is already the one the judgment was made on.
+        self.assertEqual(completed[0]["predictions"][0]["scored_label"], "unsafe")
+        self.assertEqual(completed[10], gr.skip())
+        self.assertEqual(completed[11], gr.skip())
 
     def test_app_registers_safety_alongside_other_safety_extension(self):
         settings.update(enabled_extensions=["osguard", "os_harm"])

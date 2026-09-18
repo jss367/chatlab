@@ -12,11 +12,20 @@ from .runner import Runner, StreamingResponse
 from .storage import save_json
 
 SCORING = {"Label probabilities": "probability", "Free-text judgment": "judgment"}
+# What an imported file may say about how its judgments were produced. Both
+# import paths read the same list: a run that loses its scoring mode on the way
+# through cannot say afterwards whether those numbers came from replayed label
+# probabilities or from parsed free text.
+PROVENANCE = ("mode", "scoring", "model_id", "sampling", "created_at", "dataset_sha256")
 
 CSS = """
 #computer-safety-page {overflow-y:auto; min-height:0; padding:12px;}
 #computer-safety-page .safety-note {max-width:1000px;}
 """
+
+
+def provenance(value):
+    return {key: value[key] for key in PROVENANCE if key in value}
 
 
 def percent(value):
@@ -36,12 +45,12 @@ def result_rows(cases, predictions):
     return rows
 
 
-def summary(scores, threshold=0.0):
+def summary(scores, threshold=None):
     interval = scores.get("accuracy_interval")
     band = f" (95% CI {percent(interval[0])}–{percent(interval[1])})" if interval else ""
     skipped = f" · **Skipped:** {scores['skipped']}" if scores.get("skipped") else ""
     decision = (f"Predictions re-decided at P(unsafe) ≥ {threshold:.2f}; the saved run keeps "
-                "each model's own answer." if threshold else
+                "each model's own answer." if threshold is not None else
                 "Predictions are the model's own top label.")
     return (f"**Completed:** {scores['completed']}/{scores['total']} · "
             f"**Scored:** {scores['scored']} · **Invalid answers:** {scores['invalid']}{skipped}\n\n"
@@ -52,12 +61,22 @@ def summary(scores, threshold=0.0):
             "The interval is a 95% Wilson score interval over the scored cases.")
 
 
-def scored_view(cases, predictions, threshold=0.0):
+def scored_view(cases, predictions, threshold=None):
     """Table, summary, scores and curve for one set of results at one threshold."""
     decided = at_threshold(predictions, threshold)
     scores = report(cases, decided)
     return (result_rows(cases, decided), summary(scores, threshold), scores,
             tradeoff_chart(scores["blocking"]))
+
+
+def blocking_threshold(blocking, block_at):
+    """The slider is a number only once blocking is switched on.
+
+    Keeping the switch out of the number is what makes every point on the
+    curve reachable: zero is a threshold that blocks everything, and "keep each
+    row's own answer" is not a threshold at all.
+    """
+    return float(block_at) if blocking else None
 
 
 def build_page(context):
@@ -121,10 +140,15 @@ def build_page(context):
                     start = gr.Button("Evaluate all cases · text only", variant="primary")
                     stop = gr.Button("Stop batch")
                 score_note = gr.Markdown("No judgments yet.")
-                threshold = gr.Slider(0, 1, value=0, step=0.01,
-                                      label="Block when P(unsafe) is at least this",
-                                      info="Rescores the cases already run, without the model. "
-                                           "Zero keeps each model's own top label.")
+                with gr.Row():
+                    blocking = gr.Checkbox(value=False, label="Block on P(unsafe)",
+                                           info="Off keeps each model's own top label, which is "
+                                                "what a run without probabilities has.")
+                    threshold = gr.Slider(0, 1, value=0.5, step=0.01,
+                                          label="Block when P(unsafe) is at least this",
+                                          info="Rescores the cases already run, without the model. "
+                                               "Read only while blocking is on, and every value is "
+                                               "a real threshold: zero blocks every case.")
                 curve = gr.HTML(tradeoff_chart(None))
                 table = gr.Dataframe(headers=["Case", "Source", "Reference", "Prediction", "P(unsafe)", "Status"],
                                      datatype=["str"] * 6, value=[], interactive=False, label="Select a case to inspect")
@@ -160,7 +184,7 @@ def build_page(context):
         payload, _ = selections.view(session_id, uuid4().hex, [])
         return payload, [], None, "", "Select a token from a local run.", []
 
-    def load_cases(path, session_id, block_at, synthetic=False):
+    def load_cases(path, session_id, block_on, block_at, synthetic=False):
         try:
             value = demo_cases() if synthetic else read_json(path, allow_saved_run=True)
             cases = cases_from(value)
@@ -172,9 +196,9 @@ def build_page(context):
             run = dict(format=FORMAT, paper=PAPER, cases=cases, predictions=predictions,
                        dataset_sha256=dataset_digest(cases), mode="imported" if predictions else "not_run")
             if isinstance(value, dict):
-                run["imported_provenance"] = {key: value[key] for key in
-                    ("mode", "scoring", "model_id", "sampling", "created_at", "dataset_sha256") if key in value}
-            rows, note_text, scores, chart = scored_view(cases, predictions, block_at)
+                run["imported_provenance"] = provenance(value)
+            rows, note_text, scores, chart = scored_view(
+                cases, predictions, blocking_threshold(block_on, block_at))
             message = ("Loaded synthetic demonstration — not official benchmark data." if synthetic else
                        f"Loaded {len(cases)} cases. Imported results retain responses; token inspection is available for local runs in this session.")
             without_state = sum(1 for case in cases if not case.get("state_text", "").strip())
@@ -189,11 +213,11 @@ def build_page(context):
     load_outputs = [cases_state, run_state, table, note, score_note, scores_json, curve, export,
                     token_state, strip, case_detail, response, detail, alternatives]
     serial = dict(concurrency_id="computer-safety-batch", concurrency_limit=1)
-    import_cases.click(load_cases, [case_file, owner, threshold], load_outputs, **serial)
-    demo.click(lambda session_id, block_at: load_cases(None, session_id, block_at, True),
-               [owner, threshold], load_outputs, **serial)
+    import_cases.click(load_cases, [case_file, owner, blocking, threshold], load_outputs, **serial)
+    demo.click(lambda session_id, block_on, block_at: load_cases(None, session_id, block_on, block_at, True),
+               [owner, blocking, threshold], load_outputs, **serial)
 
-    def score_external(path, cases, session_id, block_at):
+    def score_external(path, cases, session_id, block_on, block_at):
         try:
             if not cases:
                 raise ValueError("Import cases first.")
@@ -204,35 +228,39 @@ def build_page(context):
             run = dict(format=FORMAT, paper=PAPER, cases=cases, predictions=predictions,
                        dataset_sha256=dataset_digest(cases), mode="external_predictions")
             if isinstance(value, dict):
-                run["imported_provenance"] = {key: value[key] for key in ("model_id", "mode", "sampling", "created_at") if key in value}
-            rows, note_text, scores, chart = scored_view(cases, predictions, block_at)
+                run["imported_provenance"] = provenance(value)
+            rows, note_text, scores, chart = scored_view(
+                cases, predictions, blocking_threshold(block_on, block_at))
             return (run, rows, note_text, scores, chart, None, *clear_view(session_id))
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
 
-    import_predictions.click(score_external, [prediction_file, cases_state, owner, threshold],
+    import_predictions.click(score_external, [prediction_file, cases_state, owner, blocking, threshold],
                              [run_state, table, score_note, scores_json, curve, export, token_state, strip,
                               case_detail, response, detail, alternatives], **serial)
 
-    def rescore(cases, run, session_id, block_at):
+    def rescore(cases, run, session_id, block_on, block_at):
         """Move the blocking threshold over results already in hand."""
-        thresholds[session_id] = block_at
+        current = blocking_threshold(block_on, block_at)
+        thresholds[session_id] = current
         if not cases:
             return gr.skip(), gr.skip(), gr.skip(), gr.skip()
-        rows, note_text, scores, chart = scored_view(cases, run.get("predictions", []), block_at)
+        rows, note_text, scores, chart = scored_view(cases, run.get("predictions", []), current)
         return rows, note_text, scores, chart
 
     # Deliberately outside the batch queue: rescoring reads a snapshot and
     # touches no model, and a slider that answered only once an hour-long
     # batch had finished would not be a control at all.
-    threshold.release(rescore, [cases_state, run_state, owner, threshold],
-                      [table, score_note, scores_json, curve])
+    rescoring = dict(inputs=[cases_state, run_state, owner, blocking, threshold],
+                     outputs=[table, score_note, scores_json, curve])
+    threshold.release(rescore, **rescoring)
+    blocking.change(rescore, **rescoring)
 
-    def evaluate(cases, session_id, mode, token_limit, random_seed, block_at):
+    def evaluate(cases, session_id, mode, token_limit, random_seed, block_on, block_at):
         try:
             if mode not in SCORING:
                 raise ValueError("Choose label probabilities or free-text judgment.")
-            thresholds[session_id] = block_at
+            thresholds[session_id] = blocking_threshold(block_on, block_at)
             by_id = {case["id"]: case for case in cases}
             stream = runner.run(session_id, cases, mode=SCORING[mode],
                                 max_new_tokens=token_limit, seed=random_seed)
@@ -241,7 +269,13 @@ def build_page(context):
                     if isinstance(run, StreamingResponse):
                         last = run.result
                         metrics = last["metrics"]
-                        payload, changed = selections.view(session_id, (run.run_id, last["id"]), metrics)
+                        # Probability scoring replaces the strip once per label
+                        # rather than extending one answer, so the label whose
+                        # trace this is belongs in the identity: without it the
+                        # detail panel would keep showing a token from a trace
+                        # that has already been swapped out.
+                        payload, changed = selections.view(
+                            session_id, (run.run_id, last["id"], last.get("scored_label")), metrics)
                         # Leave batch state, tables, scores and downloads alone
                         # until a case completes; only stream the current answer.
                         yield (gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), payload,
@@ -251,15 +285,16 @@ def build_page(context):
                         continue
                     last = run["predictions"][-1] if run["predictions"] else {}
                     metrics = last.get("metrics", [])
-                    payload, changed = selections.view(session_id, (run["id"], last.get("id")), metrics)
+                    payload, changed = selections.view(
+                        session_id, (run["id"], last.get("id"), last.get("scored_label")), metrics)
                     case = by_id.get(last.get("id"))
                     # The runner already scored this frame; only a moved
                     # threshold makes those numbers the wrong ones to show.
                     # Read it now rather than trust the click's snapshot: the
                     # reader may have moved the slider since the batch began.
-                    current = thresholds.get(session_id, block_at)
+                    current = thresholds.get(session_id)
                     rows, note_text, scores, chart = (
-                        scored_view(cases, run["predictions"], current) if current else
+                        scored_view(cases, run["predictions"], current) if current is not None else
                         (result_rows(cases, run["predictions"]), summary(run["scores"]),
                          run["scores"], tradeoff_chart(run["scores"]["blocking"])))
                     yield (run, rows, note_text, scores, chart, path, payload,
@@ -271,7 +306,7 @@ def build_page(context):
         except (ValueError, OSError, RuntimeError) as exc:
             raise gr.Error(str(exc)) from exc
 
-    start.click(evaluate, [cases_state, owner, scoring, max_tokens, seed, threshold],
+    start.click(evaluate, [cases_state, owner, scoring, max_tokens, seed, blocking, threshold],
                 [run_state, table, score_note, scores_json, curve, export, token_state, strip,
                  case_detail, response, detail, alternatives, note], **serial)
     stop.click(runner.cancel, owner, [], queue=False)
@@ -283,7 +318,8 @@ def build_page(context):
         case = cases[index]
         result = next((r for r in run.get("predictions", []) if r["id"] == case["id"]), {})
         metrics = result.get("metrics", [])
-        payload, _ = selections.view(session_id, (run.get("id"), case["id"]), metrics)
+        payload, _ = selections.view(
+            session_id, (run.get("id"), case["id"], result.get("scored_label")), metrics)
         return case, str(result.get("response", "")), payload, context.tokens.strip(metrics), "Select a generated token.", []
 
     table.select(inspect_case, [cases_state, run_state, owner],

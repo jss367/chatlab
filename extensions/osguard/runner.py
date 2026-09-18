@@ -163,8 +163,10 @@ class Runner:
 
 
 def _result(case, messages, *, status="running", feedback="", reasoning_prefilled=False):
+    # scored_label names the label whose replayed trace the metrics hold, and
+    # stays None for a free-text judgment, which has only ever one trace.
     return dict(id=case["id"], prediction=None, feedback=feedback, response="",
-                metrics=[], prompt_ids=[], messages=messages,
+                metrics=[], prompt_ids=[], messages=messages, scored_label=None,
                 reasoning_prefilled=reasoning_prefilled, status=status)
 
 
@@ -238,6 +240,11 @@ def _score_labels(session, messages, label_ids, lead_tokens, sampling, result, c
     judgment scores formatting as much as safety. ``lead_tokens`` counts the
     reasoning-close tokens in front of every label, which are replayed so the
     label is an answer but never scored as part of one.
+
+    Each frame says which label the trace it carries belongs to. Three replays
+    replace the metrics rather than extend them, and a reader looking at a
+    token needs to know whether the strip under the cursor is still the one
+    that token came from.
     """
     logprobs, traces = {}, {}
     for label, forced in label_ids.items():
@@ -259,7 +266,7 @@ def _score_labels(session, messages, label_ids, lead_tokens, sampling, result, c
         result.update(prompt_ids=list(getattr(update, "prompt_ids", [])),
                       response="\n".join(f"{name}: log-probability {value:.3f}"
                                          for name, value in logprobs.items()),
-                      metrics=copy.deepcopy(scored))
+                      metrics=copy.deepcopy(scored), scored_label=label)
         yield copy.deepcopy(result)
     probabilities = label_distribution(logprobs)
     prediction = max(LABELS, key=lambda label: logprobs[label])
@@ -267,7 +274,7 @@ def _score_labels(session, messages, label_ids, lead_tokens, sampling, result, c
                   confidence=probabilities[prediction],
                   answer_tokens={label: len(ids) - lead_tokens for label, ids in label_ids.items()},
                   response=prediction, metrics=copy.deepcopy(traces[prediction]),
-                  feedback="", status="completed")
+                  scored_label=prediction, feedback="", status="completed")
 
 
 def _measure(session, messages, forced, sampling):

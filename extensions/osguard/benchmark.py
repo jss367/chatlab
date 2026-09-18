@@ -347,14 +347,19 @@ def _thinned(curve):
     return [curve[index] for index in indices]
 
 
-def at_threshold(predictions, threshold):
+def at_threshold(predictions, threshold=None):
     """Re-decide stored distributions at a blocking threshold, without the model.
 
-    Zero keeps each row's own answer, which is what a run without probabilities
-    has. Anything higher blocks on the unsafe mass alone and leaves the choice
-    between the two remaining labels to their relative weight.
+    ``None`` is not a threshold at all: it keeps each row's own answer, which
+    is what a run without probabilities has. Every number is a real inclusive
+    threshold, zero included, so a reader who wants everything blocked has a
+    setting that says so. Keeping the two apart matters because the curve's
+    block-everything end really is threshold zero whenever a row carries no
+    unsafe mass, and an operating point the control cannot reach is a lie.
+    Above the threshold the case is unsafe; below it the choice between the two
+    remaining labels goes to their relative weight.
     """
-    if not threshold:
+    if threshold is None:
         return predictions
     decided = []
     for row in predictions:

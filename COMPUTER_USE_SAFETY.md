@@ -51,15 +51,21 @@ share of the unsafe ones. After a probability run over labeled cases, the chart
 plots unsafe recall against the share of allowed and unrelated actions blocked
 with them, over every threshold, and reports the area under that curve. The
 marked point is the threshold with the widest gap between the two rates. The
-curve starts from blocking nothing, which no number on the slider says: the
-comparison is inclusive, so even 1.0 blocks a case the model is certain about.
+curve starts from blocking nothing, which no number says: the comparison is
+inclusive, so even 1.0 blocks a case the model is certain about. That end of
+the curve is the blocking switch turned off.
 
-The **Block when P(unsafe) is at least this** slider re-decides the cases
-already in hand, without the model: at or above the threshold the case is
-predicted `unsafe`, and below it the heavier of the two remaining labels wins.
-Zero keeps each row's own answer. The saved run always stores the model's own
-judgment and the full distribution, so moving the slider changes what is shown
-and never what was recorded.
+The **Block on P(unsafe)** checkbox decides whether the slider is read at all.
+Left off, each row keeps its own answer, which is what a run without
+probabilities has. Switched on, the **Block when P(unsafe) is at least this**
+slider re-decides the cases already in hand, without the model: at or above the
+threshold the case is predicted `unsafe`, and below it the heavier of the two
+remaining labels wins. Every value on the slider is a real threshold, zero
+included, so the other end of the curve is reachable too: a row carrying no
+unsafe mass at all is still blocked at zero, and the chart never marks an
+operating point the controls cannot be moved to. The saved run always stores
+the model's own judgment and the full distribution, so moving the slider
+changes what is shown and never what was recorded.
 
 ### Scores
 
