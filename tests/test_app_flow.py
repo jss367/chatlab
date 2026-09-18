@@ -4353,12 +4353,13 @@ class ConversationSamplingTests(unittest.TestCase):
         self.assertEqual(
             {event for fn in sliders for _block, event in fn.targets}, {"input"}
         )
-        # The one other write is Reset to defaults, which runs from the end
-        # of its own chain: a press is the reader's own move as much as a
-        # drag is, and it is stored the same way.
+        # The other writes are the five resets, each running from the end of
+        # its own chain: a press is the reader's own move as much as a drag
+        # is, and it is stored the same way.
         chained = [fn for fn in listeners if fn not in sliders]
-        self.assertEqual(len(chained), 1)
-        self.assertIsNotNone(getattr(chained[0], "trigger_after", None))
+        self.assertEqual(len(chained), len(settings.CONVERSATION_SAMPLING))
+        for fn in chained:
+            self.assertIsNotNone(getattr(fn, "trigger_after", None))
 
     def test_a_control_reporting_what_the_conversation_already_holds_writes_nothing(self):
         forks = new_forks()

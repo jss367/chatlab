@@ -305,7 +305,7 @@ class ThemeControlTests(unittest.TestCase):
                 self.demo.blocks[block_id]
                 for fn in saving
                 for block_id, _ in fn.targets
-                # Reset to defaults saves the settings from the end of a
+                # A sampling reset saves the settings from the end of a
                 # chain, which Gradio writes down as a target with no block.
                 if block_id is not None
             ],
