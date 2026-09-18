@@ -187,6 +187,33 @@ class RestartOfferTests(unittest.TestCase):
         relaunch.assert_not_called()
         window.destroy.assert_not_called()
 
+    def test_a_restart_asked_for_while_the_update_relaunches_stands_down(self):
+        """The stretch between the swap ending and the relaunch is the update's.
+
+        ``_offer`` clears ``swapping`` before it relaunches and closes the
+        window, so a restart confirmed in that gap would otherwise start a
+        second copy of the one the update is already bringing up. The update's
+        own close still has to go through, or the replaced window would be
+        left sitting there.
+        """
+
+        flows = []
+
+        def mid_handoff(flow):
+            flows.append(flow)
+            self.assertTrue(flow._begin_swap())
+            flow._end_swap(relaunching=True)
+
+        seen, window, relaunch = self.open_window(
+            Path("/Applications/ChatLab.app"), prepare=mid_handoff
+        )
+
+        self.assertTrue(seen["offered"])
+        self.assertIn("installing an update", seen["declined"])
+        relaunch.assert_not_called()
+        window.destroy.assert_not_called()
+        self.assertTrue(flows[0]._on_closing())
+
     def test_a_window_the_user_already_closed_costs_the_restart_nothing(self):
         window = mock.MagicMock()
         window.destroy.side_effect = RuntimeError("window is gone")
@@ -202,6 +229,32 @@ class RestartOfferTests(unittest.TestCase):
                 self.assertEqual(desktop_launcher.run_desktop(), 0)
             self.assertIsNone(desktop.restart())
         patched.relaunch.assert_called_once_with(Path("/Applications/ChatLab.app"))
+
+    def test_an_update_that_fails_hands_the_restart_back(self):
+        """Only a finished swap owns the restart; a failed one gives it up.
+
+        The flag that keeps Settings' restart out through the relaunch is set
+        on the success path alone, so somebody whose update fell over can
+        still restart into the choice they just saved.
+        """
+
+        release = updater.ReleaseInfo(
+            version="9.9.9",
+            asset_name="ChatLab.zip",
+            asset_url="https://example.invalid/ChatLab.zip",
+            asset_size=None,
+            release_url="https://example.invalid/release",
+            checksum_url=None,
+        )
+        flow = desktop_launcher.UpdateFlow(mock.MagicMock(), Path("/Applications/ChatLab.app"))
+        with mock.patch.object(updater, "install_update", side_effect=updater.UpdateError("disk full")), \
+                mock.patch.object(updater, "relaunch") as relaunch:
+            with self.assertLogs(level="ERROR"):
+                flow._offer(release)
+
+        relaunch.assert_not_called()
+        self.assertFalse(flow.relaunching.is_set())
+        self.assertTrue(flow.may_restart())
 
     def test_a_run_from_a_checkout_offers_nothing_to_restart(self):
         seen, _, relaunch = self.open_window(None)

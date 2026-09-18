@@ -130,27 +130,41 @@ class UpdateFlow:
         self.window = window
         self.bundle = bundle
         self._lock = threading.Lock()
-        # ``swapping`` and ``cancel`` only change under ``_phase_lock`` so a quit
-        # and the start of the swap cannot both win.
+        # ``swapping``, ``relaunching`` and ``cancel`` only change under
+        # ``_phase_lock``, so a quit and the start of the swap cannot both win
+        # and the swap hands the restart on without letting go of it first.
         self._phase_lock = threading.Lock()
         self.swapping = threading.Event()
+        # Held from the end of the swap until the update's own relaunch and
+        # close are committed: the restart belongs to the update until then.
+        self.relaunching = threading.Event()
         self.cancel = threading.Event()
         window.events.closing += self._on_closing
 
-    def may_close(self) -> bool:
+    def _claim_close(self, *, manual: bool) -> bool:
         """Claim the right to close: cancels a download, refuses during a swap.
 
-        The two steps are one decision and share ``_phase_lock``, so a close
-        either stops the update before the swap or finds the swap already under
-        way. Everything that ends the window - the user's quit, Settings asking
-        for a restart - asks this first.
+        The steps are one decision and share ``_phase_lock``, so a close either
+        stops the update before the swap or finds the swap already under way.
+        Everything that ends the window asks this first, and says whose close
+        it is. A ``manual`` one - Settings asking for a restart - also stands
+        down for the stretch after the swap while the update is relaunching,
+        since a copy is already on its way up. The update's own close, the one
+        that finishes that handoff, is not manual and goes through.
         """
 
         with self._phase_lock:
             if self.swapping.is_set():
                 return False
+            if manual and self.relaunching.is_set():
+                return False
             self.cancel.set()
             return True
+
+    def may_restart(self) -> bool:
+        """Answer Settings asking to close this window and open a fresh copy."""
+
+        return self._claim_close(manual=True)
 
     def _on_closing(self) -> bool:
         """Quit cancels a download in flight but waits out the bundle swap.
@@ -160,7 +174,7 @@ class UpdateFlow:
         new one in cannot be interrupted.
         """
 
-        return self.may_close()
+        return self._claim_close(manual=False)
 
     def _begin_swap(self) -> bool:
         """Enter the protected swap phase unless a quit already cancelled us."""
@@ -171,6 +185,20 @@ class UpdateFlow:
             self.swapping.set()
         self._window_call("set_title", f"{WINDOW_TITLE} — installing update…")
         return True
+
+    def _end_swap(self, *, relaunching: bool) -> None:
+        """Leave the swap phase, handing the restart on where one is coming.
+
+        Both flags move under a single ``_phase_lock``, so there is no moment
+        in which neither the swap nor the relaunch owns the restart and a
+        manual one could slip through and start a second copy. A cancelled or
+        failed update sets nothing and leaves the manual restart available.
+        """
+
+        with self._phase_lock:
+            if relaunching:
+                self.relaunching.set()
+            self.swapping.clear()
 
     def check_in_background(self, *, interactive: bool) -> threading.Thread:
         """Run ``check`` on a daemon thread so a quit can abandon it.
@@ -269,6 +297,7 @@ class UpdateFlow:
         )
         if not accepted:
             return
+        relaunching = False
         try:
             updater.install_update(
                 release,
@@ -285,8 +314,10 @@ class UpdateFlow:
             self._window_call("set_title", WINDOW_TITLE)
             self._window_call("create_confirmation_dialog", "Update failed", str(error))
             return
+        else:
+            relaunching = True
         finally:
-            self.swapping.clear()
+            self._end_swap(relaunching=relaunching)
         logging.info("Relaunching ChatLab %s", release.version)
         updater.relaunch(self.bundle)
         self._window_call("destroy")
@@ -313,16 +344,17 @@ def run_desktop() -> int:
     def restart() -> str | None:
         """Quit and open a fresh copy, which Settings asks for after a change.
 
-        A restart is a close, so it asks the update flow the same question a
-        quit asks, and stands down with a reason where a quit would have been
-        refused: mid-swap the bundle is being replaced, and the update relaunches
-        the app itself once it is done. Otherwise it is ordered the way the
-        update flow orders it - the replacement is started first and the window
-        closed behind it, so what is on screen is replaced rather than vanishing
-        ahead of a launch that may not come.
+        A restart is a close, so it asks the update flow to claim one, and
+        stands down with a reason for as long as an update owns it: mid-swap
+        the bundle is being replaced, and from there until the update has
+        relaunched and closed the window a fresh copy is already coming up.
+        Otherwise it is ordered the way the update flow orders it - the
+        replacement is started first and the window closed behind it, so what
+        is on screen is replaced rather than vanishing ahead of a launch that
+        may not come.
         """
 
-        if flow is not None and not flow.may_close():
+        if flow is not None and not flow.may_restart():
             logging.info("Restart declined: an update is installing")
             return (
                 "ChatLab is installing an update. It restarts itself when the "
