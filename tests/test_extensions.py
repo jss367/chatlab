@@ -491,6 +491,13 @@ class RestartButtonTests(unittest.TestCase):
         with self.assertRaisesRegex(gr.Error, 'Quit and reopen'):
             restart_now()
 
+    def test_a_restart_the_window_declines_says_so_instead_of_claiming_it_ran(self):
+        # An update installing right now owns the bundle and reopens the app
+        # when it is done, so the handler stands down with a sentence to show.
+        desktop.offer_restart(lambda: 'ChatLab is installing an update.')
+        with self.assertRaisesRegex(gr.Error, 'installing an update'):
+            restart_now()
+
     def test_the_restored_choice_brings_its_button_back_with_it(self):
         desktop.offer_restart(lambda: None)
         save_extensions(['maze_experiments'], [])

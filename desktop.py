@@ -9,9 +9,18 @@ here once it has a window to close and a bundle to reopen.
 
 _restart_handler = None
 
+# What a page says when nobody is listening, which is what ``python app.py``
+# looks like: no bundle to reopen and no window to close, so the reader has to
+# do it.
+NO_RESTART_AVAILABLE = "Quit and reopen ChatLab to apply this change."
+
 
 def offer_restart(handler) -> None:
-    """Let the pages quit and reopen the app by calling ``handler``."""
+    """Let the pages quit and reopen the app by calling ``handler``.
+
+    ``handler`` returns ``None`` when it is restarting, or a sentence saying
+    why it is not: a restart is a close, and a close can be refused.
+    """
 
     global _restart_handler
     _restart_handler = handler
@@ -23,11 +32,10 @@ def restart_offered() -> bool:
     return _restart_handler is not None
 
 
-def restart() -> bool:
-    """Restart the app. False means nobody was listening and nothing happened."""
+def restart() -> str | None:
+    """Restart the app. ``None`` means it is; a string says why it is not."""
 
     handler = _restart_handler
     if handler is None:
-        return False
-    handler()
-    return True
+        return NO_RESTART_AVAILABLE
+    return handler()

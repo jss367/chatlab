@@ -137,6 +137,21 @@ class UpdateFlow:
         self.cancel = threading.Event()
         window.events.closing += self._on_closing
 
+    def may_close(self) -> bool:
+        """Claim the right to close: cancels a download, refuses during a swap.
+
+        The two steps are one decision and share ``_phase_lock``, so a close
+        either stops the update before the swap or finds the swap already under
+        way. Everything that ends the window - the user's quit, Settings asking
+        for a restart - asks this first.
+        """
+
+        with self._phase_lock:
+            if self.swapping.is_set():
+                return False
+            self.cancel.set()
+            return True
+
     def _on_closing(self) -> bool:
         """Quit cancels a download in flight but waits out the bundle swap.
 
@@ -145,11 +160,7 @@ class UpdateFlow:
         new one in cannot be interrupted.
         """
 
-        with self._phase_lock:
-            if self.swapping.is_set():
-                return False
-            self.cancel.set()
-            return True
+        return self.may_close()
 
     def _begin_swap(self) -> bool:
         """Enter the protected swap phase unless a quit already cancelled us."""
@@ -297,21 +308,33 @@ def run_desktop() -> int:
     support_directory.mkdir(parents=True, exist_ok=True)
     bundle = updater.running_app_bundle()
     window = None
+    flow: UpdateFlow | None = None
 
-    def restart() -> None:
+    def restart() -> str | None:
         """Quit and open a fresh copy, which Settings asks for after a change.
 
-        Ordered the way the update flow orders it: the replacement is started
-        first and the window closed behind it, so what is on screen is
-        replaced rather than vanishing ahead of a launch that may not come.
+        A restart is a close, so it asks the update flow the same question a
+        quit asks, and stands down with a reason where a quit would have been
+        refused: mid-swap the bundle is being replaced, and the update relaunches
+        the app itself once it is done. Otherwise it is ordered the way the
+        update flow orders it - the replacement is started first and the window
+        closed behind it, so what is on screen is replaced rather than vanishing
+        ahead of a launch that may not come.
         """
 
+        if flow is not None and not flow.may_close():
+            logging.info("Restart declined: an update is installing")
+            return (
+                "ChatLab is installing an update. It restarts itself when the "
+                "update finishes, and the saved choice applies then."
+            )
         logging.info("Restarting ChatLab %s at the reader's request", __version__)
         updater.relaunch(bundle)
         try:
             window.destroy()
         except Exception as error:  # noqa: BLE001 - window is gone; log and carry on
             logging.info("Window close skipped: %s", error)
+        return None
 
     # A run that is not from a bundle has nothing to reopen, so Settings
     # leaves the button off the page rather than quitting into nothing.
@@ -323,7 +346,6 @@ def run_desktop() -> int:
     # and has nothing to watch; this records the run-up to a memory kill,
     # which is a thing that happens to sessions, not to checks.
     model_runtime.watch_memory()
-    flow: UpdateFlow | None = None
 
     try:
         window = webview.create_window(

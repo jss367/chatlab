@@ -76,10 +76,15 @@ def pending_note(selected, active_ids):
 
 
 def restart_now():
-    """Quit and reopen the app so the saved choice takes effect."""
+    """Quit and reopen the app so the saved choice takes effect.
 
-    if not desktop.restart():
-        raise gr.Error("Quit and reopen ChatLab to apply this change.")
+    A restart can be declined - an update installing right now restarts the app
+    itself when it is done - and what comes back is the sentence to show.
+    """
+
+    declined = desktop.restart()
+    if declined is not None:
+        raise gr.Error(declined)
     return "Restarting ChatLab…", gr.update(visible=False), gr.update(visible=False)
 
 

@@ -123,16 +123,30 @@ class RestartOfferTests(unittest.TestCase):
     def setUp(self):
         self.addCleanup(desktop.offer_restart, None)
 
-    def open_window(self, bundle):
-        """Run the launcher against a fake window, restarting once it is up."""
+    def open_window(self, bundle, prepare=None):
+        """Run the launcher against a fake window, restarting once it is up.
+
+        ``prepare`` is handed the live :class:`UpdateFlow` just before the
+        restart, for the tests that need an update already under way.
+        """
 
         window = mock.MagicMock()
         seen = {}
+        flows = []
+        build_flow = desktop_launcher.UpdateFlow
+
+        def make_flow(*args, **kwargs):
+            flow = build_flow(*args, **kwargs)
+            flows.append(flow)
+            return flow
 
         def started(**_kwargs):
+            if prepare is not None:
+                prepare(flows[-1])
             seen["offered"] = desktop.restart_offered()
-            seen["restarted"] = desktop.restart()
+            seen["declined"] = desktop.restart()
 
+        self.enterContext(mock.patch.object(desktop_launcher, "UpdateFlow", make_flow))
         webview = SimpleNamespace(create_window=mock.Mock(return_value=window), start=started)
         menu = SimpleNamespace(Menu=mock.Mock(), MenuAction=mock.Mock())
         with tempfile.TemporaryDirectory() as support, \
@@ -152,9 +166,26 @@ class RestartOfferTests(unittest.TestCase):
         seen, window, relaunch = self.open_window(bundle)
 
         self.assertTrue(seen["offered"])
-        self.assertTrue(seen["restarted"])
+        self.assertIsNone(seen["declined"])
         relaunch.assert_called_once_with(bundle)
         window.destroy.assert_called_once_with()
+
+    def test_a_restart_asked_for_mid_update_waits_for_the_update_to_finish(self):
+        """The swap owns the bundle, and the update reopens the app itself.
+
+        Starting a second copy over a bundle being replaced would leave the
+        current window open anyway - ``_on_closing`` refuses the close - so the
+        restart stands down and says why.
+        """
+
+        seen, window, relaunch = self.open_window(
+            Path("/Applications/ChatLab.app"), prepare=lambda flow: flow.swapping.set()
+        )
+
+        self.assertTrue(seen["offered"])
+        self.assertIn("installing an update", seen["declined"])
+        relaunch.assert_not_called()
+        window.destroy.assert_not_called()
 
     def test_a_window_the_user_already_closed_costs_the_restart_nothing(self):
         window = mock.MagicMock()
@@ -169,12 +200,12 @@ class RestartOfferTests(unittest.TestCase):
                     mock.patch.object(desktop_launcher, "start_local_server", return_value=(mock.Mock(), "http://127.0.0.1:47890/")), \
                     mock.patch.object(model_runtime, "watch_memory"):
                 self.assertEqual(desktop_launcher.run_desktop(), 0)
-            self.assertTrue(desktop.restart())
+            self.assertIsNone(desktop.restart())
         patched.relaunch.assert_called_once_with(Path("/Applications/ChatLab.app"))
 
     def test_a_run_from_a_checkout_offers_nothing_to_restart(self):
         seen, _, relaunch = self.open_window(None)
 
         self.assertFalse(seen["offered"])
-        self.assertFalse(seen["restarted"])
+        self.assertEqual(seen["declined"], desktop.NO_RESTART_AVAILABLE)
         relaunch.assert_not_called()
