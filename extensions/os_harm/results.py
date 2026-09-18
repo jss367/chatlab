@@ -341,17 +341,21 @@ EMPTY_COMPARISON = dict(rows=[], keys=[], shared=0, baseline_only=0, comparison_
                         duplicates=0, regressions=0, improvements=0, unjudged=0)
 
 
-def compare_runs(tasks, judge, baseline, comparison):
+def compare_runs(tasks, judge, baseline, comparison, match=None):
     """Pair two runs by application and task ID and report where they differ.
 
     Only tasks both runs attempted are paired; a rate over different task sets
-    would compare the task lists as much as the models.
+    would compare the task lists as much as the models. Pairing happens before
+    `match` narrows the result, so a search naming one run's label or model
+    keeps that run's pairs instead of dropping the other side of each one.
     """
     if not baseline or not comparison or baseline == comparison:
         return dict(EMPTY_COMPARISON)
     before_tasks, before_duplicates = by_task(tasks, baseline)
     after_tasks, after_duplicates = by_task(tasks, comparison)
-    shared = sorted(before_tasks.keys() & after_tasks.keys())
+    wanted = (lambda *pair: True) if match is None else (lambda *pair: any(match(t) for t in pair))
+    paired = before_tasks.keys() & after_tasks.keys()
+    shared = sorted(k for k in paired if wanted(before_tasks[k], after_tasks[k]))
     rows, keys, regressions, improvements, unjudged = [], [], 0, 0, 0
     for key in shared:
         before, after = before_tasks[key], after_tasks[key]
@@ -368,7 +372,8 @@ def compare_runs(tasks, judge, baseline, comparison):
                          ' → '.join(safety), ' → '.join(completion), after.instruction])
             keys.append(after.key)
     return dict(rows=rows, keys=keys, shared=len(shared),
-                baseline_only=len(before_tasks) - len(shared), comparison_only=len(after_tasks) - len(shared),
+                baseline_only=sum(wanted(task) for key, task in before_tasks.items() if key not in paired),
+                comparison_only=sum(wanted(task) for key, task in after_tasks.items() if key not in paired),
                 duplicates=before_duplicates + after_duplicates,
                 regressions=regressions, improvements=improvements, unjudged=unjudged)
 

@@ -330,8 +330,13 @@ class ResultTests(unittest.TestCase):
         self.write('better_log.json', self.log, self.task_dir.parent / 'task-b')
         baseline = self.load(label='First')
         later = self.second_run(safety=True, success=False)
-        diff = compare_runs(baseline + later, self.judge, baseline[0].run, later[0].run)
+        tasks = baseline + later
+        diff = compare_runs(tasks, self.judge, baseline[0].run, later[0].run)
         self.assertEqual((diff['shared'], diff['baseline_only'], diff['comparison_only']), (1, 1, 0))
+        narrowed = compare_runs(tasks, self.judge, baseline[0].run, later[0].run,
+                                lambda task: task.task_id == 'task-b')
+        self.assertEqual((narrowed['shared'], narrowed['baseline_only'], narrowed['comparison_only']), (0, 1, 0))
+        self.assertEqual(narrowed['rows'], [])
         self.assertEqual((diff['improvements'], diff['regressions'], diff['unjudged']), (1, 0, 0))
         self.assertEqual(diff['keys'], [later[0].key])
         row, = diff['rows']
@@ -350,6 +355,11 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(len(filtered(tasks, self.judge, safety='Safe')), 1)
         self.assertIn('share no task', page.comparison_panel(tasks, self.judge, baseline[0].run, later[0].run,
                                                              'All categories', 'absent')[0])
+        # A search naming one run must not delete the other side of every pair.
+        for query in ('First', 'Second', 'task-a'):
+            with self.subTest(query=query):
+                self.assertIn('1 paired task ·', page.comparison_panel(tasks, self.judge, baseline[0].run,
+                                                                       later[0].run, 'All categories', query)[0])
         self.assertIn('two different runs', page.comparison_panel(tasks, self.judge, baseline[0].run,
                                                                   baseline[0].run, 'All categories', '')[0])
 

@@ -85,8 +85,10 @@ paired tasks, tasks that became unsafe or safe, tasks left unjudged in one run,
 and tasks only one run attempted. Pairing uses the selected judge; a run missing
 that judge's judgments makes every pair unjudged rather than safe.
 
-The category and search filters narrow the pairing. The safety filter does not,
-since it would hide one side of every pair. When one run repeats an application
+The category and search filters narrow the pairs rather than the tasks: runs are
+paired first, and a pair is kept when either side matches, so searching for one
+run's label or model still shows that run's pairs. The safety filter does not
+apply at all, since it would hide one side of every pair. When one run repeats an application
 and task ID, the first task directory in sorted order is paired and the rest are
 counted as ignored. Selecting a row opens that task in **Inspect task** on the
 comparison side, adding it to the inspector's list when a filter hides it.

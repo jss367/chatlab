@@ -123,8 +123,12 @@ def comparison_note(diff, baseline, comparison):
 
 def comparison_panel(tasks, judge, baseline, comparison, category, query):
     # The safety filter would remove one side of every pair, so only the
-    # category and search filters narrow a task-by-task comparison.
-    diff = compare_runs(filtered(tasks, judge, category, 'All outcomes', query), judge, baseline, comparison)
+    # category and search filters narrow a task-by-task comparison. They narrow
+    # the pairs rather than the tasks: a search naming one run's label or model
+    # matches one side of a pair, and dropping the other side before pairing
+    # would report that the runs have nothing in common.
+    visible = {task.key for task in filtered(tasks, judge, category, 'All outcomes', query)}
+    diff = compare_runs(tasks, judge, baseline, comparison, lambda task: task.key in visible)
     return comparison_note(diff, baseline, comparison), diff['rows'], diff['keys']
 
 
