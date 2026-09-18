@@ -151,6 +151,10 @@ class UpdateFlow:
         # relaunch and close, and by a manual restart for its own. Whoever
         # holds it, nobody else starts a second copy behind them.
         self.relaunching = threading.Event()
+        # The cancellation the update running now answers to. An attempt takes
+        # the event it started with and keeps reading that one, so a worker
+        # told to stop stays stopped even after ``release_restart`` puts a
+        # fresh event here for whatever comes next.
         self.cancel = threading.Event()
         window.events.closing += self._on_closing
 
@@ -193,10 +197,17 @@ class UpdateFlow:
         it goes back rather than standing forever, and the next restart -
         the reader's next try, or the one after the next saved choice - is
         free to take it.
+
+        The claim also set ``cancel``, which is what keeps a download already
+        in flight from entering the swap behind a departing window. That stop
+        stands for the update it stopped, which goes on reading the event it
+        was told through; the flow gets a fresh one, so a restart that never
+        happened does not cancel every update for the life of the process.
         """
 
         with self._phase_lock:
             self.relaunching.clear()
+            self.cancel = threading.Event()
 
     def _on_closing(self) -> bool:
         """Quit cancels a download in flight but waits out the bundle swap.
@@ -208,11 +219,17 @@ class UpdateFlow:
 
         return self._claim_close(manual=False) is None
 
-    def _begin_swap(self) -> bool:
-        """Enter the protected swap phase unless a quit already cancelled us."""
+    def _begin_swap(self, cancel: threading.Event | None = None) -> bool:
+        """Enter the protected swap phase unless a quit already cancelled us.
+
+        ``cancel`` is the event the attempt asking started with. It is checked
+        alongside the flow's current one, so an attempt that was told to stop
+        cannot swap on the strength of the fresh event a later restart left
+        behind, and nothing swaps while a close is being granted.
+        """
 
         with self._phase_lock:
-            if self.cancel.is_set():
+            if self.cancel.is_set() or (cancel is not None and cancel.is_set()):
                 return False
             self.swapping.set()
         self._window_call("set_title", f"{WINDOW_TITLE} — installing update…")
@@ -330,13 +347,18 @@ class UpdateFlow:
         if not accepted:
             return
         relaunching = False
+        # The cancellation this attempt answers to, taken once and read
+        # everywhere below, so a restart that gives its claim back mid-download
+        # cannot leave half of this update reading one event and half another.
+        with self._phase_lock:
+            cancel = self.cancel
         try:
             updater.install_update(
                 release,
                 self.bundle,
                 progress=self._report_progress,
-                begin_swap=self._begin_swap,
-                cancelled=self.cancel.is_set,
+                begin_swap=lambda: self._begin_swap(cancel),
+                cancelled=cancel.is_set,
             )
         except updater.UpdateCancelled as error:
             logging.info("%s", error)

@@ -320,6 +320,66 @@ class RestartOfferTests(unittest.TestCase):
         self.assertFalse(flow.relaunching.is_set())
         self.assertIsNone(flow.may_restart())
 
+    def test_a_restart_that_failed_does_not_cancel_the_next_update(self):
+        """The stop a restart posts belongs to that restart, not to the app.
+
+        Claiming a restart cancels whatever is downloading, so nothing slips
+        into the swap behind a window that is about to go. When the relaunch
+        then falls over the window stays, and the update flow has to keep
+        working: an update asked for afterwards downloads and swaps rather
+        than being cancelled the moment it starts.
+        """
+
+        flow = desktop_launcher.UpdateFlow(mock.MagicMock(), Path("/Applications/ChatLab.app"))
+        self.assertIsNone(flow.may_restart())
+        stopped = flow.cancel
+        flow.release_restart()
+
+        seen = {}
+
+        def install(release, bundle, progress=None, begin_swap=None, cancelled=None):
+            seen["cancelled"] = cancelled()
+            seen["swapped"] = begin_swap()
+
+        with mock.patch.object(updater, "install_update", side_effect=install), \
+                mock.patch.object(updater, "relaunch") as relaunch:
+            flow._offer(self.a_release())
+
+        self.assertFalse(seen["cancelled"])
+        self.assertTrue(seen["swapped"])
+        self.assertTrue(stopped.is_set())
+        relaunch.assert_called_once_with(flow.bundle)
+
+    def test_the_update_a_failed_restart_stopped_stays_stopped(self):
+        """A worker told to stop is not un-told by the restart giving up.
+
+        The restart arrives mid-download and hands its claim back when the
+        relaunch fails. The download it cancelled reads the event it was
+        cancelled through, so it still reports cancelled and is still refused
+        the swap - the fresh event is for the next update, not for this one.
+        """
+
+        flow = desktop_launcher.UpdateFlow(mock.MagicMock(), Path("/Applications/ChatLab.app"))
+        seen = {}
+
+        def install(release, bundle, progress=None, begin_swap=None, cancelled=None):
+            self.assertIsNone(flow.may_restart())
+            flow.release_restart()
+            seen["cancelled"] = cancelled()
+            seen["swapped"] = begin_swap()
+            raise updater.UpdateCancelled("Update cancelled before installation.")
+
+        with mock.patch.object(updater, "install_update", side_effect=install), \
+                mock.patch.object(updater, "relaunch") as relaunch:
+            with self.assertLogs(level="INFO"):
+                flow._offer(self.a_release())
+
+        self.assertTrue(seen["cancelled"])
+        self.assertFalse(seen["swapped"])
+        self.assertFalse(flow.swapping.is_set())
+        relaunch.assert_not_called()
+        flow.window.destroy.assert_not_called()
+
     def test_a_run_from_a_checkout_offers_nothing_to_restart(self):
         seen, _, relaunch = self.open_window(None)
 
