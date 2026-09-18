@@ -156,11 +156,11 @@ def update_sampling_label(temperature, top_p, top_k, skip_top_below, max_new_tok
     )
 
 
-def reset_sampling(built_limit: int):
-    """The five sampling controls, back at the values the app ships with.
+def reset_sampling(name: str, built_limit: int):
+    """One sampling control, back at the value the app ships with.
 
-    Worked out when the button is pressed rather than read off the values the
-    sliders were built with, which is what Gradio's own reset button does and
+    Worked out when the button is pressed rather than read off the value the
+    slider was built with, which is what Gradio's own reset button does and
     why it is turned off here: the sliders are built holding the saved
     settings, and the settings file follows every move of them, so that
     button restored the number already on screen.
@@ -178,9 +178,7 @@ def reset_sampling(built_limit: int):
         settings.DEFAULTS.to_mapping()
         | {"prefill_token_limit": min(settings.current().prefill_token_limit, built_limit)}
     )
-    return tuple(
-        gr.update(value=getattr(values, name)) for name in settings.CONVERSATION_SAMPLING
-    )
+    return gr.update(value=getattr(values, name))
 
 
 # The settings that outlive the session, in the order the controls wired to

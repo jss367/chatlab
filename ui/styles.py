@@ -585,6 +585,23 @@ label.{ICON_CLASS} {{ display: inline-flex; }}
 #conversation-pane .row button {{ min-width: 0 !important; }}
 #chat-tab button {{ font-size: 13px; }}
 #shell button:focus-visible {{ outline: 2px solid var(--color-accent); outline-offset: 2px; }}
+/* Each sampling slider carries its own ↺, in the corner Gradio draws one in.
+   It is a button of ours rather than Gradio's, which restores the value its
+   slider was built with - here the saved setting already on screen; see
+   ui/layout.py. Gradio has no way to put a button inside a slider's head, so
+   this one is a sibling taken out of the column's flow and laid over that
+   corner, and the number box gives up the width it sits in. The label is in
+   the page for a screen reader and drawn at no size, so only the mark shows. */
+.sampling-field {{ position: relative; }}
+/* Through #shell because #chat-tab sets a size on every button below it, and
+   a rule of one class would lose to it. */
+#shell .sampling-field .sampling-reset {{
+  position: absolute; top: 8px; right: 8px; z-index: 1;
+  width: 24px; min-width: 0 !important; height: 24px;
+  padding: 0; font-size: 0; border-radius: var(--radius-sm);
+}}
+#shell .sampling-field .sampling-reset::before {{ width: 14px; height: 14px; }}
+.sampling-field .tab-like-container {{ margin-right: 30px; }}
 
 /* Compact windows retain separate scroll areas in two stacked rows. */
 @media (max-width: 1050px) {{
