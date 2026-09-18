@@ -123,11 +123,27 @@ class RestartOfferTests(unittest.TestCase):
     def setUp(self):
         self.addCleanup(desktop.offer_restart, None)
 
-    def open_window(self, bundle, prepare=None):
+    def a_release(self):
+        """A release newer than this one, for the tests that install it."""
+
+        return updater.ReleaseInfo(
+            version="9.9.9",
+            asset_name="ChatLab.zip",
+            asset_url="https://example.invalid/ChatLab.zip",
+            asset_size=None,
+            release_url="https://example.invalid/release",
+            checksum_url=None,
+        )
+
+    def open_window(self, bundle, prepare=None, restarts=1, relaunch_effect=None):
         """Run the launcher against a fake window, restarting once it is up.
 
         ``prepare`` is handed the live :class:`UpdateFlow` just before the
         restart, for the tests that need an update already under way.
+        ``restarts`` presses the button more than once, for the tests about a
+        second confirmation arriving before the first has taken the app away,
+        and ``relaunch_effect`` is ``updater.relaunch``'s side effect, for the
+        ones where reopening the app fails.
         """
 
         window = mock.MagicMock()
@@ -144,7 +160,8 @@ class RestartOfferTests(unittest.TestCase):
             if prepare is not None:
                 prepare(flows[-1])
             seen["offered"] = desktop.restart_offered()
-            seen["declined"] = desktop.restart()
+            seen["answers"] = [desktop.restart() for _ in range(restarts)]
+            seen["declined"] = seen["answers"][0]
 
         self.enterContext(mock.patch.object(desktop_launcher, "UpdateFlow", make_flow))
         webview = SimpleNamespace(create_window=mock.Mock(return_value=window), start=started)
@@ -158,6 +175,7 @@ class RestartOfferTests(unittest.TestCase):
                 mock.patch.object(updater, "remove_previous_bundles"), \
                 mock.patch.object(updater, "remove_stale_work_dirs"), \
                 mock.patch.object(updater, "relaunch") as relaunch:
+            relaunch.side_effect = relaunch_effect
             self.assertEqual(desktop_launcher.run_desktop(), 0)
         return seen, window, relaunch
 
@@ -209,7 +227,7 @@ class RestartOfferTests(unittest.TestCase):
         )
 
         self.assertTrue(seen["offered"])
-        self.assertIn("installing an update", seen["declined"])
+        self.assertIn("already restarting", seen["declined"])
         relaunch.assert_not_called()
         window.destroy.assert_not_called()
         self.assertTrue(flows[0]._on_closing())
@@ -238,23 +256,69 @@ class RestartOfferTests(unittest.TestCase):
         still restart into the choice they just saved.
         """
 
-        release = updater.ReleaseInfo(
-            version="9.9.9",
-            asset_name="ChatLab.zip",
-            asset_url="https://example.invalid/ChatLab.zip",
-            asset_size=None,
-            release_url="https://example.invalid/release",
-            checksum_url=None,
-        )
         flow = desktop_launcher.UpdateFlow(mock.MagicMock(), Path("/Applications/ChatLab.app"))
         with mock.patch.object(updater, "install_update", side_effect=updater.UpdateError("disk full")), \
                 mock.patch.object(updater, "relaunch") as relaunch:
             with self.assertLogs(level="ERROR"):
-                flow._offer(release)
+                flow._offer(self.a_release())
 
         relaunch.assert_not_called()
         self.assertFalse(flow.relaunching.is_set())
-        self.assertTrue(flow.may_restart())
+        self.assertIsNone(flow.may_restart())
+
+    def test_a_second_restart_confirmation_does_not_open_a_second_copy(self):
+        """Confirming twice before the app goes away is still one restart.
+
+        A double-click, or a second tab left open on the window's fixed port,
+        gets two confirmations through before the server dies. The first takes
+        the claim the update flow keeps for whoever is bringing a copy up, so
+        the second is refused and says a restart is already under way.
+        """
+
+        bundle = Path("/Applications/ChatLab.app")
+        seen, window, relaunch = self.open_window(bundle, restarts=2)
+
+        self.assertIsNone(seen["answers"][0])
+        self.assertIn("already restarting", seen["answers"][1])
+        relaunch.assert_called_once_with(bundle)
+        window.destroy.assert_called_once_with()
+
+    def test_a_restart_that_cannot_reopen_the_app_leaves_it_where_it_is(self):
+        """``open`` can fail, and a window closed after it would take the app.
+
+        The claim goes back when it does, so the reader who presses the button
+        again gets a real attempt rather than a refusal, and the window they
+        are still looking at is the one the second attempt closes.
+        """
+
+        bundle = Path("/Applications/ChatLab.app")
+        with self.assertLogs(level="ERROR"):
+            seen, window, relaunch = self.open_window(
+                bundle, restarts=2, relaunch_effect=[OSError("no such file"), None]
+            )
+
+        self.assertEqual(seen["answers"][0], desktop_launcher.RESTART_FAILED)
+        self.assertIsNone(seen["answers"][1])
+        self.assertEqual(relaunch.call_count, 2)
+        window.destroy.assert_called_once_with()
+
+    def test_an_update_that_cannot_reopen_the_app_hands_the_restart_back(self):
+        """The bundle is replaced; only the reopening fell over.
+
+        Destroying the window would leave the reader with nothing on screen
+        and nothing coming, so it stays open, and the restart it still offers
+        has to work - the update is not relaunching any more.
+        """
+
+        flow = desktop_launcher.UpdateFlow(mock.MagicMock(), Path("/Applications/ChatLab.app"))
+        with mock.patch.object(updater, "install_update"), \
+                mock.patch.object(updater, "relaunch", side_effect=OSError("no such file")):
+            with self.assertLogs(level="ERROR"):
+                flow._offer(self.a_release())
+
+        flow.window.destroy.assert_not_called()
+        self.assertFalse(flow.relaunching.is_set())
+        self.assertIsNone(flow.may_restart())
 
     def test_a_run_from_a_checkout_offers_nothing_to_restart(self):
         seen, _, relaunch = self.open_window(None)

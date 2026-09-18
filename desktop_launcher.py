@@ -37,6 +37,17 @@ LOOPBACK_ADDRESS = "127.0.0.1"
 # fall back to any free port cannot be handed this one by accident.
 DESKTOP_PORT = 47890
 
+# What Settings is told when the restart it asked for is not its to make,
+# and when the one it was granted could not be started after all.
+RESTART_DURING_UPDATE = (
+    "ChatLab is installing an update. It restarts itself when the update "
+    "finishes, and the saved choice applies then."
+)
+RESTART_ALREADY_UNDER_WAY = (
+    "ChatLab is already restarting. The saved choice applies when the new window opens."
+)
+RESTART_FAILED = "ChatLab could not reopen itself. Quit and open it again to apply this change."
+
 
 def app_support_directory() -> Path:
     """Return the per-user directory used for logs and WebKit storage."""
@@ -135,36 +146,57 @@ class UpdateFlow:
         # and the swap hands the restart on without letting go of it first.
         self._phase_lock = threading.Lock()
         self.swapping = threading.Event()
-        # Held from the end of the swap until the update's own relaunch and
-        # close are committed: the restart belongs to the update until then.
+        # Held from the moment a restart is claimed until the copy it starts
+        # is on its way up: by the swap, which hands it to the update's own
+        # relaunch and close, and by a manual restart for its own. Whoever
+        # holds it, nobody else starts a second copy behind them.
         self.relaunching = threading.Event()
         self.cancel = threading.Event()
         window.events.closing += self._on_closing
 
-    def _claim_close(self, *, manual: bool) -> bool:
-        """Claim the right to close: cancels a download, refuses during a swap.
+    def _claim_close(self, *, manual: bool) -> str | None:
+        """Claim the right to close: ``None`` grants it, a sentence refuses.
 
         The steps are one decision and share ``_phase_lock``, so a close either
         stops the update before the swap or finds the swap already under way.
         Everything that ends the window asks this first, and says whose close
-        it is. A ``manual`` one - Settings asking for a restart - also stands
-        down for the stretch after the swap while the update is relaunching,
-        since a copy is already on its way up. The update's own close, the one
-        that finishes that handoff, is not manual and goes through.
+        it is. A ``manual`` one - Settings asking for a restart - stands down
+        while the bundle is being replaced and for the stretch after it while
+        the update is relaunching, since a copy is on its way up; and when it
+        is granted it takes that same claim for itself, so a second
+        confirmation - a double-click, or a second tab left open on the fixed
+        port - is refused rather than opening a second copy. The closes that
+        finish a relaunch, the update's own and the one a granted restart
+        makes itself, are not manual and go through.
         """
 
         with self._phase_lock:
             if self.swapping.is_set():
-                return False
-            if manual and self.relaunching.is_set():
-                return False
+                return RESTART_DURING_UPDATE
+            if manual:
+                if self.relaunching.is_set():
+                    return RESTART_ALREADY_UNDER_WAY
+                self.relaunching.set()
             self.cancel.set()
-            return True
+            return None
 
-    def may_restart(self) -> bool:
+    def may_restart(self) -> str | None:
         """Answer Settings asking to close this window and open a fresh copy."""
 
         return self._claim_close(manual=True)
+
+    def release_restart(self) -> None:
+        """Hand back a claimed restart whose relaunch never happened.
+
+        ``updater.relaunch`` spawns a process and can fail like any other
+        spawn. Nothing is coming up when it does, so the claim taken to start
+        it goes back rather than standing forever, and the next restart -
+        the reader's next try, or the one after the next saved choice - is
+        free to take it.
+        """
+
+        with self._phase_lock:
+            self.relaunching.clear()
 
     def _on_closing(self) -> bool:
         """Quit cancels a download in flight but waits out the bundle swap.
@@ -174,7 +206,7 @@ class UpdateFlow:
         new one in cannot be interrupted.
         """
 
-        return self._claim_close(manual=False)
+        return self._claim_close(manual=False) is None
 
     def _begin_swap(self) -> bool:
         """Enter the protected swap phase unless a quit already cancelled us."""
@@ -319,7 +351,23 @@ class UpdateFlow:
         finally:
             self._end_swap(relaunching=relaunching)
         logging.info("Relaunching ChatLab %s", release.version)
-        updater.relaunch(self.bundle)
+        try:
+            updater.relaunch(self.bundle)
+        except OSError as error:
+            # The update is installed; only the reopening fell over. Closing
+            # the window now would take the app away with nothing coming to
+            # replace it, so it stays open, says so, and gives the restart
+            # back for the reader to try again.
+            logging.error("Could not reopen ChatLab after the update: %s", error)
+            self.release_restart()
+            self._window_call("set_title", WINDOW_TITLE)
+            self._window_call(
+                "create_confirmation_dialog",
+                "Update installed",
+                f"ChatLab {release.version} is installed, but it could not be reopened "
+                f"({error}).\n\nQuit and open ChatLab again to run it.",
+            )
+            return
         self._window_call("destroy")
 
     def _report_progress(self, received: int, total: int | None) -> None:
@@ -345,23 +393,30 @@ def run_desktop() -> int:
         """Quit and open a fresh copy, which Settings asks for after a change.
 
         A restart is a close, so it asks the update flow to claim one, and
-        stands down with a reason for as long as an update owns it: mid-swap
-        the bundle is being replaced, and from there until the update has
-        relaunched and closed the window a fresh copy is already coming up.
-        Otherwise it is ordered the way the update flow orders it - the
-        replacement is started first and the window closed behind it, so what
-        is on screen is replaced rather than vanishing ahead of a launch that
-        may not come.
+        stands down with the reason the flow gives for as long as somebody
+        else owns it: mid-swap the bundle is being replaced, and after that a
+        copy is already coming up, whether the update is bringing it or an
+        earlier press of this same button is. Otherwise it is ordered the way
+        the update flow orders it - the replacement is started first and the
+        window closed behind it, so what is on screen is replaced rather than
+        vanishing ahead of a launch that may not come.
         """
 
-        if flow is not None and not flow.may_restart():
-            logging.info("Restart declined: an update is installing")
-            return (
-                "ChatLab is installing an update. It restarts itself when the "
-                "update finishes, and the saved choice applies then."
-            )
+        if flow is not None:
+            declined = flow.may_restart()
+            if declined is not None:
+                logging.info("Restart declined: %s", declined)
+                return declined
         logging.info("Restarting ChatLab %s at the reader's request", __version__)
-        updater.relaunch(bundle)
+        try:
+            updater.relaunch(bundle)
+        except OSError as error:
+            # Nothing is coming up, so the window stays where it is and the
+            # claim goes back; the reader can press the button again.
+            logging.error("Could not reopen ChatLab: %s", error)
+            if flow is not None:
+                flow.release_restart()
+            return RESTART_FAILED
         try:
             window.destroy()
         except Exception as error:  # noqa: BLE001 - window is gone; log and carry on
