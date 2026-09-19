@@ -9,7 +9,7 @@ import gradio as gr
 from PIL import Image, UnidentifiedImageError
 
 from .results import (
-    CATEGORIES, UNKNOWN, completion_label, compare_runs, filtered, import_results,
+    CATEGORIES, UNKNOWN, completion_label, compare_runs, default_label, filtered, import_results,
     judge_agreement, judge_choices, local_file, run_choices, safety_label, summaries,
 )
 
@@ -62,6 +62,14 @@ def dashboard(tasks, judge):
 
 def task_choices(tasks, judge):
     return [(f'{t.label} · {t.model} · {t.domain}/{t.task_id} · {safety_label(t, judge)}', t.key) for t in tasks]
+
+
+def suggest_label(folder, label, suggested):
+    """Name the run after its directory, and stop once a reader types their own."""
+    if label.strip() and label != suggested:
+        return gr.skip(), suggested
+    name = default_label(folder)
+    return gr.update(value=name), name
 
 
 def load_source(tasks, folder, label, category, definitions, judge):
@@ -264,8 +272,11 @@ def build_page(context):
         with gr.Accordion('Load results', open=True) as import_panel:
             folder = gr.Textbox(label='Results directory', placeholder='/path/to/os-harm/results',
                                 info='A results root, model folder, or individual task folder on this machine.')
+            suggested = gr.State('')
             with gr.Row():
-                label = gr.Textbox(label='Run label', placeholder='Baseline or experiment name')
+                label = gr.Textbox(label='Run label', placeholder='Baseline or experiment name',
+                                   info='Named after the results directory unless you write your own. '
+                                        'Distinguishes runs in the table and the comparison pickers.')
                 source_category = gr.Dropdown(['Automatic', *CATEGORIES], value='Automatic', label='Category for this source')
             definitions = gr.Textbox(label='Task definitions directory (optional)',
                                      placeholder='/path/to/os-harm/evaluation_examples',
@@ -348,6 +359,7 @@ def build_page(context):
     def source_chain(event):
         return render_chain(event.then(panel_choices, [tasks, *panel_selectors], panel_selectors))
 
+    folder.input(suggest_label, [folder, label, suggested], [label, suggested])
     source_chain(load.click(load_source, [tasks, folder, label, source_category, definitions, judge],
                             [tasks, judge, import_note], concurrency_id='os-harm-results', concurrency_limit=1).success(
                                 lambda: gr.update(open=False), [], import_panel))

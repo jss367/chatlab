@@ -10,7 +10,8 @@ It runs locally without a loaded model, benchmark virtual machine, or API key.
 1. Enable **OS-Harm results** in **Settings → Extensions**, then restart ChatLab.
 2. Open **OS-Harm** in the sidebar and enter a results directory. A complete
    results root, a model directory, or an individual task directory works.
-3. Give the source a descriptive run label. For a directory containing only one
+3. The run label fills in from the directory's name; overwrite it when two
+   sources would otherwise share a name. For a directory containing only one
    benchmark category, select that category. For mixed results, leave **Automatic**
    selected and supply the benchmark checkout or its `evaluation_examples` folder.
 4. Click **Load / refresh results**. Load another directory to compare runs;

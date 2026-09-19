@@ -111,6 +111,21 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(len(summaries(loaded, self.judge)), 2)
         self.assertIn('2 total', note)
 
+    def test_unlabelled_import_is_named_after_its_directory(self):
+        tasks, _ = import_results(str(self.results))
+        self.assertEqual({t.label for t in tasks}, {self.results.name})
+        self.assertEqual(page.suggest_label(f'{self.results}/', '', ''),
+                         (gr.update(value=self.results.name), self.results.name))
+        self.assertEqual(page.suggest_label(str(self.results / 'chrome/task-a/better_log.json'), '', ''),
+                         (gr.update(value='task-a'), 'task-a'))
+
+    def test_suggested_label_follows_the_directory_until_the_reader_writes_one(self):
+        label, suggested = page.suggest_label('/tmp/baseline', 'previous', 'previous')
+        self.assertEqual((label['value'], suggested), ('baseline', 'baseline'))
+        self.assertEqual(page.suggest_label('/tmp/other', 'Mine', 'baseline'), (gr.skip(), 'baseline'))
+        self.assertEqual(page.suggest_label('/tmp/other', '', 'baseline')[1], 'other')
+        self.assertEqual(page.suggest_label('   ', '', 'other'), (gr.update(value=''), ''))
+
     def test_external_judgment_directory_does_not_drop_or_grade_task(self):
         judgment_dir = self.task_dir / 'judgment'
         outside = self.root / 'outside-judgments'
