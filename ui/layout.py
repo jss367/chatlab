@@ -285,7 +285,12 @@ def build_app() -> gr.Blocks:
     # by the time a reader looks.
     warm_device()
     extensions, extension_errors = load_enabled(saved.enabled_extensions)
-    page_choices = [PAGES[0], *(ext.spec.page_label for ext in extensions), *PAGES[1:]]
+    # The built-in pages keep fixed places in the nav and the extensions an
+    # enabled build adds sit below them, above Settings. Spliced in among the
+    # built-ins instead, an extension being enabled or removed would move
+    # Images and Models up and down the pane under a reader who had learned
+    # where they were.
+    page_choices = [*PAGES[:-1], *(ext.spec.page_label for ext in extensions), PAGES[-1]]
     # Gradio otherwise caps the page at one of a handful of widths and centers
     # it, which leaves a band of empty room down each side on a wide screen.
     # The shell wants every pixel: the two side panes are a fixed width, so the
@@ -381,9 +386,10 @@ def build_app() -> gr.Blocks:
         score_budget_load = gr.State(None)
 
         with gr.Row(elem_id="shell"):
-            # The thin pane at the far left picks the page: Chat, Models, or
-            # Settings. The stylesheet stacks the choices and pins Settings to
-            # the bottom.
+            # The thin pane at the far left picks the page: Chat, Images,
+            # Models, any extension pages, then Settings. The stylesheet stacks
+            # the choices, rules off the extensions from the pages that ship
+            # with the app, and pins Settings to the bottom.
             with gr.Column(scale=0, min_width=NAV_PANE_WIDTH, elem_id="nav-pane"):
                 nav = gr.Radio(
                     choices=page_choices,

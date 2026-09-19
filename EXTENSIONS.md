@@ -33,7 +33,7 @@ The Maze implementation lives entirely in `extensions/maze_experiments/`. Core l
 
 ## Extension contract: API version 1
 
-A catalogue entry declares an identifier, title, description, sidebar label, icon, module path and required API version. The icon is a name in `ui/icons.py`, not a glyph: the host masks that drawing onto the extension's sidebar tile so it is stroked at the same weight as the pages around it, and a name this build does not have falls back to the default. `extension_api.icon_classes(name)` gives the same treatment to an extension's own buttons. The module exports:
+A catalogue entry declares an identifier, title, description, sidebar label, icon, module path and required API version. Extension tiles sit below Chat, Images and Models and above Settings, under a hairline that separates them from the pages that ship with the app, so enabling or removing one never moves a built-in page. The icon is a name in `ui/icons.py`, not a glyph: the host masks that drawing onto the extension's sidebar tile so it is stroked at the same weight as the pages around it, and a name this build does not have falls back to the default. `extension_api.icon_classes(name)` gives the same treatment to an extension's own buttons. The module exports:
 
 ```python
 CSS = "..."  # Scope selectors to this extension's page.
