@@ -14,6 +14,7 @@ from .results import (
 )
 
 logger = logging.getLogger(__name__)
+LABEL_PLACEHOLDER = 'Baseline or experiment name'
 CSS = """
 #os-harm-page {padding:20px 24px; height:100%; min-height:0; overflow:auto; flex-wrap:nowrap;}
 #os-harm-page > * {flex-shrink:0;}
@@ -64,20 +65,19 @@ def task_choices(tasks, judge):
     return [(f'{t.label} · {t.model} · {t.domain}/{t.task_id} · {safety_label(t, judge)}', t.key) for t in tasks]
 
 
-def suggest_label(folder, label, suggested):
-    """Name the run after its directory, and stop once a reader types their own."""
-    if label.strip() and label != suggested:
-        return gr.skip(), suggested
-    name = default_label(folder)
-    return gr.update(value=name), name
+def suggest_label(folder):
+    """Show the name an unlabelled load would use, as the box's placeholder.
+
+    A suggestion written into the box would arrive from a queued request that
+    captured an older label, and could overwrite a name typed meanwhile or be
+    read stale by a load clicked at once. Only the placeholder is written, and
+    the label itself is settled from the submitted folder when a load runs.
+    """
+    return gr.update(placeholder=default_label(folder) or LABEL_PLACEHOLDER)
 
 
-def load_source(tasks, folder, label, suggested, category, definitions, judge):
-    # The suggestion is a queued event, so a reader who edits the path and clicks
-    # Load at once can submit the previous folder's name. An untouched label is
-    # therefore taken from the folder here rather than from the box.
-    if not label.strip() or label == suggested:
-        label = default_label(folder)
+def load_source(tasks, folder, label, category, definitions, judge):
+    label = label.strip() or default_label(folder)
     try:
         imported, warnings = import_results(folder, label, category, definitions)
     except (OSError, ValueError) as exc:
@@ -88,7 +88,8 @@ def load_source(tasks, folder, label, suggested, category, definitions, judge):
     tasks = [t for t in tasks if t.source != source and t.key not in keys] + imported
     choices = judge_choices(tasks)
     selected = judge if judge in choices else ('gpt-4.1/aer/v3' if 'gpt-4.1/aer/v3' in choices else next(iter(choices), None))
-    note = f'Loaded {len(imported)} tasks; {len(tasks)} total. Import again to refresh this source.'
+    note = (f'Loaded {len(imported)} tasks as "{imported[0].label}"; {len(tasks)} total. '
+            'Import again to refresh this source.')
     unknown = sum(t.category == UNKNOWN for t in imported)
     if unknown:
         note += f' {unknown} tasks have no category: choose a category or supply the benchmark task definitions.'
@@ -277,9 +278,8 @@ def build_page(context):
         with gr.Accordion('Load results', open=True) as import_panel:
             folder = gr.Textbox(label='Results directory', placeholder='/path/to/os-harm/results',
                                 info='A results root, model folder, or individual task folder on this machine.')
-            suggested = gr.State('')
             with gr.Row():
-                label = gr.Textbox(label='Run label', placeholder='Baseline or experiment name',
+                label = gr.Textbox(label='Run label (optional)', placeholder=LABEL_PLACEHOLDER,
                                    info='Named after the results directory unless you write your own. '
                                         'Distinguishes runs in the table and the comparison pickers.')
                 source_category = gr.Dropdown(['Automatic', *CATEGORIES], value='Automatic', label='Category for this source')
@@ -364,8 +364,8 @@ def build_page(context):
     def source_chain(event):
         return render_chain(event.then(panel_choices, [tasks, *panel_selectors], panel_selectors))
 
-    folder.input(suggest_label, [folder, label, suggested], [label, suggested])
-    source_chain(load.click(load_source, [tasks, folder, label, suggested, source_category, definitions, judge],
+    folder.input(suggest_label, folder, label, queue=False, show_progress='hidden')
+    source_chain(load.click(load_source, [tasks, folder, label, source_category, definitions, judge],
                             [tasks, judge, import_note], concurrency_id='os-harm-results', concurrency_limit=1).success(
                                 lambda: gr.update(open=False), [], import_panel))
     # Both actions replace the session's task list. Queue Clear behind any

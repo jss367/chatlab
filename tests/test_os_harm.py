@@ -104,38 +104,29 @@ class ResultTests(unittest.TestCase):
         other = self.root / 'second' / 'chrome' / 'task-a'
         self.write('better_log.json', self.log, other)
         tasks += import_results(str(self.root / 'second'), label='Second')[0]
-        loaded, judge, note = page.load_source(tasks, str(self.results), 'Updated', '', 'Automatic', '', self.judge)
+        loaded, judge, note = page.load_source(tasks, str(self.results), 'Updated', 'Automatic', '', self.judge)
         self.assertEqual(len(loaded), 2)
         self.assertEqual({t.label for t in loaded}, {'Second', 'Updated'})
         self.assertEqual(judge['value'], self.judge)
         self.assertEqual(len(summaries(loaded, self.judge)), 2)
         self.assertIn('2 total', note)
 
-    def test_unlabelled_import_is_named_after_its_directory(self):
+    def test_unlabelled_load_is_named_after_its_directory(self):
         tasks, _ = import_results(str(self.results))
         self.assertEqual({t.label for t in tasks}, {self.results.name})
-        self.assertEqual(page.suggest_label(f'{self.results}/', '', ''),
-                         (gr.update(value=self.results.name), self.results.name))
-        self.assertEqual(page.suggest_label(str(self.results / 'chrome/task-a/better_log.json'), '', ''),
-                         (gr.update(value='task-a'), 'task-a'))
+        loaded, _, note = page.load_source([], f'{self.results}/', '  ', 'Automatic', '', None)
+        self.assertEqual({t.label for t in loaded}, {self.results.name})
+        self.assertIn(f'as "{self.results.name}"', note)
+        written, _, _ = page.load_source([], str(self.results), 'Mine', 'Automatic', '', None)
+        self.assertEqual({t.label for t in written}, {'Mine'})
 
-    def test_load_ignores_a_stale_suggestion_still_in_flight(self):
-        other = self.root / 'second' / 'chrome' / 'task-a'
-        self.write('better_log.json', self.log, other)
-        # The box still holds the previous folder's suggestion when Load is clicked.
-        loaded, _, _ = page.load_source([], str(self.root / 'second'), self.results.name,
-                                        self.results.name, 'Automatic', '', None)
-        self.assertEqual({t.label for t in loaded}, {'second'})
-        kept, _, _ = page.load_source([], str(self.root / 'second'), 'Mine', self.results.name,
-                                      'Automatic', '', None)
-        self.assertEqual({t.label for t in kept}, {'Mine'})
-
-    def test_suggested_label_follows_the_directory_until_the_reader_writes_one(self):
-        label, suggested = page.suggest_label('/tmp/baseline', 'previous', 'previous')
-        self.assertEqual((label['value'], suggested), ('baseline', 'baseline'))
-        self.assertEqual(page.suggest_label('/tmp/other', 'Mine', 'baseline'), (gr.skip(), 'baseline'))
-        self.assertEqual(page.suggest_label('/tmp/other', '', 'baseline')[1], 'other')
-        self.assertEqual(page.suggest_label('   ', '', 'other'), (gr.update(value=''), ''))
+    def test_suggestion_names_the_directory_without_touching_the_typed_label(self):
+        # Only the placeholder is written, so a queued suggestion cannot overwrite
+        # a label typed while it was in flight, nor be read stale by a load.
+        self.assertEqual(page.suggest_label('/tmp/baseline/'), gr.update(placeholder='baseline'))
+        self.assertEqual(page.suggest_label('/tmp/baseline/chrome/task-a/better_log.json'),
+                         gr.update(placeholder='task-a'))
+        self.assertEqual(page.suggest_label('   '), gr.update(placeholder=page.LABEL_PLACEHOLDER))
 
     def test_external_judgment_directory_does_not_drop_or_grade_task(self):
         judgment_dir = self.task_dir / 'judgment'
@@ -322,7 +313,7 @@ class ResultTests(unittest.TestCase):
         self.load()
         self.assertEqual(set(self.root.rglob('*')), before)
         with self.assertRaises(gr.Error):
-            page.load_source([], '', '', '', 'Automatic', '', None)
+            page.load_source([], '', '', 'Automatic', '', None)
 
     def test_recorded_observations_are_read_on_demand(self):
         self.trajectory([{'step_num': 1, 'screenshot_file': 'step_1.png'}])
