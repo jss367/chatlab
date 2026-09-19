@@ -111,6 +111,23 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(len(summaries(loaded, self.judge)), 2)
         self.assertIn('2 total', note)
 
+    def test_unlabelled_load_is_named_after_its_directory(self):
+        tasks, _ = import_results(str(self.results))
+        self.assertEqual({t.label for t in tasks}, {self.results.name})
+        loaded, _, note = page.load_source([], f'{self.results}/', '  ', 'Automatic', '', None)
+        self.assertEqual({t.label for t in loaded}, {self.results.name})
+        self.assertIn(f'as "{self.results.name}"', note)
+        written, _, _ = page.load_source([], str(self.results), 'Mine', 'Automatic', '', None)
+        self.assertEqual({t.label for t in written}, {'Mine'})
+
+    def test_suggestion_names_the_directory_without_touching_the_typed_label(self):
+        # Only the placeholder is written, so a queued suggestion cannot overwrite
+        # a label typed while it was in flight, nor be read stale by a load.
+        self.assertEqual(page.suggest_label('/tmp/baseline/'), gr.update(placeholder='baseline'))
+        self.assertEqual(page.suggest_label('/tmp/baseline/chrome/task-a/better_log.json'),
+                         gr.update(placeholder='task-a'))
+        self.assertEqual(page.suggest_label('   '), gr.update(placeholder=page.LABEL_PLACEHOLDER))
+
     def test_external_judgment_directory_does_not_drop_or_grade_task(self):
         judgment_dir = self.task_dir / 'judgment'
         outside = self.root / 'outside-judgments'

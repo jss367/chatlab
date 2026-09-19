@@ -255,6 +255,14 @@ def load_task(directory, root, label, category, index):
                 len(log['steps']), judgments, errors, warnings)
 
 
+def default_label(folder: str):
+    """The label an unlabelled import takes: the selected directory's own name."""
+    if not folder.strip():
+        return ''
+    path = Path(folder.strip()).expanduser()
+    return (path.parent if path.name == 'better_log.json' else path).name
+
+
 def import_results(folder: str, label='', category='Automatic', definitions=''):
     if not folder.strip():
         raise ValueError('Enter an OS-Harm results directory.')
@@ -274,7 +282,7 @@ def import_results(folder: str, label='', category='Automatic', definitions=''):
         try:
             if not resolve_path(path).is_relative_to(root):
                 raise ValueError('Result symlink leaves the selected directory.')
-            task = load_task(path.parent, root, label.strip() or root.name, category, index)
+            task = load_task(path.parent, root, label.strip() or default_label(str(root)), category, index)
             tasks.append(task)
             warnings.extend(f'{path.parent.name}: {w}' for w in task.warnings)
         except (OSError, ValueError) as exc:
