@@ -20,12 +20,36 @@ SHELL_CSS = """
 """
 
 
+def nav_divider_css(extensions):
+    """A hairline above the first extension's nav tile.
+
+    The extensions sit in the same column of tiles as the pages that ship
+    with the app, and the line says which is which - worth knowing when a
+    page misbehaves and a reader is deciding whether the app or an extension
+    they added is at fault. It is drawn on the tile's ::after, in the gap the
+    tile's own margin opens above it, because ::before already carries the
+    icon and a border on the tile itself would fight the outline the selected
+    tile wears.
+    """
+
+    if not extensions:
+        return ""
+    first = json.dumps(extensions[0].spec.page_label + "-radio-label")
+    return f"""
+#nav label[data-testid={first}] {{ margin-top: 0.6rem; }}
+#nav label[data-testid={first}]::after {{
+  content: ""; position: absolute; left: 0.35rem; right: 0.35rem; top: -0.45rem;
+  border-top: 1px solid var(--border-color-primary);
+}}
+"""
+
+
 def extension_css(extensions):
     """The shell rules, each extension's nav icon, and each extension's CSS.
 
     An extension names an icon in ui.icons rather than supplying a drawing,
-    so its tile is stroked at the same weight as the pages it sits between.
-    A name this build does not have falls back to the default rather than
+    so its tile is stroked at the same weight as the pages it sits under. A
+    name this build does not have falls back to the default rather than
     emitting a rule that masks the tile away to nothing.
     """
 
@@ -36,7 +60,10 @@ def extension_css(extensions):
         )
         for ext in extensions
     )
-    return SHELL_CSS + tiles + "\n" + "\n".join(ext.css for ext in extensions)
+    return (
+        SHELL_CSS + tiles + nav_divider_css(extensions) + "\n"
+        + "\n".join(ext.css for ext in extensions)
+    )
 
 
 def data_directory(extension_id):

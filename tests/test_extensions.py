@@ -19,7 +19,8 @@ from extension_api import ModelService, NavigationService, TokenInspector
 from model_runtime import GENERATING, LOADING
 from extensions.maze_experiments.maze import default_instruction
 from extensions.registry import ExtensionSpec, LoadedExtension, load_enabled
-from ui.extensions_page import restart_now, restore_extensions, save_extensions
+from ui.extensions_page import (extension_css, nav_divider_css, restart_now,
+                                restore_extensions, save_extensions)
 
 
 def setUpModule():
@@ -350,6 +351,28 @@ class RegistryTests(unittest.TestCase):
         finally:
             demo.close()
 
+    def test_extension_tiles_sit_under_the_built_in_pages_behind_a_rule(self):
+        specs = [
+            ExtensionSpec('one', 'One', '', 'One', 'one_module'),
+            ExtensionSpec('two', 'Two', '', 'Two', 'two_module'),
+        ]
+        loaded = [LoadedExtension(spec, lambda context: None, '') for spec in specs]
+        css = extension_css(loaded)
+        self.assertIn('#nav label[data-testid="One-radio-label"]::after', css)
+        self.assertNotIn('#nav label[data-testid="Two-radio-label"]::after', css)
+        self.assertEqual(nav_divider_css([]), '')
+
+        with mock.patch('ui.layout.load_enabled', return_value=(loaded, [])):
+            demo = app.build_app()
+        try:
+            nav = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'nav')
+            self.assertEqual(
+                [value for _, value in nav.choices],
+                ['Chat', 'Images', 'Models', 'One', 'Two', 'Settings'],
+            )
+        finally:
+            demo.close()
+
 
 class ExtensionSettingsTests(unittest.TestCase):
     def setUp(self):
@@ -405,7 +428,7 @@ class ExtensionSettingsTests(unittest.TestCase):
             nav = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'nav')
             self.assertEqual(
             [value for _, value in nav.choices],
-            ['Chat', 'Maze', 'Images', 'Models', 'Settings'],
+            ['Chat', 'Images', 'Models', 'Maze', 'Settings'],
         )
             self.assertTrue(any(getattr(b, 'elem_id', None) == 'maze-run' for b in demo.blocks.values()))
         finally:

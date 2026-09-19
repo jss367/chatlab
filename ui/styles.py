@@ -638,12 +638,14 @@ label.{ICON_CLASS} {{ display: inline-flex; }}
 
 /* The nav is a Radio drawn as a column of tiles. Its inputs are hidden, the
    selected tile is filled, and the last tile (Settings) is pushed to the
-   bottom. */
+   bottom. Extension tiles follow the pages that ship with the app, under a
+   hairline that ui.extensions_page draws on the first of them. */
 #nav-pane > *, #nav, #nav .wrap {{ height: 100%; }}
 #nav {{ overflow: visible !important; }}
 #nav .wrap {{ flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 0.3rem; }}
 /* Each tile stacks the icon over the page's name, so the name is on screen
-   rather than a hover away. Three pages is not a number worth hiding. */
+   rather than a hover away. Four pages and a couple of extensions is not a
+   number worth hiding. */
 #nav label {{
   position: relative;
   display: flex; flex-direction: column; align-items: center; gap: 0.15rem;
