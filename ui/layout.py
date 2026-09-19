@@ -210,6 +210,7 @@ from ui.token_menu import (
     prompt_menu_payload, token_menu_payload,
 )
 from ui.styles import (
+    COLUMN_JS,
     CSS,
     THEME,
     READ_ONLY_TEXT_JS,
@@ -2113,6 +2114,9 @@ def build_app() -> gr.Blocks:
         # The two readings panes are dragged wider or narrower by the handle
         # on their seam, and remember the width they were left at.
         demo.load(None, None, None, js=RESIZE_JS)
+        # A table column is dragged wider by the seam on its header, for the
+        # text Gradio's own measurement clips.
+        demo.load(None, None, None, js=COLUMN_JS)
         # A box that only shows text is read-only rather than dead, so text
         # too long for it can be scrolled to and taken out.
         demo.load(None, None, None, js=READ_ONLY_TEXT_JS)

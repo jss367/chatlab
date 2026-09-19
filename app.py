@@ -393,6 +393,7 @@ from ui.settings_page import (
     update_sampling_label,
 )
 from ui.styles import (
+    COLUMN_JS,
     CSS,
     MESSAGE_BOX_MAX_LINES,
     READ_ONLY_TEXT_JS,

@@ -150,6 +150,15 @@ html, body {{ height: 100%; overflow: hidden; }}
   outline: none;
 }}
 body.pane-dragging {{ cursor: col-resize; user-select: none; }}
+/* The seam between two columns, drawn on the header whose edge it is; see
+   COLUMN_JS. The line is inset rather than a border because a border would
+   change the width the drag is measuring. */
+.table-wrap thead th.column-seam {{
+  cursor: col-resize;
+  box-shadow: inset -3px 0 0 -1px var(--color-accent);
+}}
+body.column-dragging, body.column-dragging * {{ cursor: col-resize !important; }}
+body.column-dragging {{ user-select: none; }}
 #models-page, #settings-page {{
   height: 100%; overflow-y: auto; overscroll-behavior-y: contain;
   padding: 24px 32px;
@@ -1418,6 +1427,194 @@ RESIZE_JS = """
     write(handle.dataset.property, width);
     store(handle.dataset.store, width);
     announce(handle, width, room);
+  });
+}
+"""
+
+
+# A table's columns are as wide as Gradio measured them, and anything that
+# did not fit is clipped: a column of task IDs or of instructions arrives
+# with its text cut off mid-word and nothing on the page will show the rest,
+# because the table scrolls sideways but every column in it keeps the width
+# Gradio chose. So the right edge of each header is a seam to drag, the way
+# the panes' seams are, and double-clicking one hands the column back the
+# width Gradio measured.
+#
+# Where the width is written is what makes a dragged column stay dragged.
+# Gradio keeps each column's width in a --cell-width-<i> property on the
+# wrap around the table it measures with, and rewrites all of them whenever
+# the rows change, which on a filtered table is with every keystroke. The
+# table the reader sees sits in a second wrap inside that one and inherits
+# the properties, so a width written to the inner wrap covers Gradio's
+# without overwriting it: the column the reader dragged holds its width
+# through a filter, and every column they left alone goes on being measured.
+#
+# The listeners are on the document rather than on the headers, because the
+# tables belong to pages the nav has not built yet and Gradio rebuilds a
+# header row whenever its columns change. Nothing is added to the table
+# either: the seam is a strip of the header cell rather than an element of
+# its own, so there is nothing for Gradio to throw away.
+COLUMN_JS = """
+() => {
+  if (window.__chatlabColumnResize) { return; }
+  window.__chatlabColumnResize = true;
+  // How near a header's edge a pointer counts as being at the seam.
+  const EDGE = 6;
+  // Narrow enough to push a column out of the way, wide enough to leave
+  // something to grab on the way back.
+  const MIN_COLUMN = 48;
+
+  // One table's header cells, in the order Gradio numbers their columns.
+  // The row number column is not one of them and carries a width of its
+  // own, so counting past it would name the wrong column.
+  const headersOf = (th) => {
+    const row = th.parentElement;
+    if (!row) { return []; }
+    return Array.prototype.filter.call(row.children, (cell) =>
+      cell.tagName === 'TH' && !cell.classList.contains('row-number'));
+  };
+
+  const headerAt = (target) =>
+    target && target.closest ? target.closest('thead th') : null;
+
+  // The seam a pointer at x is at, named by the column on its left, which
+  // is the column a drag resizes. A pointer just inside the header on the
+  // right is at the same seam, so the strip is the full EDGE either side of
+  // the line rather than half of it on one header.
+  const seamAt = (th, x) => {
+    const columns = headersOf(th);
+    const column = columns.indexOf(th);
+    if (column === -1) { return null; }
+    const box = th.getBoundingClientRect();
+    if (Math.abs(x - box.right) <= EDGE) { return { th: th, column: column }; }
+    if (column > 0 && Math.abs(x - box.left) <= EDGE) {
+      return { th: columns[column - 1], column: column - 1 };
+    }
+    return null;
+  };
+
+  // Onto the wrap the header is in, which is the one holding the table on
+  // screen. Gradio writes the same properties to the wrap outside it and
+  // goes on doing so; this one covers them for as long as the reader wants
+  // it to, and a width of null uncovers them again.
+  const write = (seam, width) => {
+    const wrap = seam.th.closest('.table-wrap');
+    if (!wrap) { return; }
+    const property = '--cell-width-' + seam.column;
+    if (width === null) { wrap.style.removeProperty(property); }
+    else { wrap.style.setProperty(property, Math.round(width) + 'px'); }
+  };
+
+  let dragging = null;
+  let marked = null;
+  // A click on a header sorts the table. Every release on a seam is also a
+  // click on the header behind it and means nothing of the kind, so it is
+  // caught on the way down and dropped - the release that ends a drag, and
+  // the two releases that make the double-click asking for a reset, which
+  // would otherwise sort the table twice on the way to putting a column
+  // back.
+  let swallow = false;
+
+  // The seam draws itself on the header to its left, so the line under the
+  // pointer is the edge that is about to move.
+  const mark = (seam) => {
+    const th = seam ? seam.th : null;
+    if (marked === th) { return; }
+    if (marked) { marked.classList.remove('column-seam'); }
+    marked = th;
+    if (marked) { marked.classList.add('column-seam'); }
+  };
+
+  // A second finger on a touch screen reports its own moves and its own
+  // release, and neither has anything to do with the drag the first one
+  // started.
+  const elsewhere = (event) =>
+    event && event.pointerId !== undefined && event.pointerId !== dragging.pointer;
+
+  const finish = (event) => {
+    if (!dragging || elsewhere(event)) { return; }
+    if (dragging.seam.th.hasPointerCapture(dragging.pointer)) {
+      dragging.seam.th.releasePointerCapture(dragging.pointer);
+    }
+    document.body.classList.remove('column-dragging');
+    // Only a release makes a click. A drag the browser took back, or one
+    // let go somewhere the page never heard about, is followed by nothing,
+    // and a flag left standing for it would be spent on whatever the reader
+    // clicked next, anywhere on the page.
+    swallow = !!(event && event.type === 'pointerup');
+    dragging = null;
+  };
+
+  const move = (event) => {
+    if (!dragging || elsewhere(event)) { return; }
+    // A pointer back over the window with no button held was let go
+    // somewhere the page never heard about, and the drag ended with it.
+    if (!event.buttons) { finish(); return; }
+    const width = Math.max(
+      MIN_COLUMN, dragging.start + (event.clientX - dragging.origin)
+    );
+    if (Math.round(width) !== Math.round(dragging.start)) { dragging.moved = true; }
+    write(dragging.seam, width);
+  };
+
+  document.addEventListener('pointerdown', (event) => {
+    // Whatever a previous gesture left unspent belongs to that gesture, and
+    // a new press is the last moment it can be dropped without taking a
+    // click the reader meant with it.
+    swallow = false;
+    // A drag belongs to the pointer that began it until that pointer ends
+    // it, and a touch that lands on a seam is a scroll of the table rather
+    // than a resize of a column.
+    if (dragging || event.button !== 0 || event.pointerType === 'touch') { return; }
+    const th = headerAt(event.target);
+    const seam = th && seamAt(th, event.clientX);
+    if (!seam) { return; }
+    event.preventDefault();
+    dragging = {
+      seam: seam,
+      pointer: event.pointerId,
+      origin: event.clientX,
+      start: seam.th.getBoundingClientRect().width,
+      moved: false,
+    };
+    mark(seam);
+    // The header keeps the pointer for the whole drag, so a release out
+    // beyond the edge of the window is still delivered and still ends it.
+    // Without that the reader comes back to a column following a pointer
+    // with nothing held down.
+    seam.th.setPointerCapture(event.pointerId);
+    document.body.classList.add('column-dragging');
+  });
+
+  // On the window, because a captured pointer aims its events at the header
+  // and they reach the window from there, and because a header on a page
+  // the nav has not shown yet is not in the document when this runs.
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', finish);
+  window.addEventListener('pointercancel', finish);
+
+  // Nothing on a table says which of its edges can be dragged, so the seam
+  // under the pointer says it for itself.
+  document.addEventListener('pointermove', (event) => {
+    if (dragging) { return; }
+    const th = headerAt(event.target);
+    mark(th ? seamAt(th, event.clientX) : null);
+  });
+
+  document.addEventListener('click', (event) => {
+    if (!swallow) { return; }
+    swallow = false;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
+
+  document.addEventListener('dblclick', (event) => {
+    const th = headerAt(event.target);
+    const seam = th && seamAt(th, event.clientX);
+    if (!seam) { return; }
+    event.preventDefault();
+    event.stopPropagation();
+    write(seam, null);
   });
 }
 """
