@@ -1507,9 +1507,12 @@ COLUMN_JS = """
 
   let dragging = null;
   let marked = null;
-  // A click on a header sorts the table. The click that ends a drag is the
-  // release of that drag and means nothing of the kind, so it is caught on
-  // the way down and dropped.
+  // A click on a header sorts the table. Every release on a seam is also a
+  // click on the header behind it and means nothing of the kind, so it is
+  // caught on the way down and dropped - the release that ends a drag, and
+  // the two releases that make the double-click asking for a reset, which
+  // would otherwise sort the table twice on the way to putting a column
+  // back.
   let swallow = false;
 
   // The seam draws itself on the header to its left, so the line under the
@@ -1534,7 +1537,11 @@ COLUMN_JS = """
       dragging.seam.th.releasePointerCapture(dragging.pointer);
     }
     document.body.classList.remove('column-dragging');
-    swallow = dragging.moved;
+    // Only a release makes a click. A drag the browser took back, or one
+    // let go somewhere the page never heard about, is followed by nothing,
+    // and a flag left standing for it would be spent on whatever the reader
+    // clicked next, anywhere on the page.
+    swallow = !!(event && event.type === 'pointerup');
     dragging = null;
   };
 
@@ -1551,6 +1558,10 @@ COLUMN_JS = """
   };
 
   document.addEventListener('pointerdown', (event) => {
+    // Whatever a previous gesture left unspent belongs to that gesture, and
+    // a new press is the last moment it can be dropped without taking a
+    // click the reader meant with it.
+    swallow = false;
     // A drag belongs to the pointer that began it until that pointer ends
     // it, and a touch that lands on a seam is a scroll of the table rather
     // than a resize of a column.

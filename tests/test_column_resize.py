@@ -86,6 +86,7 @@ const window = {
 // A real event runs up from the header it was aimed at to the document and
 // on to the window, so both sets of listeners hear it.
 const fire = (type, event) => {
+  event.type = type;
   event.defaulted = false;
   event.stopped = false;
   event.preventDefault = () => { event.defaulted = true; };
@@ -259,9 +260,12 @@ assert.strictEqual(next.stopped, false, 'a later click sorts as it always did');
         )
 
     @unittest.skipUnless(shutil.which("node"), "needs node to run the script")
-    def test_a_press_that_moved_nothing_leaves_the_click_alone(self):
-        # A press on the seam that goes nowhere is a click on the header,
-        # and the reader who meant to sort should get their sort.
+    def test_a_press_on_a_seam_never_sorts_however_little_it_moved(self):
+        # Every release on a seam is also a click on the header behind it.
+        # Sorting on the ones that happened to move nothing would make the
+        # double-click that resets a column sort the table twice on its way
+        # to putting the column back - and rebuild the header row the
+        # reader is still holding.
         self.check(
             """
 start();
@@ -269,9 +273,55 @@ const table = dataframe([120, 200, 90]);
 
 press(table.columns[1], 320);
 release();
-const event = fire('click', { target: table.columns[1] });
+const still = fire('click', { target: table.columns[1] });
+assert.strictEqual(still.stopped, true, 'a press at the seam is not a sort');
 
-assert.strictEqual(event.stopped, false, 'a still press is still a click');
+// The two releases of a double-click, and then the reset itself.
+press(table.columns[1], 320);
+release();
+assert.strictEqual(
+  fire('click', { target: table.columns[1] }).stopped, true,
+  'nor is the second of them'
+);
+fire('dblclick', { target: table.columns[1], clientX: 320 });
+
+// A press anywhere else on the header still sorts.
+press(table.columns[1], 220);
+release();
+assert.strictEqual(
+  fire('click', { target: table.columns[1] }).stopped, false,
+  'the rest of the header is still a sort'
+);
+"""
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the script")
+    def test_a_gesture_the_page_lost_does_not_swallow_a_later_click(self):
+        # A drag the browser takes back, or one let go out beyond the edge
+        # of the window, is followed by no click at all. A suppression left
+        # standing for it would be spent on whatever the reader pressed
+        # next, anywhere on the page.
+        self.check(
+            """
+start();
+const table = dataframe([120, 200, 90]);
+
+press(table.columns[1], 320);
+drag(420);
+fire('pointercancel', { target: body, pointerId: 1 });
+assert.strictEqual(
+  fire('click', { target: table.columns[0] }).stopped, false,
+  'a cancelled drag leaves the next click alone'
+);
+
+// And the same for a release the page never heard.
+press(table.columns[1], 320);
+drag(470);
+fire('pointermove', { target: body, clientX: 470, pointerId: 1, buttons: 0 });
+assert.strictEqual(
+  fire('click', { target: table.columns[0] }).stopped, false,
+  'and so does a release beyond the window'
+);
 """
         )
 
