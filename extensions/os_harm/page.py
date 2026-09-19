@@ -72,7 +72,12 @@ def suggest_label(folder, label, suggested):
     return gr.update(value=name), name
 
 
-def load_source(tasks, folder, label, category, definitions, judge):
+def load_source(tasks, folder, label, suggested, category, definitions, judge):
+    # The suggestion is a queued event, so a reader who edits the path and clicks
+    # Load at once can submit the previous folder's name. An untouched label is
+    # therefore taken from the folder here rather than from the box.
+    if not label.strip() or label == suggested:
+        label = default_label(folder)
     try:
         imported, warnings = import_results(folder, label, category, definitions)
     except (OSError, ValueError) as exc:
@@ -360,7 +365,7 @@ def build_page(context):
         return render_chain(event.then(panel_choices, [tasks, *panel_selectors], panel_selectors))
 
     folder.input(suggest_label, [folder, label, suggested], [label, suggested])
-    source_chain(load.click(load_source, [tasks, folder, label, source_category, definitions, judge],
+    source_chain(load.click(load_source, [tasks, folder, label, suggested, source_category, definitions, judge],
                             [tasks, judge, import_note], concurrency_id='os-harm-results', concurrency_limit=1).success(
                                 lambda: gr.update(open=False), [], import_panel))
     # Both actions replace the session's task list. Queue Clear behind any
