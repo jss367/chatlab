@@ -326,6 +326,18 @@ def swapped_model(recorded_model, used_model):
     return used_model if used_model and recorded_model and used_model != recorded_model else ""
 
 
+def read_by_another(recorded_model, used_model):
+    """Name a reading made by a model that did not record the run.
+
+    Said of the model rather than of a load having moved: two vocabularies
+    number their pieces independently, so this is another model's answer to
+    the same messages and not a revision of the record, which the softer
+    wording about a vocabulary having moved would leave a reader guessing at.
+    """
+    return (f", under {html.escape(used_model)} rather than the "
+            f"{html.escape(recorded_model)} that recorded this run")
+
+
 def spelled_by_another(count, recorded_model, used_model):
     """Say that a run's recorded prompt IDs were left undecoded, and name both models.
 
@@ -413,12 +425,19 @@ def context_view(ep, models, index=None):
         # so a model carried from another could be called loaded beside text
         # it did not spell.
         swapped = swapped_model(ep.model_id, model_of(load_id))
-        aside = spelled_by_another(len(ids), ep.model_id, swapped) if ids and swapped else ""
-        # The aside already names both models, so the load stamps would only
-        # repeat it in weaker words.
+        if not swapped:
+            frame, aside = under_load(ep.load_id, load_id), ""
+        elif ids:
+            # The aside names both models, so the load stamps would only repeat
+            # it in weaker words.
+            frame, aside = "", spelled_by_another(len(ids), ep.model_id, swapped)
+        else:
+            # No recorded IDs to leave undecoded, no response having been asked
+            # for yet, so the swap is said of the reading itself rather than
+            # going unsaid.
+            frame, aside = read_by_another(ep.model_id, swapped), ""
         return (f"**{where} · as the loaded model would be given it** · {len(messages)} messages and the move tool "
-                f"through that model's own template{'' if swapped else under_load(ep.load_id, load_id)}."
-                f"{aside}{tail}", text)
+                f"through that model's own template{frame}.{aside}{tail}", text)
     # Nothing here was spelled by a load, this transcript being the run's own
     # messages, so the model is read fresh rather than carried from a reading
     # that failed: what the aside says is what is in memory as it is written,

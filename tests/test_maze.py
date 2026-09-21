@@ -1208,6 +1208,16 @@ class MazeTests(unittest.TestCase):
                       'loaded and another/model recorded them', note)
         self.assertNotIn('rather than the', note)
         ep.turns[0]['prompt_ids'] = spelled
+        # The initial prompt has no recorded IDs to leave undecoded, so there
+        # is no aside to carry the two names. The reading is still one model's
+        # answer to another's messages, and is marked as that rather than
+        # falling silent or reporting a vocabulary that has moved.
+        note, text = context_view(ep, manager, -1)
+        self.assertIn('**Initial prompt · as the loaded model would be given it**', note)
+        self.assertIn('under test/model rather than the another/model that recorded this run', note)
+        self.assertNotIn('not decoded here', note)
+        self.assertNotIn('would read differently here', note)
+        self.assertTrue(text.endswith('<assistant>'))
         # A different model that can decode the IDs but whose template refuses
         # this history leaves the pane at its least readable, which is where
         # naming the recording model helps most. That model is in memory as the
