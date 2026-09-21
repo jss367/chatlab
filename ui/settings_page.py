@@ -85,9 +85,17 @@ def _metal_cap(profile: DeviceProfile) -> str:
             "PyTorch's own, because Metal did not say what it recommends. "
             "Set `mps_memory_fraction` in the settings file to hold it down."
         )
+    spent = (
+        ""
+        if not profile.taken
+        else (
+            f" {memory_note(profile.taken)} of it is taken already, and the cap "
+            "counts that against the next load rather than on top of it."
+        )
+    )
     return (
         f"{format_memory(profile.ceiling)}, {profile.fraction:.2f} of the "
-        f"{memory_note(profile.recommended)} Metal recommends. A conversation "
+        f"{memory_note(profile.recommended)} Metal recommends.{spent} A conversation "
         "that outgrows it ends with an out-of-memory message rather than a "
         "frozen Mac; `mps_memory_fraction` in the settings file moves it."
     )

@@ -1882,6 +1882,76 @@ class LoadingReportTests(unittest.TestCase):
         release.assert_called_once()
         self.assertFalse(manager.loaded)
 
+    def test_the_refusal_says_how_far_the_load_got_and_what_the_cap_is(self):
+        # Metal's own complaint is three figures and a watermark variable,
+        # none of which says that the ceiling it names is ChatLab's own. A
+        # reader given only that closes applications, which is the wrong
+        # half of the machine.
+        import torch
+
+        manager = model_runtime.ModelManager()
+        GB = 1024**3
+        with (
+            mock.patch("model_runtime.detect_backend", return_value="mps"),
+            mock.patch.object(manager, "_unload_locked"),
+            mock.patch.object(manager, "_cap_mps_memory", return_value=24 * GB),
+            mock.patch.object(manager, "_check_memory", return_value=(17 * GB, 20 * GB)),
+            mock.patch.object(manager, "_release_device_cache"),
+            mock.patch("model_runtime.allocated_bytes", return_value=9 * GB),
+            mock.patch("model_runtime.reserved_bytes", return_value=23 * GB),
+            mock.patch(
+                "model_runtime._read_text_model",
+                side_effect=RuntimeError("MPS backend out of memory (max allowed: 24.00 GiB)"),
+            ),
+            self.assertLogs("model_runtime", level="WARNING"),
+            self.assertRaises(model_runtime.OutOfMemoryError) as caught,
+        ):
+            manager._load_locked("org/model", Path("/snap"), torch)
+
+        message = str(caught.exception)
+        self.assertIn("9.0 GB of an estimated 17.0 GB", message)
+        # A Metal text load at full weights has 8- and 4-bit to fall back on.
+        self.assertIn("a smaller model or a narrower weight precision", message)
+        self.assertIn("caps Metal allocations at 24.0 GB", message)
+        self.assertIn("23.0 GB was out when it stopped", message)
+        self.assertIn("mps_memory_fraction", message)
+        self.assertIn("MPS backend out of memory", message)
+
+    def test_a_load_that_cannot_be_packed_narrower_is_not_told_to_try(self):
+        # _load_locked clears the radio's choice on anything but a Metal
+        # text load, so advising a precision there sends the reader round
+        # the same full-weight load a second time.
+        import torch
+
+        manager = model_runtime.ModelManager()
+        with (
+            mock.patch("model_runtime.detect_backend", return_value="cpu"),
+            mock.patch.object(manager, "_unload_locked"),
+            mock.patch.object(manager, "_check_memory", return_value=(None, None)),
+            mock.patch.object(manager, "_release_device_cache"),
+            mock.patch("model_runtime.allocated_bytes", return_value=None),
+            mock.patch("model_runtime.reserved_bytes", return_value=None),
+            mock.patch("model_runtime._read_text_model", side_effect=MemoryError()),
+            self.assertLogs("model_runtime", level="WARNING"),
+            self.assertRaises(model_runtime.OutOfMemoryError) as caught,
+        ):
+            manager._load_locked("org/model", Path("/snap"), torch, precision="4-bit")
+
+        message = str(caught.exception)
+        self.assertIn("choose a smaller model.", message)
+        self.assertNotIn("precision", message)
+
+    def test_a_refusal_with_nothing_to_measure_still_says_what_to_do(self):
+        from model_runtime import load_out_of_memory_message
+
+        note = load_out_of_memory_message("org/model", error=MemoryError())
+        self.assertEqual(
+            note,
+            "org/model did not fit in memory. Unload anything else on the "
+            "device, close memory-heavy applications, or choose a smaller "
+            "model. (no message from MemoryError)",
+        )
+
     def test_conversion_cause_is_visible_without_terminal_formatting(self):
         import logging
 
@@ -2204,7 +2274,8 @@ class AllocatedBytesTests(unittest.TestCase):
 
     def test_metal_counts_what_mlx_holds_beside_pytorch(self):
         # MLX draws on the same device through its own allocator, so an MLX
-        # load's progress and the panel's "held" figure both need its share.
+        # load's progress needs its share: current_allocated_memory is
+        # PyTorch's own tensors and nothing else's.
         from model_runtime import allocated_bytes, reserved_bytes
 
         torch = types.SimpleNamespace(
@@ -2217,7 +2288,13 @@ class AllocatedBytesTests(unittest.TestCase):
 
         with mock.patch("mlx_runtime.active_bytes", return_value=1000):
             self.assertEqual(allocated_bytes("mps", torch), 5096)
-            self.assertEqual(reserved_bytes(torch), 9192)
+            # The driver figure is the other way round: it is the whole
+            # process's allocation on the Metal device, MLX's buffers
+            # included, so adding MLX's own count again would charge them
+            # twice against the ceiling it is checked against. Measured with
+            # a 1 GiB MLX array, which moves the driver figure by 1 GiB
+            # whether or not torch has a tensor on the device.
+            self.assertEqual(reserved_bytes(torch), 8192)
 
     def test_host_memory_keeps_no_such_figure(self):
         from model_runtime import allocated_bytes
@@ -2475,7 +2552,9 @@ class MemoryGuardTests(unittest.TestCase):
         torch = self._fake_torch((1, 1), failing=True)
         self.assertEqual(cuda_memory(torch), (None, None))
 
-    def _check_with(self, snapshot, backend, host, gpu, ceiling=None, bits=None):
+    def _check_with(
+        self, snapshot, backend, host, gpu, ceiling=None, bits=None, charged=None
+    ):
         import model_runtime
         from model_runtime import ModelManager
 
@@ -2484,7 +2563,13 @@ class MemoryGuardTests(unittest.TestCase):
         model_runtime.cuda_memory = lambda torch=None: gpu
         try:
             return ModelManager._check_memory(
-                "org/model", snapshot, "float16", backend, ceiling=ceiling, bits=bits
+                "org/model",
+                snapshot,
+                "float16",
+                backend,
+                ceiling=ceiling,
+                bits=bits,
+                charged=charged,
             )
         finally:
             model_runtime.system_memory, model_runtime.cuda_memory = saved
@@ -2560,6 +2645,37 @@ class MemoryGuardTests(unittest.TestCase):
         message = str(refused.exception)
         self.assertIn("Metal on this machine", message)
         self.assertIn("24.0 GB", message)
+
+    def test_a_ceiling_already_spent_is_not_offered_to_the_next_load(self):
+        # The refusal this covers is the one that used to arrive from the
+        # allocator halfway through the weights: a 16 GB model under a 24 GB
+        # cap with 15 GB of it already out fits the cap and not what is left
+        # of it. The check has to say so before the checkpoint is read.
+        from model_runtime import InsufficientMemoryError
+
+        snapshot = self._sparse_snapshot("model.safetensors", 16 * self.GB)
+        idle = (48 * self.GB, 40 * self.GB)
+
+        # Nothing taken, and the same model goes through.
+        estimated, available = self._check_with(
+            snapshot, "mps", host=idle, gpu=(None, None), ceiling=24 * self.GB
+        )
+        self.assertEqual((estimated, available), (16 * self.GB, 24 * self.GB))
+
+        with self.assertRaises(InsufficientMemoryError) as refused:
+            self._check_with(
+                snapshot,
+                "mps",
+                host=idle,
+                gpu=(None, None),
+                ceiling=24 * self.GB,
+                charged=15 * self.GB,
+            )
+        # Tight rather than too big: the machine is idle and the cap could
+        # hold it, so the message is the one about making room.
+        message = str(refused.exception)
+        self.assertIn("9.0 GB available", message)
+        self.assertNotIn("in total", message)
 
     def test_a_refusal_reports_the_precision_the_load_would_have_used(self):
         # The bits are cleared before the check on anything but Metal, so
@@ -3186,14 +3302,14 @@ class DeviceProfileTests(unittest.TestCase):
         torch.cuda = types.SimpleNamespace(is_bf16_supported=lambda: False)
         self.assertEqual(dtype_name(load_dtype("cuda", torch)), "float16")
 
-    def _pool_with(self, backend, host, gpu, ceiling=None):
+    def _pool_with(self, backend, host, gpu, ceiling=None, charged=None):
         import model_runtime
 
         saved = model_runtime.system_memory, model_runtime.cuda_memory
         model_runtime.system_memory = lambda: host
         model_runtime.cuda_memory = lambda torch=None: gpu
         try:
-            return model_runtime.memory_pool(backend, ceiling)
+            return model_runtime.memory_pool(backend, ceiling, charged=charged)
         finally:
             model_runtime.system_memory, model_runtime.cuda_memory = saved
 
@@ -3223,6 +3339,49 @@ class DeviceProfileTests(unittest.TestCase):
             "mps", (None, None), (None, None), ceiling=24 * self.GB
         )
         self.assertEqual((total, available), (24 * self.GB, 24 * self.GB))
+
+    def test_what_metal_already_holds_comes_off_the_ceiling(self):
+        # The cap is a total, not an allowance on top of what is out: Metal
+        # checks a new allocation against every byte this process holds. A
+        # pool that read the ceiling as untouched passed a model that fits
+        # it and left the allocator to refuse the same model halfway in.
+        total, available, _ = self._pool_with(
+            "mps",
+            (48 * self.GB, 40 * self.GB),
+            (None, None),
+            ceiling=24 * self.GB,
+            charged=15 * self.GB,
+        )
+        # The whole cap is still the size of the pool - a 30 GB model is
+        # unfit here whatever is freed - but only 9 GB of it is on offer.
+        self.assertEqual((total, available), (24 * self.GB, 9 * self.GB))
+
+    def test_a_machine_that_says_nothing_still_counts_what_is_taken(self):
+        total, available, _ = self._pool_with(
+            "mps", (None, None), (None, None), ceiling=24 * self.GB, charged=15 * self.GB
+        )
+        self.assertEqual((total, available), (24 * self.GB, 9 * self.GB))
+
+    def test_a_ceiling_spent_past_itself_offers_nothing_rather_than_less_than_nothing(self):
+        total, available, _ = self._pool_with(
+            "mps",
+            (48 * self.GB, 40 * self.GB),
+            (None, None),
+            ceiling=24 * self.GB,
+            charged=30 * self.GB,
+        )
+        self.assertEqual((total, available), (24 * self.GB, 0))
+
+    def test_what_a_card_holds_does_not_come_off_a_pool_with_no_ceiling(self):
+        # Only a ceiling is a total the allocator counts against; the CUDA
+        # and host figures already report what is free.
+        self.assertEqual(
+            self._pool_with(
+                "cuda", (48 * self.GB, 40 * self.GB), (24 * self.GB, 20 * self.GB),
+                charged=10 * self.GB,
+            ),
+            (72 * self.GB, 60 * self.GB, "the GPU plus this machine"),
+        )
 
     def test_the_profile_answers_from_memory_alone_before_torch_is_imported(self):
         # The Models page is painted before anything has needed torch, and
@@ -3325,6 +3484,30 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertEqual(profile.reclaimed(2 * self.GB).available, 5 * self.GB)
         self.assertEqual(profile.reclaimed(None).available, 5 * self.GB)
 
+    def test_a_ceiling_gets_the_cached_blocks_back_as_well_as_the_weights(self):
+        # An unload empties the allocator's cache along with the model, and
+        # the ceiling was charged for both. Giving back the weights alone
+        # would hold a replacement to a cap that is about to be handed the
+        # rest, and list as tight a model the button then loads.
+        import dataclasses
+
+        from model_runtime import DeviceProfile
+
+        capped = DeviceProfile(
+            backend="mps",
+            total=24 * self.GB,
+            available=9 * self.GB,
+            ceiling=24 * self.GB,
+            pool="Metal on this machine",
+            held=10 * self.GB,
+            taken=15 * self.GB,
+        )
+        self.assertEqual(capped.reclaimed(10 * self.GB).available, 24 * self.GB)
+        # Without a ceiling the allocator's cache is nobody's to give back:
+        # the machine's own availability figure already counts it.
+        uncapped = dataclasses.replace(capped, ceiling=None, pool="this machine")
+        self.assertEqual(uncapped.reclaimed(10 * self.GB).available, 19 * self.GB)
+
     def test_an_mlx_load_is_judged_against_the_machine_not_the_metal_cap(self):
         # The ceiling is PyTorch's allocator cap, and _load_locked passes
         # none for an MLX load because mlx-lm allocates on its own. The
@@ -3358,8 +3541,10 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertIsNone(mlx.ceiling)
         self.assertEqual(mlx.pool, "this machine")
         self.assertEqual(replacing.available, 28 * self.GB)
-        # A Transformers load is held to the cap as before.
-        self.assertEqual((text.total, text.available), (16 * self.GB, 18 * self.GB))
+        # A Transformers load is held to the cap as before, and the unload
+        # it counts in cannot carry it past the cap: the 2 GB given back is
+        # 2 GB of the ceiling freed, not 2 GB added to it.
+        self.assertEqual((text.total, text.available), (16 * self.GB, 16 * self.GB))
         self.assertEqual(text.ceiling, 16 * self.GB)
         self.assertEqual(text.pool, "Metal on this machine")
 

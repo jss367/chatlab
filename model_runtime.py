@@ -1307,7 +1307,15 @@ def reserved_bytes(torch=None) -> int | None:
     :func:`allocated_bytes` counts live tensors, which is what a load measures
     its own progress against. This counts what the process has taken out of
     the machine, cached blocks included, which is the figure a machine-wide
-    memory problem shows up in and so the one worth recording.
+    memory problem shows up in and so the one worth recording. It is also
+    what a Metal ceiling is checked against; see :func:`memory_pool`.
+
+    On Metal that is the driver's figure alone. It is the whole process's
+    allocation on the device and not PyTorch's share of it - MPS, MPSGraph
+    and mlx-lm allocate through the same Metal device - so adding what MLX
+    reports would count those buffers twice. Measured: a 1 GiB MLX array
+    moves ``torch.mps.driver_allocated_memory`` by 1 GiB, with or without a
+    torch tensor on the device first.
     """
 
     if torch is None:
@@ -1317,11 +1325,7 @@ def reserved_bytes(torch=None) -> int | None:
             devices = range(int(torch.cuda.device_count()))
             return sum(int(torch.cuda.memory_reserved(index)) for index in devices)
         if torch.backends.mps.is_available():
-            # MLX draws on the same Metal device through its own allocator,
-            # so what it holds is part of the same figure.
-            return _sum_known(
-                int(torch.mps.driver_allocated_memory()), mlx_runtime.active_bytes()
-            )
+            return int(torch.mps.driver_allocated_memory())
     except (RuntimeError, AttributeError, ValueError, TypeError):
         return None
     return None
@@ -1517,7 +1521,10 @@ def dtype_name(dtype) -> str:
 
 
 def memory_pool(
-    backend: str, ceiling: int | None = None, kind: str = TEXT_KIND
+    backend: str,
+    ceiling: int | None = None,
+    kind: str = TEXT_KIND,
+    charged: int | None = None,
 ) -> tuple[int | None, int | None, str]:
     """Total and available memory a load on ``backend`` may use, and its name.
 
@@ -1539,6 +1546,16 @@ def memory_pool(
     ``.to("cuda")`` does not spread a model the way ``device_map="auto"``
     does: the sum would pass a pipeline that fits the aggregate and fails on
     card 0. See :func:`cuda_device_memory`.
+
+    ``charged`` is what the device's allocator has already taken out against
+    that ceiling, as :func:`reserved_bytes` reads it. It comes off the
+    availability figure because the ceiling is a total and not an allowance
+    on top of what is already held: Metal checks a new allocation against
+    every byte this process has out, so a machine with 40 GB free and 15 GB
+    already taken from a 24 GB ceiling has 9 GB to offer a load, not 24.
+    Without it a check reads the ceiling as untouched, passes a model that
+    fits it, and leaves the allocator to refuse the same model part way
+    through reading it.
     """
 
     if backend == "cuda" and kind == IMAGE_KIND:
@@ -1551,8 +1568,14 @@ def memory_pool(
         total, available = system_memory()
         pool = "this machine"
     if ceiling is not None:
+        # The total stays the whole ceiling: it is the size of the pool, and
+        # a model too big for it is unfit however idle the process is.
+        # Availability is what is left of it now, so a model that outgrew
+        # only the memory already taken reads as tight - the verdict an
+        # unload or a quit would lift.
+        room = ceiling - min(charged or 0, ceiling)
         total = ceiling if total is None else min(total, ceiling)
-        available = ceiling if available is None else min(available, ceiling)
+        available = room if available is None else min(available, room)
         if total == ceiling:
             pool = "Metal on this machine"
     return total, available, pool
@@ -1747,6 +1770,15 @@ class DeviceProfile:
     card an image pipeline would land on.
     """
 
+    taken: int | None = None
+    """What the device allocator holds from the driver, cached blocks included.
+
+    More than :attr:`held` wherever the allocator is keeping blocks no
+    tensor is using, and it is this figure rather than that one that a
+    Metal ceiling is checked against; see :func:`memory_pool`. ``None``
+    where the device keeps no such figure.
+    """
+
     held_here: int | None = None
     """Live tensors on the one device a load would land on.
 
@@ -1839,15 +1871,34 @@ class DeviceProfile:
         the cards by one while the other covers the whole of it. On Metal the
         allocator figure can be the larger, a response's key-value cache
         being live tensors too, and that is freed with the model.
+
+        Under a Metal ceiling neither figure is enough either, because an
+        unload hands back the allocator's cached blocks as well as the
+        weights and the ceiling was charged for both; see :attr:`taken`.
         """
 
         given = self.reclaimable(estimated)
+        if self.ceiling is not None and self.taken is not None:
+            # An unload empties the allocator's cache as well as dropping the
+            # weights, so everything the allocator is holding comes back from
+            # under a ceiling, not the model's own share of it. Cached blocks
+            # can be the larger part: crediting the weights alone would leave
+            # them charged against a cap that is about to be handed them
+            # back, and list a model as tight that the button then loads.
+            given = max(given, self.taken)
         if not given:
             return self
-        return replace(
-            self,
-            available=None if self.available is None else self.available + given,
-        )
+        if self.available is None:
+            return self
+        # Never past the pool itself. Under a Metal ceiling availability is
+        # the ceiling less what is already taken from it, and an unload
+        # gives back what it took rather than more: without the clamp a
+        # model whose weights outweigh the blocks it is holding would credit
+        # the difference to a pool that never had it.
+        available = self.available + given
+        if self.total is not None:
+            available = min(available, self.total)
+        return replace(self, available=available)
 
     def reclaimable(self, estimated: int | None = None) -> int:
         """How much of the loaded model's memory a summed pool gets back.
@@ -1894,7 +1945,8 @@ def device_profile(torch=None) -> DeviceProfile:
         return DeviceProfile(total=total, available=available)
     backend = detect_backend(torch)
     budget = mps_budget(torch) if backend == "mps" else MetalBudget()
-    total, available, pool = memory_pool(backend, budget.ceiling)
+    taken = reserved_bytes(torch)
+    total, available, pool = memory_pool(backend, budget.ceiling, charged=taken)
     return DeviceProfile(
         backend=backend,
         dtype=dtype_name(load_dtype(backend, torch)),
@@ -1905,6 +1957,7 @@ def device_profile(torch=None) -> DeviceProfile:
         recommended=budget.recommended,
         fraction=budget.fraction,
         held=allocated_bytes(backend, torch),
+        taken=taken,
         held_here=allocated_bytes(backend, torch, device_only=True),
     )
 
@@ -2236,6 +2289,75 @@ def out_of_memory_message(error: BaseException, kind: str = TEXT_KIND) -> str:
         f"The model ran out of memory. {advice}, or load a smaller model. "
         f"({first_line(error)})"
     )
+
+
+def load_out_of_memory_message(
+    model_id: str,
+    estimated: int | None = None,
+    reached: int | None = None,
+    taken: int | None = None,
+    ceiling: int | None = None,
+    weights: str | None = None,
+    lower_precision: bool = False,
+    error: BaseException | None = None,
+) -> str:
+    """What to tell a reader whose load ran out of memory part way through.
+
+    The backend's own complaint names bytes that say nothing without the
+    figures around them - Metal's is three numbers and a watermark
+    environment variable - so it is quoted at the end rather than left to
+    speak for itself.
+
+    ``reached`` against ``estimated`` is how far the weights got, which is
+    what says whether a smaller precision would have been enough or nothing
+    short of a smaller model would. ``taken`` is everything the process has
+    out on the device, cached blocks included, and it is that figure rather
+    than the weights that a Metal ``ceiling`` is checked against: a load can
+    be refused with half the weights in because the rest of the cap is
+    already spoken for. Naming the ceiling matters because on Metal it is
+    ChatLab's own and a reader told only to close applications would be
+    working on the wrong half of the machine.
+
+    ``lower_precision`` is whether a narrower width is open to this load at
+    all, which the caller works out from the backend and the kind. Only a
+    Metal text load can be packed narrower: the quantizer is Transformers'
+    own, an image pipeline is loaded whole, and an MLX repo is already
+    packed at the width it was converted to. Advising a precision anywhere
+    else sends the reader round the same full-weight load a second time.
+    """
+
+    parts = [f"{model_id} did not fit in memory."]
+    if estimated is not None and reached is not None:
+        parts.append(
+            f"About {format_memory(reached)} of an estimated "
+            f"{format_memory(estimated)} of {weights or 'weights'} was in when "
+            "the device refused the next allocation."
+        )
+    if ceiling is not None:
+        # The two figures differ by the blocks the allocator is holding
+        # without a tensor in them, which is the whole reason a load can
+        # stop with half the weights in, so the cap is described as counting
+        # them rather than left to look like arithmetic that does not add up.
+        out = (
+            "" if taken is None else f" {format_memory(taken)} was out when it stopped."
+        )
+        parts.append(
+            f"ChatLab caps Metal allocations at {format_memory(ceiling)} and counts "
+            f"every block the allocator holds against it, cached ones included.{out} "
+            "`mps_memory_fraction` in the settings file moves that cap."
+        )
+    smaller = (
+        "a smaller model or a narrower weight precision"
+        if lower_precision
+        else "a smaller model"
+    )
+    parts.append(
+        "Unload anything else on the device, close memory-heavy applications, "
+        f"or choose {smaller}."
+    )
+    if error is not None:
+        parts.append(f"({first_line(error)})")
+    return " ".join(parts)
 
 
 # Transformers builds a tokenizer straight from a repo's ``tokenizer.json``,
@@ -5271,6 +5393,11 @@ class ModelManager:
         ceiling = (
             self._cap_mps_memory(torch) if backend == "mps" and kind != MLX_KIND else None
         )
+        # Read after the unload above, so what a replaced model held is not
+        # counted against its replacement. Whatever is left is memory the
+        # ceiling has already been spent on, and the check has to see it or
+        # it judges the weights against a ceiling nothing is holding.
+        charged = reserved_bytes(torch) if ceiling is not None else None
         estimated, available = self._check_memory(
             model_id,
             local_path,
@@ -5279,6 +5406,7 @@ class ModelManager:
             ceiling=ceiling,
             bits=bits,
             kind=kind,
+            charged=charged,
         )
         # Bytes are counted only where the device keeps a total to count
         # them against; elsewhere the loader's own steps are all there is.
@@ -5297,6 +5425,7 @@ class ModelManager:
         except (RuntimeError, MemoryError) as error:
             # Before the cache goes back, so the figure is what the device was
             # holding when the load gave up rather than what survived cleanup.
+            reached, taken = allocated_bytes(backend, torch), reserved_bytes(torch)
             logger.warning(
                 "Load of %s as %s (%s weights) on %s failed: %s estimated, %s held "
                 "on the device, %s estimated available beforehand, device ceiling %s (%s)",
@@ -5305,7 +5434,7 @@ class ModelManager:
                 precision,
                 backend,
                 memory_note(estimated),
-                memory_note(reserved_bytes(torch)),
+                memory_note(taken),
                 memory_note(available),
                 memory_note(ceiling),
                 first_line(error),
@@ -5313,9 +5442,26 @@ class ModelManager:
             self._release_device_cache(torch)
             if is_out_of_memory_error(error):
                 raise OutOfMemoryError(
-                    f"{model_id.strip()} did not fit in memory. Close other "
-                    "applications or choose a smaller model. "
-                    f"({first_line(error)})"
+                    load_out_of_memory_message(
+                        model_id.strip(),
+                        estimated=estimated,
+                        reached=reached,
+                        taken=taken,
+                        ceiling=ceiling,
+                        weights=weights_note(dtype_name(dtype), bits),
+                        # Only a Metal text load has a narrower width to
+                        # fall back on, and only one already wider than the
+                        # narrowest: everything else would repeat the load
+                        # it just failed. ``bits`` is what this load really
+                        # used, the radio's choice having been cleared
+                        # above wherever it could not be honoured.
+                        lower_precision=(
+                            backend == "mps"
+                            and kind == TEXT_KIND
+                            and (bits is None or bits > min(QUANTIZED_BITS.values()))
+                        ),
+                        error=error,
+                    )
                 ) from error
             raise
 
@@ -5550,6 +5696,7 @@ class ModelManager:
         ceiling: int | None = None,
         bits: int | None = None,
         kind: str = TEXT_KIND,
+        charged: int | None = None,
     ) -> tuple[int | None, int | None]:
         """Refuse a load that cannot fit, before any weight is read.
 
@@ -5576,6 +5723,11 @@ class ModelManager:
         Metal is less than the machine holds. Whichever of the two is smaller
         is what the weights have to fit inside, so a model too big for the
         allocator is refused here rather than part way through reading it.
+        ``charged`` is how much of that ceiling the allocator has already
+        spent, which comes off the availability figure for the reason
+        :func:`memory_pool` gives: the ceiling counts every Metal byte the
+        process holds, so a check that read it as untouched would pass a
+        model the allocator refuses halfway in.
 
         ``kind`` picks which weights are measured: one checkpoint at the root
         for a text model, and for an image pipeline the sum over its
@@ -5599,7 +5751,7 @@ class ModelManager:
         estimated = estimate_snapshot_bytes(local_path, load_dtype, bits, kind)
         if estimated is None:
             return None, None
-        total, available, pool = memory_pool(backend, ceiling, kind)
+        total, available, pool = memory_pool(backend, ceiling, kind, charged=charged)
         weights = weights_note(load_dtype, bits)
         try:
             check_memory_for_load(
