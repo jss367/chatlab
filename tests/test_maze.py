@@ -1286,6 +1286,28 @@ class MazeTests(unittest.TestCase):
         manager.model_id, manager.load_id = 'another/model', 'another/model#1'
         self.assertIn('**Response 1 · as recorded**', context_view(ep, manager, 0)[0])
 
+    def test_a_run_that_names_no_model_is_not_read_back_from_its_ids(self):
+        # A file written elsewhere can carry prompt IDs and no record of what
+        # produced them. Decoding those under whatever is loaded is the same
+        # fluent text unrelated to the prompt, offered as the record, so the
+        # silence is refused rather than taken as permission.
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        east = call_text(MAZE.maze_id, 'east')
+        manager = Manager([(east, [8, 0])])
+        list(stream_episode(ep, manager))
+        ep.model_id = None
+        note, text = context_view(ep, manager, 0)
+        self.assertIn('**Response 1 · as the loaded model would be given it**', note)
+        self.assertIn('this run does not record which model produced them', note)
+        self.assertNotIn('as recorded**', note)
+        self.assertIn('"name": "move"', text)
+        # An episode of this application takes the loaded model's name before
+        # its first response, so only a foreign file reaches that.
+        fresh = Episode(MAZE, CONFIG)
+        list(stream_episode(fresh, Manager([(east, [8, 0])])))
+        self.assertEqual(fresh.model_id, 'test/model')
+        self.assertIn('**Response 1 · as recorded**', context_view(fresh, manager, 0)[0])
+
     def test_context_view_templates_the_initial_prompt_and_falls_back_without_a_model(self):
         ep = Episode(MAZE, CONFIG | {'system_prompt': 'Be brief.'})
         manager = Manager([])
