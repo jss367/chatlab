@@ -4,5 +4,5 @@
 publishes the release; nothing else should need to set it by hand.
 """
 
-__version__ = "0.26.0"
+__version__ = "0.27.0"
 BUNDLE_IDENTIFIER = "build.chatlab.app"
