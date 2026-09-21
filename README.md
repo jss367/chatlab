@@ -160,6 +160,15 @@ out to about `0.64` and `1.0` restores the old ceiling. The environment wins
 over the file, and PyTorch's own `PYTORCH_MPS_HIGH_WATERMARK_RATIO`, if set,
 leaves the allocator alone. The cache a response used is handed back when it
 finishes, so the process returns to the model's own size between requests.
+That cap is a total rather than an allowance on top of what is already out:
+Metal judges each new allocation against every block the process holds,
+cached ones included, so what the allocator has already taken comes off the
+memory a load is told it may use. A Mac with 40 GB free and 15 GB already
+taken from a 24 GB cap has 9 GB to offer, and a model that would fit the cap
+on an empty allocator is refused before its weights are read rather than part
+way through them. When a load does run out anyway, the message names how far
+the weights got, how much of the cap was out at the time, and the setting that
+moves it.
 
 Each load and each response is recorded in the log with the model, the
 weight precision, the estimate, what the device ended up holding and the
@@ -334,7 +343,7 @@ The system prompt, assistant prefill, and reasoning options; the analysis and in
 
 **Light or dark** picks which of the two the chosen theme is drawn in. **Follow system** is what a new install comes up on: the page turns with the system's own setting, at whatever hour it does. **Light** and **Dark** override it and stay put. The page changes as you choose, with no reload, and the choice is saved as `appearance`.
 
-**Hardware** is what the memory guard reads when it decides whether a model fits: the device a load would use and the precision it would read weights as, the machine's memory and how much of it ChatLab estimates is available within its own limits, the safety reserve it keeps beside the weights, the Metal cap and the share of Metal's recommendation it comes to, what the device allocator is holding for this process, and the model in memory. It is read when the page opens, when the Settings page is opened, after every load and unload, and whenever **Refresh** is pressed - not on a timer, since reading it costs a subprocess. The same figures go to the log with every load and every reply, which is what makes a memory failure readable after the fact; the panel is how to look before one.
+**Hardware** is what the memory guard reads when it decides whether a model fits: the device a load would use and the precision it would read weights as, the machine's memory and how much of it ChatLab estimates is available within its own limits, the safety reserve it keeps beside the weights, the Metal cap with the share of Metal's recommendation it comes to and how much of it is taken already, what the device allocator is holding for this process, and the model in memory. It is read when the page opens, when the Settings page is opened, after every load and unload, and whenever **Refresh** is pressed - not on a timer, since reading it costs a subprocess. The same figures go to the log with every load and every reply, which is what makes a memory failure readable after the fact; the panel is how to look before one.
 
 The sampling controls are **not** here. Temperature, top-p, top-k, **Skip top choice below**, the response length and the seed are what gets moved between one retry and the next, so they sit under the message box on the Chat page, in a **Sampling** section that wears its own values: the summary reads without opening it. Each slider carries a ↺ beside its number box that puts that one back where the app ships it - temperature 0.8, top-p 0.95, top-k 50, no top-choice skip, 1,024 new tokens, or the context limit if it is lower - which is the way back from an experiment without having to remember where you started. A press counts as moving that slider by hand, so it is written into the conversation and the settings file like any other move, and it leaves the other four where they are. The seed has no ↺: a seed being held to reproduce a reply is not a setting to be put back.
 
