@@ -1337,6 +1337,7 @@ class MazeTests(unittest.TestCase):
         service = ModelService(MidLoad)
         self.assertEqual(service.decode([1, 2]), (None, None))
         self.assertEqual(service.prompt_text([{'role': 'user', 'content': 'hi'}]), (None, None))
+        self.assertIsNone(service.loaded_model_id())
 
         # A load that lands while the reading is under way is refused too: the
         # text belongs to one vocabulary and the identifier to another.
@@ -1353,6 +1354,11 @@ class MazeTests(unittest.TestCase):
                                    'test/model#1' if self.reads < 2 else 'test/model#2')
 
         self.assertEqual(ModelService(LoadsDuringRead).decode([65]), (None, None))
+        # Naming the model is framed the same way, its tokenizer being read
+        # after the snapshot: a load landing in between would otherwise name
+        # the model before it while the model after it holds the vocabulary
+        # that was checked.
+        self.assertIsNone(ModelService(LoadsDuringRead).loaded_model_id())
         # The maze pane falls back to the recorded messages rather than
         # showing a prompt it cannot say was spelled by any one load.
         ep = Episode(MAZE, CONFIG)

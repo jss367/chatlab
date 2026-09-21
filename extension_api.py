@@ -70,13 +70,16 @@ class ModelService:
         no tokenizer, so it is not an answer here: it spells nothing, and a
         caller naming it would be explaining a vocabulary by a model that has
         none. It is the same condition :meth:`_read` reads before its own
-        reading.
+        reading, and framed the way :meth:`_read` frames a reading, because
+        the tokenizer is read after the snapshot: a load landing in between
+        would otherwise have this name the model before it while the model
+        after it holds the vocabulary that was checked.
         """
         manager = self._provider()
         published = manager.loaded_model()
         if published.load_id is None or manager.tokenizer is None:
             return None
-        return published.model_id
+        return published.model_id if manager.loaded_model() == published else None
 
     def _read(self, reading):
         """Read the loaded model, or answer that no one load made the reading.
