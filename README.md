@@ -323,7 +323,9 @@ does in `mlx-community/Qwen3-0.6B-4bit`.
 
 Fitted lenses for many open models are published on the Hub; search for
 `jacobian-lens` or `jlens`. A lens fetched from a repository is kept under
-`lenses/` beside the settings file, outside the model cache. Whichever lens
+`lenses/` beside the settings file, outside the model cache, and a lens
+chosen from disk is copied into `lenses/uploads/` there, since the browser's
+upload cache does not outlive the session. Whichever lens
 you import is written down for the loaded model ID in `jacobian_lenses.json`
 in the same folder, and the next load of that model picks it up on the first
 inspection without another import. To fit your own, use the

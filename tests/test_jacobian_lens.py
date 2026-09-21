@@ -281,7 +281,10 @@ class JacobianLensTests(unittest.TestCase):
             imported, status = inspection.import_jacobian_lens(str(self.path), self.manager.model_id)
             self.assertIn("Remembered", status)
             record = jacobian_lens.remembered(self.manager.model_id)
-            self.assertEqual(record["path"], str(self.path))
+            kept = Path(record["path"])
+            self.assertEqual(kept.parent, store.parent / "lenses" / "uploads")
+            self.assertEqual(kept.name, "lens.pt")
+            self.assertTrue(kept.is_file())
             self.assertEqual(record["fitted_model_id"], self.manager.model_id)
             self.assertIsNone(jacobian_lens.remembered("other/model"))
 
@@ -303,7 +306,7 @@ class JacobianLensTests(unittest.TestCase):
 
             # A record whose file is gone leaves the usual message.
             self.manager.load_count += 1
-            self.path.unlink()
+            kept.unlink()
             result = list(inspection.inspect_layers(*args(), lens_mode="Jacobian", imported_lens=None))[-1]
             self.assertIn("Import a Jacobian", result[4])
             self.assertIsNone(self.manager.jacobian_lens_import())
@@ -333,7 +336,7 @@ class JacobianLensTests(unittest.TestCase):
             self.assertIn("import_id", imported)
             self.assertIn("2 fitted layers", status)
             self.assertEqual((calls["repository"], calls["filename"]), ("org/lenses", "lenses/tiny.pt"))
-            self.assertEqual(Path(calls["local_dir"]), store.parent / "lenses" / "org__lenses")
+            self.assertEqual(Path(calls["local_dir"]), store.parent / "lenses" / "org" / "lenses")
             record = jacobian_lens.remembered(self.manager.model_id)
             self.assertEqual((record["repository"], record["filename"]), ("org/lenses", "lenses/tiny.pt"))
             self.assertTrue(Path(record["path"]).is_file())
@@ -375,7 +378,10 @@ class JacobianLensTests(unittest.TestCase):
     def test_ui_refuses_import_when_busy_and_releases_reservation_on_errors(self):
         from ui import inspection, runtime
 
-        with mock.patch.object(runtime, "MANAGER", self.manager):
+        store = Path(self.directory.name) / "config" / "jacobian_lenses.json"
+        with mock.patch.object(jacobian_lens, "store_path", return_value=store), mock.patch.object(
+            runtime, "MANAGER", self.manager,
+        ):
             self.manager.claim_generation()
             result = inspection.import_jacobian_lens(self.path, self.manager.model_id)
             self.assertEqual(result[1], inspection.INSPECT_BUSY)

@@ -15,9 +15,11 @@ in float32 except the norm and head, which run where the model's weights are.
 
 from __future__ import annotations
 
+import filecmp
 import json
 import logging
 import re
+import shutil
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -327,7 +329,7 @@ def store_path() -> Path:
 
 
 def lens_directory() -> Path:
-    """Where lenses fetched from the Hub are kept, outside the model cache."""
+    """Where imported lenses are kept, outside the model cache."""
     return store_path().with_name("lenses")
 
 
@@ -392,7 +394,8 @@ def download(repository: str, filename: str) -> Path:
         metadata = get_hf_file_metadata(hf_hub_url(repository, filename))
         if metadata.size is not None and metadata.size > MAX_FILE_BYTES:
             raise ValueError("That lens file is larger than the 2 GiB limit.")
-        target = lens_directory() / repository.replace("/", "__")
+        owner, name = repository.split("/")
+        target = lens_directory() / owner / name
         target.mkdir(parents=True, exist_ok=True)
         return Path(hf_hub_download(repository, filename, local_dir=str(target)))
     except GatedRepoError:
@@ -403,3 +406,27 @@ def download(repository: str, filename: str) -> Path:
         raise ValueError(f"Hugging Face refused the download: {error}") from None
     except OSError as error:
         raise ValueError(f"The lens could not be downloaded: {error}") from None
+
+
+def keep(path) -> Path:
+    """Copy a lens chosen from disk under ``lens_directory()/uploads``; the kept path.
+
+    A browser upload lands in Gradio's cache, which does not outlive the
+    session, so the copy is what gets remembered. A file already inside the
+    lens directory stays where it is; a kept file with the same name and
+    content is reused, and a different one takes a numbered name.
+    """
+    source = Path(path)
+    directory = lens_directory()
+    if source.resolve().is_relative_to(directory.resolve()):
+        return source
+    uploads = directory / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    target = uploads / source.name
+    counter = 1
+    while target.exists() and not filecmp.cmp(source, target, shallow=False):
+        counter += 1
+        target = uploads / f"{source.stem}-{counter}{source.suffix}"
+    if not target.exists():
+        shutil.copy2(source, target)
+    return target

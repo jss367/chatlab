@@ -421,8 +421,10 @@ def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):
     """Keep large lens tensors in the model manager, never in browser state.
 
     A repository and file name fetch the lens from the Hub first; otherwise
-    the chosen file is read. A successful import is written down for the
-    loaded model, so the next load of it finds the lens without this step.
+    the chosen file is copied beside the settings, since a browser upload
+    lands in a cache that does not outlive the session. A successful import
+    is written down for the loaded model, so the next load of it finds the
+    lens without this step.
     """
     repository = (repository or "").strip()
     filename = (filename or "").strip()
@@ -435,6 +437,11 @@ def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):
         source = {"repository": repository, "filename": filename}
     if not path:
         return gr.skip(), "Choose a saved lens.pt file, or name a Hub repository and file."
+    if not source:
+        try:
+            path = str(jacobian_lens.keep(path))
+        except OSError as error:
+            return gr.skip(), failure_status("Could not import the lens", str(error))
     held = runtime.MANAGER.claim_generation()
     if held:
         return gr.skip(), INSPECT_LOADING if held == LOADING else INSPECT_BUSY
