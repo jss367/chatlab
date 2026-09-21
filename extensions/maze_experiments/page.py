@@ -307,6 +307,37 @@ def under_load(recorded, used):
             "so a vocabulary that has moved since would read differently here")
 
 
+def swapped_model(recorded_model, load_id):
+    """The model a reading was made under, when it is not the one that recorded the run.
+
+    A load stamp is a model ID and which load it is, so the ID inside it is
+    what says whether a reading was made by the run's own model at all. The
+    stamp as a whole cannot say that: two sessions of one model disagree
+    exactly as loudly as two different models do, and a run carrying a stamp
+    from somewhere else disagrees with every load here. Empty when the same
+    model is loaded, or when either side names nothing.
+    """
+    used = (load_id or "").rsplit("#", 1)[0]
+    return used if used and recorded_model and used != recorded_model else ""
+
+
+def spelled_by_another(count, recorded_model, used_model):
+    """Say that a run's recorded prompt IDs were left undecoded, and name both models.
+
+    A token ID is a position in one vocabulary, so the same numbers read under
+    another model spell whatever that model keeps at those positions: text
+    fluent enough to be read as the prompt and related to it in nothing. Two
+    vocabularies also overlap in size, so nothing here raises - a Llama-3 ID
+    is a Qwen3 ID - which is why this is decided by the models' names and not
+    by whether a decode succeeds. The model that recorded the run is named
+    because loading it is the way to read the prompt at all.
+    """
+    return (f" The {count:,} prompt tokens it recorded are not decoded here: "
+            f"{html.escape(used_model)} is loaded and {html.escape(recorded_model)} recorded them, "
+            "and one model's IDs spell unrelated text under another's vocabulary. Load "
+            f"{html.escape(recorded_model)} to read this prompt as it was recorded.")
+
+
 def read_through(reading, *arguments):
     """Read the model, or report how it failed to answer.
 
@@ -345,6 +376,13 @@ def context_view(ep, models, index=None):
     generation takes. With nothing loaded, the messages and the tool schema
     are shown as recorded, which is as close as a run can be read without the
     vocabulary that spelled it.
+
+    Recorded IDs are read back only by the model that recorded them. Another
+    model decodes them without complaint, its vocabulary being no smaller,
+    and answers with fluent text that is not the prompt, so the same gate the
+    fork path applies - the run's model ID against the loaded one - decides
+    whether they are decoded at all. A run whose model is not loaded falls
+    through to the template, which reads the messages themselves.
     """
     index = ep.viewing if index is None else index
     index = max(-1, min(index, len(ep.turns) - 1))
@@ -354,20 +392,25 @@ def context_view(ep, models, index=None):
     tail = (f" A supplied prefix of {supplied:,} tokens followed it, shown under **Supplied text & full response**."
             if supplied else "")
     ids = turn.get("prompt_ids")
-    failure = None
+    failure, swapped = None, ""
     if ids:
         text, load_id, failure = read_through(models.decode, ids)
-        if text is not None:
+        swapped = swapped_model(ep.model_id, load_id)
+        if text is not None and not swapped:
             return (f"**{where} · as recorded** · {len(ids):,} prompt tokens, decoded"
                     f"{under_load(turn.get('load_id'), load_id)}.{tail}", text)
+    aside = spelled_by_another(len(ids), ep.model_id, swapped) if swapped else ""
     messages = context_messages(ep, index)
     text, load_id, refused = read_through(models.prompt_text, messages, TOOLS)
     if text is not None:
+        # The aside already names both models, so the load stamps would only
+        # repeat it in weaker words.
         return (f"**{where} · as the loaded model would be given it** · {len(messages)} messages and the move tool "
-                f"through that model's own template{under_load(ep.load_id, load_id)}.{tail}", text)
+                f"through that model's own template{'' if swapped else under_load(ep.load_id, load_id)}."
+                f"{aside}{tail}", text)
     return (f"**{where} · as recorded, untemplated** · {unspelled(models, refused or failure)}, so the "
             f"{len(messages)} messages and the move tool are shown as the run recorded them. A template adds its own "
-            f"turn markers and writes the tool schemas its own way.{tail}", transcript(messages))
+            f"turn markers and writes the tool schemas its own way.{aside}{tail}", transcript(messages))
 
 
 def transport_buttons(ep):
