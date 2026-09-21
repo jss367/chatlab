@@ -533,6 +533,16 @@ class JacobianLensTests(unittest.TestCase):
             self.assertIn("import_id", imported)
             self.assertIn("could not be written down", status)
             self.assertNotIn("Remembered", status)
+        # Two different files with one name are kept apart, and nothing is
+        # left under a working name.
+        with mock.patch.object(jacobian_lens, "store_path", return_value=store):
+            other = Path(self.directory.name) / "elsewhere" / "lens.pt"
+            other.parent.mkdir()
+            torch.save(self.data | {"n_prompts": 7}, other)
+            kept_other = jacobian_lens.keep(other)
+            self.assertEqual(kept_other.name, "lens-2.pt")
+            self.assertEqual(jacobian_lens.keep(self.path).name, "lens.pt")
+            self.assertEqual(sorted(p.name for p in kept_other.parent.iterdir()), ["lens-2.pt", "lens.pt"])
         unwritable = Path(self.directory.name) / "file-not-folder"
         unwritable.write_text("x")
         with mock.patch.object(jacobian_lens, "store_path", return_value=unwritable / "jacobian_lenses.json"):

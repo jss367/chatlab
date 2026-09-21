@@ -355,6 +355,7 @@ def lens_directory() -> Path:
 
 
 _STORE_LOCK = threading.Lock()
+_UPLOAD_LOCK = threading.Lock()
 
 
 def _read_store() -> dict:
@@ -452,12 +453,18 @@ def keep(path) -> Path:
     if source.resolve().is_relative_to(directory.resolve()):
         return source
     uploads = directory / "uploads"
-    uploads.mkdir(parents=True, exist_ok=True)
-    target = uploads / source.name
-    counter = 1
-    while target.exists() and not filecmp.cmp(source, target, shallow=False):
-        counter += 1
-        target = uploads / f"{source.stem}-{counter}{source.suffix}"
-    if not target.exists():
-        shutil.copy2(source, target)
+    # Choosing the name and filling it are one step under the lock, so two
+    # imports of different files with the same name cannot pick one target;
+    # the copy lands under a working name and is renamed into place complete.
+    with _UPLOAD_LOCK:
+        uploads.mkdir(parents=True, exist_ok=True)
+        target = uploads / source.name
+        counter = 1
+        while target.exists() and not filecmp.cmp(source, target, shallow=False):
+            counter += 1
+            target = uploads / f"{source.stem}-{counter}{source.suffix}"
+        if not target.exists():
+            staged = target.with_name(target.name + ".part")
+            shutil.copy2(source, staged)
+            staged.replace(target)
     return target
