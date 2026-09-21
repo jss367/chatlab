@@ -2248,7 +2248,8 @@ class AllocatedBytesTests(unittest.TestCase):
 
     def test_metal_counts_what_mlx_holds_beside_pytorch(self):
         # MLX draws on the same device through its own allocator, so an MLX
-        # load's progress and the panel's "held" figure both need its share.
+        # load's progress needs its share: current_allocated_memory is
+        # PyTorch's own tensors and nothing else's.
         from model_runtime import allocated_bytes, reserved_bytes
 
         torch = types.SimpleNamespace(
@@ -2261,7 +2262,13 @@ class AllocatedBytesTests(unittest.TestCase):
 
         with mock.patch("mlx_runtime.active_bytes", return_value=1000):
             self.assertEqual(allocated_bytes("mps", torch), 5096)
-            self.assertEqual(reserved_bytes(torch), 9192)
+            # The driver figure is the other way round: it is the whole
+            # process's allocation on the Metal device, MLX's buffers
+            # included, so adding MLX's own count again would charge them
+            # twice against the ceiling it is checked against. Measured with
+            # a 1 GiB MLX array, which moves the driver figure by 1 GiB
+            # whether or not torch has a tensor on the device.
+            self.assertEqual(reserved_bytes(torch), 8192)
 
     def test_host_memory_keeps_no_such_figure(self):
         from model_runtime import allocated_bytes
@@ -3450,6 +3457,30 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertEqual(profile.reclaimed(10 * self.GB).available, 11 * self.GB)
         self.assertEqual(profile.reclaimed(2 * self.GB).available, 5 * self.GB)
         self.assertEqual(profile.reclaimed(None).available, 5 * self.GB)
+
+    def test_a_ceiling_gets_the_cached_blocks_back_as_well_as_the_weights(self):
+        # An unload empties the allocator's cache along with the model, and
+        # the ceiling was charged for both. Giving back the weights alone
+        # would hold a replacement to a cap that is about to be handed the
+        # rest, and list as tight a model the button then loads.
+        import dataclasses
+
+        from model_runtime import DeviceProfile
+
+        capped = DeviceProfile(
+            backend="mps",
+            total=24 * self.GB,
+            available=9 * self.GB,
+            ceiling=24 * self.GB,
+            pool="Metal on this machine",
+            held=10 * self.GB,
+            taken=15 * self.GB,
+        )
+        self.assertEqual(capped.reclaimed(10 * self.GB).available, 24 * self.GB)
+        # Without a ceiling the allocator's cache is nobody's to give back:
+        # the machine's own availability figure already counts it.
+        uncapped = dataclasses.replace(capped, ceiling=None, pool="this machine")
+        self.assertEqual(uncapped.reclaimed(10 * self.GB).available, 19 * self.GB)
 
     def test_an_mlx_load_is_judged_against_the_machine_not_the_metal_cap(self):
         # The ceiling is PyTorch's allocator cap, and _load_locked passes

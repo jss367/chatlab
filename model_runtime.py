@@ -1307,7 +1307,15 @@ def reserved_bytes(torch=None) -> int | None:
     :func:`allocated_bytes` counts live tensors, which is what a load measures
     its own progress against. This counts what the process has taken out of
     the machine, cached blocks included, which is the figure a machine-wide
-    memory problem shows up in and so the one worth recording.
+    memory problem shows up in and so the one worth recording. It is also
+    what a Metal ceiling is checked against; see :func:`memory_pool`.
+
+    On Metal that is the driver's figure alone. It is the whole process's
+    allocation on the device and not PyTorch's share of it - MPS, MPSGraph
+    and mlx-lm allocate through the same Metal device - so adding what MLX
+    reports would count those buffers twice. Measured: a 1 GiB MLX array
+    moves ``torch.mps.driver_allocated_memory`` by 1 GiB, with or without a
+    torch tensor on the device first.
     """
 
     if torch is None:
@@ -1317,11 +1325,7 @@ def reserved_bytes(torch=None) -> int | None:
             devices = range(int(torch.cuda.device_count()))
             return sum(int(torch.cuda.memory_reserved(index)) for index in devices)
         if torch.backends.mps.is_available():
-            # MLX draws on the same Metal device through its own allocator,
-            # so what it holds is part of the same figure.
-            return _sum_known(
-                int(torch.mps.driver_allocated_memory()), mlx_runtime.active_bytes()
-            )
+            return int(torch.mps.driver_allocated_memory())
     except (RuntimeError, AttributeError, ValueError, TypeError):
         return None
     return None
@@ -1867,9 +1871,21 @@ class DeviceProfile:
         the cards by one while the other covers the whole of it. On Metal the
         allocator figure can be the larger, a response's key-value cache
         being live tensors too, and that is freed with the model.
+
+        Under a Metal ceiling neither figure is enough either, because an
+        unload hands back the allocator's cached blocks as well as the
+        weights and the ceiling was charged for both; see :attr:`taken`.
         """
 
         given = self.reclaimable(estimated)
+        if self.ceiling is not None and self.taken is not None:
+            # An unload empties the allocator's cache as well as dropping the
+            # weights, so everything the allocator is holding comes back from
+            # under a ceiling, not the model's own share of it. Cached blocks
+            # can be the larger part: crediting the weights alone would leave
+            # them charged against a cap that is about to be handed them
+            # back, and list a model as tight that the button then loads.
+            given = max(given, self.taken)
         if not given:
             return self
         if self.available is None:
