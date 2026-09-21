@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import threading
 import time
 from uuid import uuid4
@@ -10,6 +11,7 @@ from uuid import uuid4
 import gradio as gr
 
 import charts
+import jacobian_lens
 from model_runtime import (
     LOADING,
     ModelChanged,
@@ -53,6 +55,79 @@ INSPECT_OUTPUT_ONLY = (
     "Only the output is shown: this model's intermediate layers could not be "
     "read the way it reads its own output."
 )
+
+
+# A click on a slice cell pins that cell's token and runs the inspection
+# again, which is what typing the token and pressing the button would do.
+# The value is written the way the token menu writes its bridge, so Gradio
+# sees an ordinary edit; the click follows once that edit has been sent.
+# The cell's token ID goes into a hidden box first, paired with the text it
+# was shown for: a token whose text does not encode back to itself (a byte
+# fallback, a special token) is then pinned by ID rather than re-tokenized.
+JACOBIAN_JS = r"""
+() => {
+  if (window.chatlabJacobianInstalled) return;
+  window.chatlabJacobianInstalled = true;
+  document.addEventListener('click', event => {
+    const cell = event.target.closest('#jacobian-lens td[data-token]');
+    if (!cell) return;
+    const input = document.querySelector('#jacobian-pin textarea, #jacobian-pin input');
+    if (!input) return;
+    let text;
+    try { text = JSON.parse(cell.dataset.token); } catch (error) { return; }
+    if (typeof text !== 'string') return;
+    const write = (field, value) => {
+      const prototype = field.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, 'value').set.call(field, value);
+      field.dispatchEvent(new Event('input', {bubbles: true}));
+    };
+    const idInput = document.querySelector('#jacobian-pin-id textarea, #jacobian-pin-id input');
+    if (idInput) write(idInput, JSON.stringify({token_id: Number(cell.dataset.tokenId), text}));
+    write(input, text);
+    const holder = document.querySelector('#inspect-layers');
+    const button = holder && (holder.tagName === 'BUTTON' ? holder : holder.querySelector('button'));
+    if (button) setTimeout(() => button.click(), 120);
+  });
+  // A pin the reader types is not the clicked cell's token any more, even
+  // when the text comes out the same: a typed pin goes through the tokenizer
+  // as documented. The bridge's own write is a synthetic event, so only an
+  // edit that came from the keyboard or a paste (isTrusted) clears the ID.
+  document.addEventListener('input', event => {
+    if (!event.isTrusted || !event.target.closest || !event.target.closest('#jacobian-pin')) return;
+    const bridge = document.querySelector('#jacobian-pin-id textarea, #jacobian-pin-id input');
+    if (!bridge || bridge.value === '') return;
+    const prototype = bridge.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(prototype, 'value').set.call(bridge, '');
+    bridge.dispatchEvent(new Event('input', {bubbles: true}));
+  }, true);
+  // A readout arrives with the selected token in its last column, which a
+  // wide window puts out of sight; bring that column into view once.
+  const reveal = () => {
+    document.querySelectorAll('#jacobian-lens .jl-grid-wrap:not([data-revealed])').forEach(wrap => {
+      wrap.dataset.revealed = '1';
+      const cell = wrap.querySelector('thead .jl-selected');
+      if (cell) wrap.scrollLeft = Math.max(0, cell.offsetLeft + cell.offsetWidth - wrap.clientWidth + 12);
+    });
+  };
+  new MutationObserver(reveal).observe(document.body, {childList: true, subtree: true});
+}
+"""
+
+JACOBIAN_CSS = """
+.jl-grid-wrap { overflow: auto; max-height: 420px; margin: 0.3rem 0; border: 1px solid var(--viz-grid); border-radius: 6px; }
+.jl-grid { border-collapse: separate; border-spacing: 0; font-size: 0.74rem; font-variant-numeric: tabular-nums; }
+.jl-grid th, .jl-grid td { padding: 0.15rem 0.35rem; white-space: nowrap; color: var(--viz-ink); border-bottom: 1px solid var(--viz-grid); border-right: 1px solid var(--viz-grid); }
+.jl-grid thead th { position: sticky; top: 0; z-index: 2; background: var(--background-fill-primary); color: var(--viz-muted); font-weight: 500; }
+.jl-grid tbody th { position: sticky; left: 0; z-index: 1; background: var(--background-fill-primary); color: var(--viz-muted); font-weight: 500; text-align: right; }
+.jl-grid thead th:first-child { left: 0; z-index: 3; }
+.jl-grid code { background: none; padding: 0; font-size: inherit; }
+.jl-cell { cursor: pointer; background: color-mix(in srgb, var(--viz-line) calc(var(--jl-heat, 0) * 70%), transparent); }
+.jl-cell:hover { outline: 1px solid var(--viz-line); outline-offset: -1px; }
+.jl-cell sup { color: var(--viz-muted); margin-left: 0.15rem; font-size: 0.62rem; }
+.jl-grid .jl-selected { box-shadow: inset 0 -2px 0 var(--viz-line); }
+.jl-grid thead .jl-selected { color: var(--viz-ink); font-weight: 600; }
+.jl-output th, .jl-output td { border-top: 2px solid var(--viz-axis); }
+"""
 
 
 class InspectionControls:
@@ -120,6 +195,29 @@ def remember_inspect_target(strip: str):
     return remember
 
 
+def _pin_by_id(pinned_token_id, pinned_text: str) -> dict:
+    """The exact token ID a clicked cell supplied, if it still matches the pin.
+
+    A click writes ``{"token_id", "text"}`` beside the visible text; the ID
+    counts only while the text box still shows that same text, so a pin typed
+    over it goes through the tokenizer as before and the ID is left unused.
+    The page script also clears the record on any edit the reader makes to
+    the visible box (see JACOBIAN_JS), so retyping the clicked text later
+    tokenizes it rather than reviving the clicked ID; the text check here is
+    the server-side guard for a page script that did not run.
+    """
+    try:
+        record = json.loads(pinned_token_id or "")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(record, dict) or record.get("text") != pinned_text:
+        return {}
+    token_id = record.get("token_id")
+    if isinstance(token_id, bool) or not isinstance(token_id, int):
+        return {}
+    return {"pinned_id": token_id}
+
+
 def inspect_layers(
     target: dict | None,
     metrics_state: tuple[int, list[dict]],
@@ -134,6 +232,7 @@ def inspect_layers(
     imported_lens: dict | None = None,
     pinned_text: str = "",
     inspection_session: str | None = None,
+    pinned_token_id: str = "",
 ):
     """Run the logit lens and attention readout for the clicked token.
 
@@ -157,6 +256,7 @@ def inspect_layers(
     skip = gr.skip()
     refused = (skip, skip, skip, skip)
     revision = INSPECTION_CONTROLS.capture(inspection_session, lens_mode, pinned_text or "")
+    pin = _pin_by_id(pinned_token_id, pinned_text or "")
 
     def controls_current():
         return inspection_session is None or INSPECTION_CONTROLS.current(inspection_session, revision)
@@ -232,16 +332,26 @@ def inspect_layers(
         sequence = context_ids + [int(metric["token_id"]) for metric in metrics]
 
         started = time.monotonic()
+        note = None
         try:
             options = {"context_count": len(context_ids), "load_id": load_id}
             if steering is not None:
                 options["steering"] = steering
             if lens_mode == "Jacobian":
+                # The state's import counts only for the load it was made for.
+                # Otherwise the manager's current lens serves, and when there
+                # is none the one written down for this model is brought back.
+                imported = imported_lens if (imported_lens or {}).get("load_id") == load_id else None
+                recalled = None
+                if imported is None and runtime.MANAGER.jacobian_lens_import() is None:
+                    recalled, note = recall_lens()
                 insight = runtime.MANAGER.inspect_jacobian(
                     sequence, index,
-                    lens_id=(imported_lens or {}).get("import_id"),
-                    pinned_text=pinned_text or "", **options,
+                    lens_id=(imported or {}).get("import_id"),
+                    pinned_text=pinned_text or "", **pin, **options,
                 ).to_dict()
+                if recalled:
+                    insight["recalled"] = recalled
             else:
                 insight = runtime.MANAGER.inspect(sequence, index, **options).to_dict()
         except ModelChanged:
@@ -256,7 +366,7 @@ def inspect_layers(
                 return
             yield (
                 *refused,
-                failure_status("Could not inspect that token", str(error)),
+                failure_status("Could not inspect that token", f"{error} {note}" if note else str(error)),
             )
             return
         if not controls_current():
@@ -276,10 +386,14 @@ def inspect_layers(
             f"layers in {time.monotonic() - started:.1f}s."
         )
         if insight.get("kind") == "jacobian":
+            window = len((insight.get("slice") or {}).get("tokens") or [])
             status = (
                 f"{where} {position + 1}: <code>{shown}</code>, read after processing this token "
-                f"at {len(insight['layers'])} fitted layers in {time.monotonic() - started:.1f}s."
+                f"at {len(insight['layers'])} fitted layers, over {window} positions, "
+                f"in {time.monotonic() - started:.1f}s."
             )
+            if insight.get("recalled"):
+                status = f"{status} Using the remembered lens <code>{html.escape(insight['recalled'])}</code>."
         elif not read:
             status = f"{status} {INSPECT_OUTPUT_ONLY}"
         if not layer_count and insight.get("kind") != "jacobian":
@@ -333,24 +447,102 @@ def render_lens(insight: dict) -> str:
     return charts.logit_lens_chart(insight)
 
 
-def import_jacobian_lens(path, fitted_model_id):
-    """Keep large lens tensors in the model manager, never in browser state."""
+def recall_lens() -> tuple[str | None, str | None]:
+    """Import the lens written down for the loaded model; ``(name, note)``.
+
+    Called under the generation claim with no lens imported for this load.
+    A record whose file has gone, or that the current weights refuse, leaves
+    the manager as it was and the ordinary "import a lens" message follows.
+    A record made for another revision of the same model ID is not tried at
+    all, since the lens was fitted for other weights; the note says so, for
+    the inspection to add to that message.
+    """
+    record = jacobian_lens.remembered(runtime.MANAGER.model_id or "")
+    if record is None:
+        return None, None
+    remembered, current = record.get("model_revision"), runtime.MANAGER.model_revision()
+    if isinstance(remembered, str) and isinstance(current, str) and remembered != current:
+        return None, "The remembered lens was imported for another revision of this model; import it again."
+    try:
+        imported = runtime.MANAGER.import_jacobian_lens(record["path"], record.get("fitted_model_id") or "")
+    except Exception:  # noqa: BLE001 - the inspection reports the missing lens itself
+        return None, None
+    return imported["name"], None
+
+
+def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):
+    """Keep large lens tensors in the model manager, never in browser state.
+
+    A repository and file name fetch the lens from the Hub first; otherwise
+    the chosen file is copied beside the settings, since a browser upload
+    lands in a cache that does not outlive the session. A successful import
+    is written down for the loaded model, so the next load of it finds the
+    lens without this step.
+    """
+    repository = (repository or "").strip()
+    filename = (filename or "").strip()
+    source = {}
+    if repository or filename:
+        # The slot is checked, not held, over the download. A transfer of up
+        # to 2 GiB can take minutes, and holding the slot for it would block
+        # chat and loading the whole time; the import below validates the
+        # lens against whatever model is loaded when it runs, under the model
+        # lock, so a model swapped in mid-download is refused rather than
+        # misread. A finished download is kept on disk, so a "busy" answer
+        # after it costs nothing to retry. The check here spares the bytes
+        # when the model is already known to be busy.
+        held = runtime.MANAGER.claim_generation()
+        if held:
+            return gr.skip(), INSPECT_LOADING if held == LOADING else INSPECT_BUSY
+        # The import below is bound to this load: a model swapped in during
+        # the transfer is refused by name, not read through the new weights.
+        load_id = runtime.MANAGER.load_id
+        runtime.MANAGER.release_generation()
+        try:
+            path = str(jacobian_lens.download(repository, filename))
+        except ValueError as error:
+            return gr.skip(), failure_status("Could not fetch the lens", str(error))
+        source = {"repository": repository, "filename": filename}
     if not path:
-        return gr.skip(), "Choose a saved lens.pt file first."
+        return gr.skip(), "Choose a saved lens.pt file, or name a Hub repository and file."
     held = runtime.MANAGER.claim_generation()
     if held:
         return gr.skip(), INSPECT_LOADING if held == LOADING else INSPECT_BUSY
     try:
+        if source and runtime.MANAGER.load_id != load_id:
+            return gr.skip(), failure_status(
+                "Could not import the lens",
+                "The model was reloaded while the lens downloaded. The file is kept; press Import lens again.",
+            )
         imported = runtime.MANAGER.import_jacobian_lens(path, fitted_model_id or "")
-        return imported, (
-            f"Imported for `{html.escape(imported['model_id'])}`: "
-            f"{imported['layers']} fitted layers, {imported['n_prompts']:,} fitting prompts. "
-            "Reloading the model requires importing the lens again."
-        )
     except Exception as error:
         return gr.skip(), failure_status("Could not import the lens", str(error))
     finally:
         runtime.MANAGER.release_generation()
+    status = (
+        f"Imported for `{html.escape(imported['model_id'])}`: "
+        f"{imported['layers']} fitted layers, {imported['n_prompts']:,} fitting prompts."
+    )
+    # Copied only once the file has passed every check, so a rejected upload
+    # never lands beside the settings and nothing is left behind on failure.
+    if not source:
+        try:
+            imported = imported | {"path": str(jacobian_lens.keep(path))}
+        except OSError as error:
+            return imported, f"{status} It could not be kept for later loads: {html.escape(str(error))}"
+    # The slot was released after the import, so another client may have
+    # imported a different lens since. The record must describe the lens that
+    # is actually in memory, so the manager writes it only for the import
+    # that is still current, checking and writing under its own lock.
+    outcome = runtime.MANAGER.remember_jacobian_lens(imported["import_id"], imported | source)
+    if outcome == "replaced":
+        return imported, f"{status} Another lens was imported meanwhile, so this one was not remembered."
+    if outcome == "unwritable":
+        return imported, (
+            f"{status} It could not be written down for later loads; check that the settings "
+            "folder is writable. This session keeps using it."
+        )
+    return imported, f"{status} Remembered for this model, so its next load picks the lens up again."
 
 
 def change_lens_mode(mode, inspection_session=None):

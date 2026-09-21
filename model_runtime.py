@@ -4356,6 +4356,18 @@ class TorchLogits:
     def row(self, index: int) -> np.ndarray:
         return self.logits[index].detach().float().cpu().numpy()
 
+    def best(self) -> tuple[np.ndarray, np.ndarray]:
+        """Each position's highest-scoring token and its logit, as numpy."""
+        values, ids = self.logits.detach().float().max(dim=-1)
+        return ids.cpu().numpy(), values.cpu().numpy()
+
+    def pinned(self, token_id: int) -> tuple[np.ndarray, np.ndarray]:
+        """``token_id``'s rank (1 is best) and logit at each position, as numpy."""
+        rows = self.logits.detach().float()
+        scores = rows[:, token_id]
+        ranks = (rows > scores[:, None]).sum(dim=-1) + 1
+        return ranks.cpu().numpy().astype(np.int64), scores.cpu().numpy()
+
 
 class TorchEngine:
     """Run a Transformers causal LM for :class:`ModelManager`.
@@ -7277,36 +7289,105 @@ class ModelManager:
 
         return self._engine().final_norm()
 
+    def model_revision(self) -> str | None:
+        """The loaded checkpoint's revision, or ``None`` when it is not recorded.
+
+        A Transformers config carries the resolved commit hash; an MLX
+        conversion is loaded from a cache snapshot whose folder is named for
+        its commit. Same ID, different revision means different weights, so
+        this is what a lens written down for the model is compared against.
+        """
+        with self._lock:
+            if not self.loaded:
+                return None
+            if self._engine().backend == "torch":
+                revision = getattr(getattr(self.model, "config", None), "_commit_hash", None)
+            else:
+                path = self.local_path
+                revision = path.name if path is not None and path.parent.name == "snapshots" else None
+            return revision if isinstance(revision, str) else None
+
     def import_jacobian_lens(self, path: str, fitted_model_id: str) -> dict:
-        """Validate a reference lens file; caller owns the generation reservation."""
+        """Validate a reference lens file; caller owns the generation reservation.
+
+        A Transformers model must hold full-precision weights, since the lens
+        was fitted on them. An MLX conversion only exists at its packed width;
+        it is read as it is, and the final-block replay in each inspection is
+        what decides whether the readout is close enough to trust.
+        """
+        revision = self.model_revision()
         with self._lock:
             if not self.loaded:
                 raise ValueError("Load the model this lens was fitted for first.")
-            if self.precision not in (None, "full"):
+            engine = self._engine()
+            if engine.backend == "torch" and self.precision not in (None, "full"):
                 raise ValueError("Load full-precision weights for Jacobian inspection.")
-            lens = jacobian_lens.FittedLens.load(path, self._engine(), self.model_id, fitted_model_id)
+            lens = jacobian_lens.FittedLens.load(path, engine, self.model_id, fitted_model_id)
             import_id = os.urandom(16).hex()
             self._jacobian_lens = (self.load_id, import_id, lens)
             return {
                 "import_id": import_id, "load_id": self.load_id,
                 "model_id": self.model_id, "name": lens.name,
                 "layers": len(lens.matrices), "n_prompts": lens.n_prompts,
+                "path": str(path), "fitted_model_id": fitted_model_id.strip(),
+                "backend": engine.backend, "model_revision": revision,
             }
+
+    def jacobian_lens_import(self) -> dict | None:
+        """The lens imported for the current load, or ``None`` when there is none."""
+        with self._lock:
+            imported = self._jacobian_lens
+            if imported is None or not self.loaded or imported[0] != self.load_id:
+                return None
+            return {"import_id": imported[1], "load_id": self.load_id, "name": imported[2].name}
+
+    def remember_jacobian_lens(self, import_id: str, record: dict) -> str:
+        """Write ``record`` down for this model if ``import_id`` is still the lens in memory.
+
+        The check and the write happen under the model lock, so two clients
+        importing at once cannot leave the record naming the lens that lost.
+        Answers ``"remembered"``, ``"replaced"`` when another import has
+        taken the lens's place, or ``"unwritable"`` when the store refused.
+        """
+        with self._lock:
+            imported = self._jacobian_lens
+            if imported is None or not self.loaded or imported[:2] != (self.load_id, import_id):
+                return "replaced"
+            return "remembered" if jacobian_lens.remember(self.model_id, record) else "unwritable"
 
     @_guards_device_memory
     def inspect_jacobian(
         self, token_ids: Sequence[int], index: int, *, lens_id: str | None,
-        pinned_text: str = "", context_count: int = 0,
+        pinned_text: str = "", pinned_id: int | None = None, context_count: int = 0,
         load_id: str | None = None, steering: dict | None = None,
+        positions: int = jacobian_lens.SLICE_POSITIONS,
     ) -> jacobian_lens.JacobianInsight:
-        """Read concepts after processing the clicked token, with no look-ahead."""
+        """Read concepts after processing the clicked token, with no look-ahead.
+
+        The clicked token and up to ``positions - 1`` tokens before it are fed
+        in one step, so the same pass also reads every one of those positions
+        through the lens: that is the layer × position slice. Nothing after
+        the clicked token is fed, so no position sees a later one.
+
+        ``lens_id`` names the import the caller saw; ``None`` accepts whatever
+        lens is imported for the current load, which is how a lens recalled
+        from disk after a reload is used without the caller having seen it.
+
+        ``pinned_id`` pins a vocabulary token outright, as a clicked cell does;
+        ``pinned_text`` is encoded only when no ID is given, since a token's
+        text need not encode back to that token. The lens checks the ID against
+        the output vocabulary.
+        """
         import torch
 
         with self._lock, torch.inference_mode(), contextlib.ExitStack() as scope:
             if not self.loaded or load_id != self.load_id:
                 raise ModelChanged("The model has been reloaded. Generate or score again.")
             imported = self._jacobian_lens
-            if imported is None or imported[:2] != (self.load_id, lens_id):
+            if (
+                imported is None or imported[0] != self.load_id
+                or (lens_id is not None and imported[1] != lens_id)
+            ):
                 raise ValueError("Import a Jacobian lens for the current model load first.")
             lens = imported[2]
             engine = self._engine()
@@ -7314,8 +7395,9 @@ class ModelManager:
             ids = [int(token) for token in token_ids]
             if not 0 <= index < len(ids):
                 raise ValueError("Select a token in the current transcript.")
-            pinned_id = None
-            if pinned_text:
+            if pinned_id is not None:
+                pinned_id = int(pinned_id)
+            elif pinned_text:
                 encoded = self.tokenizer.encode(pinned_text, add_special_tokens=False)
                 if len(encoded) != 1:
                     raise ValueError("Pin one vocabulary token. Try a single word, including its leading space if needed.")
@@ -7323,14 +7405,39 @@ class ModelManager:
             scope.enter_context(self._steering(steering))
             if steering_vectors.active(steering):
                 self._drop_inspect_cache()
-            cache = self._inspect_cache_for(ids[:index])
-            with lens.record(engine) as states:
-                logits, cache = engine.forward([ids[index]], cache, index)
+            start = max(0, index + 1 - max(1, int(positions)))
+            cache = self._inspect_cache_for(ids[:start])
+            with lens.capture(engine) as states:
+                logits, cache = engine.forward(ids[start:index + 1], cache, start)
+
+            decoded: dict[int, str] = {}
+
             def decode(token):
-                return self._decode_token(token) or self._token_fallback(token)
+                token = int(token)
+                if token not in decoded:
+                    decoded[token] = self._decode_token(token) or self._token_fallback(token)
+                return decoded[token]
 
             actual = logits.row(-1)
-            rows = lens.read(engine, states, actual, decode, pinned_id)
+            rows, cells = lens.read(engine, states, actual, decode, pinned_id)
+            best_ids, best_scores = logits.best()
+            output = [
+                {"token_id": int(token), "text": decode(token), "score": float(score)}
+                for token, score in zip(best_ids, best_scores)
+            ]
+            if pinned_id is not None:
+                # The model's own row is shaded by the pinned token too.
+                for cell, rank, score in zip(output, *logits.pinned(pinned_id)):
+                    cell["pinned_rank"] = int(rank)
+                    cell["pinned_score"] = float(score)
+            tokens = [
+                {
+                    "index": position, "token_id": ids[position], "text": decode(ids[position]),
+                    "segment": "prompt" if position < context_count else "response",
+                }
+                for position in range(start, index + 1)
+            ]
+            del logits
             if cache is not None and not steering_vectors.active(steering):
                 self._inspect_cache = (self.load_id, ids[:index + 1], cache)
             return jacobian_lens.JacobianInsight({
@@ -7340,7 +7447,12 @@ class ModelManager:
                 "pinned_text": decode(pinned_id) if pinned_id is not None else None,
                 "pinned_id": pinned_id, "vocab_size": len(actual),
                 "lens_name": lens.name, "n_prompts": lens.n_prompts,
-                "model_id": self.model_id,
+                "model_id": self.model_id, "import_id": imported[1],
+                "backend": engine.backend, "precision": self.precision,
+                "slice": {
+                    "start": start, "total": len(ids), "tokens": tokens,
+                    "layers": cells, "output": output,
+                },
             })
 
     def patch_activations(self, donor, recipient, target_index, donor_count, width):

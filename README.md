@@ -47,7 +47,7 @@ drove.
 - Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
 - Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
-- An optional Jacobian lens reading concepts after a token, with imported model-specific lenses and pinned-token rank traces
+- An optional Jacobian lens reading concepts after a token as a layer × position grid, with lenses fetched from the Hub or imported from disk, click-to-pin tokens, and rank shading
 - An attention view showing which earlier tokens the model looked at when predicting it
 - A hardware panel naming the device, the memory ChatLab judges a load against, the Metal cap, and what the process is holding
 - Apple Metal, NVIDIA CUDA, and CPU loading
@@ -120,7 +120,7 @@ On Apple silicon the requirements also bring in [mlx-lm](https://github.com/ml-e
 
 A repository quantized with `mlx_lm.convert`, which is what `mlx-community` publishes, keeps its weights in safetensors files under the names Transformers uses, but packed the way MLX packs them: a 4-bit matrix plus per-group scales and biases per linear layer, which `AutoModelForCausalLM` cannot read. ChatLab recognises one by the `quantization` block in its `config.json`, lists it under **My Models** marked *MLX*, and loads it through mlx-lm rather than through Transformers. It runs on the GPU through Metal at the width it was converted to, so a 7B model at four bits takes about 4 GB and the **Weight precision** radio does not apply; the badge above the chat says *Apple Metal (MLX), 4-bit weights*.
 
-The standard token measurements, logit lens, and attention view survive the change of runtime. The optional Jacobian lens currently requires the Transformers backend. The model returns logits for every position, so the ranks, probabilities, surprise, entropy, alternatives and branching are read exactly as they are from a Transformers model, and **Score text** and **Prompts** work the same way. The logit lens records the residual stream between the decoder layers for the one step an inspection takes, reads each state through the model's final norm and output head, and checks that the last state read that way reproduces the model's own output before it trusts the intermediate rows, as it does for Transformers. The attention view recomputes the weights beside the fused attention kernel for the inspected query, so it shows one row per layer wherever the architecture attends the ordinary way; a model whose layers do not (state-space layers, quantized caches) shows the lens alone and says so. An unquantized MLX conversion (`-bf16`, `-fp16`) is a Transformers checkpoint under another name and loads as one.
+The standard token measurements, logit lens, attention view, and Jacobian lens survive the change of runtime. The model returns logits for every position, so the ranks, probabilities, surprise, entropy, alternatives and branching are read exactly as they are from a Transformers model, and **Score text** and **Prompts** work the same way. The logit lens records the residual stream between the decoder layers for the one step an inspection takes, reads each state through the model's final norm and output head, and checks that the last state read that way reproduces the model's own output before it trusts the intermediate rows, as it does for Transformers. The attention view recomputes the weights beside the fused attention kernel for the inspected query, so it shows one row per layer wherever the architecture attends the ordinary way; a model whose layers do not (state-space layers, quantized caches) shows the lens alone and says so. An unquantized MLX conversion (`-bf16`, `-fp16`) is a Transformers checkpoint under another name and loads as one.
 
 The OpenAI-compatible API lists MLX models beside the Transformers ones and answers from them the same way. GGUF files are not loaded: llama.cpp exposes no hidden states, so the logit lens could not be read, and Transformers can only dequantize them into full weights, which would lose the memory the packing buys.
 
@@ -281,43 +281,76 @@ Transformers models for all three supported architectures, without downloads.
 
 ### Jacobian concept inspection
 
-In **Chat → Layers and attention**, select **Jacobian**, choose a fitted
-`lens.pt`, enter the model ID it was fitted for, and press **Import lens**.
-Click a prompt or response token, then **Inspect layers**. The readout lists
-the five highest-scoring vocabulary tokens at each fitted decoder block.
-To track a token's vocabulary rank across layers, enter its exact text in
-**Pin a vocabulary token** and inspect again. Preserve leading spaces; phrases
-that split into several tokens are rejected.
+In **Chat → Layers and attention**, select **Jacobian** and import a fitted
+lens under **Lens setup**: name a Hugging Face repository and the `.pt` file
+inside it, or choose a saved file, enter the model ID the lens was fitted
+for, and press **Import lens**. Then click a prompt or response token and
+press **Inspect layers**.
 
-The Jacobian view reads the activation **after processing the selected token**,
-including the first token of a sequence. It never reads later tokens. The
-Logit view reads the activation that predicted the selected token. Jacobian
-scores are vocabulary readouts through a fitted transformation; they are not
-generation probabilities or evidence, by themselves, that a concept caused
-the response. The rank plot puts rank 1 at the top on a logarithmic scale.
-Visible decoder blocks are numbered from 1; artifact layer indices start at 0
-and refer to block outputs before the final normalization.
+The readout is a grid: one column per token up to and including the one you
+clicked, one row per fitted decoder block, and a final **Output** row holding
+the model's own next-token prediction at each position. Each cell shows the
+highest-scoring vocabulary token the lens reads at that block and position.
+Below the grid, a table lists the five highest-scoring tokens at every fitted
+block for the clicked token. The grid covers at most the 128 tokens ending
+at the clicked one; its note says which tokens are shown.
 
-The initial implementation supports **Llama, Qwen2, and Qwen3 text models
-using unquantized Transformers weights**. MLX, quantized models, and other
-architectures are not supported yet. The existing logit lens remains available
-on its supported backends. A lens is kept for the current model load only;
-reloading the model or restarting ChatLab requires importing it again.
+Click any cell to pin its token: the inspection runs again with every cell
+carrying that token's vocabulary rank, shaded darker the closer it is to
+rank 1 on a logarithmic scale, and a line traces its rank across blocks at
+the clicked position. A click pins the exact token the cell shows, even one
+whose text would not tokenize back to itself. **Pin a vocabulary token**
+accepts a typed token as well, which must be one vocabulary token; preserve
+leading spaces, and phrases that split into several tokens are rejected.
 
-Use the [reference fitting tools](https://github.com/anthropics/jacobian-lens#fit)
-outside ChatLab to fit a lens, then export it with `lens.save("lens.pt")`.
-ChatLab accepts that saved artifact directly, up to 2 GiB; a resumable fitting
-checkpoint is a different format. It expects `J`, `d_model`, `source_layers`,
-and `n_prompts`. Matrices are mapped into CPU memory and transported one layer
-at a time, so the full lens is not copied onto the accelerator.
+The Jacobian view reads the activation **after processing each token**,
+including the first token of a sequence. Nothing after the clicked token is
+fed to the model, so no column sees a later one. The Logit view instead
+reads the activation that predicted the selected token. Jacobian scores are
+vocabulary readouts through a fitted transformation; they are not generation
+probabilities or evidence, by themselves, that a concept caused the
+response. Visible decoder blocks are numbered from 1; artifact layer indices
+start at 0 and refer to block outputs before the final normalization.
+
+Supported are Llama, Mistral, Qwen2, Qwen3, Gemma 2 and 3, OLMo 2 and 3,
+GLM-4, Phi-3, Granite, Cohere, and SmolLM3 text models, loaded either as
+unquantized Transformers weights or as MLX conversions. An MLX conversion
+runs at the width it was converted to, while every published lens was
+fitted on full-precision weights, so its readouts are approximate and the
+panel says so; the final-block check below still applies. For an MLX load,
+enter the full-precision model the conversion was made from as the fitted
+model ID; its name must match the conversion's name once the quantization
+suffix is removed, as `Qwen/Qwen3-0.6B` does for
+`mlx-community/Qwen3-0.6B-4bit`, so a `Qwen3-4B` lens is not accepted for
+`Qwen3-4B-Instruct-4bit`.
+
+Fitted lenses for many open models are published on the Hub; search for
+`jacobian-lens` or `jlens`. A lens fetched from a repository is kept under
+`lenses/` beside the settings file, outside the model cache, and a lens
+chosen from disk is copied into `lenses/uploads/` there, since the browser's
+upload cache does not outlive the session. Whichever lens
+you import is written down for the loaded model ID in `jacobian_lenses.json`
+in the same folder, and the next load of that model picks it up on the first
+inspection without another import. The record is tied to the checkpoint's
+revision when that is known, so a lens remembered for the model before it was
+redownloaded at a new revision is not brought back; import it again. To fit
+your own, use the
+[reference fitting tools](https://github.com/anthropics/jacobian-lens#fit)
+outside ChatLab and export with `lens.save("lens.pt")`. ChatLab accepts that
+saved artifact directly, up to 2 GiB; a resumable fitting checkpoint is a
+different format. It expects `J`, `d_model`, `source_layers`, and
+`n_prompts`. Matrices are mapped into CPU memory and the transport runs
+there one block at a time, so the lens never takes accelerator memory; only
+the model's own norm and head run where its weights are.
 
 The reference artifact does **not** identify its source model: the entered
 model ID is your declaration, and matching dimensions cannot prove that the
 lens was fitted for those weights. Use the exact model checkpoint and tokenizer
 used during fitting. If an artifact also includes `model_id` or
-`model_revision`, ChatLab checks them against the loaded model and its resolved
-revision. Each inspection verifies that the final block readout reproduces
-the model's actual output before displaying results.
+`model_revision`, ChatLab checks them against the declared model and, for a
+Transformers load, its resolved revision. Each inspection verifies that the
+final block readout reproduces the model's actual output before displaying
+results.
 
 ### Models
 
