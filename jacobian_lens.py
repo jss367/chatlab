@@ -48,6 +48,9 @@ SLICE_POSITIONS = 128
 TOP_CANDIDATES = 5
 
 REPOSITORY_ID = re.compile(r"^[A-Za-z0-9][\w.-]*/[\w.-]+$")
+# What mlx-community appends to a source model's name: the width (``-4bit``,
+# ``-8bit``, ``-bf16``) and the method or packaging (``-DWQ``, ``-mixed``).
+CONVERSION_SUFFIX = re.compile(r"[-_](?:[1-9][-_]?bit|bf16|fp16|fp32|dwq|mlx|mixed)$", re.IGNORECASE)
 
 
 @dataclass
@@ -102,13 +105,30 @@ def _mlx_layout(engine) -> Layout:
     return Layout("mlx", blocks, norm, width, config["model_type"])
 
 
+def conversion_source_name(model_id: str) -> str:
+    """The name of the model an MLX conversion was made from, as its own name tells it.
+
+    ``mlx-community/Qwen3-0.6B-4bit`` was made from ``Qwen3-0.6B``; the
+    conversion suffixes are peeled off the end one at a time, so
+    ``Qwen3-4B-Instruct-4bit-DWQ`` gives ``Qwen3-4B-Instruct``, not ``Qwen3-4B``.
+    """
+    name = model_id.rsplit("/", 1)[-1]
+    while True:
+        stripped = CONVERSION_SUFFIX.sub("", name)
+        if stripped == name:
+            return name
+        name = stripped
+
+
 def check_identity(layout: Layout, model_id: str, fitted_model_id: str) -> str:
     """The declared fitted model, once it is allowed to stand for the loaded one.
 
     A Transformers load is the checkpoint itself, so the declaration must
     name it exactly. An MLX conversion is another repository made from that
-    checkpoint, and the conversion carries the source's name (``Qwen3-0.6B``
-    inside ``mlx-community/Qwen3-0.6B-4bit``), which is the one link there is.
+    checkpoint, and the conversion is named for its source with the width
+    appended (``Qwen3-0.6B`` in ``mlx-community/Qwen3-0.6B-4bit``), which is
+    the one link there is; the names must agree once that suffix is removed,
+    so a ``Qwen3-4B`` lens does not pass for ``Qwen3-4B-Instruct-4bit``.
     """
 
     fitted = fitted_model_id.strip()
@@ -117,10 +137,11 @@ def check_identity(layout: Layout, model_id: str, fitted_model_id: str) -> str:
             raise ValueError("The fitted model ID must exactly match the loaded model ID.")
         return fitted
     name = fitted.rsplit("/", 1)[-1].lower()
-    if not name or name not in model_id.lower():
+    if not name or conversion_source_name(model_id).lower() != name:
         raise ValueError(
             "Enter the ID of the full-precision model this MLX conversion was made from; "
-            "its name must appear in the loaded model's name."
+            "its name must match the conversion's name once the quantization suffix is "
+            "removed, as Qwen/Qwen3-0.6B does for mlx-community/Qwen3-0.6B-4bit."
         )
     return fitted
 
@@ -353,12 +374,17 @@ def remembered(model_id: str) -> dict | None:
 
 
 def remember(model_id: str, record: dict) -> None:
-    """Write down which lens ``model_id`` uses, so a reload finds it again."""
+    """Write down which lens ``model_id`` uses, so a reload finds it again.
+
+    The checkpoint's revision goes in beside it when it is known: the same
+    ID redownloaded can hold different weights, and a lens fitted for the
+    old ones must not be brought back for the new.
+    """
     with _STORE_LOCK:
         data = _read_store()
         data[model_id] = {
             key: record[key]
-            for key in ("path", "fitted_model_id", "repository", "filename")
+            for key in ("path", "fitted_model_id", "repository", "filename", "model_revision")
             if isinstance(record.get(key), str)
         }
         path = store_path()

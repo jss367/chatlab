@@ -318,8 +318,10 @@ runs at the width it was converted to, while every published lens was
 fitted on full-precision weights, so its readouts are approximate and the
 panel says so; the final-block check below still applies. For an MLX load,
 enter the full-precision model the conversion was made from as the fitted
-model ID; its name must appear in the conversion's name, as `Qwen3-0.6B`
-does in `mlx-community/Qwen3-0.6B-4bit`.
+model ID; its name must match the conversion's name once the quantization
+suffix is removed, as `Qwen/Qwen3-0.6B` does for
+`mlx-community/Qwen3-0.6B-4bit`, so a `Qwen3-4B` lens is not accepted for
+`Qwen3-4B-Instruct-4bit`.
 
 Fitted lenses for many open models are published on the Hub; search for
 `jacobian-lens` or `jlens`. A lens fetched from a repository is kept under
@@ -328,7 +330,10 @@ chosen from disk is copied into `lenses/uploads/` there, since the browser's
 upload cache does not outlive the session. Whichever lens
 you import is written down for the loaded model ID in `jacobian_lenses.json`
 in the same folder, and the next load of that model picks it up on the first
-inspection without another import. To fit your own, use the
+inspection without another import. The record is tied to the checkpoint's
+revision when that is known, so a lens remembered for the model before it was
+redownloaded at a new revision is not brought back; import it again. To fit
+your own, use the
 [reference fitting tools](https://github.com/anthropics/jacobian-lens#fit)
 outside ChatLab and export with `lens.save("lens.pt")`. ChatLab accepts that
 saved artifact directly, up to 2 GiB; a resumable fitting checkpoint is a

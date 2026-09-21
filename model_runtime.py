@@ -4361,6 +4361,13 @@ class TorchLogits:
         values, ids = self.logits.detach().float().max(dim=-1)
         return ids.cpu().numpy(), values.cpu().numpy()
 
+    def pinned(self, token_id: int) -> tuple[np.ndarray, np.ndarray]:
+        """``token_id``'s rank (1 is best) and logit at each position, as numpy."""
+        rows = self.logits.detach().float()
+        scores = rows[:, token_id]
+        ranks = (rows > scores[:, None]).sum(dim=-1) + 1
+        return ranks.cpu().numpy().astype(np.int64), scores.cpu().numpy()
+
 
 class TorchEngine:
     """Run a Transformers causal LM for :class:`ModelManager`.
@@ -7282,6 +7289,24 @@ class ModelManager:
 
         return self._engine().final_norm()
 
+    def model_revision(self) -> str | None:
+        """The loaded checkpoint's revision, or ``None`` when it is not recorded.
+
+        A Transformers config carries the resolved commit hash; an MLX
+        conversion is loaded from a cache snapshot whose folder is named for
+        its commit. Same ID, different revision means different weights, so
+        this is what a lens written down for the model is compared against.
+        """
+        with self._lock:
+            if not self.loaded:
+                return None
+            if self._engine().backend == "torch":
+                revision = getattr(getattr(self.model, "config", None), "_commit_hash", None)
+            else:
+                path = self.local_path
+                revision = path.name if path is not None and path.parent.name == "snapshots" else None
+            return revision if isinstance(revision, str) else None
+
     def import_jacobian_lens(self, path: str, fitted_model_id: str) -> dict:
         """Validate a reference lens file; caller owns the generation reservation.
 
@@ -7290,6 +7315,7 @@ class ModelManager:
         it is read as it is, and the final-block replay in each inspection is
         what decides whether the readout is close enough to trust.
         """
+        revision = self.model_revision()
         with self._lock:
             if not self.loaded:
                 raise ValueError("Load the model this lens was fitted for first.")
@@ -7304,7 +7330,7 @@ class ModelManager:
                 "model_id": self.model_id, "name": lens.name,
                 "layers": len(lens.matrices), "n_prompts": lens.n_prompts,
                 "path": str(path), "fitted_model_id": fitted_model_id.strip(),
-                "backend": engine.backend,
+                "backend": engine.backend, "model_revision": revision,
             }
 
     def jacobian_lens_import(self) -> dict | None:
@@ -7379,6 +7405,11 @@ class ModelManager:
                 {"token_id": int(token), "text": decode(token), "score": float(score)}
                 for token, score in zip(best_ids, best_scores)
             ]
+            if pinned_id is not None:
+                # The model's own row is shaded by the pinned token too.
+                for cell, rank, score in zip(output, *logits.pinned(pinned_id)):
+                    cell["pinned_rank"] = int(rank)
+                    cell["pinned_score"] = float(score)
             tokens = [
                 {
                     "index": position, "token_id": ids[position], "text": decode(ids[position]),

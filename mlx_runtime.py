@@ -282,6 +282,16 @@ class MlxLogits:
         mx.eval(ids, values)
         return np.array(ids), np.array(values)
 
+    def pinned(self, token_id: int) -> tuple[np.ndarray, np.ndarray]:
+        """``token_id``'s rank (1 is best) and logit at each position, as numpy."""
+        import mlx.core as mx
+
+        rows = self.logits[0].astype(mx.float32)
+        scores = rows[:, token_id]
+        ranks = mx.sum(rows > rows[:, token_id:token_id + 1], axis=-1) + 1
+        mx.eval(ranks, scores)
+        return np.array(ranks).astype(np.int64), np.array(scores)
+
 
 @dataclass
 class LensReading:

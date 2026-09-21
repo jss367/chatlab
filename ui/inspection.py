@@ -286,6 +286,7 @@ def inspect_layers(
         sequence = context_ids + [int(metric["token_id"]) for metric in metrics]
 
         started = time.monotonic()
+        note = None
         try:
             options = {"context_count": len(context_ids), "load_id": load_id}
             if steering is not None:
@@ -297,7 +298,7 @@ def inspect_layers(
                 imported = imported_lens if (imported_lens or {}).get("load_id") == load_id else None
                 recalled = None
                 if imported is None and runtime.MANAGER.jacobian_lens_import() is None:
-                    recalled = recall_lens()
+                    recalled, note = recall_lens()
                 insight = runtime.MANAGER.inspect_jacobian(
                     sequence, index,
                     lens_id=(imported or {}).get("import_id"),
@@ -319,7 +320,7 @@ def inspect_layers(
                 return
             yield (
                 *refused,
-                failure_status("Could not inspect that token", str(error)),
+                failure_status("Could not inspect that token", f"{error} {note}" if note else str(error)),
             )
             return
         if not controls_current():
@@ -400,21 +401,27 @@ def render_lens(insight: dict) -> str:
     return charts.logit_lens_chart(insight)
 
 
-def recall_lens() -> str | None:
-    """Import the lens written down for the loaded model; its name, or ``None``.
+def recall_lens() -> tuple[str | None, str | None]:
+    """Import the lens written down for the loaded model; ``(name, note)``.
 
     Called under the generation claim with no lens imported for this load.
     A record whose file has gone, or that the current weights refuse, leaves
     the manager as it was and the ordinary "import a lens" message follows.
+    A record made for another revision of the same model ID is not tried at
+    all, since the lens was fitted for other weights; the note says so, for
+    the inspection to add to that message.
     """
     record = jacobian_lens.remembered(runtime.MANAGER.model_id or "")
     if record is None:
-        return None
+        return None, None
+    remembered, current = record.get("model_revision"), runtime.MANAGER.model_revision()
+    if isinstance(remembered, str) and isinstance(current, str) and remembered != current:
+        return None, "The remembered lens was imported for another revision of this model; import it again."
     try:
         imported = runtime.MANAGER.import_jacobian_lens(record["path"], record.get("fitted_model_id") or "")
     except Exception:  # noqa: BLE001 - the inspection reports the missing lens itself
-        return None
-    return imported["name"]
+        return None, None
+    return imported["name"], None
 
 
 def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):

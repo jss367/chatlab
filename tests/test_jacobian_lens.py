@@ -110,6 +110,18 @@ class JacobianLensTests(unittest.TestCase):
                     [cell["token_id"] for cell in window["output"]],
                     reference[: index + 1].argmax(dim=-1).tolist(),
                 )
+                # The model's own row carries the pinned token's rank as well.
+                for position, cell in enumerate(window["output"]):
+                    pinned = reference[position, self.ids[index]]
+                    self.assertEqual(cell["pinned_rank"], int((reference[position] > pinned).sum()) + 1)
+                    self.assertAlmostEqual(cell["pinned_score"], float(pinned), places=5)
+
+    def test_conversion_source_name_strips_quantization_suffixes(self):
+        self.assertEqual(jacobian_lens.conversion_source_name("mlx-community/Qwen3-4B-Instruct-4bit"), "Qwen3-4B-Instruct")
+        self.assertEqual(jacobian_lens.conversion_source_name("mlx-community/Qwen3-0.6B-8bit"), "Qwen3-0.6B")
+        self.assertEqual(jacobian_lens.conversion_source_name("mlx-community/Qwen3-4B-4bit-DWQ"), "Qwen3-4B")
+        self.assertEqual(jacobian_lens.conversion_source_name("mlx-community/Llama-3.2-1B-bf16"), "Llama-3.2-1B")
+        self.assertEqual(jacobian_lens.conversion_source_name("Qwen/Qwen3-0.6B"), "Qwen3-0.6B")
 
     def test_slice_window_ends_at_the_token_without_changing_its_readout(self):
         imported = self.import_lens()
@@ -249,7 +261,8 @@ class JacobianLensTests(unittest.TestCase):
         # The selected column: its header and one cell per row.
         self.assertEqual(rendered.count("jl-selected"), 4)
         self.assertIn("--jl-heat:", rendered)
-        self.assertIn("<sup>", rendered)
+        # Every cell, the output row's included, shows the pinned token's rank.
+        self.assertEqual(rendered.count("<sup>"), 4 * 3)
         self.assertIn("tokens 1–4 of 6", rendered)
         self.assertIn("all 6 tokens", charts.jacobian_lens_chart(self.inspect(5)))
         self.assertNotIn("<b>", rendered)
@@ -275,12 +288,15 @@ class JacobianLensTests(unittest.TestCase):
                 (7, metrics), (7, prompt), (7, self.ids[:2], self.manager.load_id), 0,
             )
 
+        self.manager.model.config._commit_hash = "abc"
         with mock.patch.object(jacobian_lens, "store_path", return_value=store), mock.patch.object(
             runtime, "MANAGER", self.manager,
         ), mock.patch.object(inspection, "current_strip_generation", return_value=7):
             imported, status = inspection.import_jacobian_lens(str(self.path), self.manager.model_id)
             self.assertIn("Remembered", status)
+            self.assertEqual(imported["model_revision"], "abc")
             record = jacobian_lens.remembered(self.manager.model_id)
+            self.assertEqual(record["model_revision"], "abc")
             kept = Path(record["path"])
             self.assertEqual(kept.parent, store.parent / "lenses" / "uploads")
             self.assertEqual(kept.name, "lens.pt")
@@ -303,6 +319,16 @@ class JacobianLensTests(unittest.TestCase):
                 recall.assert_not_called()
             self.assertIn("jacobian-lens", result[0])
             self.assertNotIn("remembered", result[4])
+
+            # The same ID at another revision is other weights: the record is
+            # left alone and the message says why.
+            self.manager.load_count += 1
+            self.manager.model.config._commit_hash = "def"
+            result = list(inspection.inspect_layers(*args(), lens_mode="Jacobian", imported_lens=None))[-1]
+            self.assertIn("Import a Jacobian", result[4])
+            self.assertIn("another revision", result[4])
+            self.assertIsNone(self.manager.jacobian_lens_import())
+            self.manager.model.config._commit_hash = "abc"
 
             # A record whose file is gone leaves the usual message.
             self.manager.load_count += 1
@@ -578,6 +604,9 @@ class MlxJacobianLensTests(unittest.TestCase):
             [cell["token_id"] for cell in result["slice"]["output"]],
             logits[: index + 1].argmax(axis=-1).tolist(),
         )
+        for position, cell in enumerate(result["slice"]["output"]):
+            self.assertEqual(cell["pinned_rank"], int((logits[position] > logits[position, 7]).sum()) + 1)
+            self.assertAlmostEqual(cell["pinned_score"], float(logits[position, 7]), places=4)
         rendered = charts.jacobian_lens_chart(result)
         self.assertIn("4-bit MLX weights", rendered)
 
@@ -586,8 +615,16 @@ class MlxJacobianLensTests(unittest.TestCase):
             self.manager.import_jacobian_lens(str(self.path), "test/other-decoder")
         with self.assertRaisesRegex(ValueError, "MLX conversion"):
             self.manager.import_jacobian_lens(str(self.path), "")
-        self.manager.model_id = "mlx-community/Tiny-Decoder-bf16"
-        self.assertIn("import_id", self.manager.import_jacobian_lens(str(self.path), "test/tiny-decoder"))
+        # A base-model lens is not the instruct conversion's, though its name is inside it.
+        self.manager.model_id = "mlx-community/tiny-decoder-instruct-4bit"
+        with self.assertRaisesRegex(ValueError, "quantization suffix"):
+            self.manager.import_jacobian_lens(str(self.path), "test/tiny-decoder")
+        for conversion in (
+            "mlx-community/Tiny-Decoder-bf16", "mlx-community/Tiny-Decoder-4bit-DWQ",
+            "mlx-community/tiny-decoder-bf16",
+        ):
+            self.manager.model_id = conversion
+            self.assertIn("import_id", self.manager.import_jacobian_lens(str(self.path), "test/tiny-decoder"))
 
 
 if __name__ == "__main__":
