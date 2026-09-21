@@ -631,7 +631,7 @@ def _build_page(context):
                 trial_load = gr.Button("Load trial", size="sm", elem_id="maze-load-trial")
                 trial_note = gr.Markdown(trial_note_text(initial))
             with gr.Accordion("Load a saved run", open=False):
-                upload = gr.File(label="Saved run JSON", file_types=[".json"], type="filepath")
+                upload = gr.File(label="Saved run JSON", show_label=False, file_types=[".json"], type="filepath")
             gr.Markdown("The settings below apply to the next episode. Loading a trial or a saved run shows the settings it used.")
             prepare = gr.Button("New episode · apply settings", elem_id="maze-prepare")
             with gr.Accordion("Setup prompt", open=False):
