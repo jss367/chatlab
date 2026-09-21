@@ -25,7 +25,7 @@ MAZE = Maze(("...", "##.", "..."), (0, 0), (0, 2))
 class Manager:
     loaded = True
     model_id = "test/model"
-    load_id = "test-load"
+    load_id = "test/model#1"
     reasoning_prefilled = False
     tokenizer = SimpleNamespace(encode=lambda s, **kw: list(s.encode()), decode=lambda ids, **kw: bytes(ids).decode())
 
@@ -46,6 +46,9 @@ class Manager:
 
     def prompt_text(self, messages, tools=None):
         return ModelService(lambda: self).prompt_text(messages, tools)
+
+    def loaded_model_id(self):
+        return ModelService(lambda: self).loaded_model_id()
 
     def _prompt_token_ids(self, messages, tools=None):
         # Stands in for a chat template: the fixture's vocabulary is UTF-8
@@ -401,14 +404,14 @@ class MazeTests(unittest.TestCase):
 
         # The same repository ID reloaded: a new load_id, the same tokenizer.
         reloaded = Manager([])
-        reloaded.load_id = "test-load#2"
+        reloaded.load_id = "test/model#2"
         index = move.index("east")
         with reloaded.open_session() as session:
             forked = fork_token_edit(replay, 0, index, "west", session)
         self.assertFalse(forked.replay_only)
-        self.assertEqual((forked.load_id, forked.model_id), ("test-load#2", "test/model"))
+        self.assertEqual((forked.load_id, forked.model_id), ("test/model#2", "test/model"))
         self.assertEqual(forked.token_edit["parent_run_id"], ep.run_id)
-        self.assertEqual(forked.token_edit["parent_load_id"], "test-load")
+        self.assertEqual(forked.token_edit["parent_load_id"], "test/model#1")
         self.assertTrue(forked.token_edit["parent_replay"])
         self.assertEqual(forked.pending_edit["forced_ids"], ids[:index] + list(b"west"))
         self.assertEqual(forked.turns, [])
@@ -437,7 +440,7 @@ class MazeTests(unittest.TestCase):
 
         # Same model ID, new load, a vocabulary that maps those IDs elsewhere.
         revised = Manager([])
-        revised.load_id = "test-load#2"
+        revised.load_id = "test/model#2"
         revised.tokenizer = SimpleNamespace(
             encode=lambda s, **kw: [(b + 1) % 128 for b in s.encode()],
             decode=lambda ids, **kw: bytes((i + 1) % 128 for i in ids).decode())
@@ -449,7 +452,7 @@ class MazeTests(unittest.TestCase):
         # An ID beyond the new vocabulary raises rather than returning text.
         vocabulary = list(range(64))
         out_of_range = Manager([])
-        out_of_range.load_id = "test-load#3"
+        out_of_range.load_id = "test/model#3"
         out_of_range.tokenizer = SimpleNamespace(
             encode=lambda s, **kw: list(s.encode()),
             decode=lambda ids, **kw: bytes(vocabulary[i] for i in ids).decode())
@@ -468,7 +471,7 @@ class MazeTests(unittest.TestCase):
                 fork_token_edit(replay, 0, index, "west", session)
         self.assertIn("tokenize differently", str(caught.exception))
         reloaded = Manager([])
-        reloaded.load_id = "test-load#4"
+        reloaded.load_id = "test/model#4"
         with reloaded.open_session() as session:
             forked = fork_token_edit(replay, 0, index, "west", session)
         self.assertEqual(forked.pending_edit["forced_ids"], ids[:index] + list(b"west"))
@@ -499,7 +502,7 @@ class MazeTests(unittest.TestCase):
         # response would read it as a length failure and skip its movement.
         replay = from_payload(json.loads(json.dumps(ep.payload())))
         restopped = Manager([])
-        restopped.load_id = "test-load#2"
+        restopped.load_id = "test/model#2"
         restopped._stop_token_ids = lambda: {1}
         with restopped.open_session() as session:
             with self.assertRaisesRegex(ValueError, "stop tokens differ"):
@@ -510,7 +513,7 @@ class MazeTests(unittest.TestCase):
         drifted = from_payload(json.loads(json.dumps(ep.payload())))
         drifted.turns[0]["text"] = "¡" + drifted.turns[0]["text"]
         reloaded = Manager([])
-        reloaded.load_id = "test-load#2"
+        reloaded.load_id = "test/model#2"
         with reloaded.open_session() as session:
             with self.assertRaisesRegex(ValueError, "tokenize differently"):
                 fork_token_edit(drifted, 1, index, "west", session)
@@ -537,7 +540,7 @@ class MazeTests(unittest.TestCase):
         # Every ID still decodes the same and the response still ends on a stop
         # token, but the newline inside the retained prefix is now one too.
         restopped = Manager([])
-        restopped.load_id = "test-load#2"
+        restopped.load_id = "test/model#2"
         restopped._stop_token_ids = lambda: {0, 10}
         with restopped.open_session() as session:
             with self.assertRaisesRegex(ValueError, "retained prefix"):
@@ -565,7 +568,7 @@ class MazeTests(unittest.TestCase):
         # which is the same recording whichever way the offering vocabulary
         # spelled it, so the loaded one has nothing to be checked against.
         reloaded = Manager([])
-        reloaded.load_id = "test-load#2"
+        reloaded.load_id = "test/model#2"
         with reloaded.open_session() as session:
             with self.assertRaisesRegex(ValueError, "Replacement text"):
                 fork_token_edit(replay, 0, index, "ignored", session, candidate_id=120)
@@ -578,7 +581,7 @@ class MazeTests(unittest.TestCase):
 
         # A live run whose weights have been reloaded since is refused too: the
         # load that offered the alternative is no longer the one in memory.
-        author.load_id = "test-load#2"
+        author.load_id = "test/model#2"
         with author.open_session() as session:
             with self.assertRaisesRegex(ValueError, "Replacement text"):
                 fork_token_edit(ep, 0, index, "ignored", session, candidate_id=120)
@@ -720,7 +723,7 @@ class MazeTests(unittest.TestCase):
         for position in halves:
             replay.turns[0]["metrics"][position]["text"] = "�"
         reloaded = Manager([])
-        reloaded.load_id = "test-load#2"
+        reloaded.load_id = "test/model#2"
         with reloaded.open_session() as session:
             forked = fork_token_edit(replay, 0, index, "west", session)
         self.assertEqual(forked.pending_edit["forced_ids"], ids[:index] + list(b"west"))
@@ -729,7 +732,7 @@ class MazeTests(unittest.TestCase):
         # retained prefix, which the response it belongs to still catches.
         swapped = {0xC3: 0xC4, 0xC4: 0xC3}
         moved = Manager([])
-        moved.load_id = "test-load#3"
+        moved.load_id = "test/model#3"
         moved.tokenizer = SimpleNamespace(
             encode=lambda s, **kw: list(s.encode()),
             decode=lambda ids, **kw: bytes(swapped.get(i, i) for i in ids).decode())
@@ -752,9 +755,9 @@ class MazeTests(unittest.TestCase):
         is what makes the two positions of the same ID read differently.
         """
         manager = Manager([])
-        manager.load_id = "test-load#2"
+        manager.load_id = "test/model#2"
         ep = Episode(MAZE, CONFIG)
-        ep.model_id, ep.load_id = "test/model", "test-load"
+        ep.model_id, ep.load_id = "test/model", "test/model#1"
         ep.replay_only = True
         ep.turns = [dict(text="a\x00b", forced_prefix_tokens=2, literal_prefill_tokens=2, finish_reason="stop",
                          metrics=[{"token_id": token_id} for token_id in (97, 0, 98, 0)])]
@@ -781,7 +784,7 @@ class MazeTests(unittest.TestCase):
             completed = archive.read_bytes()
 
             replay = from_payload(snapshot)
-            manager.load_id = "test-load#2"
+            manager.load_id = "test/model#2"
             index = move.index("east")
             suffix = move[index + len("east"):]
             manager.replies = iter([(suffix, list(suffix.encode()) + [0])])
@@ -1157,9 +1160,180 @@ class MazeTests(unittest.TestCase):
         self.assertEqual(text.count(east), 1)
         # A later load spells IDs its own way, so a reading made under one that
         # is not the recorded load says so rather than passing as the record.
-        manager.load_id = 'test-load-2'
-        self.assertIn('under test-load-2 rather than the test-load that recorded it',
+        manager.load_id = 'test/model#2'
+        self.assertIn('under test/model#2 rather than the test/model#1 that recorded it',
                       context_view(ep, manager, 1)[0])
+
+    def test_recorded_ids_are_not_decoded_by_a_model_that_did_not_record_them(self):
+        # Vocabularies overlap in size, so a run's IDs decode under another
+        # model without raising and spell fluent text that is not the prompt.
+        # The model IDs are what catch it, the same gate a fork applies, and
+        # the prompt is read through the loaded model's template instead.
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        east = call_text(MAZE.maze_id, 'east')
+        manager = Manager([(east, [8, 0])])
+        list(stream_episode(ep, manager))
+        self.assertEqual(ep.model_id, 'test/model')
+        # The response answers for itself, so it is renamed with the run.
+        ep.model_id, ep.load_id = 'another/model', 'recorded-elsewhere'
+        ep.turns[0]['model_id'] = 'another/model'
+        note, text = context_view(ep, manager, 0)
+        self.assertIn('**Response 1 · as the loaded model would be given it**', note)
+        self.assertIn(f"The {len(ep.turns[0]['prompt_ids']):,} prompt tokens it recorded are not "
+                      'decoded here: test/model is loaded and another/model recorded them', note)
+        self.assertIn('Load another/model to read this prompt as it was recorded.', note)
+        # One warning, not two: the load stamps would only repeat it in words
+        # that describe a vocabulary moving under one name.
+        self.assertNotIn('as recorded**', note)
+        self.assertNotIn('rather than the', note)
+        # What the reader gets instead is the prompt itself, spelled by the
+        # template rather than by the wrong vocabulary.
+        self.assertIn('"name": "move"', text)
+        self.assertIn(default_instruction('coordinates'), text)
+        self.assertTrue(text.endswith('<assistant>'))
+        # With nothing loaded there is no model spelling anything wrongly, so
+        # the pane keeps its own words for that.
+        unloaded = ModelService(lambda: SimpleNamespace(
+            loaded=False, load_id=None, tokenizer=None, loaded_model=LoadedModel))
+        note, text = context_view(ep, unloaded, 0)
+        self.assertIn('**Response 1 · as recorded, untemplated**', note)
+        self.assertIn('No model is loaded to spell this prompt', note)
+        self.assertNotIn('are not decoded here', note)
+        # A vocabulary too small to spell an ID is the same mismatch arriving
+        # as an exception. That decode names no load, so the warning is taken
+        # from the load that rendered the template rather than lost.
+        spelled = ep.turns[0]['prompt_ids']
+        ep.turns[0]['prompt_ids'] = [999999]
+        note, _ = context_view(ep, manager, 0)
+        self.assertIn('**Response 1 · as the loaded model would be given it**', note)
+        self.assertIn('The 1 prompt tokens it recorded are not decoded here: test/model is '
+                      'loaded and another/model recorded them', note)
+        self.assertNotIn('rather than the', note)
+        ep.turns[0]['prompt_ids'] = spelled
+        # An image pipeline is in memory under its own ID and has no
+        # tokenizer, so it spells nothing and is not named as the model that
+        # would. Naming it would explain a vocabulary by a model without one,
+        # in the same breath as saying no model is loaded.
+        drawing = ModelService(lambda: SimpleNamespace(
+            loaded=False, load_id='stabilityai/sd-turbo#1', tokenizer=None,
+            loaded_model=lambda: LoadedModel('stabilityai/sd-turbo', 'mps', 'full',
+                                             'stabilityai/sd-turbo#1')))
+        note, text = context_view(ep, drawing, 0)
+        self.assertIn('**Response 1 · as recorded, untemplated**', note)
+        self.assertIn('No model is loaded to spell this prompt', note)
+        self.assertNotIn('sd-turbo', note)
+        self.assertNotIn('are not decoded here', note)
+        self.assertTrue(text.startswith('[tool schemas]'))
+        # The IDs never reach the wrong vocabulary at all: a model that cannot
+        # mean them is not asked to.
+        class CountsDecodes(Manager):
+            decodes = 0
+
+            def decode(self, ids):
+                type(self).decodes += 1
+                return super().decode(ids)
+
+        counting = CountsDecodes([])
+        self.assertIn('are not decoded here', context_view(ep, counting, 0)[0])
+        self.assertEqual(CountsDecodes.decodes, 0)
+        ep.model_id = ep.turns[0]['model_id'] = 'test/model'
+        self.assertIn('**Response 1 · as recorded**', context_view(ep, counting, 0)[0])
+        self.assertEqual(CountsDecodes.decodes, 1)
+        ep.model_id = ep.turns[0]['model_id'] = 'another/model'
+        # The initial prompt has no recorded IDs to leave undecoded, so there
+        # is no aside to carry the two names. The reading is still one model's
+        # answer to another's messages, and is marked as that rather than
+        # falling silent or reporting a vocabulary that has moved.
+        note, text = context_view(ep, manager, -1)
+        self.assertIn('**Initial prompt · as the loaded model would be given it**', note)
+        self.assertIn('under test/model rather than the another/model that recorded this run', note)
+        self.assertNotIn('not decoded here', note)
+        self.assertNotIn('would read differently here', note)
+        self.assertTrue(text.endswith('<assistant>'))
+        # A different model that can decode the IDs but whose template refuses
+        # this history leaves the pane at its least readable, which is where
+        # naming the recording model helps most. That model is in memory as the
+        # note is written, so the note says so.
+        class NoToolTemplate(Manager):
+            def _prompt_token_ids(self, messages, tools=None):
+                if tools is not None:
+                    raise ValueError("Tool use requires a model with a native chat/tool template.")
+                return list(b'plain'), False
+
+        note, text = context_view(ep, NoToolTemplate([]), 0)
+        self.assertIn('**Response 1 · as recorded, untemplated**', note)
+        self.assertIn('Tool use requires a model with a native chat/tool template', note)
+        self.assertIn('not decoded here: test/model is loaded and another/model recorded them', note)
+        self.assertIn('Load another/model to read this prompt as it was recorded.', note)
+        self.assertTrue(text.startswith('[tool schemas]'))
+        # A model that is gone by the time the prompt is read is not called
+        # loaded beside a transcript it did not spell: the model is named by
+        # the reading being shown, and that reading is spelled by nothing.
+        class UnloadsAfterAsking(Manager):
+            def __init__(self):
+                super().__init__([])
+                self.reads = 0
+
+            def loaded_model(self):
+                # The pane's first look answers; the load is gone by the next.
+                self.reads += 1
+                return super().loaded_model() if self.reads < 2 else LoadedModel()
+
+        note, text = context_view(ep, UnloadsAfterAsking(), 0)
+        self.assertIn('**Response 1 · as recorded, untemplated**', note)
+        self.assertNotIn('are not decoded here', note)
+        self.assertNotIn('test/model', note)
+        self.assertTrue(text.startswith('[tool schemas]'))
+        # A load of the recording model reads the IDs back as before.
+        manager.model_id, manager.load_id = 'another/model', 'another/model#1'
+        self.assertIn('**Response 1 · as recorded**', context_view(ep, manager, 0)[0])
+
+    def test_a_run_that_names_no_model_is_not_read_back_from_its_ids(self):
+        # A file written elsewhere can carry prompt IDs and no record of what
+        # produced them. Decoding those under whatever is loaded is the same
+        # fluent text unrelated to the prompt, offered as the record, so the
+        # silence is refused rather than taken as permission.
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        east = call_text(MAZE.maze_id, 'east')
+        manager = Manager([(east, [8, 0])])
+        list(stream_episode(ep, manager))
+        ep.model_id = None
+        ep.turns[0].pop('model_id')
+        note, text = context_view(ep, manager, 0)
+        self.assertIn('**Response 1 · as the loaded model would be given it**', note)
+        self.assertIn('this run does not record which model produced them', note)
+        self.assertNotIn('as recorded**', note)
+        self.assertIn('"name": "move"', text)
+        # An episode of this application takes the loaded model's name before
+        # its first response, so only a foreign file reaches that.
+        fresh = Episode(MAZE, CONFIG)
+        list(stream_episode(fresh, Manager([(east, [8, 0])])))
+        self.assertEqual(fresh.model_id, 'test/model')
+        self.assertIn('**Response 1 · as recorded**', context_view(fresh, manager, 0)[0])
+        # A response recorded before responses carried their own name is
+        # answered for by the run, which is what that fallback is.
+        fresh.turns[0].pop('model_id')
+        self.assertIn('**Response 1 · as recorded**', context_view(fresh, manager, 0)[0])
+
+    def test_a_response_is_read_back_by_the_model_that_recorded_it_not_the_run(self):
+        # An episode continues under whatever is loaded: generating under one
+        # model, loading another and pressing Next leaves the run named after
+        # the first and the new response after the second. Reading that
+        # response under the run's name would decode one model's IDs with the
+        # other's vocabulary and call the result the record.
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        east = call_text(MAZE.maze_id, 'east')
+        manager = Manager([(east, [8, 0])])
+        list(stream_episode(ep, manager))
+        self.assertEqual((ep.model_id, ep.turns[0]['model_id']), ('test/model', 'test/model'))
+        ep.turns[0]['model_id'] = 'continued/elsewhere'
+        note, _ = context_view(ep, manager, 0)
+        self.assertNotIn('as recorded**', note)
+        self.assertIn('test/model is loaded and continued/elsewhere recorded them', note)
+        self.assertIn('Load continued/elsewhere to read this prompt as it was recorded.', note)
+        # The initial prompt belongs to no response, so the run answers for it.
+        self.assertIn('**Initial prompt · as the loaded model would be given it**',
+                      context_view(ep, manager, -1)[0])
 
     def test_context_view_templates_the_initial_prompt_and_falls_back_without_a_model(self):
         ep = Episode(MAZE, CONFIG | {'system_prompt': 'Be brief.'})
@@ -1187,7 +1361,7 @@ class MazeTests(unittest.TestCase):
         # An uploaded run read under whatever is loaded now is not that run's
         # own spelling either, and the note carries the same warning.
         ep.load_id = 'elsewhere#1'
-        self.assertIn('under test-load rather than the elsewhere#1 that recorded it',
+        self.assertIn('under test/model#1 rather than the elsewhere#1 that recorded it',
                       context_view(ep, manager, -1)[0])
 
     def test_reading_a_model_mid_load_is_refused_rather_than_stamped(self):
@@ -1212,6 +1386,7 @@ class MazeTests(unittest.TestCase):
         service = ModelService(MidLoad)
         self.assertEqual(service.decode([1, 2]), (None, None))
         self.assertEqual(service.prompt_text([{'role': 'user', 'content': 'hi'}]), (None, None))
+        self.assertIsNone(service.loaded_model_id())
 
         # A load that lands while the reading is under way is refused too: the
         # text belongs to one vocabulary and the identifier to another.
@@ -1225,9 +1400,14 @@ class MazeTests(unittest.TestCase):
                 # The first reading frames the start of the read; the load
                 # lands before the second.
                 return LoadedModel('test/model', 'test-device', 'full',
-                                   'test-load' if self.reads < 2 else 'test-load-2')
+                                   'test/model#1' if self.reads < 2 else 'test/model#2')
 
         self.assertEqual(ModelService(LoadsDuringRead).decode([65]), (None, None))
+        # Naming the model is framed the same way, its tokenizer being read
+        # after the snapshot: a load landing in between would otherwise name
+        # the model before it while the model after it holds the vocabulary
+        # that was checked.
+        self.assertIsNone(ModelService(LoadsDuringRead).loaded_model_id())
         # The maze pane falls back to the recorded messages rather than
         # showing a prompt it cannot say was spelled by any one load.
         ep = Episode(MAZE, CONFIG)
@@ -1253,7 +1433,7 @@ class MazeTests(unittest.TestCase):
         self.assertTrue(text.startswith('[tool schemas]'))
         # A response whose recorded IDs this vocabulary cannot spell still has
         # the template as a second best, and takes it.
-        ep.turns.append({'prompt_ids': [999999], 'load_id': 'test-load', 'metrics': [],
+        ep.turns.append({'prompt_ids': [999999], 'load_id': 'test/model#1', 'metrics': [],
                          'forced_prefix_tokens': 0, 'text': ''})
         note, _ = context_view(ep, Manager([]), 0)
         self.assertIn('**Response 1 · as the loaded model would be given it**', note)
