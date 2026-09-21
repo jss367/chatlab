@@ -57,7 +57,7 @@ class ModelService:
         return self._read(render)
 
     def loaded_model_id(self):
-        """The model in memory now, framing no text at all.
+        """The model that could spell text now, framing none of it.
 
         A snapshot moves as one (see :meth:`_read`), so this is the model a
         reader would be told to unload, read at the moment it is asked for.
@@ -65,9 +65,18 @@ class ModelService:
         describe the application beside text no load produced, and :meth:`decode`
         or :meth:`prompt_text` for text a load did produce. ``None`` when
         nothing is loaded or a load is under way.
+
+        An image pipeline is published under its own ID like any load and has
+        no tokenizer, so it is not an answer here: it spells nothing, and a
+        caller naming it would be explaining a vocabulary by a model that has
+        none. It is the same condition :meth:`_read` reads before its own
+        reading.
         """
-        published = self._provider().loaded_model()
-        return published.model_id if published.load_id is not None else None
+        manager = self._provider()
+        published = manager.loaded_model()
+        if published.load_id is None or manager.tokenizer is None:
+            return None
+        return published.model_id
 
     def _read(self, reading):
         """Read the loaded model, or answer that no one load made the reading.

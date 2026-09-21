@@ -1208,6 +1208,20 @@ class MazeTests(unittest.TestCase):
                       'loaded and another/model recorded them', note)
         self.assertNotIn('rather than the', note)
         ep.turns[0]['prompt_ids'] = spelled
+        # An image pipeline is in memory under its own ID and has no
+        # tokenizer, so it spells nothing and is not named as the model that
+        # would. Naming it would explain a vocabulary by a model without one,
+        # in the same breath as saying no model is loaded.
+        drawing = ModelService(lambda: SimpleNamespace(
+            loaded=False, load_id='stabilityai/sd-turbo#1', tokenizer=None,
+            loaded_model=lambda: LoadedModel('stabilityai/sd-turbo', 'mps', 'full',
+                                             'stabilityai/sd-turbo#1')))
+        note, text = context_view(ep, drawing, 0)
+        self.assertIn('**Response 1 · as recorded, untemplated**', note)
+        self.assertIn('No model is loaded to spell this prompt', note)
+        self.assertNotIn('sd-turbo', note)
+        self.assertNotIn('are not decoded here', note)
+        self.assertTrue(text.startswith('[tool schemas]'))
         # The IDs never reach the wrong vocabulary at all: a model that cannot
         # mean them is not asked to.
         class CountsDecodes(Manager):
