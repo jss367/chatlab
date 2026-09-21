@@ -415,9 +415,19 @@ class JacobianLensTests(unittest.TestCase):
             result = inspection.import_jacobian_lens(self.path, "other/model")
             self.assertIn("Could not import", result[1])
             self.assertIsNone(self.manager.occupant)
+            # A rejected file is never copied beside the settings.
+            self.assertFalse((store.parent / "lenses" / "uploads").exists())
+            self.assertIsNone(jacobian_lens.remembered(self.manager.model_id))
             imported, status = inspection.import_jacobian_lens(self.path, self.manager.model_id)
             self.assertIn("import_id", imported)
             self.assertIn("2 fitted layers", status)
+            self.assertTrue((store.parent / "lenses" / "uploads" / "lens.pt").is_file())
+            # A copy that fails still leaves the lens imported, and says so.
+            with mock.patch.object(jacobian_lens, "keep", side_effect=OSError("disk full")):
+                imported, status = inspection.import_jacobian_lens(self.path, self.manager.model_id)
+            self.assertIn("import_id", imported)
+            self.assertIn("could not be kept", status)
+            self.assertIn("disk full", status)
 
 
     @contextmanager

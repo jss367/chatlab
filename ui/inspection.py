@@ -444,26 +444,28 @@ def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):
         source = {"repository": repository, "filename": filename}
     if not path:
         return gr.skip(), "Choose a saved lens.pt file, or name a Hub repository and file."
-    if not source:
-        try:
-            path = str(jacobian_lens.keep(path))
-        except OSError as error:
-            return gr.skip(), failure_status("Could not import the lens", str(error))
     held = runtime.MANAGER.claim_generation()
     if held:
         return gr.skip(), INSPECT_LOADING if held == LOADING else INSPECT_BUSY
     try:
         imported = runtime.MANAGER.import_jacobian_lens(path, fitted_model_id or "")
-        jacobian_lens.remember(imported["model_id"], imported | source)
-        return imported, (
-            f"Imported for `{html.escape(imported['model_id'])}`: "
-            f"{imported['layers']} fitted layers, {imported['n_prompts']:,} fitting prompts. "
-            "Remembered for this model, so its next load picks the lens up again."
-        )
     except Exception as error:
         return gr.skip(), failure_status("Could not import the lens", str(error))
     finally:
         runtime.MANAGER.release_generation()
+    status = (
+        f"Imported for `{html.escape(imported['model_id'])}`: "
+        f"{imported['layers']} fitted layers, {imported['n_prompts']:,} fitting prompts."
+    )
+    # Copied only once the file has passed every check, so a rejected upload
+    # never lands beside the settings and nothing is left behind on failure.
+    if not source:
+        try:
+            imported = imported | {"path": str(jacobian_lens.keep(path))}
+        except OSError as error:
+            return imported, f"{status} It could not be kept for later loads: {html.escape(str(error))}"
+    jacobian_lens.remember(imported["model_id"], imported | source)
+    return imported, f"{status} Remembered for this model, so its next load picks the lens up again."
 
 
 def change_lens_mode(mode, inspection_session=None):

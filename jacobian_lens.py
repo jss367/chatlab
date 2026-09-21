@@ -438,9 +438,11 @@ def keep(path) -> Path:
     """Copy a lens chosen from disk under ``lens_directory()/uploads``; the kept path.
 
     A browser upload lands in Gradio's cache, which does not outlive the
-    session, so the copy is what gets remembered. A file already inside the
-    lens directory stays where it is; a kept file with the same name and
-    content is reused, and a different one takes a numbered name.
+    session, so the copy is what gets remembered. Called after the file has
+    passed :meth:`FittedLens.load`, never before, so only a valid lens within
+    the size limit is copied. A file already inside the lens directory stays
+    where it is; a kept file with the same name and content is reused, and a
+    different one takes a numbered name.
     """
     source = Path(path)
     directory = lens_directory()
