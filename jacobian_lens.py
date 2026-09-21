@@ -373,12 +373,13 @@ def remembered(model_id: str) -> dict | None:
     return record
 
 
-def remember(model_id: str, record: dict) -> None:
+def remember(model_id: str, record: dict) -> bool:
     """Write down which lens ``model_id`` uses, so a reload finds it again.
 
     The checkpoint's revision goes in beside it when it is known: the same
     ID redownloaded can hold different weights, and a lens fitted for the
-    old ones must not be brought back for the new.
+    old ones must not be brought back for the new. Answers whether the
+    record reached the disk; the caller says so either way.
     """
     with _STORE_LOCK:
         data = _read_store()
@@ -395,6 +396,8 @@ def remember(model_id: str, record: dict) -> None:
             staged.replace(path)
         except OSError:
             logger.warning("Could not write down the Jacobian lens for %s", model_id, exc_info=True)
+            return False
+    return True
 
 
 def download(repository: str, filename: str) -> Path:

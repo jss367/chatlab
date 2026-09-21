@@ -478,6 +478,9 @@ def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):
         held = runtime.MANAGER.claim_generation()
         if held:
             return gr.skip(), INSPECT_LOADING if held == LOADING else INSPECT_BUSY
+        # The import below is bound to this load: a model swapped in during
+        # the transfer is refused by name, not read through the new weights.
+        load_id = runtime.MANAGER.load_id
         runtime.MANAGER.release_generation()
         try:
             path = str(jacobian_lens.download(repository, filename))
@@ -490,6 +493,11 @@ def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):
     if held:
         return gr.skip(), INSPECT_LOADING if held == LOADING else INSPECT_BUSY
     try:
+        if source and runtime.MANAGER.load_id != load_id:
+            return gr.skip(), failure_status(
+                "Could not import the lens",
+                "The model was reloaded while the lens downloaded. The file is kept; press Import lens again.",
+            )
         imported = runtime.MANAGER.import_jacobian_lens(path, fitted_model_id or "")
     except Exception as error:
         return gr.skip(), failure_status("Could not import the lens", str(error))
@@ -506,7 +514,11 @@ def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):
             imported = imported | {"path": str(jacobian_lens.keep(path))}
         except OSError as error:
             return imported, f"{status} It could not be kept for later loads: {html.escape(str(error))}"
-    jacobian_lens.remember(imported["model_id"], imported | source)
+    if not jacobian_lens.remember(imported["model_id"], imported | source):
+        return imported, (
+            f"{status} It could not be written down for later loads; check that the settings "
+            "folder is writable. This session keeps using it."
+        )
     return imported, f"{status} Remembered for this model, so its next load picks the lens up again."
 
 

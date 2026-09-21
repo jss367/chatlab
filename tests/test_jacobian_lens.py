@@ -409,6 +409,23 @@ class JacobianLensTests(unittest.TestCase):
             self.assertEqual(status, inspection.INSPECT_BUSY)
             self.assertEqual(calls, {})
             self.assertIsNone(self.manager.occupant)
+            # A model reloaded during the transfer is refused by name, and the
+            # file stays for the retry.
+            def reloading_download(repository, filename, local_dir):
+                self.manager.load_count += 1
+                return fake_download(repository, filename, local_dir)
+
+            with mock.patch("huggingface_hub.hf_hub_download", side_effect=reloading_download):
+                result, status = inspection.import_jacobian_lens(
+                    None, self.manager.model_id, "org/lenses", "lenses/tiny.pt",
+                )
+            self.assertIn("reloaded while the lens downloaded", status)
+            self.assertTrue(Path(calls["local_dir"], calls["filename"]).is_file())
+            self.assertIsNone(self.manager.occupant)
+            imported, status = inspection.import_jacobian_lens(
+                None, self.manager.model_id, "org/lenses", "lenses/tiny.pt",
+            )
+            self.assertIn("import_id", imported)
         for repository, filename in (("lenses", "a.pt"), ("org/lenses", "../a.pt"), ("org/lenses", "a.bin"), ("org/lenses", "")):
             with self.subTest(repository=repository, filename=filename), self.assertRaises(ValueError):
                 jacobian_lens.download(repository, filename)
@@ -497,6 +514,16 @@ class JacobianLensTests(unittest.TestCase):
             self.assertIn("import_id", imported)
             self.assertIn("could not be kept", status)
             self.assertIn("disk full", status)
+            # A record that cannot be written is not claimed to be remembered.
+            with mock.patch.object(jacobian_lens, "remember", return_value=False):
+                imported, status = inspection.import_jacobian_lens(self.path, self.manager.model_id)
+            self.assertIn("import_id", imported)
+            self.assertIn("could not be written down", status)
+            self.assertNotIn("Remembered", status)
+        unwritable = Path(self.directory.name) / "file-not-folder"
+        unwritable.write_text("x")
+        with mock.patch.object(jacobian_lens, "store_path", return_value=unwritable / "jacobian_lenses.json"):
+            self.assertFalse(jacobian_lens.remember(self.manager.model_id, {"path": str(self.path)}))
 
 
     @contextmanager
