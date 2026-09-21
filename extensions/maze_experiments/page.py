@@ -412,7 +412,12 @@ def context_view(ep, models, index=None):
             if supplied else "")
     ids = turn.get("prompt_ids")
     failure = None
-    if ids:
+    # Asked before the decode as well as after it, so a foreign run's IDs are
+    # not put through a vocabulary that cannot mean them in the first place.
+    # The reading below is still what decides, because this answer frames no
+    # text and can be a load behind by the time it arrives: acting on a stale
+    # one costs this pane a decode it could have shown, and says nothing.
+    if ids and not swapped_model(ep.model_id, models.loaded_model_id()):
         text, load_id, failure = read_through(models.decode, ids)
         if text is not None and not swapped_model(ep.model_id, model_of(load_id)):
             return (f"**{where} · as recorded** · {len(ids):,} prompt tokens, decoded"

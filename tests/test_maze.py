@@ -1208,6 +1208,22 @@ class MazeTests(unittest.TestCase):
                       'loaded and another/model recorded them', note)
         self.assertNotIn('rather than the', note)
         ep.turns[0]['prompt_ids'] = spelled
+        # The IDs never reach the wrong vocabulary at all: a model that cannot
+        # mean them is not asked to.
+        class CountsDecodes(Manager):
+            decodes = 0
+
+            def decode(self, ids):
+                type(self).decodes += 1
+                return super().decode(ids)
+
+        counting = CountsDecodes([])
+        self.assertIn('are not decoded here', context_view(ep, counting, 0)[0])
+        self.assertEqual(CountsDecodes.decodes, 0)
+        ep.model_id = 'test/model'
+        self.assertIn('**Response 1 · as recorded**', context_view(ep, counting, 0)[0])
+        self.assertEqual(CountsDecodes.decodes, 1)
+        ep.model_id = 'another/model'
         # The initial prompt has no recorded IDs to leave undecoded, so there
         # is no aside to carry the two names. The reading is still one model's
         # answer to another's messages, and is marked as that rather than
@@ -1234,25 +1250,20 @@ class MazeTests(unittest.TestCase):
         self.assertIn('not decoded here: test/model is loaded and another/model recorded them', note)
         self.assertIn('Load another/model to read this prompt as it was recorded.', note)
         self.assertTrue(text.startswith('[tool schemas]'))
-        # A model that decodes the IDs and is gone before the template is read
-        # is not called loaded beside a transcript it did not spell: the model
-        # is named by the reading being shown, and that reading is spelled by
-        # nothing.
-        class UnloadsAfterDecode(Manager):
+        # A model that is gone by the time the prompt is read is not called
+        # loaded beside a transcript it did not spell: the model is named by
+        # the reading being shown, and that reading is spelled by nothing.
+        class UnloadsAfterAsking(Manager):
             def __init__(self):
                 super().__init__([])
-                self.decoded = False
+                self.reads = 0
 
             def loaded_model(self):
-                return LoadedModel() if self.decoded else super().loaded_model()
+                # The pane's first look answers; the load is gone by the next.
+                self.reads += 1
+                return super().loaded_model() if self.reads < 2 else LoadedModel()
 
-            def decode(self, ids):
-                try:
-                    return super().decode(ids)
-                finally:
-                    self.decoded = True
-
-        note, text = context_view(ep, UnloadsAfterDecode(), 0)
+        note, text = context_view(ep, UnloadsAfterAsking(), 0)
         self.assertIn('**Response 1 · as recorded, untemplated**', note)
         self.assertNotIn('are not decoded here', note)
         self.assertNotIn('test/model', note)
