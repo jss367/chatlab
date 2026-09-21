@@ -1188,8 +1188,10 @@ def build_app() -> gr.Blocks:
                                 )
                                 # A clicked cell writes its exact token ID here beside the
                                 # visible text, so a token whose text does not tokenize back
-                                # to itself is still pinned as the token it is.
-                                pinned_token_id = gr.Textbox(visible=False, elem_id="jacobian-pin-id")
+                                # to itself is still pinned as the token it is. Hidden by the
+                                # bridge class, not visible=False, which would take the box
+                                # out of the DOM where the page script has to find it.
+                                pinned_token_id = gr.Textbox(elem_id="jacobian-pin-id", elem_classes=[MENU_BRIDGE_CLASS])
                             with gr.Row():
                                 inspect_button = gr.Button(
                                     "Inspect layers", size="sm", scale=0, min_width=160,
