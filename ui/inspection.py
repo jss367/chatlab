@@ -88,6 +88,18 @@ JACOBIAN_JS = r"""
     const button = holder && (holder.tagName === 'BUTTON' ? holder : holder.querySelector('button'));
     if (button) setTimeout(() => button.click(), 120);
   });
+  // A pin the reader types is not the clicked cell's token any more, even
+  // when the text comes out the same: a typed pin goes through the tokenizer
+  // as documented. The bridge's own write is a synthetic event, so only an
+  // edit that came from the keyboard or a paste (isTrusted) clears the ID.
+  document.addEventListener('input', event => {
+    if (!event.isTrusted || !event.target.closest || !event.target.closest('#jacobian-pin')) return;
+    const bridge = document.querySelector('#jacobian-pin-id textarea, #jacobian-pin-id input');
+    if (!bridge || bridge.value === '') return;
+    const prototype = bridge.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(prototype, 'value').set.call(bridge, '');
+    bridge.dispatchEvent(new Event('input', {bubbles: true}));
+  }, true);
   // A readout arrives with the selected token in its last column, which a
   // wide window puts out of sight; bring that column into view once.
   const reveal = () => {
@@ -189,6 +201,10 @@ def _pin_by_id(pinned_token_id, pinned_text: str) -> dict:
     A click writes ``{"token_id", "text"}`` beside the visible text; the ID
     counts only while the text box still shows that same text, so a pin typed
     over it goes through the tokenizer as before and the ID is left unused.
+    The page script also clears the record on any edit the reader makes to
+    the visible box (see JACOBIAN_JS), so retyping the clicked text later
+    tokenizes it rather than reviving the clicked ID; the text check here is
+    the server-side guard for a page script that did not run.
     """
     try:
         record = json.loads(pinned_token_id or "")
