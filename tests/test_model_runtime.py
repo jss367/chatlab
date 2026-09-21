@@ -1910,10 +1910,36 @@ class LoadingReportTests(unittest.TestCase):
 
         message = str(caught.exception)
         self.assertIn("9.0 GB of an estimated 17.0 GB", message)
+        # A Metal text load at full weights has 8- and 4-bit to fall back on.
+        self.assertIn("a smaller model or a narrower weight precision", message)
         self.assertIn("caps Metal allocations at 24.0 GB", message)
         self.assertIn("23.0 GB was out when it stopped", message)
         self.assertIn("mps_memory_fraction", message)
         self.assertIn("MPS backend out of memory", message)
+
+    def test_a_load_that_cannot_be_packed_narrower_is_not_told_to_try(self):
+        # _load_locked clears the radio's choice on anything but a Metal
+        # text load, so advising a precision there sends the reader round
+        # the same full-weight load a second time.
+        import torch
+
+        manager = model_runtime.ModelManager()
+        with (
+            mock.patch("model_runtime.detect_backend", return_value="cpu"),
+            mock.patch.object(manager, "_unload_locked"),
+            mock.patch.object(manager, "_check_memory", return_value=(None, None)),
+            mock.patch.object(manager, "_release_device_cache"),
+            mock.patch("model_runtime.allocated_bytes", return_value=None),
+            mock.patch("model_runtime.reserved_bytes", return_value=None),
+            mock.patch("model_runtime._read_text_model", side_effect=MemoryError()),
+            self.assertLogs("model_runtime", level="WARNING"),
+            self.assertRaises(model_runtime.OutOfMemoryError) as caught,
+        ):
+            manager._load_locked("org/model", Path("/snap"), torch, precision="4-bit")
+
+        message = str(caught.exception)
+        self.assertIn("choose a smaller model.", message)
+        self.assertNotIn("precision", message)
 
     def test_a_refusal_with_nothing_to_measure_still_says_what_to_do(self):
         from model_runtime import load_out_of_memory_message
@@ -1923,7 +1949,7 @@ class LoadingReportTests(unittest.TestCase):
             note,
             "org/model did not fit in memory. Unload anything else on the "
             "device, close memory-heavy applications, or choose a smaller "
-            "model or weight precision. (no message from MemoryError)",
+            "model. (no message from MemoryError)",
         )
 
     def test_conversion_cause_is_visible_without_terminal_formatting(self):

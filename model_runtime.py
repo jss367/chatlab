@@ -2298,6 +2298,7 @@ def load_out_of_memory_message(
     taken: int | None = None,
     ceiling: int | None = None,
     weights: str | None = None,
+    lower_precision: bool = False,
     error: BaseException | None = None,
 ) -> str:
     """What to tell a reader whose load ran out of memory part way through.
@@ -2316,6 +2317,13 @@ def load_out_of_memory_message(
     already spoken for. Naming the ceiling matters because on Metal it is
     ChatLab's own and a reader told only to close applications would be
     working on the wrong half of the machine.
+
+    ``lower_precision`` is whether a narrower width is open to this load at
+    all, which the caller works out from the backend and the kind. Only a
+    Metal text load can be packed narrower: the quantizer is Transformers'
+    own, an image pipeline is loaded whole, and an MLX repo is already
+    packed at the width it was converted to. Advising a precision anywhere
+    else sends the reader round the same full-weight load a second time.
     """
 
     parts = [f"{model_id} did not fit in memory."]
@@ -2338,9 +2346,14 @@ def load_out_of_memory_message(
             f"every block the allocator holds against it, cached ones included.{out} "
             "`mps_memory_fraction` in the settings file moves that cap."
         )
+    smaller = (
+        "a smaller model or a narrower weight precision"
+        if lower_precision
+        else "a smaller model"
+    )
     parts.append(
         "Unload anything else on the device, close memory-heavy applications, "
-        "or choose a smaller model or weight precision."
+        f"or choose {smaller}."
     )
     if error is not None:
         parts.append(f"({first_line(error)})")
@@ -5424,6 +5437,17 @@ class ModelManager:
                         taken=taken,
                         ceiling=ceiling,
                         weights=weights_note(dtype_name(dtype), bits),
+                        # Only a Metal text load has a narrower width to
+                        # fall back on, and only one already wider than the
+                        # narrowest: everything else would repeat the load
+                        # it just failed. ``bits`` is what this load really
+                        # used, the radio's choice having been cleared
+                        # above wherever it could not be honoured.
+                        lower_precision=(
+                            backend == "mps"
+                            and kind == TEXT_KIND
+                            and (bits is None or bits > min(QUANTIZED_BITS.values()))
+                        ),
                         error=error,
                     )
                 ) from error
