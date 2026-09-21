@@ -1174,7 +1174,9 @@ class MazeTests(unittest.TestCase):
         manager = Manager([(east, [8, 0])])
         list(stream_episode(ep, manager))
         self.assertEqual(ep.model_id, 'test/model')
+        # The response answers for itself, so it is renamed with the run.
         ep.model_id, ep.load_id = 'another/model', 'recorded-elsewhere'
+        ep.turns[0]['model_id'] = 'another/model'
         note, text = context_view(ep, manager, 0)
         self.assertIn('**Response 1 · as the loaded model would be given it**', note)
         self.assertIn(f"The {len(ep.turns[0]['prompt_ids']):,} prompt tokens it recorded are not "
@@ -1234,10 +1236,10 @@ class MazeTests(unittest.TestCase):
         counting = CountsDecodes([])
         self.assertIn('are not decoded here', context_view(ep, counting, 0)[0])
         self.assertEqual(CountsDecodes.decodes, 0)
-        ep.model_id = 'test/model'
+        ep.model_id = ep.turns[0]['model_id'] = 'test/model'
         self.assertIn('**Response 1 · as recorded**', context_view(ep, counting, 0)[0])
         self.assertEqual(CountsDecodes.decodes, 1)
-        ep.model_id = 'another/model'
+        ep.model_id = ep.turns[0]['model_id'] = 'another/model'
         # The initial prompt has no recorded IDs to leave undecoded, so there
         # is no aside to carry the two names. The reading is still one model's
         # answer to another's messages, and is marked as that rather than
@@ -1296,6 +1298,7 @@ class MazeTests(unittest.TestCase):
         manager = Manager([(east, [8, 0])])
         list(stream_episode(ep, manager))
         ep.model_id = None
+        ep.turns[0].pop('model_id')
         note, text = context_view(ep, manager, 0)
         self.assertIn('**Response 1 · as the loaded model would be given it**', note)
         self.assertIn('this run does not record which model produced them', note)
@@ -1307,6 +1310,30 @@ class MazeTests(unittest.TestCase):
         list(stream_episode(fresh, Manager([(east, [8, 0])])))
         self.assertEqual(fresh.model_id, 'test/model')
         self.assertIn('**Response 1 · as recorded**', context_view(fresh, manager, 0)[0])
+        # A response recorded before responses carried their own name is
+        # answered for by the run, which is what that fallback is.
+        fresh.turns[0].pop('model_id')
+        self.assertIn('**Response 1 · as recorded**', context_view(fresh, manager, 0)[0])
+
+    def test_a_response_is_read_back_by_the_model_that_recorded_it_not_the_run(self):
+        # An episode continues under whatever is loaded: generating under one
+        # model, loading another and pressing Next leaves the run named after
+        # the first and the new response after the second. Reading that
+        # response under the run's name would decode one model's IDs with the
+        # other's vocabulary and call the result the record.
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        east = call_text(MAZE.maze_id, 'east')
+        manager = Manager([(east, [8, 0])])
+        list(stream_episode(ep, manager))
+        self.assertEqual((ep.model_id, ep.turns[0]['model_id']), ('test/model', 'test/model'))
+        ep.turns[0]['model_id'] = 'continued/elsewhere'
+        note, _ = context_view(ep, manager, 0)
+        self.assertNotIn('as recorded**', note)
+        self.assertIn('test/model is loaded and continued/elsewhere recorded them', note)
+        self.assertIn('Load continued/elsewhere to read this prompt as it was recorded.', note)
+        # The initial prompt belongs to no response, so the run answers for it.
+        self.assertIn('**Initial prompt · as the loaded model would be given it**',
+                      context_view(ep, manager, -1)[0])
 
     def test_context_view_templates_the_initial_prompt_and_falls_back_without_a_model(self):
         ep = Episode(MAZE, CONFIG | {'system_prompt': 'Be brief.'})

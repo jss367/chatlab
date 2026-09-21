@@ -326,6 +326,19 @@ def swapped_model(recorded_model, used_model):
     return used_model if used_model and recorded_model and used_model != recorded_model else ""
 
 
+def recording_model(ep, turn):
+    """Which model recorded this response, the run answering only where it does not.
+
+    A response records the model that produced it, and an episode continues
+    under whatever is loaded when it is continued: generating under one
+    model, loading another and pressing Next leaves the run named after the
+    first and the new response after the second, no file having been edited.
+    A response's IDs are answerable to the model that wrote them, so the run's
+    name is the fallback for responses recorded before they carried their own.
+    """
+    return turn.get("model_id") or ep.model_id
+
+
 def reads_back(recorded_model, used_model):
     """Whether IDs recorded by one model may be read back by the model loaded now.
 
@@ -424,10 +437,11 @@ def context_view(ep, models, index=None):
 
     Recorded IDs are read back only by the model that recorded them. Another
     model decodes them without complaint, its vocabulary being no smaller,
-    and answers with fluent text that is not the prompt, so the run's model ID
-    against the loaded one decides whether they are decoded at all, and a run
-    that names no model is refused with them: see :func:`reads_back`. A run
-    whose model is not loaded falls through to the template, which reads the
+    and answers with fluent text that is not the prompt, so the model that
+    recorded this response against the loaded one decides whether they are
+    decoded at all, and a response answering for no model is refused with
+    them: see :func:`recording_model` and :func:`reads_back`. A response whose
+    model is not loaded falls through to the template, which reads the
     messages themselves.
     """
     index = ep.viewing if index is None else index
@@ -438,15 +452,16 @@ def context_view(ep, models, index=None):
     tail = (f" A supplied prefix of {supplied:,} tokens followed it, shown under **Supplied text & full response**."
             if supplied else "")
     ids = turn.get("prompt_ids")
+    recorded = recording_model(ep, turn)
     failure = None
     # Asked before the decode as well as after it, so a foreign run's IDs are
     # not put through a vocabulary that cannot mean them in the first place.
     # The reading below is still what decides, because this answer frames no
     # text and can be a load behind by the time it arrives: acting on a stale
     # one costs this pane a decode it could have shown, and says nothing.
-    if ids and not swapped_model(ep.model_id, models.loaded_model_id()):
+    if ids and not swapped_model(recorded, models.loaded_model_id()):
         text, load_id, failure = read_through(models.decode, ids)
-        if text is not None and reads_back(ep.model_id, model_of(load_id)):
+        if text is not None and reads_back(recorded, model_of(load_id)):
             return (f"**{where} · as recorded** · {len(ids):,} prompt tokens, decoded"
                     f"{under_load(turn.get('load_id'), load_id)}.{tail}", text)
     messages = context_messages(ep, index)
@@ -456,19 +471,19 @@ def context_view(ep, models, index=None):
         # reading: the load that answered one reading can be gone by the next,
         # so a model carried from another could be called loaded beside text
         # it did not spell.
-        swapped = swapped_model(ep.model_id, model_of(load_id))
+        swapped = swapped_model(recorded, model_of(load_id))
         if swapped and ids:
             # The aside names both models, so the load stamps would only repeat
             # it in weaker words.
-            frame, aside = "", spelled_by_another(len(ids), ep.model_id, swapped)
+            frame, aside = "", spelled_by_another(len(ids), recorded, swapped)
         elif swapped:
             # No recorded IDs to leave undecoded, no response having been asked
             # for yet, so the swap is said of the reading itself rather than
             # going unsaid.
-            frame, aside = read_by_another(ep.model_id, swapped), ""
+            frame, aside = read_by_another(recorded, swapped), ""
         else:
             frame = under_load(ep.load_id, load_id)
-            aside = unnamed_model(len(ids)) if ids and not ep.model_id else ""
+            aside = unnamed_model(len(ids)) if ids and not recorded else ""
         return (f"**{where} · as the loaded model would be given it** · {len(messages)} messages and the move tool "
                 f"through that model's own template{frame}.{aside}{tail}", text)
     # Nothing here was spelled by a load, this transcript being the run's own
@@ -476,11 +491,11 @@ def context_view(ep, models, index=None):
     # that failed: what the aside says is what is in memory as it is written,
     # which is also what the reader is being asked to change. A load under way
     # names nothing and the aside stays away, as it does with none loaded.
-    swapped = swapped_model(ep.model_id, models.loaded_model_id())
+    swapped = swapped_model(recorded, models.loaded_model_id())
     if ids and swapped:
-        aside = spelled_by_another(len(ids), ep.model_id, swapped)
+        aside = spelled_by_another(len(ids), recorded, swapped)
     else:
-        aside = unnamed_model(len(ids)) if ids and not ep.model_id else ""
+        aside = unnamed_model(len(ids)) if ids and not recorded else ""
     return (f"**{where} · as recorded, untemplated** · {unspelled(models, refused or failure)}, so the "
             f"{len(messages)} messages and the move tool are shown as the run recorded them. A template adds its own "
             f"turn markers and writes the tool schemas its own way.{aside}{tail}", transcript(messages))
