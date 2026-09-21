@@ -1194,6 +1194,17 @@ class MazeTests(unittest.TestCase):
         self.assertIn('**Response 1 · as recorded, untemplated**', note)
         self.assertIn('No model is loaded to spell this prompt', note)
         self.assertNotIn('are not decoded here', note)
+        # A vocabulary too small to spell an ID is the same mismatch arriving
+        # as an exception. That decode names no load, so the warning is taken
+        # from the load that rendered the template rather than lost.
+        spelled = ep.turns[0]['prompt_ids']
+        ep.turns[0]['prompt_ids'] = [999999]
+        note, _ = context_view(ep, manager, 0)
+        self.assertIn('**Response 1 · as the loaded model would be given it**', note)
+        self.assertIn('The 1 prompt tokens it recorded are not decoded here: test/model is '
+                      'loaded and another/model recorded them', note)
+        self.assertNotIn('rather than the', note)
+        ep.turns[0]['prompt_ids'] = spelled
         # A load of the recording model reads the IDs back as before.
         manager.model_id, manager.load_id = 'another/model', 'another/model#1'
         self.assertIn('**Response 1 · as recorded**', context_view(ep, manager, 0)[0])

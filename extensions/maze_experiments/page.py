@@ -327,14 +327,16 @@ def spelled_by_another(count, recorded_model, used_model):
     A token ID is a position in one vocabulary, so the same numbers read under
     another model spell whatever that model keeps at those positions: text
     fluent enough to be read as the prompt and related to it in nothing. Two
-    vocabularies also overlap in size, so nothing here raises - a Llama-3 ID
-    is a Qwen3 ID - which is why this is decided by the models' names and not
-    by whether a decode succeeds. The model that recorded the run is named
-    because loading it is the way to read the prompt at all.
+    vocabularies also overlap in size, so nothing need raise - a Llama-3 ID is
+    a Qwen3 ID - which is why this is decided by the models' names and not by
+    whether a decode succeeds. A vocabulary too small for an ID is the same
+    mismatch arriving as an exception, and it is said the same way. The model
+    that recorded the run is named because loading it is the way to read the
+    prompt at all.
     """
     return (f" The {count:,} prompt tokens it recorded are not decoded here: "
             f"{html.escape(used_model)} is loaded and {html.escape(recorded_model)} recorded them, "
-            "and one model's IDs spell unrelated text under another's vocabulary. Load "
+            "and an ID means whatever the vocabulary reading it holds at that position. Load "
             f"{html.escape(recorded_model)} to read this prompt as it was recorded.")
 
 
@@ -392,16 +394,21 @@ def context_view(ep, models, index=None):
     tail = (f" A supplied prefix of {supplied:,} tokens followed it, shown under **Supplied text & full response**."
             if supplied else "")
     ids = turn.get("prompt_ids")
-    failure, swapped = None, ""
+    failure, tried = None, None
     if ids:
-        text, load_id, failure = read_through(models.decode, ids)
-        swapped = swapped_model(ep.model_id, load_id)
-        if text is not None and not swapped:
+        text, tried, failure = read_through(models.decode, ids)
+        if text is not None and not swapped_model(ep.model_id, tried):
             return (f"**{where} · as recorded** · {len(ids):,} prompt tokens, decoded"
-                    f"{under_load(turn.get('load_id'), load_id)}.{tail}", text)
-    aside = spelled_by_another(len(ids), ep.model_id, swapped) if swapped else ""
+                    f"{under_load(turn.get('load_id'), tried)}.{tail}", text)
     messages = context_messages(ep, index)
     text, load_id, refused = read_through(models.prompt_text, messages, TOOLS)
+    # Named from the load that made the reading being shown rather than the one
+    # the IDs were tried against: a decode that raised names no load at all, so
+    # a vocabulary too small to spell them would fall back to the load stamps
+    # and never say which model to load, and a load landing between the two
+    # readings would have this name one model beside a prompt the next spelled.
+    swapped = swapped_model(ep.model_id, load_id or tried)
+    aside = spelled_by_another(len(ids), ep.model_id, swapped) if ids and swapped else ""
     if text is not None:
         # The aside already names both models, so the load stamps would only
         # repeat it in weaker words.
