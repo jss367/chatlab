@@ -514,13 +514,19 @@ class JacobianLensTests(unittest.TestCase):
             self.assertIn("import_id", imported)
             self.assertIn("could not be kept", status)
             self.assertIn("disk full", status)
-            # An import overtaken by another does not write the record.
+            # An import overtaken by another does not write the record: the
+            # check and the write share the manager lock.
             before = jacobian_lens.remembered(self.manager.model_id)
-            with mock.patch.object(self.manager, "jacobian_lens_import", return_value={"import_id": "other"}):
+            self.assertEqual(self.manager.remember_jacobian_lens("stale", {"path": "/elsewhere"}), "replaced")
+            self.assertEqual(jacobian_lens.remembered(self.manager.model_id), before)
+            with mock.patch.object(self.manager, "remember_jacobian_lens", return_value="replaced"):
                 imported, status = inspection.import_jacobian_lens(self.path, self.manager.model_id)
             self.assertIn("import_id", imported)
             self.assertIn("imported meanwhile", status)
             self.assertEqual(jacobian_lens.remembered(self.manager.model_id), before)
+            current = self.manager.jacobian_lens_import()["import_id"]
+            self.assertEqual(self.manager.remember_jacobian_lens(current, {"path": "/elsewhere"}), "remembered")
+            self.assertEqual(jacobian_lens.remembered(self.manager.model_id)["path"], "/elsewhere")
             # A record that cannot be written is not claimed to be remembered.
             with mock.patch.object(jacobian_lens, "remember", return_value=False):
                 imported, status = inspection.import_jacobian_lens(self.path, self.manager.model_id)

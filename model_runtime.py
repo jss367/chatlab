@@ -7341,6 +7341,20 @@ class ModelManager:
                 return None
             return {"import_id": imported[1], "load_id": self.load_id, "name": imported[2].name}
 
+    def remember_jacobian_lens(self, import_id: str, record: dict) -> str:
+        """Write ``record`` down for this model if ``import_id`` is still the lens in memory.
+
+        The check and the write happen under the model lock, so two clients
+        importing at once cannot leave the record naming the lens that lost.
+        Answers ``"remembered"``, ``"replaced"`` when another import has
+        taken the lens's place, or ``"unwritable"`` when the store refused.
+        """
+        with self._lock:
+            imported = self._jacobian_lens
+            if imported is None or not self.loaded or imported[:2] != (self.load_id, import_id):
+                return "replaced"
+            return "remembered" if jacobian_lens.remember(self.model_id, record) else "unwritable"
+
     @_guards_device_memory
     def inspect_jacobian(
         self, token_ids: Sequence[int], index: int, *, lens_id: str | None,

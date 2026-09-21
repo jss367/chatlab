@@ -516,11 +516,12 @@ def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):
             return imported, f"{status} It could not be kept for later loads: {html.escape(str(error))}"
     # The slot was released after the import, so another client may have
     # imported a different lens since. The record must describe the lens that
-    # is actually in memory, so only the import that is still current writes it.
-    current = runtime.MANAGER.jacobian_lens_import()
-    if current is None or current["import_id"] != imported["import_id"]:
+    # is actually in memory, so the manager writes it only for the import
+    # that is still current, checking and writing under its own lock.
+    outcome = runtime.MANAGER.remember_jacobian_lens(imported["import_id"], imported | source)
+    if outcome == "replaced":
         return imported, f"{status} Another lens was imported meanwhile, so this one was not remembered."
-    if not jacobian_lens.remember(imported["model_id"], imported | source):
+    if outcome == "unwritable":
         return imported, (
             f"{status} It could not be written down for later loads; check that the settings "
             "folder is writable. This session keeps using it."
