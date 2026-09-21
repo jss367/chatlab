@@ -273,6 +273,15 @@ class MlxLogits:
 
         return np.array(self.logits[0, index].astype(mx.float32))
 
+    def best(self) -> tuple[np.ndarray, np.ndarray]:
+        """Each position's highest-scoring token and its logit, as numpy."""
+        import mlx.core as mx
+
+        rows = self.logits[0].astype(mx.float32)
+        ids, values = mx.argmax(rows, axis=-1), mx.max(rows, axis=-1)
+        mx.eval(ids, values)
+        return np.array(ids), np.array(values)
+
 
 @dataclass
 class LensReading:

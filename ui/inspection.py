@@ -10,6 +10,7 @@ from uuid import uuid4
 import gradio as gr
 
 import charts
+import jacobian_lens
 from model_runtime import (
     LOADING,
     ModelChanged,
@@ -53,6 +54,59 @@ INSPECT_OUTPUT_ONLY = (
     "Only the output is shown: this model's intermediate layers could not be "
     "read the way it reads its own output."
 )
+
+
+# A click on a slice cell pins that cell's token and runs the inspection
+# again, which is what typing the token and pressing the button would do.
+# The value is written the way the token menu writes its bridge, so Gradio
+# sees an ordinary edit; the click follows once that edit has been sent.
+JACOBIAN_JS = r"""
+() => {
+  if (window.chatlabJacobianInstalled) return;
+  window.chatlabJacobianInstalled = true;
+  document.addEventListener('click', event => {
+    const cell = event.target.closest('#jacobian-lens td[data-token]');
+    if (!cell) return;
+    const input = document.querySelector('#jacobian-pin textarea, #jacobian-pin input');
+    if (!input) return;
+    let text;
+    try { text = JSON.parse(cell.dataset.token); } catch (error) { return; }
+    if (typeof text !== 'string') return;
+    const prototype = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(prototype, 'value').set.call(input, text);
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    const holder = document.querySelector('#inspect-layers');
+    const button = holder && (holder.tagName === 'BUTTON' ? holder : holder.querySelector('button'));
+    if (button) setTimeout(() => button.click(), 120);
+  });
+  // A readout arrives with the selected token in its last column, which a
+  // wide window puts out of sight; bring that column into view once.
+  const reveal = () => {
+    document.querySelectorAll('#jacobian-lens .jl-grid-wrap:not([data-revealed])').forEach(wrap => {
+      wrap.dataset.revealed = '1';
+      const cell = wrap.querySelector('thead .jl-selected');
+      if (cell) wrap.scrollLeft = Math.max(0, cell.offsetLeft + cell.offsetWidth - wrap.clientWidth + 12);
+    });
+  };
+  new MutationObserver(reveal).observe(document.body, {childList: true, subtree: true});
+}
+"""
+
+JACOBIAN_CSS = """
+.jl-grid-wrap { overflow: auto; max-height: 420px; margin: 0.3rem 0; border: 1px solid var(--viz-grid); border-radius: 6px; }
+.jl-grid { border-collapse: separate; border-spacing: 0; font-size: 0.74rem; font-variant-numeric: tabular-nums; }
+.jl-grid th, .jl-grid td { padding: 0.15rem 0.35rem; white-space: nowrap; color: var(--viz-ink); border-bottom: 1px solid var(--viz-grid); border-right: 1px solid var(--viz-grid); }
+.jl-grid thead th { position: sticky; top: 0; z-index: 2; background: var(--background-fill-primary); color: var(--viz-muted); font-weight: 500; }
+.jl-grid tbody th { position: sticky; left: 0; z-index: 1; background: var(--background-fill-primary); color: var(--viz-muted); font-weight: 500; text-align: right; }
+.jl-grid thead th:first-child { left: 0; z-index: 3; }
+.jl-grid code { background: none; padding: 0; font-size: inherit; }
+.jl-cell { cursor: pointer; background: color-mix(in srgb, var(--viz-line) calc(var(--jl-heat, 0) * 70%), transparent); }
+.jl-cell:hover { outline: 1px solid var(--viz-line); outline-offset: -1px; }
+.jl-cell sup { color: var(--viz-muted); margin-left: 0.15rem; font-size: 0.62rem; }
+.jl-grid .jl-selected { box-shadow: inset 0 -2px 0 var(--viz-line); }
+.jl-grid thead .jl-selected { color: var(--viz-ink); font-weight: 600; }
+.jl-output th, .jl-output td { border-top: 2px solid var(--viz-axis); }
+"""
 
 
 class InspectionControls:
@@ -237,11 +291,20 @@ def inspect_layers(
             if steering is not None:
                 options["steering"] = steering
             if lens_mode == "Jacobian":
+                # The state's import counts only for the load it was made for.
+                # Otherwise the manager's current lens serves, and when there
+                # is none the one written down for this model is brought back.
+                imported = imported_lens if (imported_lens or {}).get("load_id") == load_id else None
+                recalled = None
+                if imported is None and runtime.MANAGER.jacobian_lens_import() is None:
+                    recalled = recall_lens()
                 insight = runtime.MANAGER.inspect_jacobian(
                     sequence, index,
-                    lens_id=(imported_lens or {}).get("import_id"),
+                    lens_id=(imported or {}).get("import_id"),
                     pinned_text=pinned_text or "", **options,
                 ).to_dict()
+                if recalled:
+                    insight["recalled"] = recalled
             else:
                 insight = runtime.MANAGER.inspect(sequence, index, **options).to_dict()
         except ModelChanged:
@@ -276,10 +339,14 @@ def inspect_layers(
             f"layers in {time.monotonic() - started:.1f}s."
         )
         if insight.get("kind") == "jacobian":
+            window = len((insight.get("slice") or {}).get("tokens") or [])
             status = (
                 f"{where} {position + 1}: <code>{shown}</code>, read after processing this token "
-                f"at {len(insight['layers'])} fitted layers in {time.monotonic() - started:.1f}s."
+                f"at {len(insight['layers'])} fitted layers, over {window} positions, "
+                f"in {time.monotonic() - started:.1f}s."
             )
+            if insight.get("recalled"):
+                status = f"{status} Using the remembered lens <code>{html.escape(insight['recalled'])}</code>."
         elif not read:
             status = f"{status} {INSPECT_OUTPUT_ONLY}"
         if not layer_count and insight.get("kind") != "jacobian":
@@ -333,19 +400,51 @@ def render_lens(insight: dict) -> str:
     return charts.logit_lens_chart(insight)
 
 
-def import_jacobian_lens(path, fitted_model_id):
-    """Keep large lens tensors in the model manager, never in browser state."""
+def recall_lens() -> str | None:
+    """Import the lens written down for the loaded model; its name, or ``None``.
+
+    Called under the generation claim with no lens imported for this load.
+    A record whose file has gone, or that the current weights refuse, leaves
+    the manager as it was and the ordinary "import a lens" message follows.
+    """
+    record = jacobian_lens.remembered(runtime.MANAGER.model_id or "")
+    if record is None:
+        return None
+    try:
+        imported = runtime.MANAGER.import_jacobian_lens(record["path"], record.get("fitted_model_id") or "")
+    except Exception:  # noqa: BLE001 - the inspection reports the missing lens itself
+        return None
+    return imported["name"]
+
+
+def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):
+    """Keep large lens tensors in the model manager, never in browser state.
+
+    A repository and file name fetch the lens from the Hub first; otherwise
+    the chosen file is read. A successful import is written down for the
+    loaded model, so the next load of it finds the lens without this step.
+    """
+    repository = (repository or "").strip()
+    filename = (filename or "").strip()
+    source = {}
+    if repository or filename:
+        try:
+            path = str(jacobian_lens.download(repository, filename))
+        except ValueError as error:
+            return gr.skip(), failure_status("Could not fetch the lens", str(error))
+        source = {"repository": repository, "filename": filename}
     if not path:
-        return gr.skip(), "Choose a saved lens.pt file first."
+        return gr.skip(), "Choose a saved lens.pt file, or name a Hub repository and file."
     held = runtime.MANAGER.claim_generation()
     if held:
         return gr.skip(), INSPECT_LOADING if held == LOADING else INSPECT_BUSY
     try:
         imported = runtime.MANAGER.import_jacobian_lens(path, fitted_model_id or "")
+        jacobian_lens.remember(imported["model_id"], imported | source)
         return imported, (
             f"Imported for `{html.escape(imported['model_id'])}`: "
             f"{imported['layers']} fitted layers, {imported['n_prompts']:,} fitting prompts. "
-            "Reloading the model requires importing the lens again."
+            "Remembered for this model, so its next load picks the lens up again."
         )
     except Exception as error:
         return gr.skip(), failure_status("Could not import the lens", str(error))

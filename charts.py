@@ -8,6 +8,7 @@ the app stylesheet, so light and dark themes are each stepped deliberately.
 from __future__ import annotations
 
 import html
+import json
 import math
 from typing import Sequence
 
@@ -414,13 +415,88 @@ def logit_lens_chart(insight: dict) -> str:
     )
 
 
+def _jacobian_slice(insight: dict) -> str:
+    """The layer × position grid: each block's top lens token at every fed position.
+
+    Blocks run down the table and positions across it, ending at the selected
+    token, whose column is marked. The last row is the model's own next-token
+    prediction at each position, which needs no lens. With a token pinned,
+    each cell also carries that token's vocabulary rank and is shaded by it,
+    rank 1 darkest on a logarithmic scale. A cell names its token in a JSON
+    data attribute so a click on it can pin that token (see JACOBIAN_JS).
+    """
+    data = insight.get("slice") or {}
+    tokens = data.get("tokens") or []
+    layers = data.get("layers") or []
+    if not tokens or not layers:
+        return ""
+    selected = insight.get("index")
+    pinned = insight.get("pinned_text") is not None
+    maximum = max(2, int(insight.get("vocab_size") or 2))
+
+    def heat(rank) -> str:
+        if not pinned or rank is None:
+            return ""
+        level = 1.0 - math.log(max(1, rank)) / math.log(maximum)
+        return f' style="--jl-heat:{max(0.0, min(1.0, level)):.2f}"'
+
+    def cell(item: dict, position: int, block: str) -> str:
+        text = item.get("text", "")
+        shown = html.escape(repr(text))
+        rank = item.get("pinned_rank")
+        tip = f"{block}, position {position + 1}: top token {text!r}, score {item.get('score', 0.0):.3f}"
+        if rank is not None:
+            tip += f"; pinned rank {rank:,}, score {item.get('pinned_score', 0.0):.3f}"
+        classes = "jl-cell" + (" jl-selected" if position == selected else "")
+        badge = f"<sup>{rank:,}</sup>" if rank is not None else ""
+        return (
+            f'<td class="{classes}" data-token="{html.escape(json.dumps(text), quote=True)}"'
+            f'{heat(rank)} title="{html.escape(tip)}"><code>{shown}</code>{badge}</td>'
+        )
+
+    head = []
+    for token in tokens:
+        marked = " jl-selected" if token["index"] == selected else ""
+        tip = html.escape(f"Position {token['index'] + 1} · {token.get('segment', '')}")
+        head.append(
+            f'<th class="jl-token{marked}" title="{tip}">'
+            f'<code>{html.escape(repr(token.get("text", "")))}</code></th>'
+        )
+    head = "".join(head)
+    body = []
+    for row in layers:
+        block = f"Block {row['layer'] + 1}"
+        cells = "".join(
+            cell(item, token["index"], block) for item, token in zip(row["cells"], tokens)
+        )
+        body.append(f'<tr><th scope="row">{row["layer"] + 1}</th>{cells}</tr>')
+    output = data.get("output") or []
+    if len(output) == len(tokens):
+        cells = "".join(cell(item, token["index"], "Output") for item, token in zip(output, tokens))
+        body.append(f'<tr class="jl-output"><th scope="row">Output</th>{cells}</tr>')
+    start = tokens[0]["index"] + 1
+    end = tokens[-1]["index"] + 1
+    total = int(data.get("total") or end)
+    span = f"tokens {start:,}–{end:,} of {total:,}" if total > len(tokens) else f"all {total:,} tokens"
+    hint = " Click a cell to pin its token and shade every cell by that token's rank." if not pinned else (
+        " Shading follows the pinned token's rank; rank 1 is darkest."
+    )
+    return (
+        f'<div class="viz-note">Top lens token at each block and position, {span}; '
+        f'the Output row is the model\'s own next-token prediction.{hint}</div>'
+        '<div class="jl-grid-wrap"><table class="jl-grid">'
+        f'<thead><tr><th scope="col">Block</th>{head}</tr></thead>'
+        f'<tbody>{"".join(body)}</tbody></table></div>'
+    )
+
+
 def jacobian_lens_chart(insight: dict) -> str:
     """Ranked concept readouts after a token; scores are never probabilities."""
     layers = insight.get("layers") or []
     if not layers:
         return EMPTY_JACOBIAN
     pinned = insight.get("pinned_text")
-    chart = ""
+    chart = _jacobian_slice(insight)
     if pinned is not None:
         first, last = layers[0]["layer"], layers[-1]["layer"]
         width = _VIEW_WIDTH - _LENS_PAD_LEFT - _PAD_RIGHT
@@ -449,7 +525,7 @@ def jacobian_lens_chart(insight: dict) -> str:
             f'fill="currentColor"><title>Block {row["layer"] + 1}: rank {row["rank"]:,}, '
             f'score {row["score"]:.3f}</title></circle>' for row in layers
         )
-        chart = (
+        chart += (
             f'<div class="viz-note">Pinned token: <code>{html.escape(repr(pinned))}</code>. '
             'Vocabulary rank by layer; rank 1 is at the top, on a logarithmic scale.</div>'
             f'<svg viewBox="0 0 {_VIEW_WIDTH:g} {_LENS_HEIGHT:g}" role="img" '
@@ -479,12 +555,24 @@ def jacobian_lens_chart(insight: dict) -> str:
         '<div class="viz-note">Vocabulary readouts of the state after processing this token. '
         'Scores measure the fitted lens readout; they are not generation probabilities or '
         'proof that a concept caused the answer. Blocks are numbered from 1.</div>'
-        f'{chart}<div class="viz-table-wrap"><table class="viz-table">'
+        f'{chart}<div class="viz-note">Top tokens after <code>{html.escape(repr(insight.get("token_text", "")))}</code>, '
+        'per fitted block.</div>'
+        '<div class="viz-table-wrap"><table class="viz-table">'
         f'<thead><tr><th>Decoder block</th><th>Top tokens · score</th>{tracked_headers}</tr></thead>'
         f'<tbody>{"".join(rows)}</tbody></table></div>'
         f'<div class="viz-note">Lens: {html.escape(insight.get("lens_name", ""))} · '
-        f'{insight.get("n_prompts", 0):,} fitting prompts.</div></figure>'
+        f'{insight.get("n_prompts", 0):,} fitting prompts.{_jacobian_precision_note(insight)}</div></figure>'
     )
+
+
+def _jacobian_precision_note(insight: dict) -> str:
+    precision = insight.get("precision")
+    if insight.get("backend") == "mlx" and precision and precision != "full":
+        return (
+            f" Read through {html.escape(str(precision))} MLX weights; the lens was fitted on "
+            "full-precision weights, so treat the scores as approximate."
+        )
+    return ""
 
 
 def _lens_title(row: dict) -> str:

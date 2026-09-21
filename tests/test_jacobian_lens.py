@@ -1,5 +1,6 @@
 """Numerical and lifecycle checks using small, real Transformers decoders."""
 
+import shutil
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -9,13 +10,15 @@ from unittest import mock
 import numpy as np
 import torch
 from transformers import (
-    LlamaConfig, LlamaForCausalLM, Qwen2Config, Qwen2ForCausalLM,
-    Qwen3Config, Qwen3ForCausalLM,
+    LlamaConfig, LlamaForCausalLM, MistralConfig, MistralForCausalLM,
+    Qwen2Config, Qwen2ForCausalLM, Qwen3Config, Qwen3ForCausalLM,
 )
 
 import charts
+import jacobian_lens
 from jacobian_lens import FittedLens
 from model_runtime import ModelChanged, ModelManager
+from test_mlx_runtime import needs_mlx
 from tiny_tokenizer import build
 
 
@@ -64,8 +67,8 @@ class JacobianLensTests(unittest.TestCase):
 
     def test_transport_matches_full_sequence_block_readout_on_supported_models(self):
         for config, model in (
-            (LlamaConfig, LlamaForCausalLM), (Qwen2Config, Qwen2ForCausalLM),
-            (Qwen3Config, Qwen3ForCausalLM),
+            (LlamaConfig, LlamaForCausalLM), (MistralConfig, MistralForCausalLM),
+            (Qwen2Config, Qwen2ForCausalLM), (Qwen3Config, Qwen3ForCausalLM),
         ):
             with self.subTest(model=model.__name__):
                 self.manager = small_manager(config, model)
@@ -74,25 +77,57 @@ class JacobianLensTests(unittest.TestCase):
                 handles = []
                 for layer in self.data["J"]:
                     def capture(_module, _inputs, output, layer=layer):
-                        captured[layer] = output[0, index].detach().clone()
+                        captured[layer] = output[0].detach().clone()
                     handles.append(self.manager.model.model.layers[layer].register_forward_hook(capture))
                 with torch.no_grad():
-                    self.manager.model(torch.tensor([self.ids]), use_cache=False)
+                    reference = self.manager.model(torch.tensor([self.ids]), use_cache=False).logits[0]
                 for handle in handles:
                     handle.remove()
                 pin = self.manager.tokenizer.decode([self.ids[index]])
                 result = self.inspect(index, pinned_text=pin)
                 self.assertEqual(result["token_id"], self.ids[index])
                 self.assertEqual(result["pinned_id"], self.ids[index])
-                for row in result["layers"]:
+                window = result["slice"]
+                self.assertEqual([token["index"] for token in window["tokens"]], [0, 1, 2])
+                self.assertEqual([token["token_id"] for token in window["tokens"]], self.ids[:3])
+                for row, column in zip(result["layers"], window["layers"]):
+                    self.assertEqual(column["layer"], row["layer"])
                     with torch.no_grad():
                         transported = captured[row["layer"]] @ self.data["J"][row["layer"]].T
                         expected = self.manager.model.lm_head(self.manager.model.model.norm(transported))
-                    values, ids = expected.topk(5)
+                    values, ids = expected[index].topk(5)
                     self.assertEqual([c["token_id"] for c in row["candidates"]], ids.tolist())
                     np.testing.assert_allclose([c["score"] for c in row["candidates"]], values.numpy(), atol=1e-6)
-                    self.assertEqual(row["rank"], int((expected > expected[self.ids[index]]).sum()) + 1)
-                    self.assertAlmostEqual(row["score"], float(expected[self.ids[index]]), places=6)
+                    self.assertEqual(row["rank"], int((expected[index] > expected[index, self.ids[index]]).sum()) + 1)
+                    self.assertAlmostEqual(row["score"], float(expected[index, self.ids[index]]), places=6)
+                    # Every earlier position reads the state after its own token only.
+                    for position, cell in enumerate(column["cells"]):
+                        self.assertEqual(cell["token_id"], int(expected[position].argmax()))
+                        self.assertAlmostEqual(cell["score"], float(expected[position].max()), places=5)
+                        pinned = expected[position, self.ids[index]]
+                        self.assertEqual(cell["pinned_rank"], int((expected[position] > pinned).sum()) + 1)
+                self.assertEqual(
+                    [cell["token_id"] for cell in window["output"]],
+                    reference[: index + 1].argmax(dim=-1).tolist(),
+                )
+
+    def test_slice_window_ends_at_the_token_without_changing_its_readout(self):
+        imported = self.import_lens()
+        full = self.inspect(4, imported)
+        self.assertEqual([token["index"] for token in full["slice"]["tokens"]], [0, 1, 2, 3, 4])
+        self.assertEqual(full["slice"]["total"], len(self.ids))
+        for row, column in zip(full["layers"], full["slice"]["layers"]):
+            self.assertEqual(column["cells"][-1]["token_id"], row["candidates"][0]["token_id"])
+        windowed = self.inspect(4, imported, positions=2)
+        self.assertEqual([token["index"] for token in windowed["slice"]["tokens"]], [3, 4])
+        self.assertEqual(len(windowed["slice"]["output"]), 2)
+        for left, right in zip(full["layers"], windowed["layers"]):
+            self.assertEqual([c["token_id"] for c in left["candidates"]], [c["token_id"] for c in right["candidates"]])
+            np.testing.assert_allclose(
+                [c["score"] for c in left["candidates"]], [c["score"] for c in right["candidates"]], atol=1e-5,
+            )
+        for left, right in zip(full["slice"]["layers"], windowed["slice"]["layers"]):
+            self.assertEqual([c["token_id"] for c in left["cells"][3:]], [c["token_id"] for c in right["cells"]])
 
     def test_first_token_is_readable_and_later_tokens_do_not_affect_it(self):
         imported = self.import_lens()
@@ -154,8 +189,8 @@ class JacobianLensTests(unittest.TestCase):
     def test_requires_matching_declared_model_and_supported_backend(self):
         with self.assertRaisesRegex(ValueError, "exactly match"):
             self.manager.import_jacobian_lens(str(self.path), "other/model")
-        self.manager.engine = mock.Mock(backend="mlx")
-        with self.assertRaisesRegex(ValueError, "MLX"):
+        self.manager.engine = mock.Mock(backend="mlx", config={"model_type": "mamba"})
+        with self.assertRaisesRegex(ValueError, "supports Llama"):
             self.import_lens()
         self.manager.engine = None
         self.manager.model.config.model_type = "unknown"
@@ -201,6 +236,118 @@ class JacobianLensTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;", rendered)
         self.assertNotIn("<img>", rendered)
         self.assertIn("<svg", rendered)
+
+    def test_slice_grid_marks_the_selected_column_and_carries_pinnable_tokens(self):
+        result = self.inspect(3, pinned_text="the")
+        result["slice"]["tokens"][0]["text"] = "<b>"
+        result["slice"]["layers"][0]["cells"][0]["text"] = 'say "hi"'
+        rendered = charts.jacobian_lens_chart(result)
+        self.assertIn('class="jl-grid"', rendered)
+        # Four positions, two fitted blocks and the model's own output row.
+        self.assertEqual(rendered.count('class="jl-cell'), 4 * 3)
+        self.assertEqual(rendered.count("jl-output"), 1)
+        # The selected column: its header and one cell per row.
+        self.assertEqual(rendered.count("jl-selected"), 4)
+        self.assertIn("--jl-heat:", rendered)
+        self.assertIn("<sup>", rendered)
+        self.assertIn("tokens 1–4 of 6", rendered)
+        self.assertIn("all 6 tokens", charts.jacobian_lens_chart(self.inspect(5)))
+        self.assertNotIn("<b>", rendered)
+        self.assertIn("&lt;b&gt;", rendered)
+        self.assertIn('data-token="&quot;say \\&quot;hi\\&quot;&quot;"', rendered)
+        unpinned = charts.jacobian_lens_chart(self.inspect(3))
+        self.assertNotIn("<sup>", unpinned)
+        self.assertNotIn("--jl-heat", unpinned)
+        self.assertIn("Click a cell", unpinned)
+        windowed = charts.jacobian_lens_chart(self.inspect(3, positions=2))
+        self.assertIn("tokens 3–4 of 6", windowed)
+
+    def test_imported_lens_is_remembered_and_recalled_after_a_reload(self):
+        from ui import inspection, runtime
+
+        store = Path(self.directory.name) / "config" / "jacobian_lenses.json"
+        prompt = [{"token_id": token} for token in self.ids[:2]]
+        metrics = [{"token_id": token} for token in self.ids[2:]]
+
+        def args():
+            return (
+                {"generation": 7, "strip": "prompt", "index": 1},
+                (7, metrics), (7, prompt), (7, self.ids[:2], self.manager.load_id), 0,
+            )
+
+        with mock.patch.object(jacobian_lens, "store_path", return_value=store), mock.patch.object(
+            runtime, "MANAGER", self.manager,
+        ), mock.patch.object(inspection, "current_strip_generation", return_value=7):
+            imported, status = inspection.import_jacobian_lens(str(self.path), self.manager.model_id)
+            self.assertIn("Remembered", status)
+            record = jacobian_lens.remembered(self.manager.model_id)
+            self.assertEqual(record["path"], str(self.path))
+            self.assertEqual(record["fitted_model_id"], self.manager.model_id)
+            self.assertIsNone(jacobian_lens.remembered("other/model"))
+
+            self.manager.load_count += 1
+            self.assertIsNone(self.manager.jacobian_lens_import())
+            result = list(inspection.inspect_layers(*args(), lens_mode="Jacobian", imported_lens=imported))[-1]
+            self.assertIn("jacobian-lens", result[0])
+            self.assertIn("remembered lens", result[4])
+            self.assertIn("lens.pt", result[4])
+            self.assertEqual(self.manager.jacobian_lens_import()["load_id"], self.manager.load_id)
+            self.assertIsNone(self.manager.occupant)
+
+            # Once imported, later clicks use it without another recall.
+            with mock.patch.object(inspection, "recall_lens") as recall:
+                result = list(inspection.inspect_layers(*args(), lens_mode="Jacobian", imported_lens=None))[-1]
+                recall.assert_not_called()
+            self.assertIn("jacobian-lens", result[0])
+            self.assertNotIn("remembered", result[4])
+
+            # A record whose file is gone leaves the usual message.
+            self.manager.load_count += 1
+            self.path.unlink()
+            result = list(inspection.inspect_layers(*args(), lens_mode="Jacobian", imported_lens=None))[-1]
+            self.assertIn("Import a Jacobian", result[4])
+            self.assertIsNone(self.manager.jacobian_lens_import())
+
+    def test_hub_lens_is_fetched_into_the_lens_directory_and_imported(self):
+        from ui import inspection, runtime
+
+        store = Path(self.directory.name) / "config" / "jacobian_lenses.json"
+        calls = {}
+
+        def fake_download(repository, filename, local_dir):
+            calls.update(repository=repository, filename=filename, local_dir=local_dir)
+            target = Path(local_dir) / filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(self.path, target)
+            return str(target)
+
+        metadata = mock.Mock(size=self.path.stat().st_size)
+        with mock.patch.object(jacobian_lens, "store_path", return_value=store), mock.patch.object(
+            runtime, "MANAGER", self.manager,
+        ), mock.patch("huggingface_hub.hf_hub_download", side_effect=fake_download), mock.patch(
+            "huggingface_hub.get_hf_file_metadata", return_value=metadata,
+        ):
+            imported, status = inspection.import_jacobian_lens(
+                None, self.manager.model_id, " org/lenses ", "lenses/tiny.pt",
+            )
+            self.assertIn("import_id", imported)
+            self.assertIn("2 fitted layers", status)
+            self.assertEqual((calls["repository"], calls["filename"]), ("org/lenses", "lenses/tiny.pt"))
+            self.assertEqual(Path(calls["local_dir"]), store.parent / "lenses" / "org__lenses")
+            record = jacobian_lens.remembered(self.manager.model_id)
+            self.assertEqual((record["repository"], record["filename"]), ("org/lenses", "lenses/tiny.pt"))
+            self.assertTrue(Path(record["path"]).is_file())
+
+            metadata.size = jacobian_lens.MAX_FILE_BYTES + 1
+            _, status = inspection.import_jacobian_lens(None, self.manager.model_id, "org/lenses", "lenses/tiny.pt")
+            self.assertIn("Could not fetch", status)
+            self.assertIn("2 GiB", status)
+            self.assertIsNone(self.manager.occupant)
+        for repository, filename in (("lenses", "a.pt"), ("org/lenses", "../a.pt"), ("org/lenses", "a.bin"), ("org/lenses", "")):
+            with self.subTest(repository=repository, filename=filename), self.assertRaises(ValueError):
+                jacobian_lens.download(repository, filename)
+        _, status = inspection.import_jacobian_lens(None, self.manager.model_id)
+        self.assertIn("Choose a saved lens.pt file", status)
 
     def test_ui_reads_first_prompt_token_after_it_and_labels_the_result(self):
         from ui import inspection, runtime
@@ -342,6 +489,99 @@ class JacobianLensTests(unittest.TestCase):
                 self.assertFalse(inspection.INSPECTION_CONTROLS.current(session, first[3]["inspection_controls"]["revision"]))
             finally:
                 inspection.INSPECTION_CONTROLS.forget(other)
+
+
+@needs_mlx
+class MlxJacobianLensTests(unittest.TestCase):
+    """The same lens read through an MLX conversion of the fitted model."""
+
+    def setUp(self):
+        import mlx.core as mx
+
+        from mlx_runtime import MlxEngine
+        from test_mlx_runtime import HIDDEN, LAYERS, VOCAB, tiny_llama
+        from test_streaming import FakeTokenizer
+
+        class Tokenizer(FakeTokenizer):
+            def encode(self, text, add_special_tokens=True):
+                return self(text, add_special_tokens=False)["input_ids"]
+
+        self.mx = mx
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "lens.pt"
+        self.model = tiny_llama()
+        self.manager = ModelManager()
+        self.manager.model = self.model
+        self.manager.engine = MlxEngine(self.model, {
+            "eos_token_id": 99, "model_type": "llama",
+            "hidden_size": HIDDEN, "num_hidden_layers": LAYERS,
+        })
+        self.manager.tokenizer = Tokenizer(tuple(f"t{i}" for i in range(VOCAB)), 1)
+        self.manager.model_id = "mlx-community/tiny-decoder-4bit"
+        self.manager.kind = "mlx"
+        self.manager.precision = "4-bit"
+        torch.manual_seed(7)
+        self.data = {
+            "J": {layer: torch.randn(HIDDEN, HIDDEN) for layer in range(LAYERS)},
+            "source_layers": list(range(LAYERS)), "n_prompts": 50, "d_model": HIDDEN,
+        }
+        torch.save(self.data, self.path)
+        self.ids = [3, 5, 7, 11, 13]
+
+    def reference(self):
+        """Each block's readout at every position from one uncached pass."""
+        from mlx_runtime import _Recorder
+
+        mx = self.mx
+        engine = self.manager.engine
+        recorder = _Recorder()
+        with engine._recording(recorder):
+            logits = self.model(mx.array([self.ids]))
+        mx.eval(logits, *recorder.hidden)
+        norm = engine.final_norm()
+        expected = {}
+        for layer, matrix in self.data["J"].items():
+            hidden = np.array(recorder.hidden[layer + 1][0].astype(mx.float32))
+            transported = mx.array(hidden @ matrix.numpy().T)[None]
+            expected[layer] = np.array(engine.read_head(norm(transported))[0].astype(mx.float32))
+        return expected, np.array(logits[0].astype(mx.float32))
+
+    def test_a_quantized_conversion_reads_the_lens_fitted_for_its_source(self):
+        imported = self.manager.import_jacobian_lens(str(self.path), "test/tiny-decoder")
+        self.assertEqual(imported["backend"], "mlx")
+        index = 3
+        result = self.manager.inspect_jacobian(
+            self.ids, index, lens_id=imported["import_id"], load_id=self.manager.load_id,
+            pinned_text="t7",
+        ).to_dict()
+        expected, logits = self.reference()
+        self.assertEqual(result["pinned_id"], 7)
+        self.assertEqual(result["backend"], "mlx")
+        self.assertEqual(result["precision"], "4-bit")
+        for row, column in zip(result["layers"], result["slice"]["layers"]):
+            scores = expected[row["layer"]]
+            top = np.argsort(-scores[index])[:5]
+            self.assertEqual([c["token_id"] for c in row["candidates"]], top.tolist())
+            np.testing.assert_allclose([c["score"] for c in row["candidates"]], scores[index, top], atol=1e-3)
+            self.assertEqual(row["rank"], int((scores[index] > scores[index, 7]).sum()) + 1)
+            for position, cell in enumerate(column["cells"]):
+                self.assertEqual(cell["token_id"], int(scores[position].argmax()))
+                self.assertEqual(cell["pinned_rank"], int((scores[position] > scores[position, 7]).sum()) + 1)
+        self.assertEqual(
+            [cell["token_id"] for cell in result["slice"]["output"]],
+            logits[: index + 1].argmax(axis=-1).tolist(),
+        )
+        rendered = charts.jacobian_lens_chart(result)
+        self.assertIn("4-bit MLX weights", rendered)
+
+    def test_the_declared_source_must_name_the_conversion(self):
+        with self.assertRaisesRegex(ValueError, "MLX conversion"):
+            self.manager.import_jacobian_lens(str(self.path), "test/other-decoder")
+        with self.assertRaisesRegex(ValueError, "MLX conversion"):
+            self.manager.import_jacobian_lens(str(self.path), "")
+        self.manager.model_id = "mlx-community/Tiny-Decoder-bf16"
+        self.assertIn("import_id", self.manager.import_jacobian_lens(str(self.path), "test/tiny-decoder"))
 
 
 if __name__ == "__main__":

@@ -120,6 +120,8 @@ from ui.generation import (
 from ui.inspection import (
     INSPECT_HINT,
     INSPECTION_CONTROLS,
+    JACOBIAN_CSS,
+    JACOBIAN_JS,
     change_lens_mode,
     change_pinned_token,
     import_jacobian_lens,
@@ -307,7 +309,7 @@ def build_app() -> gr.Blocks:
     # GRADIO_ANALYTICS_ENABLED so it holds however the app is started - the
     # desktop bundle, run.sh, or python app.py.
     with gr.Blocks(
-        title="ChatLab", css=CSS + TOKEN_MENU_CSS + TREE_CSS + extension_css(extensions), theme=THEME, fill_width=True,
+        title="ChatLab", css=CSS + TOKEN_MENU_CSS + TREE_CSS + JACOBIAN_CSS + extension_css(extensions), theme=THEME, fill_width=True,
         analytics_enabled=False,
     ) as demo:
         # The chosen theme's colors, as a stylesheet on the page. Gradio fixes
@@ -1155,26 +1157,39 @@ def build_app() -> gr.Blocks:
                             with gr.Column(visible=False) as jacobian_controls:
                                 with gr.Accordion("Lens setup", open=True) as lens_setup:
                                     gr.Markdown(
-                                        "Import a lens fitted for the exact loaded checkpoint. "
-                                        "Supports full-precision Llama, Qwen2, and Qwen3 Transformers models. "
-                                        "[Lens format and fitting instructions](https://github.com/anthropics/jacobian-lens#fit)."
+                                        "Import a lens fitted for the loaded checkpoint, from a Hugging Face "
+                                        "repository or a saved file. Fitted lenses are published for many "
+                                        "open models; the [reference tools](https://github.com/anthropics/jacobian-lens#fit) "
+                                        "fit new ones. Supports Llama, Mistral, Qwen, Gemma, OLMo, GLM-4, Phi-3, "
+                                        "Granite, Cohere, and SmolLM3 text models, as Transformers weights or MLX conversions."
                                     )
-                                    lens_file = gr.File(label="Fitted Jacobian lens", file_types=[".pt"], type="filepath")
+                                    with gr.Row():
+                                        lens_repository = gr.Textbox(
+                                            label="Hub repository", placeholder="For example, mhough/olmo3-jacobian-lenses",
+                                            scale=1,
+                                        )
+                                        lens_filename = gr.Textbox(
+                                            label="File in the repository", placeholder="For example, lenses/olmo-3-7b-think.pt",
+                                            scale=1,
+                                        )
+                                    lens_file = gr.File(label="Or a saved lens.pt file", file_types=[".pt"], type="filepath")
                                     fitted_model_id = gr.Textbox(
                                         label="Model ID the lens was fitted for",
                                         placeholder="For example, Qwen/Qwen3-0.6B",
+                                        info="For an MLX conversion, the full-precision model it was made from.",
                                     )
                                     import_lens_button = gr.Button("Import lens", size="sm")
                                 import_lens_status = gr.Markdown("No lens imported for this session.")
                                 pinned_concept = gr.Textbox(
                                     label="Pin a vocabulary token (optional)",
-                                    placeholder="Type a token from the readout, then inspect again",
+                                    placeholder="Click a cell in the grid, or type a token, then inspect again",
                                     info="Use the exact text, including any leading space. One vocabulary token at a time.",
+                                    elem_id="jacobian-pin",
                                 )
                             with gr.Row():
                                 inspect_button = gr.Button(
                                     "Inspect layers", size="sm", scale=0, min_width=160,
-                                    elem_classes=icon_classes("layers"),
+                                    elem_classes=icon_classes("layers"), elem_id="inspect-layers",
                                 )
                                 inspect_status = gr.Markdown(
                                     INSPECT_HINT, elem_classes=["scale-caption"]
@@ -2101,6 +2116,7 @@ def build_app() -> gr.Blocks:
         # The menu handles Escape before the global generation shortcut.
         demo.load(None, None, None, js=TOKEN_MENU_JS)
         demo.load(None, None, None, js=TREE_JS)
+        demo.load(None, None, None, js=JACOBIAN_JS)
         tree_action.input(
             select_tree_branch,
             [tree_action, conversation_state, forks_state, tree_selection],
@@ -3099,7 +3115,8 @@ def build_app() -> gr.Blocks:
             queue=False,
         )
         import_lens_button.click(
-            import_jacobian_lens, [lens_file, fitted_model_id], [imported_lens, import_lens_status],
+            import_jacobian_lens, [lens_file, fitted_model_id, lens_repository, lens_filename],
+            [imported_lens, import_lens_status],
         )
         # QUIET_TICK for the same reason as the metrics_state handler below:
         # clearing a stale readout is instant, so the panel should not flash a
