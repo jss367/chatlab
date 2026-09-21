@@ -1205,6 +1205,29 @@ class MazeTests(unittest.TestCase):
                       'loaded and another/model recorded them', note)
         self.assertNotIn('rather than the', note)
         ep.turns[0]['prompt_ids'] = spelled
+        # A model that decodes the IDs and is gone before the template is read
+        # is not called loaded beside a transcript it did not spell: the model
+        # is named by the reading being shown, and that reading is spelled by
+        # nothing.
+        class UnloadsAfterDecode(Manager):
+            def __init__(self):
+                super().__init__([])
+                self.decoded = False
+
+            def loaded_model(self):
+                return LoadedModel() if self.decoded else super().loaded_model()
+
+            def decode(self, ids):
+                try:
+                    return super().decode(ids)
+                finally:
+                    self.decoded = True
+
+        note, text = context_view(ep, UnloadsAfterDecode(), 0)
+        self.assertIn('**Response 1 · as recorded, untemplated**', note)
+        self.assertNotIn('are not decoded here', note)
+        self.assertNotIn('test/model', note)
+        self.assertTrue(text.startswith('[tool schemas]'))
         # A load of the recording model reads the IDs back as before.
         manager.model_id, manager.load_id = 'another/model', 'another/model#1'
         self.assertIn('**Response 1 · as recorded**', context_view(ep, manager, 0)[0])

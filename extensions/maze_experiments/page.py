@@ -394,22 +394,22 @@ def context_view(ep, models, index=None):
     tail = (f" A supplied prefix of {supplied:,} tokens followed it, shown under **Supplied text & full response**."
             if supplied else "")
     ids = turn.get("prompt_ids")
-    failure, tried = None, None
+    failure = None
     if ids:
-        text, tried, failure = read_through(models.decode, ids)
-        if text is not None and not swapped_model(ep.model_id, tried):
+        text, load_id, failure = read_through(models.decode, ids)
+        if text is not None and not swapped_model(ep.model_id, load_id):
             return (f"**{where} · as recorded** · {len(ids):,} prompt tokens, decoded"
-                    f"{under_load(turn.get('load_id'), tried)}.{tail}", text)
+                    f"{under_load(turn.get('load_id'), load_id)}.{tail}", text)
     messages = context_messages(ep, index)
     text, load_id, refused = read_through(models.prompt_text, messages, TOOLS)
-    # Named from the load that made the reading being shown rather than the one
-    # the IDs were tried against: a decode that raised names no load at all, so
-    # a vocabulary too small to spell them would fall back to the load stamps
-    # and never say which model to load, and a load landing between the two
-    # readings would have this name one model beside a prompt the next spelled.
-    swapped = swapped_model(ep.model_id, load_id or tried)
-    aside = spelled_by_another(len(ids), ep.model_id, swapped) if ids and swapped else ""
     if text is not None:
+        # Named by the load that spelled this template and by no other reading:
+        # a decode that raised names no load, and the load that answered one
+        # reading can be gone by the next, so a model taken from anywhere else
+        # could be called loaded beside text it did not spell. The messages
+        # shown below are spelled by nothing, and say so in their own words.
+        swapped = swapped_model(ep.model_id, load_id)
+        aside = spelled_by_another(len(ids), ep.model_id, swapped) if ids and swapped else ""
         # The aside already names both models, so the load stamps would only
         # repeat it in weaker words.
         return (f"**{where} · as the loaded model would be given it** · {len(messages)} messages and the move tool "
@@ -417,7 +417,7 @@ def context_view(ep, models, index=None):
                 f"{aside}{tail}", text)
     return (f"**{where} · as recorded, untemplated** · {unspelled(models, refused or failure)}, so the "
             f"{len(messages)} messages and the move tool are shown as the run recorded them. A template adds its own "
-            f"turn markers and writes the tool schemas its own way.{aside}{tail}", transcript(messages))
+            f"turn markers and writes the tool schemas its own way.{tail}", transcript(messages))
 
 
 def transport_buttons(ep):
