@@ -451,6 +451,7 @@ def _jacobian_slice(insight: dict) -> str:
         badge = f"<sup>{rank:,}</sup>" if rank is not None else ""
         return (
             f'<td class="{classes}" data-token="{html.escape(json.dumps(text), quote=True)}"'
+            f' data-token-id="{int(item.get("token_id", -1))}"'
             f'{heat(rank)} title="{html.escape(tip)}"><code>{shown}</code>{badge}</td>'
         )
 

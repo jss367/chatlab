@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import threading
 import time
 from uuid import uuid4
@@ -60,6 +61,9 @@ INSPECT_OUTPUT_ONLY = (
 # again, which is what typing the token and pressing the button would do.
 # The value is written the way the token menu writes its bridge, so Gradio
 # sees an ordinary edit; the click follows once that edit has been sent.
+# The cell's token ID goes into a hidden box first, paired with the text it
+# was shown for: a token whose text does not encode back to itself (a byte
+# fallback, a special token) is then pinned by ID rather than re-tokenized.
 JACOBIAN_JS = r"""
 () => {
   if (window.chatlabJacobianInstalled) return;
@@ -72,9 +76,14 @@ JACOBIAN_JS = r"""
     let text;
     try { text = JSON.parse(cell.dataset.token); } catch (error) { return; }
     if (typeof text !== 'string') return;
-    const prototype = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    Object.getOwnPropertyDescriptor(prototype, 'value').set.call(input, text);
-    input.dispatchEvent(new Event('input', {bubbles: true}));
+    const write = (field, value) => {
+      const prototype = field.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, 'value').set.call(field, value);
+      field.dispatchEvent(new Event('input', {bubbles: true}));
+    };
+    const idInput = document.querySelector('#jacobian-pin-id textarea, #jacobian-pin-id input');
+    if (idInput) write(idInput, JSON.stringify({token_id: Number(cell.dataset.tokenId), text}));
+    write(input, text);
     const holder = document.querySelector('#inspect-layers');
     const button = holder && (holder.tagName === 'BUTTON' ? holder : holder.querySelector('button'));
     if (button) setTimeout(() => button.click(), 120);
@@ -174,6 +183,25 @@ def remember_inspect_target(strip: str):
     return remember
 
 
+def _pin_by_id(pinned_token_id, pinned_text: str) -> dict:
+    """The exact token ID a clicked cell supplied, if it still matches the pin.
+
+    A click writes ``{"token_id", "text"}`` beside the visible text; the ID
+    counts only while the text box still shows that same text, so a pin typed
+    over it goes through the tokenizer as before and the ID is left unused.
+    """
+    try:
+        record = json.loads(pinned_token_id or "")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(record, dict) or record.get("text") != pinned_text:
+        return {}
+    token_id = record.get("token_id")
+    if isinstance(token_id, bool) or not isinstance(token_id, int):
+        return {}
+    return {"pinned_id": token_id}
+
+
 def inspect_layers(
     target: dict | None,
     metrics_state: tuple[int, list[dict]],
@@ -188,6 +216,7 @@ def inspect_layers(
     imported_lens: dict | None = None,
     pinned_text: str = "",
     inspection_session: str | None = None,
+    pinned_token_id: str = "",
 ):
     """Run the logit lens and attention readout for the clicked token.
 
@@ -211,6 +240,7 @@ def inspect_layers(
     skip = gr.skip()
     refused = (skip, skip, skip, skip)
     revision = INSPECTION_CONTROLS.capture(inspection_session, lens_mode, pinned_text or "")
+    pin = _pin_by_id(pinned_token_id, pinned_text or "")
 
     def controls_current():
         return inspection_session is None or INSPECTION_CONTROLS.current(inspection_session, revision)
@@ -302,7 +332,7 @@ def inspect_layers(
                 insight = runtime.MANAGER.inspect_jacobian(
                     sequence, index,
                     lens_id=(imported or {}).get("import_id"),
-                    pinned_text=pinned_text or "", **options,
+                    pinned_text=pinned_text or "", **pin, **options,
                 ).to_dict()
                 if recalled:
                     insight["recalled"] = recalled
@@ -437,6 +467,18 @@ def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):
     filename = (filename or "").strip()
     source = {}
     if repository or filename:
+        # The slot is checked, not held, over the download. A transfer of up
+        # to 2 GiB can take minutes, and holding the slot for it would block
+        # chat and loading the whole time; the import below validates the
+        # lens against whatever model is loaded when it runs, under the model
+        # lock, so a model swapped in mid-download is refused rather than
+        # misread. A finished download is kept on disk, so a "busy" answer
+        # after it costs nothing to retry. The check here spares the bytes
+        # when the model is already known to be busy.
+        held = runtime.MANAGER.claim_generation()
+        if held:
+            return gr.skip(), INSPECT_LOADING if held == LOADING else INSPECT_BUSY
+        runtime.MANAGER.release_generation()
         try:
             path = str(jacobian_lens.download(repository, filename))
         except ValueError as error:

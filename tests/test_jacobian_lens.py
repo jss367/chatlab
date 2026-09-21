@@ -1,5 +1,6 @@
 """Numerical and lifecycle checks using small, real Transformers decoders."""
 
+import json
 import shutil
 import tempfile
 import unittest
@@ -217,6 +218,23 @@ class JacobianLensTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "one vocabulary token"):
             self.inspect(1, pinned_text="a whole sentence")
 
+    def test_pinning_by_id_matches_pinning_by_text_and_checks_the_vocabulary(self):
+        imported = self.import_lens()
+        by_text = self.inspect(2, imported, pinned_text=self.manager.tokenizer.decode([self.ids[2]]))
+        by_id = self.inspect(2, imported, pinned_id=self.ids[2])
+        self.assertEqual(by_id["pinned_id"], self.ids[2])
+        self.assertEqual(by_id["pinned_id"], by_text["pinned_id"])
+        self.assertEqual(by_id["pinned_text"], by_text["pinned_text"])
+        ranks = lambda result: [  # noqa: E731
+            [cell["pinned_rank"] for cell in row["cells"]] for row in result["slice"]["layers"]
+        ]
+        self.assertEqual(ranks(by_id), ranks(by_text))
+        # The ID wins when both are given, so a click is never re-tokenized.
+        both = self.inspect(2, imported, pinned_text="a whole sentence", pinned_id=self.ids[2])
+        self.assertEqual(both["pinned_id"], self.ids[2])
+        with self.assertRaisesRegex(ValueError, "outside this model's output vocabulary"):
+            self.inspect(2, imported, pinned_id=len(self.manager.tokenizer) + 10_000)
+
     def test_unrecognized_output_transform_withholds_readout(self):
         imported = self.import_lens()
         forward = self.manager.model.forward
@@ -268,6 +286,10 @@ class JacobianLensTests(unittest.TestCase):
         self.assertNotIn("<b>", rendered)
         self.assertIn("&lt;b&gt;", rendered)
         self.assertIn('data-token="&quot;say \\&quot;hi\\&quot;&quot;"', rendered)
+        # Each cell also names its token by ID, so a click pins the exact token.
+        self.assertEqual(rendered.count('data-token-id="'), 4 * 3)
+        first = result["slice"]["layers"][0]["cells"][0]["token_id"]
+        self.assertIn(f'data-token-id="{first}"', rendered)
         unpinned = charts.jacobian_lens_chart(self.inspect(3))
         self.assertNotIn("<sup>", unpinned)
         self.assertNotIn("--jl-heat", unpinned)
@@ -372,11 +394,58 @@ class JacobianLensTests(unittest.TestCase):
             self.assertIn("Could not fetch", status)
             self.assertIn("2 GiB", status)
             self.assertIsNone(self.manager.occupant)
+
+            # A busy model is reported before any bytes move; the slot is not
+            # held over the transfer itself.
+            metadata.size = self.path.stat().st_size
+            calls.clear()
+            self.assertIsNone(self.manager.claim_generation())
+            try:
+                _, status = inspection.import_jacobian_lens(
+                    None, self.manager.model_id, "org/lenses", "lenses/tiny.pt",
+                )
+            finally:
+                self.manager.release_generation()
+            self.assertEqual(status, inspection.INSPECT_BUSY)
+            self.assertEqual(calls, {})
+            self.assertIsNone(self.manager.occupant)
         for repository, filename in (("lenses", "a.pt"), ("org/lenses", "../a.pt"), ("org/lenses", "a.bin"), ("org/lenses", "")):
             with self.subTest(repository=repository, filename=filename), self.assertRaises(ValueError):
                 jacobian_lens.download(repository, filename)
         _, status = inspection.import_jacobian_lens(None, self.manager.model_id)
         self.assertIn("Choose a saved lens.pt file", status)
+
+    def test_ui_pins_a_clicked_cell_by_id_only_while_its_text_is_still_the_pin(self):
+        from ui import inspection, runtime
+
+        imported = self.import_lens()
+        the = self.manager.tokenizer.encode("the", add_special_tokens=False)[0]
+        args = (
+            {"generation": 7, "strip": "prompt", "index": 1},
+            (7, [{"token_id": token} for token in self.ids[2:]]),
+            (7, [{"token_id": token} for token in self.ids[:2]]),
+            (7, self.ids[:2], self.manager.load_id), 0,
+        )
+
+        def request(pinned_token_id):
+            return list(inspection.inspect_layers(
+                *args, lens_mode="Jacobian", imported_lens=imported, pinned_text="the",
+                pinned_token_id=pinned_token_id,
+            ))[-1]
+
+        with mock.patch.object(runtime, "MANAGER", self.manager), mock.patch.object(
+            inspection, "current_strip_generation", return_value=7,
+        ), mock.patch.object(self.manager, "inspect_jacobian", wraps=self.manager.inspect_jacobian) as run:
+            result = request(json.dumps({"token_id": the, "text": "the"}))
+            self.assertEqual(run.call_args.kwargs["pinned_id"], the)
+            self.assertEqual(result[3]["pinned_id"], the)
+            # A pin typed over the clicked text goes through the tokenizer.
+            for stale in (json.dumps({"token_id": 5, "text": "other"}), "", "not json", "[1]",
+                          json.dumps({"token_id": "5", "text": "the"})):
+                with self.subTest(stale=stale):
+                    request(stale)
+                    self.assertNotIn("pinned_id", run.call_args.kwargs)
+            self.assertIsNone(self.manager.occupant)
 
     def test_ui_reads_first_prompt_token_after_it_and_labels_the_result(self):
         from ui import inspection, runtime

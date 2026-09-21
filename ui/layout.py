@@ -1186,6 +1186,10 @@ def build_app() -> gr.Blocks:
                                     info="Use the exact text, including any leading space. One vocabulary token at a time.",
                                     elem_id="jacobian-pin",
                                 )
+                                # A clicked cell writes its exact token ID here beside the
+                                # visible text, so a token whose text does not tokenize back
+                                # to itself is still pinned as the token it is.
+                                pinned_token_id = gr.Textbox(visible=False, elem_id="jacobian-pin-id")
                             with gr.Row():
                                 inspect_button = gr.Button(
                                     "Inspect layers", size="sm", scale=0, min_width=160,
@@ -3103,6 +3107,7 @@ def build_app() -> gr.Blocks:
                 imported_lens,
                 pinned_concept,
                 inspection_session,
+                pinned_token_id,
             ],
             [lens_panel, attention_panel, attention_layer, insight_state, inspect_status],
         )

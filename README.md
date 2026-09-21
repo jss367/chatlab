@@ -298,9 +298,10 @@ at the clicked one; its note says which tokens are shown.
 Click any cell to pin its token: the inspection runs again with every cell
 carrying that token's vocabulary rank, shaded darker the closer it is to
 rank 1 on a logarithmic scale, and a line traces its rank across blocks at
-the clicked position. **Pin a vocabulary token** accepts a typed token as
-well; preserve leading spaces, and phrases that split into several tokens
-are rejected.
+the clicked position. A click pins the exact token the cell shows, even one
+whose text would not tokenize back to itself. **Pin a vocabulary token**
+accepts a typed token as well, which must be one vocabulary token; preserve
+leading spaces, and phrases that split into several tokens are rejected.
 
 The Jacobian view reads the activation **after processing each token**,
 including the first token of a sequence. Nothing after the clicked token is

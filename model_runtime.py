@@ -7344,7 +7344,7 @@ class ModelManager:
     @_guards_device_memory
     def inspect_jacobian(
         self, token_ids: Sequence[int], index: int, *, lens_id: str | None,
-        pinned_text: str = "", context_count: int = 0,
+        pinned_text: str = "", pinned_id: int | None = None, context_count: int = 0,
         load_id: str | None = None, steering: dict | None = None,
         positions: int = jacobian_lens.SLICE_POSITIONS,
     ) -> jacobian_lens.JacobianInsight:
@@ -7358,6 +7358,11 @@ class ModelManager:
         ``lens_id`` names the import the caller saw; ``None`` accepts whatever
         lens is imported for the current load, which is how a lens recalled
         from disk after a reload is used without the caller having seen it.
+
+        ``pinned_id`` pins a vocabulary token outright, as a clicked cell does;
+        ``pinned_text`` is encoded only when no ID is given, since a token's
+        text need not encode back to that token. The lens checks the ID against
+        the output vocabulary.
         """
         import torch
 
@@ -7376,8 +7381,9 @@ class ModelManager:
             ids = [int(token) for token in token_ids]
             if not 0 <= index < len(ids):
                 raise ValueError("Select a token in the current transcript.")
-            pinned_id = None
-            if pinned_text:
+            if pinned_id is not None:
+                pinned_id = int(pinned_id)
+            elif pinned_text:
                 encoded = self.tokenizer.encode(pinned_text, add_special_tokens=False)
                 if len(encoded) != 1:
                     raise ValueError("Pin one vocabulary token. Try a single word, including its leading space if needed.")
