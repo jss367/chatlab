@@ -47,6 +47,9 @@ class Manager:
     def prompt_text(self, messages, tools=None):
         return ModelService(lambda: self).prompt_text(messages, tools)
 
+    def loaded_model_id(self):
+        return ModelService(lambda: self).loaded_model_id()
+
     def _prompt_token_ids(self, messages, tools=None):
         # Stands in for a chat template: the fixture's vocabulary is UTF-8
         # bytes, so a rendering the reader can read round-trips through decode.
@@ -1205,6 +1208,22 @@ class MazeTests(unittest.TestCase):
                       'loaded and another/model recorded them', note)
         self.assertNotIn('rather than the', note)
         ep.turns[0]['prompt_ids'] = spelled
+        # A different model that can decode the IDs but whose template refuses
+        # this history leaves the pane at its least readable, which is where
+        # naming the recording model helps most. That model is in memory as the
+        # note is written, so the note says so.
+        class NoToolTemplate(Manager):
+            def _prompt_token_ids(self, messages, tools=None):
+                if tools is not None:
+                    raise ValueError("Tool use requires a model with a native chat/tool template.")
+                return list(b'plain'), False
+
+        note, text = context_view(ep, NoToolTemplate([]), 0)
+        self.assertIn('**Response 1 · as recorded, untemplated**', note)
+        self.assertIn('Tool use requires a model with a native chat/tool template', note)
+        self.assertIn('not decoded here: test/model is loaded and another/model recorded them', note)
+        self.assertIn('Load another/model to read this prompt as it was recorded.', note)
+        self.assertTrue(text.startswith('[tool schemas]'))
         # A model that decodes the IDs and is gone before the template is read
         # is not called loaded beside a transcript it did not spell: the model
         # is named by the reading being shown, and that reading is spelled by

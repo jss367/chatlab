@@ -56,6 +56,19 @@ class ModelService:
             )
         return self._read(render)
 
+    def loaded_model_id(self):
+        """The model in memory now, framing no text at all.
+
+        A snapshot moves as one (see :meth:`_read`), so this is the model a
+        reader would be told to unload, read at the moment it is asked for.
+        What it cannot say is that this model spelled anything: use it to
+        describe the application beside text no load produced, and :meth:`decode`
+        or :meth:`prompt_text` for text a load did produce. ``None`` when
+        nothing is loaded or a load is under way.
+        """
+        published = self._provider().loaded_model()
+        return published.model_id if published.load_id is not None else None
+
     def _read(self, reading):
         """Read the loaded model, or answer that no one load made the reading.
 
