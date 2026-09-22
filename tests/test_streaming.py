@@ -1355,6 +1355,22 @@ class HiddenTokenTests(unittest.TestCase):
         manager.tokenizer = tokenizer
         self.assertEqual(manager.hidden_token_ids(), {2})
 
+    def test_a_stop_token_the_tokenizer_does_not_list_is_hidden(self):
+        # OLMo 3 stops on <|im_end|>, which its generation config names but
+        # Transformers 5 leaves out of all_special_ids.
+        pieces = ["Hello", " world", "<|endoftext|>", "<|im_end|>"]
+        manager = loaded_manager([0, 1, 3], pieces=pieces, eos_id=2)
+        manager.model.generation_config.eos_token_id = [3, 2]
+
+        self.assertEqual(manager.hidden_token_ids(), {2, 3})
+        final = list(
+            manager.generate(
+                [{"role": "user", "content": "hi"}],
+                temperature=0.0, top_p=1.0, top_k=0, max_new_tokens=10, seed=1,
+            )
+        )[-1]
+        self.assertEqual(final.text, "Hello world")
+
 
 class SkipTopChoiceStreamTests(unittest.TestCase):
     """The Sampling control reaches the tokens the model actually writes."""

@@ -9,7 +9,7 @@ from .benchmark import (
 )
 from .chart import tradeoff_chart
 from .runner import Runner, StreamingResponse
-from .storage import save_json
+from .storage import download_copy, save_json
 
 SCORING = {"Label probabilities": "probability", "Free-text judgment": "judgment"}
 # What an imported file may say about how its judgments were produced. Both
@@ -354,7 +354,7 @@ def build_page(context):
         path = context.data_dir / f"{uuid4().hex}.json"
         value = dict(run, scores=report(run["cases"], run["predictions"]))
         save_json(path, value)
-        return str(path)
+        return str(download_copy(path))
 
     save.click(export_run, run_state, export, **serial)
 
@@ -365,7 +365,7 @@ def build_page(context):
             destination = context.data_dir / f"execution-{uuid4().hex}.json"
             save_json(destination, dict(paper=PAPER, executions=rows, scores=scores))
             return ([[row["id"], row.get("condition", "unspecified"), row["outcome"], row["retry_terminated"],
-                      ", ".join(row["violated_invariants"])] for row in rows], scores, str(destination))
+                      ", ".join(row["violated_invariants"])] for row in rows], scores, str(download_copy(destination)))
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
 

@@ -507,6 +507,21 @@ class RunnerTests(unittest.TestCase):
         live_frames = [frame for frame, _ in frames if isinstance(frame, StreamingResponse)]
         self.assertEqual(live_frames[0].result["response"], '{"label":')
 
+    def test_the_download_is_a_copy_gradio_will_serve(self):
+        # Gradio refuses to serve a returned file outside its temporary
+        # directories and the working directory, which the data directory is
+        # not when the app runs from a checkout.
+        frames = list(self.batch("owner", demo_cases()))
+        _final, path = frames[-1]
+        saved = self.runner.data_dir / f"{frames[-1][0]['id']}.json"
+
+        self.assertTrue(saved.exists())
+        self.assertNotEqual(Path(path), saved)
+        self.assertTrue(Path(path).resolve().is_relative_to(Path(tempfile.gettempdir()).resolve()))
+        self.assertEqual(Path(path).read_text(), saved.read_text())
+        offered = {Path(path).parent for path in self.case_paths(frames) if path}
+        self.assertEqual(len(offered), 1, "one folder per batch, not one per case")
+
     def test_streaming_does_not_rescore_or_copy_prior_results(self):
         from extensions.osguard import runner as module
 

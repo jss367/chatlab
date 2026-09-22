@@ -223,6 +223,30 @@ class WriteTests(unittest.TestCase):
             [key for key in payload if "secret" in key or key.endswith("token")], []
         )
 
+    def test_a_file_that_could_not_be_read_is_kept_rather_than_overwritten(self):
+        for broken in ('{"temperature": 0.3,}', "[1, 2]", ""):
+            with self.subTest(broken=broken):
+                for stale in self.root.glob("settings.json*"):
+                    stale.unlink()
+                self.path.write_text(broken, encoding="utf-8")
+
+                with self.assertLogs("settings", level="WARNING"):
+                    settings.write(settings.DEFAULTS, path=self.path)
+
+                kept = list(self.root.glob("settings.json.unreadable-*"))
+                self.assertEqual(len(kept), 1)
+                self.assertEqual(kept[0].read_text(encoding="utf-8"), broken)
+                self.assertEqual(
+                    json.loads(self.path.read_text(encoding="utf-8")),
+                    settings.DEFAULTS.to_mapping(),
+                )
+
+    def test_a_file_that_is_not_utf8_reads_as_the_defaults(self):
+        self.path.write_bytes(b'{"system_prompt": "\\xff\xff"}')
+
+        with self.assertLogs("settings", level="WARNING"):
+            self.assertEqual(settings.read(self.path), (settings.DEFAULTS, {}))
+
     def test_keys_from_a_later_version_are_put_back_where_they_were(self):
         settings.write(settings.DEFAULTS, {"from_a_later_version": 7}, path=self.path)
         payload = json.loads(self.path.read_text(encoding="utf-8"))

@@ -561,6 +561,12 @@ PROMPT_EDIT_NO_MESSAGE = (
 )
 
 
+PROMPT_EDIT_SCORED = (
+    "✏️ These are the tokens of the scored context, and no reply was given "
+    "them. Prompt tokens can be replaced in the prompt of a chat reply."
+)
+
+
 PROMPT_EDIT_EMPTY = "Type the text that should replace the prompt token first."
 
 
@@ -682,6 +688,11 @@ def prompt_edit_target(
     metric = strip_metric("prompt", prompt_state, selection.get("index"))
     if metric is None or selection.get("generation") != generation:
         return PROMPT_EDIT_UNAVAILABLE
+    # Score text draws its context into this strip under its own stamp, which
+    # the checks below would accept. An edit answers the chat's last message
+    # again, so the chat's reply would be replaced by one to the scored text.
+    if generation == current_strip_generation("score"):
+        return PROMPT_EDIT_SCORED
     if not isinstance(context_state, (tuple, list)) or len(context_state) < 3:
         return PROMPT_EDIT_UNAVAILABLE
     context_generation, ids, load_id = context_state[0], context_state[1], context_state[2]
