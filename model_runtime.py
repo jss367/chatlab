@@ -3700,6 +3700,14 @@ class GenerationUpdate:
     as truncated.
     """
 
+    ends_on_position_limit: bool = False
+    """Whether the response stopped because the model has no more positions.
+
+    A learned position table has nothing past its last row, so the token
+    sampled there is kept but never fed, and the response ends short of the
+    length it was asked for.
+    """
+
     model_id: str | None = None
     """Which weights produced this update, read under the model lock.
 
@@ -6194,9 +6202,10 @@ class ModelManager:
         The continuation half is a typed branch's alone. A branch names the
         response length it wants replayed room for up front, so reserving the
         positions before the stream starts is the honest answer; an ordinary
-        reply is free to run into the position table and keep what it wrote,
-        which is the better outcome when the model would have stopped on its
-        own long before the requested length.
+        reply is free to run to the end of the position table, where the
+        sampling loop stops it, and keep what it wrote, which is the better
+        outcome when the model would have stopped on its own long before the
+        requested length.
         """
 
         assert self.model is not None
@@ -6877,6 +6886,18 @@ class ModelManager:
                     if stable_length(start) < stable_length(end)
                 )
                 limit = len(forced) + int(max_new_tokens)
+                # Each sampled token but the last is fed back at position
+                # len(prompt_ids) + position - 1, and a learned position table
+                # has no row at or past its window: on CPU that raises, and on
+                # Metal it reads past the table and the tokens after it are
+                # wrong. The prefix already fits, so at least one token is
+                # always sampled.
+                window = model_position_limit(self.model)
+                position_bound = (
+                    window is not None and window - len(prompt_ids) + 1 < limit
+                )
+                if position_bound:
+                    limit = window - len(prompt_ids) + 1
                 pending_tokens = 0
                 last_yield = time.monotonic()
 
@@ -6950,6 +6971,11 @@ class ModelManager:
                             prompt_ids=tuple(prompt_ids),
                             model_id=model_id,
                             ends_on_stop_token=token_id in stop_ids,
+                            ends_on_position_limit=(
+                                position_bound
+                                and position == limit
+                                and token_id not in stop_ids
+                            ),
                         )
 
                     if stopping:

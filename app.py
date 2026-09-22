@@ -199,6 +199,7 @@ from ui.generation import (
     clear_chat,
     edit_message,
     generate_reply,
+    POSITION_LIMIT_NOTE,
     generation_progress,
     hide_clear_confirm,
     idle_state,

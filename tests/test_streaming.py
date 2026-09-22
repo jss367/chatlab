@@ -627,6 +627,51 @@ class ContextLimitTests(unittest.TestCase):
         self.assertNotIn("Context limit (tokens)", message)
 
 
+class PositionLimitTests(unittest.TestCase):
+    """An ordinary reply stops where the model's position table ends."""
+
+    def run_to_the_end(self, manager, max_new_tokens):
+        return list(
+            manager.generate(
+                [{"role": "user", "content": "hi"}],
+                temperature=0.0, top_p=1.0, top_k=0,
+                max_new_tokens=max_new_tokens, seed=1,
+            )
+        )[-1]
+
+    def test_a_reply_is_not_fed_past_the_last_position(self):
+        # One prompt token and a window of 16: fifteen sampled tokens are fed
+        # back after it, and the sixteenth is kept but never fed. Feeding it
+        # would index past the table - an IndexError on CPU and wrong tokens
+        # on Metal.
+        manager = loaded_manager([0, 1])
+        manager.model.config = SimpleNamespace(max_position_embeddings=16)
+
+        final = self.run_to_the_end(manager, max_new_tokens=40)
+
+        self.assertEqual(len(final.metrics), 16)
+        self.assertEqual(manager.model.step, 16)
+        self.assertTrue(final.ends_on_position_limit)
+        self.assertFalse(final.ends_on_stop_token)
+
+    def test_a_reply_that_fits_does_not_claim_the_limit(self):
+        manager = loaded_manager([0, 1])
+        manager.model.config = SimpleNamespace(max_position_embeddings=16)
+
+        final = self.run_to_the_end(manager, max_new_tokens=16)
+        self.assertEqual(len(final.metrics), 16)
+        self.assertFalse(final.ends_on_position_limit)
+
+        # The sixteenth sampled token, the last the table allows, is a stop
+        # token: the reply finished on its own.
+        manager = loaded_manager([0] * 15 + [EOS_ID])
+        manager.model.config = SimpleNamespace(max_position_embeddings=16)
+        final = self.run_to_the_end(manager, max_new_tokens=40)
+        self.assertEqual(len(final.metrics), 16)
+        self.assertTrue(final.ends_on_stop_token)
+        self.assertFalse(final.ends_on_position_limit)
+
+
 class ForcedPrefixTests(unittest.TestCase):
     """A branched response replays kept tokens before it samples anything."""
 

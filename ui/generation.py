@@ -248,6 +248,12 @@ def resolve_seed(seed, randomize: bool) -> int:
     return max(value, 0)
 
 
+POSITION_LIMIT_NOTE = (
+    "The reply stopped at the last position this model can attend to. "
+    "Shorten the conversation to let it write more."
+)
+
+
 def generation_progress(count: int, started: float, seed: int) -> str:
     elapsed = max(time.monotonic() - started, 1e-6)
     plural = "" if count == 1 else "s"
@@ -810,6 +816,8 @@ def _stream_reply(
                 status = generation_progress(len(metrics), started, used_seed)
                 if stream_note:
                     status = f"{stream_note} {status}"
+                if update.ends_on_position_limit:
+                    status = f"{status} {POSITION_LIMIT_NOTE}"
                 prompt_panel = None
                 context_ids = gr.skip()
                 if first:
