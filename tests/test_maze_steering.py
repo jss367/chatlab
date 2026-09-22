@@ -199,11 +199,24 @@ class SteeringTests(unittest.TestCase):
             with self.subTest(cell=cell), self.assertRaisesRegex(ValueError, message):
                 episode.request_closure(cell)
         episode.request_closure((3, 0))
-        forged = json.loads(json.dumps(episode.payload()))
-        forged["config"]["map_updates"] = [dict(before_turn=0, position=[2, 0], closed_cell=[0, 3],
-                                                grid=["....", ".###", "....", "...."])]
-        with self.assertRaises(ValueError):
-            from_payload(forged)
+
+        def forge(episode, cell, grid):
+            # The closure is recorded as landed, so the queue that asked for it is empty.
+            forged = json.loads(json.dumps(episode.payload()))
+            forged.update(close_next=[], manual_intervention=True)
+            forged["config"]["map_updates"] = [dict(before_turn=0, position=[2, 0], closed_cell=cell, grid=grid)]
+            return forged
+
+        from_payload(forge(episode, [3, 0], ["....", ".###", "....", "#..."]))
+        for cell, grid, message in (([0, 3], ["...#", ".###", "....", "...."], "waypoint is never closed"),
+                                    ([0, 1], [".#..", ".###", "....", "...."], "steering cell is never closed"),
+                                    ([0, 2], ["..#.", ".###", "....", "...."], "cut the character off from the waypoint")):
+            with self.subTest(saved=cell), self.assertRaisesRegex(ValueError, f"could not have made. .*{message}"):
+                from_payload(forge(episode, cell, grid))
+        # A waypoint holds its rules in a run carrying no vector at all.
+        plain = Episode(maze, BASE | dict(waypoint=[0, 3]))
+        with self.assertRaisesRegex(ValueError, "cut the character off from the waypoint"):
+            from_payload(forge(plain, [0, 2], ["..#.", ".###", "....", "...."]))
 
 
 class TrialTests(unittest.TestCase):

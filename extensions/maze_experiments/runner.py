@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from .dynamic_maze import (FORMAT as CHANGING_FORMAT, ChangingMaze, check_closure, load_maze,
+from .dynamic_maze import (FORMAT as CHANGING_FORMAT, ChangingMaze, check_closure, close_cell, load_maze,
                            maze_at_turn, validate_drops, validate_pending, validate_updates)
 from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call
 from extension_api import normalize_steering, write_private_text
@@ -351,25 +351,34 @@ class Episode:
             self.close_next, self.manual_intervention = tuple(cell), True
 
 
-def check_checkpoint_closure(episode, cell, changed):
+def check_checkpoint_closure(episode, cell, changed, boundary=None, position=None):
     """Refuse a closure that takes away the waypoint or the steering cell.
 
     Neither is ever closed, so the board and the saved run always show the
     cell the run was set up around. Until the character has reached one, a
     closure that walls the character off from it is refused as well, since
     the run could no longer do what it was set up to test.
+
+    ``boundary`` and ``position`` default to the run as it stands, which is
+    where a live closure lands. A saved run's closures are asked the same
+    question at the boundary and position each one records, so a file cannot
+    carry a closure the run itself would have refused.
     """
     config = episode.config
+    boundary = len(episode.turns) if boundary is None else boundary
+    position = episode.position if position is None else position
+    reached, steered = episode.waypoint_turn, episode.steer_turn
     checkpoints = []
     if config.get("waypoint") is not None:
-        checkpoints.append(("waypoint", config["waypoint"], episode.waypoint_turn is None))
+        checkpoints.append(("waypoint", config["waypoint"], reached is None or reached >= boundary))
     when = config.get("steer_when") or {}
     if "cell" in when:
-        checkpoints.append(("steering cell", when["cell"], steering_active(config) and episode.steer_turn is None))
+        checkpoints.append(("steering cell", when["cell"],
+                            steering_active(config) and (steered is None or steered >= boundary)))
     for label, point, _ in checkpoints:
         if tuple(point) == tuple(cell):
             raise ValueError(f"The {label} is never closed.")
-    reachable = changed.distances(tuple(episode.position))
+    reachable = changed.distances(tuple(position))
     for label, point, pending in checkpoints:
         if pending and tuple(point) not in reachable:
             raise ValueError(f"Closing this cell would cut the character off from the {label}.")
@@ -1015,10 +1024,26 @@ def validate_steering(episode):
         event = by_turn.get(index)
         if event and event["accepted"]:
             position, moves = tuple(event["after"]), moves + 1
-    for update in config.get("map_updates", ()):
-        checkpoints = [config.get("waypoint"), (config.get("steer_when") or {}).get("cell")]
-        if list(update["closed_cell"]) in [list(c) for c in checkpoints if c is not None]:
-            raise ValueError("A run cannot record closing its waypoint or its steering cell.")
+
+
+def validate_checkpoint_closures(episode):
+    """Refuse a saved run whose map changes a live run would have refused.
+
+    Each closure is checked by check_checkpoint_closure, at the boundary and
+    position it records, against the map it produced. A run with a waypoint
+    and no vector is checked too, since the waypoint rule does not depend on
+    steering. Runs after validate_updates and validate_steering, so the
+    closures, the path and the steered flags it reads from are ones the file
+    has already been held to.
+    """
+    maze = episode.maze
+    for update in episode.config.get("map_updates", ()):
+        maze = close_cell(maze, update["closed_cell"])
+        try:
+            check_checkpoint_closure(episode, update["closed_cell"], maze, update["before_turn"], update["position"])
+        except ValueError as exc:
+            raise ValueError(f"The map change before response {update['before_turn'] + 1} is one the run "
+                             f"could not have made. {exc}") from None
 
 
 def from_payload(data):
@@ -1076,6 +1101,7 @@ def from_payload(data):
     if tuple(result.position) != position:
         raise ValueError("The saved final position does not match its path.")
     validate_steering(result)
+    validate_checkpoint_closures(result)
     result.position = position
     result.replay_only = True
     return result
