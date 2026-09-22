@@ -1,6 +1,6 @@
 # Optional extensions for ChatLab
 
-Extensions add specialized pages while sharing ChatLab's model runtime and token inspection. Bundled extensions include **Maze experiments**, **OS-Harm results** and **Computer-use safety benchmark**. Fresh installations start with all extensions disabled.
+Extensions add specialized pages while sharing ChatLab's model runtime and token inspection. Bundled extensions include **Maze experiments**, **OS-Harm results**, **Computer-use safety benchmark** and **Hangman**. Fresh installations start with all extensions disabled.
 
 ## Enable or disable an extension
 
@@ -8,7 +8,7 @@ Open **Settings → Extensions**, check or uncheck an extension, and restart Cha
 
 In the macOS app, **Restart ChatLab** appears beside that note while the saved choice differs from the pages on screen. It asks first, because restarting unloads the model and stops anything running; answering **Restart now** closes the window and opens a fresh copy. A ChatLab served to a browser by `python app.py` has no window to reopen, so it shows the note without the button and the server is restarted by hand.
 
-When enabled, **Maze**, **OS-Harm** or **Safety** appears in the sidebar. When disabled, an extension's Python module and stylesheet are not loaded, its page and callbacks are not registered, and existing saved results remain on disk. The rest of ChatLab works without it. Import or API-version failures appear in Settings and do not prevent the core app from starting.
+When enabled, **Maze**, **OS-Harm**, **Safety** or **Hangman** appears in the sidebar. When disabled, an extension's Python module and stylesheet are not loaded, its page and callbacks are not registered, and existing saved results remain on disk. The rest of ChatLab works without it. Import or API-version failures appear in Settings and do not prevent the core app from starting.
 
 This version provides **bundled, optional modules**. It does not yet install external packages. The explicit catalogue and versioned service boundary give us a place to add external distribution later. Extensions are trusted Python code running in ChatLab's process, not sandboxed programs.
 
@@ -16,6 +16,8 @@ For importing computer-use safety evaluations, comparing recorded judgments,
 and replaying screenshots in **OS-Harm**, see the [results viewer guide](OS_HARM_RESULTS.md).
 
 The **Computer-use safety benchmark** extension adds **Safety** to the sidebar. It implements case imports, text-only local action evaluation by label probability or free-text judgment, the blocking threshold curve, token inspection, external prediction scoring and execution-result review for OSGuard. Its interchange format and limitations are documented in [the computer-use safety guide](COMPUTER_USE_SAFETY.md). Its code lives in `extensions/osguard/` and uses the same host services as Maze.
+
+The **Hangman** extension has the loaded model host a game of hangman. You guess, and each reply is shown token by token and checked against the replies before it. Any token can be branched from. See [the hangman guide](HANGMAN.md). Its code lives in `extensions/hangman/`.
 
 ## Ownership
 

@@ -65,6 +65,7 @@ ICONS: dict[str, str] = {
         '0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>'
         '<circle cx="12" cy="12" r="3"/>'
     ),
+    "spell-check": '<path d="m6 16 6-12 6 12"/><path d="M8 12h8"/><path d="m16 20 2 2 4-4"/>',
     "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
     "git-branch": (
         '<line x1="6" x2="6" y1="3" y2="15"/>'

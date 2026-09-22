@@ -1,0 +1,262 @@
+"""Hangman hosted by the model: prompts, board reading and consistency checks.
+
+Nothing here knows the word. The model is the only place a word could be held,
+so every check reads what the model wrote and asks whether some single word
+could have produced all of it.
+"""
+import copy
+from datetime import datetime, timezone
+from functools import lru_cache
+import json
+from pathlib import Path
+import re
+from uuid import uuid4
+
+FORMAT = "chatlab-hangman-1"
+MAX_FILE_BYTES = 64 * 1024 * 1024
+WORD_LIST = Path("/usr/share/dict/words")
+
+SYSTEM = """You are hosting a game of hangman. Think of one secret English word and keep it to yourself for the whole game. Do not write the word until the game ends.
+
+The player guesses one letter at a time, or the whole word. After every guess, reply in exactly this format:
+
+Board: the word, one character per letter separated by spaces, with each correctly guessed letter shown and each hidden letter written as _
+Guessed: every letter guessed so far
+Wrong guesses left: a number, starting at 6
+
+Then say in one sentence whether the guess was in the word. When the player guesses the word, runs out of wrong guesses, or asks for the word, reveal it on its own line as:
+Word: the secret word"""
+
+OPENING = "Let's play. Think of your word and show me the empty board."
+
+BOARD_LINE = re.compile(r"^[\s>*_`#-]*board[\s*_`]*:(.*)$", re.I | re.M)
+WORD_LINE = re.compile(r"^[\s>*_`#-]*word[\s*_`]*:[\s*_`]*([A-Za-z]+)[\s*_`.!]*$", re.I | re.M)
+HIDDEN = "_"
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def new_game(system):
+    """Sampling is recorded per response, since the controls can move mid-game."""
+    return dict(format=FORMAT, id=uuid4().hex, created_at=now(), parent=None, system=system, turns=[])
+
+
+def answer_of(text, reasoning_prefilled=False):
+    """The visible answer: what follows the reasoning block, if there is one."""
+    if reasoning_prefilled:
+        text = "<think>" + text
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
+    return text.split("<think>", 1)[0].strip()
+
+
+def reasoning_of(text, reasoning_prefilled=False):
+    """The text of every reasoning block, an unclosed last one included."""
+    if reasoning_prefilled:
+        text = "<think>" + text
+    return "\n\n".join(block.strip() for block in re.findall(r"<think>(.*?)(?:</think>|$)", text, flags=re.S)
+                       if block.strip())
+
+
+def history_content(turn):
+    """What the next prompt says this response was, reasoning included.
+
+    The template decides whether earlier reasoning survives into the next
+    prompt; many drop it. Whatever the model worked out there, a word included,
+    is then gone by the next turn, which is exactly what the context view shows.
+    """
+    return ("<think>" + turn["text"]) if turn.get("reasoning_prefilled") else turn["text"]
+
+
+def messages_for(game, turn_index):
+    """The conversation the model answers when it produces turn ``turn_index``."""
+    messages = [{"role": "system", "content": game["system"]}] if game["system"].strip() else []
+    for turn in game["turns"][:turn_index]:
+        messages.append({"role": "user", "content": turn["guess"]})
+        messages.append({"role": "assistant", "content": history_content(turn)})
+    messages.append({"role": "user", "content": game["turns"][turn_index]["guess"]})
+    return messages
+
+
+def read_board(answer):
+    """The last board line as a list of letters and hidden cells, or None.
+
+    Cells may be separated by spaces or run together. Separated by spaces, a
+    run of underscores is one blank, as some models draw them. Anything other
+    than a letter or an underscore makes the line unreadable rather than
+    guessed at.
+    """
+    lines = BOARD_LINE.findall(answer)
+    if not lines:
+        return None
+    raw = lines[-1].replace("\\_", HIDDEN).strip(" \t*`")
+    parts = raw.split()
+    board = []
+    for cell in parts if len(parts) > 1 else list(raw):
+        if re.fullmatch(r"_+", cell):
+            board.append(HIDDEN)
+        elif len(cell) == 1 and cell.isalpha():
+            board.append(cell.lower())
+        else:
+            return None
+    return board or None
+
+
+def read_word(answer):
+    found = WORD_LINE.findall(answer)
+    return found[-1].lower() if found else None
+
+
+def guess_of(text):
+    """("letter", "e"), ("word", "apple") or ("other", None)."""
+    value = text.strip().strip(".!?\"'").strip()
+    if len(value) == 1 and value.isalpha():
+        return "letter", value.lower()
+    if value.isalpha():
+        return "word", value.lower()
+    return "other", None
+
+
+def finish_turn(turn):
+    answer = answer_of(turn["text"], turn.get("reasoning_prefilled", False))
+    turn.update(answer=answer, board=read_board(answer), revealed_word=read_word(answer))
+    return turn
+
+
+def check(game):
+    """Every place the boards so far contradict each other or the guesses.
+
+    Returns a list of (turn number, message), one-based to match the page.
+    Letters are held to the first readable board drawn after they were
+    guessed: that board fixes where the letter is, or that it is absent, and
+    every later board and the revealed word have to agree.
+    """
+    problems = []
+    length, shown, placed = None, {}, {}
+    guessed, moved, pending = set(), set(), set()
+    for number, turn in enumerate(game["turns"], 1):
+        kind, value = guess_of(turn["guess"])
+        board = turn.get("board")
+        if kind == "letter":
+            if value not in guessed:
+                pending.add(value)
+            guessed.add(value)
+        elif kind == "word" and board is not None and "".join(board) == value:
+            # A right word guess reveals letters nobody guessed one at a time.
+            guessed.update(value)
+        if board is not None:
+            if length is not None and len(board) != length:
+                problems.append((number, f"The board went from {length} letters to {len(board)}."))
+            else:
+                length = len(board)
+                for position, cell in enumerate(board):
+                    before = shown.get(position)
+                    if before and cell != before:
+                        problems.append((number, f"Position {position + 1} showed {before.upper()} "
+                                                 f"and now shows {'nothing' if cell == HIDDEN else cell.upper()}."))
+                    if cell == HIDDEN:
+                        # Reported once; the placement check keeps the letter to its place.
+                        shown.pop(position, None)
+                    else:
+                        shown[position] = cell
+                        if cell != before and cell not in guessed:
+                            problems.append((number, f"{cell.upper()} is on the board but was never guessed."))
+                for letter, positions in placed.items():
+                    now_at = {i for i, cell in enumerate(board) if cell == letter}
+                    if now_at != positions and (letter, frozenset(now_at)) not in moved:
+                        moved.add((letter, frozenset(now_at)))
+                        problems.append((number, f"{letter.upper()} was placed at {_positions(positions)} "
+                                                 f"and is now at {_positions(now_at)}."))
+                placed.update((letter, {i for i, cell in enumerate(board) if cell == letter})
+                              for letter in pending)
+                pending.clear()
+        word = turn.get("revealed_word")
+        if word:
+            problems.extend((number, message) for message in _word_problems(word, length, shown, placed))
+    # A word revealed again on every later turn contradicts the boards the
+    # same way each time; the first turn that said so is the one to read.
+    seen = set()
+    return [(number, message) for number, message in problems
+            if message not in seen and not seen.add(message)]
+
+
+def _positions(positions):
+    return ", ".join(str(i + 1) for i in sorted(positions)) if positions else "no position"
+
+
+def _word_problems(word, length, shown, placed):
+    if length is not None and len(word) != length:
+        yield f"The revealed word {word.upper()} has {len(word)} letters; the board had {length}."
+        return
+    for position, letter in shown.items():
+        if position < len(word) and word[position] != letter:
+            yield f"The revealed word {word.upper()} has {word[position].upper()} at position {position + 1}, where the board showed {letter.upper()}."
+    for letter, positions in placed.items():
+        actual = {i for i, character in enumerate(word) if character == letter}
+        if actual != positions:
+            yield (f"The revealed word {word.upper()} has {letter.upper()} at {_positions(actual)}; "
+                   f"the board placed it at {_positions(positions)}.")
+
+
+@lru_cache(maxsize=1)
+def dictionary():
+    """Lowercase words from the system list, or an empty tuple without one.
+
+    Capitalized entries are proper nouns there, which hangman does not use.
+    """
+    try:
+        return tuple(sorted({w for w in WORD_LIST.read_text(errors="ignore").split()
+                             if w.isalpha() and w.islower() and w.isascii()}))
+    except OSError:
+        return ()
+
+
+def fitting_words(game, words=None):
+    """Words that fit the latest readable board and every guessed letter.
+
+    A hidden cell cannot hold a letter already guessed: had it been there, the
+    board would show it. None when there is no board to fit.
+    """
+    board = next((t["board"] for t in reversed(game["turns"]) if t.get("board")), None)
+    if board is None:
+        return None
+    guessed = {value for kind, value in (guess_of(t["guess"]) for t in game["turns"]) if kind == "letter"}
+    pattern = re.compile("".join(re.escape(cell) if cell != HIDDEN else
+                                 (f"[^{''.join(sorted(guessed))}]" if guessed else ".")
+                                 for cell in board) + "$")
+    return [word for word in (dictionary() if words is None else words)
+            if len(word) == len(board) and pattern.match(word)]
+
+
+def saved(game):
+    return json.dumps(game, ensure_ascii=False, indent=2)
+
+
+def load(path):
+    path = Path(path)
+    if path.stat().st_size > MAX_FILE_BYTES:
+        raise ValueError("That file is too large to be a saved hangman game.")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("That file is not a saved hangman game.") from exc
+    if not isinstance(value, dict) or value.get("format") != FORMAT:
+        raise ValueError(f"That file is not a {FORMAT} game.")
+    turns = value.get("turns")
+    if (not isinstance(turns, list) or not isinstance(value.get("system"), str)
+            or not all(isinstance(t, dict) and isinstance(t.get("guess"), str) and isinstance(t.get("text"), str)
+                       for t in turns)):
+        raise ValueError("The saved game is missing its prompt or its turns.")
+    for turn in turns:
+        turn.setdefault("metrics", [])
+        finish_turn(turn)
+    return value
+
+
+def rewound(game, turn_count):
+    """A new game holding the first ``turn_count`` turns, pointing at its parent."""
+    child = copy.deepcopy(game)
+    child.update(id=uuid4().hex, created_at=now(), turns=child["turns"][:turn_count],
+                 parent=dict(id=game["id"], turns=turn_count))
+    return child
