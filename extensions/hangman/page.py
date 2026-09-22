@@ -206,9 +206,11 @@ def build_page(context):
             payload, _ = selections.view(session_id, (game["id"], None), [])
             return (gr.update(choices=turn_choices(game), value=None), "", payload, [], "")
         turn = game["turns"][index]
+        # Stamped last: a response that fails to render leaves the session's
+        # token clicks on the view still shown.
+        note, token_strip = turn_note(turn), context.tokens.strip(turn["metrics"])
         payload, _ = selections.view(session_id, (game["id"], index), turn["metrics"])
-        return (gr.update(choices=turn_choices(game), value=index), turn_note(turn), payload,
-                context.tokens.strip(turn["metrics"]), turn["text"])
+        return (gr.update(choices=turn_choices(game), value=index), note, payload, token_strip, turn["text"])
 
     def cleared():
         return "Select a token.", []
@@ -415,17 +417,18 @@ def build_page(context):
             raise gr.Error(str(exc)) from exc
         except (AttributeError, IndexError, KeyError, TypeError) as exc:
             raise gr.Error(MALFORMED) from exc
-        # load checks the shape of the file, not every field of every token it
-        # records, so the game is rendered here in full before any of it is
-        # shown: a file wrong deeper down is refused whole, not half drawn.
+        # load checks every field this extension reads; the fields ChatLab's
+        # token strip and detail panel read are checked by rendering every
+        # token here, before anything touches the session, so a file wrong
+        # deeper down is refused whole and leaves the game on screen working.
         try:
+            for turn in game["turns"]:
+                context.tokens.strip(turn["metrics"])
+                for metric in turn["metrics"]:
+                    context.tokens.describe(metric)
             # A new id, so continuing it never writes over the file that was opened.
             child = reopened(game)
             shown_game = frame(child, session_id, len(child["turns"]) - 1 if child["turns"] else None, path=None)
-            # Selecting a token later reads fields the strip does not.
-            for turn in child["turns"]:
-                for metric in turn["metrics"]:
-                    context.tokens.describe(metric)
         except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
             raise gr.Error(MALFORMED) from exc
         return (*shown_game, *cleared())

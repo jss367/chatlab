@@ -339,18 +339,29 @@ class PageTests(unittest.TestCase):
         self.assertEqual(len(opened["turns"]), 2)
 
     def test_a_save_wrong_below_its_shape_is_refused_whole(self):
-        game = list(self.fn["start_game"](SYSTEM, "go", "owner", 1.0, 7, 64))[-1][0]
-        broken = json.loads(saved(game))
-        broken["turns"][0]["metrics"] = [{}]
+        frames = list(self.fn["start_game"](SYSTEM, "go", "owner", 1.0, 7, 64))
+        game, payload = frames[-1][0], frames[-1][5]
         path = self.data / "broken.json"
-        path.write_text(json.dumps(broken))
-        with self.assertRaisesRegex(gr.Error, "not a valid saved hangman game"):
-            self.fn["open_saved"](str(path), "owner")
+
+        def refused(metric, message="not a valid saved hangman game"):
+            broken = json.loads(saved(game))
+            broken["turns"][0]["metrics"] = [metric]
+            path.write_text(json.dumps(broken))
+            with self.assertRaisesRegex(gr.Error, message):
+                self.fn["open_saved"](str(path), "owner")
+        # Fields the extension reads itself are refused by load.
+        refused({}, "Response 1 of the saved game is malformed")
+        good = game["turns"][0]["metrics"][0]
+        refused(dict(good, token_id=True), "Response 1 of the saved game is malformed")
+        for candidate in (dict(token_id=[], text="Z", probability=.1), dict(token_id=1, text=None, probability=.1),
+                          dict(token_id=1, text="Z", probability="high")):
+            refused(dict(good, top_candidates=[candidate]), "Response 1 of the saved game is malformed")
         # Drawn fine, but selecting the token would read fields it lacks.
-        broken["turns"][0]["metrics"] = [{"display_text": "x", "raw_rank": 1}]
-        path.write_text(json.dumps(broken))
-        with self.assertRaisesRegex(gr.Error, "not a valid saved hangman game"):
-            self.fn["open_saved"](str(path), "owner")
+        refused({"display_text": "x", "raw_rank": 1, "token_id": 1})
+        # Refused before the session was touched: the game on screen still answers clicks.
+        detail, _ = self.fn["inspect_token"]("owner", payload, SimpleNamespace(index=0))
+        self.assertNotEqual(detail, gr.skip())
+        self.assertIn("Token 1", detail)
 
     def test_the_context_note_shows_a_recorded_model_id_without_rendering_it(self):
         game = list(self.fn["start_game"](SYSTEM, "go", "owner", 1.0, 7, 64))[-1][0]

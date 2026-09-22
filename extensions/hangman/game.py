@@ -267,6 +267,26 @@ def saved(game):
     return json.dumps(game, ensure_ascii=False, indent=2)
 
 
+def _integer(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _readable_metric(metric):
+    """Whether ``metric`` holds every field this extension reads, as the type it reads.
+
+    That is the token ID replayed on a branch and, per alternative, the ID,
+    text and probability the menu offers. What the runtime's own panel reads
+    is checked by rendering it, on opening, not repeated here.
+    """
+    if not isinstance(metric, dict) or not _integer(metric.get("token_id")):
+        return False
+    candidates = metric.get("top_candidates", [])
+    return isinstance(candidates, list) and all(
+        isinstance(c, dict) and _integer(c.get("token_id")) and isinstance(c.get("text"), str)
+        and isinstance(c.get("probability"), (int, float)) and not isinstance(c.get("probability"), bool)
+        for c in candidates)
+
+
 def load(path):
     path = Path(path)
     if path.stat().st_size > MAX_FILE_BYTES:
@@ -287,7 +307,7 @@ def load(path):
     # Opening the game renders these, so a wrong type has to be refused here.
     for number, turn in enumerate(turns, 1):
         metrics = turn.get("metrics", [])
-        if (not isinstance(metrics, list) or not all(isinstance(m, dict) for m in metrics)
+        if (not isinstance(metrics, list) or not all(map(_readable_metric, metrics))
                 or not isinstance(turn.get("sampling", {}), dict)
                 or not isinstance(turn.get("branch") or {}, dict)
                 or not isinstance(turn.get("forced_prefix_tokens", 0), int)):
