@@ -62,6 +62,7 @@ def read_trials(path):
     # The label is what the picker shows, so two conditions carrying the same
     # one are indistinguishable there however different their IDs are.
     seen = {"id": set(), "label": set()}
+    vectors, checked = data.get("vectors"), set()
     for item in items:
         if not isinstance(item, dict):
             raise ValueError("Each trial must be an object.")
@@ -80,10 +81,23 @@ def read_trials(path):
         config = item["config"]
         if not isinstance(config, dict) or set(config) - OPTIONAL_KEYS != CONFIG_KEYS:
             raise ValueError("Trial configuration fields do not match the supported format.")
+        steering = config.get("steering")
+        named = steering["vector"] if isinstance(steering, dict) and isinstance(steering.get("vector"), str) else None
         try:
-            check_checkpoint(dict(resolve_steering(config, data.get("vectors"))), maze)
+            resolved = resolve_steering(config, vectors)
+            # A sweep can name one vector of 65,536 numbers from each of 2000
+            # trials, and checking those numbers every time holds the upload
+            # for tens of seconds. They are judged apart from the fields a
+            # trial overrides, so once one trial has passed with them, later
+            # trials naming the same vector are checked against a one-number
+            # stand-in, which still covers everything else they set.
+            if named in checked:
+                resolved = dict(resolved, steering=dict(resolved["steering"], vector=[0.0]))
+            check_checkpoint(dict(resolved), maze)
         except ValueError as exc:
             raise ValueError(f"Trial {item['id']!r}: {exc}") from exc
+        if named is not None:
+            checked.add(named)
         limits = {"supplied_moves": (0, len(maze.route()) - 2), "interrupt_after": (0, 255),
                   "prefix_tokens": (0, 1024), "sampling_seed": (0, 2147483647),
                   "per_turn_tokens": (1, 8192), "token_budget": (1, 32768), "attempt_budget": (1, 256),

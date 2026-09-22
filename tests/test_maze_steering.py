@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import gradio as gr
 
@@ -13,7 +14,7 @@ from extensions.maze_experiments.page import (board, build_page, cell_text, chec
                                               timeline)
 from extensions.maze_experiments.runner import Episode, fork_token_edit, from_payload, stream_episode
 from extensions.maze_experiments.trials import FORMAT as TRIALS_FORMAT, prepare_trial, read_trials
-from extension_api import ModelService, SteeringError, TokenInspector
+from extension_api import ModelService, SteeringError, TokenInspector, normalize_steering
 
 from test_maze import CONFIG, NO_CHECKPOINT, Manager
 
@@ -269,6 +270,25 @@ class TrialTests(unittest.TestCase):
     def test_an_inline_vector_is_read_too(self):
         path = self.write([self.trial(steering=VECTOR, steer_when={"moves": 2}, steer_responses=0)])
         self.assertEqual(prepare_trial(read_trials(path), "t1", Episode(ROOM, BASE)).config["steering"], VECTOR)
+
+    def test_a_vector_many_trials_name_is_checked_once(self):
+        wide = dict(VECTOR, vector=[.25] * 4096)
+        trials = [dict(self.trial(steering={"vector": "penguins", "strength": i}, steer_when={"moves": 1}),
+                       id=f"t{i}", label=f"Room · {i}") for i in range(20)]
+        widths = []
+
+        def counting(value):
+            widths.append(len(value["vector"]))
+            return normalize_steering(value)
+
+        with mock.patch("extensions.maze_experiments.runner.normalize_steering", counting):
+            data = read_trials(self.write(trials, vectors={"penguins": wide}))
+        self.assertEqual(widths.count(4096), 1)
+        self.assertEqual(prepare_trial(data, "t7", Episode(ROOM, BASE)).config["steering"], dict(wide, strength=7.0))
+        # A later trial's overrides are still checked in full.
+        trials[5]["config"]["steering"]["strength"] = 1000
+        with self.assertRaisesRegex(ValueError, "Trial 't5': Strength must be"):
+            read_trials(self.write(trials, vectors={"penguins": wide}))
 
     def test_bad_trial_checkpoints_are_refused(self):
         for trial, extra, message in (
