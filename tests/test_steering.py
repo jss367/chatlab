@@ -228,6 +228,41 @@ class RuntimeTests(unittest.TestCase):
         self.assertAlmostEqual(held.inspect(ids, index).layers[-1]["probability"], plain, places=7)
         self.assertEqual(dict(steering.decoder_layers(held.model)[0]._forward_hooks), hooks)
 
+    def test_check_steering_refuses_ahead_of_time_and_installs_nothing(self):
+        held = manager()
+        block = steering.decoder_layers(held.model)[0]
+        held.check_steering(vector())
+        held.check_steering(None)
+        held.check_steering(dict(vector(), enabled=False, model_id="other/model"))
+        for value, message in ((dict(vector(), model_id="other/model"), "requires other/model"),
+                               (dict(vector(), layer=9), "has 2 layers"),
+                               (dict(vector(), vector=[1.0] * 4), "8 entries")):
+            with self.subTest(message=message), self.assertRaisesRegex(steering.SteeringError, message):
+                held.check_steering(value)
+        with mock.patch.object(held, "_engine", return_value=SimpleNamespace(backend="mlx")):
+            with self.assertRaisesRegex(steering.SteeringError, "MLX"):
+                held.check_steering(vector())
+        self.assertFalse(block._forward_hooks)
+
+    def test_an_extension_session_steers_the_responses_it_is_asked_to(self):
+        from extension_api import ModelService
+
+        held = manager()
+        service = ModelService(lambda: held)
+
+        def first_probability(**options):
+            with service.open_session() as session:
+                session.check_steering(options.get("steering"))
+                return list(session.generate(MESSAGES, **SAMPLING, **options))[-1].metrics[0]["raw_probability"]
+
+        plain = first_probability()
+        self.assertNotAlmostEqual(first_probability(steering=vector()), plain, places=5)
+        self.assertAlmostEqual(first_probability(steering=None), plain, places=7)
+        self.assertFalse(steering.decoder_layers(held.model)[0]._forward_hooks)
+        with service.open_session() as session:
+            with self.assertRaisesRegex(ValueError, "requires other/model"):
+                session.check_steering(dict(vector(), model_id="other/model"))
+
     def test_negative_strength_reverses_the_addition(self):
         held = manager()
         block = steering.decoder_layers(held.model)[0]

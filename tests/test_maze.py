@@ -20,6 +20,8 @@ import gradio as gr
 CONFIG = dict(supplied_moves=0, interrupt_after=0, interruption_text="Distracted", prefix_tokens=2,
               temperature=.7, sampling_seed=99, per_turn_tokens=100, token_budget=300, attempt_budget=10)
 MAZE = Maze(("...", "##.", "..."), (0, 0), (0, 2))
+# The Waypoint & steering controls as a fresh pane has them: no waypoint, steering off.
+NO_CHECKPOINT = ('', None, 1.0, 0, 'off', '', 3, 1)
 
 
 class Manager:
@@ -1503,7 +1505,7 @@ class MazeTests(unittest.TestCase):
                 self.assertEqual(change('hidden', 'Find the star yourself.')[2], gr.skip())
                 ep = Episode(MAZE, CONFIG)
                 values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10, 700, 5,
-                          'coordinates', '', 'Be brief.', 'Reach the star.', False)
+                          'coordinates', '', 'Be brief.', 'Reach the star.', False, *NO_CHECKPOINT)
                 new = callbacks['prepare_episode'](ep, False, session, None, *values)[0]
                 self.assertEqual(new.messages[0]['content'], 'Be brief.')
                 self.assertTrue(new.messages[1]['content'].startswith('Reach the star.\n{'))
@@ -1553,7 +1555,7 @@ class MazeTests(unittest.TestCase):
                 self.assertEqual(loaded[-2]['value'], 'Load test/model')
                 self.assertEqual(loaded[-1], 'test/model')
                 values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10, 700, 5,
-                          'coordinates', '', 'Be brief.', 'Reach the star.', False)
+                          'coordinates', '', 'Be brief.', 'Reach the star.', False, *NO_CHECKPOINT)
                 fresh = callbacks['prepare_episode'](loaded[0], False, session, None, *values)
                 self.assertEqual(fresh[-2]['value'], 'Choose / load model')
                 self.assertEqual(fresh[-1], '')

@@ -5692,6 +5692,25 @@ class ModelManager:
             )
         return steering_vectors.applied(self.model, self.model_id, steering)
 
+    def check_steering(self, steering: dict | None) -> None:
+        """Refuse a vector the loaded model cannot take, without installing it.
+
+        The same questions :meth:`_steering` asks when a response starts - the
+        backend, the vector's model, its layer and its width - asked ahead of
+        time, for a caller that only turns steering on partway through a run
+        and would otherwise learn at that response that it never could. No
+        hook is installed, so this needs no model lock.
+        """
+
+        if not steering_vectors.active(steering):
+            return
+        if getattr(self._engine(), "backend", "torch") != "torch":
+            raise steering_vectors.SteeringError(
+                "Steering is not supported for MLX models. Load the model's "
+                "unquantized Transformers version to steer it, or turn steering off."
+            )
+        steering_vectors.validate_model(self.model, self.model_id, steering_vectors.expand(steering))
+
     @staticmethod
     def _check_memory(
         model_id: str,

@@ -8,14 +8,15 @@ import re
 import threading
 import tempfile
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from .dynamic_maze import (FORMAT as CHANGING_FORMAT, ChangingMaze, check_closure, load_maze,
+from .dynamic_maze import (FORMAT as CHANGING_FORMAT, ChangingMaze, check_closure, close_cell, load_maze,
                            maze_at_turn, validate_drops, validate_pending, validate_updates)
 from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call
-from extension_api import write_private_text
+from extension_api import normalize_steering, write_private_text
 
 # One line for each response and each episode outcome, so a run read in
 # ChatLab.log afterwards says what it did rather than only that a model was
@@ -29,6 +30,105 @@ TERMINAL = {"arrived", "abandoned", "budget", "stopped", "error"}
 # The pilot's window, kept as the default so runs written before it was
 # configurable are read under the window that scored them.
 RECOVERY_DEFAULTS = {"recovery_tokens": 1024, "recovery_attempts": 4}
+
+
+def reachable_before_arriving(maze, origin):
+    """The cells a character at ``origin`` can walk to without arriving on the way.
+
+    Arriving at the destination ends the run, so a cell whose every route
+    passes through the destination is one the run can never reach, however
+    open the map around it. The destination itself is left out for the same
+    reason.
+    """
+    origin = tuple(origin)
+    found, todo = {origin}, deque([origin])
+    while todo:
+        for cell in maze.neighbors(todo.popleft()).values():
+            if cell not in found and cell != maze.goal:
+                found.add(cell)
+                todo.append(cell)
+    return found
+
+
+def checked_cell(value, maze, label):
+    """One cell of ``maze`` the run can reach before arriving, as a list, or None."""
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2 or any(type(x) is not int for x in value):
+        raise ValueError(f"The {label} names one cell as a row and a column.")
+    if not maze.open(value):
+        raise ValueError(f"The {label} must be an open cell inside the maze.")
+    if tuple(value) == maze.goal:
+        raise ValueError(f"The {label} cannot be the destination, because arriving there ends the run.")
+    if tuple(value) not in reachable_before_arriving(maze, maze.start):
+        raise ValueError(f"The {label} has to be reachable from the start without passing through the "
+                         "destination, because arriving there ends the run.")
+    return list(value)
+
+
+def check_checkpoint(config, maze):
+    """Validate a run's waypoint and steering trigger, normalizing them in place.
+
+    A waypoint is a cell the run asks the model to pass through on its way.
+    Steering adds an activation vector to the responses it covers: it starts
+    with the first response generated once its trigger holds - the character
+    standing on ``steer_when["cell"]``, or ``steer_when["moves"]`` accepted
+    moves made, supplied ones included, as the interruption counts them - and
+    covers ``steer_responses`` responses from there, 0 meaning every response
+    to the end of the run. It starts once: a character that leaves the cell and
+    comes back is not steered again. A run carries its vector whole rather
+    than a reference into this machine's vector store, so an export reads
+    back anywhere.
+    """
+    waypoint = checked_cell(config.get("waypoint"), maze, "waypoint")
+    if waypoint is not None and tuple(waypoint) == maze.start:
+        raise ValueError("The waypoint cannot be the start, because the run would begin having reached it.")
+    if "waypoint" in config:
+        config["waypoint"] = waypoint
+    if config.get("steering") is None:
+        if config.get("steer_when") is not None or config.get("steer_responses"):
+            raise ValueError("A steering trigger needs a steering vector.")
+        return
+    vector = normalize_steering(config["steering"])
+    if "vector" not in vector:
+        raise ValueError("A maze run carries its steering vector whole. Import the vector file itself.")
+    when = config.get("steer_when")
+    if not isinstance(when, dict) or len(when) != 1 or set(when) - {"cell", "moves"}:
+        raise ValueError("Say when steering starts: at a cell, or after a number of accepted moves.")
+    if "cell" in when:
+        # checked_cell reads None as no cell, which is right for an optional
+        # waypoint and wrong here: a trigger at no cell would never fire, and
+        # the run would read as steered while nothing steered it.
+        if when["cell"] is None:
+            raise ValueError("Name the cell steering starts at.")
+        when = {"cell": checked_cell(when["cell"], maze, "steering cell")}
+    elif type(when["moves"]) is not int or not 0 <= when["moves"] <= 255:
+        raise ValueError("Steering after moves needs a whole number of moves from 0 to 255.")
+    responses = config.get("steer_responses", 0)
+    if type(responses) is not int or not 0 <= responses <= 256:
+        raise ValueError("Steered responses must be a whole number from 0 to 256; 0 steers to the end of the run.")
+    config.update(steering=vector, steer_when=dict(when), steer_responses=responses)
+
+
+def steering_active(config):
+    vector = config.get("steering")
+    return bool(vector and vector.get("enabled", True) and vector.get("strength", 1) != 0)
+
+
+def steered_at(config, start, index, position, moves):
+    """Whether response ``index`` is steered, given the run as it stands before it.
+
+    ``start`` is the first steered response so far, or None. Written as one
+    function over the recorded quantities so generation, a fork rebuilding its
+    earlier responses, and a saved run being read back all decide it the same way.
+    """
+    if not steering_active(config):
+        return False
+    if start is None:
+        when = config["steer_when"]
+        return list(position) == when["cell"] if "cell" in when else moves >= when["moves"]
+    count = config["steer_responses"]
+    return count == 0 or index - start < count
 
 
 @dataclass
@@ -112,10 +212,12 @@ class Episode:
                 self.config[key] = fallback
             elif type(self.config[key]) is not int or self.config[key] < 1:
                 raise ValueError("The recovery window must be a positive number of sampled tokens and tool attempts.")
+        check_checkpoint(self.config, self.maze)
         supplied = int(self.config.get("supplied_moves", 3))
         self.messages, self.events, self.position = initial_history(
             self.maze, supplied, goal_mode=self.config["goal_mode"], goal_hint=self.config["goal_hint"],
-            system=self.config["system_prompt"], instruction=self.config["instruction"])
+            system=self.config["system_prompt"], instruction=self.config["instruction"],
+            waypoint=self.config.get("waypoint"))
         self.supplied_moves = supplied
 
     @property
@@ -135,7 +237,32 @@ class Episode:
 
     def model_state(self, error=None):
         return self.current_maze.state(self.position, error, goal_mode=self.config["goal_mode"],
-                                       goal_hint=self.config["goal_hint"])
+                                       goal_hint=self.config["goal_hint"], waypoint=self.config.get("waypoint"),
+                                       waypoint_reached=self.waypoint_turn is not None)
+
+    @property
+    def waypoint_turn(self):
+        """The response whose accepted move reached the waypoint, -1 for a supplied move, or None.
+
+        Read off the path rather than kept, so it cannot disagree with the
+        moves a saved run is checked against.
+        """
+        waypoint = self.config.get("waypoint")
+        if waypoint is None:
+            return None
+        for event in self.events:
+            if event["accepted"] and list(event["after"]) == list(waypoint):
+                return event.get("turn", -1) if event.get("source") == "model" else -1
+        return None
+
+    @property
+    def steer_turn(self):
+        """The first steered response, or None while steering has not started."""
+        return next((i for i, turn in enumerate(self.turns) if turn.get("steered")), None)
+
+    def steers_next(self):
+        """Whether the response about to be generated is steered."""
+        return steered_at(self.config, self.steer_turn, len(self.turns), self.position, self.moves)
 
     @property
     def moves(self):
@@ -242,8 +369,43 @@ class Episode:
             if any(record["before_turn"] == boundary
                    for record in (*self.config.get("map_updates", ()), *self.dropped_closures)):
                 raise ValueError("The map already changed before this response. Generate it before closing another cell.")
-            check_closure(self.current_maze, self.position, cell)
+            check_checkpoint_closure(self, cell, check_closure(self.current_maze, self.position, cell))
             self.close_next, self.manual_intervention = tuple(cell), True
+
+
+def check_checkpoint_closure(episode, cell, changed, boundary=None, position=None):
+    """Refuse a closure that takes away the waypoint or the steering cell.
+
+    Neither is ever closed, so the board and the saved run always show the
+    cell the run was set up around. Until the character has reached one, a
+    closure that walls the character off from it is refused as well, since
+    the run could no longer do what it was set up to test. A route left only
+    through the destination counts as walled off, because arriving ends the
+    run before the character gets there.
+
+    ``boundary`` and ``position`` default to the run as it stands, which is
+    where a live closure lands. A saved run's closures are asked the same
+    question at the boundary and position each one records, so a file cannot
+    carry a closure the run itself would have refused.
+    """
+    config = episode.config
+    boundary = len(episode.turns) if boundary is None else boundary
+    position = episode.position if position is None else position
+    reached, steered = episode.waypoint_turn, episode.steer_turn
+    checkpoints = []
+    if config.get("waypoint") is not None:
+        checkpoints.append(("waypoint", config["waypoint"], reached is None or reached >= boundary))
+    when = config.get("steer_when") or {}
+    if "cell" in when:
+        checkpoints.append(("steering cell", when["cell"],
+                            steering_active(config) and (steered is None or steered >= boundary)))
+    for label, point, _ in checkpoints:
+        if tuple(point) == tuple(cell):
+            raise ValueError(f"The {label} is never closed.")
+    reachable = reachable_before_arriving(changed, position)
+    for label, point, pending in checkpoints:
+        if pending and tuple(point) not in reachable:
+            raise ValueError(f"Closing this cell would cut the character off from the {label}.")
 
 
 def abandon_closure(episode):
@@ -287,6 +449,7 @@ def apply_closure(episode):
         boundary = len(episode.turns)
         try:
             changed = check_closure(episode.current_maze, episode.position, cell)
+            check_checkpoint_closure(episode, cell, changed)
         except ValueError as exc:
             episode.dropped_closures.append(dict(before_turn=boundary, cell=list(cell), reason=str(exc)))
             episode.detail = f"The queued closure at row {cell[0]}, column {cell[1]} was dropped. {exc}"
@@ -672,6 +835,14 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
         if episode.phase in TERMINAL or episode.replay_only:
             raise ValueError("Start a new episode to run again. This episode is finished or is a saved replay. Use Play or Next to inspect its recorded responses.")
         manager = models.open_session()
+        # Steering can start several responses in, so a vector this load
+        # cannot take is refused before the run starts rather than there.
+        if steering_active(episode.config):
+            try:
+                manager.check_steering(episode.config["steering"])
+            except BaseException:
+                manager.close()
+                raise
         episode.busy = True
         episode.pause_requested = episode.stop_requested = False
         episode.phase = "running"
@@ -698,9 +869,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
         that took no time rather than one nobody timed.
         """
         turn.setdefault("seconds", time.time() - turn["started_at"])
-        logger.info("Run %s response %s: %s after %s sampled tokens in %.1fs. %s",
-                    episode.run_id, len(episode.turns), turn["finish_reason"],
-                    turn.get("sampled_tokens", 0), turn["seconds"], episode.detail)
+        logger.info("Run %s response %s%s: %s after %s sampled tokens in %.1fs. %s",
+                    episode.run_id, len(episode.turns), ", steered" if turn.get("steered") else "",
+                    turn["finish_reason"], turn.get("sampled_tokens", 0), turn["seconds"], episode.detail)
 
     def autosave():
         nonlocal autosave_error
@@ -749,6 +920,14 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
                     "planned_prefix_ids": forced, "planned_prefix_text": manager.decode(forced),
                     "position_before": list(episode.position), "started_at": time.time(), "finish_reason": None}
             turn["literal_prefill_tokens"] = edit["literal_prefill_tokens"] if edit else len(forced)
+            steered = episode.steers_next()
+            if episode.config.get("steering") is not None:
+                # Unmarked until generation is entered below. The flag says the
+                # vector touched this response, and a Stop taken at the opening
+                # frame ends the run before the vector is ever installed.
+                turn["steered"] = False
+                if steered and episode.steer_turn is None:
+                    episode.detail = "Steering starts with this response."
             if edit:
                 turn["token_edit"] = copy.deepcopy(episode.token_edit)
             episode.turns.append(turn)
@@ -758,11 +937,14 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
                 finish_turn(episode, turn, set(), limit)
                 record(turn)
                 break
+            if steered:
+                turn["steered"] = True
             stop_ids = manager.stop_token_ids
             generator = manager.generate(
                 episode.messages, temperature=episode.config["temperature"], top_p=1., top_k=0,
                 max_new_tokens=limit, seed=episode.config["sampling_seed"] + 100003 * (len(episode.turns) - 1),
                 analyze_prompt=False, tools=TOOLS, forced_ids=forced, literal_prefill_tokens=turn["literal_prefill_tokens"],
+                steering=episode.config["steering"] if steered else None,
             )
             try:
                 for update in generator:
@@ -844,6 +1026,62 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
     yield episode
 
 
+def validate_steering(episode):
+    """Refuse a saved run whose steered responses are not the ones its trigger picks.
+
+    Each response's flag is read as provenance - which responses the vector
+    touched - so it is decided again from the recorded path, and a run that
+    marks a response the trigger would have left alone, or leaves unmarked one
+    it would have steered, is refused rather than scored.
+
+    One response the trigger picks may be unmarked: a run stopped at the
+    opening frame of a response, before generation, never installed the
+    vector. That response carries no metrics and a stop as its outcome, and
+    is the run's last, because a stopped run cannot continue.
+    """
+    config = episode.config
+    if config.get("steering") is None:
+        if any("steered" in turn for turn in episode.turns):
+            raise ValueError("A run without a steering vector cannot mark responses as steered.")
+        return
+    supplied = [e for e in episode.events if e["source"] == "supplied"]
+    position = tuple(supplied[-1]["after"]) if supplied else episode.maze.start
+    moves, start = len(supplied), None
+    by_turn = {e["turn"]: e for e in episode.events if e["source"] == "model"}
+    for index, turn in enumerate(episode.turns):
+        expected = steered_at(config, start, index, position, moves)
+        never_generated = (index == len(episode.turns) - 1 and not turn.get("metrics")
+                           and turn.get("finish_reason") in ("user_stopped", "stopped"))
+        if turn.get("steered", False) is not expected and not (expected and never_generated):
+            raise ValueError(f"Response {index + 1} is recorded as {'steered' if turn.get('steered') else 'unsteered'}, "
+                             "which is not what the run's steering trigger decides at that point in its path.")
+        if expected and start is None:
+            start = index
+        event = by_turn.get(index)
+        if event and event["accepted"]:
+            position, moves = tuple(event["after"]), moves + 1
+
+
+def validate_checkpoint_closures(episode):
+    """Refuse a saved run whose map changes a live run would have refused.
+
+    Each closure is checked by check_checkpoint_closure, at the boundary and
+    position it records, against the map it produced. A run with a waypoint
+    and no vector is checked too, since the waypoint rule does not depend on
+    steering. Runs after validate_updates and validate_steering, so the
+    closures, the path and the steered flags it reads from are ones the file
+    has already been held to.
+    """
+    maze = episode.maze
+    for update in episode.config.get("map_updates", ()):
+        maze = close_cell(maze, update["closed_cell"])
+        try:
+            check_checkpoint_closure(episode, update["closed_cell"], maze, update["before_turn"], update["position"])
+        except ValueError as exc:
+            raise ValueError(f"The map change before response {update['before_turn'] + 1} is one the run "
+                             f"could not have made. {exc}") from None
+
+
 def from_payload(data):
     if not isinstance(data, dict) or data.get("format") not in (FORMAT, CHANGING_FORMAT):
         raise ValueError("Choose a ChatLab maze run JSON file.")
@@ -898,6 +1136,8 @@ def from_payload(data):
             raise ValueError("A rejected action changed the saved position.")
     if tuple(result.position) != position:
         raise ValueError("The saved final position does not match its path.")
+    validate_steering(result)
+    validate_checkpoint_closures(result)
     result.position = position
     result.replay_only = True
     return result
