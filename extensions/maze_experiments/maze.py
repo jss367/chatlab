@@ -121,7 +121,7 @@ class Maze:
             path.append(next(q for q in self.neighbors(path[-1]).values() if distances[q] < distances[path[-1]]))
         return path
 
-    def state(self, position, error=None, *, goal_mode="coordinates", goal_hint=""):
+    def state(self, position, error=None, *, goal_mode="coordinates", goal_hint="", waypoint=None, waypoint_reached=False):
         goal_instruction(goal_mode, goal_hint)
         state = {"maze_id": self.tool_id(goal_mode), "row_labels": list(range(self.size)),
                 "column_labels": list(range(self.size)), "grid": list(self.grid),
@@ -130,6 +130,10 @@ class Maze:
             state["destination"] = list(self.goal)
         elif goal_mode == "hint":
             state["goal_hint"] = goal_hint
+        # A waypoint is a cell the run asks the model to pass through. It is
+        # not the destination, so every goal mode shows it.
+        if waypoint is not None:
+            state.update(waypoint=list(waypoint), waypoint_reached=bool(waypoint_reached))
         state.update(valid_directions=list(self.neighbors(position)) if tuple(position) != self.goal else [],
                      arrived=tuple(position) == self.goal, error=error)
         return state
@@ -236,7 +240,8 @@ def apply_call(maze, position, args, *, goal_mode="coordinates"):
             "error": None, "arrived": after == maze.goal, "progress": distances[after] < distances[position]}
 
 
-def initial_history(maze, supplied_moves=3, *, goal_mode="coordinates", goal_hint="", system=SYSTEM, instruction=None):
+def initial_history(maze, supplied_moves=3, *, goal_mode="coordinates", goal_hint="", system=SYSTEM, instruction=None,
+                    waypoint=None):
     # The goal mode is validated whatever the wording, because it also decides
     # what every simulator reply discloses. Supplied wording only replaces text.
     default = goal_instruction(goal_mode, goal_hint)
@@ -245,7 +250,10 @@ def initial_history(maze, supplied_moves=3, *, goal_mode="coordinates", goal_hin
     if not 0 <= supplied_moves < len(route) - 1:
         raise ValueError("Supplied moves must leave at least one move before the destination.")
     position = maze.start
-    state = json.dumps(maze.state(position, goal_mode=goal_mode, goal_hint=goal_hint), separators=(",", ":"))
+    waypoint = None if waypoint is None else tuple(waypoint)
+    reached = position == waypoint
+    state = json.dumps(maze.state(position, goal_mode=goal_mode, goal_hint=goal_hint, waypoint=waypoint,
+                                  waypoint_reached=reached), separators=(",", ":"))
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": "\n".join(filter(None, [instruction, state]))}]
     events = []
@@ -256,5 +264,8 @@ def initial_history(maze, supplied_moves=3, *, goal_mode="coordinates", goal_hin
         event["source"] = "supplied"
         events.append(event)
         position = after
-        messages.append({"role": "tool", "content": json.dumps(maze.state(position, goal_mode=goal_mode, goal_hint=goal_hint), separators=(",", ":"))})
+        reached = reached or position == waypoint
+        messages.append({"role": "tool", "content": json.dumps(maze.state(
+            position, goal_mode=goal_mode, goal_hint=goal_hint, waypoint=waypoint, waypoint_reached=reached),
+            separators=(",", ":"))})
     return messages, events, position

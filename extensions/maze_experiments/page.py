@@ -14,7 +14,7 @@ from .dynamic_maze import ChangingMaze, changing, maze_at_turn
 from .maze import GOAL_MODES, PASSAGES, SYSTEM, TOOLS, default_instruction, generate
 from .runner import RECOVERY_DEFAULTS, TERMINAL, Episode, context_messages, fork_token_edit, from_payload, stream_episode
 from .trials import prepare_trial, read_trials
-from extension_api import TokenInspector, icon_classes
+from extension_api import TokenInspector, icon_classes, read_steering_vector
 
 TOKENS = TokenInspector()
 STALE_TOKEN = "Select a token in the current response again."
@@ -140,9 +140,20 @@ def board(ep, index=None, reveal=False, animate=False):
     parts.append(f'<text x="{x}" y="{y+5}" text-anchor="middle" fill="#64748b" font-size="14" font-weight="700">S</text>')
     x, y = center(maze.goal)
     parts.append(f'<circle cx="{x}" cy="{y}" r="17" fill="#d1fae5"/><text x="{x}" y="{y+7}" text-anchor="middle" font-size="23" fill="#047857">★</text>')
+    waypoint, steer_cell = ep.config.get("waypoint"), (ep.config.get("steer_when") or {}).get("cell")
+    if steer_cell is not None:
+        x, y = center(steer_cell)
+        parts.append(f'<rect x="{x-24}" y="{y-24}" width="48" height="48" rx="9" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-dasharray="5 4"/>')
+    if waypoint is not None:
+        x, y = center(waypoint)
+        parts.append(f'<text x="{x}" y="{y+8}" text-anchor="middle" font-size="22" fill="#0f766e">⚑</text>')
     if ep.interrupted and (index is None or index >= ep.intervention_turn):
         x, y = center(ep.turns[ep.intervention_turn]["position_before"])
         parts.append(f'<circle cx="{x}" cy="{y}" r="23" stroke="#f59e0b" stroke-width="3" fill="none"/>')
+    start = ep.steer_turn
+    if start is not None and (index is None or index >= start):
+        x, y = center(ep.turns[start]["position_before"])
+        parts.append(f'<circle cx="{x}" cy="{y}" r="27" stroke="#7c3aed" stroke-width="3" fill="none"/>')
     x, y = center(position)
     motion = ""
     # Only the displayed response's own move animates. A response that was
@@ -154,6 +165,10 @@ def board(ep, index=None, reveal=False, animate=False):
     parts.append(f'<g transform="translate({x} {y})">{motion}<circle r="17" fill="#4f46e5" stroke="white" stroke-width="3"/><circle cx="-5" cy="-2" r="2.5" fill="white"/><circle cx="5" cy="-2" r="2.5" fill="white"/><path d="M -5 6 Q 0 10 5 6" stroke="white" fill="none" stroke-width="2"/></g></svg>')
     legend = ['<span>● Character / model path</span>', '<span>┄ Supplied moves</span>', '<span>★ Destination</span>',
               '<span style="color:#b77906">○ Interruption</span>']
+    if waypoint is not None:
+        legend.append('<span style="color:#0f766e">⚑ Waypoint</span>')
+    if ep.config.get("steering") is not None:
+        legend.append('<span style="color:#7c3aed">○ Steering started</span>')
     if ep.map_changes:
         legend.append('<span style="color:#78350f">▪ Closed during the run</span>')
     parts.append('<div class="maze-legend">' + "".join(legend) + '</div>')
@@ -177,6 +192,64 @@ def scenario_values(ep):
             mode, gr.update(value=config["goal_hint"], visible=mode == "hint"),
             config["system_prompt"], config["instruction"], ep.map_changes,
             "None" if not text else named or "Custom")
+
+
+STEER_MODES = {"off": "Off", "cell": "When the character reaches a cell", "moves": "After accepted moves"}
+
+
+def cell_text(cell):
+    return "" if cell is None else f"{cell[0]}, {cell[1]}"
+
+
+def parse_cell(text, label):
+    """A cell typed as "row, column", or None for a blank box."""
+    text = (text or "").strip().strip("()[]")
+    if not text:
+        return None
+    parts = [part for part in text.replace(",", " ").split() if part]
+    try:
+        cell = [int(part) for part in parts]
+    except ValueError:
+        cell = []
+    if len(cell) != 2:
+        raise ValueError(f"Write the {label} as a row and a column, such as 3, 3.")
+    return cell
+
+
+def checkpoint_values(ep):
+    """The waypoint and steering controls in the order `checkpoint_controls`
+    lists them, then the vector note, so a loaded run replaces those too."""
+    config = ep.config
+    vector, when = config.get("steering"), config.get("steer_when") or {}
+    mode = "off" if vector is None else "cell" if "cell" in when else "moves"
+    return (cell_text(config.get("waypoint")), vector,
+            vector["strength"] if vector else 1.0, vector["layer"] if vector else 0,
+            mode, cell_text(when.get("cell")), when.get("moves", 3), config.get("steer_responses", 1),
+            vector_note(vector))
+
+
+def vector_note(vector):
+    if vector is None:
+        return "No steering vector imported. Download one from **Chat → Conversation tools → Steering vector**."
+    return (f"**Vector:** {html.escape(vector['model_id'])} · {len(vector['vector']):,} entries · "
+            f"layer {vector['layer']} · strength {vector['strength']:g}")
+
+
+def steering_config(vector, strength, layer, mode, cell, moves, responses, waypoint):
+    """The steering part of a new episode's config, or nothing when steering is off."""
+    if mode == "off":
+        return {}
+    if vector is None:
+        raise ValueError("Import a steering vector, or set Steer to Off.")
+    if mode == "cell":
+        cell = parse_cell(cell, "steering cell") or waypoint
+        if cell is None:
+            raise ValueError("Name the cell steering starts at, or set a waypoint for it to start at.")
+        when = {"cell": cell}
+    else:
+        when = {"moves": int(moves)}
+    return dict(steering=dict(vector, strength=float(strength), layer=int(layer), enabled=True),
+                steer_when=when, steer_responses=int(responses))
 
 
 OPENNESS_CHOICES = tuple(round(.35 + .05 * step, 2) for step in range(13))
@@ -234,7 +307,34 @@ def status(ep):
             f"{'' if 'openness' in ep.config else ' · **Open cells:** Unrecorded, so the slider beside this run is not its own'}\n\n"
             f"**Recovery:** {recovery} · **Recovery window:** {window} · "
             f"**Model:** {html.escape(ep.model_id or 'load one on the Models page')}"
-            f"{map_line(ep)}")
+            f"{checkpoint_line(ep)}{map_line(ep)}")
+
+
+def checkpoint_line(ep):
+    """Whether the run passed its waypoint, and what steering did, for a run that has either."""
+    parts = []
+    waypoint = ep.config.get("waypoint")
+    if waypoint is not None:
+        turn = ep.waypoint_turn
+        reached = ("reached by a supplied move" if turn == -1 else f"reached in response {turn + 1}" if turn is not None
+                   else "missed" if ep.phase in TERMINAL else "not reached yet")
+        parts.append(f"**Waypoint** ({waypoint[0]}, {waypoint[1]}): {reached}")
+    vector = ep.config.get("steering")
+    if vector is not None:
+        when, count = ep.config["steer_when"], ep.config["steer_responses"]
+        trigger = (f"at ({when['cell'][0]}, {when['cell'][1]})" if "cell" in when
+                   else f"after {when['moves']} accepted move{'' if when['moves'] == 1 else 's'}")
+        span = "to the end of the run" if count == 0 else f"for {count} response{'' if count == 1 else 's'}"
+        steered = {i for i, turn in enumerate(ep.turns) if turn.get("steered")}
+        if not steered:
+            state = "never started" if ep.phase in TERMINAL else "not started yet"
+        else:
+            moves = [e for e in ep.events if e["source"] == "model" and e["turn"] in steered and e["accepted"]]
+            state = (f"started in response {min(steered) + 1} · {len(steered)} steered · "
+                     f"{len(moves)} accepted move{'' if len(moves) == 1 else 's'} under steering, "
+                     f"{sum(e['progress'] for e in moves)} toward the destination")
+        parts.append(f"**Steering:** layer {vector['layer']}, strength {vector['strength']:g}, {trigger}, {span} · {state}")
+    return "".join(f"\n\n{part}" for part in parts)
 
 
 def map_line(ep):
@@ -261,10 +361,11 @@ def timeline(ep):
         event = by_turn.get(index)
         if event:
             position = event["after"]
+        result = (("Accepted" if event["accepted"] else event["error"].replace("_", " ")) if event
+                  else ("Generating…" if turn.get("finish_reason") is None else "No move"))
         rows.append([f"Response {index + 1}", str(tuple(position)),
                      event.get("direction") or "—" if event else "—",
-                     ("Accepted" if event["accepted"] else event["error"].replace("_", " ")) if event
-                     else ("Generating…" if turn.get("finish_reason") is None else "No move")])
+                     result + (" · steered" if turn.get("steered") else "")])
     selected = max(0, min(ep.viewing + 1, len(rows) - 1))
     rows[selected][0] = "▶ " + rows[selected][0]
     return rows
@@ -544,7 +645,7 @@ def views(ep, reveal, selections, session_id, index=None, animate=False):
                 "Earlier token IDs and your replacement are supplied as context; only the new continuation counts toward sampled-token limits.")
     return (board(ep, index, reveal, animate), status(ep), TOKENS.strip(metrics[forced:]),
             t.get("text", ""), note, t.get("prefix_text") or t.get("planned_prefix_text", ""), timeline(ep), stamped,
-            gr.update(choices=[("Initial / supplied history", -1)] + [(f"Response {i+1}" + (" · token edit" if t.get("token_edit") else " · interruption" if t.get("prefix_ids") else ""), i) for i, t in enumerate(ep.turns)], value=index),
+            gr.update(choices=[("Initial / supplied history", -1)] + [(f"Response {i+1}" + (" · token edit" if t.get("token_edit") else " · interruption" if t.get("prefix_ids") else "") + (" · steered" if t.get("steered") else ""), i) for i, t in enumerate(ep.turns)], value=index),
             "Select a model-generated token above." if changed else gr.skip(), [] if changed else gr.skip())
 
 
@@ -658,6 +759,28 @@ def _build_page(context):
             passage = gr.Dropdown(["None", *PASSAGES, "Custom"], value=next(iter(PASSAGES)), label="Interruption passage")
             text = gr.Textbox(value=next(iter(PASSAGES.values())), label="Interruption text", lines=3)
             prefix = gr.Number(value=8, precision=0, minimum=0, maximum=1024, label="Supplied token count", info="0 uses all text.")
+            with gr.Accordion("Waypoint & steering", open=False):
+                waypoint = gr.Textbox(label="Waypoint", placeholder="row, column", elem_id="maze-waypoint",
+                                      info="A cell the model is asked to pass through. The state shows it with "
+                                           "waypoint_reached; say what it means in the Task instruction. Blank for none.")
+                steer_vector = gr.State(None)
+                steer_file = gr.File(label="Steering vector JSON", file_types=[".json"], type="filepath",
+                                     elem_id="maze-steer-file")
+                steer_note = gr.Markdown(vector_note(None))
+                with gr.Row():
+                    steer_strength = gr.Number(value=1.0, minimum=-100, maximum=100, label="Strength",
+                                               elem_id="maze-steer-strength")
+                    steer_layer = gr.Number(value=0, precision=0, minimum=0, label="Layer", elem_id="maze-steer-layer")
+                steer_mode = gr.Dropdown(choices=[(label, mode) for mode, label in STEER_MODES.items()], value="off",
+                                         label="Steer", elem_id="maze-steer-mode",
+                                         info="Steering starts with the first response generated once this holds, and starts once.")
+                with gr.Row():
+                    steer_cell = gr.Textbox(label="Steering cell", placeholder="row, column", elem_id="maze-steer-cell",
+                                            info="Blank uses the waypoint.")
+                    steer_after = gr.Number(value=3, precision=0, minimum=0, maximum=255, label="After moves",
+                                            elem_id="maze-steer-after", info="Counts supplied moves.")
+                steer_responses = gr.Number(value=1, precision=0, minimum=0, maximum=256, label="Steered responses",
+                                            elem_id="maze-steer-responses", info="0 keeps steering on to the end of the run.")
             with gr.Accordion("Generation limits", open=False):
                 temperature = gr.Slider(0, 2, value=.7, step=.05, label="Maze sampling temperature")
                 sampling_seed = gr.Number(value=20260914, precision=0, minimum=0, maximum=2147483647, label="Maze sampling seed")
@@ -748,13 +871,19 @@ def _build_page(context):
     controls = [size, seed, distance, openness, supplied, after, text, prefix, temperature, sampling_seed, per_turn,
                 budget, attempts, recovery_tokens, recovery_attempts, goal_mode, goal_hint, system_prompt, instruction,
                 changing_map]
+    checkpoint_controls = [waypoint, steer_vector, steer_strength, steer_layer, steer_mode, steer_cell, steer_after,
+                           steer_responses]
 
     def prepare_episode(ep, show, session_id, data, *values):
         if ep.busy:
             raise gr.Error("Stop or pause this episode before starting another.")
         (n, s, d, o, supplied_n, trigger, passage_text, count, temp, sample_seed, per, total, tries,
-         window_tokens, window_attempts, mode, hint, system_text, instruction_text, map_changes) = values
+         window_tokens, window_attempts, mode, hint, system_text, instruction_text, map_changes,
+         waypoint_text, *steer) = values
         try:
+            waypoint_cell = parse_cell(waypoint_text, "waypoint")
+            checkpoint = dict(waypoint=waypoint_cell) if waypoint_cell else {}
+            checkpoint.update(steering_config(*steer, waypoint_cell))
             drawn = generate(n, s, d, o)
             new = Episode(changing(drawn) if map_changes else drawn,
                           dict(supplied_moves=int(supplied_n), interrupt_after=int(trigger),
@@ -762,15 +891,20 @@ def _build_page(context):
                                openness=float(o), sampling_seed=int(sample_seed), per_turn_tokens=int(per),
                                token_budget=int(total), attempt_budget=int(tries),
                                recovery_tokens=int(window_tokens), recovery_attempts=int(window_attempts),
-                               goal_mode=mode, goal_hint=hint, system_prompt=system_text, instruction=instruction_text))
+                               goal_mode=mode, goal_hint=hint, system_prompt=system_text, instruction=instruction_text,
+                               **checkpoint))
         except (ValueError, TypeError) as exc:
             logger.warning("Refused the scenario settings for a new episode: %s", exc)
             raise gr.Error(str(exc)) from exc
         interruption = str(new.config.get("interruption_text") or "").strip()
-        logger.info("New episode %s: %s x %s %s maze, seed %s, %s goal, %s supplied moves, interruption %s",
+        logger.info("New episode %s: %s x %s %s maze, seed %s, %s goal, %s supplied moves, interruption %s, "
+                    "waypoint %s, steering %s",
                     new.run_id, new.maze.size, new.maze.size, "changing" if new.map_changes else "fixed",
                     new.maze.seed, new.config["goal_mode"], new.supplied_moves,
-                    f"after {new.config['interrupt_after']} moves" if interruption else "off")
+                    f"after {new.config['interrupt_after']} moves" if interruption else "off",
+                    new.config.get("waypoint") or "none",
+                    f"{new.config['steer_when']} for {new.config['steer_responses'] or 'all'} responses"
+                    if new.config.get("steering") else "off")
         stop_replay(ep)
         return (new, *render(new, show, session_id), trial_note_text(new, data), None, *model_button(new))
 
@@ -802,7 +936,7 @@ def _build_page(context):
         stop_replay(ep)
         # The same description a loaded run gets: the trial is in the episode
         # now, so nothing here has to spell the controls out a second time.
-        return (new, *render(new, show, session_id), *scenario_values(new),
+        return (new, *render(new, show, session_id), *checkpoint_values(new), *scenario_values(new),
                 trial_note_text(new), None, None, *model_button(new))
 
     def play(ep, show, session_id, single=False):
@@ -951,14 +1085,14 @@ def _build_page(context):
             raise gr.Error("Pause or stop this episode before loading a replay.")
         if not path:
             logger.info("A replay upload arrived with no file; run %s is unchanged", ep.run_id)
-            return (gr.skip(),) * (len(outputs) + len(controls) + 5)
+            return (gr.skip(),) * (len(outputs) + len(checkpoint_controls) + len(controls) + 6)
         try:
             if Path(path).stat().st_size > 50_000_000:
                 raise ValueError("Run files must be smaller than 50 MB.")
             replay = from_payload(json.loads(Path(path).read_text()))
             # Before the first frame: recovering the open-cell probability writes
             # it onto the run, and Run details reports whichever way that went.
-            values = scenario_values(replay)
+            values = (*checkpoint_values(replay), *scenario_values(replay))
             # Every part of the frame is built inside this guard. One built on
             # the return would escape the handler if the run it read defeated
             # it, and Gradio abandons an event whole: the board, the controls
@@ -1114,7 +1248,7 @@ def _build_page(context):
     # or an inspection click into a terminal stop with a partial response.
     toggle.click(play_back, [episode, reveal, selection_session, pace], outputs,
                  show_progress="hidden", concurrency_limit=None, trigger_mode="multiple")
-    prepare.click(prepare_episode, [episode, reveal, selection_session, trial_data, *controls],
+    prepare.click(prepare_episode, [episode, reveal, selection_session, trial_data, *controls, *checkpoint_controls],
                   [episode, *outputs, trial_note, download, models, wanted_model],
                   concurrency_id="maze-view", show_progress="hidden")
     # On the view's own queue, so a Load trial click cannot run between the
@@ -1127,8 +1261,8 @@ def _build_page(context):
         event(load_trial_file, [trial_upload, episode, trial_data], [trial_data, trial_picker, trial_note],
               concurrency_id="maze-view", show_progress="hidden")
     trial_load.click(load_trial, [trial_data, trial_picker, episode, reveal, selection_session],
-                     [episode, *outputs, *controls, passage, trial_note, edit_selection, download,
-                      models, wanted_model],
+                     [episode, *outputs, *checkpoint_controls, steer_note, *controls, passage, trial_note,
+                      edit_selection, download, models, wanted_model],
                      concurrency_id="maze-view", show_progress="hidden")
     first.click(step_first, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")
     back.click(step_back, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")
@@ -1171,8 +1305,23 @@ def _build_page(context):
                       edit_outputs, concurrency_id="maze-view", show_progress="hidden")
     save.click(export, episode, download, show_progress="hidden")
     upload.upload(load, [upload, episode, reveal, selection_session, trial_data],
-                  [episode, *outputs, *controls, passage, trial_note, models, wanted_model],
+                  [episode, *outputs, *checkpoint_controls, steer_note, *controls, passage, trial_note, models,
+                   wanted_model],
                   concurrency_id="maze-view", show_progress="hidden")
+    def import_vector(path):
+        if not path:
+            return None, vector_note(None), gr.skip(), gr.skip()
+        try:
+            vector = read_steering_vector(path)
+        except (ValueError, OSError) as exc:
+            logger.warning("Could not read the steering vector in %s: %s", path, exc)
+            raise gr.Error(f"Could not load the vector: {exc}") from exc
+        logger.info("Read a steering vector for %s at layer %s from %s", vector["model_id"], vector["layer"], path)
+        return vector, vector_note(vector), vector["strength"], vector["layer"]
+
+    for event in (steer_file.upload, steer_file.clear):
+        event(import_vector, steer_file, [steer_vector, steer_note, steer_strength, steer_layer],
+              show_progress="hidden")
     context.navigation.open_models(models, wanted_model)
 
 

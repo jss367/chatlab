@@ -5,7 +5,7 @@ import math
 from pathlib import Path
 
 from .maze import Maze, goal_instruction
-from .runner import RECOVERY_DEFAULTS, Episode
+from .runner import RECOVERY_DEFAULTS, Episode, check_checkpoint
 
 FORMAT = "chatlab-maze-trials-1"
 CONFIG_KEYS = {"supplied_moves", "interrupt_after", "interruption_text", "prefix_tokens",
@@ -19,7 +19,28 @@ PROMPT_KEYS = {"system_prompt", "instruction"}
 # Left out, it runs the pilot's window, which is what a file written before the
 # window became configurable meant by omitting it.
 RECOVERY_KEYS = set(RECOVERY_DEFAULTS)
-OPTIONAL_KEYS = PROMPT_KEYS | RECOVERY_KEYS
+# A trial may ask the model to pass through a waypoint, and may steer it. Left
+# out, it has neither, which is what a file written before either existed meant.
+CHECKPOINT_KEYS = {"waypoint", "steering", "steer_when", "steer_responses"}
+OPTIONAL_KEYS = PROMPT_KEYS | RECOVERY_KEYS | CHECKPOINT_KEYS
+
+
+def resolve_steering(config, vectors):
+    """The trial's config with a named vector read out of the file's own table.
+
+    A vector is thousands of numbers, and a sweep runs the same one across
+    many trials, so a file writes each vector once under ``vectors`` and a
+    trial names it: ``{"vector": "penguins", "strength": 6}`` takes the named
+    vector and overrides whatever else it gives. A trial may also write its
+    vector inline, as a vector file has it.
+    """
+    steering = config.get("steering")
+    if not isinstance(steering, dict) or not isinstance(steering.get("vector"), str):
+        return config
+    name = steering["vector"]
+    if not isinstance(vectors, dict) or not isinstance(vectors.get(name), dict):
+        raise ValueError(f"The trial names a steering vector {name!r} that the file's vectors table does not hold.")
+    return dict(config, steering={**vectors[name], **{k: v for k, v in steering.items() if k != "vector"}})
 
 
 def read_trials(path):
@@ -59,6 +80,10 @@ def read_trials(path):
         config = item["config"]
         if not isinstance(config, dict) or set(config) - OPTIONAL_KEYS != CONFIG_KEYS:
             raise ValueError("Trial configuration fields do not match the supported format.")
+        try:
+            check_checkpoint(dict(resolve_steering(config, data.get("vectors"))), maze)
+        except ValueError as exc:
+            raise ValueError(f"Trial {item['id']!r}: {exc}") from exc
         limits = {"supplied_moves": (0, len(maze.route()) - 2), "interrupt_after": (0, 255),
                   "prefix_tokens": (0, 1024), "sampling_seed": (0, 2147483647),
                   "per_turn_tokens": (1, 8192), "token_budget": (1, 32768), "attempt_budget": (1, 256),
@@ -91,7 +116,7 @@ def prepare_trial(data, trial_id, current):
     # The openness lives on the trial rather than its config, and an episode
     # that cannot name the probability it was drawn with is searched for it
     # later. Record it now, while the file still says.
-    config = dict(item["config"], openness=item["openness"])
+    config = dict(resolve_steering(item["config"], data.get("vectors")), openness=item["openness"])
     config["trial"] = {"id": item["id"], "label": item["label"], "title": data["title"],
                        "file_sha256": data["file_sha256"]}
     return Episode(maze, config)

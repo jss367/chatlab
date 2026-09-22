@@ -12,11 +12,13 @@ from pathlib import Path
 from uuid import uuid4
 
 from model_runtime import LOADING
+from steering import SteeringError, normalize as normalize_steering, read_vector as read_steering_vector
 from trace_export import write_private_text
 from ui.icons import icon_classes
 
 API_VERSION = 1
-__all__ = ["API_VERSION", "ExtensionContext", "ModelService", "GenerationSession", "TokenInspector", "TokenMenu", "TokenSelections", "NavigationService", "write_private_text", "icon_classes"]
+__all__ = ["API_VERSION", "ExtensionContext", "ModelService", "GenerationSession", "TokenInspector", "TokenMenu", "TokenSelections", "NavigationService", "write_private_text", "icon_classes",
+           "SteeringError", "normalize_steering", "read_steering_vector"]
 
 
 class ModelService:
@@ -194,9 +196,19 @@ class GenerationSession:
         self._check()
         return set(self._manager.hidden_token_ids())
 
+    def check_steering(self, steering):
+        """Raise ``ValueError`` if the pinned model cannot take this vector.
+
+        ``generate`` asks the same when it is handed the vector. Ask here first
+        when a run only turns steering on partway through, so an MLX load or a
+        vector for another model is refused before the run starts.
+        """
+        self._check()
+        self._manager.check_steering(steering)
+
     def generate(self, messages, *, temperature, top_p, top_k, max_new_tokens, seed,
                  skip_top_below=0.0, tools=None, forced_ids=(),
-                 literal_prefill_tokens=0, analyze_prompt=False):
+                 literal_prefill_tokens=0, analyze_prompt=False, steering=None):
         self._check()
         if self._generating:
             raise ValueError("This model session is already streaming.")
@@ -210,7 +222,7 @@ class GenerationSession:
                 skip_top_below=skip_top_below, max_new_tokens=max_new_tokens,
                 seed=seed, tools=tools,
                 forced_ids=forced_ids, literal_prefill_tokens=literal_prefill_tokens,
-                analyze_prompt=analyze_prompt, load_id=self.load_id,
+                analyze_prompt=analyze_prompt, load_id=self.load_id, steering=steering,
             )
             for update in generator:
                 if self._cancelled.is_set():
