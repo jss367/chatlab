@@ -147,6 +147,24 @@ class PromptEditTests(unittest.TestCase):
         self.assertIsNone(payload["selection"])
         self.assertEqual(payload["error"], app.PROMPT_EDIT_UNAVAILABLE)
 
+    def test_the_scored_context_is_not_taken_for_the_chat_prompt(self):
+        # Score text draws its context into the prompt strip under a stamp of
+        # its own. Answering an edit of it would replace the chat's last reply
+        # with one generated from the scored text.
+        runtime.MANAGER.model.step = 0
+        scored = list(app.score_text("Hello world", "hi", False, app.DEFAULT_COLOR_SCALE))[-1]
+        frame = list(self.frame)
+        frame[PROMPT_METRICS], frame[CONTEXT_IDS] = scored[4], scored[-1]
+
+        payload = self.payload(index=0, frame=frame)
+        self.assertIsNone(payload["selection"])
+        self.assertEqual(payload["error"], app.PROMPT_EDIT_SCORED)
+
+        selection = {"source": "prompt", "generation": scored[4][0], "index": 0}
+        final = self.edit(dict(kind="text", text="bye", selection=selection), frame=frame)
+        self.assertIn(app.PROMPT_EDIT_SCORED, final[STATUS])
+        self.assertEqual(final[TURNS], self.frame[TURNS])
+
     # -------------------------------------------------------------- editing
 
     def test_a_candidate_is_put_in_the_token_position(self):

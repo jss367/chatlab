@@ -441,12 +441,14 @@ def unscored_explanation(metric: dict) -> str:
 def describe_token(metric: dict) -> tuple[str, list[list]]:
     """The detail panel and the alternatives table for one token."""
 
-    token_repr = html.escape(repr(metric["text"]))
+    # Markdown prose rather than a code span: the renderer shows a span's text
+    # exactly as written, so escaped quotes would read as &#x27;.
+    token_repr = as_plain_text(repr(metric["text"]))
     where = "Prompt token" if metric["segment"] == "prompt" else "Token"
     if not metric.get("scored", True):
         why = unscored_explanation(metric)
         return (
-            f"### {where} {metric['position']}: `{token_repr}`\n\n"
+            f"### {where} {metric['position']}: {token_repr}\n\n"
             f"{why}\n\n"
             f"- **Token ID:** {metric['token_id']:,}",
             [],
@@ -456,7 +458,7 @@ def describe_token(metric: dict) -> tuple[str, list[list]]:
     # so each name carries its own sentence: hovering it, or reaching it with
     # a screen reader, says what the number is.
     summary = (
-        f"### {where} {metric['position']}: `{token_repr}`\n\n"
+        f"### {where} {metric['position']}: {token_repr}\n\n"
         f"- **{metric_term('Raw rank')}:** {metric['raw_rank']:,}\n"
         f"- **{metric_term('Raw model probability')}:** {metric['raw_probability']:.5%}\n"
         f"- **{metric_term('Actual sampling probability')}:** {metric['sampling_probability']:.5%}\n"
@@ -525,6 +527,12 @@ PROMPT_EDIT_MODEL_CHANGED = (
 
 PROMPT_EDIT_NO_MESSAGE = (
     "✏️ There is no message for this prompt to answer again. Send one first."
+)
+
+
+PROMPT_EDIT_SCORED = (
+    "✏️ These are the tokens of the scored context, and no reply was given "
+    "them. Prompt tokens can be replaced in the prompt of a chat reply."
 )
 
 
@@ -649,6 +657,11 @@ def prompt_edit_target(
     metric = strip_metric("prompt", prompt_state, selection.get("index"))
     if metric is None or selection.get("generation") != generation:
         return PROMPT_EDIT_UNAVAILABLE
+    # Score text draws its context into this strip under its own stamp, which
+    # the checks below would accept. An edit answers the chat's last message
+    # again, so the chat's reply would be replaced by one to the scored text.
+    if generation == current_strip_generation("score"):
+        return PROMPT_EDIT_SCORED
     if not isinstance(context_state, (tuple, list)) or len(context_state) < 3:
         return PROMPT_EDIT_UNAVAILABLE
     context_generation, ids, load_id = context_state[0], context_state[1], context_state[2]
@@ -662,17 +675,17 @@ def prompt_edit_target(
 
 def branch_ready_text(pick: dict) -> str:
     position = pick["position"]
-    chosen = html.escape(repr(pick["text"]))
-    original = html.escape(repr(pick["original"]))
+    chosen = as_plain_text(repr(pick["text"]))
+    original = as_plain_text(repr(pick["original"]))
     if pick["token_id"] == pick["original_id"]:
         return (
             f"🌱 **Branch ready:** keep the reply through token {position} "
-            f"(`{chosen}`) and let the model continue from there with a fresh "
+            f"({chosen}) and let the model continue from there with a fresh "
             "sample. Press **Branch from token**."
         )
     return (
         f"🌱 **Branch ready:** keep the first {position - 1} token"
-        f"{'' if position == 2 else 's'}, put `{chosen}` where `{original}` was, "
+        f"{'' if position == 2 else 's'}, put {chosen} where {original} was, "
         "and let the model continue. Press **Branch from token**."
     )
 

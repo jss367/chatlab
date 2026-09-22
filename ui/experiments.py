@@ -152,9 +152,6 @@ def select_token(document, index, scale=DEFAULT_COLOR_SCALE):
     index = int(index)
     metric = document["run"]["metrics"][index]
     detail, candidates = describe_token(metric)
-    # Escape as Markdown prose here: entities inside a code span would show
-    # their spelling instead of the quoted token's characters.
-    detail = f"### Token {metric['position']}: {as_plain_text(repr(metric['text']))}\n" + detail.split("\n", 1)[1]
     return (index, detail, candidates, document.get("bookmarks", {}).get(str(index), ""),
             index + 1, token_strip(document, scale, index))
 

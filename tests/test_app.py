@@ -100,6 +100,21 @@ class InspectTokenTests(unittest.TestCase):
         self.assertIn("&lt;img", detail)
         self.assertNotIn("<img", detail)
 
+    def test_the_token_is_quoted_with_quotes_rather_than_entities(self):
+        # Inside a Markdown code span an entity is shown as it is spelled, so
+        # the heading once read Token 3: &#x27;<img&#x27;.
+        metric = unscored_metric(
+            position=3, token_id=7, token_text="<img src=x>", fallback_text="<img src=x>"
+        ).to_dict()
+
+        detail, _rows = self.inspect(metric)
+
+        heading = detail.splitlines()[0]
+        self.assertNotIn("&#x27;", heading)
+        self.assertNotIn("`", heading)
+        self.assertNotIn("<img", heading)
+        self.assertIn("\\'&lt;img", heading)
+
     def test_a_recorded_reason_cannot_fetch_a_picture_through_markdown(self):
         # Markdown renders as surely as HTML does: an image in the sentence
         # would have the panel call an address of the file's choosing the

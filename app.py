@@ -316,6 +316,7 @@ from ui.panel import (
     PROMPT_EDIT_EMPTY,
     PROMPT_EDIT_MODEL_CHANGED,
     PROMPT_EDIT_NO_MESSAGE,
+    PROMPT_EDIT_SCORED,
     PROMPT_EDIT_UNAVAILABLE,
     branch_ready_text,
     branch_target,
