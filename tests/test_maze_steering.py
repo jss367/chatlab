@@ -24,6 +24,10 @@ ROOM = Maze(("....", "....", "....", "...."), (0, 0), (0, 3))
 # A top-right pocket reached only along the top row, so sealing (0, 2) cuts
 # the pocket off while the start keeps its own way to the destination.
 POCKET = Maze(("....", ".###", "....", "...."), (2, 0), (3, 3))
+# The top-left corner is reached down the left column or through the
+# destination beside it, so sealing (1, 0) leaves only the second, which the
+# run ends on.
+CORNER = Maze(("....", ".##.", "....", "...."), (2, 2), (0, 1))
 VECTOR = {"format": "chatlab-steering-1", "model_id": "test/model", "layer": 3,
           "vector": [1.0, -2.0, 0.5], "strength": 4.0, "enabled": True}
 BASE = CONFIG | {"interruption_text": "", "per_turn_tokens": 200, "token_budget": 4000, "attempt_budget": 20}
@@ -99,6 +103,13 @@ class WaypointTests(unittest.TestCase):
                 Episode(ROOM, BASE | {"waypoint": cell})
         with self.assertRaisesRegex(ValueError, "open cell"):
             Episode(POCKET, BASE | {"waypoint": [1, 1]})
+        # Open, but only through the destination, where the run ends.
+        behind = Maze(("....", "###.", "....", "...."), (2, 0), (0, 2))
+        with self.assertRaisesRegex(ValueError, "waypoint has to be reachable from the start without passing"):
+            Episode(behind, BASE | {"waypoint": [0, 1]})
+        with self.assertRaisesRegex(ValueError, "steering cell has to be reachable"):
+            Episode(behind, checkpoint(waypoint=None, steer_when={"cell": [0, 0]}))
+        Episode(behind, BASE | {"waypoint": [0, 3]})
 
 
 class SteeringTests(unittest.TestCase):
@@ -242,6 +253,25 @@ class SteeringTests(unittest.TestCase):
         plain = Episode(maze, BASE | dict(waypoint=[0, 3]))
         with self.assertRaisesRegex(ValueError, "cut the character off from the waypoint"):
             from_payload(forge(plain, [0, 2], ["..#.", ".###", "....", "...."]))
+
+    def test_a_route_left_only_through_the_destination_cuts_a_checkpoint_off(self):
+        maze = changing(CORNER)
+        sealed = ["....", "###.", "....", "...."]
+        for label, config in (("waypoint", BASE | dict(waypoint=[0, 0])),
+                              ("steering cell", checkpoint(waypoint=None, steer_when={"cell": [0, 0]}))):
+            episode = Episode(maze, config)
+            with self.subTest(label), self.assertRaisesRegex(ValueError, f"cut the character off from the {label}"):
+                episode.request_closure((1, 0))
+            forged = json.loads(json.dumps(episode.payload()))
+            forged.update(manual_intervention=True)
+            forged["config"]["map_updates"] = [dict(before_turn=0, position=[2, 2], closed_cell=[1, 0], grid=sealed)]
+            with self.subTest(saved=label), self.assertRaisesRegex(ValueError, f"cut the character off from the {label}"):
+                from_payload(forged)
+            # Put past the click's refusal, it is dropped where it lands by the same rule.
+            episode.close_next, episode.manual_intervention = (1, 0), True
+            list(stream_episode(episode, SteeringManager([reply(maze, "north")]), single_step=True))
+            self.assertEqual(episode.dropped_closures[0]["cell"], [1, 0])
+            self.assertIn(f"cut the character off from the {label}", episode.dropped_closures[0]["reason"])
 
 
 class TrialTests(unittest.TestCase):

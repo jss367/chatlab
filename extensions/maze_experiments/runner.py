@@ -8,6 +8,7 @@ import re
 import threading
 import tempfile
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
@@ -31,8 +32,26 @@ TERMINAL = {"arrived", "abandoned", "budget", "stopped", "error"}
 RECOVERY_DEFAULTS = {"recovery_tokens": 1024, "recovery_attempts": 4}
 
 
+def reachable_before_arriving(maze, origin):
+    """The cells a character at ``origin`` can walk to without arriving on the way.
+
+    Arriving at the destination ends the run, so a cell whose every route
+    passes through the destination is one the run can never reach, however
+    open the map around it. The destination itself is left out for the same
+    reason.
+    """
+    origin = tuple(origin)
+    found, todo = {origin}, deque([origin])
+    while todo:
+        for cell in maze.neighbors(todo.popleft()).values():
+            if cell not in found and cell != maze.goal:
+                found.add(cell)
+                todo.append(cell)
+    return found
+
+
 def checked_cell(value, maze, label):
-    """One open cell of ``maze`` other than its destination, as a list, or None."""
+    """One cell of ``maze`` the run can reach before arriving, as a list, or None."""
     if value is None:
         return None
     if not isinstance(value, (list, tuple)) or len(value) != 2 or any(type(x) is not int for x in value):
@@ -41,6 +60,9 @@ def checked_cell(value, maze, label):
         raise ValueError(f"The {label} must be an open cell inside the maze.")
     if tuple(value) == maze.goal:
         raise ValueError(f"The {label} cannot be the destination, because arriving there ends the run.")
+    if tuple(value) not in reachable_before_arriving(maze, maze.start):
+        raise ValueError(f"The {label} has to be reachable from the start without passing through the "
+                         "destination, because arriving there ends the run.")
     return list(value)
 
 
@@ -357,7 +379,9 @@ def check_checkpoint_closure(episode, cell, changed, boundary=None, position=Non
     Neither is ever closed, so the board and the saved run always show the
     cell the run was set up around. Until the character has reached one, a
     closure that walls the character off from it is refused as well, since
-    the run could no longer do what it was set up to test.
+    the run could no longer do what it was set up to test. A route left only
+    through the destination counts as walled off, because arriving ends the
+    run before the character gets there.
 
     ``boundary`` and ``position`` default to the run as it stands, which is
     where a live closure lands. A saved run's closures are asked the same
@@ -378,7 +402,7 @@ def check_checkpoint_closure(episode, cell, changed, boundary=None, position=Non
     for label, point, _ in checkpoints:
         if tuple(point) == tuple(cell):
             raise ValueError(f"The {label} is never closed.")
-    reachable = changed.distances(tuple(position))
+    reachable = reachable_before_arriving(changed, position)
     for label, point, pending in checkpoints:
         if pending and tuple(point) not in reachable:
             raise ValueError(f"Closing this cell would cut the character off from the {label}.")
