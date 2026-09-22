@@ -322,6 +322,19 @@ class PageTests(unittest.TestCase):
             list(self.fn["branch"](game, "owner", payload, action, 1.0, 7, 64))
         self.assertFalse(self.manager.busy)
 
+    def test_branch_refuses_a_reopened_game_even_under_a_same_named_load(self):
+        # A restarted process numbers its loads from one again, so the save's
+        # load ID can match the one in memory without naming the same weights.
+        game = list(self.fn["start_game"](SYSTEM, "go", "owner", 1.0, 7, 64))[-1][0]
+        opened = self.fn["open_saved"](str(self.data / f"{game['id']}.json"), "owner")[0]
+        self.assertIsNone(opened["turns"][0]["load_id"])
+        self.assertEqual(opened["turns"][0]["recorded_load_id"], "first")
+        payload = self.fn["select_response"](opened, "owner", 0)[2]
+        action = json.dumps(dict(kind="text", text="x", selection=dict(view_id=[opened["id"], 0], index=2)))
+        with self.assertRaisesRegex(gr.Error, "from a saved game"):
+            list(self.fn["branch"](opened, "owner", payload, action, 1.0, 7, 64))
+        self.assertFalse(self.manager.busy)
+
     def test_stale_selection_is_refused(self):
         game = list(self.fn["start_game"](SYSTEM, "go", "owner", 1.0, 7, 64))[-1][0]
         payload = self.fn["select_response"](game, "owner", 0)[2]

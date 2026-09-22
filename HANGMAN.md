@@ -32,7 +32,7 @@ Only the visible answer is read, not the reasoning block. Replies with no readab
 
 ## Reading and branching tokens
 
-Choose a response under **Response** to show its tokens. Click a token to see its probability and the alternatives. Right-click a token to branch there: pick an alternative or type replacement text, and the page regenerates that response. The response keeps every token before the one you picked, then continues from your replacement. The branch becomes a new game, and later responses are dropped from it. The game you left stays saved. Branching replays token IDs, so it only works under the model load that wrote the response.
+Choose a response under **Response** to show its tokens. Click a token to see its probability and the alternatives. Right-click a token to branch there: pick an alternative or type replacement text, and the page regenerates that response. The response keeps every token before the one you picked, then continues from your replacement. The branch becomes a new game, and later responses are dropped from it. The game you left stays saved. Branching replays token IDs, so it only works under the model load that wrote the response, and never on a game opened from a file.
 
 **Rewind to this response** starts a new game that ends at the selected response. Use it to put a different guess to the same game state.
 

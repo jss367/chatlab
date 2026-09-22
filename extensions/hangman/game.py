@@ -337,6 +337,18 @@ def reopened(game):
 
     Unlike ``rewound`` nothing is copied: ``load`` built the game fresh, and a
     copy of a large save would double what opening it holds in memory.
+
+    Each response keeps the load that wrote it as ``recorded_load_id`` and
+    loses it as ``load_id``, which is what branching compares with the load in
+    memory. A load ID counts loads within one process, so after a restart the
+    first load of any model is named the same as the first load before it,
+    and a save's token IDs could be replayed through weights that never
+    produced them. A reopened response is never the session's own load, so
+    branching refuses it and rewinding, which replays text, still works.
     """
     game.update(id=uuid4().hex, created_at=now(), parent=dict(id=game["id"], turns=len(game["turns"])))
+    for turn in game["turns"]:
+        if turn.get("load_id") is not None:
+            turn["recorded_load_id"] = turn["load_id"]
+        turn["load_id"] = None
     return game

@@ -313,8 +313,8 @@ def build_page(context):
     def branch_ids(session, edit):
         """The kept tokens of the edited response, then the replacement."""
         if edit["load_id"] != session.load_id:
-            raise ValueError("That response came from a different model load, so its tokens cannot be replayed. "
-                             "Rewind instead, or load the model that wrote it.")
+            raise ValueError("That response came from a different model load, or from a saved game, so its "
+                             "tokens cannot be replayed. Rewind to the response before it and guess again instead.")
         kept = edit["kept_ids"]
         if edit.get("candidate_id") is not None:
             candidate = edit["candidate_id"]
