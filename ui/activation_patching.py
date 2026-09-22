@@ -17,6 +17,7 @@ from model_runtime import LOADING
 from trace_export import write_private_text
 from ui import runtime
 from ui.common import failure_status
+from ui.panel import code_span
 
 
 HINT = "Fill A and B under the same model load, then select an answer token to measure."
@@ -167,7 +168,7 @@ def run(left, right, direction, target, donor_count, width, session, revision):
                 last_frame = time.monotonic()
                 status = (
                     f"**{direction} · answer token {target + 1}:** "
-                    f"<code>{html.escape(repr(result['target_text']))}</code> · "
+                    f"{code_span(repr(result['target_text']))} · "
                     f"Unpatched probability **{result['baseline']['probability']:.6%}** · "
                     f"{done:,}/{total:,} interventions · {result['seconds']:.1f}s"
                 )
