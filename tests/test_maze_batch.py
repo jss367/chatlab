@@ -195,6 +195,22 @@ class BatchTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "No space left"):
                 list(run_trials(data, CountingManager([ARRIVE] * 2), self.root, BatchControl()))
 
+    def test_a_rewrite_that_fails_part_way_keeps_the_last_good_summary(self):
+        directory = self.root / "batch"
+        directory.mkdir()
+        batch_module.write_summary(directory, dict(status="running"), [])
+        before = {name: (directory / name).read_text() for name in (SUMMARY_NAME, MANIFEST_NAME)}
+
+        def cut_off(path, text, **kwargs):
+            path.write_text(text[:3])
+            raise OSError("No space left on device")
+
+        with mock.patch.object(batch_module, "write_private_text", cut_off):
+            with self.assertRaises(OSError):
+                batch_module.write_summary(directory, dict(status="finished"), [])
+        self.assertEqual({name: (directory / name).read_text() for name in before}, before)
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), sorted(before))
+
     def test_a_busy_model_refuses_the_batch_before_anything_is_written(self):
         manager = CountingManager([])
         manager.busy = True

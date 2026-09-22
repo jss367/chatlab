@@ -13,12 +13,14 @@ import csv
 import io
 import json
 import logging
+import os
 import re
 import shutil
 import tempfile
 import time
 from contextlib import closing
 from pathlib import Path
+from uuid import uuid4
 
 from .runner import stream_episode
 from .trials import prepare_trial
@@ -114,9 +116,24 @@ def write_summary(directory, manifest, rows):
     trial rather than at the end. Rewriting them costs a few kilobytes a trial,
     which is nothing beside a response.
     """
-    write_private_text(directory / SUMMARY_NAME, summary_csv(rows), newline="")
-    write_private_text(directory / MANIFEST_NAME,
-                       json.dumps(dict(manifest, results=rows), ensure_ascii=False, indent=1) + "\n")
+    replace_text(directory / SUMMARY_NAME, summary_csv(rows), newline="")
+    replace_text(directory / MANIFEST_NAME,
+                 json.dumps(dict(manifest, results=rows), ensure_ascii=False, indent=1) + "\n")
+
+
+def replace_text(path, text, *, newline=None):
+    """Write ``text`` beside ``path`` and move it into place once it is whole.
+
+    The files are rewritten after every trial, and a write that fails part way,
+    on a full disk most often, would otherwise leave the last good copy empty
+    or cut off at the moment the batch is failing and that copy is its record.
+    """
+    staged = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        write_private_text(staged, text, newline=newline)
+        os.replace(staged, path)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def downloads(directory):
