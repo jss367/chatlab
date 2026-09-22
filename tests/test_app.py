@@ -887,6 +887,25 @@ class DownloadCardTests(unittest.TestCase):
         self.assertIn(models_page.UNLOAD_WHILE_LOADING, card)
         self.assertTrue(manager.loaded)
 
+    def test_unload_mid_load_is_refused_even_before_the_new_model_arrives(self):
+        # A load clears the old model first and reads the new one after, so
+        # nothing is in memory while the load is still under way.
+        manager = ModelManager()
+        runtime.MANAGER = manager
+        manager.reserve_load("org/model")
+
+        card = app.unload_model()
+
+        self.assertIn(models_page.UNLOAD_WHILE_LOADING, card)
+
+    def test_unload_with_nothing_loaded_gives_the_slot_back(self):
+        manager = ModelManager()
+        runtime.MANAGER = manager
+
+        self.assertIn("No model loaded", app.unload_model())
+        self.assertIsNone(manager.claim_generation(), "the slot is free again")
+        manager.release_generation()
+
     def test_unload_gives_the_slot_back(self):
         from test_streaming import loaded_manager
 

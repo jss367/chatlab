@@ -749,6 +749,7 @@ def _stream_reply(
     first = True
     recorded_context = None
     forced_prefix_tokens = 0
+    position_limited = False
     literal_prefill = ""
     literal_spans: tuple[tuple[int, int], ...] = ()
 
@@ -816,7 +817,8 @@ def _stream_reply(
                 status = generation_progress(len(metrics), started, used_seed)
                 if stream_note:
                     status = f"{stream_note} {status}"
-                if update.ends_on_position_limit:
+                position_limited = update.ends_on_position_limit
+                if position_limited:
                     status = f"{status} {POSITION_LIMIT_NOTE}"
                 prompt_panel = None
                 context_ids = gr.skip()
@@ -943,6 +945,10 @@ def _stream_reply(
         sampling["forced_prefix_tokens"] = forced_prefix_tokens
     if applied_prefill:
         sampling["assistant_prefill"] = assistant_prefill
+    if position_limited:
+        # The reply ended where the model ran out of positions, not where it
+        # chose to: an export read without this would count it as complete.
+        sampling["position_limit"] = True
     if prompt_edit:
         # ``messages`` records the conversation this reply was given, which is
         # no longer what the model read: the recorded turns would be rendered

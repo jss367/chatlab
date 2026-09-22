@@ -822,14 +822,16 @@ def unload_model():
     remove the model the moment it arrived.
     """
 
-    if not runtime.MANAGER.in_memory:
-        return status_card("No model loaded", "There is nothing to unload.")
+    # Claimed before the emptiness check: a load clears the old model before
+    # it reads the new one, so a model-less manager can still be mid-load.
     held = runtime.MANAGER.claim_generation()
     if held is not None:
         logger.info("Unload refused: %s has the model", held)
         reason = occupied_reason(held, UNLOAD_WHILE_LOADING, UNLOAD_WHILE_GENERATING)
         return status_card("Cannot unload now", reason, "error")
     try:
+        if not runtime.MANAGER.in_memory:
+            return status_card("No model loaded", "There is nothing to unload.")
         logger.info("Unload requested for %s", runtime.MANAGER.model_id or "the loaded model")
         runtime.MANAGER.unload()
     finally:

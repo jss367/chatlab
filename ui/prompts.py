@@ -346,6 +346,7 @@ def _run_batch(
         literal_prefill = ""
         forced_prefix_tokens = 0
         applied_prefill = bool(assistant_prefill)
+        position_limit = False
         kept = False
         failed = False
 
@@ -384,6 +385,10 @@ def _run_batch(
                 # did not say so would be read as a finished response and put
                 # a truncated answer in an experiment beside whole ones.
                 sampling["stopped"] = True
+            if position_limit:
+                # Cut short as surely as a stopped answer, by the model's
+                # position table rather than the reader: the table says so.
+                sampling["position_limit"] = True
             trace = build_trace(
                 model_id=model_id,
                 messages=request,
@@ -443,6 +448,7 @@ def _run_batch(
                     model_id = update.model_id or model_id
                     prefilled = update.reasoning_prefilled
                     forced_prefix_tokens = update.forced_prefix_tokens
+                    position_limit = update.ends_on_position_limit
                     if update.literal_prefill_text:
                         literal_prefill = update.literal_prefill_text
                     if held is not None:
