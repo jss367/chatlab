@@ -564,10 +564,18 @@ def from_payload(data):
         resolved = round_index < rounds
         if asked != moving if resolved else asked != moving[:len(asked)]:
             raise ValueError("A round asks agents other than the ones still moving, in their order.")
+        # The cap the live run set for this round, which no response in it
+        # could have sampled past.
+        limit = min(result.config["per_turn_tokens"],
+                    (result.config["token_budget"] - result.sampled_tokens) // len(moving))
         actions = []
         for saved in by_round[round_index]:
             if resolved and saved["finish_reason"] not in ("stop", "length", "incomplete_stream"):
                 raise ValueError("A response in a finished round ends in a way no finished round records.")
+            if limit <= 0 or len(saved["metrics"]) > limit:
+                raise ValueError("A response holds more tokens than its round allowed each agent.")
+            if saved.get("position_before") != list(result.agents[saved["agent"]]["position"]):
+                raise ValueError("A response records a starting position its agent was not in.")
             turn = copy.deepcopy({key: value for key, value in saved.items() if key not in derived})
             result.turns.append(turn)
             action = take_action(result, turn, len(result.turns) - 1)

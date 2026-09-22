@@ -255,12 +255,17 @@ class TeamEpisodeTests(unittest.TestCase):
             "missing mail": (altered(lambda c: c.update(mail=[])), "messages do not match"),
             "a claimed status": (altered(lambda c: c["agents"][1].update(status="arrived")), "agents do not match"),
             "a forged outcome": (altered(lambda c: c.update(phase="budget")), "outcome other than"),
+            "a response longer than its cap": (
+                altered(lambda c: c["config"].update(per_turn_tokens=10)), "more tokens than its round allowed"),
+            "a moved starting position": (
+                altered(lambda c: c["turns"][1].update(position_before=[2, 2])), "starting position"),
             "a zeroed token count": (altered(lambda c: c.update(sampled_tokens=0)), "sampled-token count does not"),
             "a zeroed call count": (altered(lambda c: c.update(tool_attempts=0)), "call count does not"),
             "more rounds than the limit": (altered(lambda c: c.update(rounds=99)), "within its round limit"),
-            # Walking south instead never reaches the arrival the run reports.
+            # Walking south instead leaves agent-1 where its later responses
+            # say it was not, and never reaches the arrival the run reports.
             "an edited response": (altered(lambda c: c["turns"][0].update(text=call("south", "east is open")[0])),
-                                   "outcome other than"),
+                                   "starting position|outcome other than"),
         }
         for name, (payload, message) in refused.items():
             with self.subTest(name), self.assertRaisesRegex(ValueError, message):
@@ -303,7 +308,7 @@ class TeamPageTests(unittest.TestCase):
                 callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
                 prepare = callbacks["team_prepare_episode"]
                 values = (2, True, "any", 3, 1, 2, .9, "coordinates", "", "Be brief.", "Reach the star.",
-                          .7, 1, 100, 1000, 10)
+                          .7, 1, 200, 1000, 10)
                 prepared = prepare.fn(team(), False, *values)
                 self.assertEqual(len(prepared), len(prepare.outputs))
                 ep = prepared[0]
