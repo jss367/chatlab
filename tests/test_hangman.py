@@ -111,6 +111,12 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(check(game_of(("start", "Board: _ _ _"), ("reveal", "Word: cat"),
                                        ("c", "Board: C _ _"), ("t", "Board: C _ T"))), [])
 
+    def test_a_word_guess_confirmed_by_its_word_line_counts_as_guessed(self):
+        game = game_of(("start", "Board: _ _ _"), ("cat", "Yes!\nWord: cat"), ("again", "Board: C A T"))
+        self.assertEqual(check(game), [])
+        game = game_of(("start", "Board: _ _ _"), ("cot", "No.\nWord: cat"), ("again", "Board: C A T"))
+        self.assertIn((3, "T is on the board but was never guessed."), check(game))
+
     def test_words_that_fit_respect_revealed_and_ruled_out_letters(self):
         game = game_of(("start", "Board: _ _ _"), ("a", "Board: _ A _"), ("t", "Board: _ A _"))
         self.assertEqual(fitting_words(game, ["cat", "cab", "bad", "ace", "can"]), ["cab", "bad", "can"])
@@ -213,9 +219,9 @@ class Manager:
         reply = [ord(c) for c in self.replies.pop(0)] + [STOP]
         ids = forced + reply
         metrics = []
-        for token in ids:
+        for position, token in enumerate(ids, 1):
             metrics.append(dict(token_id=token, text=chr(token) if token else "", display_text=chr(token) if token else "⏹",
-                                scored=False, top_candidates=[dict(token_id=ord("Z"), text="Z", probability=.1)]))
+                                segment="response", position=position, scored=False, top_candidates=[dict(token_id=ord("Z"), text="Z", probability=.1)]))
             yield SimpleNamespace(text="".join(chr(m["token_id"]) for m in metrics if m["token_id"]),
                                   metrics=[dict(m) for m in metrics], forced_prefix_tokens=len(forced),
                                   reasoning_prefilled=False)
@@ -340,6 +346,19 @@ class PageTests(unittest.TestCase):
         path.write_text(json.dumps(broken))
         with self.assertRaisesRegex(gr.Error, "not a valid saved hangman game"):
             self.fn["open_saved"](str(path), "owner")
+        # Drawn fine, but selecting the token would read fields it lacks.
+        broken["turns"][0]["metrics"] = [{"display_text": "x", "raw_rank": 1}]
+        path.write_text(json.dumps(broken))
+        with self.assertRaisesRegex(gr.Error, "not a valid saved hangman game"):
+            self.fn["open_saved"](str(path), "owner")
+
+    def test_the_context_note_shows_a_recorded_model_id_without_rendering_it(self):
+        game = list(self.fn["start_game"](SYSTEM, "go", "owner", 1.0, 7, 64))[-1][0]
+        game["turns"][0].update(load_id="elsewhere", model_id="x`![x](https://host/pixel)")
+        with mock.patch.object(ModelService, "prompt_text", return_value=("prompt", "first")):
+            note, text = self.fn["show_context"](game, 0)
+        self.assertIn("`x'![x](https://host/pixel)` under another load", note)
+        self.assertEqual(text, "prompt")
 
 
 if __name__ == "__main__":

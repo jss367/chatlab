@@ -422,6 +422,10 @@ def build_page(context):
             # A new id, so continuing it never writes over the file that was opened.
             child = reopened(game)
             shown_game = frame(child, session_id, len(child["turns"]) - 1 if child["turns"] else None, path=None)
+            # Selecting a token later reads fields the strip does not.
+            for turn in child["turns"]:
+                for metric in turn["metrics"]:
+                    context.tokens.describe(metric)
         except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
             raise gr.Error(MALFORMED) from exc
         return (*shown_game, *cleared())
@@ -438,7 +442,7 @@ def build_page(context):
         if load_id == turn.get("load_id"):
             return f"The prompt response {index + 1} was generated from.", text
         return (f"Rendered by the model loaded now. Response {index + 1} came from "
-                f"`{turn.get('model_id') or 'an unrecorded model'}` under another load, "
+                f"{shown(turn.get('model_id') or 'an unrecorded model')} under another load, "
                 "so its template may have differed."), text
 
     context_refresh.click(show_context, [game_state, picker], [context_note, context_body], show_progress="hidden")

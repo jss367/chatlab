@@ -150,8 +150,9 @@ def check(game):
             if value not in guessed:
                 pending.add(value)
             guessed.add(value)
-        elif kind == "word" and board is not None and "".join(board) == value:
-            # A right word guess reveals letters nobody guessed one at a time.
+        elif kind == "word" and value in ("".join(board or ()), turn.get("revealed_word")):
+            # A right word guess, confirmed by the board or by a Word: line,
+            # reveals letters nobody guessed one at a time.
             guessed.update(value)
         if board is not None:
             if length is not None and len(board) != length:
