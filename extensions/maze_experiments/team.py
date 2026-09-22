@@ -348,6 +348,18 @@ def resolve_round(episode, actions):
                           f"moved an agent, {len(sent)} message{'' if len(sent) == 1 else 's'} sent.")
 
 
+def discard_round(episode):
+    """Mark the responses of a round that will never resolve as not applied.
+
+    None of it is applied: the agents that answered would otherwise have moved
+    while their teammates had not. A resolved round has nothing left to mark,
+    so this is safe to call however the stream ends.
+    """
+    for waiting in episode.turns:
+        if waiting["round"] == episode.rounds and "event" not in waiting and not waiting.get("outcome"):
+            waiting["outcome"] = "not_applied"
+
+
 def stream_team(episode, models, *, single_step=False, save_dir=None):
     """Generate rounds until the team finishes, pauses or is stopped.
 
@@ -394,12 +406,17 @@ def stream_team(episode, models, *, single_step=False, save_dir=None):
                 break
             if manager.load_id != episode.load_id:
                 raise ValueError("The model changed during this episode. Start a new team episode with the selected model.")
-            actions, exhausted = [], False
-            for index in [i for i, agent in enumerate(episode.agents) if agent["status"] == "active"]:
-                limit = min(episode.config["per_turn_tokens"], episode.config["token_budget"] - episode.sampled_tokens)
-                if limit <= 0:
-                    exhausted = True
-                    break
+            moving = [i for i, agent in enumerate(episode.agents) if agent["status"] == "active"]
+            # The budget left is split before anyone answers, so an agent asked
+            # later in the round is capped exactly as the first one was.
+            limit = min(episode.config["per_turn_tokens"],
+                        (episode.config["token_budget"] - episode.sampled_tokens) // len(moving))
+            if limit <= 0:
+                episode.phase, episode.detail = "budget", ("The team's remaining sampled tokens cannot give every "
+                                                           "moving agent a response.")
+                break
+            actions = []
+            for index in moving:
                 agent = episode.agents[index]
                 turn = {"agent": index, "round": episode.rounds, "text": "", "metrics": [], "prompt_ids": [],
                         "position_before": list(agent["position"]), "started_at": time.time(), "finish_reason": None}
@@ -438,18 +455,11 @@ def stream_team(episode, models, *, single_step=False, save_dir=None):
                 if episode.stop_requested:
                     break
             if episode.stop_requested:
-                # The round never finished, so none of it is applied: the
-                # agents that answered would otherwise have moved while their
-                # teammates had not.
-                for waiting in episode.turns:
-                    if waiting["round"] == episode.rounds and "event" not in waiting and not waiting.get("outcome"):
-                        waiting["outcome"] = "not_applied"
+                discard_round(episode)
                 episode.phase = "stopped"
                 episode.detail = f"Stopped by you during round {episode.rounds + 1}. Its responses were kept and none of its moves applied."
                 break
             resolve_round(episode, actions)
-            if exhausted and episode.phase == "running":
-                episode.phase, episode.detail = "budget", "The team reached its sampled-token limit during the round."
             autosave()
             episode.viewing, episode.selected_turn = episode.rounds - 1, None
             yield episode
@@ -472,6 +482,10 @@ def stream_team(episode, models, *, single_step=False, save_dir=None):
             episode.sampled_tokens += count
             turn.update(sampled_tokens=count, tokens_cumulative=episode.sampled_tokens, finish_reason=episode.phase,
                         outcome="not_applied")
+        # A failure or a viewer hanging up mid-round never reaches the round's
+        # resolution either, so the teammates that already answered are marked
+        # the same way a stop marks them.
+        discard_round(episode)
         with episode.lock:
             episode.busy = False
             manager.close()

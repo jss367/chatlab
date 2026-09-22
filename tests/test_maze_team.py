@@ -132,6 +132,31 @@ class TeamEpisodeTests(unittest.TestCase):
         list(stream_team(ep, manager))
         self.assertEqual((ep.phase, ep.detail), ("budget", "The team reached its round limit."))
 
+    def test_the_budget_left_is_split_evenly_before_the_round(self):
+        manager = Manager([call("south"), call("south")])
+        ep = team(token_budget=30, per_turn_tokens=100)
+        list(stream_team(ep, manager))
+        # Each reply is far longer than 15 tokens, so asking in turn would have
+        # left the second agent nothing.
+        self.assertEqual([kwargs["max_new_tokens"] for _, kwargs in manager.calls], [15, 15])
+
+    def test_a_budget_too_small_for_every_agent_runs_no_round(self):
+        manager = Manager([])
+        ep = team(token_budget=1)
+        list(stream_team(ep, manager))
+        self.assertEqual(manager.calls, [])
+        self.assertEqual((ep.phase, ep.rounds), ("budget", 0))
+
+    def test_a_failure_mid_round_marks_every_answered_response_not_applied(self):
+        # The fixture runs out of replies on agent-2, which fails its response.
+        manager = Manager([call("east")])
+        ep = team()
+        list(stream_team(ep, manager))
+        self.assertEqual(ep.phase, "error")
+        self.assertEqual(ep.events, [])
+        self.assertEqual([turn["outcome"] for turn in ep.turns], ["not_applied", "not_applied"])
+        self.assertEqual([row[4] for row in team_timeline(ep)[1:]], ["Not applied", "Not applied"])
+
     def test_every_agent_samples_under_its_own_seed(self):
         manager = Manager([call("south"), call("south"), call("east"), call("east")])
         list(stream_team(team(sampling_seed=5, round_limit=2), manager))
