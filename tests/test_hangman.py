@@ -354,7 +354,9 @@ class PageTests(unittest.TestCase):
         good = game["turns"][0]["metrics"][0]
         refused(dict(good, token_id=True), "Response 1 of the saved game is malformed")
         for candidate in (dict(token_id=[], text="Z", probability=.1), dict(token_id=1, text=None, probability=.1),
-                          dict(token_id=1, text="Z", probability="high")):
+                          dict(token_id=1, text="Z", probability="high"),
+                          dict(token_id=1, text="Z", probability=float("inf")),
+                          dict(token_id=1, text="Z", probability=float("nan"))):
             refused(dict(good, top_candidates=[candidate]), "Response 1 of the saved game is malformed")
         # Drawn fine, but selecting the token would read fields it lacks.
         refused({"display_text": "x", "raw_rank": 1, "token_id": 1})

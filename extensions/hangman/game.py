@@ -8,6 +8,7 @@ import copy
 from datetime import datetime, timezone
 from functools import lru_cache
 import json
+import math
 from pathlib import Path
 import re
 from uuid import uuid4
@@ -283,8 +284,13 @@ def _readable_metric(metric):
     candidates = metric.get("top_candidates", [])
     return isinstance(candidates, list) and all(
         isinstance(c, dict) and _integer(c.get("token_id")) and isinstance(c.get("text"), str)
-        and isinstance(c.get("probability"), (int, float)) and not isinstance(c.get("probability"), bool)
-        for c in candidates)
+        and _probability(c.get("probability")) for c in candidates)
+
+
+def _probability(value):
+    """A finite number. JSON reads ``1e309`` as infinity and ``NaN`` as NaN, and
+    the token menu serializes either into markup its script cannot parse."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def load(path):
