@@ -169,6 +169,21 @@ class TeamEpisodeTests(unittest.TestCase):
         self.assertEqual(ep.turns[0]["text"], "I give up.")
         self.assertIn("agent-1 · active", team_board(ep))
 
+    def test_runs_ended_mid_round_read_back_as_they_were_saved(self):
+        stopped = team()
+        for frame in stream_team(stopped, Manager([call("east"), call("east")])):
+            if len(frame.turns) == 2 and frame.turns[0].get("finish_reason") == "stop":
+                stopped.request_stop()
+        failed = team()
+        list(stream_team(failed, Manager([say("I give up.")])))
+        paused = team()
+        list(stream_team(paused, Manager([call("south"), call("south")]), single_step=True))
+        for ep in (stopped, failed, paused):
+            with self.subTest(ep.phase):
+                replay = from_payload(json.loads(json.dumps(ep.payload())))
+                self.assertEqual(replay.phase, ep.phase)
+                self.assertEqual(json.loads(json.dumps(replay.payload())), json.loads(json.dumps(ep.payload())))
+
     def test_every_agent_samples_under_its_own_seed(self):
         manager = Manager([call("south"), call("south"), call("east"), call("east")])
         list(stream_team(team(sampling_seed=5, round_limit=2), manager))
@@ -209,37 +224,47 @@ class TeamEpisodeTests(unittest.TestCase):
         self.assertIn("east is open", mail_text(replay))
         with self.assertRaisesRegex(ValueError, "Start a new team episode"):
             list(stream_team(replay, manager))
-        moved = json.loads(json.dumps(saved))
-        moved["agents"][1]["position"] = [0, 1]
-        with self.assertRaisesRegex(ValueError, "final position"):
-            from_payload(moved)
-        def forged(change):
-            # A forgery rewrites a move in both places the run records it.
+        def altered(change):
             copy = json.loads(json.dumps(saved))
-            for event in (copy["events"][0], copy["turns"][copy["events"][0]["turn"]]["event"]):
-                change(event)
+            change(copy)
             return copy
 
-        with self.assertRaisesRegex(ValueError, "records something other"):
-            from_payload(forged(lambda event: event.update(after=[2, 2])))
-        with self.assertRaisesRegex(ValueError, "records something other"):
-            from_payload(forged(lambda event: event.update(arrived=True)))
-        with self.assertRaisesRegex(ValueError, "records something other"):
-            from_payload(forged(lambda event: event.update(progress=not event["progress"])))
-        with self.assertRaisesRegex(ValueError, "does not belong"):
-            loose = json.loads(json.dumps(saved))
-            loose["events"][0]["after"] = [0, 0]
-            from_payload(loose)
-        with self.assertRaisesRegex(ValueError, "messages do not match"):
-            from_payload(forged(lambda event: event.update(message="a different plan")))
-        with self.assertRaisesRegex(ValueError, "messages do not match"):
-            quiet = json.loads(json.dumps(saved))
-            quiet["mail"] = []
-            from_payload(quiet)
-        with self.assertRaisesRegex(ValueError, "status does not match"):
-            claimed = json.loads(json.dumps(saved))
-            claimed["agents"][1]["status"] = "arrived"
-            from_payload(claimed)
+        def forged(change):
+            # A forgery rewrites a move in both places the run records it.
+            def both(copy):
+                for event in (copy["events"][0], copy["turns"][copy["events"][0]["turn"]]["event"]):
+                    change(event)
+            return altered(both)
+
+        refused = {
+            "a moved final position": (altered(lambda c: c["agents"][1].update(position=[0, 1])), "agents do not match"),
+            "a teleport": (forged(lambda e: e.update(after=[2, 2])), "responses do not match"),
+            "a forged arrival": (forged(lambda e: e.update(arrived=True)), "responses do not match"),
+            "forged progress": (forged(lambda e: e.update(progress=not e["progress"]))
+                                , "responses do not match"),
+            # The response still says east, so another legal direction is a
+            # move that response never asked for.
+            "a direction the response never asked for": (
+                forged(lambda e: e.update(direction="south", after=[0, 0], accepted=False)), "responses do not match"),
+            "an error the simulator never gave": (
+                forged(lambda e: e.update(accepted=False, error="already_arrived", after=[0, 0])),
+                "responses do not match"),
+            "a move detached from its response": (
+                altered(lambda c: c["events"][0].update(after=[0, 0])), "moves do not match"),
+            "a message nobody sent": (forged(lambda e: e.update(message="a different plan")), "responses do not match"),
+            "missing mail": (altered(lambda c: c.update(mail=[])), "messages do not match"),
+            "a claimed status": (altered(lambda c: c["agents"][1].update(status="arrived")), "agents do not match"),
+            "a forged outcome": (altered(lambda c: c.update(phase="budget")), "outcome other than"),
+            "a zeroed token count": (altered(lambda c: c.update(sampled_tokens=0)), "sampled-token count does not"),
+            "a zeroed call count": (altered(lambda c: c.update(tool_attempts=0)), "call count does not"),
+            "more rounds than the limit": (altered(lambda c: c.update(rounds=99)), "within its round limit"),
+            # Walking south instead never reaches the arrival the run reports.
+            "an edited response": (altered(lambda c: c["turns"][0].update(text=call("south", "east is open")[0])),
+                                   "outcome other than"),
+        }
+        for name, (payload, message) in refused.items():
+            with self.subTest(name), self.assertRaisesRegex(ValueError, message):
+                from_payload(payload)
         prompt = json.loads(json.dumps(saved))
         prompt["agents"][0]["messages"][1]["content"] = "Something else."
         with self.assertRaisesRegex(ValueError, "agents do not match"):

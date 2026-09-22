@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from .maze import DIRECTIONS, SYSTEM, TOOLS, Maze, apply_call, default_instruction, goal_instruction, parse_call
+from .maze import SYSTEM, TOOLS, Maze, apply_call, default_instruction, goal_instruction, parse_call
 from extension_api import write_private_text
 
 logger = logging.getLogger(__name__)
@@ -45,11 +45,6 @@ MAX_AGENTS = 4
 AGENT_STATUSES = {"active", "arrived", "abandoned", "cut_off"}
 # What a response that takes no action does to its agent once its round resolves.
 DROPPED = {"no_call": "abandoned", "cut_off": "cut_off"}
-# What parse_call refuses and what the simulator refuses, the only reasons a
-# saved call can have been rejected for.
-PARSE_ERRORS = {"malformed_or_multiple_calls", "text_after_tool_call", "invalid_json", "invalid_tool_schema",
-                "invalid_arguments", "message_too_long"}
-REJECTIONS = PARSE_ERRORS | {"already_arrived", "wrong_maze", "blocked_move"}
 DEFAULT_CONFIG = dict(agents=2, communication=True, team_goal="any", goal_mode="coordinates", goal_hint="",
                       temperature=.7, sampling_seed=20260914, per_turn_tokens=1024, token_budget=16384,
                       round_limit=24)
@@ -264,17 +259,30 @@ def finish_response(episode, turn, stop_ids, max_tokens):
     leaves it in the team.
     """
     sampled = turn["metrics"]
+    if episode.stop_requested:
+        turn["finish_reason"] = "user_stopped"
+    elif sampled and sampled[-1]["token_id"] in stop_ids:
+        turn["finish_reason"] = "stop"
+    else:
+        turn["finish_reason"] = "length" if len(sampled) >= max_tokens else "incomplete_stream"
+    return take_action(episode, turn, len(episode.turns) - 1)
+
+
+def take_action(episode, turn, index):
+    """Count a response's tokens and read the action its finish reason allows.
+
+    Shared by generation and by replay, so a saved run is read back through
+    exactly the rules that produced it.
+    """
+    sampled = turn["metrics"]
     episode.sampled_tokens += len(sampled)
     turn["sampled_tokens"] = len(sampled)
     turn["tokens_cumulative"] = episode.sampled_tokens
-    if episode.stop_requested:
-        turn["finish_reason"] = "user_stopped"
+    if turn["finish_reason"] == "user_stopped":
         return None
-    if not (sampled and sampled[-1]["token_id"] in stop_ids):
-        turn["finish_reason"] = "length" if len(sampled) >= max_tokens else "incomplete_stream"
+    if turn["finish_reason"] != "stop":
         turn["outcome"] = "cut_off"
         return None
-    turn["finish_reason"] = "stop"
     text = turn["text"]
     if turn.get("reasoning_prefilled"):
         text = "<think>" + text
@@ -288,8 +296,7 @@ def finish_response(episode, turn, stop_ids, max_tokens):
         turn["outcome"] = "no_call"
         return None
     episode.tool_attempts += 1
-    # The response being finished is always the latest one recorded.
-    return dict(agent=turn["agent"], turn=len(episode.turns) - 1, content=content, args=args, error=error)
+    return dict(agent=turn["agent"], turn=index, content=content, args=args, error=error)
 
 
 def resolve_round(episode, actions):
@@ -514,13 +521,13 @@ def stream_team(episode, models, *, single_step=False, save_dir=None):
 
 
 def from_payload(data):
-    """A saved team run, rebuilt for replay from the moves it records.
+    """A saved team run, rebuilt for replay from the responses it records.
 
-    Nothing the simulator decides is taken as written. Each agent's path is
-    replayed through the simulator from the start, every recorded move is
-    compared whole with the one the simulator makes, and the messages, the
-    final positions and each agent's status are rebuilt from those moves and
-    the responses that made them. A file that disagrees anywhere is refused.
+    Nothing the run derived is taken as written. Every recorded response is
+    read again through the rules that read it live, round by round, and the
+    moves, messages, histories, positions, statuses, counters and outcome that
+    produces are compared with the file's. A file that disagrees anywhere
+    describes a run these responses could not have made, and is refused.
     """
     if not isinstance(data, dict) or data.get("format") != FORMAT:
         raise ValueError("Choose a ChatLab maze team run JSON file.")
@@ -530,81 +537,73 @@ def from_payload(data):
         raise ValueError("The run is missing its map or its configuration.")
     maze = Maze.from_dict(data["maze"])
     result = TeamEpisode(maze, data["config"])
-    fresh = copy.deepcopy(result.agents)
-    for key in result.payload().keys() - {"format", "maze", "config", "exploratory"}:
+    turns, rounds = data.get("turns"), data.get("rounds")
+    if type(rounds) is not int or not 0 <= rounds <= result.config["round_limit"]:
+        raise ValueError("The run's round count must be within its round limit.")
+    if not isinstance(turns, list) or any(
+            not isinstance(t, dict) or type(t.get("agent")) is not int or not 0 <= t["agent"] < len(result.agents)
+            or type(t.get("round")) is not int or not isinstance(t.get("text"), str)
+            or not isinstance(t.get("metrics"), list) or not all(isinstance(m, dict) and type(m.get("token_id")) is int
+                                                                 for m in t["metrics"])
+            or not isinstance(t.get("finish_reason"), str) for t in turns):
+        raise ValueError("Each saved response needs its agent, round, text, tokens and finish reason.")
+    by_round = {}
+    for turn in turns:
+        by_round.setdefault(turn["round"], []).append(turn)
+    if [t["round"] for t in turns] != sorted(t["round"] for t in turns) or set(by_round) - set(range(rounds + 1)) \
+            or set(range(rounds)) - set(by_round):
+        raise ValueError("The saved responses are not in round order.")
+    derived = {"event", "outcome", "sampled_tokens", "tokens_cumulative"}
+    for round_index in range(rounds + 1):
+        if round_index not in by_round:
+            continue
+        if result.phase in TERMINAL:
+            raise ValueError("The run records responses after it had ended.")
+        moving = [i for i, agent in enumerate(result.agents) if agent["status"] == "active"]
+        asked = [t["agent"] for t in by_round[round_index]]
+        resolved = round_index < rounds
+        if asked != moving if resolved else asked != moving[:len(asked)]:
+            raise ValueError("A round asks agents other than the ones still moving, in their order.")
+        actions = []
+        for saved in by_round[round_index]:
+            if resolved and saved["finish_reason"] not in ("stop", "length", "incomplete_stream"):
+                raise ValueError("A response in a finished round ends in a way no finished round records.")
+            turn = copy.deepcopy({key: value for key, value in saved.items() if key not in derived})
+            result.turns.append(turn)
+            action = take_action(result, turn, len(result.turns) - 1)
+            if action:
+                actions.append(action)
+        if resolved:
+            resolve_round(result, actions)
+        else:
+            discard_round(result)
+    if result.phase in TERMINAL:
+        if data.get("phase") != result.phase or len(by_round) > rounds:
+            raise ValueError("The run reports an outcome other than the one its responses reach.")
+    else:
+        phase = data.get("phase")
+        moving = [agent for agent in result.agents if agent["status"] == "active"]
+        starved = bool(moving) and (result.config["token_budget"] - result.sampled_tokens) // len(moving) <= 0
+        if phase not in ("ready", "running", "paused", "stopped", "error", "budget") \
+                or (phase == "ready" and turns) or (phase == "budget" and not starved):
+            raise ValueError("The run reports an outcome other than the one its responses reach.")
+        result.phase = phase
+        if isinstance(data.get("detail"), str):
+            result.detail = data["detail"]
+    saved_agents = data.get("agents")
+    rebuilt = json.loads(json.dumps(result.agents))
+    checks = {"responses": (turns, result.turns), "moves": (data.get("events"), result.events),
+              "messages": (data.get("mail"), result.mail), "agents": (saved_agents, rebuilt),
+              "sampled-token count": (data.get("sampled_tokens"), result.sampled_tokens),
+              "call count": (data.get("tool_attempts"), result.tool_attempts)}
+    for name, (recorded, replayed) in checks.items():
+        if json.loads(json.dumps(recorded)) != json.loads(json.dumps(replayed)):
+            raise ValueError(f"The run's {name} do not match what its responses produce."
+                             if name.endswith("s") else f"The run's {name} does not match what its responses produce.")
+    result.rounds = rounds
+    for key in ("run_id", "model_id", "load_id", "created_at"):
         if key in data:
             setattr(result, key, data[key])
-    agents = result.agents
-    if (not isinstance(agents, list) or len(agents) != len(fresh)
-            or any(not isinstance(a, dict) or a.get("name") != f["name"] or a.get("status") not in AGENT_STATUSES
-                   or not isinstance(a.get("messages"), list) or a["messages"][:2] != f["messages"]
-                   for a, f in zip(agents, fresh))):
-        raise ValueError("The run's agents do not match the team its configuration describes.")
-    if type(result.rounds) is not int or result.rounds < 0:
-        raise ValueError("The run's round count must be a non-negative integer.")
-    turns = result.turns
-    if not isinstance(turns, list) or any(
-            not isinstance(t, dict) or type(t.get("agent")) is not int or not 0 <= t["agent"] < len(agents)
-            or type(t.get("round")) is not int or not 0 <= t["round"] <= result.rounds for t in turns):
-        raise ValueError("Each saved response names an agent of the team and a round of the run.")
-    if sum("event" in t for t in turns) != len(result.events):
-        raise ValueError("The saved moves and the responses that made them do not match.")
-    mode, communicate = result.config["goal_mode"], result.config["communication"]
-    positions = [maze.start] * len(agents)
-    previous, mail = 0, []
-    for event in result.events:
-        if not isinstance(event, dict):
-            raise ValueError("Each saved move must be an object.")
-        index, round_index, turn_index = event.get("agent"), event.get("round"), event.get("turn")
-        if type(index) is not int or not 0 <= index < len(agents):
-            raise ValueError("A saved move names an agent the team does not have.")
-        if type(round_index) is not int or not previous <= round_index < result.rounds:
-            raise ValueError("The saved moves are not in round order.")
-        if (type(turn_index) is not int or not 0 <= turn_index < len(turns) or turns[turn_index].get("event") != event
-                or (turns[turn_index]["agent"], turns[turn_index]["round"]) != (index, round_index)):
-            raise ValueError("A saved move does not belong to the response that records it.")
-        previous = round_index
-        # Every field the simulator decides is decided again here, so a file
-        # cannot report an arrival, an error or progress its own path never had.
-        position = positions[index]
-        if event.get("accepted") is True:
-            expected = apply_call(maze, position, {"maze_id": maze.tool_id(mode), "direction": event.get("direction")},
-                                  goal_mode=mode) if event.get("direction") in DIRECTIONS else {"accepted": False}
-            if not expected["accepted"]:
-                raise ValueError("The saved path contains an invalid transition.")
-        elif event.get("error") in REJECTIONS:
-            expected = {"accepted": False, "before": list(position), "after": list(position), "error": event["error"],
-                        "arrived": False, "progress": False}
-        else:
-            raise ValueError("A saved move is neither a legal move nor a rejection the simulator makes.")
-        expected.update(source="model", agent=index, round=round_index, turn=turn_index)
-        if "message" in event:
-            message = event["message"]
-            if (not communicate or not isinstance(message, str) or message != message.strip() or not message
-                    or len(message) > MESSAGE_LIMIT or event.get("error") in PARSE_ERRORS):
-                raise ValueError("A saved move carries a message no call of this run could have sent.")
-            expected["message"] = message
-            mail.append((round_index, index, message))
-        if event != expected:
-            raise ValueError("A saved move records something other than what the simulator did.")
-        positions[index] = tuple(expected["after"])
-    # A message reaches every teammate that made a call in its round.
-    callers = {}
-    for event in result.events:
-        callers.setdefault(event["round"], []).append(event["agent"])
-    names = [agent["name"] for agent in agents]
-    if result.mail != [dict(round=r, sender=names[i], text=text, to=[names[j] for j in callers[r] if j != i])
-                       for r, i, text in mail]:
-        raise ValueError("The run's messages do not match the calls that sent them.")
-    for index, (agent, position) in enumerate(zip(agents, positions)):
-        if tuple(agent.get("position", ())) != position:
-            raise ValueError("An agent's saved final position does not match its path.")
-        dropped = [DROPPED[t["outcome"]] for t in turns
-                   if t["agent"] == index and t["round"] < result.rounds and t.get("outcome") in DROPPED]
-        status = "arrived" if position == maze.goal else dropped[-1] if dropped else "active"
-        if agent["status"] != status:
-            raise ValueError("An agent's saved status does not match what its responses did.")
-        agent["position"] = position
     result.replay_only = True
     result.viewing, result.selected_turn = -1, None
     return result
