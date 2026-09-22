@@ -34,6 +34,9 @@ CATALOGUE = (
     ExtensionSpec("osguard", "Computer-use safety benchmark",
                   "Evaluate OSGuard action judgments, inspect tokens and review desktop safety results.",
                   "Safety", "extensions.osguard", icon="box"),
+    ExtensionSpec("hangman", "Hangman",
+                  "Play hangman with the model as host, check each board against the last and branch replies at any token.",
+                  "Hangman", "extensions.hangman", icon="spell-check"),
 )
 
 
