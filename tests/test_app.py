@@ -859,6 +859,47 @@ class DownloadCardTests(unittest.TestCase):
         self.assertEqual(len(frames), 1)
         self.assertIn(models_page.LOAD_WHILE_GENERATING, frames[0])
 
+    def test_unload_is_refused_while_a_reply_is_running(self):
+        # Waiting on the model lock would pull the model out between the end
+        # of the stream and the reply's trace, which then names no tokenizer.
+        from test_streaming import loaded_manager
+
+        manager = loaded_manager([0])
+        runtime.MANAGER = manager
+        self.assertTrue(manager.reserve_generation())
+        self.addCleanup(manager.release_generation)
+
+        card = app.unload_model()
+
+        self.assertIn("Cannot unload now", card)
+        self.assertIn(models_page.UNLOAD_WHILE_GENERATING, card)
+        self.assertTrue(manager.loaded)
+
+    def test_unload_is_refused_while_a_load_stands(self):
+        from test_streaming import loaded_manager
+
+        manager = loaded_manager([0])
+        runtime.MANAGER = manager
+        manager.reserve_load("org/other")
+
+        card = app.unload_model()
+
+        self.assertIn(models_page.UNLOAD_WHILE_LOADING, card)
+        self.assertTrue(manager.loaded)
+
+    def test_unload_gives_the_slot_back(self):
+        from test_streaming import loaded_manager
+
+        manager = loaded_manager([0])
+        runtime.MANAGER = manager
+
+        card = app.unload_model()
+
+        self.assertIn("Model unloaded", card)
+        self.assertFalse(manager.loaded)
+        self.assertIsNone(manager.claim_generation(), "the slot is free again")
+        manager.release_generation()
+
     def test_load_cached_gives_the_claim_back_when_it_refuses(self):
         manager = ModelManager()
         runtime.MANAGER = manager
