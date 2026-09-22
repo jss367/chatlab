@@ -175,6 +175,30 @@ class SteeringTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "without a steering vector"):
             from_payload(forged)
 
+    def test_a_stop_before_generation_leaves_the_response_unsteered(self):
+        manager = SteeringManager([])
+        episode = Episode(ROOM, checkpoint(steer_when={"moves": 0}))
+        stream = stream_episode(episode, manager)
+        next(stream)
+        episode.request_stop()
+        list(stream)
+        self.assertEqual((episode.phase, manager.calls), ("stopped", []))
+        self.assertEqual((episode.turns[0]["steered"], episode.turns[0]["finish_reason"]), (False, "user_stopped"))
+        self.assertIsNone(episode.steer_turn)
+        self.assertIn("never started", status(episode))
+        saved = json.loads(json.dumps(episode.payload()))
+        self.assertFalse(from_payload(saved).turns[0]["steered"])
+        # A response stopped once generation had begun, before its first token,
+        # carries the mark, and reads back too.
+        flagged = copy.deepcopy(saved)
+        flagged["turns"][0]["steered"] = True
+        from_payload(flagged)
+        # A response that did generate is held to the trigger as before.
+        generated = copy.deepcopy(saved)
+        generated["turns"][0]["metrics"] = [{"token_id": 60}]
+        with self.assertRaisesRegex(ValueError, "Response 1 is recorded as unsteered"):
+            from_payload(generated)
+
     def test_a_fork_of_a_steered_response_is_steered_again(self):
         episode, _ = run(checkpoint())
         # The edit keeps the response's first token, so the regenerated

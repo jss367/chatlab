@@ -898,7 +898,10 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             turn["literal_prefill_tokens"] = edit["literal_prefill_tokens"] if edit else len(forced)
             steered = episode.steers_next()
             if episode.config.get("steering") is not None:
-                turn["steered"] = steered
+                # Unmarked until generation is entered below. The flag says the
+                # vector touched this response, and a Stop taken at the opening
+                # frame ends the run before the vector is ever installed.
+                turn["steered"] = False
                 if steered and episode.steer_turn is None:
                     episode.detail = "Steering starts with this response."
             if edit:
@@ -910,6 +913,8 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
                 finish_turn(episode, turn, set(), limit)
                 record(turn)
                 break
+            if steered:
+                turn["steered"] = True
             stop_ids = manager.stop_token_ids
             generator = manager.generate(
                 episode.messages, temperature=episode.config["temperature"], top_p=1., top_k=0,
@@ -1004,6 +1009,11 @@ def validate_steering(episode):
     touched - so it is decided again from the recorded path, and a run that
     marks a response the trigger would have left alone, or leaves unmarked one
     it would have steered, is refused rather than scored.
+
+    One response the trigger picks may be unmarked: a run stopped at the
+    opening frame of a response, before generation, never installed the
+    vector. That response carries no metrics and a stop as its outcome, and
+    is the run's last, because a stopped run cannot continue.
     """
     config = episode.config
     if config.get("steering") is None:
@@ -1016,7 +1026,9 @@ def validate_steering(episode):
     by_turn = {e["turn"]: e for e in episode.events if e["source"] == "model"}
     for index, turn in enumerate(episode.turns):
         expected = steered_at(config, start, index, position, moves)
-        if turn.get("steered", False) is not expected:
+        never_generated = (index == len(episode.turns) - 1 and not turn.get("metrics")
+                           and turn.get("finish_reason") in ("user_stopped", "stopped"))
+        if turn.get("steered", False) is not expected and not (expected and never_generated):
             raise ValueError(f"Response {index + 1} is recorded as {'steered' if turn.get('steered') else 'unsteered'}, "
                              "which is not what the run's steering trigger decides at that point in its path.")
         if expected and start is None:
