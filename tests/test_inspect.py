@@ -393,6 +393,27 @@ class InspectTests(unittest.TestCase):
         self.assertEqual(first.crops, [])
         self.assertIsNot(manager._inspect_cache[2], first)
 
+    def test_an_earlier_click_rebuilds_a_cache_with_recurrent_layers(self):
+        # Qwen3.5, LFM2 and Mamba keep a running state in some layers, which
+        # cannot be cut back, and their crop raises rather than doing it.
+        manager = lens_manager([1, 2, 3, 4, 5, 6, 7])
+        manager.model.caching = True
+        ids = [0, 1, 2, 3, 4, 5, 6]
+        manager.inspect(ids, 6)
+        first = manager._inspect_cache[2]
+        first.is_croppable = False
+
+        def refuse(_tokens):
+            raise RuntimeError("crop was called, but the layer does not track past states")
+
+        first.crop = refuse
+        manager.model.fed.clear()
+
+        manager.inspect(ids, 3)
+
+        self.assertEqual(manager.model.fed, [2, 1])
+        self.assertIsNot(manager._inspect_cache[2], first)
+
     def test_an_earlier_click_still_crops_a_sliding_cache_within_its_window(self):
         manager = lens_manager([1, 2, 3, 4, 5, 6, 7])
         manager.model.caching = True

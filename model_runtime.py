@@ -4201,6 +4201,11 @@ def _cache_can_crop(cache, held: int) -> bool:
 
     if not hasattr(cache, "crop"):
         return False
+    # A hybrid model's linear-attention layers hold a running state rather
+    # than one entry per token, so there is no earlier state to cut back to;
+    # their crop raises. Transformers says so through is_croppable.
+    if not getattr(cache, "is_croppable", True):
+        return False
     sliding = getattr(cache, "is_sliding", None) or []
     layers = getattr(cache, "layers", None) or []
     for index, is_sliding in enumerate(sliding):
@@ -6308,7 +6313,7 @@ class ModelManager:
         assert self.model is not None
         assert self.tokenizer is not None
         values: set[int] = set(self._engine().eos_token_ids())
-        candidate = self.tokenizer.eos_token_id
+        candidate = getattr(self.tokenizer, "eos_token_id", None)
         if isinstance(candidate, int):
             values.add(candidate)
         elif candidate:
@@ -6358,6 +6363,12 @@ class ModelManager:
             if "think" in piece.lower():
                 continue
             hidden.add(int(token_id))
+        # A stop token ends the response and is never part of it, but a
+        # checkpoint can stop on one the tokenizer does not list as special:
+        # OLMo 3 ends each turn with <|im_end|>, which its generation config
+        # names and Transformers 5 leaves out of all_special_ids.
+        if self.model is not None:
+            hidden.update(self._stop_token_ids())
         return hidden
 
     def _prefill(
