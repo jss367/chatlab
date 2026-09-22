@@ -9,8 +9,8 @@ import gradio as gr
 
 from extension_api import write_private_text
 from .game import (
-    OPENING, SYSTEM, check, dictionary, finish_turn, fitting_words, guess_of, load, messages_for,
-    new_game, reasoning_of, rewound, saved, WORD_LIST,
+    MAX_FILE_BYTES, OPENING, SYSTEM, check, dictionary, finish_turn, fitting_words, guess_of, load,
+    messages_for, new_game, reasoning_of, rewound, saved, WORD_LIST,
 )
 
 logger = logging.getLogger(__name__)
@@ -209,9 +209,12 @@ def build_page(context):
     inspector = [detail, alternatives]
 
     def save(game):
+        text = saved(game)
+        if len(text.encode("utf-8")) > MAX_FILE_BYTES:
+            raise OSError("the game is larger than a saved game can be opened at")
         path = context.data_dir / f"{game['id']}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_private_text(path, saved(game))
+        write_private_text(path, text)
         return str(path)
 
     def respond(game, session_id, text, temp, random_seed, token_limit, edit=None):
@@ -268,13 +271,16 @@ def build_page(context):
         finally:
             games.finish(session_id)
             turn["seconds"] = time.time() - turn["started_at"]
-        if failure is not None and not turn["metrics"]:
-            # Nothing was generated, so there is no response to keep: the next
-            # prompt would otherwise carry an empty assistant turn.
+        if not turn["metrics"] and (failure is not None or cancel.is_set()):
+            # Nothing was generated, whether it failed or was stopped during
+            # the prompt, so there is no response to keep: the next prompt
+            # would otherwise carry an empty assistant turn.
             game["turns"].pop()
             if shown:
                 yield (*frame(game, session_id, index - 1 if index else None), gr.skip())
-            raise gr.Error(failure)
+            if failure is not None:
+                raise gr.Error(failure)
+            return
         if failure is not None:
             turn.update(finish_reason="error", error=failure)
         finish_turn(turn)
@@ -283,6 +289,7 @@ def build_page(context):
             path = save(game)
         except OSError as exc:
             logger.warning("Could not save hangman game %s: %s", game["id"], exc)
+            gr.Warning(f"This response was not saved: {exc}.")
         yield (*frame(game, session_id, index, path=path), gr.skip())
         if failure is not None:
             raise gr.Error(failure)

@@ -13,7 +13,11 @@ import re
 from uuid import uuid4
 
 FORMAT = "chatlab-hangman-1"
-MAX_FILE_BYTES = 64 * 1024 * 1024
+# A saved token costs about 2.4 KB with its eight alternatives, so one
+# 32768-token response is about 75 MB. This allows a dozen of those, or a
+# couple of hundred at the default length; the page refuses to save a game
+# past it rather than offer a file it could not open again.
+MAX_FILE_BYTES = 1024 ** 3
 WORD_LIST = Path("/usr/share/dict/words")
 
 SYSTEM = """You are hosting a game of hangman. Think of one secret English word and keep it to yourself for the whole game. Do not write the word until the game ends.

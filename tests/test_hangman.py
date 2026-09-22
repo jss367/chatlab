@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from types import SimpleNamespace
 
 import gradio as gr
@@ -153,8 +154,12 @@ class Manager:
     def encode_replacement(self, kept_ids, text, **kw):
         return [ord(c) for c in text]
 
+    before_token = None
+
     def generate(self, messages, **options):
         self.calls.append(dict(messages=messages, **options))
+        if self.before_token:
+            self.before_token()
         forced = list(options.get("forced_ids", ()))
         reply = [ord(c) for c in self.replies.pop(0)] + [STOP]
         ids = forced + reply
@@ -215,6 +220,28 @@ class PageTests(unittest.TestCase):
         with self.assertRaises(gr.Error):
             run()
         self.assertFalse(self.manager.busy)
+
+    def test_stop_before_the_first_token_keeps_no_empty_turn(self):
+        game = list(self.fn["start_game"](SYSTEM, "go", "owner", 1.0, 7, 64))[-1][0]
+        self.manager.before_token = lambda: self.fn["cancel"]("owner")
+        restored = list(self.fn["play"](game, "a", "owner", 1.0, 7, 64))[-1][0]
+        self.assertEqual([t["guess"] for t in restored["turns"]], ["go"])
+        saved_game = json.loads((self.data / f"{game['id']}.json").read_text())
+        self.assertEqual([t["guess"] for t in saved_game["turns"]], ["go"])
+        self.assertFalse(self.manager.busy)
+        # Stopped before the model chose a word, the opening leaves no game to continue.
+        opened = list(self.fn["start_game"](SYSTEM, "go", "owner", 1.0, 7, 64))[-1][0]
+        self.assertEqual(opened["turns"], [])
+        self.assertFalse((self.data / f"{opened['id']}.json").exists())
+        with self.assertRaisesRegex(gr.Error, "Start a new game"):
+            list(self.fn["play"](opened, "a", "owner", 1.0, 7, 64))
+
+    def test_a_game_too_large_to_open_again_is_not_saved(self):
+        with mock.patch("extensions.hangman.page.MAX_FILE_BYTES", 10), mock.patch("gradio.Warning") as warned:
+            frames = list(self.fn["start_game"](SYSTEM, "go", "owner", 1.0, 7, 64))
+        self.assertIn("not saved", warned.call_args.args[0])
+        self.assertEqual(frames[-1][8], gr.skip())
+        self.assertEqual(list(self.data.glob("*.json")), [])
 
     def test_branch_replays_kept_tokens_then_the_alternative_in_a_new_game(self):
         frames = list(self.fn["start_game"](SYSTEM, "go", "owner", 1.0, 7, 64))
