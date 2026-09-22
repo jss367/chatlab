@@ -13,7 +13,7 @@ from extensions.hangman.game import (
     SYSTEM, answer_of, check, finish_turn, fitting_words, guess_of, load, messages_for, new_game,
     read_board, read_word, reasoning_of, reopened, rewound, saved,
 )
-from extensions.hangman.page import build_page
+from extensions.hangman.page import build_page, turn_note
 from model_runtime import GENERATING
 
 STOP = 0
@@ -162,6 +162,15 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(child["parent"], dict(id=game["id"], turns=1))
         self.assertNotEqual(child["id"], game["id"])
         self.assertEqual(len(game["turns"]), 2)
+
+    def test_the_note_shows_recorded_values_without_rendering_them(self):
+        turn = dict(model_id="org/model`x", sampling=dict(temperature="![x](https://host/pixel)", seed=7),
+                    metrics=[], finish_reason="stop")
+        note = turn_note(turn)
+        self.assertIn("temperature `![x](https://host/pixel)`", note)
+        self.assertIn("Model `org/model'x`", note)
+        self.assertIn("seed 7", note)
+        self.assertIn("finish: stop", note)
 
 
 class Manager:
@@ -322,6 +331,15 @@ class PageTests(unittest.TestCase):
         opened = self.fn["open_saved"](str(self.data / f"{game['id']}.json"), "owner")[0]
         self.assertEqual(opened["parent"]["id"], game["id"])
         self.assertEqual(len(opened["turns"]), 2)
+
+    def test_a_save_wrong_below_its_shape_is_refused_whole(self):
+        game = list(self.fn["start_game"](SYSTEM, "go", "owner", 1.0, 7, 64))[-1][0]
+        broken = json.loads(saved(game))
+        broken["turns"][0]["metrics"] = [{}]
+        path = self.data / "broken.json"
+        path.write_text(json.dumps(broken))
+        with self.assertRaisesRegex(gr.Error, "not a valid saved hangman game"):
+            self.fn["open_saved"](str(path), "owner")
 
 
 if __name__ == "__main__":

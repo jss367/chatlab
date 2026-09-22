@@ -2,6 +2,7 @@
 import copy
 import json
 import logging
+import re
 import threading
 import time
 
@@ -16,6 +17,7 @@ from .game import (
 logger = logging.getLogger(__name__)
 
 STALE_TOKEN = "Select a token in the current response again."
+MALFORMED = "That file is not a valid saved hangman game."
 EXAMPLES = 12
 
 CSS = """
@@ -107,15 +109,27 @@ def turn_choices(game):
     return [(f"Response {n} · {t['guess'][:40]}", n - 1) for n, t in enumerate(game["turns"], 1)]
 
 
+def shown(value):
+    """A recorded value as Markdown that shows its characters and nothing else.
+
+    An opened file can carry any string here, and in the note a string such as
+    ``![x](https://host/pixel)`` would load that address. Anything beyond plain
+    words and numbers goes in a code span, which Markdown never renders.
+    """
+    text = " ".join(str(value).split())
+    return text if re.fullmatch(r"[A-Za-z0-9.+ -]*", text) else "`" + text.replace("`", "'") + "`"
+
+
 def turn_note(turn):
     sampling = turn.get("sampling", {})
-    parts = [f"Model `{turn.get('model_id') or 'unrecorded'}`",
-             f"temperature {sampling.get('temperature')}", f"seed {sampling.get('seed')}",
+    parts = [f"Model {shown(turn.get('model_id') or 'unrecorded')}",
+             f"temperature {shown(sampling.get('temperature'))}", f"seed {shown(sampling.get('seed'))}",
              f"{len(turn.get('metrics', [])) - turn.get('forced_prefix_tokens', 0)} sampled tokens",
-             f"finish: {turn.get('finish_reason') or 'running'}"]
+             f"finish: {shown(turn.get('finish_reason') or 'running')}"]
     if turn.get("branch"):
         branch = turn["branch"]
-        parts.append(f"branched at token {branch['token_index'] + 1} with {branch['forced_tokens']} replayed tokens")
+        parts.append(f"branched at token {branch['token_index'] + 1} with {shown(branch['forced_tokens'])} "
+                     "replayed tokens")
     return " · ".join(parts)
 
 
@@ -399,10 +413,18 @@ def build_page(context):
             game = load(path)
         except (OSError, ValueError) as exc:
             raise gr.Error(str(exc)) from exc
-        # A new id, so continuing it never writes over the file that was opened.
-        child = reopened(game)
-        return (*frame(child, session_id, len(child["turns"]) - 1 if child["turns"] else None, path=None),
-                *cleared())
+        except (AttributeError, IndexError, KeyError, TypeError) as exc:
+            raise gr.Error(MALFORMED) from exc
+        # load checks the shape of the file, not every field of every token it
+        # records, so the game is rendered here in full before any of it is
+        # shown: a file wrong deeper down is refused whole, not half drawn.
+        try:
+            # A new id, so continuing it never writes over the file that was opened.
+            child = reopened(game)
+            shown_game = frame(child, session_id, len(child["turns"]) - 1 if child["turns"] else None, path=None)
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+            raise gr.Error(MALFORMED) from exc
+        return (*shown_game, *cleared())
 
     upload.upload(open_saved, [upload, owner], [*outputs, *inspector], **serial)
 
