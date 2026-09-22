@@ -74,6 +74,11 @@ def check_checkpoint(config, maze):
     if not isinstance(when, dict) or len(when) != 1 or set(when) - {"cell", "moves"}:
         raise ValueError("Say when steering starts: at a cell, or after a number of accepted moves.")
     if "cell" in when:
+        # checked_cell reads None as no cell, which is right for an optional
+        # waypoint and wrong here: a trigger at no cell would never fire, and
+        # the run would read as steered while nothing steered it.
+        if when["cell"] is None:
+            raise ValueError("Name the cell steering starts at.")
         when = {"cell": checked_cell(when["cell"], maze, "steering cell")}
     elif type(when["moves"]) is not int or not 0 <= when["moves"] <= 255:
         raise ValueError("Steering after moves needs a whole number of moves from 0 to 255.")

@@ -148,6 +148,7 @@ class SteeringTests(unittest.TestCase):
                 (dict(steer_when={"cell": [1, 1], "moves": 2}), "Say when steering starts"),
                 (dict(steer_when={"moves": -1}), "0 to 255"),
                 (dict(steer_when={"cell": [0, 3]}), "destination"),
+                (dict(steer_when={"cell": None}), "Name the cell steering starts at"),
                 (dict(steer_responses=-1), "0 to 256"),
                 (dict(steering=dict(VECTOR, vector=[])), "Vector must be"),
                 (dict(steering={k: v for k, v in VECTOR.items() if k != "vector"} | {
