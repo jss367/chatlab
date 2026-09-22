@@ -722,8 +722,8 @@ def batch_rows(rows):
              yes_no(row["waypoint_reached"])] for row in rows]
 
 
-def batch_text(data, done, total, rows, directory, current=None, ended=None):
-    """What the trials pane says about a batch: running, stopped or finished."""
+def batch_text(data, done, total, rows, directory, current=None, ended=None, error=None):
+    """What the trials pane says about a batch: running, stopped, failed or finished."""
     where = f"Runs and summary.csv are written to {as_text(str(directory))}."
     if ended is None and done >= total:
         return f"**All {total} trials ran** · writing the summary.\n\n{where}"
@@ -743,8 +743,11 @@ def batch_text(data, done, total, rows, directory, current=None, ended=None):
         outcomes[row["outcome"]] = outcomes.get(row["outcome"], 0) + 1
     counts = " · ".join(f"{count} {outcome}" for outcome, count in sorted(outcomes.items()))
     head = (f"**Finished {total} trial{'s' if total != 1 else ''}**" if ended == "finished"
+            else f"**Failed after {len(rows)} of {total} trials**" if ended == "failed"
             else f"**Stopped after {len(rows)} of {total} trials**")
-    return (f"{head} of {as_text(data['title'])}{' · ' + counts if counts else ''}\n\n{where} "
+    failed = (f"{as_text(str(error).rstrip('.'))}. What is on disk may not include the last trial. "
+              if ended == "failed" else "")
+    return (f"{head} of {as_text(data['title'])}{' · ' + counts if counts else ''}\n\n{failed}{where} "
             "Open any run under **Load a saved run** to replay it.")
 
 
@@ -1000,7 +1003,7 @@ def _build_page(context):
             raise gr.Error("This batch is already running.")
         buttons = (gr.update(visible=False), gr.update(visible=True))
         done = total = 0
-        rows, directory = [], None
+        rows, directory, failure = [], None, None
         try:
             frames = run_trials(data, context.models, runs_dir(context), control,
                                 source=Path(source).name if source else "")
@@ -1009,14 +1012,21 @@ def _build_page(context):
                        gr.update(value=batch_rows(rows), visible=bool(rows)), gr.skip(), *buttons)
         except (ValueError, OSError) as exc:
             # The model is busy or not loaded, or the batch directory could
-            # not be written. Nothing ran, or what ran is already on disk.
+            # not be written, and nothing ran. Or a run or the summary could
+            # not be written partway, and the batch failed with every row it
+            # had, even the last one, possibly never reaching the disk.
             logger.warning("Could not run the trials in %s: %s", data["title"], exc)
             gr.Warning(str(exc))
             if directory is None:
                 yield gr.skip(), gr.skip(), gr.skip(), gr.update(visible=True), gr.update(visible=False)
                 return
-        ended = "stopped" if control.stop_requested or len(rows) < total else "finished"
-        yield (batch_text(data, done, total, rows, directory, ended=ended),
+            failure = exc
+        # The failure first: one that lands writing the summary after the last
+        # trial leaves every row in place, and read from the count alone that
+        # batch would say it finished.
+        ended = ("failed" if failure is not None else "stopped" if control.stop_requested or len(rows) < total
+                 else "finished")
+        yield (batch_text(data, done, total, rows, directory, ended=ended, error=failure),
                gr.update(value=batch_rows(rows), visible=bool(rows)),
                gr.update(value=downloads(directory), visible=True),
                gr.update(visible=True), gr.update(visible=False))

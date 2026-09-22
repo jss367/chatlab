@@ -162,6 +162,10 @@ class Episode:
     dropped_closures: list = field(default_factory=list)
     pause_requested: bool = False
     stop_requested: bool = False
+    # Why the last write of this run failed, or None once it is on disk. Kept
+    # apart from the detail, which is prose for a reader, so a caller that has
+    # to know whether the file exists does not have to read it back.
+    autosave_error: str | None = None
     busy: bool = False
     replay_only: bool = False
     token_edit: dict | None = None
@@ -317,11 +321,13 @@ class Episode:
             if save_dir:
                 try:
                     self.save(save_dir)
+                    self.autosave_error = None
                 except OSError as exc:
                     self.warn_autosave(str(exc))
 
     def warn_autosave(self, error):
         logger.warning("Autosave of run %s failed: %s", self.run_id, error)
+        self.autosave_error = error
         self.detail += (f" Autosave failed: {error}. Latest changes remain in memory. "
                         "Use Export run JSON to download them, and check the run directory or free disk space.")
 
@@ -853,6 +859,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                 raise
         episode.busy = True
         episode.pause_requested = episode.stop_requested = False
+        episode.autosave_error = None
         episode.phase = "running"
         episode.model_id = episode.model_id or manager.model_id
         episode.load_id = episode.load_id or manager.load_id

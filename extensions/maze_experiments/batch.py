@@ -75,10 +75,14 @@ def summarize(item, episode, seconds, error=None):
         row.update(outcome="refused", detail=str(error))
         return row
     config = episode.config
+    # A run whose last write failed is described here from memory alone. Its
+    # file is missing or holds an earlier autosave, so the row names none
+    # rather than one a reader would open and find disagreeing with it.
+    unsaved = error is None and episode.autosave_error is not None
     model_events = [e for e in episode.events if e["source"] == "model"]
     waypoint_turn = episode.waypoint_turn
     row.update(
-        run_id=episode.run_id, outcome="refused" if error else episode.phase,
+        run_id=episode.run_id, outcome="refused" if error else "unsaved" if unsaved else episode.phase,
         model_moves=episode.moves - episode.supplied_moves, supplied_moves=episode.supplied_moves,
         responses=len(episode.turns), sampled_tokens=episode.sampled_tokens,
         tool_attempts=episode.tool_attempts, rejected_calls=sum(not e["accepted"] for e in model_events),
@@ -89,8 +93,9 @@ def summarize(item, episode, seconds, error=None):
         waypoint_reached="" if config.get("waypoint") is None else waypoint_turn is not None,
         steered_responses=sum(bool(turn.get("steered")) for turn in episode.turns),
         seconds=round(seconds, 1), model_id=episode.model_id or "",
-        run_file="" if error else f"runs/{episode.run_id}.json",
-        detail=str(error) if error else episode.detail)
+        run_file="" if error or unsaved else f"runs/{episode.run_id}.json",
+        detail=str(error) if error else f"Its run could not be saved: {episode.autosave_error}" if unsaved
+        else episode.detail)
     return row
 
 
@@ -132,7 +137,9 @@ def run_trials(data, models, root, control, *, source=""):
     written, and the episode generating now or None. A trial the loaded model
     refuses, such as one whose steering vector was made for another model, is
     recorded as refused and the batch moves on. A stop ends the trial running
-    now and runs no more.
+    now and runs no more. A trial whose run cannot be saved is recorded as
+    unsaved and ends the batch with an OSError, as does a summary that cannot
+    be written, and the manifest then says the batch failed and why.
     """
     session = models.open_session()
     try:
@@ -183,10 +190,20 @@ def run_trials(data, models, root, control, *, source=""):
                 rows.append(summarize(item, episode, time.time() - started, error))
             logger.info("Batch %s: trial %s of %s, %r, %s", directory.name, len(rows), len(items),
                         item["id"], rows[-1]["outcome"])
+            if rows[-1]["outcome"] == "unsaved":
+                # The episode paused itself rather than generate past a write
+                # that failed, and whatever failed it, a full disk most often,
+                # fails every trial after it too.
+                raise OSError(f"The run for trial {item['id']!r} could not be saved: {episode.autosave_error}")
             write_summary(directory, manifest, rows)
             yield len(rows), len(items), rows, directory, None
         manifest["status"] = "stopped" if control.stop_requested else "finished"
+    except Exception as exc:
+        manifest.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+        raise
     except BaseException:
+        # The window closed, or the process is going down: nothing went wrong
+        # with the batch itself, so it reads as stopped rather than failed.
         manifest["status"] = "stopped"
         raise
     finally:

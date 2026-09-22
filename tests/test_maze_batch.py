@@ -9,7 +9,7 @@ from unittest import mock
 import gradio as gr
 
 from extension_api import SteeringError, TokenInspector
-from extensions.maze_experiments import runner
+from extensions.maze_experiments import batch as batch_module, runner
 from extensions.maze_experiments.batch import MANIFEST_NAME, SUMMARY_NAME, BatchControl, downloads, run_trials
 from extensions.maze_experiments.maze import call_text
 from extensions.maze_experiments.page import build_page
@@ -123,6 +123,55 @@ class BatchTests(unittest.TestCase):
         manifest = json.loads((directory / MANIFEST_NAME).read_text())
         self.assertEqual(manifest["status"], "stopped")
         self.assertEqual([row["outcome"] for row in manifest["results"]], ["stopped"])
+
+    def test_a_run_that_cannot_be_saved_is_not_listed_and_fails_the_batch(self):
+        data = self.trials(trial("a"), trial("b"))
+        manager = CountingManager([ARRIVE] * 4)
+        frames = []
+        with mock.patch.object(runner.Episode, "save", side_effect=OSError("No space left on device")):
+            with self.assertRaisesRegex(OSError, "trial 'a' could not be saved"):
+                for frame in run_trials(data, manager, self.root, BatchControl()):
+                    frames.append(frame)
+        directory = frames[-1][3]
+        self.assertFalse(manager.busy)
+        manifest = json.loads((directory / MANIFEST_NAME).read_text())
+        self.assertEqual(manifest["status"], "failed")
+        self.assertIn("No space left", manifest["error"])
+        # The trial after it never started, and the one that ran names no file.
+        [row] = manifest["results"]
+        self.assertEqual((row["trial_id"], row["outcome"], row["run_file"]), ("a", "unsaved", ""))
+        self.assertIn("No space left", row["detail"])
+        self.assertFalse((directory / "runs").exists())
+
+    def test_a_summary_that_cannot_be_written_after_the_last_trial_reads_as_failed(self):
+        data = self.trials(trial("a"))
+        manager = CountingManager([ARRIVE] * 2)
+        context = SimpleNamespace(tokens=TokenInspector(), models=manager, data_dir=self.root,
+                                  navigation=SimpleNamespace(open_models=lambda button, wanted=None: None))
+        with gr.Blocks() as demo:
+            build_page(context)
+        self.addCleanup(demo.close)
+        batch = next(fn for fn in demo.fns.values() if fn.fn is not None and fn.fn.__name__ == "run_batch")
+        real, failures = batch_module.write_summary, []
+
+        def write_summary(directory, manifest, rows):
+            # Only the write that follows the trial, so the one in the cleanup
+            # still records how the batch ended.
+            if rows and manifest["status"] == "running" and not failures:
+                failures.append(True)
+                raise OSError("No space left on device")
+            real(directory, manifest, rows)
+
+        with mock.patch.object(batch_module, "write_summary", write_summary):
+            frames = list(batch.fn(data, BatchControl(), None))
+        status = frames[-1][0]
+        self.assertIn("Failed after 1 of 1 trials", status)
+        self.assertIn("No space left", status)
+        self.assertNotIn("Finished", status)
+        [directory] = (self.root / "batches").iterdir()
+        manifest = json.loads((directory / MANIFEST_NAME).read_text())
+        self.assertEqual(manifest["status"], "failed")
+        self.assertFalse(manager.busy)
 
     def test_a_busy_model_refuses_the_batch_before_anything_is_written(self):
         manager = CountingManager([])
