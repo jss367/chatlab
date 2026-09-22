@@ -1008,8 +1008,12 @@ def _build_page(context):
             frames = run_trials(data, context.models, runs_dir(context), control,
                                 source=Path(source).name if source else "")
             for done, total, rows, directory, current in frames:
+                # The files of an earlier batch are cleared while this one runs,
+                # so the pane never offers them beside another collection's
+                # progress. This batch's own are offered when it ends.
                 yield (batch_text(data, done, total, rows, directory, current),
-                       gr.update(value=batch_rows(rows), visible=bool(rows)), gr.skip(), *buttons)
+                       gr.update(value=batch_rows(rows), visible=bool(rows)),
+                       gr.update(value=None, visible=False), *buttons)
         except (ValueError, OSError) as exc:
             # The model is busy or not loaded, or the batch directory could
             # not be written, and nothing ran. Or a run or the summary could

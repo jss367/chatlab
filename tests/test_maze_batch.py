@@ -234,6 +234,10 @@ class BatchTests(unittest.TestCase):
             list(batch.fn(None, BatchControl(), None))
         frames = list(batch.fn(data, BatchControl(), str(self.root / "trials.json")))
         self.assertTrue(all(len(frame) == len(batch.outputs) for frame in frames))
+        # A second batch in the same session hides the first one's files while
+        # it runs rather than offering them beside its own progress.
+        self.assertTrue(all(frame[2] == dict(__type__="update", value=None, visible=False)
+                            for frame in frames[:-1]))
         status, table, files, run_button, stop_button = frames[-1]
         self.assertIn("Finished 1 trial", status)
         self.assertIn("1 arrived", status)
