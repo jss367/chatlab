@@ -43,6 +43,8 @@ MESSAGE_LIMIT = 280
 MAX_AGENTS = 4
 # An agent stops being asked for responses once it is anything but active.
 AGENT_STATUSES = {"active", "arrived", "abandoned", "cut_off"}
+# What a response that takes no action does to its agent once its round resolves.
+DROPPED = {"no_call": "abandoned", "cut_off": "cut_off"}
 DEFAULT_CONFIG = dict(agents=2, communication=True, team_goal="any", goal_mode="coordinates", goal_hint="",
                       temperature=.7, sampling_seed=20260914, per_turn_tokens=1024, token_budget=16384,
                       round_limit=24)
@@ -253,8 +255,9 @@ def finish_response(episode, turn, stop_ids, max_tokens):
     Returns the action, or None for a response that takes none. A response
     that ends without a call, or is cut off by a limit, takes its agent out of
     the run, as either ends a single-agent episode; its teammates carry on.
+    The agent leaves when the round resolves, so a round that never does
+    leaves it in the team.
     """
-    agent = episode.agents[turn["agent"]]
     sampled = turn["metrics"]
     episode.sampled_tokens += len(sampled)
     turn["sampled_tokens"] = len(sampled)
@@ -264,7 +267,7 @@ def finish_response(episode, turn, stop_ids, max_tokens):
         return None
     if not (sampled and sampled[-1]["token_id"] in stop_ids):
         turn["finish_reason"] = "length" if len(sampled) >= max_tokens else "incomplete_stream"
-        turn["outcome"], agent["status"] = "cut_off", "cut_off"
+        turn["outcome"] = "cut_off"
         return None
     turn["finish_reason"] = "stop"
     text = turn["text"]
@@ -277,7 +280,7 @@ def finish_response(episode, turn, stop_ids, max_tokens):
         text = text.split("<think>", 1)[0]
     args, error = parse_call(text, message_limit=MESSAGE_LIMIT if episode.config["communication"] else None)
     if args is None and error is None:
-        turn["outcome"], agent["status"] = "no_call", "abandoned"
+        turn["outcome"] = "no_call"
         return None
     episode.tool_attempts += 1
     # The response being finished is always the latest one recorded.
@@ -293,6 +296,9 @@ def resolve_round(episode, actions):
     round, which is every teammate that made a call in it.
     """
     round_index = episode.rounds
+    for turn in episode.turns:
+        if turn["round"] == round_index and turn.get("outcome") in DROPPED:
+            episode.agents[turn["agent"]]["status"] = DROPPED[turn["outcome"]]
     sent = []
     for action in actions:
         agent = episode.agents[action["agent"]]
@@ -352,11 +358,13 @@ def discard_round(episode):
     """Mark the responses of a round that will never resolve as not applied.
 
     None of it is applied: the agents that answered would otherwise have moved
-    while their teammates had not. A resolved round has nothing left to mark,
-    so this is safe to call however the stream ends.
+    while their teammates had not. That includes a response that made no call
+    or was cut off, whose agent would otherwise have left the team in a round
+    that never happened; its text is kept either way. A resolved round has
+    nothing left to mark, so this is safe to call however the stream ends.
     """
     for waiting in episode.turns:
-        if waiting["round"] == episode.rounds and "event" not in waiting and not waiting.get("outcome"):
+        if waiting["round"] == episode.rounds and "event" not in waiting:
             waiting["outcome"] = "not_applied"
 
 

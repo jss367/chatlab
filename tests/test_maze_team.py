@@ -157,6 +157,18 @@ class TeamEpisodeTests(unittest.TestCase):
         self.assertEqual([turn["outcome"] for turn in ep.turns], ["not_applied", "not_applied"])
         self.assertEqual([row[4] for row in team_timeline(ep)[1:]], ["Not applied", "Not applied"])
 
+    def test_a_discarded_round_takes_nobody_out_of_the_team(self):
+        # agent-1 makes no call, then agent-2's response fails, so the round
+        # never resolves and agent-1 never leaves.
+        manager = Manager([say("I give up.")])
+        ep = team()
+        list(stream_team(ep, manager))
+        self.assertEqual(ep.phase, "error")
+        self.assertEqual([turn["outcome"] for turn in ep.turns], ["not_applied", "not_applied"])
+        self.assertEqual([agent["status"] for agent in ep.agents], ["active", "active"])
+        self.assertEqual(ep.turns[0]["text"], "I give up.")
+        self.assertIn("agent-1 · active", team_board(ep))
+
     def test_every_agent_samples_under_its_own_seed(self):
         manager = Manager([call("south"), call("south"), call("east"), call("east")])
         list(stream_team(team(sampling_seed=5, round_limit=2), manager))
