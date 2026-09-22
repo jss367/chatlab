@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
+from types import SimpleNamespace
 
 import gradio as gr
 
@@ -240,6 +241,16 @@ class BatchExportTests(unittest.TestCase):
         rows = list(csv.DictReader(io.StringIO(traces_to_csv([whole, stopped]))))
 
         self.assertEqual([row["stopped"] for row in rows], ["False", "True"])
+
+    def test_the_table_says_which_answers_ran_out_of_positions(self):
+        whole = sample_trace(seed=1)
+        limited = sample_trace(seed=2)
+        limited["sampling"]["position_limit"] = True
+
+        rows = list(csv.DictReader(io.StringIO(traces_to_csv([whole, limited], [1, 2]))))
+
+        self.assertEqual([row["position_limit"] for row in rows], ["False", "True"])
+        self.assertEqual([row["stopped"] for row in rows], ["False", "False"])
 
     def test_prompts_with_different_candidate_counts_share_one_header(self):
         # Top-k can be changed between runs, and a shorter candidate list must
@@ -619,6 +630,24 @@ class RunPromptsTests(unittest.TestCase):
         trace = trace_of(final[FILES])
 
         self.assertNotIn("stopped", trace["sampling"])
+
+    def test_a_prompt_cut_off_by_the_position_table_says_so(self):
+        # As a stopped answer, it may not be the whole one, and an experiment
+        # reading the trace as finished would mix it in with those that are.
+        runtime.MANAGER = loaded_manager([0, 1], PIECES, EOS_ID)
+        runtime.MANAGER.model.config = SimpleNamespace(max_position_embeddings=16)
+        sampling = (0.0, 1.0, 0, 0.0, 40, 42, False)
+
+        final = list(app.run_prompts("say hello", [], "", "", *sampling))[-1]
+        trace = trace_of(final[FILES])
+
+        self.assertTrue(trace["sampling"].get("position_limit"))
+        self.assertNotIn("stopped", trace["sampling"])
+
+    def test_a_finished_prompt_is_not_marked_position_limited(self):
+        trace = trace_of(self.run_batch("say hello")[-1][FILES])
+
+        self.assertNotIn("position_limit", trace["sampling"])
 
     def test_stopping_publishes_what_the_run_wrote(self):
         run = app.run_prompts("first\n\nsecond", [], "", "", *SAMPLING)

@@ -797,6 +797,17 @@ class CompletionShapeTests(ApiTestCase):
 
         self.assertEqual(body["choices"][0]["finish_reason"], "stop")
 
+    def test_a_response_cut_off_by_the_position_table_says_length(self):
+        # Two tokens against a ceiling of 100: the count alone reads as a
+        # finished answer.
+        self.manager.updates = [
+            replace(self.manager.updates[0], ends_on_position_limit=True)
+        ]
+
+        body = self.answer(max_tokens=100)
+
+        self.assertEqual(body["choices"][0]["finish_reason"], "length")
+
     def test_the_measurements_are_left_out_until_they_are_asked_for(self):
         self.assertIsNone(self.answer()["choices"][0]["logprobs"])
 

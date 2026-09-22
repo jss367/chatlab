@@ -806,11 +806,36 @@ def _load_cached_model(cleaned: str, precision: str):
     )
 
 
+UNLOAD_WHILE_GENERATING = (
+    "The model is answering a message. Press Stop, or wait for the reply to "
+    "finish, before unloading it."
+)
+UNLOAD_WHILE_LOADING = "A load is under way. Wait for it to finish before unloading."
+
+
 def unload_model():
-    if not runtime.MANAGER.in_memory:
-        return status_card("No model loaded", "There is nothing to unload.")
-    logger.info("Unload requested for %s", runtime.MANAGER.model_id or "the loaded model")
-    runtime.MANAGER.unload()
+    """Unload the model, or refuse while a reply or a load has it.
+
+    Waiting on the model lock instead would hold this handler for the rest of
+    a reply and then pull the model out before the reply's trace was written,
+    leaving it with no tokenizer, device or precision; during a load it would
+    remove the model the moment it arrived.
+    """
+
+    # Claimed before the emptiness check: a load clears the old model before
+    # it reads the new one, so a model-less manager can still be mid-load.
+    held = runtime.MANAGER.claim_generation()
+    if held is not None:
+        logger.info("Unload refused: %s has the model", held)
+        reason = occupied_reason(held, UNLOAD_WHILE_LOADING, UNLOAD_WHILE_GENERATING)
+        return status_card("Cannot unload now", reason, "error")
+    try:
+        if not runtime.MANAGER.in_memory:
+            return status_card("No model loaded", "There is nothing to unload.")
+        logger.info("Unload requested for %s", runtime.MANAGER.model_id or "the loaded model")
+        runtime.MANAGER.unload()
+    finally:
+        runtime.MANAGER.release_generation()
     return status_card("Model unloaded", "Model memory has been released.", "success")
 
 

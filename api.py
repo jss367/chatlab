@@ -520,6 +520,8 @@ def finish_reason(update, sampling: dict) -> str:
         return "stop"
     if update.ends_on_stop_token:
         return "stop"
+    if update.ends_on_position_limit:
+        return "length"
     generated = len(update.metrics) - update.forced_prefix_tokens
     return "length" if generated >= sampling["max_new_tokens"] else "stop"
 

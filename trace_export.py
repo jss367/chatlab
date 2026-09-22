@@ -144,10 +144,10 @@ def _rows_to_csv(
     ]
     columns = (
         # A batch's rows carry the prompt they answered and whether that
-        # answer was cut short, because the table is read on its own: a
-        # reader who never opens the traces would otherwise take a stopped
-        # answer for a whole one.
-        (["prompt_index", "stopped"] if indexes is not None else [])
+        # answer was cut short, by Stop or by the model's position table,
+        # because the table is read on its own: a reader who never opens the
+        # traces would otherwise take a truncated answer for a whole one.
+        (["prompt_index", "stopped", "position_limit"] if indexes is not None else [])
         + METADATA_COLUMNS
         + SAMPLING_COLUMNS
         + TOKEN_COLUMNS
@@ -166,12 +166,16 @@ def _rows_to_csv(
         writer.writeheader()
     numbers = list(indexes) if indexes is not None else [None] * len(traces)
     for number, trace in zip(numbers, traces):
-        stopped = bool((trace.get("sampling") or {}).get("stopped"))
+        sampling = trace.get("sampling") or {}
+        cut_short = {
+            "stopped": bool(sampling.get("stopped")),
+            "position_limit": bool(sampling.get("position_limit")),
+        }
         for row in _token_rows(trace):
             writer.writerow(
                 row
                 if number is None
-                else row | {"prompt_index": number, "stopped": stopped}
+                else row | {"prompt_index": number} | cut_short
             )
 
     return output.getvalue()

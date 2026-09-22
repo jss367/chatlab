@@ -7,6 +7,7 @@ import unittest
 from dataclasses import replace
 from unittest import mock
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 
 import gradio as gr
@@ -2328,6 +2329,32 @@ class FirstFrameWindowTests(unittest.TestCase):
                 "question the running generation had already added: "
                 f"{[turn['content'] for turn in published]}"
             )
+
+
+class PositionLimitStatusTests(unittest.TestCase):
+    """A reply cut off by the model's position table says so."""
+
+    def setUp(self):
+        self.original = runtime.MANAGER
+        self.addCleanup(setattr, runtime, "MANAGER", self.original)
+
+    def test_the_status_names_the_position_limit(self):
+        runtime.MANAGER = loaded_manager([0, 1])
+        runtime.MANAGER.model.config = SimpleNamespace(max_position_embeddings=16)
+        settings = dict(FIXED, max_new_tokens=8192)
+
+        final = list(app.chat("hi", [], *settings.values()))[-1]
+
+        self.assertIn(app.POSITION_LIMIT_NOTE, final[STATUS])
+        self.assertEqual(len(final[TURNS][-1]["tokens"]), 16)
+
+    def test_a_reply_that_fits_says_nothing_about_it(self):
+        runtime.MANAGER = loaded_manager([0, 1])
+        runtime.MANAGER.model.config = SimpleNamespace(max_position_embeddings=16)
+
+        final = list(app.chat("hi", [], *SETTINGS))[-1]
+
+        self.assertNotIn(app.POSITION_LIMIT_NOTE, final[STATUS])
 
 
 class EmptyResponseTests(unittest.TestCase):
