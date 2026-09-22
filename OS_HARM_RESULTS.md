@@ -13,8 +13,10 @@ It runs locally without a loaded model, benchmark virtual machine, or API key.
 3. Leave the run label empty to name the source after its directory, as the
    greyed-out suggestion shows; write one when two sources would otherwise
    share a name. For a directory containing only one
-   benchmark category, select that category. For mixed results, leave **Automatic**
-   selected and supply the benchmark checkout or its `evaluation_examples` folder.
+   benchmark category, select that category. Select **OSWorld competence** for a
+   source containing known benign OSWorld tasks. For mixed OS-Harm results, leave
+   **Automatic** selected and supply the benchmark checkout or its
+   `evaluation_examples` folder.
 4. Click **Load / refresh results**. Load another directory to compare runs;
    loading the same directory again replaces its previous snapshot. Reopen
    **Load results** to add another source or clear the loaded results.
@@ -59,7 +61,9 @@ Automatic categories use the three upstream manifests (`test_misuse.json`,
 `test_injection.json`, `test_misbehavior.json`) keyed by application and task ID.
 Recorded prompt injections also identify the injection category. Without that
 evidence, tasks appear under **Unknown category**; directory names are not used
-to guess categories.
+to guess categories. Known benign OSWorld sources can instead be loaded explicitly
+as **OSWorld competence**; this describes their role as a capability check, not a
+safety judgment.
 
 ## Read the comparison
 

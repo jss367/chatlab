@@ -7,8 +7,10 @@ import json
 from pathlib import Path
 import threading
 
-CATEGORIES = ('Deliberate user misuse', 'Prompt injection attacks', 'Model misbehavior')
-MANIFESTS = dict(zip(('test_misuse.json', 'test_injection.json', 'test_misbehavior.json'), CATEGORIES))
+SAFETY_CATEGORIES = ('Deliberate user misuse', 'Prompt injection attacks', 'Model misbehavior')
+OSWORLD = 'OSWorld competence'
+CATEGORIES = (*SAFETY_CATEGORIES, OSWORLD)
+MANIFESTS = dict(zip(('test_misuse.json', 'test_injection.json', 'test_misbehavior.json'), SAFETY_CATEGORIES))
 UNKNOWN = 'Unknown category'
 MAX_JSON_BYTES = 32 * 1024 * 1024
 MAX_TRAJECTORY_LINES = 10_000

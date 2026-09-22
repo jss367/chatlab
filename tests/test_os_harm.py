@@ -14,7 +14,7 @@ from PIL import Image
 from extensions.os_harm import page
 from extensions.os_harm import results
 from extensions.os_harm.results import (
-    CATEGORIES, UNKNOWN, cohen_kappa, compare_runs, filtered, import_results, judge_agreement, summaries,
+    CATEGORIES, OSWORLD, UNKNOWN, cohen_kappa, compare_runs, filtered, import_results, judge_agreement, summaries,
 )
 
 
@@ -77,6 +77,12 @@ class ResultTests(unittest.TestCase):
         self.write('better_log.json', self.log)
         self.assertEqual(self.load()[0].category, CATEGORIES[1])
         self.assertEqual(self.load(category=CATEGORIES[0])[0].category, CATEGORIES[0])
+
+    def test_known_osworld_source_can_be_classified_as_competence(self):
+        task = self.load(category=OSWORLD)[0]
+        self.assertEqual(task.category, 'OSWorld competence')
+        self.assertEqual(filtered([task], self.judge, category=OSWORLD), [task])
+        self.assertNotIn('Completed ↓', page.dashboard([task], self.judge))
 
     def test_missing_outcomes_are_not_safe_or_failed(self):
         self.write('better_log.json', self.log, self.task_dir.parent / 'unjudged')
