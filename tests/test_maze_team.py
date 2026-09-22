@@ -213,10 +213,33 @@ class TeamEpisodeTests(unittest.TestCase):
         moved["agents"][1]["position"] = [0, 1]
         with self.assertRaisesRegex(ValueError, "final position"):
             from_payload(moved)
-        teleported = json.loads(json.dumps(saved))
-        teleported["events"][0]["after"] = [2, 2]
-        with self.assertRaisesRegex(ValueError, "invalid transition"):
-            from_payload(teleported)
+        def forged(change):
+            # A forgery rewrites a move in both places the run records it.
+            copy = json.loads(json.dumps(saved))
+            for event in (copy["events"][0], copy["turns"][copy["events"][0]["turn"]]["event"]):
+                change(event)
+            return copy
+
+        with self.assertRaisesRegex(ValueError, "records something other"):
+            from_payload(forged(lambda event: event.update(after=[2, 2])))
+        with self.assertRaisesRegex(ValueError, "records something other"):
+            from_payload(forged(lambda event: event.update(arrived=True)))
+        with self.assertRaisesRegex(ValueError, "records something other"):
+            from_payload(forged(lambda event: event.update(progress=not event["progress"])))
+        with self.assertRaisesRegex(ValueError, "does not belong"):
+            loose = json.loads(json.dumps(saved))
+            loose["events"][0]["after"] = [0, 0]
+            from_payload(loose)
+        with self.assertRaisesRegex(ValueError, "messages do not match"):
+            from_payload(forged(lambda event: event.update(message="a different plan")))
+        with self.assertRaisesRegex(ValueError, "messages do not match"):
+            quiet = json.loads(json.dumps(saved))
+            quiet["mail"] = []
+            from_payload(quiet)
+        with self.assertRaisesRegex(ValueError, "status does not match"):
+            claimed = json.loads(json.dumps(saved))
+            claimed["agents"][1]["status"] = "arrived"
+            from_payload(claimed)
         prompt = json.loads(json.dumps(saved))
         prompt["agents"][0]["messages"][1]["content"] = "Something else."
         with self.assertRaisesRegex(ValueError, "agents do not match"):

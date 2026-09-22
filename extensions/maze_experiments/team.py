@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from .maze import SYSTEM, TOOLS, Maze, apply_call, default_instruction, goal_instruction, parse_call
+from .maze import DIRECTIONS, SYSTEM, TOOLS, Maze, apply_call, default_instruction, goal_instruction, parse_call
 from extension_api import write_private_text
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,11 @@ MAX_AGENTS = 4
 AGENT_STATUSES = {"active", "arrived", "abandoned", "cut_off"}
 # What a response that takes no action does to its agent once its round resolves.
 DROPPED = {"no_call": "abandoned", "cut_off": "cut_off"}
+# What parse_call refuses and what the simulator refuses, the only reasons a
+# saved call can have been rejected for.
+PARSE_ERRORS = {"malformed_or_multiple_calls", "text_after_tool_call", "invalid_json", "invalid_tool_schema",
+                "invalid_arguments", "message_too_long"}
+REJECTIONS = PARSE_ERRORS | {"already_arrived", "wrong_maze", "blocked_move"}
 DEFAULT_CONFIG = dict(agents=2, communication=True, team_goal="any", goal_mode="coordinates", goal_hint="",
                       temperature=.7, sampling_seed=20260914, per_turn_tokens=1024, token_budget=16384,
                       round_limit=24)
@@ -511,9 +516,11 @@ def stream_team(episode, models, *, single_step=False, save_dir=None):
 def from_payload(data):
     """A saved team run, rebuilt for replay from the moves it records.
 
-    Positions are never taken as written. Each agent's path is replayed
-    through the simulator from the start, and a file whose agents end
-    anywhere their own recorded moves do not put them is refused.
+    Nothing the simulator decides is taken as written. Each agent's path is
+    replayed through the simulator from the start, every recorded move is
+    compared whole with the one the simulator makes, and the messages, the
+    final positions and each agent's status are rebuilt from those moves and
+    the responses that made them. A file that disagrees anywhere is refused.
     """
     if not isinstance(data, dict) or data.get("format") != FORMAT:
         raise ValueError("Choose a ChatLab maze team run JSON file.")
@@ -535,29 +542,68 @@ def from_payload(data):
         raise ValueError("The run's agents do not match the team its configuration describes.")
     if type(result.rounds) is not int or result.rounds < 0:
         raise ValueError("The run's round count must be a non-negative integer.")
+    turns = result.turns
+    if not isinstance(turns, list) or any(
+            not isinstance(t, dict) or type(t.get("agent")) is not int or not 0 <= t["agent"] < len(agents)
+            or type(t.get("round")) is not int or not 0 <= t["round"] <= result.rounds for t in turns):
+        raise ValueError("Each saved response names an agent of the team and a round of the run.")
+    if sum("event" in t for t in turns) != len(result.events):
+        raise ValueError("The saved moves and the responses that made them do not match.")
+    mode, communicate = result.config["goal_mode"], result.config["communication"]
     positions = [maze.start] * len(agents)
-    previous = 0
+    previous, mail = 0, []
     for event in result.events:
-        index, round_index = event.get("agent"), event.get("round")
+        if not isinstance(event, dict):
+            raise ValueError("Each saved move must be an object.")
+        index, round_index, turn_index = event.get("agent"), event.get("round"), event.get("turn")
         if type(index) is not int or not 0 <= index < len(agents):
             raise ValueError("A saved move names an agent the team does not have.")
         if type(round_index) is not int or not previous <= round_index < result.rounds:
             raise ValueError("The saved moves are not in round order.")
+        if (type(turn_index) is not int or not 0 <= turn_index < len(turns) or turns[turn_index].get("event") != event
+                or (turns[turn_index]["agent"], turns[turn_index]["round"]) != (index, round_index)):
+            raise ValueError("A saved move does not belong to the response that records it.")
         previous = round_index
-        if tuple(event["before"]) != positions[index]:
-            raise ValueError("The saved path contains a position mismatch.")
-        if event["accepted"]:
-            mode = result.config["goal_mode"]
-            actual = apply_call(maze, positions[index], {"maze_id": maze.tool_id(mode), "direction": event["direction"]},
-                                goal_mode=mode)
-            if not actual["accepted"] or actual["after"] != event["after"]:
+        # Every field the simulator decides is decided again here, so a file
+        # cannot report an arrival, an error or progress its own path never had.
+        position = positions[index]
+        if event.get("accepted") is True:
+            expected = apply_call(maze, position, {"maze_id": maze.tool_id(mode), "direction": event.get("direction")},
+                                  goal_mode=mode) if event.get("direction") in DIRECTIONS else {"accepted": False}
+            if not expected["accepted"]:
                 raise ValueError("The saved path contains an invalid transition.")
-            positions[index] = tuple(event["after"])
-        elif tuple(event["after"]) != positions[index]:
-            raise ValueError("A rejected action changed the saved position.")
-    for agent, position in zip(agents, positions):
+        elif event.get("error") in REJECTIONS:
+            expected = {"accepted": False, "before": list(position), "after": list(position), "error": event["error"],
+                        "arrived": False, "progress": False}
+        else:
+            raise ValueError("A saved move is neither a legal move nor a rejection the simulator makes.")
+        expected.update(source="model", agent=index, round=round_index, turn=turn_index)
+        if "message" in event:
+            message = event["message"]
+            if (not communicate or not isinstance(message, str) or message != message.strip() or not message
+                    or len(message) > MESSAGE_LIMIT or event.get("error") in PARSE_ERRORS):
+                raise ValueError("A saved move carries a message no call of this run could have sent.")
+            expected["message"] = message
+            mail.append((round_index, index, message))
+        if event != expected:
+            raise ValueError("A saved move records something other than what the simulator did.")
+        positions[index] = tuple(expected["after"])
+    # A message reaches every teammate that made a call in its round.
+    callers = {}
+    for event in result.events:
+        callers.setdefault(event["round"], []).append(event["agent"])
+    names = [agent["name"] for agent in agents]
+    if result.mail != [dict(round=r, sender=names[i], text=text, to=[names[j] for j in callers[r] if j != i])
+                       for r, i, text in mail]:
+        raise ValueError("The run's messages do not match the calls that sent them.")
+    for index, (agent, position) in enumerate(zip(agents, positions)):
         if tuple(agent.get("position", ())) != position:
             raise ValueError("An agent's saved final position does not match its path.")
+        dropped = [DROPPED[t["outcome"]] for t in turns
+                   if t["agent"] == index and t["round"] < result.rounds and t.get("outcome") in DROPPED]
+        status = "arrived" if position == maze.goal else dropped[-1] if dropped else "active"
+        if agent["status"] != status:
+            raise ValueError("An agent's saved status does not match what its responses did.")
         agent["position"] = position
     result.replay_only = True
     result.viewing, result.selected_turn = -1, None
