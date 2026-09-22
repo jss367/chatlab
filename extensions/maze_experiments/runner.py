@@ -828,20 +828,28 @@ def finish_turn(episode, turn, stop_ids, max_tokens):
         episode.phase, episode.detail = "budget", "The episode reached its token or action limit."
 
 
-def stream_episode(episode, models, *, single_step=False, save_dir=None):
+def stream_episode(episode, models, *, single_step=False, save_dir=None, session=None):
+    """Generate the episode's responses, yielding it after each change.
+
+    ``session`` is a model session the caller already holds and keeps: a batch
+    of trials holds one for every episode it runs, so nothing else can take
+    the model or load another between two trials. Without one, the episode
+    opens its own session and closes it when it stops.
+    """
     with episode.lock:
         if episode.busy:
             raise ValueError("This episode is already generating. Pause it before changing the run.")
         if episode.phase in TERMINAL or episode.replay_only:
             raise ValueError("Start a new episode to run again. This episode is finished or is a saved replay. Use Play or Next to inspect its recorded responses.")
-        manager = models.open_session()
+        manager = session or models.open_session()
         # Steering can start several responses in, so a vector this load
         # cannot take is refused before the run starts rather than there.
         if steering_active(episode.config):
             try:
                 manager.check_steering(episode.config["steering"])
             except BaseException:
-                manager.close()
+                if session is None:
+                    manager.close()
                 raise
         episode.busy = True
         episode.pause_requested = episode.stop_requested = False
@@ -1016,7 +1024,8 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             # will now never reach rather than a queue it emptied silently.
             if episode.phase in TERMINAL:
                 abandon_closure(episode)
-            manager.close()
+            if session is None:
+                manager.close()
             autosave()
             if autosave_error is not None:
                 episode.warn_autosave(autosave_error)
