@@ -218,10 +218,14 @@ def parse_cell(text, label):
 
 def checkpoint_values(ep):
     """The waypoint and steering controls in the order `checkpoint_controls`
-    lists them, then the vector note, so a loaded run replaces those too."""
+    lists them, then the vector note, so a loaded run replaces those too. A
+    vector carried switched off fills Steer as Off, because steering_config
+    switches on any vector it is handed a mode for, and a new episode from
+    these controls would then steer where the run it was filled from did not."""
     config = ep.config
     vector, when = config.get("steering"), config.get("steer_when") or {}
-    mode = "off" if vector is None else "cell" if "cell" in when else "moves"
+    off = vector is None or not vector.get("enabled", True)
+    mode = "off" if off else "cell" if "cell" in when else "moves"
     return (cell_text(config.get("waypoint")), vector,
             vector["strength"] if vector else 1.0, vector["layer"] if vector else 0,
             mode, cell_text(when.get("cell")), when.get("moves", 3), config.get("steer_responses", 1),

@@ -9,7 +9,8 @@ import gradio as gr
 
 from extensions.maze_experiments.dynamic_maze import changing
 from extensions.maze_experiments.maze import Maze, call_text, generate
-from extensions.maze_experiments.page import board, build_page, cell_text, parse_cell, status, timeline
+from extensions.maze_experiments.page import (board, build_page, cell_text, checkpoint_values, parse_cell, status,
+                                              timeline)
 from extensions.maze_experiments.runner import Episode, fork_token_edit, from_payload, stream_episode
 from extensions.maze_experiments.trials import FORMAT as TRIALS_FORMAT, prepare_trial, read_trials
 from extension_api import ModelService, SteeringError, TokenInspector
@@ -302,6 +303,11 @@ class PageTests(unittest.TestCase):
         start = 16
         self.assertEqual(loaded[start:start + 8], ("1, 1", VECTOR, 4.0, 3, "cell", "1, 1", 3, 2))
         self.assertIn("layer 3", loaded[start + 8])
+
+    def test_a_vector_carried_switched_off_fills_steer_as_off(self):
+        values = checkpoint_values(Episode(ROOM, checkpoint(steering=dict(VECTOR, enabled=False))))
+        self.assertEqual(values[1:5], (dict(VECTOR, enabled=False), 4.0, 3, "off"))
+        self.assertEqual(checkpoint_values(Episode(ROOM, checkpoint()))[4], "cell")
 
 
 if __name__ == "__main__":
