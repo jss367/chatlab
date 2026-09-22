@@ -23,6 +23,7 @@ from ui.common import (
     failure_status,
 )
 from ui.panel import (
+    code_span,
     current_strip_generation,
     event_index,
 )
@@ -379,21 +380,21 @@ def inspect_layers(
         layer_count = len(insight["attention"])
         layer = min(max(int(layer or 0), 0), layer_count)
         where = "Prompt token" if target["strip"] == "prompt" else "Token"
-        shown = html.escape(repr(insight["token_text"]))
+        shown = code_span(repr(insight["token_text"]))
         read = len(insight["layers"]) - 1
         status = (
-            f"{where} {position + 1}: <code>{shown}</code>, read through {read} "
+            f"{where} {position + 1}: {shown}, read through {read} "
             f"layers in {time.monotonic() - started:.1f}s."
         )
         if insight.get("kind") == "jacobian":
             window = len((insight.get("slice") or {}).get("tokens") or [])
             status = (
-                f"{where} {position + 1}: <code>{shown}</code>, read after processing this token "
+                f"{where} {position + 1}: {shown}, read after processing this token "
                 f"at {len(insight['layers'])} fitted layers, over {window} positions, "
                 f"in {time.monotonic() - started:.1f}s."
             )
             if insight.get("recalled"):
-                status = f"{status} Using the remembered lens <code>{html.escape(insight['recalled'])}</code>."
+                status = f"{status} Using the remembered lens {code_span(str(insight['recalled']))}."
         elif not read:
             status = f"{status} {INSPECT_OUTPUT_ONLY}"
         if not layer_count and insight.get("kind") != "jacobian":
@@ -520,7 +521,7 @@ def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):
     finally:
         runtime.MANAGER.release_generation()
     status = (
-        f"Imported for `{html.escape(imported['model_id'])}`: "
+        f"Imported for {code_span(str(imported['model_id']))}: "
         f"{imported['layers']} fitted layers, {imported['n_prompts']:,} fitting prompts."
     )
     # Copied only once the file has passed every check, so a rejected upload

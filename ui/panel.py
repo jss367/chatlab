@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import re
 import threading
 from dataclasses import dataclass
 from string import punctuation
@@ -413,6 +414,35 @@ def as_plain_text(text: str) -> str:
     return html.escape(text, quote=False).translate(MARKDOWN_LITERAL)
 
 
+def code_span(text: str) -> str:
+    """``text`` as a Markdown code span that holds every character it was given.
+
+    A token is whatever the model wrote or a saved run recorded, so it can
+    carry a backtick of its own. Between single backticks that backtick closes
+    the span early, and whatever follows it - `![x](https://elsewhere/pixel)`,
+    say - is read as Markdown again, an image the browser would fetch the
+    moment the token was clicked. CommonMark closes a span only on a run of
+    exactly as many backticks as opened it, so the fence here is one longer
+    than the longest run in the text. A text that starts or ends with a
+    backtick or a space is padded with one space on each side, which the
+    renderer strips again, so its own backtick cannot be counted as part of
+    the fence and its own spaces survive the stripping. A line break would
+    end a heading, and the span with it, so it is shown as a space, which is
+    what the renderer makes of one inside a span anyway.
+
+    Nothing is HTML-escaped: inside a span the renderer escapes every
+    character itself, and an entity written here would be shown by its
+    spelling, ``&#x27;`` rather than the quote it stands for.
+    """
+
+    text = re.sub(r"\r\n|\r|\n", " ", text)
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    if text.strip(" ") and (text[0] in "` " or text[-1] in "` "):
+        text = f" {text} "
+    return f"{fence}{text or ' '}{fence}"
+
+
 def unscored_explanation(metric: dict) -> str:
     """Why one token carries no measurement, in the words of whatever recorded it.
 
@@ -441,12 +471,15 @@ def unscored_explanation(metric: dict) -> str:
 def describe_token(metric: dict) -> tuple[str, list[list]]:
     """The detail panel and the alternatives table for one token."""
 
-    token_repr = html.escape(repr(metric["text"]))
+    token_repr = code_span(repr(metric["text"]))
+    # The position is a number ChatLab wrote, but a saved run is only a file,
+    # and whatever it holds there lands in a heading.
+    position = as_plain_text(str(metric["position"]))
     where = "Prompt token" if metric["segment"] == "prompt" else "Token"
     if not metric.get("scored", True):
         why = unscored_explanation(metric)
         return (
-            f"### {where} {metric['position']}: `{token_repr}`\n\n"
+            f"### {where} {position}: {token_repr}\n\n"
             f"{why}\n\n"
             f"- **Token ID:** {metric['token_id']:,}",
             [],
@@ -456,7 +489,7 @@ def describe_token(metric: dict) -> tuple[str, list[list]]:
     # so each name carries its own sentence: hovering it, or reaching it with
     # a screen reader, says what the number is.
     summary = (
-        f"### {where} {metric['position']}: `{token_repr}`\n\n"
+        f"### {where} {position}: {token_repr}\n\n"
         f"- **{metric_term('Raw rank')}:** {metric['raw_rank']:,}\n"
         f"- **{metric_term('Raw model probability')}:** {metric['raw_probability']:.5%}\n"
         f"- **{metric_term('Actual sampling probability')}:** {metric['sampling_probability']:.5%}\n"
@@ -662,17 +695,17 @@ def prompt_edit_target(
 
 def branch_ready_text(pick: dict) -> str:
     position = pick["position"]
-    chosen = html.escape(repr(pick["text"]))
-    original = html.escape(repr(pick["original"]))
+    chosen = code_span(repr(pick["text"]))
+    original = code_span(repr(pick["original"]))
     if pick["token_id"] == pick["original_id"]:
         return (
             f"🌱 **Branch ready:** keep the reply through token {position} "
-            f"(`{chosen}`) and let the model continue from there with a fresh "
+            f"({chosen}) and let the model continue from there with a fresh "
             "sample. Press **Branch from token**."
         )
     return (
         f"🌱 **Branch ready:** keep the first {position - 1} token"
-        f"{'' if position == 2 else 's'}, put `{chosen}` where `{original}` was, "
+        f"{'' if position == 2 else 's'}, put {chosen} where {original} was, "
         "and let the model continue. Press **Branch from token**."
     )
 
