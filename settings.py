@@ -18,6 +18,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Mapping
@@ -432,6 +433,9 @@ def read(path: Path | None = None) -> tuple[Settings, dict[str, Any]]:
     except OSError as error:
         logger.warning("Could not read settings from %s: %s", target, error)
         return DEFAULTS, {}
+    except UnicodeDecodeError as error:
+        logger.warning("Ignoring unreadable settings in %s: %s", target, error)
+        return DEFAULTS, {}
     try:
         loaded = json.loads(raw)
     except ValueError as error:
@@ -442,6 +446,30 @@ def read(path: Path | None = None) -> tuple[Settings, dict[str, Any]]:
         return DEFAULTS, {}
     unknown = {key: value for key, value in loaded.items() if key not in _FIELD_NAMES}
     return sanitize(loaded), unknown
+
+
+def _keep_unreadable(destination: Path) -> None:
+    """Move a settings file :func:`read` could not use out of the way of a save.
+
+    A file with a JSON error reads as the defaults, and the save that follows
+    would put them over it: one stray comma in a hand edit would cost every
+    choice the file held, and every key a newer version wrote there. The file
+    is kept beside the new one instead, for the reader to mend.
+    """
+
+    try:
+        loaded = json.loads(destination.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except ValueError:
+        loaded = None
+    if isinstance(loaded, dict):
+        return
+    kept = destination.with_name(
+        f"{destination.name}.unreadable-{time.strftime('%Y%m%d-%H%M%S')}"
+    )
+    os.replace(destination, kept)
+    logger.warning("Kept the unreadable settings file as %s.", kept)
 
 
 def write(
@@ -468,6 +496,7 @@ def write(
         # keeps the file, and leaves the link itself alone.
         destination = target.resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
+        _keep_unreadable(destination)
         # Same directory as the destination: os.replace is only atomic within
         # one filesystem, and the temporary directory is often another.
         handle = tempfile.NamedTemporaryFile(
