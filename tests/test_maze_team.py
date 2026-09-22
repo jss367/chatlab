@@ -259,6 +259,12 @@ class TeamEpisodeTests(unittest.TestCase):
                 altered(lambda c: c["config"].update(per_turn_tokens=10)), "more tokens than its round allowed"),
             "a moved starting position": (
                 altered(lambda c: c["turns"][1].update(position_before=[2, 2])), "starting position"),
+            "a stop with no tokens": (altered(lambda c: [t.update(metrics=[]) for t in c["turns"]]),
+                                      "finish reason its tokens"),
+            "a cut-off short of its cap": (altered(lambda c: c["turns"][0].update(finish_reason="length")),
+                                           "finish reason its tokens"),
+            "another model": (altered(lambda c: c.update(model_id="other/model")), "names a model other"),
+            "another load": (altered(lambda c: c.update(load_id="test/model#9")), "names a model other"),
             "a zeroed token count": (altered(lambda c: c.update(sampled_tokens=0)), "sampled-token count does not"),
             "a zeroed call count": (altered(lambda c: c.update(tool_attempts=0)), "call count does not"),
             "more rounds than the limit": (altered(lambda c: c.update(rounds=99)), "within its round limit"),
