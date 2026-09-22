@@ -11,7 +11,7 @@ from .benchmark import (
     FORMAT, LABELS, MODES, PAPER, THINK_CLOSE, dataset_digest, label_distribution,
     messages_for, parse_response, report,
 )
-from .storage import save_json
+from .storage import download_copy, save_json
 
 # A checkpoint rewrites the whole run, so a batch long enough to want one is
 # also long enough for that write to cost real time. Waiting four times the
@@ -98,9 +98,21 @@ class Runner:
             write_cost = last_write - started
             on_disk = True
 
+        download, copied = None, None
+
         def checkpoint():
-            """The download is the file, and there is no file until one is written."""
-            return str(path) if on_disk else None
+            """A copy of the file to download, and no download until the file is written.
+
+            Copied again only after a save, so a batch of nine hundred cases
+            copies about as often as it writes rather than once per case.
+            """
+            nonlocal download, copied
+            if not on_disk:
+                return None
+            if copied != last_write:
+                download = download_copy(path, download.parent if download else None)
+                copied = last_write
+            return str(download)
 
         try:
             with self.models.open_session() as session:
