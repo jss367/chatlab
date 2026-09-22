@@ -102,6 +102,15 @@ class CheckTests(unittest.TestCase):
                        ("t", "Board: _ _ T"), ("c", "Board: C A T"))
         self.assertIn((4, "A was placed at no position and is now at 2."), check(game))
 
+    def test_a_word_revealed_early_holds_every_later_board_and_word(self):
+        game = game_of(("start", "Board: _ _ _"), ("reveal", "Board: _ _ _\nWord: cat"),
+                       ("d", "Board: D _ _"), ("dog", "Board: D O G\nWord: dog"))
+        problems = check(game)
+        self.assertIn((3, "The revealed word CAT has C at position 1, where the board showed D."), problems)
+        self.assertIn((4, "The word revealed at response 2 was CAT; this one is DOG."), problems)
+        self.assertEqual(check(game_of(("start", "Board: _ _ _"), ("reveal", "Word: cat"),
+                                       ("c", "Board: C _ _"), ("t", "Board: C _ T"))), [])
+
     def test_words_that_fit_respect_revealed_and_ruled_out_letters(self):
         game = game_of(("start", "Board: _ _ _"), ("a", "Board: _ A _"), ("t", "Board: _ A _"))
         self.assertEqual(fitting_words(game, ["cat", "cab", "bad", "ace", "can"]), ["cab", "bad", "can"])
@@ -136,6 +145,17 @@ class RecordTests(unittest.TestCase):
             self.assertNotEqual(opened["id"], game["id"])
             path.write_text(json.dumps({"format": "other"}))
             with self.assertRaisesRegex(ValueError, "not a chatlab-hangman-1"):
+                load(path)
+            # Fields opening the game renders are refused up front, not at render.
+            broken = json.loads(saved(game))
+            del broken["id"]
+            path.write_text(json.dumps(broken))
+            with self.assertRaisesRegex(ValueError, "missing its id"):
+                load(path)
+            broken = json.loads(saved(game))
+            broken["turns"][1]["metrics"] = None
+            path.write_text(json.dumps(broken))
+            with self.assertRaisesRegex(ValueError, "Response 2 of the saved game is malformed"):
                 load(path)
         child = rewound(game, 1)
         self.assertEqual(len(child["turns"]), 1)

@@ -136,11 +136,13 @@ def check(game):
     after they were guessed: that board fixes where the letter is, or that it
     is absent, and every later board and the revealed word have to agree. The
     first readable board sets the length; one of another length is reported
-    as a change of size and checked only for letters nobody guessed.
+    as a change of size and checked only for letters nobody guessed. The
+    first revealed word is held to every board and word that follows it.
     """
     problems = []
     length, shown, placed = None, {}, {}
     guessed, moved, pending = set(), set(), set()
+    first = None
     for number, turn in enumerate(game["turns"], 1):
         kind, value = guess_of(turn["guess"])
         board = turn.get("board")
@@ -182,9 +184,16 @@ def check(game):
                 placed.update((letter, {i for i, cell in enumerate(board) if cell == letter})
                               for letter in pending)
                 pending.clear()
+        # The first word revealed stays the word: the game can go on after it,
+        # and every later board and word has to agree with it too.
         word = turn.get("revealed_word")
-        if word:
-            problems.extend((number, message) for message in _word_problems(word, length, shown, placed))
+        if word and first and word != first[1]:
+            problems.append((number, f"The word revealed at response {first[0]} was {first[1].upper()}; "
+                                     f"this one is {word.upper()}."))
+        for held in dict.fromkeys(w for w in (first and first[1], word) if w):
+            problems.extend((number, message) for message in _word_problems(held, length, shown, placed))
+        if word and not first:
+            first = (number, word)
     # A word revealed again on every later turn contradicts the boards the
     # same way each time; the first turn that said so is the one to read.
     seen = set()
@@ -272,6 +281,16 @@ def load(path):
             or not all(isinstance(t, dict) and isinstance(t.get("guess"), str) and isinstance(t.get("text"), str)
                        for t in turns)):
         raise ValueError("The saved game is missing its prompt or its turns.")
+    if not isinstance(value.get("id"), str):
+        raise ValueError("The saved game is missing its id.")
+    # Opening the game renders these, so a wrong type has to be refused here.
+    for number, turn in enumerate(turns, 1):
+        metrics = turn.get("metrics", [])
+        if (not isinstance(metrics, list) or not all(isinstance(m, dict) for m in metrics)
+                or not isinstance(turn.get("sampling", {}), dict)
+                or not isinstance(turn.get("branch") or {}, dict)
+                or not isinstance(turn.get("forced_prefix_tokens", 0), int)):
+            raise ValueError(f"Response {number} of the saved game is malformed.")
     for turn in turns:
         turn.setdefault("metrics", [])
         finish_turn(turn)
