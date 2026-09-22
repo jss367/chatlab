@@ -1,4 +1,5 @@
 import html
+import re
 import threading
 import time
 import unittest
@@ -100,21 +101,6 @@ class InspectTokenTests(unittest.TestCase):
         self.assertIn("&lt;img", detail)
         self.assertNotIn("<img", detail)
 
-    def test_the_token_is_quoted_with_quotes_rather_than_entities(self):
-        # Inside a Markdown code span an entity is shown as it is spelled, so
-        # the heading once read Token 3: &#x27;<img&#x27;.
-        metric = unscored_metric(
-            position=3, token_id=7, token_text="<img src=x>", fallback_text="<img src=x>"
-        ).to_dict()
-
-        detail, _rows = self.inspect(metric)
-
-        heading = detail.splitlines()[0]
-        self.assertNotIn("&#x27;", heading)
-        self.assertNotIn("`", heading)
-        self.assertNotIn("<img", heading)
-        self.assertIn("\\'&lt;img", heading)
-
     def test_a_recorded_reason_cannot_fetch_a_picture_through_markdown(self):
         # Markdown renders as surely as HTML does: an image in the sentence
         # would have the panel call an address of the file's choosing the
@@ -153,6 +139,128 @@ class InspectTokenTests(unittest.TestCase):
         detail, _rows = self.inspect(metric)
 
         self.assertIn("Nothing came before this token", detail)
+
+
+def read_code_span(markdown: str, start: int) -> tuple[str, int]:
+    """The text a CommonMark code span opening at ``start`` shows, and its end.
+
+    Read the way the renderer reads it: the span closes on the first run of
+    exactly as many backticks as opened it, a line break inside shows as a
+    space, and one space is stripped from each side when both are there.
+    """
+
+    fence = re.match(r"`+", markdown[start:]).group()
+    body = start + len(fence)
+    for run in re.finditer(r"`+", markdown[body:]):
+        if len(run.group()) == len(fence):
+            content = markdown[body:body + run.start()].replace("\n", " ")
+            if content.startswith(" ") and content.endswith(" ") and content.strip(" "):
+                content = content[1:-1]
+            return content, body + run.end()
+    raise AssertionError(f"The code span at {start} never closes: {markdown!r}")
+
+
+def outside_code_spans(markdown: str) -> str:
+    """Everything the renderer would read as Markdown rather than as code."""
+
+    kept, at = [], 0
+    while (start := markdown.find("`", at)) != -1:
+        kept.append(markdown[at:start])
+        _content, at = read_code_span(markdown, start)
+    kept.append(markdown[at:])
+    return "".join(kept)
+
+
+# A backtick closes a single-backtick span early, and the image after it would
+# be rendered - and fetched - the moment the token was clicked.
+INJECTED = "x`![x](https://host/pixel)"
+
+
+class TokenCodeSpanTests(unittest.TestCase):
+    """Token text is shown inside its code span, whatever characters it holds."""
+
+    def test_an_ordinary_token_keeps_its_single_backticks(self):
+        detail, _rows = app.describe_token(
+            unscored_metric(
+                position=3, token_id=7, token_text="a", fallback_text="a"
+            ).to_dict()
+        )
+
+        self.assertTrue(detail.startswith("### Prompt token 3: `'a'`\n\n"))
+
+    def test_a_token_is_not_escaped_twice(self):
+        # Inside a span the renderer escapes every character itself, so an
+        # entity written here would be shown by its spelling.
+        self.assertEqual(panel.code_span(repr("<&>")), "`'<&>'`")
+
+    def test_a_backtick_cannot_end_the_span_and_open_an_image(self):
+        for scored in (False, True):
+            with self.subTest(scored=scored):
+                if scored:
+                    log_probs = np.log(np.array([0.75, 0.25]))
+                    metric = build_metric(
+                        position=3,
+                        token_id=0,
+                        token_text=INJECTED,
+                        fallback_text=INJECTED,
+                        raw_log_probabilities=log_probs,
+                        sampled_probabilities=np.exp(log_probs),
+                        decode_token=str,
+                    ).to_dict()
+                else:
+                    metric = unscored_metric(
+                        position=3, token_id=7, token_text=INJECTED, fallback_text=INJECTED
+                    ).to_dict()
+
+                detail, _rows = app.describe_token(metric)
+                heading = detail.split("\n", 1)[0]
+                opening = heading.index(": ") + 2
+                shown, end = read_code_span(heading, opening)
+
+                self.assertEqual(shown, repr(INJECTED))
+                self.assertEqual(end, len(heading))
+                self.assertNotIn("![", outside_code_spans(detail))
+
+    def test_text_that_starts_or_ends_with_a_backtick_survives_whole(self):
+        for text in ("`", "``", "`a", "a`", "``a```", " `a` ", " a ", "a ```` b"):
+            with self.subTest(text=text):
+                span = panel.code_span(text)
+                shown, end = read_code_span(span, 0)
+
+                self.assertEqual(shown, text)
+                self.assertEqual(end, len(span))
+
+    def test_a_line_break_cannot_split_the_span(self):
+        span = panel.code_span("a\n# b\r\nc\r`d")
+
+        self.assertNotIn("\n", span)
+        self.assertNotIn("\r", span)
+        self.assertEqual(read_code_span(span, 0), ("a # b c `d", len(span)))
+
+    def test_a_saved_position_cannot_write_markdown_into_the_heading(self):
+        metric = unscored_metric(
+            position=3, token_id=7, token_text="a", fallback_text="a"
+        ).to_dict()
+        metric["position"] = "![x](https://host/pixel)"
+
+        detail, _rows = app.describe_token(metric)
+
+        self.assertNotIn("![", outside_code_spans(detail))
+
+    def test_the_branch_note_keeps_both_tokens_inside_their_spans(self):
+        pick = {
+            "position": 4,
+            "token_id": 9,
+            "text": INJECTED,
+            "original_id": 7,
+            "original": "`![y](https://host/other)`",
+        }
+
+        note = app.branch_ready_text(pick)
+
+        self.assertNotIn("![", outside_code_spans(note))
+        self.assertIn(panel.code_span(repr(INJECTED)), note)
+        self.assertIn(panel.code_span(repr(pick["original"])), note)
 
 
 class StubManager:
