@@ -129,6 +129,17 @@ def downloads(directory):
     return found
 
 
+def cut_short(rows, total):
+    """Whether a batch ended before every trial ran to its own end.
+
+    Read off the rows rather than the Stop button. A click that lands after
+    the last trial has finished, while the pane is still showing its final
+    frame, stops nothing, and a completed experiment has to keep reading as
+    finished. A trial ends as stopped only when a stop reached it.
+    """
+    return len(rows) < total or any(row["outcome"] == "stopped" for row in rows)
+
+
 def run_trials(data, models, root, control, *, source=""):
     """Run every trial in ``data`` in order, yielding progress as it goes.
 
@@ -154,7 +165,7 @@ def run_trials(data, models, root, control, *, source=""):
                     model_id=session.model_id, load_id=session.load_id,
                     started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"), finished_at=None,
                     status="running", total=len(items))
-    rows = []
+    rows, completed = [], False
     logger.info("Batch %s: running %s trials from %s with %s", directory.name, len(items),
                 data["title"], session.model_id)
     try:
@@ -197,7 +208,8 @@ def run_trials(data, models, root, control, *, source=""):
                 raise OSError(f"The run for trial {item['id']!r} could not be saved: {episode.autosave_error}")
             write_summary(directory, manifest, rows)
             yield len(rows), len(items), rows, directory, None
-        manifest["status"] = "stopped" if control.stop_requested else "finished"
+        manifest["status"] = "stopped" if cut_short(rows, len(items)) else "finished"
+        completed = True
     except Exception as exc:
         manifest.update(status="failed", error=f"{type(exc).__name__}: {exc}")
         raise
@@ -214,4 +226,9 @@ def run_trials(data, models, root, control, *, source=""):
             write_summary(directory, manifest, rows)
         except OSError as exc:
             logger.warning("Batch %s: could not write its summary: %s", directory.name, exc)
+            # A batch that failed or was closed is already on its way out with
+            # that reason. One that ran to its end would otherwise report
+            # finishing beside a manifest still saying it is running.
+            if completed:
+                raise
         logger.info("Batch %s %s after %s of %s trials", directory.name, manifest["status"], len(rows), len(items))

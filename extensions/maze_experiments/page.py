@@ -12,7 +12,7 @@ import gradio as gr
 
 from .dynamic_maze import ChangingMaze, changing, maze_at_turn
 from .maze import GOAL_MODES, PASSAGES, SYSTEM, TOOLS, default_instruction, generate
-from .batch import BatchControl, downloads, run_trials
+from .batch import BatchControl, cut_short, downloads, run_trials
 from .runner import RECOVERY_DEFAULTS, TERMINAL, Episode, context_messages, fork_token_edit, from_payload, stream_episode
 from .trials import prepare_trial, read_trials
 from extension_api import TokenInspector, icon_classes, read_steering_vector
@@ -1024,8 +1024,7 @@ def _build_page(context):
         # The failure first: one that lands writing the summary after the last
         # trial leaves every row in place, and read from the count alone that
         # batch would say it finished.
-        ended = ("failed" if failure is not None else "stopped" if control.stop_requested or len(rows) < total
-                 else "finished")
+        ended = "failed" if failure is not None else "stopped" if cut_short(rows, total) else "finished"
         yield (batch_text(data, done, total, rows, directory, ended=ended, error=failure),
                gr.update(value=batch_rows(rows), visible=bool(rows)),
                gr.update(value=downloads(directory), visible=True),

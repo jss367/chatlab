@@ -173,6 +173,28 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(manifest["status"], "failed")
         self.assertFalse(manager.busy)
 
+    def test_a_stop_clicked_after_the_last_trial_leaves_the_batch_finished(self):
+        data = self.trials(trial("a"))
+        control = BatchControl()
+        for done, total, rows, directory, current in run_trials(data, CountingManager([ARRIVE] * 2), self.root,
+                                                                 control):
+            if done == total:
+                control.request_stop()
+        self.assertEqual(json.loads((directory / MANIFEST_NAME).read_text())["status"], "finished")
+
+    def test_a_manifest_that_cannot_be_written_at_the_end_fails_the_batch(self):
+        data = self.trials(trial("a"))
+        real = batch_module.write_summary
+
+        def write_summary(directory, manifest, rows):
+            if manifest["status"] != "running":
+                raise OSError("No space left on device")
+            real(directory, manifest, rows)
+
+        with mock.patch.object(batch_module, "write_summary", write_summary):
+            with self.assertRaisesRegex(OSError, "No space left"):
+                list(run_trials(data, CountingManager([ARRIVE] * 2), self.root, BatchControl()))
+
     def test_a_busy_model_refuses_the_batch_before_anything_is_written(self):
         manager = CountingManager([])
         manager.busy = True
