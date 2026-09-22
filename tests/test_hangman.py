@@ -117,6 +117,14 @@ class CheckTests(unittest.TestCase):
         game = game_of(("start", "Board: _ _ _"), ("cot", "No.\nWord: cat"), ("again", "Board: C A T"))
         self.assertIn((3, "T is on the board but was never guessed."), check(game))
 
+    def test_a_word_confirmed_without_a_board_is_held_to_later_boards(self):
+        game = game_of(("start", "Board: _ _ _"), ("cat", "Right!\nWord: cat"), ("more", "Board: _ _ _"))
+        problems = check(game)
+        self.assertIn((3, "C was placed at 1 and is now at no position."), problems)
+        self.assertIn((3, "T was placed at 3 and is now at no position."), problems)
+        consistent = game_of(("start", "Board: _ _ _"), ("cat", "Right!\nWord: cat"), ("more", "Board: C A T"))
+        self.assertEqual(check(consistent), [])
+
     def test_words_that_fit_respect_revealed_and_ruled_out_letters(self):
         game = game_of(("start", "Board: _ _ _"), ("a", "Board: _ A _"), ("t", "Board: _ A _"))
         self.assertEqual(fitting_words(game, ["cat", "cab", "bad", "ace", "can"]), ["cab", "bad", "can"])

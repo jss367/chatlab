@@ -153,8 +153,15 @@ def check(game):
             guessed.add(value)
         elif kind == "word" and value in ("".join(board or ()), turn.get("revealed_word")):
             # A right word guess, confirmed by the board or by a Word: line,
-            # reveals letters nobody guessed one at a time.
+            # reveals letters nobody guessed one at a time, and says where
+            # each one is: the word is on the board from here on, whether or
+            # not this reply drew a board to show it.
             guessed.update(value)
+            if length is None or len(value) == length:
+                for letter in dict.fromkeys(value):
+                    if letter not in placed:
+                        placed[letter] = {i for i, character in enumerate(value) if character == letter}
+                        pending.discard(letter)
         if board is not None:
             if length is not None and len(board) != length:
                 problems.append((number, f"The board went from {length} letters to {len(board)}."))
