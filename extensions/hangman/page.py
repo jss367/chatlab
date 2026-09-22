@@ -9,8 +9,8 @@ import gradio as gr
 
 from extension_api import write_private_text
 from .game import (
-    MAX_FILE_BYTES, OPENING, SYSTEM, check, dictionary, finish_turn, fitting_words, guess_of, load,
-    messages_for, new_game, reasoning_of, rewound, saved, WORD_LIST,
+    MAX_FILE_BYTES, OPENING, SYSTEM, check, dictionary, finish_turn, fitting_words, latest_board, load,
+    messages_for, new_game, reasoning_of, reopened, rewound, saved, WORD_LIST,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,8 +75,8 @@ def check_text(game):
     if not game["turns"]:
         return "Start a game. The page reads the **Board:** line of each reply and checks it against the ones before."
     parts = []
-    board = next((t["board"] for t in reversed(game["turns"]) if t.get("board")), None)
-    guessed = sorted({value for kind, value in (guess_of(t["guess"]) for t in game["turns"]) if kind == "letter"})
+    board, guessed = latest_board(game)
+    guessed = sorted(guessed)
     if board is None:
         parts.append("**Board:** no readable `Board:` line yet.")
     else:
@@ -399,8 +399,8 @@ def build_page(context):
             game = load(path)
         except (OSError, ValueError) as exc:
             raise gr.Error(str(exc)) from exc
-        # A copy, so continuing it never writes over the file that was opened.
-        child = rewound(game, len(game["turns"]))
+        # A new id, so continuing it never writes over the file that was opened.
+        child = reopened(game)
         return (*frame(child, session_id, len(child["turns"]) - 1 if child["turns"] else None, path=None),
                 *cleared())
 

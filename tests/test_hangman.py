@@ -11,7 +11,7 @@ import gradio as gr
 from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from extensions.hangman.game import (
     SYSTEM, answer_of, check, finish_turn, fitting_words, guess_of, load, messages_for, new_game,
-    read_board, read_word, reasoning_of, rewound, saved,
+    read_board, read_word, reasoning_of, reopened, rewound, saved,
 )
 from extensions.hangman.page import build_page
 from model_runtime import GENERATING
@@ -90,10 +90,28 @@ class CheckTests(unittest.TestCase):
                        ("a", "Board: _ A _"), ("c", "Board: C A T"))
         self.assertIn((4, "T was placed at no position and is now at 3."), check(game))
 
+    def test_a_resized_board_is_checked_for_unguessed_letters_but_places_nothing(self):
+        game = game_of(("start", "Board: _ _ _"), ("a", "Board: _ A _ Z"),
+                       ("t", "Board: _ A T"), ("c", "Board: C A T"))
+        problems = check(game)
+        self.assertIn((2, "The board went from 3 letters to 4."), problems)
+        self.assertIn((2, "Z is on the board but was never guessed."), problems)
+        # A waits for a board of the game's length, and that board agrees.
+        self.assertEqual(len(problems), 2)
+        game = game_of(("start", "Board: _ _ _"), ("a", "Board: _ _ _ _"),
+                       ("t", "Board: _ _ T"), ("c", "Board: C A T"))
+        self.assertIn((4, "A was placed at no position and is now at 2."), check(game))
+
     def test_words_that_fit_respect_revealed_and_ruled_out_letters(self):
         game = game_of(("start", "Board: _ _ _"), ("a", "Board: _ A _"), ("t", "Board: _ A _"))
         self.assertEqual(fitting_words(game, ["cat", "cab", "bad", "ace", "can"]), ["cab", "bad", "can"])
         self.assertIsNone(fitting_words(game_of(("start", "no board"))))
+
+    def test_words_that_fit_ignore_letters_guessed_after_the_board(self):
+        game = game_of(("start", "Board: _ _ _"), ("a", "Sorry, no board this time."))
+        self.assertEqual(fitting_words(game, ["cat", "dog"]), ["cat", "dog"])
+        game = game_of(("start", "Board: _ _ _"), ("o", "Board: _ _ _"), ("a", "Sorry, no board."))
+        self.assertEqual(fitting_words(game, ["cat", "dog"]), ["cat"])
 
 
 class RecordTests(unittest.TestCase):
@@ -112,8 +130,10 @@ class RecordTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "game.json"
             path.write_text(saved(game))
-            reopened = load(path)
-            self.assertEqual(reopened["turns"][1]["board"], ["_", "a", "_"])
+            opened = reopened(load(path))
+            self.assertEqual(opened["turns"][1]["board"], ["_", "a", "_"])
+            self.assertEqual(opened["parent"], dict(id=game["id"], turns=2))
+            self.assertNotEqual(opened["id"], game["id"])
             path.write_text(json.dumps({"format": "other"}))
             with self.assertRaisesRegex(ValueError, "not a chatlab-hangman-1"):
                 load(path)

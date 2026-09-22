@@ -132,9 +132,11 @@ def check(game):
     """Every place the boards so far contradict each other or the guesses.
 
     Returns a list of (turn number, message), one-based to match the page.
-    Letters are held to the first readable board drawn after they were
-    guessed: that board fixes where the letter is, or that it is absent, and
-    every later board and the revealed word have to agree.
+    Letters are held to the first readable board of the game's length drawn
+    after they were guessed: that board fixes where the letter is, or that it
+    is absent, and every later board and the revealed word have to agree. The
+    first readable board sets the length; one of another length is reported
+    as a change of size and checked only for letters nobody guessed.
     """
     problems = []
     length, shown, placed = None, {}, {}
@@ -152,6 +154,11 @@ def check(game):
         if board is not None:
             if length is not None and len(board) != length:
                 problems.append((number, f"The board went from {length} letters to {len(board)}."))
+                # Its positions line up with no other board, so it neither
+                # moves letters nor places the pending ones; what it shows
+                # still has to have been guessed.
+                problems.extend((number, f"{cell.upper()} is on the board but was never guessed.")
+                                for cell in dict.fromkeys(board) if cell != HIDDEN and cell not in guessed)
             else:
                 length = len(board)
                 for position, cell in enumerate(board):
@@ -216,16 +223,29 @@ def dictionary():
         return ()
 
 
+def latest_board(game):
+    """The latest readable board and the letters guessed by the turn that drew it.
+
+    A letter guessed after that turn has no board saying where it went yet, so
+    it says nothing about this one. (None, set()) when no board is readable.
+    """
+    for index in range(len(game["turns"]) - 1, -1, -1):
+        board = game["turns"][index].get("board")
+        if board:
+            return board, {value for kind, value in (guess_of(t["guess"]) for t in game["turns"][:index + 1])
+                           if kind == "letter"}
+    return None, set()
+
+
 def fitting_words(game, words=None):
-    """Words that fit the latest readable board and every guessed letter.
+    """Words that fit the latest readable board and the letters guessed by then.
 
     A hidden cell cannot hold a letter already guessed: had it been there, the
     board would show it. None when there is no board to fit.
     """
-    board = next((t["board"] for t in reversed(game["turns"]) if t.get("board")), None)
+    board, guessed = latest_board(game)
     if board is None:
         return None
-    guessed = {value for kind, value in (guess_of(t["guess"]) for t in game["turns"]) if kind == "letter"}
     pattern = re.compile("".join(re.escape(cell) if cell != HIDDEN else
                                  (f"[^{''.join(sorted(guessed))}]" if guessed else ".")
                                  for cell in board) + "$")
@@ -264,3 +284,13 @@ def rewound(game, turn_count):
     child.update(id=uuid4().hex, created_at=now(), turns=child["turns"][:turn_count],
                  parent=dict(id=game["id"], turns=turn_count))
     return child
+
+
+def reopened(game):
+    """A game just read by ``load`` as a new child of the file it came from.
+
+    Unlike ``rewound`` nothing is copied: ``load`` built the game fresh, and a
+    copy of a large save would double what opening it holds in memory.
+    """
+    game.update(id=uuid4().hex, created_at=now(), parent=dict(id=game["id"], turns=len(game["turns"])))
+    return game
