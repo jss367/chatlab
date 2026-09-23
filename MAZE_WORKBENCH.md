@@ -91,6 +91,25 @@ Each agent is sent the task instruction, then a paragraph naming it, its teammat
 
 Team runs autosave to the same directory as single runs, as `chatlab-maze-team-1` files, and load back through **Load a saved team run** for replay. A loaded run is rebuilt from its recorded responses: each one is read again through the rules that read it live, round by round, and has to fit the token cap its round set, end for a reason its tokens could have produced, name the run's model and start where its agent stood, and the moves, messages, conversations, positions, statuses, token and call counts and outcome that produces have to match the file's. A file that disagrees anywhere describes a run its responses could not have made, and is refused. Interruptions, token edits, changing maps and trial files are single-agent features for now.
 
+### Team checkpoint and steering
+
+Open **Checkpoint & steering** in the Team scenario pane to intervene on agents as they cross a cell:
+
+1. Set **Agents: 2**, **Team goal: Every agent arrives**, and enable messaging.
+2. Enable **Generate an unavoidable checkpoint**. New episodes then use a maze with an interior cell that every route from the start to the destination crosses. The generator preserves the requested shortest route length; a route needs at least two moves. If it cannot find a suitable maze, try another seed, fewer open cells, or a shorter route. The teal square marks the chosen checkpoint, and **Run details** gives its coordinates.
+3. Import a vector downloaded from **Chat → Conversation tools → Steering vector**, then choose its strength and layer. Set **Steer** to **When the character reaches a cell** and leave **Steering cell** blank to use the generated checkpoint. Select **Every agent**, or one agent, under **Agents to steer**.
+4. Set **Steered responses per agent**, with **0** continuing through that agent's remaining responses. Click **New team episode · apply settings**, then **Next** or **Play**.
+
+Each agent starts steering on its first response after reaching the cell. Onset and duration follow its own responses, so one teammate can be steered while another has not reached the checkpoint yet. Leaving and returning does not restart steering. The checkpoint is strictly before the exit, giving the agent at least one response under steering before arrival. A longer route can leave more room to observe recovery. Alternatively, switch off checkpoint generation and enter a steering cell yourself, or trigger after a number of accepted moves per agent; those alternatives do not guarantee crossing the cell.
+
+The loaded PyTorch model must accept the vector before any agent generates, even if its trigger is several rounds away. MLX, wrong-model vectors, invalid layers and incompatible widths are refused. A disabled vector or strength zero applies no steering. Steering affects prompt and generated positions for each selected response, as in One agent mode. Each response starts a fresh model call, so the teammate's call receives no steering unless its own trigger selects it.
+
+The checkpoint and steering markers are viewer only. Agents receive no automatic warning about the intervention. Put a warning or a shared objective, such as delivering a solution to a waiting user, in **Setup prompt → Task instruction** if desired. Arrival is the scored objective; ChatLab does not infer model preferences or implement a separate delivery reward.
+
+**Responses** and the selected response mark steered generations. **Run details** reports each agent's first steered round, steered-response count and checkpoint passage. Exports carry the whole vector, targets, trigger, duration and a `steered` flag on every response when a vector is configured. Replay recomputes the flags from each agent's path and rejects contradictions; it also checks that a required checkpoint really is unavoidable. A stopped or failed partial round retains steering marks on generated responses even though none of its moves apply. A response stopped before generation remains unmarked. Older team exports without steering still load.
+
+For the four-condition comparison, keep checkpoint generation enabled and keep maze size, seed, shortest route length, openness, prompts and generation settings fixed. Run **Steer: Off** and cell steering with communication both off and on. These conditions generate the same maze and checkpoint; switching steering off does not remove the bottleneck. Export each result. Team trial batches are not yet supported.
+
 ## Run locally
 
 Use the repository's normal Python environment and dependencies:
