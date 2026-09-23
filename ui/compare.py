@@ -24,6 +24,7 @@ import gradio as gr
 
 import charts
 import compare
+from experiment_runs import SESSION_ID
 from conversation import make_turn, model_messages
 from model_runtime import LOADING, ModelChanged
 from steering import SteeringError, compact as compact_steering, from_controls
@@ -286,6 +287,7 @@ def _write_reply(
         "model_id": model_id,
         "load_id": published.load_id,
         "run_id": uuid4().hex,
+        "session_id": SESSION_ID,
         "device_name": published.device_name,
         "precision": published.precision,
         "prompt": prompt,
@@ -348,6 +350,7 @@ def _measure_text(context, measured, use_chat_template, vector, published):
         "model_id": published.model_id,
         "load_id": published.load_id,
         "run_id": uuid4().hex,
+        "session_id": SESSION_ID,
         "device_name": published.device_name,
         "precision": published.precision,
         "prompt": context or "",

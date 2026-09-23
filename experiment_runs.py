@@ -149,11 +149,35 @@ def from_trace(trace: dict, context=None) -> dict:
         "messages": messages,
         "text": trace.get("response", ""),
         "metrics": trace["tokens"],
+        "prompt_metrics": copy.deepcopy(trace.get("prompt_tokens") or []),
         "settings": sampling,
         "device_name": recorded.get("device_name", sampling.get("device_name")),
         "precision": recorded.get("precision", sampling.get("precision")),
         "generated_at": trace.get("generated_at"),
     }
+
+
+def save_timeline_inspection(identifier: str, position: int, insight: dict) -> dict:
+    """Store bounded, recomputed readouts; never retain raw activation tensors."""
+    with _LOCK:
+        document = read(identifier)
+        run = document["run"]
+        ids = run.get("context_ids", []) + [m["token_id"] for m in run["metrics"]]
+        if (not 0 <= position < len(ids) or insight.get("index") != position
+                or insight.get("token_id") != ids[position]):
+            raise ValueError("The inspection does not match this timeline position.")
+        records = document.setdefault("timeline_inspections", {})
+        key = f"{insight.get('kind', 'logit')}:{position}"
+        if key not in records and len(records) >= 64:
+            raise ValueError("This experiment already has 64 timeline readouts. Save a new experiment to capture more.")
+        records[key] = {
+            "source": "recomputed", "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "insight": copy.deepcopy(insight),
+        }
+        if len(json.dumps(records).encode("utf-8")) > 32 * 1024 * 1024:
+            raise ValueError("Timeline readouts would exceed 32 MB. Capture without attention or use a shorter context.")
+        _write(document)
+        return document
 
 
 def ranked_tokens(run: dict, mode: str) -> list[int]:

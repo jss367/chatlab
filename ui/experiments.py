@@ -15,6 +15,7 @@ from ui.common import failure_status
 from ui.inspection import render_lens
 from ui.panel import as_plain_text, describe_token, event_index
 from ui import runtime
+from ui import inference_timeline
 
 
 def choices(query="", selected=None):
@@ -63,6 +64,7 @@ def build():
         text = gr.Textbox(label="Recorded response or passage", interactive=False, lines=3)
         with gr.Accordion("Recorded configuration", open=False):
             configuration = gr.JSON(label="Configuration")
+        timeline = inference_timeline.build()
         scale = gr.Dropdown(list(COLOR_SCALES), value=DEFAULT_COLOR_SCALE, label="Color saved tokens by")
         strip = gr.HighlightedText(label="Saved tokens", combine_adjacent=False,
                                    color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
@@ -121,7 +123,7 @@ def open_run(identifier, scale):
         item = runs.read(identifier)
         run = item["run"]
         configuration = {key: value for key, value in run.items()
-                         if key not in ("metrics", "decoded", "token_ends", "context_ids", "text",
+                         if key not in ("metrics", "prompt_metrics", "decoded", "token_ends", "context_ids", "text",
                                         "session_id", "metrics_generation", "load_id")}
         inspections = item.get("inspections", [])
         return (item, None, f"Opened **{as_plain_text(item['title'])}** · {len(run['metrics']):,} tokens.",
@@ -210,6 +212,7 @@ def attach_inspection(document, insight, target, context, expected_identifier):
 
 
 def wire(view, demo, trace, context, left, right, insight, target):
+    inference_timeline.wire(view.timeline, view)
     opened = [view.held, view.selected, view.status, view.text, view.configuration, view.strip,
               view.marks, view.detail, view.candidates, view.note, view.position,
               view.inspection_picker, view.lens, view.attention]
