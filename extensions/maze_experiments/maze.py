@@ -146,10 +146,27 @@ class Maze:
         return cls(tuple(value["grid"]), tuple(value["start"]), tuple(value["goal"]), int(value.get("seed", 0)))
 
 
-def generate(size=5, seed=20260911, distance=10, openness=.70):
+def unavoidable_cells(maze):
+    """Interior cells every start-to-goal route crosses, in route order."""
+    result = []
+    for blocked in maze.route()[1:-1]:
+        found, todo = {maze.start}, deque([maze.start])
+        while todo:
+            for cell in maze.neighbors(todo.popleft()).values():
+                if cell != blocked and cell not in found:
+                    found.add(cell)
+                    todo.append(cell)
+        if maze.goal not in found:
+            result.append(blocked)
+    return result
+
+
+def generate(size=5, seed=20260911, distance=10, openness=.70, *, require_checkpoint=False):
     size, seed, distance = int(size), int(seed), int(distance)
     if not 3 <= size <= 15 or not 1 <= distance < size * size or not .35 <= openness <= .95:
         raise ValueError("Choose size 3–15, a feasible positive route length, and 35–95% open cells.")
+    if require_checkpoint and distance < 2:
+        raise ValueError("An unavoidable checkpoint needs a route of at least two moves.")
     rng = random.Random(seed)
     deadline = time.monotonic() + 8
     for _ in range(15000):
@@ -175,10 +192,15 @@ def generate(size=5, seed=20260911, distance=10, openness=.70):
         pairs = [(p, q) for p in sorted(cells) for q, d in distances(p).items() if d == distance]
         if pairs:
             start, goal = rng.choice(pairs)
-            return Maze(tuple("".join("." if (r, c) in cells else "#" for c in range(size))
+            maze = Maze(tuple("".join("." if (r, c) in cells else "#" for c in range(size))
                               for r in range(size)), start, goal, seed)
+            if not require_checkpoint or unavoidable_cells(maze):
+                return maze
         if time.monotonic() > deadline:
             break
+    if require_checkpoint:
+        raise ValueError("No maze with that route length and an unavoidable checkpoint was found. "
+                         "Try a different seed, a shorter route, or fewer open cells.")
     raise ValueError("No maze with that route length was found. Try a shorter route, a different seed, or more open cells.")
 
 

@@ -29,7 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from .maze import SYSTEM, TOOLS, Maze, apply_call, default_instruction, goal_instruction, parse_call
+from .maze import SYSTEM, TOOLS, Maze, apply_call, default_instruction, goal_instruction, parse_call, unavoidable_cells
+from .runner import check_checkpoint, checked_cell, steered_at, steering_active
 from extension_api import write_private_text
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,17 @@ class TeamEpisode:
     def __post_init__(self):
         self.lock = threading.RLock()
         self.config = check_config(self.config)
+        check_checkpoint(self.config, self.maze)
+        checkpoint = checked_cell(self.config.get("required_checkpoint"), self.maze, "required checkpoint")
+        if checkpoint is not None:
+            if tuple(checkpoint) not in unavoidable_cells(self.maze):
+                raise ValueError("The required checkpoint must be before the destination on every route from the start.")
+            self.config["required_checkpoint"] = checkpoint
+        targets = self.config.get("steer_agents")
+        if targets is not None and (not isinstance(targets, list) or not targets
+                                   or any(type(i) is not int or not 0 <= i < self.config["agents"] for i in targets)
+                                   or len(set(targets)) != len(targets)):
+            raise ValueError("Choose one or more distinct agents in this team to steer.")
         names = agent_names(self.config["agents"])
         self.agents = [dict(name=name, position=self.maze.start, status="active", messages=[]) for name in names]
         for index, agent in enumerate(self.agents):
@@ -183,6 +195,15 @@ class TeamEpisode:
     @property
     def moves(self):
         return sum(event["accepted"] for event in self.events)
+
+    def steers_next(self, index):
+        """Evaluate onset and duration on this agent's own response history."""
+        if index not in (self.config.get("steer_agents") or range(len(self.agents))):
+            return False
+        turns = [turn for turn in self.turns if turn["agent"] == index]
+        start = next((i for i, turn in enumerate(turns) if turn.get("steered")), None)
+        moves = sum(e["accepted"] for e in self.events if e["agent"] == index)
+        return steered_at(self.config, start, len(turns), self.agents[index]["position"], moves)
 
     def agent_state(self, index, error=None, inbox=()):
         """What the simulator tells one agent: its own position, never its teammates'.
@@ -394,6 +415,12 @@ def stream_team(episode, models, *, single_step=False, save_dir=None):
         if episode.phase in TERMINAL or episode.replay_only:
             raise ValueError("Start a new team episode to run again. This one is finished or is a saved replay.")
         manager = models.open_session()
+        if steering_active(episode.config):
+            try:
+                manager.check_steering(episode.config["steering"])
+            except BaseException:
+                manager.close()
+                raise
         episode.busy = True
         episode.pause_requested = episode.stop_requested = False
         episode.phase = "running"
@@ -438,8 +465,11 @@ def stream_team(episode, models, *, single_step=False, save_dir=None):
             actions = []
             for index in moving:
                 agent = episode.agents[index]
+                steered = episode.steers_next(index)
                 turn = {"agent": index, "round": episode.rounds, "text": "", "metrics": [], "prompt_ids": [],
                         "position_before": list(agent["position"]), "started_at": time.time(), "finish_reason": None}
+                if episode.config.get("steering") is not None:
+                    turn["steered"] = False
                 episode.turns.append(turn)
                 episode.selected_turn = len(episode.turns) - 1
                 yield episode
@@ -447,10 +477,13 @@ def stream_team(episode, models, *, single_step=False, save_dir=None):
                     finish_response(episode, turn, set(), limit)
                     break
                 stop_ids = manager.stop_token_ids
+                if steered:
+                    turn["steered"] = True
                 generator = manager.generate(
                     agent["messages"], temperature=episode.config["temperature"], top_p=1., top_k=0,
                     max_new_tokens=limit, analyze_prompt=False, tools=episode.tools, forced_ids=[],
                     literal_prefill_tokens=0,
+                    steering=episode.config["steering"] if steered else None,
                     # Distinct per agent as well as per round: agents given the
                     # same prompt would otherwise sample the same response.
                     seed=episode.config["sampling_seed"] + 100003 * episode.rounds + 7919 * index)
@@ -582,6 +615,16 @@ def from_payload(data):
                 raise ValueError("A response records a finish reason its tokens could not have produced.")
             if saved.get("position_before") != list(result.agents[saved["agent"]]["position"]):
                 raise ValueError("A response records a starting position its agent was not in.")
+            if result.config.get("steering") is None:
+                if "steered" in saved:
+                    raise ValueError("A run without a steering vector cannot mark responses as steered.")
+            else:
+                expected = result.steers_next(saved["agent"])
+                never_generated = (saved is turns[-1] and not saved["metrics"]
+                                   and saved["finish_reason"] in ("user_stopped", "stopped"))
+                flag = saved.get("steered")
+                if type(flag) is not bool or (flag != expected and not (expected and never_generated)):
+                    raise ValueError("A response's steered flag does not match its agent's steering trigger.")
             turn = copy.deepcopy({key: value for key, value in saved.items() if key not in derived})
             result.turns.append(turn)
             action = take_action(result, turn, len(result.turns) - 1)

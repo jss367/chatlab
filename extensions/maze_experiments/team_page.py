@@ -9,10 +9,10 @@ from pathlib import Path
 
 import gradio as gr
 
-from .page import MARKDOWN
-from .maze import GOAL_MODES, SYSTEM, default_instruction, generate
+from .page import MARKDOWN, STEER_MODES, checkpoint_values, steering_config, vector_note
+from .maze import GOAL_MODES, SYSTEM, default_instruction, generate, unavoidable_cells
 from .team import MAX_AGENTS, TEAM_GOALS, TERMINAL, TeamEpisode, from_payload, stream_team
-from extension_api import TokenInspector, icon_classes
+from extension_api import TokenInspector, icon_classes, read_steering_vector
 
 TOKENS = TokenInspector()
 logger = logging.getLogger(__name__)
@@ -55,6 +55,16 @@ def team_board(ep, index=None, reveal=False):
         parts.append(f'<text x="12" y="{pad+(i+.5)*cell+4}" text-anchor="middle" fill="#7b8598" font-size="12">{i}</text>')
     if reveal:
         parts.append(f'<polyline points="{points(maze.route())}" fill="none" stroke="#b4bdcc" stroke-width="4" stroke-dasharray="3 8"/>')
+    checkpoint = ep.config.get("required_checkpoint")
+    steer_cell = (ep.config.get("steer_when") or {}).get("cell")
+    for point, color, label in ((checkpoint, "#0891b2", "Required checkpoint"),
+                                (steer_cell, "#9333ea", "Steering cell")):
+        if point is not None:
+            x, y = center(point)
+            inset = 22 if label == "Required checkpoint" else 18
+            parts.append(f'<rect x="{x-inset}" y="{y-inset}" width="{inset*2}" height="{inset*2}" '
+                         f'fill="none" stroke="{color}" stroke-width="3" stroke-dasharray="5 3">'
+                         f'<title>{label}</title></rect>')
     # Each agent's path is drawn a little off the cell centre, so two agents
     # walking the same corridor stay two lines.
     offsets = [((k % 2) * 2 - 1) * 5 * (k // 2 + 1) if len(ep.agents) > 1 else 0 for k in range(len(ep.agents))]
@@ -84,6 +94,10 @@ def team_board(ep, index=None, reveal=False):
     legend = [f'<span style="color:{COLORS[k]}">● {html.escape(a["name"])} · {status.replace("_", " ")}</span>'
               for k, (a, status) in enumerate(zip(ep.agents, statuses_after(ep, index)))]
     legend.append('<span>★ Destination</span>')
+    if checkpoint is not None:
+        legend.append(f'<span style="color:#0891b2">□ Required checkpoint {tuple(checkpoint)}</span>')
+    if steer_cell is not None:
+        legend.append(f'<span style="color:#9333ea">□ Steering cell {tuple(steer_cell)}</span>')
     parts.append('<div class="maze-legend">' + "".join(legend) + '</div>')
     return "".join(parts)
 
@@ -101,7 +115,31 @@ def team_status(ep):
             f"{ep.sampled_tokens + partial:,} of {config['token_budget']:,} sampled tokens · {ep.tool_attempts} calls · "
             f"{len(ep.mail)} message{'' if len(ep.mail) == 1 else 's'}\n\n"
             f"**Goal information:** {GOAL_MODES[config['goal_mode']]} · "
-            f"**Model:** {html.escape(ep.model_id or 'load one on the Models page')}")
+            f"**Model:** {html.escape(ep.model_id or 'load one on the Models page')}" + steering_status(ep))
+
+
+def steering_status(ep):
+    checkpoint = ep.config.get("required_checkpoint")
+    vector = ep.config.get("steering")
+    if checkpoint is None and vector is None:
+        return ""
+    lines = []
+    if checkpoint is not None:
+        lines.append(f"**Required checkpoint:** {tuple(checkpoint)} · every route to the destination crosses it.")
+    if vector is not None:
+        when = ep.config["steer_when"]
+        trigger = f"cell {tuple(when['cell'])}" if "cell" in when else f"{when['moves']} accepted moves"
+        targets = ep.config.get("steer_agents") or range(len(ep.agents))
+        lines.append(f"**Steering:** {trigger} · {ep.config['steer_responses'] or 'all remaining'} responses per agent · "
+                     + ", ".join(ep.agents[i]["name"] for i in targets))
+    for index, agent in enumerate(ep.agents):
+        turns = [t for t in ep.turns if t["agent"] == index and t.get("steered")]
+        events = [e for e in ep.events if e["agent"] == index]
+        reached = any(e["accepted"] and e["after"] == checkpoint for e in events)
+        detail = ("checkpoint reached · " if reached else "checkpoint not reached · ") if checkpoint is not None else ""
+        onset = f", first in round {turns[0]['round'] + 1}" if turns else ""
+        lines.append(f"**{agent['name']}:** {detail}{len(turns)} steered responses{onset}")
+    return "\n\n" + "\n\n".join(lines)
 
 
 def team_timeline(ep):
@@ -117,7 +155,8 @@ def team_timeline(ep):
         else:
             result = "Generating…" if turn["finish_reason"] is None else "Waiting for the round"
         rows.append([f"Round {turn['round'] + 1}", ep.agents[turn["agent"]]["name"], str(position),
-                     (event or {}).get("direction") or "—", result, (event or {}).get("message") or "—"])
+                     (event or {}).get("direction") or "—", result + (" · steered" if turn.get("steered") else ""),
+                     (event or {}).get("message") or "—"])
     if ep.selected_turn is not None and 0 <= ep.selected_turn < len(ep.turns):
         rows[ep.selected_turn + 1][0] = "▶ " + rows[ep.selected_turn + 1][0]
     return rows
@@ -180,7 +219,8 @@ def response_view(ep):
         return "Select a response in the history to read it.", [], ""
     turn = ep.turns[index]
     name = ep.agents[turn["agent"]]["name"]
-    return (f"**Round {turn['round'] + 1} · {html.escape(name)}** · {turn.get('sampled_tokens', len(turn['metrics'])):,} sampled tokens",
+    return (f"**Round {turn['round'] + 1} · {html.escape(name)}** · {turn.get('sampled_tokens', len(turn['metrics'])):,} sampled tokens"
+            + (" · **Steered**" if turn.get("steered") else ""),
             TOKENS.strip(turn["metrics"]), turn["text"])
 
 
@@ -253,6 +293,29 @@ def build_team_page(context, runs_dir):
             goal_mode = gr.Dropdown(choices=[(label, mode) for mode, label in GOAL_MODES.items()], value="coordinates",
                                     label="Goal information", elem_id="team-goal-mode")
             goal_hint = gr.Textbox(label="Goal hint", lines=2, visible=False, elem_id="team-goal-hint")
+            with gr.Accordion("Checkpoint & steering", open=False):
+                required = gr.Checkbox(label="Generate an unavoidable checkpoint", value=False,
+                                       info="Every route to the destination crosses this cell. Keep this on for both "
+                                            "steered runs and unsteered baselines, using the same maze settings.")
+                gr.Markdown("The checkpoint is chosen before the exit. Steering starts on each selected agent's first "
+                            "response after reaching it. These markers are viewer only; use the task instruction "
+                            "if you want to warn agents about the intervention. Steering requires a PyTorch model.")
+                steer_vector = gr.State(None)
+                steer_file = gr.File(label="Steering vector JSON", file_types=[".json"], type="filepath")
+                steer_note = gr.Markdown(vector_note(None))
+                with gr.Row():
+                    steer_strength = gr.Number(value=1., minimum=-100, maximum=100, label="Strength")
+                    steer_layer = gr.Number(value=0, precision=0, minimum=0, label="Layer")
+                steer_mode = gr.Dropdown(choices=[(label, mode) for mode, label in STEER_MODES.items()],
+                                         value="off", label="Steer")
+                steer_cell = gr.Textbox(label="Steering cell", placeholder="row, column",
+                                       info="Leave blank to use the generated checkpoint. Otherwise enter an open cell.")
+                steer_after = gr.Number(value=3, precision=0, minimum=0, maximum=255, label="After moves per agent")
+                steer_responses = gr.Number(value=0, precision=0, minimum=0, maximum=256,
+                                            label="Steered responses per agent", info="0 steers to the end. Starts only once per agent.")
+                steer_agents = gr.Dropdown(choices=[("Every agent", "all")] +
+                                           [(f"Agent {i+1} only", str(i)) for i in range(MAX_AGENTS)],
+                                           value="all", label="Agents to steer")
             with gr.Accordion("Setup prompt", open=False):
                 system_prompt = gr.Textbox(value=SYSTEM, label="System prompt", lines=2)
                 instruction = gr.Textbox(value=default_instruction("coordinates"), label="Task instruction", lines=6,
@@ -314,18 +377,33 @@ def build_team_page(context, runs_dir):
 
     controls = [agents, communication, team_goal, size, seed, distance, openness, goal_mode, goal_hint,
                 system_prompt, instruction, temperature, sampling_seed, per_turn, budget, round_limit]
+    checkpoint_controls = [required, steer_vector, steer_strength, steer_layer, steer_mode, steer_cell,
+                           steer_after, steer_responses, steer_agents]
 
     def team_prepare_episode(ep, show, *values):
         if ep.busy:
             raise gr.Error("Stop or pause this team episode before starting another.")
         (count, talk, goal, n, s, d, o, mode, hint, system_text, instruction_text, temp, sample_seed, per,
-         total, rounds) = values
+         total, rounds, *checkpoint_settings) = values
         try:
-            new = TeamEpisode(generate(n, s, d, o), dict(
+            required_cell, vector, strength, layer, steer, cell, after, responses, targets = (
+                checkpoint_settings or [False, None, 1., 0, "off", "", 3, 0, "all"])
+            maze = generate(n, s, d, o, require_checkpoint=required_cell)
+            checkpoint = {}
+            candidates = unavoidable_cells(maze) if required_cell else []
+            chosen = list(candidates[len(candidates) // 2]) if candidates else None
+            if chosen is not None:
+                checkpoint["required_checkpoint"] = chosen
+            checkpoint.update(steering_config(vector, strength, layer, steer, cell, after, responses, chosen))
+            if chosen is not None and steer == "cell" and checkpoint["steer_when"]["cell"] != chosen:
+                raise ValueError("Leave Steering cell blank to steer at the generated unavoidable checkpoint.")
+            if targets != "all":
+                checkpoint["steer_agents"] = [int(target) for target in targets.split(",")]
+            new = TeamEpisode(maze, dict(
                 agents=int(count), communication=bool(talk), team_goal=goal, goal_mode=mode, goal_hint=hint,
                 system_prompt=system_text, instruction=instruction_text, temperature=float(temp),
                 sampling_seed=int(sample_seed), per_turn_tokens=int(per), token_budget=int(total),
-                round_limit=int(rounds), openness=float(o)))
+                round_limit=int(rounds), openness=float(o), **checkpoint))
         except (ValueError, TypeError) as exc:
             logger.warning("Refused the settings for a new team episode: %s", exc)
             raise gr.Error(str(exc)) from exc
@@ -436,7 +514,7 @@ def build_team_page(context, runs_dir):
         if ep.busy:
             raise gr.Error("Pause or stop this team episode before loading a replay.")
         if not path:
-            return (gr.skip(),) * (len(outputs) + len(controls) + 1)
+            return (gr.skip(),) * (len(outputs) + len(controls) + len(checkpoint_controls) + 2)
         try:
             if Path(path).stat().st_size > 50_000_000:
                 raise ValueError("Run files must be smaller than 50 MB.")
@@ -454,7 +532,27 @@ def build_team_page(context, runs_dir):
                   gr.update(value=config["goal_hint"], visible=config["goal_mode"] == "hint"),
                   config["system_prompt"], config["instruction"], config["temperature"], config["sampling_seed"],
                   config["per_turn_tokens"], config["token_budget"], config["round_limit"])
-        return (replay, *rendered, *values)
+        checkpoint = checkpoint_values(replay)
+        targets = config.get("steer_agents") or list(range(len(replay.agents)))
+        # Imports can select a subset; retain it rather than silently steering everyone.
+        target_value = "all" if targets == list(range(len(replay.agents))) else ",".join(map(str, targets))
+        target_choices = [("Every agent", "all")] + [(f"Agent {i+1} only", str(i)) for i in range(MAX_AGENTS)]
+        if len(targets) > 1 and target_value != "all":
+            target_choices.append((", ".join(replay.agents[i]["name"] for i in targets), target_value))
+        steering_values = list(checkpoint[1:-1])
+        if (config.get("steer_when") or {}).get("cell") == config.get("required_checkpoint"):
+            steering_values[4] = ""
+        return (replay, *rendered, *values, config.get("required_checkpoint") is not None,
+                *steering_values, gr.update(choices=target_choices, value=target_value), checkpoint[-1])
+
+    def team_import_vector(path):
+        if not path:
+            return None, vector_note(None), gr.skip(), gr.skip()
+        try:
+            vector = read_steering_vector(path)
+        except (ValueError, OSError) as exc:
+            raise gr.Error(f"Could not load the vector: {exc}") from exc
+        return vector, vector_note(vector), vector["strength"], vector["layer"]
 
     def team_change_goal_mode(mode, wording):
         stock = wording in {default_instruction(m) for m in GOAL_MODES}
@@ -465,7 +563,7 @@ def build_team_page(context, runs_dir):
 
     toggle.click(team_play_back, [episode, reveal, pace], outputs, show_progress="hidden",
                  concurrency_limit=None, trigger_mode="multiple")
-    prepare.click(team_prepare_episode, [episode, reveal, *controls], [episode, *outputs, download],
+    prepare.click(team_prepare_episode, [episode, reveal, *controls, *checkpoint_controls], [episode, *outputs, download],
                   concurrency_id="maze-team-view", show_progress="hidden")
     first.click(lambda ep, show: team_step(ep, show, -1), [episode, reveal], outputs,
                 concurrency_id="maze-team-view", show_progress="hidden")
@@ -481,6 +579,9 @@ def build_team_page(context, runs_dir):
     context_refresh.click(team_show_context, episode, [context_note, context_body], show_progress="hidden")
     context_pane.expand(team_show_context, episode, [context_note, context_body], show_progress="hidden")
     save.click(team_export, episode, download, show_progress="hidden")
-    upload.upload(team_load, [upload, episode, reveal], [episode, *outputs, *controls],
+    upload.upload(team_load, [upload, episode, reveal], [episode, *outputs, *controls, *checkpoint_controls, steer_note],
                   concurrency_id="maze-team-view", show_progress="hidden")
+    for event in (steer_file.upload, steer_file.clear):
+        event(team_import_vector, steer_file, [steer_vector, steer_note, steer_strength, steer_layer],
+              show_progress="hidden")
     context.navigation.open_models(models)
