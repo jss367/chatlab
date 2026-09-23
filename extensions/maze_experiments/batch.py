@@ -69,10 +69,15 @@ def batch_directory(root, title):
     return candidate
 
 
-def summarize(item, episode, seconds, error=None):
-    """One row of the summary table for a trial, whether or not it ran."""
+def summarize(item, episode, seconds, model_id, error=None):
+    """One row of the summary table for a trial, whether or not it ran.
+
+    ``model_id`` is the model the batch holds. A trial refused before its
+    first response never takes the model's name, and a refusal such as a
+    steering vector made for another model means nothing without it.
+    """
     row = dict.fromkeys(COLUMNS, "")
-    row.update(trial_id=item["id"], label=item["label"])
+    row.update(trial_id=item["id"], label=item["label"], model_id=model_id)
     if episode is None:
         row.update(outcome="refused", detail=str(error))
         return row
@@ -94,7 +99,7 @@ def summarize(item, episode, seconds, error=None):
         first_move_progress="" if episode.first_move_progress is None else episode.first_move_progress,
         waypoint_reached="" if config.get("waypoint") is None else waypoint_turn is not None,
         steered_responses=sum(bool(turn.get("steered")) for turn in episode.turns),
-        seconds=round(seconds, 1), model_id=episode.model_id or "",
+        seconds=round(seconds, 1), model_id=episode.model_id or model_id,
         run_file="" if error or unsaved else f"runs/{episode.run_id}.json",
         detail=str(error) if error else f"Its run could not be saved: {episode.autosave_error}" if unsaved
         else episode.detail)
@@ -215,7 +220,7 @@ def run_trials(data, models, root, control, *, source=""):
                 # In the finally, so a batch closed mid-trial - its window gone,
                 # say - still lists the trial whose run it saved as stopped.
                 control.episode = None
-                rows.append(summarize(item, episode, time.time() - started, error))
+                rows.append(summarize(item, episode, time.time() - started, session.model_id, error))
             logger.info("Batch %s: trial %s of %s, %r, %s", directory.name, len(rows), len(items),
                         item["id"], rows[-1]["outcome"])
             if rows[-1]["outcome"] == "unsaved":

@@ -1042,9 +1042,16 @@ def _build_page(context):
         # trial leaves every row in place, and read from the count alone that
         # batch would say it finished.
         ended = "failed" if failure is not None else "stopped" if cut_short(rows, total) else "finished"
+        try:
+            files = gr.update(value=downloads(directory), visible=True)
+        except OSError as exc:
+            # The disk that failed the batch is often the one the copies would
+            # go to. The pane still has to say how the batch ended and give the
+            # Run button back; the files themselves are named in the status.
+            logger.warning("Could not stage the downloads for %s: %s", directory, exc)
+            files = gr.update(value=None, visible=False)
         yield (batch_text(data, done, total, rows, directory, ended=ended, error=failure),
-               gr.update(value=batch_rows(rows), visible=bool(rows)),
-               gr.update(value=downloads(directory), visible=True),
+               gr.update(value=batch_rows(rows), visible=bool(rows)), files,
                gr.update(visible=True), gr.update(visible=False))
 
     def stop_batch(control):

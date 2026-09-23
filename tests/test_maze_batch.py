@@ -99,6 +99,8 @@ class BatchTests(unittest.TestCase):
         self.assertEqual([row["outcome"] for row in rows], ["refused", "arrived"])
         self.assertIn("another model", rows[0]["detail"])
         self.assertEqual(rows[0]["run_file"], "")
+        # The model that refused it is the context the refusal is read in.
+        self.assertEqual(rows[0]["model_id"], "test/model")
 
     def test_stop_ends_the_running_trial_as_stopped_and_starts_no_more(self):
         data = self.trials(trial("a"), trial("b"))
@@ -207,6 +209,21 @@ class BatchTests(unittest.TestCase):
             frames = list(batch.fn(data, BatchControl(), None))
         self.assertIn("busy", warning.call_args.args[0])
         self.assertTrue(all(update == gr.skip() for update in frames[-1]))
+
+    def test_the_pane_ends_the_batch_even_when_its_downloads_cannot_be_staged(self):
+        data = self.trials(trial("a"))
+        context = SimpleNamespace(tokens=TokenInspector(), models=CountingManager([ARRIVE] * 2), data_dir=self.root,
+                                  navigation=SimpleNamespace(open_models=lambda button, wanted=None: None))
+        with gr.Blocks() as demo:
+            build_page(context)
+        self.addCleanup(demo.close)
+        batch = next(fn for fn in demo.fns.values() if fn.fn is not None and fn.fn.__name__ == "run_batch")
+        with mock.patch("extensions.maze_experiments.page.downloads", side_effect=OSError("No space left on device")):
+            status, _table, files, run_button, stop_button = list(batch.fn(data, BatchControl(), None))[-1]
+        self.assertIn("Finished 1 trial", status)
+        self.assertFalse(files["visible"])
+        self.assertTrue(run_button["visible"])
+        self.assertFalse(stop_button["visible"])
 
     def test_a_manifest_that_cannot_be_written_at_the_end_fails_the_batch(self):
         data = self.trials(trial("a"))
