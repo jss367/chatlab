@@ -532,6 +532,22 @@ class ForkTests(unittest.TestCase):
                 self.assertEqual(earlier.payload()["format"], "chatlab-maze-run-1")
                 self.assertNotIn(ADVICE, json.dumps(earlier.messages))
 
+    def test_a_fork_asks_the_loaded_model_what_the_upload_could_not(self):
+        # Uploaded with no model to read its prompts: response 2's leaves the note out.
+        stale = hand_built(note())
+        plain = [dict(m, content=json.dumps(MAZE.state((0, 2)), separators=(",", ":"))) if i == 5 else m
+                 for i, m in enumerate(stale["messages"][:6])]
+        stale["turns"][1]["prompt_ids"] = Manager([])._prompt_token_ids(plain, TOOLS)[0]
+        with self.assertRaisesRegex(ValueError, "Response 2's recorded prompt is not the history"):
+            self.forked(stale, 1, "west")
+        # A fork before the message carries nothing, so nothing is asked.
+        self.forked(stale, 0, "south")
+        # A spelling the fixed list lets through but this tokenizer reads as a
+        # special token (the fixture's vocabulary is bytes; 0 is its special).
+        special = hand_built(note(text="Go\x00east"))
+        with self.assertRaisesRegex(ValueError, "reads a special token out of the message inserted before response 2"):
+            self.forked(special, 1, "west")
+
     def test_a_fork_later_than_the_message_replays_it_at_its_own_boundary(self):
         payload = hand_built(note(before_turn=0, position=(0, 1)), moves=("east", "east"))
         replay, fork, manager, suffix = self.forked(payload, 1, "west")

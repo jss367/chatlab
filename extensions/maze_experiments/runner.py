@@ -793,6 +793,44 @@ def verify_recorded_stops(episode, turn_index, kept, literal_prefill_tokens, sto
                          "different revision; load that snapshot to fork this run.")
 
 
+def verify_carried_inserts(episode, turn_index, manager):
+    """Refuse a fork that would carry a message the loaded model cannot vouch for.
+
+    An uploaded run is checked against its recorded prompts only where the
+    model that recorded them was loaded at upload, and against special tokens
+    only by the fixed list in inserts.py. A fork has that model in memory, so
+    the messages it keeps are asked both questions a live run asks: whether
+    this tokenizer reads a special token out of one, and whether every kept
+    response from the first message on, the edited one included, recorded the
+    prompt its history becomes under this template.
+    """
+    inserts = [i for i in episode.config.get("context_inserts", ()) if i["before_turn"] <= turn_index]
+    if not inserts:
+        return
+    hidden = manager.hidden_token_ids
+    for insert in inserts:
+        if any(set(manager.encode(value)) & hidden for value in (insert["text"], insert.get("sender") or "")):
+            raise ValueError(f"The loaded model reads a special token out of the message inserted before response "
+                             f"{insert['before_turn'] + 1}, so it cannot be carried into a fork.")
+    for index in range(inserts[0]["before_turn"], turn_index + 1):
+        turn = episode.turns[index]
+        if not turn.get("prompt_ids") or (turn.get("model_id") or episode.model_id) != manager.model_id:
+            continue
+        context = context_messages(episode, index)
+        try:
+            prompt = manager.decode(turn["prompt_ids"])
+        except (IndexError, KeyError, OverflowError, TypeError, ValueError):
+            prompt = None
+        try:
+            templated = manager.prompt_text(context, TOOLS)
+        except Exception:
+            templated = None
+        if prompt is None or not (prompt == templated if templated is not None
+                                  else prompt_holds(prompt, context, episode.messages[len(context):])):
+            raise ValueError(f"Response {index + 1}'s recorded prompt is not the history the run records for it "
+                             "with its inserted messages, so those messages cannot be carried into a fork.")
+
+
 def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, candidate_id=None):
     """Fork before one response; replay exact earlier IDs plus a replacement.
 
@@ -825,6 +863,7 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
         literal_prefill_tokens = literal_prefill_of(original)
         verify_recorded_text(episode, turn_index, manager)
         verify_recorded_stops(episode, turn_index, kept, literal_prefill_tokens, stop_ids)
+        verify_carried_inserts(episode, turn_index, manager)
         if candidate_id is None:
             replacement_ids = manager.encode_replacement(
                 kept_ids, replacement, literal_prefill_tokens=literal_prefill_tokens,
