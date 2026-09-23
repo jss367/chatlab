@@ -411,7 +411,7 @@ class Episode:
                                        advised_direction=advised_direction or None))
             # A response being generated now will be answered by the
             # simulator before this lands, so only an idle run is asked.
-            if not self.busy and channel != "user":
+            if not self.busy:
                 render_insert(self.messages, insert)
             self.insert_next, self.manual_intervention = insert, True
 
@@ -429,7 +429,7 @@ def land_insert(episode, insert):
     episode.config.setdefault("context_inserts", []).append(insert)
 
 
-def apply_insert(episode):
+def apply_insert(episode, manager=None):
     """Put the queued message into the context, if one is queued, and record where it landed.
 
     Called with a response about to be appended. Returns the history as it
@@ -437,7 +437,11 @@ def apply_insert(episode):
     never reaches the model: a message is only kept on the record once a
     prompt holding it has been fed, as an interruption is only marked once
     its tokens have been. One that can no longer be rendered is dropped with
-    a note in the detail rather than recorded, and None comes back.
+    a note in the detail rather than recorded, and None comes back, as is
+    one ``manager``'s tokenizer reads a special token out of: templates
+    tokenize message text with the specials parsed, so such a message would
+    end or open a turn wherever it sits, whatever spelling the fixed list in
+    inserts.py missed.
     """
     with episode.lock:
         if not episode.insert_next:
@@ -448,6 +452,8 @@ def apply_insert(episode):
                       sender=queued["sender"], position=list(episode.position),
                       advised_direction=queued["advised_direction"])
         try:
+            if manager is not None and set(manager.encode(insert["text"])) & manager.hidden_token_ids:
+                raise ValueError("The loaded model reads part of the text as one of its special tokens.")
             land_insert(episode, insert)
         except ValueError as exc:
             episode.detail = f"{describe_insert(insert)} was dropped. {exc}"
@@ -1064,7 +1070,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                 break
             # After the budget is known to allow a response, so an insertion is
             # only ever recorded with the response that read it.
-            inserted = apply_insert(episode)
+            inserted = apply_insert(episode, manager)
             turn = {"text": "", "metrics": [], "prompt_ids": [], "forced_prefix_tokens": 0,
                     "prefix_ids": [], "prefix_text": "",
                     "planned_prefix_ids": forced, "planned_prefix_text": manager.decode(forced),

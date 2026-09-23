@@ -7,14 +7,21 @@ history exactly as ChatLab replays it.
 from __future__ import annotations
 
 import json
+import re
 
 FORMAT = "chatlab-maze-run-3"
 CHANNELS = {"tool_note": "Simulator note", "teammate": "Teammate message", "user": "User message"}
 DIRECTIONS = ("north", "east", "south", "west")
 KEYS = {"before_turn", "channel", "text", "sender", "position", "advised_direction"}
 # Spellings that would let an inserted message open a turn, a call or a
-# reasoning block of its own once the template renders it.
-MARKS = ("<tool_call", "</tool_call", "<|im_", "<|endoftext|>", "<think>", "</think>")
+# reasoning block of its own once the template renders it: tool calls,
+# reasoning tags, and the turn markers the supported families write -
+# every <|...|> special (Qwen, Llama 3, OLMo, Phi), DeepSeek's full-width
+# form, Gemma's turns, and the Llama 2 and Mistral instruction markers.
+# Written without a tokenizer, so a run can be checked anywhere; generation
+# also asks the loaded tokenizer, which knows its own specials exactly.
+MARKS = re.compile(r"</?tool_call|</?think>|<\|im_|<\|[^|\s]*\|>|<｜[^｜\s]*｜>|<(?:start|end)_of_turn>"
+                   r"|</?s>|<(?:bos|eos)>|\[/?INST\]")
 
 
 def check_insert(insert):
@@ -30,7 +37,7 @@ def check_insert(insert):
         raise ValueError("An inserted message goes in as a tool_note, a teammate message, or a user message.")
     if not isinstance(text, str) or not text.strip():
         raise ValueError("An inserted message needs text.")
-    if any(mark in text for mark in MARKS):
+    if MARKS.search(text):
         raise ValueError("An inserted message cannot supply tool syntax, conversation boundary tokens or "
                          "reasoning delimiters.")
     if channel == "teammate":
@@ -60,15 +67,17 @@ def render_insert(messages, insert):
     A simulator note or a teammate message becomes the last key of the latest
     simulator reply, in the reply's own compact JSON, so the note reads as
     part of the state and a teammate's message reads as it does in a team run.
-    A user message is a turn of its own after that reply. ``messages`` is left
-    as it was.
+    A user message is a turn of its own after that reply. Every channel needs
+    that reply: before it, the history ends on the task's own user turn, and a
+    second user turn there is one that templates enforcing alternation refuse.
+    ``messages`` is left as it was.
     """
     added = appended(insert)
+    if not messages or messages[-1]["role"] != "tool":
+        raise ValueError("There is no simulator reply yet to carry this message. Insert it after the first "
+                         "move, or supply a starting move.")
     if added is None:
         return [*messages, {"role": "user", "content": insert["text"]}]
-    if not messages or messages[-1]["role"] != "tool":
-        raise ValueError("There is no simulator reply yet to carry this message. Send it as a user message, "
-                         "or insert it after the first move.")
     state = json.loads(messages[-1]["content"])
     if added[0] in state:
         raise ValueError(f"The simulator's reply already carries {added[0]}.")

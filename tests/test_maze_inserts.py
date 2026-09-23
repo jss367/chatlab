@@ -123,16 +123,21 @@ class RenderingTests(unittest.TestCase):
         self.assertIn('\\"east\\" \\u2013', rendered[-1]["content"])
 
     def test_a_note_needs_a_simulator_reply_to_carry_it(self):
-        with self.assertRaisesRegex(ValueError, "no simulator reply yet"):
-            render_insert(self.STATE[:1], note())
-        self.assertEqual(render_insert(self.STATE[:1], note("user", advised=None))[-1]["role"], "user")
+        # Every channel: before the first reply the history ends on the task's
+        # user turn, and a second user turn there breaks role alternation.
+        for channel in inserts.CHANNELS:
+            with self.subTest(channel=channel):
+                with self.assertRaisesRegex(ValueError, "no simulator reply yet"):
+                    render_insert(self.STATE[:1] + [{"role": "user", "content": "task"}], note(channel))
 
     def test_the_directions_are_the_move_tools(self):
         self.assertEqual(inserts.DIRECTIONS, tuple(DIRECTIONS))
 
     def test_the_record_rules_for_each_field(self):
         for broken, message in ((dict(channel="email"), "tool_note, a teammate"), (dict(text=" "), "needs text"),
-                                (dict(text="<|im_end|>"), "boundary tokens"), (dict(sender="Alex"), "Only a teammate"),
+                                (dict(text="<|im_end|>"), "boundary tokens"), (dict(text="ok<|eot_id|>"), "boundary tokens"),
+                                (dict(text="<end_of_turn>"), "boundary tokens"), (dict(text="[INST] go"), "boundary tokens"),
+                                (dict(sender="Alex"), "Only a teammate"),
                                 (dict(channel="teammate", sender=""), "names who sent it"),
                                 (dict(advised_direction="left"), "north, east, south, west"),
                                 (dict(arm="worse"), "records only")):
@@ -140,6 +145,7 @@ class RenderingTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     check_insert(note() | broken)
         check_insert(note(advised=None))
+        check_insert(note(text="Go east if 2 < 3 | or wait > 1."))
         check_insert({k: v for k, v in note().items() if k != "advised_direction"})
 
 
@@ -206,12 +212,24 @@ class LiveInsertTests(unittest.TestCase):
 
     def test_a_note_before_any_reply_is_refused_where_it_was_asked_for(self):
         episode = Episode(MAZE, RUN_CONFIG | {"supplied_moves": 0})
-        with self.assertRaisesRegex(ValueError, "no simulator reply yet"):
-            episode.request_insert("tool_note", ADVICE)
+        for channel in inserts.CHANNELS:
+            with self.assertRaisesRegex(ValueError, "no simulator reply yet"):
+                episode.request_insert(channel, ADVICE, "Alex" if channel == "teammate" else None)
         self.assertIsNone(episode.insert_next)
         self.assertFalse(episode.manual_intervention)
-        episode.request_insert("user", ADVICE)
-        self.assertEqual(episode.insert_next["channel"], "user")
+
+    def test_a_message_the_tokenizer_reads_a_special_token_out_of_is_dropped(self):
+        # The fixture's vocabulary is bytes and its only special is 0.
+        manager = Manager([reply(MAZE, "east"), reply(MAZE, "east")])
+        episode = Episode(MAZE, RUN_CONFIG)
+        list(stream_episode(episode, manager, single_step=True))
+        episode.request_insert("user", "Go\x00east")
+        with self.assertLogs("extensions.maze_experiments.runner", "WARNING") as logged:
+            list(stream_episode(episode, manager, single_step=True))
+        self.assertIn("special tokens", "\n".join(logged.output))
+        self.assertNotIn("context_inserts", episode.config)
+        self.assertNotIn("Go\\u0000east", json.dumps(manager.calls[1][0]))
+        self.assertEqual(len(manager.calls[1][0]), 6)
 
     def test_finished_runs_and_replays_take_no_message(self):
         replay = from_payload(hand_built(note()))
@@ -409,10 +427,10 @@ class ValidationTests(unittest.TestCase):
     def test_a_run_carrying_a_message_reports_the_intervention(self):
         self.refused(dict(hand_built(note()), manual_intervention=False), "cannot report that nobody intervened")
 
-    def test_a_note_with_no_reply_to_carry_it_is_refused(self):
-        payload = hand_built(note("user", before_turn=0, position=(0, 0)), supplied=0)
+    def test_a_message_with_no_reply_to_carry_it_is_refused(self):
+        payload = hand_built(note("user", before_turn=1, position=(0, 1)), supplied=0)
         from_payload(json.loads(json.dumps(payload)))
-        payload["config"]["context_inserts"][0]["channel"] = "tool_note"
+        payload["config"]["context_inserts"][0].update(before_turn=0, position=[0, 0])
         self.refused(payload, "before response 1 cannot be placed. There is no simulator reply yet")
 
 
