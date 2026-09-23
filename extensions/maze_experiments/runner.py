@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from .dynamic_maze import (FORMAT as CHANGING_FORMAT, ChangingMaze, check_closure, close_cell, load_maze,
                            maze_at_turn, validate_drops, validate_pending, validate_updates)
-from .inserts import CHANNELS, FORMAT as INSERT_FORMAT, check_insert, inserted_fragment, render_insert
+from .inserts import CHANNELS, FORMAT as INSERT_FORMAT, check_insert, render_insert
 from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call
 from extension_api import normalize_steering, write_private_text
 
@@ -432,13 +432,17 @@ def land_insert(episode, insert):
 def apply_insert(episode):
     """Put the queued message into the context, if one is queued, and record where it landed.
 
-    Called with a response about to be appended, so every recorded insertion
-    has the response that read it. One that can no longer be rendered is
-    dropped with a note in the detail rather than recorded.
+    Called with a response about to be appended. Returns the history as it
+    stood before, so the stream can withdraw the message if that response
+    never reaches the model: a message is only kept on the record once a
+    prompt holding it has been fed, as an interruption is only marked once
+    its tokens have been. One that can no longer be rendered is dropped with
+    a note in the detail rather than recorded, and None comes back.
     """
     with episode.lock:
         if not episode.insert_next:
-            return
+            return None
+        before = episode.messages
         queued, episode.insert_next = episode.insert_next, None
         insert = dict(before_turn=len(episode.turns), channel=queued["channel"], text=queued["text"],
                       sender=queued["sender"], position=list(episode.position),
@@ -449,10 +453,28 @@ def apply_insert(episode):
             episode.detail = f"{describe_insert(insert)} was dropped. {exc}"
             logger.warning("Run %s dropped the message queued before response %s: %s",
                            episode.run_id, insert["before_turn"] + 1, exc)
-            return
+            return None
         episode.detail = f"{describe_insert(insert)} went into the context before this response."
         logger.info("Run %s inserted a %s before response %s at %s", episode.run_id, insert["channel"],
                     insert["before_turn"] + 1, insert["position"])
+        return before
+
+
+def withdraw_insert(episode, before):
+    """Take back the message the last apply_insert landed, its response never having been generated.
+
+    A stop at the opening frame, or a model call that fails before its first
+    update, leaves a response the model never read a prompt for, so a record
+    saying that response received the message would describe an
+    intervention nobody made.
+    """
+    with episode.lock:
+        withdrawn = episode.config["context_inserts"].pop()
+        if not episode.config["context_inserts"]:
+            del episode.config["context_inserts"]
+        episode.messages = before
+    logger.warning("Run %s withdrew the %s before response %s: that response was never generated",
+                   episode.run_id, withdrawn["channel"], withdrawn["before_turn"] + 1)
 
 
 def abandon_insert(episode):
@@ -976,6 +998,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                 episode.run_id, episode.model_id, len(episode.turns), episode.sampled_tokens,
                 episode.moves, "one response" if single_step else "until it ends")
     turn = None
+    inserted = None
     autosave_error = None
 
     def record(turn):
@@ -1041,7 +1064,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                 break
             # After the budget is known to allow a response, so an insertion is
             # only ever recorded with the response that read it.
-            apply_insert(episode)
+            inserted = apply_insert(episode)
             turn = {"text": "", "metrics": [], "prompt_ids": [], "forced_prefix_tokens": 0,
                     "prefix_ids": [], "prefix_text": "",
                     "planned_prefix_ids": forced, "planned_prefix_text": manager.decode(forced),
@@ -1061,6 +1084,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
             episode.pending_edit = None
             yield episode
             if episode.stop_requested:
+                if inserted is not None:
+                    withdraw_insert(episode, inserted)
+                    inserted = None
                 finish_turn(episode, turn, set(), limit)
                 record(turn)
                 break
@@ -1078,6 +1104,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                     turn.update(text=update.text, metrics=copy.deepcopy(update.metrics), prompt_ids=list(update.prompt_ids),
                                 forced_prefix_tokens=update.forced_prefix_tokens, reasoning_prefilled=update.reasoning_prefilled,
                                 load_id=update.load_id, model_id=update.model_id)
+                    # The prompt holding the message has been fed.
+                    if update.prompt_ids:
+                        inserted = None
                     # The runtime emits prefix metrics only after prefill has
                     # consumed them. An opening frame or a failed model call
                     # alone is not evidence that an interruption was inserted.
@@ -1094,6 +1123,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                         break
             finally:
                 generator.close()
+            if inserted is not None:
+                withdraw_insert(episode, inserted)
+                inserted = None
             turn["seconds"] = time.time() - turn["started_at"]
             finish_turn(episode, turn, stop_ids, limit)
             record(turn)
@@ -1131,6 +1163,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
         logger.exception("Run %s failed while generating", episode.run_id)
         episode.phase, episode.detail = "error", f"{type(exc).__name__}: {exc}"
     finally:
+        # A model call that failed before feeding its prompt.
+        if inserted is not None:
+            withdraw_insert(episode, inserted)
         if turn is not None and turn.get("finish_reason") is None:
             count = max(0, len(turn["metrics"]) - turn["forced_prefix_tokens"])
             episode.sampled_tokens += count
@@ -1259,10 +1294,13 @@ def validate_inserts(episode, read_prompt=None):
     file whose record says one thing and whose history another would be read
     as the first and replayed as the second.
 
-    ``read_prompt(episode, turn)`` decodes a response's recorded prompt IDs, or
-    answers None when the model that recorded them is not the one loaded. Where
-    it can answer, the response each insertion landed before has to have been
-    given it. Without one, a run uploads with no tokenizer at all.
+    The response each insertion landed before has to record the prompt it
+    was fed, since a run only keeps a message once a prompt holding it has
+    been. ``read_prompt(episode, turn)`` decodes that prompt, or answers None
+    when the model that recorded it is not the one loaded. Where it can
+    answer, the prompt has to hold the history the record gives that response,
+    as :func:`prompt_holds` reads it. Without one, a run uploads with no
+    tokenizer at all.
     """
     inserts = episode.config.get("context_inserts")
     if not isinstance(inserts, list) or not inserts:
@@ -1286,19 +1324,43 @@ def validate_inserts(episode, read_prompt=None):
         if insert.get("position") != path_position(episode, boundary):
             raise ValueError(f"The message inserted before response {boundary + 1} records a position the "
                              "run's path does not reach there.")
+        if not episode.turns[boundary].get("prompt_ids"):
+            raise ValueError(f"Response {boundary + 1} records no prompt, so nothing says the model read the "
+                             "message inserted before it.")
     if not episode.manual_intervention:
         raise ValueError("A run carrying an inserted message cannot report that nobody intervened in it.")
     validate_history(episode)
     if read_prompt is None:
         return
     for insert in inserts:
-        turn = episode.turns[insert["before_turn"]]
-        if not turn.get("prompt_ids"):
-            continue
-        prompt = read_prompt(episode, turn)
-        if prompt is not None and inserted_fragment(insert) not in prompt:
-            raise ValueError(f"Response {insert['before_turn'] + 1}'s recorded prompt does not contain the "
-                             "message the run says was inserted before it.")
+        boundary = insert["before_turn"]
+        prompt = read_prompt(episode, episode.turns[boundary])
+        context = context_messages(episode, boundary)
+        if prompt is not None and not prompt_holds(prompt, context, episode.messages[len(context):]):
+            raise ValueError(f"Response {boundary + 1}'s recorded prompt is not the history the run records "
+                             "for it, up to and including the message inserted before it.")
+
+
+def prompt_holds(prompt, context, following):
+    """Whether a decoded prompt carries a response's context and nothing after it.
+
+    Read without the template: every user and simulator message has to appear
+    in the prompt as written and in order, and the next one the history holds
+    after this context must not. Templates write those two roles verbatim,
+    where some rewrite an earlier response's reasoning, so they are what can be
+    found. Finding the messages in order pins an insertion to its own
+    boundary: the same note given twice, or a user message whose words
+    already sit in the system prompt, is only found where the order puts it.
+    """
+    position = 0
+    for message in context:
+        if message["role"] in ("user", "tool"):
+            found = prompt.find(message["content"], position)
+            if found < 0:
+                return False
+            position = found + len(message["content"])
+    later = next((m["content"] for m in following if m["role"] in ("user", "tool")), None)
+    return later is None or later not in prompt[position:]
 
 
 def validate_history(episode):

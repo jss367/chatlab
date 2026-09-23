@@ -1,3 +1,4 @@
+import copy
 import json
 import tempfile
 import unittest
@@ -44,7 +45,7 @@ def note(channel="tool_note", text=ADVICE, sender=None, advised="east", before_t
                 advised_direction=advised)
 
 
-def hand_built(insert, moves=("east", "east"), maze=MAZE, supplied=1):
+def hand_built(insert, moves=("east", "east"), maze=MAZE, supplied=1, more=(), system=None):
     """A format-3 run written the way a collector outside ChatLab would write one.
 
     Built from the maze helpers and the renderer alone, with no episode and no
@@ -52,11 +53,14 @@ def hand_built(insert, moves=("east", "east"), maze=MAZE, supplied=1):
     wrote it.
     """
     template = Manager([])
-    messages, events, position = initial_history(maze, supplied)
+    records = [insert, *more]
+    extra = {} if system is None else dict(system_prompt=system)
+    messages, events, position = initial_history(maze, supplied, **({} if system is None else dict(system=system)))
     turns = []
     for index, direction in enumerate(moves):
-        if insert["before_turn"] == index:
-            messages = render_insert(messages, insert)
+        for record in records:
+            if record["before_turn"] == index:
+                messages = render_insert(messages, record)
         text, ids = reply(maze, direction)
         event = apply_call(maze, position, {"maze_id": maze.tool_id(), "direction": direction})
         event.update(source="model", turn=index)
@@ -73,7 +77,7 @@ def hand_built(insert, moves=("east", "east"), maze=MAZE, supplied=1):
                                {"role": "tool", "content": json.dumps(maze.state(position, event["error"]),
                                                                       separators=(",", ":"))}]
     return dict(format=FORMAT, run_id=uuid4().hex, maze=maze.to_dict(),
-                config=dict(RUN_CONFIG, supplied_moves=supplied, context_inserts=[insert]), messages=messages, events=events, turns=turns,
+                config=dict(RUN_CONFIG, supplied_moves=supplied, context_inserts=records, **extra), messages=messages, events=events, turns=turns,
                 position=list(position), phase="arrived" if position == maze.goal else "paused",
                 model_id=template.model_id, load_id=template.load_id, manual_intervention=True)
 
@@ -235,6 +239,35 @@ class LiveInsertTests(unittest.TestCase):
             self.assertTrue(saved["manual_intervention"])
             from_payload(saved)
 
+    def test_a_message_whose_response_is_never_generated_is_withdrawn(self):
+        for how in ("stop at the opening frame", "a model call that fails first"):
+            with self.subTest(how=how):
+                manager = Manager([reply(MAZE, "east")])
+                episode = Episode(MAZE, RUN_CONFIG)
+                list(stream_episode(episode, manager, single_step=True))
+                history = copy.deepcopy(episode.messages)
+                episode.request_insert("tool_note", ADVICE, advised_direction="east")
+                if how.startswith("stop"):
+                    frames = stream_episode(episode, manager)
+                    next(frames)
+                    self.assertEqual(len(episode.config["context_inserts"]), 1)
+                    episode.request_stop()
+                    list(frames)
+                    self.assertEqual(episode.phase, "stopped")
+                else:
+                    def fails(messages, **kwargs):
+                        raise RuntimeError("out of memory")
+                        yield
+                    manager.generate = fails
+                    list(stream_episode(episode, manager))
+                    self.assertEqual(episode.phase, "error")
+                self.assertNotIn("context_inserts", episode.config)
+                self.assertEqual(episode.messages, history)
+                self.assertTrue(episode.manual_intervention)
+                payload = json.loads(json.dumps(episode.payload()))
+                self.assertEqual(payload["format"], "chatlab-maze-run-1")
+                from_payload(payload)
+
     def test_stopping_drops_a_queued_message(self):
         episode = Episode(MAZE, RUN_CONFIG)
         episode.request_insert("user", ADVICE)
@@ -326,7 +359,7 @@ class ValidationTests(unittest.TestCase):
                  for i, m in enumerate(payload["messages"][:6])]
         payload["turns"][1]["prompt_ids"] = Manager([])._prompt_token_ids(plain, TOOLS)[0]
         loaded = Manager([])
-        self.refused(payload, "Response 2's recorded prompt does not contain",
+        self.refused(payload, "Response 2's recorded prompt is not the history the run records for it",
                      read_prompt=lambda run, turn: recorded_prompt(run, turn, loaded))
         # No tokenizer is needed to upload it, and another model is not asked.
         from_payload(json.loads(json.dumps(payload)))
@@ -336,6 +369,33 @@ class ValidationTests(unittest.TestCase):
         # The fixture as written passes under its own model.
         from_payload(hand_built(note()), read_prompt=lambda run, turn: recorded_prompt(run, turn, loaded))
 
+    def test_the_prompt_is_checked_at_the_messages_own_boundary(self):
+        loaded = Manager([])
+        reader = dict(read_prompt=lambda run, turn: recorded_prompt(run, turn, loaded))
+        # The same note twice: response 2's prompt taken from before the second
+        # one still holds the note, from the first.
+        twice = hand_built(note(before_turn=0, position=(0, 1)), more=[note()])
+        from_payload(json.loads(json.dumps(twice)), **reader)
+        stale = json.loads(json.dumps(twice))
+        stale["turns"][1]["prompt_ids"] = Manager([])._prompt_token_ids(
+            stale["messages"][:5] + [dict(stale["messages"][5], content=json.dumps(MAZE.state((0, 2)), separators=(",", ":")))],
+            TOOLS)[0]
+        self.refused(stale, "Response 2's recorded prompt is not the history", **reader)
+        # A user message whose words are already in the system prompt.
+        echoed = hand_built(note("user", advised=None), system="Remember: " + ADVICE)
+        from_payload(json.loads(json.dumps(echoed)), **reader)
+        echoed["turns"][1]["prompt_ids"] = Manager([])._prompt_token_ids(echoed["messages"][:6], TOOLS)[0]
+        self.refused(echoed, "Response 2's recorded prompt is not the history", **reader)
+        # And a prompt from a later response than the one it is filed under.
+        later = hand_built(note(before_turn=0, position=(0, 1)))
+        later["turns"][0]["prompt_ids"] = later["turns"][1]["prompt_ids"]
+        self.refused(later, "Response 1's recorded prompt is not the history", **reader)
+
+    def test_a_message_before_a_response_with_no_prompt_is_refused(self):
+        payload = hand_built(note())
+        payload["turns"][1]["prompt_ids"] = []
+        self.refused(payload, "Response 2 records no prompt")
+
     def test_the_upload_reads_the_prompt_under_the_recording_model(self):
         payload = hand_built(note())
         payload["turns"][1]["prompt_ids"] = payload["turns"][0]["prompt_ids"]
@@ -343,7 +403,7 @@ class ValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "run.json"
             path.write_text(json.dumps(payload))
-            with self.assertRaisesRegex(gr.Error, "recorded prompt does not contain"):
+            with self.assertRaisesRegex(gr.Error, "recorded prompt is not the history"):
                 callbacks["load"].fn(str(path), Episode(MAZE, RUN_CONFIG), False, "s", None)
 
     def test_a_run_carrying_a_message_reports_the_intervention(self):
