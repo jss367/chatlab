@@ -1317,6 +1317,35 @@ class PrefilledReasoningTests(unittest.TestCase):
         self.assertEqual(answer, "The answer continues")
         self.assertTrue(closed)
 
+    def test_forced_tokens_land_inside_template_supplied_reasoning(self):
+        # The maze interruption reaches the runtime as forced_ids. Unlike an
+        # answer prefill it adds no </think>, so a template that opened the
+        # reasoning block leaves the interruption inside the model's reasoning.
+        manager = self.manager(ChatTemplateTokenizer("\nassistant: <think>"))
+        manager.model = FakeModel([0, 1, 2, EOS_ID], vocab_size=len(PIECES))
+        updates = list(
+            manager.generate(
+                [{"role": "user", "content": "hi"}],
+                temperature=0.0,
+                top_p=1.0,
+                top_k=0,
+                max_new_tokens=4,
+                seed=1,
+                forced_ids=[4, 5],
+                literal_prefill_tokens=2,
+            )
+        )
+        self.assertTrue(updates[-1].reasoning_prefilled)
+        self.assertEqual(updates[-1].forced_prefix_tokens, 2)
+        self.assertTrue(updates[-1].text.startswith("How are"))
+        self.assertNotIn("</think>", updates[-1].text)
+        reasoning, answer, closed = split_reasoning(
+            updates[-1].text, reasoning_prefilled=True
+        )
+        self.assertTrue(reasoning.startswith("How are"))
+        self.assertEqual(answer, "")
+        self.assertFalse(closed)
+
     def test_a_token_straddling_the_automatic_close_is_marked(self):
         pieces = [
             "prompt",

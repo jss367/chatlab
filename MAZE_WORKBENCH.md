@@ -45,6 +45,51 @@ Editing a token forks a changing run like any other. The fork keeps the closures
 
 Closing a cell marks the run as manually intervened, as an interruption you request by hand does. The mark and the queue are set together and a run is written down as one reading, so an export taken while you are clicking cannot carry a closure while saying no intervention was made. The run is rendered under that reading rather than merely read under it, so a stop landing mid-export cannot write the same closure as pending and dropped at once. A trial file pins one map per trial and cannot yet schedule closures, so a changing run is driven by hand.
 
+## Inserted messages
+
+An inserted message is text someone other than the model placed in its context partway through a run: a note inside the simulator's reply, a message signed by a teammate, or a user turn. It is a third kind of perturbation beside the interruption and the changing map. The interruption writes into the model's own response; an insertion writes into what the model reads before it responds. The interruption stays the way to put words in the model's own reasoning: when the template opens a `<think>` block, the interruption's tokens are fed inside it, with no closing tag added.
+
+Open **Insert a message** under the board, beside **Change the map**, choose a channel, write the text, name a sender for a teammate message, optionally pick an advised direction, and click **Queue this message**. It goes into the context before the next generated response. Each channel is written into the history one way, by one function, `render_insert` in `extensions/maze_experiments/inserts.py`, which generation, forks and the upload check all call:
+
+- **Simulator note** (`tool_note`): the latest simulator reply's JSON object gains a final key, `"note": <text>`.
+- **Teammate message** (`teammate`): the same reply gains a final key, `"messages": [{"from": <sender>, "text": <text>}]`, the shape a team run delivers a teammate's message in, so the message reads the same in both modes.
+- **User message** (`user`): a new message `{"role": "user", "content": <text>}` goes after the latest simulator reply.
+
+The reply keeps its compact separators and key order, and the new key comes last. The model is told nothing else. The simulator's next reply is the ordinary state, so a note appears once, in the reply it was added to, and stays there in every later prompt as history. A note or a teammate message needs a simulator reply to ride on, so one asked for before the first move of a run with no supplied moves is refused; a user message is not. The text cannot carry tool syntax, conversation boundary tokens or reasoning delimiters.
+
+The advised direction is recorded for scoring and never sent. The run declares it; ChatLab does not read it out of the text. It may point into a wall, since bad advice is part of what an experiment varies.
+
+The queue follows the closure's rules. One message is queued at a time, and a second request is refused naming the first. One message lands before a response, so a fork holding a message at the boundary it is about to regenerate refuses another until that response exists. Queueing marks the run as manually intervened, and the refusal, the queue and the mark are one operation under the episode's lock. A message still queued when the episode ends is dropped before the final autosave. It is not recorded, since no response read it.
+
+A run carrying a message is saved as `chatlab-maze-run-3`, whether or not its map changes, so an older ChatLab refuses the file rather than reading every later response against a history shifted by one. Runs without one keep writing `chatlab-maze-run-1` and `chatlab-maze-run-2` exactly as before. Whether a format-3 run's map changes is read off its map, which a changing one saves with its environment identifier, and `config.map_updates` is then read under the changing-map rules above. Each message is recorded under `config.context_inserts`, in order:
+
+```json
+{
+  "before_turn": 3,
+  "channel": "tool_note",
+  "text": "Heading east from here reaches the goal fastest.",
+  "sender": null,
+  "position": [2, 1],
+  "advised_direction": "east"
+}
+```
+
+`before_turn` is the index of the response the message landed before, as for a closure. `sender` names the teammate and is null on the other two channels. `position` is where the character stood at that boundary. `advised_direction` is `north`, `east`, `south`, `west` or null, and may be left out. Nothing else is recorded. A response's context is counted from this record: two messages for every call before it, plus one for every user message at or before its boundary.
+
+Uploading a format-3 run refuses it, naming the response and the rule, when any of these fails:
+
+1. Each message lands before a response the run reaches, one to a response, in order.
+2. The channel is one of the three, the text is not blank, and a teammate message names its sender while the other two name none.
+3. The recorded position is the one the run's own path reaches at that boundary.
+4. The advised direction, if any, is one of the four. One into a wall is kept.
+5. Writing the history again from the setup, the responses, the simulator's replies, the closures and the recorded messages reproduces the saved `messages` exactly.
+6. The response each message landed before has recorded prompt IDs that decode to a prompt containing the message as the template wrote it. This check runs only when the model that recorded the response is the one loaded, the rule the **Context sent to the model** pane already keeps, so no tokenizer is needed to upload a run.
+7. The run reports `manual_intervention: true`.
+
+The movement history shows each message as a row of its own between the two responses it separates, with its channel, its sender, its text and its advised direction; selecting it shows the response that read it. From that response on, the board rings the cell the message landed on in rose, distinct from the amber interruption ring, and draws a short arrow in the advised direction. **Run details** lists each message with the first accepted model move after it and whether that move followed the advice, went against it (the opposite direction) or went another way, and whether the advised step was open and on a shortest route on the map at that boundary. These are worked out from the path and the map, never read from the file. **Context sent to the model** decodes the recorded prompt, so the message appears there as the model was given it.
+
+Editing a token forks a run with messages the way it forks one with closures. The fork keeps the messages at or before the edited response and writes each one in again at its own boundary while it rebuilds the history. A message at exactly the edited boundary stays, since the edited response was generated after it. Messages after it are left behind with the responses that followed them, and a fork left carrying none is saved in the format it would have had without them. Team runs, trial files and batches cannot insert messages yet.
+
 ## Waypoints and steering
 
 A waypoint is a cell the model is asked to pass through before it reaches the destination. Type it under **Waypoint** as a row and a column, such as `3, 3`. Every state the model sees then carries `waypoint` and `waypoint_reached`, in every goal mode, since the waypoint is not the destination. The stock instructions do not mention it, so write what it means in the **Task instruction**: "You must pass through the waypoint before the destination". The simulator does not refuse an arrival that skipped the waypoint. The run ends as it always does, and **Run details** reports the waypoint as reached, with the response that reached it, or missed. The board marks it with a teal flag. The waypoint cannot be the start or the destination, and it has to be reachable from the start without passing through the destination, since arriving there ends the run before the character could get to the waypoint. The steering cell is held to the same rule.
