@@ -429,6 +429,20 @@ class ValidationTests(unittest.TestCase):
         loaded.prompt_text = lambda messages, tools=None: (None, None)
         from_payload(json.loads(json.dumps(payload)), **reader)
 
+    def test_every_prompt_after_the_first_message_is_read(self):
+        loaded = Manager([])
+        reader = dict(read_prompt=lambda run, turn, context: prompt_reading(run, turn, context, loaded))
+        # The message lands before response 1; response 2's prompt leaves it out.
+        payload = hand_built(note(before_turn=0, position=(0, 1)))
+        plain = [dict(m, content=json.dumps(MAZE.state((0, 1)), separators=(",", ":"))) if i == 3 else m
+                 for i, m in enumerate(payload["messages"][:6])]
+        payload["turns"][1]["prompt_ids"] = Manager([])._prompt_token_ids(plain, TOOLS)[0]
+        self.refused(payload, "Response 2's recorded prompt is not the history", **reader)
+        # Responses before the first message are not the record's to answer for.
+        early = hand_built(note())
+        early["turns"][0]["prompt_ids"] = early["turns"][1]["prompt_ids"]
+        from_payload(json.loads(json.dumps(early)), **reader)
+
     def test_a_message_before_a_response_with_no_prompt_is_refused(self):
         payload = hand_built(note())
         payload["turns"][1]["prompt_ids"] = []

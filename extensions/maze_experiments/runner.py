@@ -1303,7 +1303,8 @@ def validate_inserts(episode, read_prompt=None):
 
     The response each insertion landed before has to record the prompt it
     was fed, since a run only keeps a message once a prompt holding it has
-    been. ``read_prompt(episode, turn, context)`` answers for that prompt with
+    been. Every response from the first insertion on that records a prompt is
+    then read. ``read_prompt(episode, turn, context)`` answers for a prompt with
     two readings, or None when the model that recorded it is not the one
     loaded: the recorded IDs decoded, and ``context`` - the messages the
     record gives that response - put through the same model's template, or
@@ -1343,17 +1344,22 @@ def validate_inserts(episode, read_prompt=None):
     validate_history(episode)
     if read_prompt is None:
         return
-    for insert in inserts:
-        boundary = insert["before_turn"]
-        context = context_messages(episode, boundary)
-        reading = read_prompt(episode, episode.turns[boundary], context)
+    # Every response from the first message on, not only the one each landed
+    # before: a message stays in every later context, and a later prompt
+    # without it would credit its response to an intervention it never read.
+    for index in range(inserts[0]["before_turn"], len(episode.turns)):
+        turn = episode.turns[index]
+        if not turn.get("prompt_ids"):
+            continue
+        context = context_messages(episode, index)
+        reading = read_prompt(episode, turn, context)
         if reading is None:
             continue
         prompt, templated = reading
         if not (prompt == templated if templated is not None
                 else prompt_holds(prompt, context, episode.messages[len(context):])):
-            raise ValueError(f"Response {boundary + 1}'s recorded prompt is not the history the run records "
-                             "for it, up to and including the message inserted before it.")
+            raise ValueError(f"Response {index + 1}'s recorded prompt is not the history the run records "
+                             "for it, with the messages inserted up to that response.")
 
 
 def prompt_holds(prompt, context, following):
