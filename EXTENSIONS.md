@@ -99,7 +99,7 @@ Close a generation iterator before closing its session, including on errors or i
 
 ### Storage and compatibility
 
-By default, extension data lives under `$XDG_DATA_HOME/chatlab/extensions/<identifier>` (or `~/.local/share/chatlab/extensions/<identifier>`). `CHATLAB_EXTENSIONS_DATA_PATH` overrides the parent directory. Maze also preserves the existing `CHATLAB_MAZE_RUNS_PATH` override. Previously exported `chatlab-maze-run-1` traces import unchanged; legacy files in `~/.local/share/chatlab/maze_runs` are left in place and can be uploaded for replay. A run whose map changes while it is running is written as `chatlab-maze-run-2` and uploads alongside them.
+By default, extension data lives under `$XDG_DATA_HOME/chatlab/extensions/<identifier>` (or `~/.local/share/chatlab/extensions/<identifier>`). `CHATLAB_EXTENSIONS_DATA_PATH` overrides the parent directory. Maze also preserves the existing `CHATLAB_MAZE_RUNS_PATH` override. Previously exported `chatlab-maze-run-1` traces import unchanged; legacy files in `~/.local/share/chatlab/maze_runs` are left in place and can be uploaded for replay. A run whose map changes while it is running is written as `chatlab-maze-run-2` and uploads alongside them. A team run, several agents in one maze, is written as `chatlab-maze-team-1` and loads in the Maze page's **Team** tab.
 
 The desktop packaging specification includes the bundled extension modules even though they are imported lazily. Adding a bundled extension means registering its manifest and implementing the contract; it does not require adding domain-specific code to the core UI.
 

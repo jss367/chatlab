@@ -187,8 +187,14 @@ def call_text(maze_id, direction):
         "maze_id": maze_id, "direction": direction}}) + '\n</tool_call>'
 
 
-def parse_call(text):
-    """Never execute quoted examples, invented state, incomplete calls, or multiple calls."""
+def parse_call(text, *, message_limit=None):
+    """Never execute quoted examples, invented state, incomplete calls, or multiple calls.
+
+    ``message_limit`` admits an optional ``message`` argument of at most that
+    many characters, which a team episode that lets its agents talk carries on
+    the move call itself. Left as None, the call takes the two arguments the
+    single-agent tool declares and nothing else.
+    """
     visible, fence = [], None
     for line in text.splitlines():
         stripped = line.lstrip()
@@ -215,10 +221,16 @@ def parse_call(text):
     if not isinstance(call, dict) or set(call) != {"name", "arguments"} or call["name"] != "move":
         return None, "invalid_tool_schema"
     args = call["arguments"]
-    if not isinstance(args, dict) or set(args) != {"maze_id", "direction"}:
+    allowed = {"maze_id", "direction"} | ({"message"} if message_limit is not None else set())
+    if not isinstance(args, dict) or not {"maze_id", "direction"} <= set(args) <= allowed:
         return None, "invalid_arguments"
     if not isinstance(args["maze_id"], str) or not isinstance(args["direction"], str) or args["direction"] not in DIRECTIONS:
         return None, "invalid_arguments"
+    if "message" in args:
+        if not isinstance(args["message"], str):
+            return None, "invalid_arguments"
+        if len(args["message"]) > message_limit:
+            return None, "message_too_long"
     return args, None
 
 
