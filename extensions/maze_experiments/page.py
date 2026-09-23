@@ -1032,7 +1032,10 @@ def _build_page(context):
             logger.warning("Could not run the trials in %s: %s", data["title"], exc)
             gr.Warning(str(exc))
             if directory is None:
-                yield gr.skip(), gr.skip(), gr.skip(), gr.update(visible=True), gr.update(visible=False)
+                # Nothing ran and nothing on the pane changed, so it is left
+                # alone: the refusal may be this session's own batch holding
+                # the model, whose Stop button has to stay where it is.
+                yield (gr.skip(),) * 5
                 return
             failure = exc
         # The failure first: one that lands writing the summary after the last
@@ -1372,11 +1375,14 @@ def _build_page(context):
     for event in (trial_upload.upload, trial_upload.clear):
         event(load_trial_file, [trial_upload, episode, trial_data], [trial_data, trial_picker, trial_note],
               concurrency_id="maze-view", show_progress="hidden")
-    # Its own queue: a batch runs for hours, and the view's queue would hold
-    # every step, selection and upload behind it.
+    # Its own queue, with no limit on it. A batch runs for hours, so the view's
+    # queue would hold every step, selection and upload behind it, and a second
+    # batch queued behind the first would start long after it was asked for, on
+    # the inputs it was asked with. Unqueued, it reaches the model session,
+    # which refuses it on the spot while another batch holds the model.
     batch_run.click(run_batch, [trial_data, batch_control, trial_upload],
                     [batch_status, batch_results, batch_download, batch_run, batch_stop],
-                    concurrency_id="maze-batch", show_progress="hidden")
+                    concurrency_id="maze-batch", concurrency_limit=None, show_progress="hidden")
     batch_stop.click(stop_batch, batch_control, None, queue=False)
     trial_load.click(load_trial, [trial_data, trial_picker, episode, reveal, selection_session],
                      [episode, *outputs, *checkpoint_controls, steer_note, *controls, passage, trial_note,

@@ -233,7 +233,9 @@ def run_trials(data, models, root, control, *, source=""):
     except BaseException:
         # The window closed, or the process is going down: nothing went wrong
         # with the batch itself, so it reads as stopped rather than failed.
-        manifest["status"] = "stopped"
+        # Unless it was already done: a window closing on the last trial's
+        # final frame ends a batch every trial of which ran to its end.
+        manifest["status"] = "stopped" if cut_short(rows, len(items)) else "finished"
         raise
     finally:
         manifest["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")

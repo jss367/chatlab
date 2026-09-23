@@ -182,6 +182,32 @@ class BatchTests(unittest.TestCase):
                 control.request_stop()
         self.assertEqual(json.loads((directory / MANIFEST_NAME).read_text())["status"], "finished")
 
+    def test_a_window_closing_on_the_last_frame_leaves_the_batch_finished(self):
+        data = self.trials(trial("a"))
+        frames = run_trials(data, CountingManager([ARRIVE] * 2), self.root, BatchControl())
+        for done, total, _rows, directory, _current in frames:
+            if done == total:
+                break
+        frames.close()
+        self.assertEqual(json.loads((directory / MANIFEST_NAME).read_text())["status"], "finished")
+
+    def test_a_second_batch_is_refused_without_touching_the_running_one(self):
+        data = self.trials(trial("a"))
+        manager = CountingManager([])
+        manager.busy = True
+        context = SimpleNamespace(tokens=TokenInspector(), models=manager, data_dir=self.root,
+                                  navigation=SimpleNamespace(open_models=lambda button, wanted=None: None))
+        with gr.Blocks() as demo:
+            build_page(context)
+        self.addCleanup(demo.close)
+        batch = next(fn for fn in demo.fns.values() if fn.fn is not None and fn.fn.__name__ == "run_batch")
+        # Unqueued, so a competing batch reaches the model session and is refused.
+        self.assertIsNone(batch.concurrency_limit)
+        with mock.patch.object(gr, "Warning") as warning:
+            frames = list(batch.fn(data, BatchControl(), None))
+        self.assertIn("busy", warning.call_args.args[0])
+        self.assertTrue(all(update == gr.skip() for update in frames[-1]))
+
     def test_a_manifest_that_cannot_be_written_at_the_end_fails_the_batch(self):
         data = self.trials(trial("a"))
         real = batch_module.write_summary
