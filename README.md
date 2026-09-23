@@ -982,6 +982,29 @@ and use **Save current response inspection** to preserve the layer readout and
 attention data. Only an inspection from that exact response can be attached.
 Recorded inspections remain viewable after restarting or unloading the model.
 
+**Experiments → Inference timeline** replays a saved run in token order. Play,
+pause, step, scrub, or click the token window to update the token measurements,
+selected lens, and attention together. Prompt/context and response/passage
+positions are labeled separately; thinking and answer tokens currently share
+the response track. New saved chat runs retain prompt measurements when prompt
+analysis was enabled. Older runs without prompt text show the recorded token
+IDs. Playback does not reproduce wall-clock timing or call the model.
+
+Open **Capture layer readouts** to recompute a selected range using the original
+model load and saved steering. Choose the Logit or Jacobian lens, a position
+step, an optional Jacobian vocabulary pin, and whether to retain attention.
+Jacobian capture requires an imported lens. Logit capture starts at position 2
+because the first token has no preceding prediction. Captures are labeled as
+recomputed after the run, and each completed position is saved immediately;
+**Stop capture** keeps those completed readouts. Capture requires the original
+app session and model load, while saved readouts replay offline after restart.
+Missing readouts leave the layer and attention panels empty.
+
+Each capture accepts up to 32 positions. An experiment holds at most 64 timeline
+readouts totaling 32 MB; repeating a position replaces its readout for that
+lens. This first version retains vocabulary readouts and optional attention,
+without raw activations or continuous recording during generation.
+
 **Use as comparison A/B** puts a saved run into the corresponding Compare slot.
 **Rerun with loaded model** uses the saved messages or measured passage and
 settings, then saves a new experiment. Load the matching model first. The

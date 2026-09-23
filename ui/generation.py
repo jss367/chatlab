@@ -976,6 +976,7 @@ def _stream_reply(
         else {}
     )
     if trace:
+        trace["prompt_tokens"] = list(update.prompt_metrics)
         # Keep provenance with the trace, so saving it after a model switch
         # never borrows metadata from the model that happens to be loaded.
         from ui.compare import _decoded_spans, _tokenizer_identity
