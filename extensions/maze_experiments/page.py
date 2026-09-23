@@ -12,6 +12,7 @@ import gradio as gr
 
 from .dynamic_maze import ChangingMaze, changing, maze_at_turn
 from .maze import GOAL_MODES, PASSAGES, SYSTEM, TOOLS, default_instruction, generate
+from .batch import BatchControl, cut_short, downloads, run_trials
 from .runner import RECOVERY_DEFAULTS, TERMINAL, Episode, context_messages, fork_token_edit, from_payload, stream_episode
 from .trials import prepare_trial, read_trials
 from extension_api import TokenInspector, icon_classes, read_steering_vector
@@ -721,6 +722,46 @@ def trial_note_text(ep, data=None):
     return " ".join(parts)
 
 
+BATCH_HEADERS = ["Trial", "Outcome", "Model moves", "Sampled tokens", "Recovered", "Waypoint"]
+
+
+def batch_rows(rows):
+    """The summary rows as the results table shows them, newest last."""
+    def yes_no(value):
+        return "" if value == "" else "Yes" if value else "No"
+    return [[row["label"], row["outcome"], row["model_moves"], row["sampled_tokens"], yes_no(row["recovered"]),
+             yes_no(row["waypoint_reached"])] for row in rows]
+
+
+def batch_text(data, done, total, rows, directory, current=None, ended=None, error=None):
+    """What the trials pane says about a batch: running, stopped, failed or finished."""
+    where = f"Runs and summary.csv are written to {as_text(str(directory))}."
+    if ended is None and done >= total:
+        return f"**All {total} trials ran** · writing the summary.\n\n{where}"
+    if ended is None:
+        label = as_text(data["trials"][done]["label"])
+        progress = ""
+        if current is not None:
+            partial = 0
+            if current.turns and current.turns[-1]["finish_reason"] is None:
+                turn = current.turns[-1]
+                partial = max(0, len(turn["metrics"]) - turn["forced_prefix_tokens"])
+            progress = (f" · response {len(current.turns)} · {current.sampled_tokens + partial:,} sampled tokens · "
+                        f"{current.moves - current.supplied_moves} model moves")
+        return f"**Running trial {done + 1} of {total}** · {label}{progress}\n\n{where}"
+    outcomes = {}
+    for row in rows:
+        outcomes[row["outcome"]] = outcomes.get(row["outcome"], 0) + 1
+    counts = " · ".join(f"{count} {outcome}" for outcome, count in sorted(outcomes.items()))
+    head = (f"**Finished {total} trial{'s' if total != 1 else ''}**" if ended == "finished"
+            else f"**Failed after {len(rows)} of {total} trials**" if ended == "failed"
+            else f"**Stopped after {len(rows)} of {total} trials**")
+    failed = (f"{as_text(str(error).rstrip('.'))}. What is on disk may not include the last trial. "
+              if ended == "failed" else "")
+    return (f"{head} of {as_text(data['title'])}{' · ' + counts if counts else ''}\n\n{failed}{where} "
+            "Open any run under **Load a saved run** to replay it.")
+
+
 def _build_page(context):
     default_config = dict(supplied_moves=3, interrupt_after=3, interruption_text=next(iter(PASSAGES.values())),
                           prefix_tokens=8, temperature=.7, sampling_seed=20260914, per_turn_tokens=1024,
@@ -745,6 +786,17 @@ def _build_page(context):
                                            info="Type to filter a long collection.")
                 trial_load = gr.Button("Load trial", size="sm", elem_id="maze-load-trial")
                 trial_note = gr.Markdown(trial_note_text(initial))
+                batch_control = gr.State(BatchControl())
+                with gr.Row():
+                    batch_run = gr.Button("Run all trials", size="sm", elem_id="maze-run-trials")
+                    batch_stop = gr.Button("Stop the batch", size="sm", visible=False, elem_id="maze-stop-trials")
+                batch_status = gr.Markdown("Run all trials generates every trial in the file to its end, one after "
+                                           "another under the loaded model, and saves each run with a summary table.",
+                                           elem_id="maze-batch-status")
+                batch_results = gr.Dataframe(headers=BATCH_HEADERS, interactive=False, wrap=True, visible=False,
+                                             elem_id="maze-batch-results")
+                batch_download = gr.File(label="Batch summary", file_count="multiple", interactive=False,
+                                         visible=False)
             with gr.Accordion("Load a saved run", open=False):
                 upload = gr.File(label="Saved run JSON", show_label=False, file_types=[".json"], type="filepath")
             gr.Markdown("The settings below apply to the next episode. Loading a trial or a saved run shows the settings it used.")
@@ -952,6 +1004,62 @@ def _build_page(context):
         # now, so nothing here has to spell the controls out a second time.
         return (new, *render(new, show, session_id), *checkpoint_values(new), *scenario_values(new),
                 trial_note_text(new), None, None, *model_button(new))
+
+    def run_batch(data, control, source):
+        """Run every trial in the loaded file, reporting each one as it finishes."""
+        if data is None:
+            raise gr.Error("Load a trial definitions file first.")
+        if control.running:
+            raise gr.Error("This batch is already running.")
+        buttons = (gr.update(visible=False), gr.update(visible=True))
+        done = total = 0
+        rows, directory, failure = [], None, None
+        try:
+            frames = run_trials(data, context.models, runs_dir(context), control,
+                                source=Path(source).name if source else "")
+            for done, total, rows, directory, current in frames:
+                # The files of an earlier batch are cleared while this one runs,
+                # so the pane never offers them beside another collection's
+                # progress. This batch's own are offered when it ends.
+                yield (batch_text(data, done, total, rows, directory, current),
+                       gr.update(value=batch_rows(rows), visible=bool(rows)),
+                       gr.update(value=None, visible=False), *buttons)
+        except (ValueError, OSError) as exc:
+            # The model is busy or not loaded, or the batch directory could
+            # not be written, and nothing ran. Or a run or the summary could
+            # not be written partway, and the batch failed with every row it
+            # had, even the last one, possibly never reaching the disk.
+            logger.warning("Could not run the trials in %s: %s", data["title"], exc)
+            gr.Warning(str(exc))
+            if directory is None:
+                # Nothing ran and nothing on the pane changed, so it is left
+                # alone: the refusal may be this session's own batch holding
+                # the model, whose Stop button has to stay where it is.
+                yield (gr.skip(),) * 5
+                return
+            failure = exc
+        # The failure first: one that lands writing the summary after the last
+        # trial leaves every row in place, and read from the count alone that
+        # batch would say it finished.
+        ended = "failed" if failure is not None else "stopped" if cut_short(rows, total) else "finished"
+        try:
+            files = gr.update(value=downloads(directory), visible=True)
+        except OSError as exc:
+            # The disk that failed the batch is often the one the copies would
+            # go to. The pane still has to say how the batch ended and give the
+            # Run button back; the files themselves are named in the status.
+            logger.warning("Could not stage the downloads for %s: %s", directory, exc)
+            files = gr.update(value=None, visible=False)
+        yield (batch_text(data, done, total, rows, directory, ended=ended, error=failure),
+               gr.update(value=batch_rows(rows), visible=bool(rows)), files,
+               gr.update(visible=True), gr.update(visible=False))
+
+    def stop_batch(control):
+        if not control.running:
+            return
+        control.request_stop()
+        logger.info("Stop requested for the running batch")
+        gr.Info("Stopping the batch: the trial running now ends as stopped, and no more trials start.")
 
     def play(ep, show, session_id, single=False):
         last_board = None
@@ -1274,6 +1382,15 @@ def _build_page(context):
     for event in (trial_upload.upload, trial_upload.clear):
         event(load_trial_file, [trial_upload, episode, trial_data], [trial_data, trial_picker, trial_note],
               concurrency_id="maze-view", show_progress="hidden")
+    # Its own queue, with no limit on it. A batch runs for hours, so the view's
+    # queue would hold every step, selection and upload behind it, and a second
+    # batch queued behind the first would start long after it was asked for, on
+    # the inputs it was asked with. Unqueued, it reaches the model session,
+    # which refuses it on the spot while another batch holds the model.
+    batch_run.click(run_batch, [trial_data, batch_control, trial_upload],
+                    [batch_status, batch_results, batch_download, batch_run, batch_stop],
+                    concurrency_id="maze-batch", concurrency_limit=None, show_progress="hidden")
+    batch_stop.click(stop_batch, batch_control, None, queue=False)
     trial_load.click(load_trial, [trial_data, trial_picker, episode, reveal, selection_session],
                      [episode, *outputs, *checkpoint_controls, steer_note, *controls, passage, trial_note,
                       edit_selection, download, models, wanted_model],

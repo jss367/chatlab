@@ -118,10 +118,14 @@ def read_trials(path):
     return data
 
 
-def prepare_trial(data, trial_id, current):
-    """A fresh episode of the named trial, which then describes itself."""
+def prepare_trial(data, trial_id, current=None):
+    """A fresh episode of the named trial, which then describes itself.
 
-    if current.busy:
+    ``current`` is the episode it replaces on screen, if any, which has to be
+    idle first. A batch prepares trials beside the screen and passes none.
+    """
+
+    if current is not None and current.busy:
         raise ValueError("Stop or pause the current episode before loading a trial.")
     item = next((t for t in data["trials"] if t["id"] == trial_id), None)
     if item is None:

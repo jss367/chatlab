@@ -162,6 +162,10 @@ class Episode:
     dropped_closures: list = field(default_factory=list)
     pause_requested: bool = False
     stop_requested: bool = False
+    # Why the last write of this run failed, or None once it is on disk. Kept
+    # apart from the detail, which is prose for a reader, so a caller that has
+    # to know whether the file exists does not have to read it back.
+    autosave_error: str | None = None
     busy: bool = False
     replay_only: bool = False
     token_edit: dict | None = None
@@ -317,11 +321,13 @@ class Episode:
             if save_dir:
                 try:
                     self.save(save_dir)
+                    self.autosave_error = None
                 except OSError as exc:
                     self.warn_autosave(str(exc))
 
     def warn_autosave(self, error):
         logger.warning("Autosave of run %s failed: %s", self.run_id, error)
+        self.autosave_error = error
         self.detail += (f" Autosave failed: {error}. Latest changes remain in memory. "
                         "Use Export run JSON to download them, and check the run directory or free disk space.")
 
@@ -828,23 +834,32 @@ def finish_turn(episode, turn, stop_ids, max_tokens):
         episode.phase, episode.detail = "budget", "The episode reached its token or action limit."
 
 
-def stream_episode(episode, models, *, single_step=False, save_dir=None):
+def stream_episode(episode, models, *, single_step=False, save_dir=None, session=None):
+    """Generate the episode's responses, yielding it after each change.
+
+    ``session`` is a model session the caller already holds and keeps: a batch
+    of trials holds one for every episode it runs, so nothing else can take
+    the model or load another between two trials. Without one, the episode
+    opens its own session and closes it when it stops.
+    """
     with episode.lock:
         if episode.busy:
             raise ValueError("This episode is already generating. Pause it before changing the run.")
         if episode.phase in TERMINAL or episode.replay_only:
             raise ValueError("Start a new episode to run again. This episode is finished or is a saved replay. Use Play or Next to inspect its recorded responses.")
-        manager = models.open_session()
+        manager = session or models.open_session()
         # Steering can start several responses in, so a vector this load
         # cannot take is refused before the run starts rather than there.
         if steering_active(episode.config):
             try:
                 manager.check_steering(episode.config["steering"])
             except BaseException:
-                manager.close()
+                if session is None:
+                    manager.close()
                 raise
         episode.busy = True
         episode.pause_requested = episode.stop_requested = False
+        episode.autosave_error = None
         episode.phase = "running"
         episode.model_id = episode.model_id or manager.model_id
         episode.load_id = episode.load_id or manager.load_id
@@ -1016,7 +1031,8 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None):
             # will now never reach rather than a queue it emptied silently.
             if episode.phase in TERMINAL:
                 abandon_closure(episode)
-            manager.close()
+            if session is None:
+                manager.close()
             autosave()
             if autosave_error is not None:
                 episode.warn_autosave(autosave_error)
