@@ -34,52 +34,63 @@ CSS = """
 #maze-page h2 {font-size:16px; letter-spacing:-.02em; margin:0;}
 #maze-page .column {flex-wrap:nowrap;}
 #maze-page .column > * {flex-shrink:0;}
-#maze-workspace {flex:1 1 0 !important; min-height:0; flex-wrap:nowrap; gap:20px;}
-#maze-scenario, #maze-inspector {flex:0 0 auto !important; min-width:240px !important; width:26%; max-width:30%; height:100%; overflow:auto; resize:horizontal; padding:0 12px 16px 0; scrollbar-width:thin; overscroll-behavior:contain;}
-#maze-inspector {width:32%; min-width:280px !important; max-width:34%; padding:0 0 16px 12px; border-left:1px solid var(--border-color-primary);}
-#maze-center {flex:1 1 0 !important; min-width:280px !important; min-height:0; height:100%; gap:12px; overflow:auto; scrollbar-width:thin;}
-#maze-board {flex:1 1 0 !important; min-height:180px; background:#f6f7fb; border:1px solid #e4e7f0; border-radius:18px; padding:12px; display:flex; flex-direction:column;}
-#maze-board .html-container, #maze-board .prose {height:100%; min-height:0; display:flex; flex-direction:column;}
-#maze-board svg {width:100%; flex:1 1 0; min-height:0; display:block; margin:auto;}
+/* The two modes share the page's height the way the workspace alone had it:
+   the tab row keeps its own, and the open panel takes the rest. */
+#maze-modes {flex:1 1 0 !important; min-height:0; display:flex; flex-direction:column;}
+#maze-modes > .tab-wrapper {flex:none;}
+#maze-modes > .tabitem {flex:1 1 0; min-height:0; padding:12px 0 0; border:0;}
+#maze-modes > .tabitem > .column {height:100%; min-height:0;}
+#maze-workspace, #team-workspace {flex:1 1 0 !important; min-height:0; flex-wrap:nowrap; gap:20px;}
+#maze-scenario, #maze-inspector, #team-scenario, #team-inspector {flex:0 0 auto !important; min-width:240px !important; width:26%; max-width:30%; height:100%; overflow:auto; resize:horizontal; padding:0 12px 16px 0; scrollbar-width:thin; overscroll-behavior:contain;}
+#maze-inspector, #team-inspector {width:32%; min-width:280px !important; max-width:34%; padding:0 0 16px 12px; border-left:1px solid var(--border-color-primary);}
+#maze-center, #team-center {flex:1 1 0 !important; min-width:280px !important; min-height:0; height:100%; gap:12px; overflow:auto; scrollbar-width:thin;}
+#maze-board, #team-board {flex:1 1 0 !important; min-height:180px; background:#f6f7fb; border:1px solid #e4e7f0; border-radius:18px; padding:12px; display:flex; flex-direction:column;}
+#maze-board .html-container, #maze-board .prose, #team-board .html-container, #team-board .prose {height:100%; min-height:0; display:flex; flex-direction:column;}
+#maze-board svg, #team-board svg {width:100%; flex:1 1 0; min-height:0; display:block; margin:auto;}
 .maze-legend {display:flex; justify-content:center; gap:8px 12px; flex-wrap:wrap; color:#647084; font:11px system-ui; padding-top:10px; flex-shrink:0;}
-#maze-transport {gap:6px; flex-wrap:nowrap;}
-#maze-transport button {min-width:0; padding:8px 6px; font-size:12px;}
-#maze-transport-status {font-size:12px; min-height:42px;}
-#maze-transport-status p {margin:0;}
+#maze-transport, #team-transport {gap:6px; flex-wrap:nowrap;}
+#maze-transport button, #team-transport button {min-width:0; padding:8px 6px; font-size:12px;}
+#maze-transport-status, #team-transport-status {font-size:12px; min-height:42px;}
+#maze-transport-status p, #team-transport-status p {margin:0;}
 #maze-status {font-size:12px;}
-#maze-tokens {max-height:32vh; min-height:110px; overflow:auto;}
+/* A long conversation between agents scrolls rather than squeezing the board. */
+#team-board {min-height:300px;}
+#team-mail {max-height:24vh; overflow:auto; font-size:12px;}
+#maze-tokens, #team-tokens {max-height:32vh; min-height:110px; overflow:auto;}
 #maze-token-editor {border:1px solid #c7d2fe; border-radius:12px; padding:12px;}
-#maze-history {font-size:12px;}
+#maze-history, #team-history {font-size:12px;}
 /* The inspector column is as tall as the window and nothing in it grows, so a
    history of a fixed height left the rest of that height empty between the
    table and the panels below it. The table takes the spare height instead, and
    gives it back when the panels open. What scrolls is the table element, whose
    max-height resolves only if every wrapper Gradio puts between it and the
    block, the virtual-table viewport included, has a height to measure. */
-#maze-page #maze-history {flex:1 1 auto !important; min-height:120px;}
+#maze-page #maze-history, #maze-page #team-history {flex:1 1 auto !important; min-height:120px;}
 #maze-history .table-container, #maze-history .table-wrap, #maze-history button,
-#maze-history svelte-virtual-table-viewport, #maze-history svelte-virtual-table-viewport > div {height:100%; min-height:0;}
-#maze-history svelte-virtual-table-viewport {display:block;}
-#maze-history table {max-height:100% !important;}
-#maze-history td, #maze-history th {font:12px/1.5 system-ui;}
-#maze-history td {cursor:pointer;}
-#maze-raw textarea, #maze-context textarea {font-family:ui-monospace,monospace; font-size:12px;}
-#maze-scenario .form, #maze-inspector .form {min-width:0 !important;}
-#maze-scenario .row {gap:8px;}
-#maze-scenario .row > * {min-width:100px !important;}
-#maze-scenario .block, #maze-inspector .block {min-width:0 !important;}
+#maze-history svelte-virtual-table-viewport, #maze-history svelte-virtual-table-viewport > div,
+#team-history .table-container, #team-history .table-wrap, #team-history button,
+#team-history svelte-virtual-table-viewport, #team-history svelte-virtual-table-viewport > div {height:100%; min-height:0;}
+#maze-history svelte-virtual-table-viewport, #team-history svelte-virtual-table-viewport {display:block;}
+#maze-history table, #team-history table {max-height:100% !important;}
+#maze-history td, #maze-history th, #team-history td, #team-history th {font:12px/1.5 system-ui;}
+#maze-history td, #team-history td {cursor:pointer;}
+#maze-raw textarea, #maze-context textarea, #team-raw textarea, #team-context textarea {font-family:ui-monospace,monospace; font-size:12px;}
+#maze-scenario .form, #maze-inspector .form, #team-scenario .form, #team-inspector .form {min-width:0 !important;}
+#maze-scenario .row, #team-scenario .row {gap:8px;}
+#maze-scenario .row > *, #team-scenario .row > * {min-width:100px !important;}
+#maze-scenario .block, #maze-inspector .block, #team-scenario .block, #team-inspector .block {min-width:0 !important;}
 @media(max-width:1100px) {
   #maze-page {padding:16px 12px;}
-  #maze-workspace {gap:12px;}
-  #maze-scenario {min-width:210px !important; width:24%; max-width:28%;}
-  #maze-inspector {min-width:240px !important; width:30%; max-width:32%;}
-  #maze-center {min-width:250px !important;}
+  #maze-workspace, #team-workspace {gap:12px;}
+  #maze-scenario, #team-scenario {min-width:210px !important; width:24%; max-width:28%;}
+  #maze-inspector, #team-inspector {min-width:240px !important; width:30%; max-width:32%;}
+  #maze-center, #team-center {min-width:250px !important;}
 }
 @media(max-width:850px) {
   #maze-page {overflow:auto;}
-  #maze-workspace {flex:none !important; flex-wrap:wrap;}
-  #maze-center {order:-1; flex:1 0 100% !important; height:560px;}
-  #maze-scenario, #maze-inspector {flex:1 1 280px !important; width:auto; max-width:none; height:560px; resize:none;}
+  #maze-workspace, #team-workspace {flex:none !important; flex-wrap:wrap;}
+  #maze-center, #team-center {order:-1; flex:1 0 100% !important; height:560px;}
+  #maze-scenario, #maze-inspector, #team-scenario, #team-inspector {flex:1 1 280px !important; width:auto; max-width:none; height:560px; resize:none;}
 }
 """
 
@@ -724,7 +735,6 @@ def _build_page(context):
     # The model a saved run needs, for the button that opens the Models page.
     wanted_model = gr.State("")
     trial_data = gr.State(None)
-    gr.Markdown("# Maze workbench")
     with gr.Row(elem_id="maze-workspace"):
         with gr.Column(elem_id="maze-scenario"):
             gr.Markdown("## Scenario")
@@ -1330,5 +1340,13 @@ def _build_page(context):
 
 
 def build_page(context):
+    # Imported here because the Team tab borrows this module's helpers.
+    from .team_page import build_team_page
+
     with gr.Column(elem_id="maze-page"):
-        _build_page(context)
+        gr.Markdown("# Maze workbench")
+        with gr.Tabs(elem_id="maze-modes"):
+            with gr.Tab("One agent", elem_id="maze-single-tab"):
+                _build_page(context)
+            with gr.Tab("Team", elem_id="maze-team-tab"):
+                build_team_page(context, lambda: runs_dir(context))
