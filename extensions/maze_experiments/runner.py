@@ -452,8 +452,9 @@ def apply_insert(episode, manager=None):
                       sender=queued["sender"], position=list(episode.position),
                       advised_direction=queued["advised_direction"])
         try:
-            if manager is not None and set(manager.encode(insert["text"])) & manager.hidden_token_ids:
-                raise ValueError("The loaded model reads part of the text as one of its special tokens.")
+            if manager is not None and any(set(manager.encode(value)) & manager.hidden_token_ids
+                                           for value in (insert["text"], insert["sender"] or "")):
+                raise ValueError("The loaded model reads part of the text or the sender as one of its special tokens.")
             land_insert(episode, insert)
         except ValueError as exc:
             episode.detail = f"{describe_insert(insert)} was dropped. {exc}"
@@ -1302,11 +1303,15 @@ def validate_inserts(episode, read_prompt=None):
 
     The response each insertion landed before has to record the prompt it
     was fed, since a run only keeps a message once a prompt holding it has
-    been. ``read_prompt(episode, turn)`` decodes that prompt, or answers None
-    when the model that recorded it is not the one loaded. Where it can
-    answer, the prompt has to hold the history the record gives that response,
-    as :func:`prompt_holds` reads it. Without one, a run uploads with no
-    tokenizer at all.
+    been. ``read_prompt(episode, turn, context)`` answers for that prompt with
+    two readings, or None when the model that recorded it is not the one
+    loaded: the recorded IDs decoded, and ``context`` - the messages the
+    record gives that response - put through the same model's template, or
+    None where the template cannot render them. The two have to be the same
+    text, the whole prompt and not only the parts the record names, so a
+    message nobody recorded cannot sit anywhere in it. Where the template
+    gives no reading, the decoded prompt is held to :func:`prompt_holds`
+    instead. Without a reader, a run uploads with no tokenizer at all.
     """
     inserts = episode.config.get("context_inserts")
     if not isinstance(inserts, list) or not inserts:
@@ -1340,9 +1345,13 @@ def validate_inserts(episode, read_prompt=None):
         return
     for insert in inserts:
         boundary = insert["before_turn"]
-        prompt = read_prompt(episode, episode.turns[boundary])
         context = context_messages(episode, boundary)
-        if prompt is not None and not prompt_holds(prompt, context, episode.messages[len(context):]):
+        reading = read_prompt(episode, episode.turns[boundary], context)
+        if reading is None:
+            continue
+        prompt, templated = reading
+        if not (prompt == templated if templated is not None
+                else prompt_holds(prompt, context, episode.messages[len(context):])):
             raise ValueError(f"Response {boundary + 1}'s recorded prompt is not the history the run records "
                              "for it, up to and including the message inserted before it.")
 
@@ -1350,7 +1359,9 @@ def validate_inserts(episode, read_prompt=None):
 def prompt_holds(prompt, context, following):
     """Whether a decoded prompt carries a response's context and nothing after it.
 
-    Read without the template: every user and simulator message has to appear
+    The fallback for a template that gives no reading, so weaker than the
+    comparison: text between the messages it finds is not read. Read without
+    the template: every user and simulator message has to appear
     in the prompt as written and in order, and the next one the history holds
     after this context must not. Templates write those two roles verbatim,
     where some rewrite an earlier response's reasoning, so they are what can be

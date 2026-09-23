@@ -558,6 +558,23 @@ def recorded_prompt(ep, turn, models):
     return text if text is not None and reads_back(recorded, model_of(load_id)) else None
 
 
+def prompt_reading(ep, turn, context, models):
+    """A response's recorded prompt beside its context put through the same model's template.
+
+    None when the recorded prompt may not be read here. The templated reading
+    is None where the template refuses the messages or a load moved between
+    the two readings, so the pair is never spelled by two models.
+    """
+    recorded = recorded_prompt(ep, turn, models)
+    if recorded is None:
+        return None
+    try:
+        templated, load_id = models.prompt_text(context, TOOLS)
+    except Exception:
+        templated, load_id = None, None
+    return recorded, templated if reads_back(recording_model(ep, turn), model_of(load_id)) else None
+
+
 def unnamed_model(count):
     """Why a run that does not say which model produced it is not read back.
 
@@ -1327,7 +1344,7 @@ def _build_page(context):
             if Path(path).stat().st_size > 50_000_000:
                 raise ValueError("Run files must be smaller than 50 MB.")
             replay = from_payload(json.loads(Path(path).read_text()),
-                                  read_prompt=lambda run, turn: recorded_prompt(run, turn, context.models))
+                                  read_prompt=lambda run, turn, messages: prompt_reading(run, turn, messages, context.models))
             # Before the first frame: recovering the open-cell probability writes
             # it onto the run, and Run details reports whichever way that went.
             values = (*checkpoint_values(replay), *scenario_values(replay))

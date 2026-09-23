@@ -43,6 +43,10 @@ def check_insert(insert):
     if channel == "teammate":
         if not isinstance(sender, str) or not sender.strip():
             raise ValueError("A teammate message names who sent it.")
+        # The sender is written into the same reply as the text.
+        if MARKS.search(sender):
+            raise ValueError("A sender cannot supply tool syntax, conversation boundary tokens or "
+                             "reasoning delimiters.")
     elif sender is not None:
         raise ValueError("Only a teammate message names a sender.")
     if insert.get("advised_direction") not in (None, *DIRECTIONS):
