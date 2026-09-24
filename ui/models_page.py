@@ -171,17 +171,23 @@ def download_detail(model_id: str, snap: DownloadSnapshot, rate: float | None) -
     return f"{name}\n\n`{progress_bar(snap.fraction)}` {percent}%\n\n{figures}"
 
 
-def stream_download(model_id: str, hf_token: str):
+def stream_download(model_id: str, hf_token: str, revision: str | None = None):
     """Yield a status card every half second until ``model_id`` is on disk.
 
     Returns the snapshot path, so a caller writes
     ``path = yield from stream_download(...)``. A failed download raises here.
+    ``revision`` is the branch, tag or commit to fetch, the default branch
+    when ``None``.
 
     The download runs on its own thread: ``snapshot_download`` blocks until the
     last byte, and a handler that blocked with it could show nothing past its
     first frame. If this model is already being fetched (a handler whose
     browser tab went away leaves its thread running), the card follows that
     download rather than starting a second one to fight over the same files.
+    That holds across revisions too, which is why a download is listed by
+    model ID alone: two revisions of one repo share its ``blobs`` folder, so
+    a pinned base waits for a default-branch download of the same repo to
+    end and then fetches what its own revision still lacks.
     """
 
     cleaned = model_id.strip()
@@ -200,13 +206,15 @@ def stream_download(model_id: str, hf_token: str):
             time.sleep(DOWNLOAD_POLL_SECONDS)
         # Whatever that download left behind is now in the cache, so this pass
         # either returns at once or resumes where it stopped.
-        return (yield from stream_download(model_id, hf_token))
+        return (yield from stream_download(model_id, hf_token, revision))
 
     outcome: dict = {}
 
     def work() -> None:
         try:
-            outcome["path"] = runtime.MANAGER.download(cleaned, hf_token, progress)
+            outcome["path"] = runtime.MANAGER.download(
+                cleaned, hf_token, progress, revision=revision
+            )
         except BaseException as error:
             outcome["error"] = error
 
@@ -231,13 +239,14 @@ def stream_download(model_id: str, hf_token: str):
     return outcome["path"]
 
 
-def adapter_base(path: Path) -> str | None:
+def adapter_base(path: Path) -> tuple[str, str | None] | None:
     """The base model the adapter snapshot at ``path`` needs, or ``None``.
 
-    ``None`` for a snapshot that is not an adapter, and for an adapter
-    ChatLab cannot load at all: fetching a base for one of those would
-    download a model nobody asked for and leave the adapter as unloadable
-    as before.
+    The base's Hub ID and the revision the adapter pins it at, ``None`` for
+    the default branch; see :func:`adapters.base_revision`. ``None`` for a
+    snapshot that is not an adapter, and for an adapter ChatLab cannot load
+    at all: fetching a base for one of those would download a model nobody
+    asked for and leave the adapter as unloadable as before.
     """
 
     if not is_adapter_snapshot(path):
@@ -245,7 +254,7 @@ def adapter_base(path: Path) -> str | None:
     config = adapters.read_adapter_config(path) or {}
     if adapters.adapter_problem(config) is not None:
         return None
-    return adapters.base_model_id(config)
+    return adapters.base_model_id(config), adapters.base_revision(config)
 
 
 def stream_download_with_base(model_id: str, hf_token: str):
@@ -259,20 +268,28 @@ def stream_download_with_base(model_id: str, hf_token: str):
     """
 
     path = yield from stream_download(model_id, hf_token)
-    base = adapter_base(Path(path))
-    if base is None:
+    needed = adapter_base(Path(path))
+    if needed is None:
         return path, ""
-    logger.info("%s is a LoRA adapter for %s; fetching the base too", model_id, base)
+    base, revision = needed
+    logger.info(
+        "%s is a LoRA adapter for %s%s; fetching the base too",
+        model_id,
+        base,
+        f" at revision {revision}" if revision else "",
+    )
     started = time.monotonic()
-    before = cache_status(base)
+    before = cache_status(base, revision=revision)
     yield status_card(
         "Downloading base model",
         f"`{model_id.strip()}` is a LoRA adapter trained on `{base}`, which is "
         "fetched next. " + describe_cache(base, before)[1],
         "working",
     )
-    yield from stream_download(base, hf_token)
-    fetched = describe_fetched(before, cache_status(base), time.monotonic() - started)
+    yield from stream_download(base, hf_token, revision)
+    fetched = describe_fetched(
+        before, cache_status(base, revision=revision), time.monotonic() - started
+    )
     return path, f" Base model `{base}`: {fetched[0].lower()}{fetched[1:]}"
 
 

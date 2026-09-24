@@ -155,6 +155,9 @@ REPLACEMENT_CHARACTER = "\ufffd"
 MODEL_ID_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$"
 )
+# A full Git commit hash, which the Hub cache files a snapshot under by name;
+# huggingface_hub's own REGEX_COMMIT_HASH.
+COMMIT_HASH = re.compile(r"^[0-9a-f]{40}$")
 
 
 def validate_model_id(model_id: str) -> str:
@@ -285,13 +288,20 @@ def snapshot_folder(folder: Path, revision: str = "main") -> Path | None:
     """The snapshot an offline ``snapshot_download`` would hand back, if any.
 
     Offline, ``huggingface_hub`` reads ``refs/<revision>`` for the commit and
-    returns ``snapshots/<commit>`` whether or not every file is in it.
+    returns ``snapshots/<commit>`` whether or not every file is in it. A
+    branch or tag has that ref file; a revision that is already a commit hash
+    does not, since there is nothing to resolve, and the hub goes straight to
+    ``snapshots/<hash>``, as this does.
     """
 
     ref = folder / "refs" / revision
-    if not ref.is_file():
+    if ref.is_file():
+        commit = ref.read_text().strip()
+    elif COMMIT_HASH.fullmatch(revision):
+        commit = revision
+    else:
         return None
-    snapshot = folder / "snapshots" / ref.read_text().strip()
+    snapshot = folder / "snapshots" / commit
     return snapshot if snapshot.is_dir() else None
 
 
@@ -348,15 +358,19 @@ def adapter_base_snapshot(snapshot: Path) -> Path | None:
     """The cached snapshot of the model an adapter snapshot was trained on.
 
     Looked up in the cache the adapter itself sits in, which its path says:
-    a snapshot is ``<cache>/models--org--name/snapshots/<commit>``. ``None``
-    when the adapter names no Hub repository or the base has no snapshot.
+    a snapshot is ``<cache>/models--org--name/snapshots/<commit>``, and at
+    the revision the adapter pins, where it pins one; see
+    :func:`adapters.base_revision`. ``None`` when the adapter names no Hub
+    repository or the base has no snapshot at that revision.
     """
 
-    base = adapters.base_model_id(adapters.read_adapter_config(snapshot) or {})
+    config = adapters.read_adapter_config(snapshot) or {}
+    base = adapters.base_model_id(config)
     if base is None:
         return None
     root = snapshot.parents[2] if snapshot.parent.name == "snapshots" else None
-    return snapshot_folder(cache_folder(base, root))
+    revision = adapters.base_revision(config) or "main"
+    return snapshot_folder(cache_folder(base, root), revision)
 
 
 def mlx_available() -> bool:
@@ -485,6 +499,11 @@ def judge_snapshot(snapshot: Path | None) -> tuple[tuple[str, ...], str]:
         # files are judged here, and cache_status judges the base, since
         # that needs the cache the two share.
         return adapters.missing_adapter_files(snapshot), TEXT_KIND
+    if not has_checkpoint and adapters.has_adapter_weights(snapshot):
+        # An adapter cut off after its weights landed and before its config
+        # did. The weights alone would read as another framework's below,
+        # and an unsupported verdict hides the download that would finish it.
+        return (adapters.ADAPTER_CONFIG,), TEXT_KIND
     if not has_checkpoint and foreign_weights(
         snapshot, transformers_config=is_transformers_config(snapshot / "config.json")
     ):
@@ -1053,13 +1072,24 @@ def missing_files(snapshot: Path) -> tuple[str, ...]:
     return tuple(missing)
 
 
-def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
-    """Measure what is already on disk for ``model_id``, without touching the network."""
+def cache_status(
+    model_id: str, cache_dir: Path | None = None, revision: str | None = None
+) -> CacheStatus:
+    """Measure what is already on disk for ``model_id``, without touching the network.
 
-    return _cache_status(model_id, cache_dir, follow_base=True)
+    The snapshot judged is the default branch's unless ``revision`` names
+    another, which is how an adapter's pinned base is judged.
+    """
+
+    return _cache_status(model_id, cache_dir, follow_base=True, revision=revision)
 
 
-def _cache_status(model_id: str, cache_dir: Path | None, follow_base: bool) -> CacheStatus:
+def _cache_status(
+    model_id: str,
+    cache_dir: Path | None,
+    follow_base: bool,
+    revision: str | None = None,
+) -> CacheStatus:
     """:func:`cache_status`, judging an adapter's base only when ``follow_base``.
 
     The base is judged one level deep. Its own status is read without
@@ -1069,7 +1099,7 @@ def _cache_status(model_id: str, cache_dir: Path | None, follow_base: bool) -> C
     """
 
     folder = cache_folder(model_id, cache_dir)
-    snapshot = snapshot_folder(folder)
+    snapshot = snapshot_folder(folder, revision or "main")
     cached = partial_files = partial_bytes = 0
     blobs = folder / "blobs"
     if blobs.is_dir():
@@ -1116,7 +1146,9 @@ def _adapter_status(
     status = replace(status, base_model=base)
     if not follow_base:
         return status
-    base_status = _cache_status(base, cache_dir, follow_base=False)
+    base_status = _cache_status(
+        base, cache_dir, follow_base=False, revision=adapters.base_revision(config)
+    )
     if base_status.base_model is not None:
         return replace(
             status,
@@ -5169,12 +5201,15 @@ class ModelManager:
         model_id: str,
         hf_token: str | None = None,
         progress: DownloadProgress | None = None,
+        revision: str | None = None,
     ) -> Path:
         """Fetch ``model_id`` into the Hugging Face cache and return its snapshot.
 
         Blocks until the last byte; ``progress`` is how a caller on another
         thread watches it happen. Files already cached are skipped, and a
-        partial file left by an interrupted download is resumed.
+        partial file left by an interrupted download is resumed. ``revision``
+        is the branch, tag or commit to fetch, the default branch when
+        ``None``; an adapter's pinned base is the one caller that sets it.
 
         ``progress`` is listed in :attr:`active_downloads` for as long as this
         runs. A caller that already listed it through :meth:`reserve_download`
@@ -5191,8 +5226,9 @@ class ModelManager:
         # holding a partial 14 GB repo looked the same in the log as one that
         # was never asked for.
         logger.info(
-            "Downloading %s from the Hub%s",
+            "Downloading %s%s from the Hub%s",
             checked_id,
+            f" at revision {revision}" if revision else "",
             " with an access token" if token else "",
         )
         try:
@@ -5201,6 +5237,7 @@ class ModelManager:
 
             path = snapshot_download(
                 repo_id=checked_id,
+                revision=revision,
                 token=token,
                 tqdm_class=progress.bar_class(),
             )

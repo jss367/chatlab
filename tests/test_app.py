@@ -540,7 +540,7 @@ class FakeDownloads(ModelManager):
     def fetch(self, model_id, token, progress):
         raise NotImplementedError
 
-    def download(self, model_id, token=None, progress=None):
+    def download(self, model_id, token=None, progress=None, revision=None):
         progress = progress or DownloadProgress()
         try:
             with self._downloads_lock:

@@ -1530,7 +1530,7 @@ class DownloadProgressTests(unittest.TestCase):
         manager = ModelManager()
         seen = {}
 
-        def fake_snapshot_download(repo_id, token, tqdm_class):
+        def fake_snapshot_download(repo_id, token, tqdm_class, revision=None):
             seen["active"] = dict(manager.active_downloads)
             tqdm_class(desc="Fetching 1 files", total=1).update(1)
             return "/cache/snapshots/abc"
@@ -1619,7 +1619,7 @@ class DownloadProgressTests(unittest.TestCase):
         self.assertIs(manager.active_downloads["org/model"], progress)
         seen = {}
 
-        def fake_snapshot_download(repo_id, token, tqdm_class):
+        def fake_snapshot_download(repo_id, token, tqdm_class, revision=None):
             seen["active"] = dict(manager.active_downloads)
             return "/cache/snapshots/abc"
 
@@ -4593,7 +4593,7 @@ class LoadRecordTests(unittest.TestCase):
     def test_a_download_records_its_start_and_what_landed(self):
         manager = ModelManager()
 
-        def fetch(repo_id, token, tqdm_class):
+        def fetch(repo_id, token, tqdm_class, revision=None):
             tqdm_class(desc="Fetching 2 files", total=2).update(2)
             bar = tqdm_class(desc="model.safetensors", total=3_000_000_000, unit="B", unit_scale=True)
             bar.update(3_000_000_000)
@@ -4623,7 +4623,7 @@ class LoadRecordTests(unittest.TestCase):
     def test_an_interrupted_download_records_how_far_it_got(self):
         manager = ModelManager()
 
-        def fetch(repo_id, token, tqdm_class):
+        def fetch(repo_id, token, tqdm_class, revision=None):
             bar = tqdm_class(desc="model.safetensors", total=3_000_000_000, unit="B", unit_scale=True)
             bar.update(1_000_000_000)
             raise OSError("connection reset")

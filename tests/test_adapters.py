@@ -58,6 +58,29 @@ def snapshot(root: Path, model_id: str, files: dict[str, bytes]) -> Path:
     return path
 
 
+def other_snapshot(
+    root: Path, model_id: str, commit: str, files: dict[str, bytes], ref: str | None = None
+) -> Path:
+    """A second snapshot of ``model_id``, at ``commit``, beside the one ``main`` names.
+
+    With ``ref`` it is a branch or tag the cache has a ref file for; without,
+    it is a commit fetched by hash, which the hub files under its own name.
+    """
+
+    folder = root / f"models--{model_id.replace('/', '--')}"
+    if ref is not None:
+        (folder / "refs" / ref).parent.mkdir(parents=True, exist_ok=True)
+        (folder / "refs" / ref).write_text(commit)
+    path = folder / "snapshots" / commit
+    path.mkdir(parents=True)
+    for name, content in files.items():
+        (path / name).write_bytes(content)
+    return path
+
+
+PINNED = "fedcba9876543210fedcba9876543210fedcba98"
+
+
 def adapter_files(**overrides) -> dict[str, bytes]:
     return {
         "adapter_config.json": json.dumps(lora_config(**overrides)).encode(),
@@ -82,6 +105,20 @@ class AdapterConfigTests(unittest.TestCase):
             with self.subTest(named=named):
                 config = lora_config(base_model_name_or_path=named)
                 self.assertEqual(adapters.base_model_id(config), loaded)
+
+    def test_a_pinned_base_revision_is_kept_except_across_the_unsloth_swap(self):
+        self.assertEqual(adapters.base_revision(lora_config(revision=PINNED)), PINNED)
+        self.assertEqual(adapters.base_revision(lora_config(revision=" v1.0 ")), "v1.0")
+        for unpinned in (None, "", "  ", 3):
+            with self.subTest(revision=unpinned):
+                self.assertIsNone(adapters.base_revision(lora_config(revision=unpinned)))
+        self.assertIsNone(adapters.base_revision(lora_config()))
+        # The pin names a commit of the 4-bit repo, which the full-precision
+        # one it is swapped for does not have.
+        swapped = lora_config(
+            base_model_name_or_path="unsloth/Qwen2.5-7B-Instruct-bnb-4bit", revision=PINNED
+        )
+        self.assertIsNone(adapters.base_revision(swapped))
 
     def test_the_adapters_chatlab_cannot_merge_are_explained(self):
         cases = {
@@ -127,6 +164,44 @@ class AdapterCacheStatusTests(unittest.TestCase):
             status = cache_status(ADAPTER, Path(root))
 
         self.assertEqual(status.missing_files, ("adapter_model.safetensors",))
+
+    def test_an_adapter_cut_off_before_its_config_is_incomplete(self):
+        # The weights landed first; alone they would read as another
+        # framework's and hide the download that finishes them.
+        with tempfile.TemporaryDirectory() as root:
+            files = adapter_files()
+            del files["adapter_config.json"]
+            snapshot(Path(root), ADAPTER, files)
+            status = cache_status(ADAPTER, Path(root))
+
+        self.assertEqual(status.kind, TEXT_KIND)
+        self.assertEqual(status.missing_files, ("adapter_config.json",))
+        self.assertFalse(status.unsupported)
+        self.assertTrue(status.present)
+
+    def test_a_pinned_base_is_judged_at_its_revision_not_at_main(self):
+        with tempfile.TemporaryDirectory() as root:
+            adapter = snapshot(Path(root), ADAPTER, adapter_files(revision=PINNED))
+            # main has moved on: the base is whole there, but not at the pin.
+            snapshot(Path(root), BASE, BASE_FILES)
+            before = cache_status(ADAPTER, Path(root))
+            self.assertIsNone(model_runtime.adapter_base_snapshot(adapter))
+            pinned = other_snapshot(Path(root), BASE, PINNED, BASE_FILES)
+            after = cache_status(ADAPTER, Path(root))
+            found = model_runtime.adapter_base_snapshot(adapter)
+
+        self.assertEqual(before.missing_files, (BASE_MODEL,))
+        self.assertTrue(after.complete)
+        self.assertEqual(found, pinned)
+
+    def test_a_base_pinned_to_a_branch_follows_that_branchs_ref(self):
+        with tempfile.TemporaryDirectory() as root:
+            adapter = snapshot(Path(root), ADAPTER, adapter_files(revision="v1"))
+            snapshot(Path(root), BASE, BASE_FILES)
+            pinned = other_snapshot(Path(root), BASE, PINNED, BASE_FILES, ref="v1")
+            found = model_runtime.adapter_base_snapshot(adapter)
+
+        self.assertEqual(found, pinned)
 
     def test_an_adapter_chatlab_cannot_merge_is_unsupported_with_its_reason(self):
         with tempfile.TemporaryDirectory() as root:
@@ -297,7 +372,7 @@ class AdapterDownloadTests(unittest.TestCase):
 
         fetched = []
 
-        def fake_download(model_id, hf_token):
+        def fake_download(model_id, hf_token, revision=None):
             fetched.append((model_id, hf_token))
             yield f"card for {model_id}"
             return self.paths[model_id]
@@ -324,13 +399,45 @@ class AdapterDownloadTests(unittest.TestCase):
         self.assertIn(BASE, note)
         self.assertTrue(any("trained on" in card for card in cards))
 
+    def test_a_pinned_base_is_fetched_and_measured_at_its_revision(self):
+        from ui import models_page
+
+        fetched = []
+
+        def fake_download(model_id, hf_token, revision=None):
+            fetched.append((model_id, revision))
+            yield "card"
+            return path
+
+        with tempfile.TemporaryDirectory() as root:
+            path = snapshot(Path(root), ADAPTER, adapter_files(revision=PINNED))
+            with (
+                mock.patch.object(models_page, "stream_download", side_effect=fake_download),
+                mock.patch.object(
+                    models_page, "cache_status", return_value=model_runtime.CacheStatus()
+                ) as status,
+            ):
+                list(models_page.stream_download_with_base(ADAPTER, ""))
+
+        self.assertEqual(fetched, [(ADAPTER, None), (BASE, PINNED)])
+        for call in status.call_args_list:
+            self.assertEqual(call, mock.call(BASE, revision=PINNED))
+
+    def test_the_manager_hands_the_revision_to_the_hub(self):
+        manager = model_runtime.ModelManager()
+        with mock.patch("huggingface_hub.snapshot_download", return_value="/cache/x") as fetch:
+            manager.download(BASE, revision=PINNED)
+
+        self.assertEqual(fetch.call_args.kwargs["repo_id"], BASE)
+        self.assertEqual(fetch.call_args.kwargs["revision"], PINNED)
+
     def test_a_model_that_is_not_an_adapter_fetches_nothing_more(self):
         from ui import models_page
 
         with tempfile.TemporaryDirectory() as root:
             path = snapshot(Path(root), BASE, BASE_FILES)
 
-            def fake_download(model_id, hf_token):
+            def fake_download(model_id, hf_token, revision=None):
                 yield "card"
                 return path
 

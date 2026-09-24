@@ -89,6 +89,28 @@ def base_model_id(config: dict[str, Any]) -> str | None:
     return unquantized.group(1) if unquantized else base
 
 
+def base_revision(config: dict[str, Any]) -> str | None:
+    """The commit, branch or tag of the base the adapter pins, or ``None``.
+
+    PEFT's ``revision`` records which state of the base repository the
+    adapter was trained on, and the Hub's default branch can have moved since:
+    merged into other weights, the adapter would load without complaint and
+    say something else. ``None`` leaves it to the default branch, which is
+    what a config that pins nothing means. A pin on an Unsloth 4-bit copy is
+    dropped with the swap in :func:`base_model_id`, because it names a commit
+    in the 4-bit repository's history, which the full-precision one does not
+    share.
+    """
+
+    revision = config.get("revision")
+    if not isinstance(revision, str) or not revision.strip():
+        return None
+    base = trained_base(config)
+    if base is not None and UNSLOTH_4BIT.fullmatch(base):
+        return None
+    return revision.strip()
+
+
 def adapter_problem(config: dict[str, Any], adapter_id: str | None = None) -> str | None:
     """Why ChatLab cannot load this adapter, or ``None`` when it can.
 
@@ -120,9 +142,13 @@ def adapter_problem(config: dict[str, Any], adapter_id: str | None = None) -> st
 def missing_adapter_files(snapshot: Path) -> tuple[str, ...]:
     """The files an adapter snapshot still needs before it can be merged."""
 
-    if any((snapshot / name).is_file() for name in ADAPTER_WEIGHTS):
-        return ()
-    return (ADAPTER_WEIGHTS[0],)
+    return () if has_adapter_weights(snapshot) else (ADAPTER_WEIGHTS[0],)
+
+
+def has_adapter_weights(snapshot: Path) -> bool:
+    """Whether the adapter's weights sit at the root, config or no config."""
+
+    return any((snapshot / name).is_file() for name in ADAPTER_WEIGHTS)
 
 
 def has_tokenizer(snapshot: Path) -> bool:
