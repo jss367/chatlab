@@ -8200,8 +8200,8 @@ class ModelManager:
             if kept is None or kept[0] != self.load_id or kept[1] != ids:
                 raise kv_cache.CacheGone(
                     "The cache from this inspection is no longer in memory. A reply, a "
-                    "scoring pass, another inspection and a steered inspection each "
-                    "release it; press Inspect layers again."
+                    "scoring pass and another inspection each release it; press "
+                    "Inspect layers again."
                 )
             engine = self._engine()
             cache = kept[2]

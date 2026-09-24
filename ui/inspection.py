@@ -13,6 +13,7 @@ import gradio as gr
 import charts
 import jacobian_lens
 import kv_cache
+import steering as steering_vectors
 from model_runtime import (
     LOADING,
     ModelChanged,
@@ -56,6 +57,12 @@ INSPECT_MODEL_CHANGED = (
 INSPECT_OUTPUT_ONLY = (
     "Only the output is shown: this model's intermediate layers could not be "
     "read the way it reads its own output."
+)
+
+
+KV_CACHE_STEERED = (
+    "A steered inspection keeps no key-value cache, so there is nothing to read here. "
+    "Turn steering off and press Inspect layers to see the cache."
 )
 
 
@@ -404,8 +411,9 @@ def inspect_layers(
             insight["inspection_controls"] = {"session": inspection_session, "revision": revision}
         insight["saved_target"] = dict(target)
         # The key-value cache view reads the cache this pass kept, and only
-        # while it still came from this load.
+        # while it still came from this load. A steered pass keeps none.
         insight["load_id"] = load_id
+        insight["steered"] = steering_vectors.active(steering)
         from experiment_runs import SESSION_ID
         insight["saved_session"] = SESSION_ID
         frame = (
@@ -452,7 +460,8 @@ def render_kv_cache(insight: dict | None, layer, metric):
     Bound to the readout's state as well as to the controls, so a new
     readout brings its cache view with it and a cleared one takes it away.
     The cache is read from memory, not rebuilt: a readout whose cache has
-    been released since says so and asks for another inspection.
+    been released since says so and asks for another inspection. A steered
+    readout never had one, and another inspection would keep none either.
     """
 
     if not insight:
@@ -464,6 +473,11 @@ def render_kv_cache(insight: dict | None, layer, metric):
         return (
             '<div class="viz-empty">Select the Logit lens to read the key-value cache '
             "behind a prediction.</div>",
+            gr.skip(),
+        )
+    if insight.get("steered"):
+        return (
+            f'<div class="viz-empty">{html.escape(KV_CACHE_STEERED)}</div>',
             gr.skip(),
         )
     tokens = insight.get("tokens") or []

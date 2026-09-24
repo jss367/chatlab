@@ -369,6 +369,14 @@ class PanelTests(unittest.TestCase):
         page, _slider = inspection.render_kv_cache(insight, 1, "Key norm")
         self.assertIn("press Inspect layers again", page)
 
+    def test_a_steered_readout_says_it_has_no_cache_without_asking_the_model(self):
+        insight = self.insight() | {"steered": True}
+        with mock.patch.object(self.manager, "read_kv_cache") as read:
+            page, _slider = inspection.render_kv_cache(insight, 1, "Key norm")
+        read.assert_not_called()
+        self.assertIn("A steered inspection keeps no key-value cache", page)
+        self.assertNotIn("press Inspect layers again", page)
+
     def test_the_jacobian_lens_points_back_to_the_logit_lens(self):
         page, _slider = inspection.render_kv_cache({"kind": "jacobian"}, 1, "Key norm")
         self.assertIn("Select the Logit lens", page)
