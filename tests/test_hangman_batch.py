@@ -176,6 +176,10 @@ class GuesserTests(Fixture):
         self.assertEqual(word_problems(game, "crane"), [])
         self.assertTrue(word_problems(game, "crate"))
         self.assertTrue(word_problems(game, "cranes"))
+        # A cell a later board hides again still holds the word to what it showed.
+        game = game_of(("go", "Board: _ _ _ _ _"), ("x", "Board: A _ _ _ _"), ("y", "Board: _ _ _ _ _"))
+        self.assertIn("The revealed word STONE has S at position 1, where the board showed A.",
+                      word_problems(game, "stone"))
         game = game_of(("go", "Board: _ _ _ _ _"), ("?", "Word: crane"))
         self.assertIn("The game revealed CRANE at response 2; this is GRAPE.", word_problems(game, "grape"))
 

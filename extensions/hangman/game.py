@@ -180,19 +180,25 @@ def word_problems(game, word):
     is held to the boards exactly as a revealed word is, and to the first word
     the game revealed.
     """
-    _, (length, shown, placed, first) = _walk(game)
+    _, (length, cells, placed, first) = _walk(game)
     word = word.lower()
     found = [f"The game revealed {first[1].upper()} at response {first[0]}; this is {word.upper()}."] \
         if first and word != first[1] else []
-    return found + list(_word_problems(word, length, shown, placed))
+    return found + list(_word_problems(word, length, cells, placed))
 
 
 def _walk(game):
     """The contradictions ``check`` reports, before it drops repeats, and the
-    board state they leave: the length, the letter shown at each position,
-    where each guessed letter was placed, and the first word revealed."""
+    board state they leave: the length, every letter any board of that length
+    showed at each position, where each guessed letter was placed, and the
+    first word revealed.
+
+    A word is held to every letter shown, not only to the latest board's: a
+    board that later hides a cell again contradicts the one before it, and a
+    word agreeing with the later board still disagrees with the earlier one.
+    """
     problems = []
-    length, shown, placed = None, {}, {}
+    length, shown, placed, cells = None, {}, {}, {}
     guessed, moved, pending = set(), set(), set()
     first = None
     for number, turn in enumerate(game["turns"], 1):
@@ -233,6 +239,7 @@ def _walk(game):
                         shown.pop(position, None)
                     else:
                         shown[position] = cell
+                        cells.setdefault(position, {})[cell] = None
                         if cell != before and cell not in guessed:
                             problems.append((number, f"{cell.upper()} is on the board but was never guessed."))
                 for letter, positions in placed.items():
@@ -251,23 +258,25 @@ def _walk(game):
             problems.append((number, f"The word revealed at response {first[0]} was {first[1].upper()}; "
                                      f"this one is {word.upper()}."))
         for held in dict.fromkeys(w for w in (first and first[1], word) if w):
-            problems.extend((number, message) for message in _word_problems(held, length, shown, placed))
+            problems.extend((number, message) for message in _word_problems(held, length, cells, placed))
         if word and not first:
             first = (number, word)
-    return problems, (length, shown, placed, first)
+    return problems, (length, cells, placed, first)
 
 
 def _positions(positions):
     return ", ".join(str(i + 1) for i in sorted(positions)) if positions else "no position"
 
 
-def _word_problems(word, length, shown, placed):
+def _word_problems(word, length, cells, placed):
     if length is not None and len(word) != length:
         yield f"The revealed word {word.upper()} has {len(word)} letters; the board had {length}."
         return
-    for position, letter in shown.items():
-        if position < len(word) and word[position] != letter:
-            yield f"The revealed word {word.upper()} has {word[position].upper()} at position {position + 1}, where the board showed {letter.upper()}."
+    for position, letters in cells.items():
+        for letter in letters:
+            if position < len(word) and word[position] != letter:
+                yield (f"The revealed word {word.upper()} has {word[position].upper()} at position {position + 1}, "
+                       f"where the board showed {letter.upper()}.")
     for letter, positions in placed.items():
         actual = {i for i, character in enumerate(word) if character == letter}
         if actual != positions:
