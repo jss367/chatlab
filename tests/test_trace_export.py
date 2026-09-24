@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import trace_export
-from trace_export import (
+from chatlab import trace_export
+from chatlab.trace_export import (
     build_trace,
     trace_to_csv,
     trace_to_json,

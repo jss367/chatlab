@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import transformers
 
-from desktop_smoke import smoke_test_metal, smoke_test_mlx, smoke_test_pipelines
+from chatlab.desktop_smoke import smoke_test_metal, smoke_test_mlx, smoke_test_pipelines
 
 
 @unittest.skipUnless(hasattr(transformers, "MetalConfig"), "Metal requires transformers>=5.3")
@@ -32,7 +32,7 @@ class DesktopMetalSmokeTests(unittest.TestCase):
 
         with (
             patch("torch.backends.mps.is_available", return_value=False),
-            patch("desktop_smoke.importlib.import_module", side_effect=without_metal),
+            patch("chatlab.desktop_smoke.importlib.import_module", side_effect=without_metal),
             self.assertRaisesRegex(ModuleNotFoundError, "metal_quantization"),
         ):
             smoke_test_metal()
@@ -61,7 +61,7 @@ class DesktopMlxSmokeTests(unittest.TestCase):
     def test_the_runner_skips_without_mlx(self):
         output = StringIO()
         with (
-            patch("mlx_runtime.mlx_available", return_value=False),
+            patch("chatlab.mlx_runtime.mlx_available", return_value=False),
             redirect_stdout(output),
         ):
             smoke_test_mlx()

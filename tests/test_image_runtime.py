@@ -12,13 +12,13 @@ from unittest import mock
 import numpy
 import torch
 
-import image_runtime
-import device_memory
-import model_cache
+from chatlab import image_runtime
+from chatlab import device_memory
+from chatlab import model_cache
 import settings_sandbox
 from fake_pipeline import FakePipeline, FakeTokenizer
-from image_runtime import ImageRequest
-from model_cache import (
+from chatlab.image_runtime import ImageRequest
+from chatlab.model_cache import (
     IMAGE_KIND,
     MODEL_WEIGHTS,
     TEXT_KIND,
@@ -32,7 +32,7 @@ from model_cache import (
     pipeline_weight_bytes,
     weight_bytes_for,
 )
-from model_runtime import ModelManager
+from chatlab.model_runtime import ModelManager
 
 
 def setUpModule():
@@ -598,7 +598,7 @@ class PipelineLayoutTests(unittest.TestCase):
     def test_the_pipeline_class_stands_in_for_an_architecture(self):
         with tempfile.TemporaryDirectory() as root:
             self.snapshot(root, self.whole())
-            from model_cache import list_cached_models
+            from chatlab.model_cache import list_cached_models
 
             (entry,) = list_cached_models(Path(root))
 
@@ -875,7 +875,7 @@ class KindAwareFitTests(unittest.TestCase):
         reclamation under test are reached on a machine that has no card.
         """
 
-        from ui import models_page, runtime
+        from chatlab.ui import models_page, runtime
 
         host = host or self.HOST
         on_cuda = device_memory.DeviceProfile(
@@ -1835,7 +1835,7 @@ class ManagerImageRunTests(unittest.TestCase):
     def test_running_out_of_memory_advises_something_a_reader_can_see(self):
         # A conversation and a response length mean nothing to someone who
         # was drawing a picture.
-        from device_memory import OutOfMemoryError
+        from chatlab.device_memory import OutOfMemoryError
 
         class Full(FakePipeline):
             def __call__(self, *args, **kwargs):
@@ -1983,7 +1983,7 @@ class PipelineLoaderTests(unittest.TestCase):
             mock.patch.object(manager, "_cap_mps_memory", return_value=None),
             mock.patch.object(manager, "_check_memory", return_value=(None, None)) as check,
             mock.patch.object(manager, "_release_device_cache"),
-            mock.patch("device_memory.allocated_bytes", return_value=None),
+            mock.patch("chatlab.device_memory.allocated_bytes", return_value=None),
         ):
             device = manager._load_locked(
                 "org/pipe", Path("/snap"), fake_torch, precision=precision, kind=IMAGE_KIND

@@ -12,9 +12,9 @@ from types import SimpleNamespace
 
 import gradio as gr
 
-import app
+from chatlab import app
 import settings_sandbox
-from prompt_batch import (
+from chatlab.prompt_batch import (
     BatchTable,
     parse_prompt_file,
     parse_prompts,
@@ -22,8 +22,8 @@ from prompt_batch import (
     write_batch_csv,
     write_batch_trace,
 )
-from trace_export import build_trace, traces_to_csv
-from ui import runtime
+from chatlab.trace_export import build_trace, traces_to_csv
+from chatlab.ui import runtime
 
 from test_streaming import EOS_ID, PIECES, loaded_manager
 

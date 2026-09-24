@@ -10,13 +10,13 @@ from unittest import mock
 import gradio as gr
 from gradio.state_holder import SessionState
 
-import app
-import library
+from chatlab import app
+from chatlab import library
 import settings_sandbox
-import ui.conversations
-from conversation import MAIN_BRANCH, make_turn, new_forks, put_branch
-from ui import runtime
-from ui.background import ConversationJob, NAMES
+from chatlab.ui import conversations
+from chatlab.conversation import MAIN_BRANCH, make_turn, new_forks, put_branch
+from chatlab.ui import runtime
+from chatlab.ui.background import ConversationJob, NAMES
 from test_app_flow import SETTINGS, THINK_EOS, THINK_PIECES
 from test_streaming import loaded_manager
 
@@ -230,13 +230,13 @@ class BackgroundConversationTests(unittest.TestCase):
 
     def test_completion_during_navigation_cannot_be_overwritten_by_its_snapshot(self):
         self.start()
-        original = ui.conversations.copy_turns
+        original = conversations.copy_turns
 
         def finish_before_copy(turns):
             self.finish()
             return original(turns)
 
-        with mock.patch.object(ui.conversations, "copy_turns", finish_before_copy):
+        with mock.patch.object(conversations, "copy_turns", finish_before_copy):
             self.call("new_conversation")
         self.call("poll")
         self.assertEqual(
@@ -282,7 +282,7 @@ class BackgroundConversationTests(unittest.TestCase):
 
         self.manager.generate = slow_tokens
         self.addCleanup(advance.set)
-        with mock.patch("text_generation.STREAM_BATCH_TOKENS", 1):
+        with mock.patch("chatlab.text_generation.STREAM_BATCH_TOKENS", 1):
             self.call("chat", {0: "hi", **dict(enumerate(SETTINGS, 2))})
             self.assertTrue(partial.wait(2))
             self.call("poll")

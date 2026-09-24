@@ -1,10 +1,10 @@
 import json
 import unittest
 
-import library
-from conversation import copy_forks, drop_branch, make_turn, new_forks, put_branch
-from fork_tree import comparison_html, tree_html, validate_origin
-from ui.fork_tree import render_fork_tree, select_tree_branch
+from chatlab import library
+from chatlab.conversation import copy_forks, drop_branch, make_turn, new_forks, put_branch
+from chatlab.fork_tree import comparison_html, tree_html, validate_origin
+from chatlab.ui.fork_tree import render_fork_tree, select_tree_branch
 
 
 def example():

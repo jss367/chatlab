@@ -35,13 +35,13 @@ jobs:
             exit 1
           fi
 
-      - name: Check the tag matches version.py
+      - name: Check the tag matches chatlab/version.py
         env:
           TAG: ${{ inputs.tag }}
         run: |
-          expected="v$(python3 -c 'from version import __version__; print(__version__)')"
+          expected="v$(python3 -c 'from chatlab.version import __version__; print(__version__)')"
           if [ "$TAG" != "$expected" ]; then
-            echo "Tag $TAG does not match version.py ($expected)." >&2
+            echo "Tag $TAG does not match chatlab/version.py ($expected)." >&2
             exit 1
           fi
 

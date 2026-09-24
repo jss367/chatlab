@@ -8,16 +8,16 @@ from uuid import uuid4
 
 import gradio as gr
 
-from extensions.maze_experiments import inserts
-from extensions.maze_experiments.dynamic_maze import FORMAT as CHANGING_FORMAT, changing, close_cell
-from extensions.maze_experiments.inserts import FORMAT, check_insert, inserted_fragment, render_insert
-from extensions.maze_experiments.maze import DIRECTIONS, TOOLS, Maze, apply_call, call_text, initial_history
-from extensions.maze_experiments.page import (board, build_page, context_view, history_rows, prompt_reading, status,
+from chatlab.extensions.maze_experiments import inserts
+from chatlab.extensions.maze_experiments.dynamic_maze import FORMAT as CHANGING_FORMAT, changing, close_cell
+from chatlab.extensions.maze_experiments.inserts import FORMAT, check_insert, inserted_fragment, render_insert
+from chatlab.extensions.maze_experiments.maze import DIRECTIONS, TOOLS, Maze, apply_call, call_text, initial_history
+from chatlab.extensions.maze_experiments.page import (board, build_page, context_view, history_rows, prompt_reading, status,
                                               timeline, transport_text, views)
-from extensions.maze_experiments.runner import (Episode, context_messages, fork_token_edit, from_payload,
+from chatlab.extensions.maze_experiments.runner import (Episode, context_messages, fork_token_edit, from_payload,
                                                 insert_outcome, stream_episode)
-from extension_api import TokenInspector
-from token_metrics import unscored_metric
+from chatlab.extension_api import TokenInspector
+from chatlab.token_metrics import unscored_metric
 
 from test_maze import CONFIG, Manager
 
@@ -225,7 +225,7 @@ class LiveInsertTests(unittest.TestCase):
         episode = Episode(MAZE, RUN_CONFIG)
         list(stream_episode(episode, manager, single_step=True))
         episode.request_insert("user", "Go\x00east")
-        with self.assertLogs("extensions.maze_experiments.runner", "WARNING") as logged:
+        with self.assertLogs("chatlab.extensions.maze_experiments.runner", "WARNING") as logged:
             list(stream_episode(episode, manager, single_step=True))
         self.assertIn("special tokens", "\n".join(logged.output))
         self.assertNotIn("context_inserts", episode.config)

@@ -15,11 +15,11 @@ from transformers import (
     Qwen2Config, Qwen2ForCausalLM, Qwen3Config, Qwen3ForCausalLM,
 )
 
-import charts
-import jacobian_lens
-from jacobian_lens import FittedLens
-from model_runtime import ModelManager
-from text_generation import ModelChanged
+from chatlab import charts
+from chatlab import jacobian_lens
+from chatlab.jacobian_lens import FittedLens
+from chatlab.model_runtime import ModelManager
+from chatlab.text_generation import ModelChanged
 from test_mlx_runtime import needs_mlx
 from tiny_tokenizer import build
 
@@ -299,7 +299,7 @@ class JacobianLensTests(unittest.TestCase):
         self.assertIn("tokens 3–4 of 6", windowed)
 
     def test_imported_lens_is_remembered_and_recalled_after_a_reload(self):
-        from ui import inspection, runtime
+        from chatlab.ui import inspection, runtime
 
         store = Path(self.directory.name) / "config" / "jacobian_lenses.json"
         prompt = [{"token_id": token} for token in self.ids[:2]]
@@ -361,7 +361,7 @@ class JacobianLensTests(unittest.TestCase):
             self.assertIsNone(self.manager.jacobian_lens_import())
 
     def test_hub_lens_is_fetched_into_the_lens_directory_and_imported(self):
-        from ui import inspection, runtime
+        from chatlab.ui import inspection, runtime
 
         store = Path(self.directory.name) / "config" / "jacobian_lenses.json"
         calls = {}
@@ -434,7 +434,7 @@ class JacobianLensTests(unittest.TestCase):
         self.assertIn("Choose a saved lens.pt file", status)
 
     def test_ui_pins_a_clicked_cell_by_id_only_while_its_text_is_still_the_pin(self):
-        from ui import inspection, runtime
+        from chatlab.ui import inspection, runtime
 
         imported = self.import_lens()
         the = self.manager.tokenizer.encode("the", add_special_tokens=False)[0]
@@ -466,7 +466,7 @@ class JacobianLensTests(unittest.TestCase):
             self.assertIsNone(self.manager.occupant)
 
     def test_ui_reads_first_prompt_token_after_it_and_labels_the_result(self):
-        from ui import inspection, runtime
+        from chatlab.ui import inspection, runtime
 
         imported = self.import_lens()
         metrics = [{"token_id": token} for token in self.ids[2:]]
@@ -489,7 +489,7 @@ class JacobianLensTests(unittest.TestCase):
             self.assertEqual(logit[-1], inspection.INSPECT_FIRST)
 
     def test_ui_refuses_import_when_busy_and_releases_reservation_on_errors(self):
-        from ui import inspection, runtime
+        from chatlab.ui import inspection, runtime
 
         store = Path(self.directory.name) / "config" / "jacobian_lenses.json"
         with mock.patch.object(jacobian_lens, "store_path", return_value=store), mock.patch.object(
@@ -552,7 +552,7 @@ class JacobianLensTests(unittest.TestCase):
 
     @contextmanager
     def controlled_ui(self, mode="Jacobian", pin="the"):
-        from ui import inspection, runtime
+        from chatlab.ui import inspection, runtime
 
         session = inspection.INSPECTION_CONTROLS.new_session()
         imported = self.import_lens()
@@ -580,7 +580,7 @@ class JacobianLensTests(unittest.TestCase):
 
     def test_control_edits_during_a_pass_discard_results_and_errors(self):
         import gradio as gr
-        from ui import inspection
+        from chatlab.ui import inspection
 
         for mode, change in (("Logit", "mode"), ("Jacobian", "mode"), ("Jacobian", "pin")):
             for fails in (False, True):
@@ -603,7 +603,7 @@ class JacobianLensTests(unittest.TestCase):
 
     def test_control_edits_during_delivery_remove_the_old_frame(self):
         import gradio as gr
-        from ui import inspection
+        from chatlab.ui import inspection
 
         for change in ("mode", "pin"):
             with self.subTest(change=change), self.controlled_ui() as (request, session):
@@ -621,7 +621,7 @@ class JacobianLensTests(unittest.TestCase):
 
     def test_control_edits_before_a_queued_request_starts_reject_its_old_inputs(self):
         import gradio as gr
-        from ui import inspection
+        from chatlab.ui import inspection
 
         for change in ("mode", "pin"):
             with self.subTest(change=change), self.controlled_ui() as (request, session):
@@ -636,7 +636,7 @@ class JacobianLensTests(unittest.TestCase):
                 self.assertIsNone(self.manager.occupant)
 
     def test_another_sessions_controls_do_not_invalidate_this_inspection(self):
-        from ui import inspection
+        from chatlab.ui import inspection
 
         with self.controlled_ui() as (request, session):
             other = inspection.INSPECTION_CONTROLS.new_session()
@@ -660,7 +660,7 @@ class MlxJacobianLensTests(unittest.TestCase):
     def setUp(self):
         import mlx.core as mx
 
-        from mlx_runtime import MlxEngine
+        from chatlab.mlx_runtime import MlxEngine
         from test_mlx_runtime import HIDDEN, LAYERS, VOCAB, tiny_llama
         from test_streaming import FakeTokenizer
 
@@ -693,7 +693,7 @@ class MlxJacobianLensTests(unittest.TestCase):
 
     def reference(self):
         """Each block's readout at every position from one uncached pass."""
-        from mlx_runtime import _Recorder
+        from chatlab.mlx_runtime import _Recorder
 
         mx = self.mx
         engine = self.manager.engine

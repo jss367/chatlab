@@ -15,11 +15,11 @@ import numpy as np
 from gradio.state_holder import SessionState
 from gradio.utils import get_function_with_locals
 
-import app
-from ui import runtime
-from ui.token_edit import close_token_editor, open_token_editor, save_token_edit
-import charts
-from conversation import (
+from chatlab import app
+from chatlab.ui import runtime
+from chatlab.ui.token_edit import close_token_editor, open_token_editor, save_token_edit
+from chatlab import charts
+from chatlab.conversation import (
     MAIN_BRANCH,
     branch_sampling,
     display_messages,
@@ -34,14 +34,14 @@ from conversation import (
     put_branch_sampling,
     to_json,
 )
-from model_inspection import TokenInsight
-from model_runtime import GENERATING
-from text_generation import GenerationUpdate, ModelChanged
-from token_metrics import DEFAULT_COLOR_SCALE
-from steering import SteeringError
+from chatlab.model_inspection import TokenInsight
+from chatlab.model_runtime import GENERATING
+from chatlab.text_generation import GenerationUpdate, ModelChanged
+from chatlab.token_metrics import DEFAULT_COLOR_SCALE
+from chatlab.steering import SteeringError
 
-import library
-import settings
+from chatlab import library
+from chatlab import settings
 import settings_sandbox
 from test_streaming import ChatTemplateTokenizer, FakeTokenizer, SentencePieceTokenizer, loaded_manager
 
@@ -226,7 +226,7 @@ class PanelSessionTests(unittest.TestCase):
     def test_restored_messages_are_editable_in_each_new_browser_session(self):
         forks = new_forks()
         forks["branches"][MAIN_BRANCH] = [make_turn("user", "Saved question")]
-        with mock.patch("library.read", return_value=forks):
+        with mock.patch("chatlab.library.read", return_value=forks):
             first = self.bound(0, app.restore_conversations)()
             second = self.bound(1, app.restore_conversations)()
         for session, restored in enumerate((first, second)):
@@ -249,7 +249,7 @@ class PanelSessionTests(unittest.TestCase):
         self.assertIsNone(self.bound(0, app.remember_inspect_target("score"))(scored[2], select(0)))
 
     def test_hidden_streams_never_build_or_publish_token_spans(self):
-        with mock.patch("ui.generation.transcript_update", side_effect=AssertionError("hidden repaint")):
+        with mock.patch("chatlab.ui.generation.transcript_update", side_effect=AssertionError("hidden repaint")):
             frames = self.respond(0)
         self.assertTrue(all(frame[STRIP] == gr.skip() for frame in frames))
         self.assertTrue(frames[-1][TURNS][-1]["tokens"])
@@ -272,7 +272,7 @@ class PanelSessionTests(unittest.TestCase):
         self.assertTrue(all(frame[STRIP] == gr.skip() for frame in self.respond(1)))
 
     def test_a_queued_toggle_reads_the_published_final_or_cleared_conversation(self):
-        with mock.patch("text_generation.STREAM_BATCH_TOKENS", 1):
+        with mock.patch("chatlab.text_generation.STREAM_BATCH_TOKENS", 1):
             frames = self.respond(0)
         queued_turns = frames[1][TURNS]
         final_turns = frames[-1][TURNS]
@@ -1329,7 +1329,7 @@ class TokenViewTests(unittest.TestCase):
     def test_refusal_before_opening_frame_keeps_edit_retryable(self):
         final = self.respond()
         _, _, target = self.open_editor(final)
-        with mock.patch("ui.generation.steering_from_controls", side_effect=SteeringError("Invalid steering")):
+        with mock.patch("chatlab.ui.generation.steering_from_controls", side_effect=SteeringError("Invalid steering")):
             restored = list(save_token_edit(target, "replacement", "draft", final[TURNS], *SETTINGS))[-1]
         self.assertEqual(restored[TURNS], final[TURNS])
         self.assertTrue(restored[-2]["visible"])
@@ -3628,7 +3628,7 @@ class NextTokenTests(unittest.TestCase):
             yield
 
         with mock.patch.object(runtime.MANAGER, "generate", side_effect=fail):
-            with self.assertLogs("ui.generation", level="ERROR"):
+            with self.assertLogs("chatlab.ui.generation", level="ERROR"):
                 frames = list(app.next_token(pick, "draft", later[TURNS], *SETTINGS))
         self.assertIn("Replay failed", frames[-1][STATUS])
         for frame in frames:
@@ -3798,7 +3798,7 @@ class ForkTests(unittest.TestCase):
         # A fork bug reads as "the wrong messages came back". Reconstructing
         # it needs the order the branches were made and left in, which no
         # part of the app used to write down.
-        with self.assertLogs("ui.conversations", level="INFO") as logged:
+        with self.assertLogs("chatlab.ui.conversations", level="INFO") as logged:
             forked = app.fork_conversation(self.turns(), new_forks(), None)
             app.switch_fork(MAIN_BRANCH, forked[FORK_TURNS], forked[FORK_STATE])
 
@@ -4227,7 +4227,7 @@ class SettingsPositionTests(unittest.TestCase):
     """
 
     def positions(self):
-        from ui import generation
+        from chatlab.ui import generation
 
         names = list(inspect.signature(generation.generate_reply).parameters)
         # ``turns`` and ``prompt_text`` come before the block the handlers
@@ -4235,7 +4235,7 @@ class SettingsPositionTests(unittest.TestCase):
         return {name: index for index, name in enumerate(names[2:])}
 
     def test_the_named_positions_match_the_signature(self):
-        from ui import generation
+        from chatlab.ui import generation
 
         positions = self.positions()
 
@@ -4987,7 +4987,7 @@ class LayerInspectionTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_scored_inspection_checks_its_stamp_before_and_after_delivery(self):
-        from ui.panel import new_metrics_generation
+        from chatlab.ui.panel import new_metrics_generation
 
         original_inspect = runtime.MANAGER.inspect
         for before_delivery in (True, False):

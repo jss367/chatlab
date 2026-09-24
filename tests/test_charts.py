@@ -1,6 +1,6 @@
 import unittest
 
-import charts
+from chatlab import charts
 
 
 def metrics(count: int, scored: bool = True) -> list[dict]:

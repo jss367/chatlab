@@ -11,15 +11,15 @@ from unittest import mock
 
 import gradio as gr
 
-import app
-import desktop
-import settings
+from chatlab import app
+from chatlab import desktop
+from chatlab import settings
 import settings_sandbox
-from extension_api import ModelService, NavigationService, TokenInspector
-from model_runtime import GENERATING, LOADING
-from extensions.maze_experiments.maze import default_instruction
-from extensions.registry import ExtensionSpec, LoadedExtension, load_enabled
-from ui.extensions_page import (extension_css, nav_divider_css, restart_now,
+from chatlab.extension_api import ModelService, NavigationService, TokenInspector
+from chatlab.model_runtime import GENERATING, LOADING
+from chatlab.extensions.maze_experiments.maze import default_instruction
+from chatlab.extensions.registry import ExtensionSpec, LoadedExtension, load_enabled
+from chatlab.ui.extensions_page import (extension_css, nav_divider_css, restart_now,
                                 restore_extensions, save_extensions)
 
 
@@ -102,7 +102,7 @@ class TokenSelectionTests(unittest.TestCase):
         self.assertEqual(self.selections.inspect(self.session, old, self.click), (gr.skip(), gr.skip()))
 
     def test_sessions_views_and_core_chat_are_isolated(self):
-        from ui.panel import current_metrics_generation
+        from chatlab.ui.panel import current_metrics_generation
         core_stamp = current_metrics_generation()
         old, _ = self.selections.view(self.session, 'first', [{'token_id': 1}])
         another_session = self.selections.new_session()
@@ -251,14 +251,14 @@ class RuntimeBoundaryTests(unittest.TestCase):
 
 class RegistryTests(unittest.TestCase):
     def test_disabled_code_is_not_imported(self):
-        with mock.patch('extensions.registry.import_module') as importer:
+        with mock.patch('chatlab.extensions.registry.import_module') as importer:
             self.assertEqual(load_enabled([]), ([], []))
             importer.assert_not_called()
 
     def test_import_and_api_failures_are_isolated(self):
         bad = ExtensionSpec('bad', 'Broken example', '', 'Example', 'missing_extension')
         incompatible = ExtensionSpec('new', 'Future example', '', 'Future', 'future_extension', api_version=99)
-        with mock.patch('extensions.registry.import_module', side_effect=ImportError('unavailable')) as importer:
+        with mock.patch('chatlab.extensions.registry.import_module', side_effect=ImportError('unavailable')) as importer:
             loaded, errors = load_enabled(['bad', 'new'], [bad, incompatible])
         self.assertEqual(loaded, [])
         self.assertEqual(len(errors), 2)
@@ -271,9 +271,9 @@ class RegistryTests(unittest.TestCase):
         def build(context):
             seen.append(context)
             gr.Markdown('Independent extension page')
-        with mock.patch('extensions.registry.import_module', return_value=SimpleNamespace(build_page=build, CSS='')):
+        with mock.patch('chatlab.extensions.registry.import_module', return_value=SimpleNamespace(build_page=build, CSS='')):
             loaded, _ = load_enabled(['example'], [spec])
-        with mock.patch('ui.layout.load_enabled', return_value=(loaded, [])):
+        with mock.patch('chatlab.ui.layout.load_enabled', return_value=(loaded, [])):
             demo = app.build_app()
         try:
             nav = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'nav')
@@ -286,7 +286,7 @@ class RegistryTests(unittest.TestCase):
     def test_broken_builder_keeps_core_app_available(self):
         spec = ExtensionSpec('example', 'Broken example', '', 'Example', 'example')
         ext = LoadedExtension(spec, mock.Mock(side_effect=RuntimeError('builder broke')), '')
-        with mock.patch('ui.layout.load_enabled', return_value=([ext], [])):
+        with mock.patch('chatlab.ui.layout.load_enabled', return_value=([ext], [])):
             demo = app.build_app()
         try:
             ids = {getattr(b, 'elem_id', None) for b in demo.blocks.values()}
@@ -303,7 +303,7 @@ class RegistryTests(unittest.TestCase):
         extensions = [LoadedExtension(
             ExtensionSpec(name, name.title(), "", name.title(), name), build, "",
         ) for name in ("first", "second")]
-        with mock.patch('ui.layout.load_enabled', return_value=(extensions, [])):
+        with mock.patch('chatlab.ui.layout.load_enabled', return_value=(extensions, [])):
             demo = app.build_app()
         try:
             for button in buttons:
@@ -331,7 +331,7 @@ class RegistryTests(unittest.TestCase):
         extension = LoadedExtension(
             ExtensionSpec("example", "Example", "", "Example", "example"), build, "",
         )
-        with mock.patch('ui.layout.load_enabled', return_value=([extension], [])):
+        with mock.patch('chatlab.ui.layout.load_enabled', return_value=([extension], [])):
             demo = app.build_app()
         try:
             listener = next(fn for fn in demo.fns.values() if fn.targets == [(buttons[0]._id, 'click')])
@@ -362,7 +362,7 @@ class RegistryTests(unittest.TestCase):
         self.assertNotIn('#nav label[data-testid="Two-radio-label"]::after', css)
         self.assertEqual(nav_divider_css([]), '')
 
-        with mock.patch('ui.layout.load_enabled', return_value=(loaded, [])):
+        with mock.patch('chatlab.ui.layout.load_enabled', return_value=(loaded, [])):
             demo = app.build_app()
         try:
             nav = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'nav')
@@ -446,7 +446,7 @@ class ExtensionSettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             # Background imports may add modules while the predicate runs.
             result = subprocess.run([sys.executable, '-c',
-                "import app,sys; demo=app.build_app(); assert not any(n.startswith(('extensions.maze_experiments', 'extensions.osguard', 'extensions.os_harm', 'extensions.hangman')) for n in tuple(sys.modules)); demo.close()"],
+                "from chatlab import app; import sys; demo=app.build_app(); assert not any(n.startswith(('chatlab.extensions.maze_experiments', 'chatlab.extensions.osguard', 'chatlab.extensions.os_harm', 'chatlab.extensions.hangman')) for n in tuple(sys.modules)); demo.close()"],
                 env=os.environ | {settings.SETTINGS_PATH_ENV: str(Path(temp)/'settings.json'), 'GRADIO_ANALYTICS_ENABLED':'False'},
                 capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -462,7 +462,7 @@ class ExtensionSettingsTests(unittest.TestCase):
         self.assertEqual(settings.sanitize({'enabled_extensions':['maze_experiments', 7, 'maze_experiments']}).enabled_extensions, ('maze_experiments',))
 
     def test_save_failure_does_not_claim_success(self):
-        with mock.patch('settings.write', return_value=None):
+        with mock.patch('chatlab.settings.write', return_value=None):
             with self.assertRaisesRegex(gr.Error, 'Could not save'):
                 save_extensions(['maze_experiments'], [])
         self.assertEqual(json.loads(settings.settings_path().read_text())['enabled_extensions'], [])
@@ -473,7 +473,7 @@ class ExtensionSettingsTests(unittest.TestCase):
 
     def test_failed_disable_keeps_previously_saved_extensions(self):
         save_extensions(['maze_experiments'], [])
-        with mock.patch('settings.write', return_value=None):
+        with mock.patch('chatlab.settings.write', return_value=None):
             with self.assertRaisesRegex(gr.Error, 'Could not save'):
                 save_extensions([], ['maze_experiments'])
         settings.update(top_k=20)

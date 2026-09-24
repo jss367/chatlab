@@ -17,8 +17,8 @@ from unittest import mock
 
 import numpy as np
 
-import mlx_runtime
-from mlx_runtime import (
+from chatlab import mlx_runtime
+from chatlab.mlx_runtime import (
     MlxEngine,
     bits_from_name,
     mlx_quantization,
@@ -162,7 +162,7 @@ class SupportsTests(unittest.TestCase):
     """Whether mlx-lm implements an architecture: the remapping table, then a module lookup."""
 
     def test_nothing_is_supported_where_mlx_is_not_installed(self):
-        with mock.patch("mlx_runtime.mlx_available", return_value=False):
+        with mock.patch("chatlab.mlx_runtime.mlx_available", return_value=False):
             self.assertFalse(mlx_supports("llama"))
 
     def test_the_lookup_goes_through_the_remapping_table_then_the_module_path(self):
@@ -180,7 +180,7 @@ class SupportsTests(unittest.TestCase):
             return object() if name in modules else None
 
         with (
-            mock.patch("mlx_runtime.mlx_available", return_value=True),
+            mock.patch("chatlab.mlx_runtime.mlx_available", return_value=True),
             mock.patch.dict(sys.modules, {"mlx_lm": package, "mlx_lm.utils": utils}),
             mock.patch("importlib.util.find_spec", side_effect=find_spec),
         ):
@@ -479,7 +479,7 @@ class ManagerTests(unittest.TestCase):
     """The manager driving an MLX engine end to end, tokenizer faked."""
 
     def manager(self):
-        from model_runtime import ModelManager
+        from chatlab.model_runtime import ModelManager
         from test_streaming import FakeTokenizer
 
         model = tiny_llama()
@@ -577,7 +577,7 @@ class ManagerTests(unittest.TestCase):
         # Steering adds its vector through a torch forward hook, which an
         # mlx-lm model cannot carry. The refusal has to say so, rather than
         # letting the decoder-block search blame the architecture.
-        import steering
+        from chatlab import steering
 
         manager = self.manager()
         wanted = steering.normalize(

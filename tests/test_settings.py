@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import settings
+from chatlab import settings
 
 
 class SettingsPathTests(unittest.TestCase):
@@ -62,13 +62,13 @@ class ReadTests(unittest.TestCase):
     def test_a_file_that_is_not_json_falls_back_to_the_defaults(self):
         self.write_file("{not json at all")
 
-        with self.assertLogs("settings", level="WARNING"):
+        with self.assertLogs("chatlab.settings", level="WARNING"):
             self.assertEqual(settings.read(self.path), (settings.DEFAULTS, {}))
 
     def test_a_file_holding_something_other_than_an_object_is_ignored(self):
         self.write_file([1, 2, 3])
 
-        with self.assertLogs("settings", level="WARNING"):
+        with self.assertLogs("chatlab.settings", level="WARNING"):
             self.assertEqual(settings.read(self.path), (settings.DEFAULTS, {}))
 
     def test_a_value_out_of_range_is_pulled_into_it(self):
@@ -230,7 +230,7 @@ class WriteTests(unittest.TestCase):
                     stale.unlink()
                 self.path.write_text(broken, encoding="utf-8")
 
-                with self.assertLogs("settings", level="WARNING"):
+                with self.assertLogs("chatlab.settings", level="WARNING"):
                     settings.write(settings.DEFAULTS, path=self.path)
 
                 kept = list(self.root.glob("settings.json.unreadable-*"))
@@ -244,7 +244,7 @@ class WriteTests(unittest.TestCase):
     def test_a_file_that_is_not_utf8_reads_as_the_defaults(self):
         self.path.write_bytes(b'{"system_prompt": "\\xff\xff"}')
 
-        with self.assertLogs("settings", level="WARNING"):
+        with self.assertLogs("chatlab.settings", level="WARNING"):
             self.assertEqual(settings.read(self.path), (settings.DEFAULTS, {}))
 
     def test_keys_from_a_later_version_are_put_back_where_they_were(self):
@@ -257,12 +257,12 @@ class WriteTests(unittest.TestCase):
         blocked = self.root / "file" / "settings.json"
         blocked.parent.write_text("in the way", encoding="utf-8")
 
-        with self.assertLogs("settings", level="WARNING"):
+        with self.assertLogs("chatlab.settings", level="WARNING"):
             self.assertIsNone(settings.write(settings.DEFAULTS, path=blocked))
 
     def test_a_failed_write_leaves_no_temporary_file_behind(self):
-        with mock.patch("settings.os.replace", side_effect=OSError("no")):
-            with self.assertLogs("settings", level="WARNING"):
+        with mock.patch("chatlab.settings.os.replace", side_effect=OSError("no")):
+            with self.assertLogs("chatlab.settings", level="WARNING"):
                 settings.write(settings.DEFAULTS, path=self.path)
 
         self.assertEqual(list(self.root.iterdir()), [])
@@ -401,7 +401,7 @@ class ProcessSettingsTests(unittest.TestCase):
 
     def test_required_save_failure_does_not_publish_but_normal_updates_still_do(self):
         settings.update(temperature=.2)
-        with mock.patch('settings.write', return_value=None):
+        with mock.patch('chatlab.settings.write', return_value=None):
             with self.assertRaises(OSError):
                 settings.update(require_saved=True, temperature=.4)
             self.assertEqual(settings.current().temperature, .2)
@@ -570,7 +570,7 @@ class SettingsLogTests(unittest.TestCase):
         # a line saying the setting moved would leave the one record of the
         # session disagreeing with the session.
         settings.update(temperature=0.2)
-        with mock.patch("settings.write", return_value=None):
+        with mock.patch("chatlab.settings.write", return_value=None):
             with self.assertNoLogs(settings.logger, level="INFO"):
                 with self.assertRaises(OSError):
                     settings.update(require_saved=True, temperature=0.4)
@@ -578,7 +578,7 @@ class SettingsLogTests(unittest.TestCase):
     def test_a_change_the_file_refused_is_still_a_change_to_the_session(self):
         # The ordinary path publishes whether or not the file takes it, and
         # write() logs its own failure beside this line.
-        with mock.patch("settings.write", return_value=None):
+        with mock.patch("chatlab.settings.write", return_value=None):
             with self.assertLogs(settings.logger, level="INFO") as logged:
                 settings.update(temperature=0.4)
 

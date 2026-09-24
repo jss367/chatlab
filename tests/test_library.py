@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import library
-from conversation import (
+from chatlab import library
+from chatlab.conversation import (
     MAIN_BRANCH,
     branch_stamp,
     copy_forks,
@@ -132,7 +132,7 @@ class RoundTripTests(unittest.TestCase):
     def test_a_replace_that_fails_leaves_no_staging_file_behind(self):
         library.write(new_forks(), self.path)
 
-        with mock.patch("library.os.replace", side_effect=OSError("no")):
+        with mock.patch("chatlab.library.os.replace", side_effect=OSError("no")):
             with self.assertLogs(library.logger, level="WARNING"):
                 self.assertIsNone(library.write(new_forks(), self.path))
 

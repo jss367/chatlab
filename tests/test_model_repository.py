@@ -10,8 +10,8 @@ from unittest import mock
 import httpx
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
-from model_cache import CacheStatus, cache_status, list_cached_models
-from ui import model_repository as repository, models_page
+from chatlab.model_cache import CacheStatus, cache_status, list_cached_models
+from chatlab.ui import model_repository as repository, models_page
 
 
 class RepositoryTests(unittest.TestCase):
@@ -44,7 +44,7 @@ class RepositoryTests(unittest.TestCase):
         })
 
     def test_mlx_lookup_checks_metadata_and_shows_fixed_precision(self):
-        with mock.patch("mlx_runtime.mlx_supports", return_value=True):
+        with mock.patch("chatlab.mlx_runtime.mlx_supports", return_value=True):
             states, call = self.check(self.info(), model_id="org/model-4bit", token=" secret ")
         call.assert_called_once_with("org/model-4bit", token="secret", files_metadata=True, timeout=10)
         self.assertEqual(states[0]["status"], "checking")
@@ -109,7 +109,7 @@ class RepositoryTests(unittest.TestCase):
     def test_unavailable_mlx_architecture_disables_loading_but_keeps_download_only(self):
         for supported in (False, True):
             with self.subTest(supported=supported), mock.patch(
-                "mlx_runtime.mlx_supports", return_value=supported
+                "chatlab.mlx_runtime.mlx_supports", return_value=supported
             ):
                 states, _ = self.check(self.info())
                 result = states[-1]
@@ -193,7 +193,7 @@ class RepositoryTests(unittest.TestCase):
                     self.assertEqual(cached["visible"], cached_status.complete)
 
     def test_gated_repository_with_configuration_access_allows_download(self):
-        with mock.patch("mlx_runtime.mlx_supports", return_value=True):
+        with mock.patch("chatlab.mlx_runtime.mlx_supports", return_value=True):
             states, _ = self.check(self.info(gated="auto"))
         detail, _ = repository.repository_view("org/model", states[-1])
         self.assertIn("Access to the configuration was verified", detail)

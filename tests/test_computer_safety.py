@@ -11,18 +11,18 @@ from unittest import mock
 
 import gradio as gr
 
-import app
-import settings
+from chatlab import app
+from chatlab import settings
 import settings_sandbox
-from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
-from extensions.osguard.benchmark import (
+from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
+from chatlab.extensions.osguard.benchmark import (
     LABELS, action_scores, at_threshold, blocking_curve, cases_from, dataset_digest, demo_cases,
     execution_results_from, execution_scores, label_distribution, messages_for, parse_response,
     predictions_from, read_json, report, wilson,
 )
-from extensions.osguard.chart import tradeoff_chart
-from extensions.osguard.page import build_page
-from extensions.osguard.runner import REASONING_LEAD, Runner, StreamingResponse
+from chatlab.extensions.osguard.chart import tradeoff_chart
+from chatlab.extensions.osguard.page import build_page
+from chatlab.extensions.osguard.runner import REASONING_LEAD, Runner, StreamingResponse
 from test_extensions import FakeManager
 
 
@@ -292,7 +292,7 @@ class BenchmarkTests(unittest.TestCase):
                 read_json(path)
 
     def test_saved_run_size_allowance_does_not_relax_other_import_limits(self):
-        from extensions.osguard import benchmark
+        from chatlab.extensions.osguard import benchmark
 
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(benchmark, 'MAX_FILE_BYTES', 100), \
@@ -523,7 +523,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(offered), 1, "one folder per batch, not one per case")
 
     def test_streaming_does_not_rescore_or_copy_prior_results(self):
-        from extensions.osguard import runner as module
+        from chatlab.extensions.osguard import runner as module
 
         with mock.patch.object(module, "report", wraps=report) as scoring:
             stream = self.batch("owner", demo_cases())
@@ -550,7 +550,7 @@ class RunnerTests(unittest.TestCase):
             stream.close()
 
     def test_checkpoints_are_paced_by_what_they_cost_to_write(self):
-        from extensions.osguard import runner as module
+        from chatlab.extensions.osguard import runner as module
 
         # A checkpoint rewrites the run, traces and all. Three cases inside one
         # interval are worth one write, not three.
@@ -653,7 +653,7 @@ class PageTests(unittest.TestCase):
             exported = functions["export_run"](frames[-1][0])
             # The checkpoint includes prompts and traces beyond the ordinary
             # dataset size. Reopen through the real saved-run callback.
-            with mock.patch('extensions.osguard.benchmark.MAX_FILE_BYTES', 100):
+            with mock.patch('chatlab.extensions.osguard.benchmark.MAX_FILE_BYTES', 100):
                 replay = functions["load_cases"](exported, "owner", False, 0.5)
             self.assertEqual(len(replay[1]["predictions"]), 3)
             self.assertEqual(replay[1]["imported_provenance"][0]["model_id"], "test/model")

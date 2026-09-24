@@ -7,17 +7,17 @@ from unittest import mock
 import numpy as np
 import torch
 
-import model_runtime
-import device_memory
-import text_generation
-import tokenization
-import settings
+from chatlab import model_runtime
+from chatlab import device_memory
+from chatlab import text_generation
+from chatlab import tokenization
+from chatlab import settings
 import settings_sandbox
 import tiny_tokenizer
-from conversation import split_reasoning
-from model_runtime import ModelManager
-from text_generation import ModelChanged
-from tokenization import IncrementalDecoder
+from chatlab.conversation import split_reasoning
+from chatlab.model_runtime import ModelManager
+from chatlab.text_generation import ModelChanged
+from chatlab.tokenization import IncrementalDecoder
 
 
 def setUpModule():
@@ -418,7 +418,7 @@ class GenerateStreamingTests(unittest.TestCase):
         # The log is the only record of what a response cost, and it is what
         # makes a later memory failure readable. One line, never one a token.
         manager = loaded_manager([0, 1, EOS_ID])
-        with self.assertLogs("text_generation", level="INFO") as logged:
+        with self.assertLogs("chatlab.text_generation", level="INFO") as logged:
             self.collect(manager, max_new_tokens=40)
         lines = [line for line in logged.output if "Generated" in line]
         self.assertEqual(len(lines), 1)
@@ -429,7 +429,7 @@ class GenerateStreamingTests(unittest.TestCase):
         # metrics, but max_new_tokens bounds the continuation alone, so
         # counting both would log "3 tokens of at most 1".
         manager = loaded_manager([0, 1, 2, EOS_ID])
-        with self.assertLogs("text_generation", level="INFO") as logged:
+        with self.assertLogs("chatlab.text_generation", level="INFO") as logged:
             for _ in manager.generate(
                 [{"role": "user", "content": "hi"}],
                 temperature=0.0,
@@ -454,7 +454,7 @@ class GenerateStreamingTests(unittest.TestCase):
             raise RuntimeError("MPS backend out of memory")
 
         manager._prefill = explode
-        with self.assertLogs("text_generation", level="INFO") as logged:
+        with self.assertLogs("chatlab.text_generation", level="INFO") as logged:
             with self.assertRaises(device_memory.OutOfMemoryError):
                 for _ in manager.generate(
                     [{"role": "user", "content": "hi"}],
@@ -484,7 +484,7 @@ class GenerateStreamingTests(unittest.TestCase):
         device_memory.reserved_bytes = watched
         self.addCleanup(setattr, model_runtime, "reserved_bytes", saved)
 
-        with self.assertLogs("text_generation", level="INFO") as logged:
+        with self.assertLogs("chatlab.text_generation", level="INFO") as logged:
             self.collect(manager, max_new_tokens=8)
 
         self.assertTrue(held, "the figure was never read")
@@ -503,7 +503,7 @@ class GenerateStreamingTests(unittest.TestCase):
             seed=1,
         )
         next(stream)
-        with self.assertLogs("text_generation", level="INFO") as logged:
+        with self.assertLogs("chatlab.text_generation", level="INFO") as logged:
             stream.close()
         self.assertTrue(any("Generated" in line for line in logged.output))
 

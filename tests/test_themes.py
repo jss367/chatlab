@@ -3,10 +3,10 @@
 import re
 import unittest
 
-import app
-import settings
+from chatlab import app
+from chatlab import settings
 import settings_sandbox
-import themes
+from chatlab import themes
 
 
 def setUpModule():

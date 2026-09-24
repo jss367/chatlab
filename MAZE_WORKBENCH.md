@@ -49,7 +49,7 @@ Closing a cell marks the run as manually intervened, as an interruption you requ
 
 An inserted message is text someone other than the model placed in its context partway through a run: a note inside the simulator's reply, a message signed by a teammate, or a user turn. It is a third kind of perturbation beside the interruption and the changing map. The interruption writes into the model's own response; an insertion writes into what the model reads before it responds. The interruption stays the way to put words in the model's own reasoning: when the template opens a `<think>` block, the interruption's tokens are fed inside it, with no closing tag added.
 
-Open **Insert a message** under the board, beside **Change the map**, choose a channel, write the text, name a sender for a teammate message, optionally pick an advised direction, and click **Queue this message**. It goes into the context before the next generated response. Each channel is written into the history one way, by one function, `render_insert` in `extensions/maze_experiments/inserts.py`, which generation, forks and the upload check all call:
+Open **Insert a message** under the board, beside **Change the map**, choose a channel, write the text, name a sender for a teammate message, optionally pick an advised direction, and click **Queue this message**. It goes into the context before the next generated response. Each channel is written into the history one way, by one function, `render_insert` in `chatlab/extensions/maze_experiments/inserts.py`, which generation, forks and the upload check all call:
 
 - **Simulator note** (`tool_note`): the latest simulator reply's JSON object gains a final key, `"note": <text>`.
 - **Teammate message** (`teammate`): the same reply gains a final key, `"messages": [{"from": <sender>, "text": <text>}]`, the shape a team run delivers a teammate's message in, so the message reads the same in both modes.
@@ -160,7 +160,7 @@ For the four-condition comparison, keep checkpoint generation enabled and keep m
 Use the repository's normal Python environment and dependencies:
 
 ```sh
-python app.py
+python -m chatlab
 ```
 
 Set `CHATLAB_MAZE_RUNS_PATH` to override the default `~/.local/share/chatlab/extensions/maze_experiments`. Completed responses and terminal states are autosaved there. Existing ChatLab conversations remain separate. A model loaded in Chat or Models is shared with Maze, and generation is mutually exclusive across views.

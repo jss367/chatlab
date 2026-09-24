@@ -12,17 +12,17 @@ import numpy as np
 import torch
 from transformers import GPT2Config, GPT2LMHeadModel, LlamaConfig, LlamaForCausalLM
 
-import conversation
-import library
-import model_inspection
+from chatlab import conversation
+from chatlab import library
+from chatlab import model_inspection
 import settings_sandbox
-import steering
-from model_runtime import ModelManager
-from text_generation import ModelChanged
+from chatlab import steering
+from chatlab.model_runtime import ModelManager
+from chatlab.text_generation import ModelChanged
 from test_streaming import FakeTokenizer, PIECES, EOS_ID
-from ui import runtime
-from ui import steering as controls
-from ui.conversations import fork_conversation, new_conversation, save_conversation
+from chatlab.ui import runtime
+from chatlab.ui import steering as controls
+from chatlab.ui.conversations import fork_conversation, new_conversation, save_conversation
 
 
 def setUpModule():
@@ -246,7 +246,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(block._forward_hooks)
 
     def test_an_extension_session_steers_the_responses_it_is_asked_to(self):
-        from extension_api import ModelService
+        from chatlab.extension_api import ModelService
 
         held = manager()
         service = ModelService(lambda: held)
@@ -281,7 +281,7 @@ class ConversationTests(unittest.TestCase):
     def test_incompatible_steering_preserves_response_on_retry_edit_and_branches(self):
         import gradio as gr
         from test_app_flow import FIXED, TURNS, STATUS
-        from ui.generation import chat, retry_last, edit_message, branch_from, branch_with_text
+        from chatlab.ui.generation import chat, retry_last, edit_message, branch_from, branch_with_text
 
         for route in ("retry", "edit", "branch", "typed_branch"):
             for invalid in (dict(vector(), model_id="other/model"), dict(vector(), layer=99), dict(vector(), vector=[1.0])):
@@ -308,7 +308,7 @@ class ConversationTests(unittest.TestCase):
 
     def test_incompatible_steering_keeps_new_user_message_without_empty_reply(self):
         from test_app_flow import FIXED, TURNS, STATUS
-        from ui.generation import chat
+        from chatlab.ui.generation import chat
 
         with mock.patch.object(runtime, "MANAGER", manager()):
             result = list(chat("Hello", [], **FIXED, steering=dict(vector(), layer=99)))[-1]
@@ -319,7 +319,7 @@ class ConversationTests(unittest.TestCase):
     def test_queued_pane_actions_read_steering_from_latest_gradio_session_state(self):
         import asyncio
         import gradio as gr
-        from ui.layout import build_app
+        from chatlab.ui.layout import build_app
 
         demo = build_app().queue(default_concurrency_limit=1)
         remember = next(fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", "") == "remember_steering")
@@ -363,7 +363,7 @@ class ConversationTests(unittest.TestCase):
 
     def test_model_reload_during_steered_branch_restores_original_response(self):
         from test_app_flow import FIXED, TURNS, STATUS
-        from ui.generation import chat, branch_from, branch_with_text, BRANCH_MODEL_CHANGED
+        from chatlab.ui.generation import chat, branch_from, branch_with_text, BRANCH_MODEL_CHANGED
 
         for route in ("branch", "typed_branch"):
             with self.subTest(route=route):
@@ -392,8 +392,8 @@ class ConversationTests(unittest.TestCase):
     def test_large_vector_is_stored_once_and_not_copied_into_streamed_turns(self):
         from test_app_flow import FIXED, TURNS, TRACE
         from test_streaming import loaded_manager
-        from ui.generation import chat
-        from trace_export import trace_to_json
+        from chatlab.ui.generation import chat
+        from chatlab.trace_export import trace_to_json
 
         large = dict(vector(), model_id="fake/model", vector=[i / steering.MAX_WIDTH for i in range(steering.MAX_WIDTH)])
         reference = steering.compact(large)
@@ -466,7 +466,7 @@ class ConversationTests(unittest.TestCase):
 
     def test_generation_paths_use_visible_controls_before_persistence_catches_up(self):
         from test_app_flow import FIXED, TURNS, TRACE
-        from ui.generation import chat, retry_last, branch_from, branch_with_text
+        from chatlab.ui.generation import chat, retry_last, branch_from, branch_with_text
 
         for route in ("send", "retry", "branch", "typed_branch"):
             for overrides in ((False, 1, 0), (True, 1, 0), (True, -2, 0), (True, 1, 1)):
@@ -497,7 +497,7 @@ class ConversationTests(unittest.TestCase):
                         self.assertEqual(stale, original)
 
     def test_generation_and_save_listeners_capture_all_visible_steering_controls(self):
-        from ui.layout import build_app
+        from chatlab.ui.layout import build_app
 
         demo = build_app()
         listeners = [fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", "") in (
@@ -560,8 +560,8 @@ class ConversationTests(unittest.TestCase):
 
     def test_ui_records_response_vector_and_inspects_that_snapshot(self):
         from test_app_flow import FIXED, TURNS, TRACE, CONTEXT_IDS, METRICS, PROMPT_METRICS
-        from ui.generation import chat
-        from ui.inspection import inspect_layers, render_kv_cache
+        from chatlab.ui.generation import chat
+        from chatlab.ui.inspection import inspect_layers, render_kv_cache
 
         with mock.patch.object(runtime, "MANAGER", manager()):
             frames = list(chat("Hello", [], **FIXED, steering=vector()))

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PIL import Image
 
-import branding
+from chatlab import branding
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -51,7 +51,7 @@ class LaunchTests(unittest.TestCase):
     """Both ways in - the window and ``python app.py`` - draw the same tab."""
 
     def test_both_launch_calls_pass_the_favicon(self):
-        for module in ("app.py", "desktop_launcher.py"):
+        for module in ("chatlab/__main__.py", "chatlab/desktop_launcher.py"):
             with self.subTest(module=module):
                 source = (REPO / module).read_text()
                 self.assertIn("favicon_path=branding.favicon_path()", source)

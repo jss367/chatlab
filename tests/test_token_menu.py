@@ -5,9 +5,9 @@ import json
 import unittest
 from unittest import mock
 
-import app
+from chatlab import app
 import gradio as gr
-from ui import runtime, token_menu
+from chatlab.ui import runtime, token_menu
 from test_app_flow import (
     FIXED, SETTINGS, THINK_EOS, THINK_PIECES, TURNS, METRICS, STATUS, TRACE,
     token_span, metrics_of,

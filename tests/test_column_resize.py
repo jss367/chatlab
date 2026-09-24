@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import app
+from chatlab import app
 
 
 # Enough of a Gradio dataframe for COLUMN_JS to run against: the two nested

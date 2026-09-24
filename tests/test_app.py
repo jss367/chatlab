@@ -9,20 +9,20 @@ from unittest import mock
 import gradio as gr
 import numpy as np
 
-import app
-from ui import models_page, panel, runtime
-import settings
-from model_cache import MODEL_WEIGHTS, CacheStatus
-from model_inspection import ScoredText
-from model_runtime import (
+from chatlab import app
+from chatlab.ui import models_page, panel, runtime
+from chatlab import settings
+from chatlab.model_cache import MODEL_WEIGHTS, CacheStatus
+from chatlab.model_inspection import ScoredText
+from chatlab.model_runtime import (
     GENERATING,
     LOADING,
     ExclusiveLoad,
     ModelManager,
 )
-from progress_bars import DownloadProgress
-from text_generation import PROMPT_SCORE_LIMIT
-from token_metrics import UNSCORED_BEYOND_LIMIT, build_metric, unscored_metric
+from chatlab.progress_bars import DownloadProgress
+from chatlab.text_generation import PROMPT_SCORE_LIMIT
+from chatlab.token_metrics import UNSCORED_BEYOND_LIMIT, build_metric, unscored_metric
 
 
 class Selection:
@@ -988,7 +988,7 @@ class DownloadCardTests(unittest.TestCase):
         runtime.MANAGER = Manager()
         self.addCleanup(runtime.MANAGER.release_generation)
 
-        with self.assertLogs("ui.models_page", level="INFO") as logged:
+        with self.assertLogs("chatlab.ui.models_page", level="INFO") as logged:
             list(app.download_and_load_model("org/model", ""))
 
         refusal = [line for line in logged.output if "refused" in line]
@@ -1172,7 +1172,7 @@ class LoadCardTests(unittest.TestCase):
 
         runtime.MANAGER = self.Manager(work)
 
-        with self.assertLogs("ui.models_page", level="INFO") as logged:
+        with self.assertLogs("chatlab.ui.models_page", level="INFO") as logged:
             list(app.load_cached_model(self.MODEL, precision="4-bit"))
 
         failure = [line for line in logged.output if "ERROR" in line]
@@ -1187,7 +1187,7 @@ class LoadCardTests(unittest.TestCase):
         # precision the reader chose to get there.
         runtime.MANAGER = self.Manager(lambda progress: "Apple Metal (MPS)")
 
-        with self.assertLogs("ui.models_page", level="INFO") as logged:
+        with self.assertLogs("chatlab.ui.models_page", level="INFO") as logged:
             list(app.load_cached_model(self.MODEL, precision="8-bit"))
 
         self.assertIn(

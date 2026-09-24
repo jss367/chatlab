@@ -111,7 +111,7 @@ To install manually:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python app.py
+python -m chatlab
 ```
 
 Model files use the standard Hugging Face cache. ChatLab lists complete downloads and resumable partial downloads under **My Models** on the Models page. By default the cache is under `~/.cache/huggingface`; setting `HF_HOME` before starting the app changes that location. A Hugging Face token is only needed for private or gated models, and the app does not save the token.
@@ -208,7 +208,7 @@ account of what happened. That is what the log is written for.
 It goes to `~/Library/Logs/ChatLab/ChatLab.log`, where Console.app looks, and
 elsewhere to `$XDG_STATE_HOME/chatlab/ChatLab.log`. Two megabytes a file and
 five files behind it, so days of use survive without the file growing
-unbounded in a directory nobody opens. `python app.py` writes to the same
+unbounded in a directory nobody opens. `python -m chatlab` writes to the same
 file and to the terminal; the app bundle has only the file. One process owns
 that name at a time, held with a lock beside it, and a second instance writes
 to `ChatLab-<pid>.log` rather than rotating the first one's file out from
@@ -678,7 +678,7 @@ conversations, first quit ChatLab and close any other running ChatLab servers,
 then run this from the source checkout:
 
 ```bash
-.venv/bin/python -m steering --cleanup-unused
+.venv/bin/python -m chatlab.steering --cleanup-unused
 ```
 
 The command keeps vectors referenced by any saved response or conversation
@@ -1150,7 +1150,7 @@ and anything that can reach one can already do everything the other can.
 ./scripts/release.sh
 ```
 
-The script bumps the minor version in `version.py`, lands it on `main`,
+The script bumps the minor version in `chatlab/version.py`, lands it on `main`,
 builds `ChatLab.app` from the commit it landed, runs the tests and the
 bundle's smoke test, tags that commit, publishes a GitHub Release with
 `ChatLab-macos-arm64.zip` and its `.sha256` checksum, and swaps the new

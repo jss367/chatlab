@@ -6,11 +6,11 @@ from types import SimpleNamespace
 
 import gradio as gr
 
-from extension_api import TokenInspector
-from extensions.maze_experiments.maze import Maze, parse_call
-from extensions.maze_experiments.page import build_page
-from extensions.maze_experiments.team import (MESSAGE_LIMIT, TeamEpisode, from_payload, stream_team, team_tools)
-from extensions.maze_experiments.team_page import mail_text, team_board, team_timeline
+from chatlab.extension_api import TokenInspector
+from chatlab.extensions.maze_experiments.maze import Maze, parse_call
+from chatlab.extensions.maze_experiments.page import build_page
+from chatlab.extensions.maze_experiments.team import (MESSAGE_LIMIT, TeamEpisode, from_payload, stream_team, team_tools)
+from chatlab.extensions.maze_experiments.team_page import mail_text, team_board, team_timeline
 from test_maze import MAZE, Manager, scored
 
 MAZE_ID = MAZE.tool_id()

@@ -4,9 +4,9 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from model_inspection import TokenInsight
-from model_runtime import ModelManager
-from text_generation import ModelChanged
+from chatlab.model_inspection import TokenInsight
+from chatlab.model_runtime import ModelManager
+from chatlab.text_generation import ModelChanged
 
 from test_streaming import EOS_ID, PIECES, FakeTokenizer
 
@@ -431,7 +431,7 @@ class InspectTests(unittest.TestCase):
         self.assertEqual(cache.crops, [-4])
 
     def test_a_sliding_layer_with_an_unknown_window_is_never_cropped(self):
-        from torch_engine import _cache_can_crop
+        from chatlab.torch_engine import _cache_can_crop
 
         unknown = FakeCache([None])
         unknown.is_sliding = [True]

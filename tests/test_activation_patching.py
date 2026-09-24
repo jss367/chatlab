@@ -7,12 +7,12 @@ from unittest import mock
 
 import torch
 
-import activation_patching as patching
-from device_memory import OutOfMemoryError
-from model_runtime import ModelManager
-from text_generation import ModelChanged
+from chatlab import activation_patching as patching
+from chatlab.device_memory import OutOfMemoryError
+from chatlab.model_runtime import ModelManager
+from chatlab.text_generation import ModelChanged
 from test_streaming import FakeTokenizer, PIECES
-from ui import activation_patching as controls
+from chatlab.ui import activation_patching as controls
 
 
 def recorded(manager, context, output=(2, 3), name="run"):

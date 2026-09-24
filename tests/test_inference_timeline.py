@@ -2,12 +2,12 @@ import copy
 import unittest
 from unittest import mock
 
-import charts
-import experiment_runs as runs
+from chatlab import charts
+from chatlab import experiment_runs as runs
 import settings_sandbox
 from test_compare import metric, run
 from test_inspect import lens_manager
-from ui import inference_timeline as timeline, runtime
+from chatlab.ui import inference_timeline as timeline, runtime
 
 
 class TimelineTests(unittest.TestCase):

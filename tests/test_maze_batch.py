@@ -8,13 +8,13 @@ from unittest import mock
 
 import gradio as gr
 
-from extension_api import SteeringError, TokenInspector
-from extensions.maze_experiments import batch as batch_module, runner
-from extensions.maze_experiments.batch import MANIFEST_NAME, SUMMARY_NAME, BatchControl, downloads, run_trials
-from extensions.maze_experiments.maze import call_text
-from extensions.maze_experiments.page import build_page
-from extensions.maze_experiments.runner import from_payload
-from extensions.maze_experiments.trials import FORMAT, read_trials
+from chatlab.extension_api import SteeringError, TokenInspector
+from chatlab.extensions.maze_experiments import batch as batch_module, runner
+from chatlab.extensions.maze_experiments.batch import MANIFEST_NAME, SUMMARY_NAME, BatchControl, downloads, run_trials
+from chatlab.extensions.maze_experiments.maze import call_text
+from chatlab.extensions.maze_experiments.page import build_page
+from chatlab.extensions.maze_experiments.runner import from_payload
+from chatlab.extensions.maze_experiments.trials import FORMAT, read_trials
 from test_maze import CONFIG, MAZE, Manager
 from test_maze_steering import VECTOR
 
@@ -218,7 +218,7 @@ class BatchTests(unittest.TestCase):
             build_page(context)
         self.addCleanup(demo.close)
         batch = next(fn for fn in demo.fns.values() if fn.fn is not None and fn.fn.__name__ == "run_batch")
-        with mock.patch("extensions.maze_experiments.page.downloads", side_effect=OSError("No space left on device")):
+        with mock.patch("chatlab.extensions.maze_experiments.page.downloads", side_effect=OSError("No space left on device")):
             status, _table, files, run_button, stop_button = list(batch.fn(data, BatchControl(), None))[-1]
         self.assertIn("Finished 1 trial", status)
         self.assertFalse(files["visible"])

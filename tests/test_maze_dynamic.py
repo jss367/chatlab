@@ -9,13 +9,13 @@ from unittest import mock
 
 import gradio as gr
 
-from extensions.maze_experiments.dynamic_maze import (FORMAT, ChangingMaze, changing, check_closure,
+from chatlab.extensions.maze_experiments.dynamic_maze import (FORMAT, ChangingMaze, changing, check_closure,
                                                       close_cell, environment_id, load_maze)
-from extensions.maze_experiments.maze import GOAL_MODES, Maze, call_text
-from extensions.maze_experiments.page import board, build_page, scenario_values, status
-from extensions.maze_experiments import runner
-from extensions.maze_experiments.runner import TERMINAL, Episode, fork_token_edit, from_payload, stream_episode
-from extension_api import TokenInspector
+from chatlab.extensions.maze_experiments.maze import GOAL_MODES, Maze, call_text
+from chatlab.extensions.maze_experiments.page import board, build_page, scenario_values, status
+from chatlab.extensions.maze_experiments import runner
+from chatlab.extensions.maze_experiments.runner import TERMINAL, Episode, fork_token_edit, from_payload, stream_episode
+from chatlab.extension_api import TokenInspector
 
 from test_maze import CONFIG, Manager
 

@@ -2,17 +2,17 @@
 
 import unittest
 
-import app
-import charts
-import image_runtime
-import settings
+from chatlab import app
+from chatlab import charts
+from chatlab import image_runtime
+from chatlab import settings
 import settings_sandbox
 from fake_pipeline import FakePipeline
-from image_runtime import ImageRequest
-from model_cache import IMAGE_KIND, TEXT_KIND
-from model_runtime import ModelManager
-from token_metrics import PROMPT_ATTENTION_SCALE
-from ui import images_page, runtime
+from chatlab.image_runtime import ImageRequest
+from chatlab.model_cache import IMAGE_KIND, TEXT_KIND
+from chatlab.model_runtime import ModelManager
+from chatlab.token_metrics import PROMPT_ATTENTION_SCALE
+from chatlab.ui import images_page, runtime
 
 
 def setUpModule():

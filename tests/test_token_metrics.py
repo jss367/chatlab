@@ -4,9 +4,9 @@ import unittest
 
 import numpy as np
 
-from ui.styles import CSS
+from chatlab.ui.styles import CSS
 
-from token_metrics import (
+from chatlab.token_metrics import (
     COLOR_SCALES,
     DIVERGING_FILLS,
     SEQUENTIAL_FILLS,

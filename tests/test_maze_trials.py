@@ -8,12 +8,12 @@ from unittest import mock
 
 import gradio as gr
 
-from extension_api import TokenInspector
-from extensions.maze_experiments import page
-from extensions.maze_experiments.page import build_page, trial_note_text
-from extensions.maze_experiments.runner import Episode, from_payload
-from extensions.maze_experiments.maze import SYSTEM, default_instruction
-from extensions.maze_experiments.trials import FORMAT, prepare_trial, read_trials
+from chatlab.extension_api import TokenInspector
+from chatlab.extensions.maze_experiments import page
+from chatlab.extensions.maze_experiments.page import build_page, trial_note_text
+from chatlab.extensions.maze_experiments.runner import Episode, from_payload
+from chatlab.extensions.maze_experiments.maze import SYSTEM, default_instruction
+from chatlab.extensions.maze_experiments.trials import FORMAT, prepare_trial, read_trials
 from test_maze import CONFIG, MAZE
 
 

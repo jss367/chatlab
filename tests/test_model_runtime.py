@@ -11,17 +11,17 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import settings
+from chatlab import settings
 import settings_sandbox
 import tiny_tokenizer
-import model_runtime
-import device_memory
-import hub_search
-import mlx_runtime
-import model_cache
-import model_loading
-from hub_search import SEARCH_SCAN_LIMIT, search_hub_models
-from model_cache import (
+from chatlab import model_runtime
+from chatlab import device_memory
+from chatlab import hub_search
+from chatlab import mlx_runtime
+from chatlab import model_cache
+from chatlab import model_loading
+from chatlab.hub_search import SEARCH_SCAN_LIMIT, search_hub_models
+from chatlab.model_cache import (
     IMAGE_KIND,
     MODEL_WEIGHTS,
     cache_status,
@@ -29,8 +29,8 @@ from model_cache import (
     list_cached_models,
     validate_model_id,
 )
-from model_runtime import ModelManager
-from tokenization import (
+from chatlab.model_runtime import ModelManager
+from chatlab.tokenization import (
     MIN_MODEL_POSITION_LIMIT,
     SCORE_TOKEN_LIMIT,
     encode_for_scoring,
@@ -1459,7 +1459,7 @@ class DownloadProgressTests(unittest.TestCase):
 
     def bars(self):
         # The three bars snapshot_download builds, with the arguments it uses.
-        from progress_bars import DownloadProgress
+        from chatlab.progress_bars import DownloadProgress
 
         progress = DownloadProgress()
         cls = progress.bar_class()
@@ -1473,7 +1473,7 @@ class DownloadProgressTests(unittest.TestCase):
         return progress, files, transfer, rebuild
 
     def test_nothing_is_started_before_the_file_list_arrives(self):
-        from progress_bars import DownloadProgress
+        from chatlab.progress_bars import DownloadProgress
 
         snap = DownloadProgress().snapshot()
 
@@ -1511,7 +1511,7 @@ class DownloadProgressTests(unittest.TestCase):
         # huggingface_hub before 1.25 hands the file bar to tqdm's thread_map,
         # which (before tqdm 4.70) advances it by iterating ``tqdm_class(iterable)``.
         # tqdm's disabled __iter__ would yield without counting.
-        from progress_bars import DownloadProgress
+        from chatlab.progress_bars import DownloadProgress
 
         progress = DownloadProgress()
         cls = progress.bar_class()
@@ -1522,7 +1522,7 @@ class DownloadProgressTests(unittest.TestCase):
         self.assertEqual((snap.files_done, snap.files_total), (3, 3))
 
     def test_iterating_a_sized_iterable_learns_its_total(self):
-        from progress_bars import DownloadProgress
+        from chatlab.progress_bars import DownloadProgress
 
         progress = DownloadProgress()
         bar = progress.bar_class()(["x", "y"], desc="Fetching 2 files")
@@ -1669,7 +1669,7 @@ class DownloadProgressTests(unittest.TestCase):
     def test_a_download_leaves_another_download_of_the_same_model_listed(self):
         from unittest import mock
 
-        from progress_bars import DownloadProgress
+        from chatlab.progress_bars import DownloadProgress
 
         manager = ModelManager()
         running, _ = manager.reserve_download("org/model")
@@ -1692,7 +1692,7 @@ class LoadProgressTests(unittest.TestCase):
     """What a load reports about itself while it runs."""
 
     def progress(self):
-        from progress_bars import LoadProgress
+        from chatlab.progress_bars import LoadProgress
 
         return LoadProgress()
 
@@ -1773,7 +1773,7 @@ class LoadProgressTests(unittest.TestCase):
         self.assertAlmostEqual(snap.fraction, 0.5, msg="counted in steps alone")
 
     def test_the_fraction_averages_the_measures_there_are(self):
-        from progress_bars import LoadSnapshot
+        from chatlab.progress_bars import LoadSnapshot
 
         # Metal reads the weights into host memory and copies them across
         # afterwards, so each measure covers half the load.
@@ -1792,7 +1792,7 @@ class LoadProgressTests(unittest.TestCase):
     def test_watching_lends_the_loader_a_bar_and_takes_it_back(self):
         import importlib
 
-        from progress_bars import LOADER_BAR_ATTRIBUTES
+        from chatlab.progress_bars import LOADER_BAR_ATTRIBUTES
 
         progress = self.progress()
         found = []
@@ -1814,7 +1814,7 @@ class LoadProgressTests(unittest.TestCase):
     def test_the_loader_gets_its_bar_back_even_when_the_load_fails(self):
         import importlib
 
-        from progress_bars import LOADER_BAR_ATTRIBUTES
+        from chatlab.progress_bars import LOADER_BAR_ATTRIBUTES
 
         # Whichever of the two the installed transformers actually draws
         # through: 5.x moved its bar between modules more than once.
@@ -1835,7 +1835,7 @@ class LoadProgressTests(unittest.TestCase):
     def test_the_manager_hands_a_load_the_progress_it_was_given(self):
         from unittest import mock
 
-        from progress_bars import LoadProgress
+        from chatlab.progress_bars import LoadProgress
 
         manager = ModelManager()
         progress = LoadProgress()
@@ -1870,15 +1870,15 @@ class LoadingReportTests(unittest.TestCase):
         import torch
 
         with (
-            mock.patch("device_memory.detect_backend", return_value="mps"),
+            mock.patch("chatlab.device_memory.detect_backend", return_value="mps"),
             mock.patch.object(manager, "_unload_locked"),
             mock.patch.object(manager, "_cap_mps_memory", return_value=None),
             mock.patch.object(manager, "_check_memory", return_value=(None, None)),
             mock.patch.object(manager, "_release_device_cache") as release,
-            mock.patch("device_memory.allocated_bytes", return_value=None),
-            mock.patch("device_memory.reserved_bytes", return_value=None),
-            mock.patch("model_loading._read_text_model", side_effect=fail),
-            self.assertLogs("model_loading", level="WARNING") as logs,
+            mock.patch("chatlab.device_memory.allocated_bytes", return_value=None),
+            mock.patch("chatlab.device_memory.reserved_bytes", return_value=None),
+            mock.patch("chatlab.model_loading._read_text_model", side_effect=fail),
+            self.assertLogs("chatlab.model_loading", level="WARNING") as logs,
             self.assertRaises(device_memory.OutOfMemoryError) as caught,
         ):
             manager._load_locked("org/model", Path("/snap"), torch, precision="4-bit")
@@ -1899,18 +1899,18 @@ class LoadingReportTests(unittest.TestCase):
         manager = model_runtime.ModelManager()
         GB = 1024**3
         with (
-            mock.patch("device_memory.detect_backend", return_value="mps"),
+            mock.patch("chatlab.device_memory.detect_backend", return_value="mps"),
             mock.patch.object(manager, "_unload_locked"),
             mock.patch.object(manager, "_cap_mps_memory", return_value=24 * GB),
             mock.patch.object(manager, "_check_memory", return_value=(17 * GB, 20 * GB)),
             mock.patch.object(manager, "_release_device_cache"),
-            mock.patch("device_memory.allocated_bytes", return_value=9 * GB),
-            mock.patch("device_memory.reserved_bytes", return_value=23 * GB),
+            mock.patch("chatlab.device_memory.allocated_bytes", return_value=9 * GB),
+            mock.patch("chatlab.device_memory.reserved_bytes", return_value=23 * GB),
             mock.patch(
-                "model_loading._read_text_model",
+                "chatlab.model_loading._read_text_model",
                 side_effect=RuntimeError("MPS backend out of memory (max allowed: 24.00 GiB)"),
             ),
-            self.assertLogs("model_loading", level="WARNING"),
+            self.assertLogs("chatlab.model_loading", level="WARNING"),
             self.assertRaises(device_memory.OutOfMemoryError) as caught,
         ):
             manager._load_locked("org/model", Path("/snap"), torch)
@@ -1932,14 +1932,14 @@ class LoadingReportTests(unittest.TestCase):
 
         manager = model_runtime.ModelManager()
         with (
-            mock.patch("device_memory.detect_backend", return_value="cpu"),
+            mock.patch("chatlab.device_memory.detect_backend", return_value="cpu"),
             mock.patch.object(manager, "_unload_locked"),
             mock.patch.object(manager, "_check_memory", return_value=(None, None)),
             mock.patch.object(manager, "_release_device_cache"),
-            mock.patch("device_memory.allocated_bytes", return_value=None),
-            mock.patch("device_memory.reserved_bytes", return_value=None),
-            mock.patch("model_loading._read_text_model", side_effect=MemoryError()),
-            self.assertLogs("model_loading", level="WARNING"),
+            mock.patch("chatlab.device_memory.allocated_bytes", return_value=None),
+            mock.patch("chatlab.device_memory.reserved_bytes", return_value=None),
+            mock.patch("chatlab.model_loading._read_text_model", side_effect=MemoryError()),
+            self.assertLogs("chatlab.model_loading", level="WARNING"),
             self.assertRaises(device_memory.OutOfMemoryError) as caught,
         ):
             manager._load_locked("org/model", Path("/snap"), torch, precision="4-bit")
@@ -1949,7 +1949,7 @@ class LoadingReportTests(unittest.TestCase):
         self.assertNotIn("precision", message)
 
     def test_a_refusal_with_nothing_to_measure_still_says_what_to_do(self):
-        from device_memory import load_out_of_memory_message
+        from chatlab.device_memory import load_out_of_memory_message
 
         note = load_out_of_memory_message("org/model", error=MemoryError())
         self.assertEqual(
@@ -2033,7 +2033,7 @@ class TokenizerSupportTests(unittest.TestCase):
     def absent(self, *packages):
         """Report these tokenizer-conversion packages as not installed."""
 
-        return mock.patch("model_loading.missing_tokenizer_packages", return_value=packages)
+        return mock.patch("chatlab.model_loading.missing_tokenizer_packages", return_value=packages)
 
     def test_the_package_the_vocabulary_needs_is_named_with_its_command(self):
         snapshot = self.snapshot("tokenizer.model")
@@ -2105,16 +2105,16 @@ class TokenizerSupportTests(unittest.TestCase):
         import torch
 
         with (
-            mock.patch("device_memory.detect_backend", return_value="mps"),
+            mock.patch("chatlab.device_memory.detect_backend", return_value="mps"),
             self.absent("tiktoken"),
             mock.patch.object(manager, "_unload_locked"),
             mock.patch.object(manager, "_cap_mps_memory", return_value=None),
             mock.patch.object(manager, "_check_memory", return_value=(None, None)),
             mock.patch.object(manager, "_release_device_cache"),
-            mock.patch("device_memory.allocated_bytes", return_value=None),
-            mock.patch("device_memory.reserved_bytes", return_value=None),
-            mock.patch("model_loading._read_text_model", side_effect=fail),
-            self.assertLogs("model_loading", level="WARNING") as logs,
+            mock.patch("chatlab.device_memory.allocated_bytes", return_value=None),
+            mock.patch("chatlab.device_memory.reserved_bytes", return_value=None),
+            mock.patch("chatlab.model_loading._read_text_model", side_effect=fail),
+            self.assertLogs("chatlab.model_loading", level="WARNING") as logs,
             self.assertRaises(RuntimeError) as caught,
         ):
             manager._load_locked("org/model", snapshot, torch, precision="full")
@@ -2128,7 +2128,7 @@ class QuantizedLoadTests(unittest.TestCase):
     """What the loader asks transformers for, per device and precision."""
 
     def load_with(self, precision, mps: bool):
-        from model_runtime import ModelManager
+        from chatlab.model_runtime import ModelManager
 
         manager = ModelManager()
         calls = []
@@ -2155,7 +2155,7 @@ class QuantizedLoadTests(unittest.TestCase):
             mock.patch.object(manager, "_cap_mps_memory", return_value=None),
             mock.patch.object(manager, "_check_memory", return_value=(None, None)) as check,
             mock.patch.object(manager, "_release_device_cache"),
-            mock.patch("device_memory.allocated_bytes", return_value=None),
+            mock.patch("chatlab.device_memory.allocated_bytes", return_value=None),
         ):
             device = manager._load_locked("org/model", Path("/snap"), fake_torch, precision=precision)
         return manager, device, calls, check
@@ -2181,7 +2181,7 @@ class QuantizedLoadTests(unittest.TestCase):
         self.assertIsNone(check.call_args.kwargs["bits"])
 
     def test_a_quantized_choice_off_metal_loads_full_weights_and_says_so(self):
-        with self.assertLogs("model_loading", level="INFO") as logs:
+        with self.assertLogs("chatlab.model_loading", level="INFO") as logs:
             manager, device, calls, check = self.load_with("8-bit", mps=False)
 
         self.assertEqual(device, "CPU")
@@ -2192,7 +2192,7 @@ class QuantizedLoadTests(unittest.TestCase):
         self.assertTrue(any("need Apple Metal" in line for line in logs.output))
 
     def test_a_transformers_without_the_quantizer_is_explained(self):
-        from model_runtime import ModelManager
+        from chatlab.model_runtime import ModelManager
 
         manager = ModelManager()
         fake_torch = types.SimpleNamespace(
@@ -2214,7 +2214,7 @@ class QuantizedLoadTests(unittest.TestCase):
             mock.patch.object(manager, "_cap_mps_memory", return_value=None),
             mock.patch.object(manager, "_check_memory", return_value=(None, None)),
             mock.patch.object(manager, "_release_device_cache"),
-            mock.patch("device_memory.allocated_bytes", return_value=None),
+            mock.patch("chatlab.device_memory.allocated_bytes", return_value=None),
         ):
             with self.assertRaises(RuntimeError) as caught:
                 manager._load_locked("org/model", Path("/snap"), fake_torch, precision="8-bit")
@@ -2223,7 +2223,7 @@ class QuantizedLoadTests(unittest.TestCase):
         self.assertFalse(manager.loaded)
 
     def test_a_missing_kernels_package_is_explained(self):
-        from model_runtime import ModelManager
+        from chatlab.model_runtime import ModelManager
 
         manager = ModelManager()
 
@@ -2246,7 +2246,7 @@ class QuantizedLoadTests(unittest.TestCase):
             mock.patch.object(manager, "_cap_mps_memory", return_value=None),
             mock.patch.object(manager, "_check_memory", return_value=(None, None)),
             mock.patch.object(manager, "_release_device_cache"),
-            mock.patch("device_memory.allocated_bytes", return_value=None),
+            mock.patch("chatlab.device_memory.allocated_bytes", return_value=None),
         ):
             with self.assertRaises(RuntimeError) as caught:
                 manager._load_locked("org/model", Path("/snap"), fake_torch, precision="4-bit")
@@ -2258,7 +2258,7 @@ class AllocatedBytesTests(unittest.TestCase):
     """How far a load has got, read from the device's own allocator."""
 
     def test_the_graphics_cards_are_summed(self):
-        from device_memory import allocated_bytes
+        from chatlab.device_memory import allocated_bytes
 
         torch = types.SimpleNamespace(
             cuda=types.SimpleNamespace(
@@ -2270,20 +2270,20 @@ class AllocatedBytesTests(unittest.TestCase):
         self.assertEqual(allocated_bytes("cuda", torch), 3000)
 
     def test_metal_reports_what_it_holds(self):
-        from device_memory import allocated_bytes
+        from chatlab.device_memory import allocated_bytes
 
         torch = types.SimpleNamespace(
             mps=types.SimpleNamespace(current_allocated_memory=lambda: 4096)
         )
 
-        with mock.patch("mlx_runtime.active_bytes", return_value=None):
+        with mock.patch("chatlab.mlx_runtime.active_bytes", return_value=None):
             self.assertEqual(allocated_bytes("mps", torch), 4096)
 
     def test_metal_counts_what_mlx_holds_beside_pytorch(self):
         # MLX draws on the same device through its own allocator, so an MLX
         # load's progress needs its share: current_allocated_memory is
         # PyTorch's own tensors and nothing else's.
-        from device_memory import allocated_bytes, reserved_bytes
+        from chatlab.device_memory import allocated_bytes, reserved_bytes
 
         torch = types.SimpleNamespace(
             cuda=types.SimpleNamespace(is_available=lambda: False),
@@ -2293,7 +2293,7 @@ class AllocatedBytesTests(unittest.TestCase):
             ),
         )
 
-        with mock.patch("mlx_runtime.active_bytes", return_value=1000):
+        with mock.patch("chatlab.mlx_runtime.active_bytes", return_value=1000):
             self.assertEqual(allocated_bytes("mps", torch), 5096)
             # The driver figure is the other way round: it is the whole
             # process's allocation on the Metal device, MLX's buffers
@@ -2304,12 +2304,12 @@ class AllocatedBytesTests(unittest.TestCase):
             self.assertEqual(reserved_bytes(torch), 8192)
 
     def test_host_memory_keeps_no_such_figure(self):
-        from device_memory import allocated_bytes
+        from chatlab.device_memory import allocated_bytes
 
         self.assertIsNone(allocated_bytes("cpu", types.SimpleNamespace()))
 
     def test_a_device_that_will_not_answer_is_left_unmeasured(self):
-        from device_memory import allocated_bytes
+        from chatlab.device_memory import allocated_bytes
 
         def refuse():
             raise RuntimeError("no metal device")
@@ -2348,13 +2348,13 @@ class MemoryGuardTests(unittest.TestCase):
         return folder
 
     def test_a_single_weights_file_is_measured_by_its_size(self):
-        from model_cache import snapshot_weight_bytes
+        from chatlab.model_cache import snapshot_weight_bytes
 
         snapshot = self._snapshot({"model.safetensors": 3000, "config.json": 10})
         self.assertEqual(snapshot_weight_bytes(snapshot), 3000)
 
     def test_shards_are_summed_once_each_however_often_the_index_names_them(self):
-        from model_cache import snapshot_weight_bytes
+        from chatlab.model_cache import snapshot_weight_bytes
 
         snapshot = self._snapshot(
             {"model-00001-of-00002.safetensors": 2000, "model-00002-of-00002.safetensors": 500},
@@ -2365,18 +2365,18 @@ class MemoryGuardTests(unittest.TestCase):
         self.assertEqual(snapshot_weight_bytes(snapshot), 2500)
 
     def test_a_snapshot_without_weights_cannot_be_measured(self):
-        from model_cache import snapshot_weight_bytes
+        from chatlab.model_cache import snapshot_weight_bytes
 
         self.assertIsNone(snapshot_weight_bytes(self._snapshot({"config.json": 10})))
 
     def test_an_index_naming_a_missing_shard_cannot_be_measured(self):
-        from model_cache import snapshot_weight_bytes
+        from chatlab.model_cache import snapshot_weight_bytes
 
         snapshot = self._snapshot({}, index={"weight_map": {"a": "missing.safetensors"}})
         self.assertIsNone(snapshot_weight_bytes(snapshot))
 
     def test_the_estimate_follows_the_dtype_conversion(self):
-        from model_cache import estimate_loaded_bytes
+        from chatlab.model_cache import estimate_loaded_bytes
 
         self.assertEqual(estimate_loaded_bytes(1000, "bfloat16", "float16"), 1000)
         self.assertEqual(estimate_loaded_bytes(1000, "float32", "float16"), 500)
@@ -2386,7 +2386,7 @@ class MemoryGuardTests(unittest.TestCase):
         self.assertEqual(estimate_loaded_bytes(1000, "int4", "float16"), 1000)
 
     def test_the_quantized_estimate_leaves_the_embeddings_whole(self):
-        from model_cache import estimate_quantized_bytes
+        from chatlab.model_cache import estimate_quantized_bytes
 
         # 1000 half-precision parameters, 200 of them in the embeddings.
         # 4-bit: 200 x 2 bytes + 800 x (0.5 + 4/64) bytes.
@@ -2401,7 +2401,7 @@ class MemoryGuardTests(unittest.TestCase):
         self.assertEqual(estimate_quantized_bytes(2000, "bfloat16", 4, 5000), 2000)
 
     def test_the_embedding_size_is_read_from_the_config(self):
-        from model_cache import _embedding_params
+        from chatlab.model_cache import _embedding_params
 
         snapshot = self._snapshot({})
         (snapshot / "config.json").write_text(
@@ -2417,7 +2417,7 @@ class MemoryGuardTests(unittest.TestCase):
         self.assertIsNone(_embedding_params(None))
 
     def test_the_width_is_read_under_the_names_other_architectures_use(self):
-        from model_cache import _embedding_params, _embedding_params_from
+        from chatlab.model_cache import _embedding_params, _embedding_params_from
 
         # GPT-2 spells it n_embd, MPT d_model. Transformers resolves both
         # through its config classes when the file names the architecture.
@@ -2439,7 +2439,7 @@ class MemoryGuardTests(unittest.TestCase):
         self.assertEqual(_embedding_params(snapshot), 1600)
 
     def test_multimodal_text_embeddings_are_not_estimated_as_quantized(self):
-        from model_cache import _embedding_params, estimate_snapshot_bytes
+        from chatlab.model_cache import _embedding_params, estimate_snapshot_bytes
 
         snapshot = self._snapshot({})
         config = {
@@ -2460,7 +2460,7 @@ class MemoryGuardTests(unittest.TestCase):
         self.assertEqual(_embedding_params(snapshot), 800)
 
     def test_a_model_larger_than_the_machine_is_refused(self):
-        from device_memory import InsufficientMemoryError, check_memory_for_load
+        from chatlab.device_memory import InsufficientMemoryError, check_memory_for_load
 
         with self.assertRaises(InsufficientMemoryError) as caught:
             check_memory_for_load("org/big", 54 * self.GB, 48 * self.GB, 40 * self.GB)
@@ -2468,7 +2468,7 @@ class MemoryGuardTests(unittest.TestCase):
         self.assertIn("54.0 GB", str(caught.exception))
 
     def test_a_model_that_fits_the_machine_but_not_right_now_is_refused(self):
-        from device_memory import InsufficientMemoryError, check_memory_for_load
+        from chatlab.device_memory import InsufficientMemoryError, check_memory_for_load
 
         with self.assertRaises(InsufficientMemoryError) as caught:
             check_memory_for_load("org/mid", 30 * self.GB, 48 * self.GB, 20 * self.GB)
@@ -2477,19 +2477,19 @@ class MemoryGuardTests(unittest.TestCase):
         self.assertNotIn("free right now", str(caught.exception))
 
     def test_headroom_is_kept_beside_the_weights(self):
-        from device_memory import InsufficientMemoryError, check_memory_for_load
+        from chatlab.device_memory import InsufficientMemoryError, check_memory_for_load
 
         check_memory_for_load("org/ok", 10 * self.GB, 48 * self.GB, 15 * self.GB, headroom=4 * self.GB)
         with self.assertRaises(InsufficientMemoryError):
             check_memory_for_load("org/ok", 12 * self.GB, 48 * self.GB, 15 * self.GB, headroom=4 * self.GB)
 
     def test_unknown_memory_figures_let_the_load_through(self):
-        from device_memory import check_memory_for_load
+        from chatlab.device_memory import check_memory_for_load
 
         check_memory_for_load("org/any", 500 * self.GB, None, None)
 
     def test_the_message_names_the_pool_the_figures_came_from(self):
-        from device_memory import InsufficientMemoryError, check_memory_for_load
+        from chatlab.device_memory import InsufficientMemoryError, check_memory_for_load
 
         with self.assertRaises(InsufficientMemoryError) as caught:
             check_memory_for_load("org/big", 30 * self.GB, 24 * self.GB, 24 * self.GB, pool="the GPU")
@@ -2499,7 +2499,7 @@ class MemoryGuardTests(unittest.TestCase):
         # The same figure is a refusal to a reader who chose four bits and a
         # fair reading to one who did not, so the number alone leaves them
         # unable to tell whether a smaller precision would lift the refusal.
-        from device_memory import InsufficientMemoryError, check_memory_for_load, weights_note
+        from chatlab.device_memory import InsufficientMemoryError, check_memory_for_load, weights_note
 
         for bits, named in ((None, "for full 16-bit weights"), (4, "for 4-bit weights")):
             with self.subTest(bits=bits):
@@ -2515,7 +2515,7 @@ class MemoryGuardTests(unittest.TestCase):
                     self.assertIn(named, str(caught.exception))
 
     def test_the_precision_note_is_the_width_the_weights_will_take(self):
-        from device_memory import weights_note
+        from chatlab.device_memory import weights_note
 
         self.assertEqual(weights_note("float16"), "full 16-bit weights")
         self.assertEqual(weights_note("bfloat16"), "full 16-bit weights")
@@ -2543,13 +2543,13 @@ class MemoryGuardTests(unittest.TestCase):
         return types.SimpleNamespace(cuda=Cuda)
 
     def test_cuda_memory_is_summed_across_devices(self):
-        from device_memory import cuda_memory
+        from chatlab.device_memory import cuda_memory
 
         torch = self._fake_torch((10 * self.GB, 24 * self.GB), (20 * self.GB, 24 * self.GB))
         self.assertEqual(cuda_memory(torch), (48 * self.GB, 30 * self.GB))
 
     def test_cuda_memory_is_unknown_without_a_usable_device(self):
-        from device_memory import cuda_memory
+        from chatlab.device_memory import cuda_memory
 
         self.assertEqual(cuda_memory(self._fake_torch()), (None, None))
         torch = self._fake_torch((1, 1), failing=True)
@@ -2558,8 +2558,8 @@ class MemoryGuardTests(unittest.TestCase):
     def _check_with(
         self, snapshot, backend, host, gpu, ceiling=None, bits=None, charged=None
     ):
-        import device_memory
-        from model_runtime import ModelManager
+        from chatlab import device_memory
+        from chatlab.model_runtime import ModelManager
 
         saved = device_memory.system_memory, device_memory.cuda_memory
         device_memory.system_memory = lambda: host
@@ -2578,7 +2578,7 @@ class MemoryGuardTests(unittest.TestCase):
             device_memory.system_memory, device_memory.cuda_memory = saved
 
     def test_the_manager_refuses_before_reading_any_weight(self):
-        from device_memory import InsufficientMemoryError
+        from chatlab.device_memory import InsufficientMemoryError
 
         snapshot = self._snapshot({"model.safetensors": 4096})
         (snapshot / "config.json").write_text(json.dumps({"torch_dtype": "bfloat16"}))
@@ -2586,7 +2586,7 @@ class MemoryGuardTests(unittest.TestCase):
             self._check_with(snapshot, "cpu", host=(2048, 2048), gpu=(None, None))
 
     def test_the_offload_pool_is_the_cards_plus_the_host(self):
-        from device_memory import offload_pool
+        from chatlab.device_memory import offload_pool
 
         gpu, host = (8 * self.GB, 6 * self.GB), (32 * self.GB, 20 * self.GB)
         self.assertEqual(offload_pool(gpu, host), (40 * self.GB, 26 * self.GB))
@@ -2597,7 +2597,7 @@ class MemoryGuardTests(unittest.TestCase):
         self.assertEqual(offload_pool((None, None), (None, None)), (None, None))
 
     def test_a_cuda_model_larger_than_the_cards_may_spill_onto_the_host(self):
-        from device_memory import InsufficientMemoryError, check_memory_for_load, offload_pool
+        from chatlab.device_memory import InsufficientMemoryError, check_memory_for_load, offload_pool
 
         # A 12 GB model on an 8 GB card: device_map="auto" puts the rest on
         # the CPU, and a 32 GB host has room for it.
@@ -2609,7 +2609,7 @@ class MemoryGuardTests(unittest.TestCase):
         self.assertIn("the GPU plus this machine has 40.0 GB in total", str(caught.exception))
 
     def test_a_cuda_load_is_judged_by_the_cards_and_the_host_together(self):
-        from device_memory import InsufficientMemoryError
+        from chatlab.device_memory import InsufficientMemoryError
 
         # A few KB of weights plus the 4 GB of headroom: more than a 2 GB host
         # can hold alone, but comfortable once 8 GB of graphics memory joins it.
@@ -2632,7 +2632,7 @@ class MemoryGuardTests(unittest.TestCase):
         # A model can fit the machine and still not fit the allocator's half
         # of it. Refusing here saves reading the whole checkpoint off disk
         # only for .to("mps") to fail.
-        from device_memory import InsufficientMemoryError
+        from chatlab.device_memory import InsufficientMemoryError
 
         snapshot = self._sparse_snapshot("model.safetensors", 25 * self.GB)
         idle = (48 * self.GB, 40 * self.GB)
@@ -2654,7 +2654,7 @@ class MemoryGuardTests(unittest.TestCase):
         # allocator halfway through the weights: a 16 GB model under a 24 GB
         # cap with 15 GB of it already out fits the cap and not what is left
         # of it. The check has to say so before the checkpoint is read.
-        from device_memory import InsufficientMemoryError
+        from chatlab.device_memory import InsufficientMemoryError
 
         snapshot = self._sparse_snapshot("model.safetensors", 16 * self.GB)
         idle = (48 * self.GB, 40 * self.GB)
@@ -2685,7 +2685,7 @@ class MemoryGuardTests(unittest.TestCase):
         # what the card and the log name is what the load would really have
         # done - which is how a reader on a graphics card learns their 4-bit
         # choice did not shrink anything.
-        from device_memory import InsufficientMemoryError
+        from chatlab.device_memory import InsufficientMemoryError
 
         snapshot = self._sparse_snapshot("model.safetensors", 25 * self.GB)
         with self.assertRaises(InsufficientMemoryError) as caught:
@@ -2695,7 +2695,7 @@ class MemoryGuardTests(unittest.TestCase):
         self.assertIn("for full 16-bit weights", str(caught.exception))
         # Quantized, the same checkpoint is a fraction of that, and it is the
         # smaller figure the message has to be about.
-        with self.assertLogs("model_loading", level="WARNING") as logged:
+        with self.assertLogs("chatlab.model_loading", level="WARNING") as logged:
             with self.assertRaises(InsufficientMemoryError) as caught:
                 self._check_with(
                     snapshot, "mps", host=(8 * self.GB, 8 * self.GB), gpu=(None, None), bits=4
@@ -2706,10 +2706,10 @@ class MemoryGuardTests(unittest.TestCase):
     def test_a_refused_load_is_recorded(self):
         # The refusal is the outcome most worth explaining afterwards, and the
         # caller turns it into a status card the log never sees.
-        from device_memory import InsufficientMemoryError
+        from chatlab.device_memory import InsufficientMemoryError
 
         snapshot = self._sparse_snapshot("model.safetensors", 8 * self.GB)
-        with self.assertLogs("model_loading", level="WARNING") as logged:
+        with self.assertLogs("chatlab.model_loading", level="WARNING") as logged:
             with self.assertRaises(InsufficientMemoryError):
                 self._check_with(
                     snapshot, "cpu", host=(32 * self.GB, 2 * self.GB), gpu=(None, None)
@@ -2769,7 +2769,7 @@ Anonymous pages:                             1440383.
     DISJOINT = 147787 + 149733 + 73270
 
     def _available(self, output, pressure="2"):
-        import device_memory
+        from chatlab import device_memory
 
         saved = device_memory._run_quietly
         def run(command):
@@ -2826,7 +2826,7 @@ Anonymous pages:                             1440383.
         )
 
     def test_a_small_model_on_a_cache_heavy_mac_passes_only_at_normal_pressure(self):
-        from device_memory import InsufficientMemoryError, check_memory_for_load
+        from chatlab.device_memory import InsufficientMemoryError, check_memory_for_load
 
         # The user's 48 GB Mac: the old estimate was only 2.1 GB, despite
         # 9.7 GB of pageable file-backed memory. No model is actually loaded.
@@ -2854,7 +2854,7 @@ Swapouts: 8624257.
                     )
 
     def test_normal_pressure_still_refuses_a_model_that_exceeds_available_memory(self):
-        from device_memory import InsufficientMemoryError, check_memory_for_load
+        from chatlab.device_memory import InsufficientMemoryError, check_memory_for_load
 
         with self.assertRaises(InsufficientMemoryError):
             check_memory_for_load(
@@ -2901,7 +2901,7 @@ class FirstLineTests(unittest.TestCase):
     """A backend that raises with nothing to say must not take the run down."""
 
     def test_the_first_line_is_quoted_and_clipped(self):
-        from device_memory import first_line
+        from chatlab.device_memory import first_line
 
         self.assertEqual(first_line(RuntimeError("boom\ndetail")), "boom")
         self.assertEqual(len(first_line(RuntimeError("x" * 500))), 200)
@@ -2910,13 +2910,13 @@ class FirstLineTests(unittest.TestCase):
         # MemoryError() is the one that turns up under memory pressure, and
         # indexing the first line of an empty message is how a memory failure
         # becomes an IndexError somewhere else entirely.
-        from device_memory import first_line, out_of_memory_message
+        from chatlab.device_memory import first_line, out_of_memory_message
 
         self.assertEqual(first_line(MemoryError()), "no message from MemoryError")
         self.assertIn("MemoryError", out_of_memory_message(MemoryError()))
 
     def test_a_message_less_error_still_reaches_the_caller_as_one(self):
-        from device_memory import OutOfMemoryError, reraise_out_of_memory
+        from chatlab.device_memory import OutOfMemoryError, reraise_out_of_memory
 
         with self.assertRaises(OutOfMemoryError):
             reraise_out_of_memory(MemoryError())
@@ -2941,7 +2941,7 @@ class MetalCapTests(unittest.TestCase):
                 os.environ[key] = value
 
     def test_the_default_caps_at_half_the_machine(self):
-        from device_memory import mps_memory_fraction
+        from chatlab.device_memory import mps_memory_fraction
 
         # A 48 GB Mac whose Metal recommendation is 37.44 GiB: half the
         # machine is 24 GB, which is 0.64 of what Metal would allow.
@@ -2950,13 +2950,13 @@ class MetalCapTests(unittest.TestCase):
         self.assertAlmostEqual(recommended * fraction / 1000**3, 24.0, places=1)
 
     def test_the_default_never_exceeds_what_metal_offers(self):
-        from device_memory import mps_memory_fraction
+        from chatlab.device_memory import mps_memory_fraction
 
         # A machine whose Metal recommendation is already below half of it.
         self.assertEqual(mps_memory_fraction(4 * 1024**3, 64 * 1024**3), 1.0)
 
     def test_unknown_figures_take_half_of_the_recommendation(self):
-        from device_memory import FALLBACK_MPS_MEMORY_FRACTION, mps_memory_fraction
+        from chatlab.device_memory import FALLBACK_MPS_MEMORY_FRACTION, mps_memory_fraction
 
         self.assertEqual(mps_memory_fraction(), FALLBACK_MPS_MEMORY_FRACTION)
         self.assertEqual(mps_memory_fraction(None, 48 * 1024**3), 0.5)
@@ -2965,13 +2965,13 @@ class MetalCapTests(unittest.TestCase):
     def test_the_environment_overrides_the_default(self):
         import os
 
-        from device_memory import mps_memory_fraction
+        from chatlab.device_memory import mps_memory_fraction
 
         os.environ["CHATLAB_MPS_MEMORY_FRACTION"] = "0.8"
         self.assertEqual(mps_memory_fraction(), 0.8)
 
     def test_the_settings_file_overrides_the_default(self):
-        from device_memory import mps_memory_fraction
+        from chatlab.device_memory import mps_memory_fraction
 
         with settings.override(mps_memory_fraction=0.6):
             self.assertEqual(mps_memory_fraction(), 0.6)
@@ -2979,7 +2979,7 @@ class MetalCapTests(unittest.TestCase):
     def test_the_environment_overrides_the_settings_file(self):
         import os
 
-        from device_memory import mps_memory_fraction
+        from chatlab.device_memory import mps_memory_fraction
 
         os.environ["CHATLAB_MPS_MEMORY_FRACTION"] = "0.9"
         with settings.override(mps_memory_fraction=0.6):
@@ -2988,7 +2988,7 @@ class MetalCapTests(unittest.TestCase):
     def test_a_value_pytorch_would_reject_leaves_the_allocator_alone(self):
         import os
 
-        from device_memory import mps_memory_fraction
+        from chatlab.device_memory import mps_memory_fraction
 
         for raw in ("0", "-1", "2.5"):
             os.environ["CHATLAB_MPS_MEMORY_FRACTION"] = raw
@@ -2999,7 +2999,7 @@ class MetalCapTests(unittest.TestCase):
     def test_a_user_set_pytorch_watermark_stands(self):
         import os
 
-        from device_memory import mps_memory_fraction
+        from chatlab.device_memory import mps_memory_fraction
 
         os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
         self.assertIsNone(mps_memory_fraction())
@@ -3007,9 +3007,9 @@ class MetalCapTests(unittest.TestCase):
     def test_the_cap_is_applied_through_torch(self):
         from types import SimpleNamespace
 
-        from model_runtime import ModelManager
+        from chatlab.model_runtime import ModelManager
 
-        import device_memory
+        from chatlab import device_memory
 
         applied = []
         recommended = 32 * 1024**3
@@ -3030,7 +3030,7 @@ class MetalCapTests(unittest.TestCase):
     def test_a_torch_without_the_setter_is_tolerated(self):
         from types import SimpleNamespace
 
-        from model_runtime import ModelManager
+        from chatlab.model_runtime import ModelManager
 
         ModelManager._cap_mps_memory(SimpleNamespace(mps=SimpleNamespace()))
 
@@ -3039,7 +3039,7 @@ class OutOfMemoryTests(unittest.TestCase):
     """A backend's out-of-memory failure reaches the caller as one readable error."""
 
     def _manager(self):
-        from model_runtime import ModelManager
+        from chatlab.model_runtime import ModelManager
 
         manager = ModelManager()
         manager.model = object()
@@ -3051,7 +3051,7 @@ class OutOfMemoryTests(unittest.TestCase):
         return manager
 
     def test_backend_messages_are_recognised(self):
-        from device_memory import OutOfMemoryError, is_out_of_memory_error
+        from chatlab.device_memory import OutOfMemoryError, is_out_of_memory_error
 
         self.assertTrue(is_out_of_memory_error(RuntimeError(
             "MPS backend out of memory (MPS allocated: 36.00 GB, other allocations: 1 KB, max allowed: 36.00 GB)."
@@ -3062,7 +3062,7 @@ class OutOfMemoryTests(unittest.TestCase):
         self.assertFalse(is_out_of_memory_error(RuntimeError("shape mismatch")))
 
     def test_a_generation_that_runs_out_of_memory_raises_one_error_and_frees_the_slot(self):
-        from device_memory import OutOfMemoryError
+        from chatlab.device_memory import OutOfMemoryError
 
         manager = self._manager()
 
@@ -3104,7 +3104,7 @@ class OutOfMemoryTests(unittest.TestCase):
         self.assertEqual(manager.released, 1)
 
     def test_scoring_and_inspection_translate_and_release_too(self):
-        from device_memory import OutOfMemoryError
+        from chatlab.device_memory import OutOfMemoryError
 
         manager = self._manager()
 
@@ -3257,7 +3257,7 @@ class DeviceProfileTests(unittest.TestCase):
     GB = 1024**3
 
     def test_the_backend_is_the_one_a_load_would_pick(self):
-        from device_memory import detect_backend
+        from chatlab.device_memory import detect_backend
 
         both = types.SimpleNamespace(
             cuda=types.SimpleNamespace(is_available=lambda: True),
@@ -3282,7 +3282,7 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertEqual(detect_backend(plain), "cpu")
 
     def test_a_torch_that_will_not_answer_is_the_cpu(self):
-        from device_memory import detect_backend
+        from chatlab.device_memory import detect_backend
 
         def raises():
             raise RuntimeError("no driver")
@@ -3291,7 +3291,7 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertEqual(detect_backend(torch), "cpu")
 
     def test_each_backend_loads_the_dtype_it_can_use(self):
-        from device_memory import dtype_name, load_dtype
+        from chatlab.device_memory import dtype_name, load_dtype
 
         torch = types.SimpleNamespace(
             bfloat16="torch.bfloat16",
@@ -3306,7 +3306,7 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertEqual(dtype_name(load_dtype("cuda", torch)), "float16")
 
     def _pool_with(self, backend, host, gpu, ceiling=None, charged=None):
-        import device_memory
+        from chatlab import device_memory
 
         saved = device_memory.system_memory, device_memory.cuda_memory
         device_memory.system_memory = lambda: host
@@ -3390,7 +3390,7 @@ class DeviceProfileTests(unittest.TestCase):
         # The Models page is painted before anything has needed torch, and
         # the import takes seconds. Until it lands the device is unknown
         # rather than guessed at, and the figures are the machine's own.
-        import device_memory
+        from chatlab import device_memory
 
         saved = device_memory.system_memory
         device_memory.system_memory = lambda: (48 * self.GB, 40 * self.GB)
@@ -3408,7 +3408,7 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertIsNone(profile.ceiling)
 
     def test_the_profile_reads_the_metal_ceiling_when_torch_is_there(self):
-        import device_memory
+        from chatlab import device_memory
 
         torch = types.SimpleNamespace(
             float16="torch.float16",
@@ -3436,7 +3436,7 @@ class DeviceProfileTests(unittest.TestCase):
     def test_the_ceiling_is_the_one_the_cap_would_set(self):
         # The fit verdict and the load's own check have to agree, so both
         # read the ceiling from one formula.
-        import device_memory
+        from chatlab import device_memory
 
         applied = []
         torch = types.SimpleNamespace(
@@ -3456,7 +3456,7 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertEqual(applied, [24 / 36])
 
     def test_the_loaded_models_memory_is_given_back_for_a_replacement(self):
-        from device_memory import DeviceProfile
+        from chatlab.device_memory import DeviceProfile
 
         profile = DeviceProfile(
             backend="mps",
@@ -3479,7 +3479,7 @@ class DeviceProfileTests(unittest.TestCase):
         # machine is only counted on the cards by the allocator, while the
         # load's estimate covers the whole of it; on Metal the allocator can
         # be the larger, a response's key-value cache being live tensors too.
-        from device_memory import DeviceProfile
+        from chatlab.device_memory import DeviceProfile
 
         profile = DeviceProfile(available=self.GB, held=4 * self.GB)
 
@@ -3494,7 +3494,7 @@ class DeviceProfileTests(unittest.TestCase):
         # rest, and list as tight a model the button then loads.
         import dataclasses
 
-        from device_memory import DeviceProfile
+        from chatlab.device_memory import DeviceProfile
 
         capped = DeviceProfile(
             backend="mps",
@@ -3517,9 +3517,9 @@ class DeviceProfileTests(unittest.TestCase):
         # profile's figures are already clamped to it, so the MLX reading
         # has to go back to the machine, or the list calls a conversion
         # tight that the button then loads.
-        import device_memory
-        from device_memory import DeviceProfile
-        from model_cache import MLX_KIND, TEXT_KIND
+        from chatlab import device_memory
+        from chatlab.device_memory import DeviceProfile
+        from chatlab.model_cache import MLX_KIND, TEXT_KIND
 
         capped = DeviceProfile(
             backend="mps",
@@ -3555,8 +3555,8 @@ class DeviceProfileTests(unittest.TestCase):
     def test_an_mlx_reading_without_a_cap_is_the_one_already_taken(self):
         # No ceiling means the figures are the machine's already; a second
         # vm_stat subprocess would buy nothing.
-        from device_memory import DeviceProfile
-        from model_cache import MLX_KIND
+        from chatlab.device_memory import DeviceProfile
+        from chatlab.model_cache import MLX_KIND
 
         def unexpected():
             raise AssertionError("the machine was read again")
@@ -3568,7 +3568,7 @@ class DeviceProfileTests(unittest.TestCase):
             self.assertEqual(profile.for_kind(MLX_KIND).available, 21 * self.GB)
 
     def test_the_profile_reads_what_the_device_is_holding(self):
-        import device_memory
+        from chatlab import device_memory
 
         torch = types.SimpleNamespace(
             float32="torch.float32",
@@ -3590,7 +3590,7 @@ class DeviceProfileTests(unittest.TestCase):
         # reader that went by presence alone could find torch without
         # torch.backends and either raise - at startup, where the hardware
         # panel is built - or quietly report the wrong device.
-        import device_memory
+        from chatlab import device_memory
 
         half_built = types.ModuleType("torch")  # no cuda, no backends, no dtypes
 
@@ -3604,7 +3604,7 @@ class DeviceProfileTests(unittest.TestCase):
                 self.assertIs(device_memory.imported_torch(), half_built)
 
     def test_the_import_thread_is_what_says_torch_may_be_read(self):
-        import device_memory
+        from chatlab import device_memory
 
         with mock.patch.object(device_memory, "_torch_ready", threading.Event()) as flag:
             device_memory.warm_device()
@@ -3612,7 +3612,7 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertIsNotNone(device_memory.imported_torch())
 
     def test_the_device_names_itself_the_way_a_loaded_model_does(self):
-        from device_memory import device_label
+        from chatlab.device_memory import device_label
 
         self.assertEqual(device_label("mps"), "Apple Metal (MPS)")
         self.assertEqual(device_label("cpu"), "CPU")
@@ -3630,12 +3630,12 @@ class FitTests(unittest.TestCase):
     GB = 1024**3
 
     def fit(self, estimated, total, available):
-        from device_memory import fit_for
+        from chatlab.device_memory import fit_for
 
         return fit_for(estimated, total, available, headroom=4 * self.GB)
 
     def test_a_model_with_room_beside_it_fits(self):
-        from device_memory import FITS
+        from chatlab.device_memory import FITS
 
         fit = self.fit(10 * self.GB, 48 * self.GB, 40 * self.GB)
         self.assertEqual(fit.state, FITS)
@@ -3643,7 +3643,7 @@ class FitTests(unittest.TestCase):
         self.assertIn("10.0 GB", fit.note)
 
     def test_a_model_larger_than_the_machine_will_not_fit(self):
-        from device_memory import UNFIT
+        from chatlab.device_memory import UNFIT
 
         fit = self.fit(60 * self.GB, 48 * self.GB, 40 * self.GB)
         self.assertEqual(fit.state, UNFIT)
@@ -3651,14 +3651,14 @@ class FitTests(unittest.TestCase):
         self.assertIn("this machine", fit.note)
 
     def test_the_headroom_is_part_of_the_verdict(self):
-        from device_memory import FITS, UNFIT
+        from chatlab.device_memory import FITS, UNFIT
 
         # 45 GB of weights fits a 48 GB machine only without the reserve.
         self.assertEqual(self.fit(45 * self.GB, 48 * self.GB, 48 * self.GB).state, UNFIT)
         self.assertEqual(self.fit(44 * self.GB, 48 * self.GB, 48 * self.GB).state, FITS)
 
     def test_a_model_the_machine_could_hold_but_has_no_room_for_now_is_tight(self):
-        from device_memory import TIGHT
+        from chatlab.device_memory import TIGHT
 
         fit = self.fit(30 * self.GB, 48 * self.GB, 20 * self.GB)
         self.assertEqual(fit.state, TIGHT)
@@ -3667,7 +3667,7 @@ class FitTests(unittest.TestCase):
         self.assertIn("memory pressure", fit.note)
 
     def test_a_size_that_could_not_be_measured_is_not_guessed_at(self):
-        from device_memory import FIT_UNKNOWN
+        from chatlab.device_memory import FIT_UNKNOWN
 
         fit = self.fit(None, 48 * self.GB, 40 * self.GB)
         self.assertEqual(fit.state, FIT_UNKNOWN)
@@ -3675,7 +3675,7 @@ class FitTests(unittest.TestCase):
         self.assertIn("downloaded", fit.note)
 
     def test_a_machine_that_reports_nothing_gets_no_verdict(self):
-        from device_memory import FIT_UNKNOWN
+        from chatlab.device_memory import FIT_UNKNOWN
 
         fit = self.fit(10 * self.GB, None, None)
         self.assertEqual(fit.state, FIT_UNKNOWN)
@@ -3685,7 +3685,7 @@ class FitTests(unittest.TestCase):
         # The panel and the refusal have to agree about the precision as well
         # as the figure: a note that left it out would look as though the
         # estimate had changed by itself when the radio moved.
-        from device_memory import fit_for, weights_note
+        from chatlab.device_memory import fit_for, weights_note
 
         for bits, named in ((None, "of full 16-bit weights"), (4, "of 4-bit weights")):
             for estimated in (10, 30, 60):
@@ -3699,7 +3699,7 @@ class FitTests(unittest.TestCase):
                     self.assertIn(named, fit.note)
 
     def test_model_fit_takes_the_precision_from_the_device_and_the_bits(self):
-        from device_memory import DeviceProfile, model_fit
+        from chatlab.device_memory import DeviceProfile, model_fit
 
         profile = DeviceProfile(
             backend="mps", dtype="float16", total=48 * self.GB, available=20 * self.GB
@@ -3711,7 +3711,7 @@ class FitTests(unittest.TestCase):
         self.assertIn("of full weights", model_fit(30 * self.GB, unread).note)
 
     def test_a_verdict_agrees_with_the_refusal_it_predicts(self):
-        from device_memory import (
+        from chatlab.device_memory import (
             FITS,
             InsufficientMemoryError,
             check_memory_for_load,
@@ -3745,7 +3745,7 @@ class EstimateTests(unittest.TestCase):
         return folder
 
     def test_a_snapshot_is_measured_by_the_weights_it_holds(self):
-        from model_cache import estimate_snapshot_bytes
+        from chatlab.model_cache import estimate_snapshot_bytes
 
         snapshot = self.snapshot(2000)
         self.assertEqual(estimate_snapshot_bytes(snapshot, "float16"), 2000)
@@ -3753,7 +3753,7 @@ class EstimateTests(unittest.TestCase):
         self.assertEqual(estimate_snapshot_bytes(snapshot, "float32"), 4000)
 
     def test_a_quantized_estimate_is_of_what_the_device_would_hold(self):
-        from model_cache import estimate_snapshot_bytes
+        from chatlab.model_cache import estimate_snapshot_bytes
 
         snapshot = self.snapshot(2000)
         whole = estimate_snapshot_bytes(snapshot, "float16")
@@ -3761,7 +3761,7 @@ class EstimateTests(unittest.TestCase):
         self.assertLess(quantized, whole // 2)
 
     def test_a_snapshot_that_cannot_be_measured_says_so(self):
-        from model_cache import estimate_snapshot_bytes
+        from chatlab.model_cache import estimate_snapshot_bytes
 
         folder = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
@@ -3769,7 +3769,7 @@ class EstimateTests(unittest.TestCase):
         self.assertIsNone(estimate_snapshot_bytes(folder, "float16"))
 
     def test_a_parameter_count_stands_in_for_a_model_not_yet_on_disk(self):
-        from model_cache import estimate_parameter_bytes
+        from chatlab.model_cache import estimate_parameter_bytes
 
         # Half precision: two bytes a parameter.
         self.assertEqual(estimate_parameter_bytes(1_000_000, "float16"), 2_000_000)
@@ -4139,7 +4139,7 @@ class MlxSnapshotTests(unittest.TestCase):
     def test_a_quantized_conversion_is_its_own_kind_where_mlx_runs(self):
         with tempfile.TemporaryDirectory() as root:
             self.snapshot(root, {"config.json": self.CONFIG, "model.safetensors": b"x" * 64})
-            with mock.patch("model_cache.mlx_available", return_value=True):
+            with mock.patch("chatlab.model_cache.mlx_available", return_value=True):
                 status = cache_status(self.MODEL, Path(root))
 
         self.assertEqual(status.kind, model_cache.MLX_KIND)
@@ -4152,7 +4152,7 @@ class MlxSnapshotTests(unittest.TestCase):
         # CTranslate2 export gets, not "incomplete".
         with tempfile.TemporaryDirectory() as root:
             self.snapshot(root, {"config.json": self.CONFIG, "model.safetensors": b"x" * 64})
-            with mock.patch("model_cache.mlx_available", return_value=False):
+            with mock.patch("chatlab.model_cache.mlx_available", return_value=False):
                 status = cache_status(self.MODEL, Path(root))
 
         self.assertTrue(status.unsupported)
@@ -4162,7 +4162,7 @@ class MlxSnapshotTests(unittest.TestCase):
     def test_a_conversion_short_of_its_weights_is_incomplete(self):
         with tempfile.TemporaryDirectory() as root:
             self.snapshot(root, {"config.json": self.CONFIG})
-            with mock.patch("model_cache.mlx_available", return_value=True):
+            with mock.patch("chatlab.model_cache.mlx_available", return_value=True):
                 status = cache_status(self.MODEL, Path(root))
 
         self.assertEqual(status.kind, model_cache.TEXT_KIND)
@@ -4172,7 +4172,7 @@ class MlxSnapshotTests(unittest.TestCase):
         plain = json.dumps({"model_type": "llama", "torch_dtype": "bfloat16"}).encode()
         with tempfile.TemporaryDirectory() as root:
             self.snapshot(root, {"config.json": plain, "model.safetensors": b"x" * 64})
-            with mock.patch("model_cache.mlx_available", return_value=True):
+            with mock.patch("chatlab.model_cache.mlx_available", return_value=True):
                 status = cache_status(self.MODEL, Path(root))
 
         self.assertEqual(status.kind, model_cache.TEXT_KIND)
@@ -4181,7 +4181,7 @@ class MlxSnapshotTests(unittest.TestCase):
     def test_the_list_names_the_packing_as_the_weight_type(self):
         with tempfile.TemporaryDirectory() as root:
             self.snapshot(root, {"config.json": self.CONFIG, "model.safetensors": b"x" * 64})
-            with mock.patch("model_cache.mlx_available", return_value=True):
+            with mock.patch("chatlab.model_cache.mlx_available", return_value=True):
                 (entry,) = list_cached_models(Path(root))
 
         self.assertEqual(entry.architecture, "Qwen2ForCausalLM")
@@ -4195,7 +4195,7 @@ class MlxSnapshotTests(unittest.TestCase):
             snapshot = self.snapshot(
                 root, {"config.json": self.CONFIG, "model.safetensors": b"x" * 1000}
             )
-            from model_cache import estimate_snapshot_bytes
+            from chatlab.model_cache import estimate_snapshot_bytes
 
             self.assertEqual(
                 estimate_snapshot_bytes(snapshot, "float16", None, model_cache.MLX_KIND), 1000
@@ -4209,8 +4209,8 @@ class MlxSnapshotTests(unittest.TestCase):
         # the width the converter chose. The radio is not it: a reader who
         # left it at full would otherwise be told a 4-bit repo needs "full
         # 16-bit weights", four times what it is.
-        from device_memory import weights_note
-        from model_cache import mlx_snapshot_bits
+        from chatlab.device_memory import weights_note
+        from chatlab.model_cache import mlx_snapshot_bits
 
         with tempfile.TemporaryDirectory() as root:
             snapshot = self.snapshot(
@@ -4239,8 +4239,8 @@ class MlxSnapshotTests(unittest.TestCase):
             with (
                 mock.patch.object(manager, "_cap_mps_memory", side_effect=AssertionError),
                 mock.patch.object(manager, "_release_device_cache"),
-                mock.patch("device_memory.memory_pool", return_value=(8, 8, "this machine")),
-                mock.patch("device_memory.allocated_bytes", return_value=None),
+                mock.patch("chatlab.device_memory.memory_pool", return_value=(8, 8, "this machine")),
+                mock.patch("chatlab.device_memory.allocated_bytes", return_value=None),
                 self.assertRaises(device_memory.InsufficientMemoryError) as refused,
             ):
                 manager._load_locked(
@@ -4274,12 +4274,12 @@ class MlxSnapshotTests(unittest.TestCase):
                 root, {"config.json": self.CONFIG, "model.safetensors": b"x" * 64}
             )
             with (
-                mock.patch("mlx_runtime.read_mlx_model", side_effect=read_mlx_model),
+                mock.patch("chatlab.mlx_runtime.read_mlx_model", side_effect=read_mlx_model),
                 mock.patch.object(manager, "_cap_mps_memory", side_effect=AssertionError),
                 mock.patch.object(manager, "_check_memory", return_value=(64, None)) as check,
                 mock.patch.object(manager, "_release_device_cache"),
-                mock.patch("device_memory.allocated_bytes", return_value=None),
-                self.assertLogs("model_loading", level="INFO") as logs,
+                mock.patch("chatlab.device_memory.allocated_bytes", return_value=None),
+                self.assertLogs("chatlab.model_loading", level="INFO") as logs,
             ):
                 device = manager._load_locked(
                     self.MODEL,
@@ -4325,10 +4325,10 @@ class MlxSnapshotTests(unittest.TestCase):
                 root, {"config.json": self.CONFIG, "model.safetensors": b"x" * 64}
             )
             with (
-                mock.patch("mlx_runtime.read_mlx_model", side_effect=AssertionError),
+                mock.patch("chatlab.mlx_runtime.read_mlx_model", side_effect=AssertionError),
                 mock.patch.object(manager, "_check_memory", return_value=(None, None)),
                 mock.patch.object(manager, "_release_device_cache"),
-                mock.patch("device_memory.allocated_bytes", return_value=None),
+                mock.patch("chatlab.device_memory.allocated_bytes", return_value=None),
             ):
                 with self.assertRaises(RuntimeError) as caught:
                     manager._load_locked(
@@ -4395,8 +4395,8 @@ class MlxHubSearchTests(unittest.TestCase):
         # is checked, on a machine with or without mlx installed.
         supported = {"qwen3", "llama", "mistral"}
         with (
-            mock.patch("model_cache.mlx_available", return_value=True),
-            mock.patch("mlx_runtime.mlx_supports", side_effect=supported.__contains__),
+            mock.patch("chatlab.model_cache.mlx_available", return_value=True),
+            mock.patch("chatlab.mlx_runtime.mlx_supports", side_effect=supported.__contains__),
         ):
             found = search_hub_models("", kind=model_cache.MLX_KIND)
 
@@ -4408,7 +4408,7 @@ class MlxHubSearchTests(unittest.TestCase):
         self.assertTrue(all(result.kind == model_cache.MLX_KIND for result in found))
 
     def test_an_mlx_search_is_refused_where_mlx_cannot_run(self):
-        with mock.patch("model_cache.mlx_available", return_value=False):
+        with mock.patch("chatlab.model_cache.mlx_available", return_value=False):
             with self.assertRaises(RuntimeError) as caught:
                 search_hub_models("", kind=model_cache.MLX_KIND)
 
