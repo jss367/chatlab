@@ -128,6 +128,7 @@ from ui.inspection import (
     inspect_layers,
     remember_inspect_target,
     render_attention,
+    render_kv_cache,
     reset_inspection,
 )
 from model_discovery import DISCOVERY_ORDERS
@@ -1210,6 +1211,21 @@ def build_app() -> gr.Blocks:
                                 info="0 averages every layer. Release the slider to repaint.",
                             )
                             attention_panel = gr.HTML(charts.EMPTY_ATTENTION)
+                            with gr.Row():
+                                kv_layer = gr.Slider(
+                                    1,
+                                    1,
+                                    value=1,
+                                    step=1,
+                                    label="Cache layer",
+                                    info="Release the slider to read another layer.",
+                                    scale=2,
+                                )
+                                kv_metric = gr.Radio(
+                                    list(charts.KV_METRICS), value="Key norm",
+                                    label="Cache readout", scale=1,
+                                )
+                            kv_panel = gr.HTML(charts.EMPTY_KV_CACHE)
                         with gr.Accordion("Response statistics", open=False, elem_classes=["inspector-section"]):
                             summary_panel = gr.HTML(charts.summary_tiles({}))
                             surprise_panel = gr.HTML(charts.EMPTY_CHART)
@@ -3116,6 +3132,13 @@ def build_app() -> gr.Blocks:
         attention_layer.release(
             render_attention, [insight_state, attention_layer], attention_panel
         )
+        # Every readout, and every reset that takes one away, passes through
+        # the insight state, so the cache view follows it there. The cache is
+        # read from memory rather than rebuilt, so each control reads again.
+        kv_inputs = [insight_state, kv_layer, kv_metric]
+        insight_state.change(render_kv_cache, kv_inputs, [kv_panel, kv_layer], **QUIET_TICK)
+        kv_layer.release(render_kv_cache, kv_inputs, [kv_panel, kv_layer])
+        kv_metric.change(render_kv_cache, kv_inputs, [kv_panel, kv_layer])
         lens_mode.change(
             change_lens_mode, [lens_mode, inspection_session],
             [jacobian_controls, attention_layer, *inspection_outputs],
