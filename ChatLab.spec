@@ -48,6 +48,9 @@ for package in (
     # retains its distribution metadata as well as kernels_data's native code.
     "kernels",
     "kernels_data",
+    # Imported only when a LoRA adapter is loaded, and it builds each tuner
+    # type from a registry of its submodules, so analysis alone misses them.
+    "peft",
     "safehttpx",
     "safetensors",
     # The tokenizer converters. Transformers imports both lazily, inside the

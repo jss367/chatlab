@@ -166,7 +166,7 @@ class AutomatedComparisonTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         cache = mock.patch.object(experiment_compare, "cache_status", return_value=SimpleNamespace(
-            present=True, missing_files=[], unsupported=False, kind="text"))
+            present=True, missing_files=[], unsupported=False, kind="text", base_model=None))
         cache.start()
         self.addCleanup(cache.stop)
         self.conditions = ["", "Current", 0.0, 12, False, 1, "", "Current", 0.0, 13, False, 1]
@@ -259,7 +259,7 @@ class AutomatedComparisonTests(unittest.TestCase):
     def test_mlx_uses_its_stored_precision(self):
         self.manager._loaded = self.manager._loaded._replace(precision="4-bit")
         with mock.patch.object(experiment_compare, "cache_status", return_value=SimpleNamespace(
-                present=True, missing_files=[], unsupported=False, kind="mlx")):
+                present=True, missing_files=[], unsupported=False, kind="mlx", base_model=None)):
             frames = list(experiment_compare.run_pair(*self.conditions, *self.shared))
             self.assertIn("Comparison complete", frames[-1][2])
             self.conditions[1] = "full"

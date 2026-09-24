@@ -540,7 +540,7 @@ class FakeDownloads(ModelManager):
     def fetch(self, model_id, token, progress):
         raise NotImplementedError
 
-    def download(self, model_id, token=None, progress=None):
+    def download(self, model_id, token=None, progress=None, revision=None):
         progress = progress or DownloadProgress()
         try:
             with self._downloads_lock:
@@ -1452,10 +1452,17 @@ class DownloadStatusTests(unittest.TestCase):
                 download.assert_not_called()
                 load.assert_not_called()
 
+    @staticmethod
+    def fetched_to(model_id, hf_token):
+        """A download with no cards that lands in a snapshot holding nothing."""
+
+        return Path("/nonexistent/snapshot")
+        yield
+
     def test_download_reports_cache_io_failure_after_fetching(self):
         with (
             mock.patch.object(models_page, "cache_status", side_effect=[CacheStatus(), OSError("Cache drive disconnected")]),
-            mock.patch.object(models_page, "stream_download", return_value=iter(())),
+            mock.patch.object(models_page, "stream_download", side_effect=self.fetched_to),
         ):
             cards = list(models_page.download_model(self.MODEL, ""))
         self.assertIn("Download failed", cards[-1])
