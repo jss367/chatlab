@@ -218,7 +218,10 @@ class GenerationSession:
 
     def generate(self, messages, *, temperature, top_p, top_k, max_new_tokens, seed,
                  skip_top_below=0.0, tools=None, forced_ids=(),
-                 literal_prefill_tokens=0, analyze_prompt=False, steering=None):
+                 literal_prefill_tokens=0, analyze_prompt=False, steering=None, answer_prefill=""):
+        """Stream one response. ``answer_prefill`` is text the response starts
+        with, as Chat's assistant prefill: after the reasoning block if the
+        template opens one, and not together with ``forced_ids``."""
         self._check()
         if self._generating:
             raise ValueError("This model session is already streaming.")
@@ -233,6 +236,7 @@ class GenerationSession:
                 seed=seed, tools=tools,
                 forced_ids=forced_ids, literal_prefill_tokens=literal_prefill_tokens,
                 analyze_prompt=analyze_prompt, load_id=self.load_id, steering=steering,
+                answer_prefill=answer_prefill,
             )
             for update in generator:
                 if self._cancelled.is_set():

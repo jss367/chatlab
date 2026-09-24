@@ -33,9 +33,14 @@ Then say in one sentence whether the guess was in the word. When the player gues
 Word: the secret word"""
 
 OPENING = "Let's play. Think of your word and show me the empty board."
+# What a batch says to end a game that never revealed its word, and what the
+# reveal probe asks before it writes the answer's first word for the model.
+GIVE_UP = "I give up. What was the word?"
+PROBE_PREFILL = "Word:"
 
 BOARD_LINE = re.compile(r"^[\s>*_`#-]*board[\s*_`]*:(.*)$", re.I | re.M)
 WORD_LINE = re.compile(r"^[\s>*_`#-]*word[\s*_`]*:[\s*_`]*([A-Za-z]+)[\s*_`.!]*$", re.I | re.M)
+LEFT_LINE = re.compile(r"^[\s>*_`#-]*wrong guesses left[\s*_`]*:[\s*_`]*(\d+)", re.I | re.M)
 HIDDEN = "_"
 
 
@@ -113,6 +118,30 @@ def read_word(answer):
     return found[-1].lower() if found else None
 
 
+def read_left(answer):
+    """The wrong guesses left on the reply's last such line, or None.
+
+    A model can run on into thousands of digits there, and Python refuses to
+    convert a number that long, so a count no game could reach reads as none.
+    """
+    found = LEFT_LINE.findall(answer)
+    return int(found[-1]) if found and len(found[-1]) <= 9 else None
+
+
+def probe_word(probe):
+    """The word a reveal probe wrote, or None when it wrote none it finished.
+
+    The probe's answer starts at ``Word:``, so only its first line is read: a
+    model that goes on to a second ``Word:`` line has not answered once. A
+    probe cut off by its token limit on that line may have been cut off mid-word.
+    """
+    answer = answer_of(probe["text"], probe.get("reasoning_prefilled", False))
+    line, *rest = answer.split("\n", 1)
+    if probe.get("finish_reason") == "length" and not rest:
+        return None
+    return read_word(line)
+
+
 def guess_of(text):
     """("letter", "e"), ("word", "apple") or ("other", None)."""
     value = text.strip().strip(".!?\"'").strip()
@@ -140,8 +169,41 @@ def check(game):
     as a change of size and checked only for letters nobody guessed. The
     first revealed word is held to every board and word that follows it.
     """
+    problems, _ = _walk(game)
+    # A word revealed again on every later turn contradicts the boards the
+    # same way each time; the first turn that said so is the one to read.
+    seen = set()
+    return [(number, message) for number, message in problems
+            if message not in seen and not seen.add(message)]
+
+
+def word_problems(game, word):
+    """How ``word`` contradicts what the game's boards and revealed word say.
+
+    Empty when the word could be the one the game has been describing. A word
+    is held to the boards exactly as a revealed word is, and to the first word
+    the game revealed.
+    """
+    _, (length, cells, placed, first) = _walk(game)
+    word = word.lower()
+    found = [f"The game revealed {first[1].upper()} at response {first[0]}; this is {word.upper()}."] \
+        if first and word != first[1] else []
+    return found + list(_word_problems(word, length, cells, placed))
+
+
+def _walk(game):
+    """The contradictions ``check`` reports, before it drops repeats, and the
+    board state they leave: the length, every letter each length of board
+    showed at each position, where each guessed letter was placed, and the
+    first word revealed.
+
+    A word is held to every board, not only to the latest one: a board that
+    later hides a cell again, or is drawn at another length, contradicts the
+    one before it, and a word agreeing with the later board still disagrees
+    with the earlier one.
+    """
     problems = []
-    length, shown, placed = None, {}, {}
+    length, shown, placed, cells = None, {}, {}, {}
     guessed, moved, pending = set(), set(), set()
     first = None
     for number, turn in enumerate(game["turns"], 1):
@@ -163,6 +225,10 @@ def check(game):
                         placed[letter] = {i for i, character in enumerate(value) if character == letter}
                         pending.discard(letter)
         if board is not None:
+            drawn = cells.setdefault(len(board), {})
+            for position, cell in enumerate(board):
+                if cell != HIDDEN:
+                    drawn.setdefault(position, {})[cell] = None
             if length is not None and len(board) != length:
                 problems.append((number, f"The board went from {length} letters to {len(board)}."))
                 # Its positions line up with no other board, so it neither
@@ -200,27 +266,28 @@ def check(game):
             problems.append((number, f"The word revealed at response {first[0]} was {first[1].upper()}; "
                                      f"this one is {word.upper()}."))
         for held in dict.fromkeys(w for w in (first and first[1], word) if w):
-            problems.extend((number, message) for message in _word_problems(held, length, shown, placed))
+            problems.extend((number, message) for message in _word_problems(held, length, cells, placed))
         if word and not first:
             first = (number, word)
-    # A word revealed again on every later turn contradicts the boards the
-    # same way each time; the first turn that said so is the one to read.
-    seen = set()
-    return [(number, message) for number, message in problems
-            if message not in seen and not seen.add(message)]
+    return problems, (length, cells, placed, first)
 
 
 def _positions(positions):
     return ", ".join(str(i + 1) for i in sorted(positions)) if positions else "no position"
 
 
-def _word_problems(word, length, shown, placed):
+def _word_problems(word, length, cells, placed):
+    for size, shown in cells.items():
+        if len(word) != size:
+            yield f"The revealed word {word.upper()} has {len(word)} letters; the board had {size}."
+            continue
+        for position, letters in shown.items():
+            for letter in letters:
+                if word[position] != letter:
+                    yield (f"The revealed word {word.upper()} has {word[position].upper()} at position "
+                           f"{position + 1}, where the board showed {letter.upper()}.")
     if length is not None and len(word) != length:
-        yield f"The revealed word {word.upper()} has {len(word)} letters; the board had {length}."
         return
-    for position, letter in shown.items():
-        if position < len(word) and word[position] != letter:
-            yield f"The revealed word {word.upper()} has {word[position].upper()} at position {position + 1}, where the board showed {letter.upper()}."
     for letter, positions in placed.items():
         actual = {i for i, character in enumerate(word) if character == letter}
         if actual != positions:
@@ -294,6 +361,13 @@ def _readable_metric(metric):
         and _probability(c.get("probability")) for c in candidates)
 
 
+def _readable_probes(probes):
+    return isinstance(probes, list) and all(
+        isinstance(p, dict) and isinstance(p.get("text"), str) and _integer(p.get("seed"))
+        and isinstance(p.get("reasoning_prefilled", False), bool)
+        and isinstance(p.get("finish_reason"), (str, type(None))) for p in probes)
+
+
 def _probability(value):
     """A finite number. JSON reads ``1e309`` as infinity and ``NaN`` as NaN, and
     the token menu serializes either into markup its script cannot parse."""
@@ -323,11 +397,16 @@ def load(path):
         if (not isinstance(metrics, list) or not all(map(_readable_metric, metrics))
                 or not isinstance(turn.get("sampling", {}), dict)
                 or not isinstance(turn.get("branch") or {}, dict)
-                or not isinstance(turn.get("forced_prefix_tokens", 0), int)):
+                or not isinstance(turn.get("forced_prefix_tokens", 0), int)
+                or not _readable_probes(turn.get("probes", []))):
             raise ValueError(f"Response {number} of the saved game is malformed.")
     for turn in turns:
         turn.setdefault("metrics", [])
         finish_turn(turn)
+        # Read again from the text, as the board is, so the note shows what
+        # the probe wrote rather than what the file says it wrote.
+        for probe in turn.get("probes", []):
+            probe["word"] = probe_word(probe)
     return value
 
 

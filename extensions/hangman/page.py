@@ -4,11 +4,14 @@ import json
 import logging
 import re
 import threading
+from collections import Counter
+from pathlib import Path
 import time
 
 import gradio as gr
 
 from extension_api import write_private_text
+from .batch import BatchControl, cut_short, downloads, read_trials, run_trials
 from .game import (
     MAX_FILE_BYTES, OPENING, SYSTEM, check, dictionary, finish_turn, fitting_words, latest_board, load,
     messages_for, new_game, reasoning_of, reopened, rewound, saved, WORD_LIST,
@@ -130,7 +133,48 @@ def turn_note(turn):
         branch = turn["branch"]
         parts.append(f"branched at token {branch['token_index'] + 1} with {shown(branch['forced_tokens'])} "
                      "replayed tokens")
+    if turn.get("probes"):
+        counts = Counter(probe["word"] or "(unreadable)" for probe in turn["probes"])
+        parts.append(f"asked for the word {len(turn['probes'])} times: "
+                     + ", ".join(f"{shown(word)} ×{count}" for word, count in counts.most_common()))
     return " · ".join(parts)
+
+
+BATCH_HEADERS = ["Trial", "Outcome", "Responses", "Contradictions", "Revealed", "Probe fit"]
+
+
+def batch_rows(rows):
+    """The summary rows as the results table shows them, newest last."""
+    return [[row["label"], row["outcome"], row["responses"], row["contradictions"], row["revealed_word"],
+             row["probe_fit_rate"]] for row in rows]
+
+
+def trials_text(data):
+    probed = sum(bool(t["probe"]) for t in data["trials"])
+    return (f"**{shown(data['title'])}** · {len(data['trials'])} game{'s' if len(data['trials']) != 1 else ''}"
+            + (f" · {probed} with the reveal probe" if probed else ""))
+
+
+def batch_text(data, done, total, rows, directory, game=None, ended=None, error=None):
+    """What the batch pane says about a batch: running, stopped, failed or finished."""
+    where = f"Games, summary.csv and probes.csv are written to {shown(str(directory))}."
+    if ended is None and done >= total:
+        return f"**All {total} games played** · writing the summary.\n\n{where}"
+    if ended is None:
+        progress = ""
+        if game is not None and game["turns"]:
+            turn = game["turns"][-1]
+            asked = f" · asking for the word ({len(turn['probes'])} so far)" if "probes" in turn else ""
+            progress = f" · response {len(game['turns'])}{asked}"
+        return (f"**Playing game {done + 1} of {total}** · {shown(data['trials'][done]['label'])}{progress}"
+                f"\n\n{where}")
+    counts = " · ".join(f"{count} {outcome}" for outcome, count in sorted(Counter(r["outcome"] for r in rows).items()))
+    head = (f"**Played {total} game{'s' if total != 1 else ''}**" if ended == "finished"
+            else f"**Failed after {len(rows)} of {total} games**" if ended == "failed"
+            else f"**Stopped after {len(rows)} of {total} games**")
+    failed = f"{shown(str(error).rstrip('.'))}. " if ended == "failed" else ""
+    return (f"{head} of {shown(data['title'])}{' · ' + counts if counts else ''}\n\n{failed}{where} "
+            "Open any game under **Saved games** to read it.")
 
 
 def build_page(context):
@@ -162,6 +206,20 @@ def build_page(context):
                 max_tokens = gr.Number(value=2048, precision=0, minimum=1, maximum=32768,
                                        label="Tokens per response")
                 start = gr.Button("New game", variant="primary")
+                with gr.Accordion("Batch games", open=False):
+                    gr.Markdown("Play every game in a `chatlab-hangman-trials-1` file with nobody guessing, "
+                                "and optionally ask for the word after every response. See HANGMAN.md.")
+                    trial_upload = gr.File(label="Trial file", file_types=[".json"], type="filepath")
+                    trial_note = gr.Markdown("")
+                    trial_data = gr.State(None)
+                    batch_control = gr.State(BatchControl())
+                    with gr.Row():
+                        batch_run = gr.Button("Play all games", size="sm")
+                        batch_stop = gr.Button("Stop the batch", size="sm", visible=False)
+                    batch_status = gr.Markdown("")
+                    batch_results = gr.Dataframe(headers=BATCH_HEADERS, interactive=False, wrap=True, visible=False)
+                    batch_download = gr.File(label="Batch summary", file_count="multiple", interactive=False,
+                                             visible=False)
                 with gr.Accordion("Saved games", open=False):
                     gr.Markdown("Every finished response saves the game. Uploading one opens a copy: new "
                                 "guesses continue it under whichever model is loaded, and the original file is left alone.")
@@ -434,6 +492,69 @@ def build_page(context):
         return (*shown_game, *cleared())
 
     upload.upload(open_saved, [upload, owner], [*outputs, *inspector], **serial)
+
+    def open_trials(path):
+        if not path:
+            return None, ""
+        try:
+            data = read_trials(path)
+        except (OSError, ValueError) as exc:
+            raise gr.Error(str(exc)) from exc
+        return data, trials_text(data)
+
+    trial_upload.upload(open_trials, trial_upload, [trial_data, trial_note], show_progress="hidden")
+    trial_upload.clear(lambda: (None, ""), None, [trial_data, trial_note], queue=False)
+
+    def run_batch(data, control, source):
+        """Play every trial in the loaded file, reporting each game as it finishes.
+
+        The results table is sent whole in every frame, never skipped: Gradio's
+        Dataframe fails in the browser on a streamed skip after an empty value.
+        """
+        if data is None:
+            raise gr.Error("Open a trial file first.")
+        if control.running:
+            raise gr.Error("This batch is already running.")
+        buttons = (gr.update(visible=False), gr.update(visible=True))
+        done = total = 0
+        rows, directory, failure = [], None, None
+        try:
+            frames = run_trials(data, context.models, context.data_dir, control,
+                                source=Path(source).name if source else "")
+            for done, total, rows, directory, game in frames:
+                yield (batch_text(data, done, total, rows, directory, game),
+                       gr.update(value=batch_rows(rows), visible=bool(rows)),
+                       gr.update(value=None, visible=False), *buttons)
+        except (ValueError, OSError) as exc:
+            logger.warning("Could not play the hangman trials in %s: %s", data["title"], exc)
+            gr.Warning(str(exc))
+            if directory is None:
+                # Nothing ran, so the pane is left as it was: the refusal may
+                # be this view's own batch holding the model.
+                yield (gr.skip(),) * 5
+                return
+            failure = exc
+        ended = "failed" if failure is not None else "stopped" if cut_short(rows, total) else "finished"
+        try:
+            files = gr.update(value=downloads(directory), visible=True)
+        except OSError as exc:
+            logger.warning("Could not stage the downloads for %s: %s", directory, exc)
+            files = gr.update(value=None, visible=False)
+        yield (batch_text(data, done, total, rows, directory, ended=ended, error=failure),
+               gr.update(value=batch_rows(rows), visible=bool(rows)), files,
+               gr.update(visible=True), gr.update(visible=False))
+
+    def stop_batch(control):
+        if control.running:
+            control.request_stop()
+            gr.Info("Stopping the batch: the game playing now ends as stopped, and no more games start.")
+
+    # Its own queue with no limit: a batch runs for hours, and a second one
+    # asked for meanwhile is refused at once by the held model, not queued.
+    batch_run.click(run_batch, [trial_data, batch_control, trial_upload],
+                    [batch_status, batch_results, batch_download, batch_run, batch_stop],
+                    concurrency_id="hangman-batch", concurrency_limit=None, show_progress="hidden")
+    batch_stop.click(stop_batch, batch_control, None, queue=False)
 
     def show_context(game, index):
         if index is None or not 0 <= index < len(game["turns"]):
