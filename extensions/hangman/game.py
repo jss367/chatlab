@@ -119,9 +119,13 @@ def read_word(answer):
 
 
 def read_left(answer):
-    """The wrong guesses left on the reply's last such line, or None."""
+    """The wrong guesses left on the reply's last such line, or None.
+
+    A model can run on into thousands of digits there, and Python refuses to
+    convert a number that long, so a count no game could reach reads as none.
+    """
     found = LEFT_LINE.findall(answer)
-    return int(found[-1]) if found else None
+    return int(found[-1]) if found and len(found[-1]) <= 9 else None
 
 
 def probe_word(probe):

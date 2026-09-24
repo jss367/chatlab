@@ -12,7 +12,7 @@ import gradio as gr
 from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from extensions.hangman import batch
 from extensions.hangman.batch import BatchControl, next_guess, read_trials, run_trials
-from extensions.hangman.game import GIVE_UP, SYSTEM, finish_turn, load, new_game, word_problems
+from extensions.hangman.game import GIVE_UP, SYSTEM, finish_turn, load, new_game, read_left, word_problems
 from extensions.hangman.page import build_page, turn_note
 from model_runtime import GENERATING
 
@@ -240,6 +240,10 @@ class BatchTests(Fixture):
         host = Host(boards=["five blanks", "?"], names=["crane", "stone", "grape", "slate", "stone"])
         row = self.run_batch(host, [dict(id="a", seed=1)], guesser=["e"], probe=dict(samples=2))[2][0]
         self.assertEqual((row["revealed_word"], row["reveal_fits"], row["probe_fit_rate"]), ("stone", "", ""))
+
+    def test_a_wrong_guess_count_too_long_to_convert_reads_as_none(self):
+        self.assertEqual(read_left("Board: _ _\n**Wrong guesses left:** 3"), 3)
+        self.assertIsNone(read_left("Wrong guesses left: " + "9" * 5000))
 
     def test_a_lost_game_asks_for_the_word(self):
         host = Host("crane", left=2)
