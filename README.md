@@ -264,8 +264,9 @@ With one, the metric is log p(answer) − log p(contrast), which equals the
 raw logit difference between the two tokens and cancels any shift that moves
 every token alike. It defaults to the token the source produced right after
 its prefix, which is the source's answer when both runs answer the same
-question, and to none when that token is the answer itself. With no
-contrast, the metric is log p(answer).
+question, and to none when that token is the answer itself. The default is
+re-chosen whenever the runs, the answer token, or the source output count
+change. With no contrast, the metric is log p(answer).
 
 **Source output tokens to include** controls the source prefix: zero uses
 only its recorded prompt/context; a positive number includes that many output

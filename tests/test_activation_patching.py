@@ -356,6 +356,15 @@ class ControlsTests(unittest.TestCase):
         self.assertEqual(controls.default_contrast(self.donor, self.recipient, 0, 2), controls.NO_CONTRAST)
         self.assertEqual(controls.default_contrast(None, None, None, 0), controls.NO_CONTRAST)
 
+    def test_changing_answer_token_rechooses_contrast(self):
+        def contrast(target, donor_count=0):
+            update, *_reset = controls.prefix_changed(
+                self.donor, self.recipient, "A → B", target, donor_count, self.session)
+            return update["value"]
+        self.assertEqual(contrast(1), 0)
+        self.assertEqual(contrast(0), controls.NO_CONTRAST)
+        self.assertEqual(contrast(0, donor_count=1), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

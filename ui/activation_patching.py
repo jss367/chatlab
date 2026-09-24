@@ -106,7 +106,8 @@ def sources_changed(left, right, direction, donor_count, session):
             contrast_update(donor, recipient, target, donor_count), *reset(session))
 
 
-def count_changed(left, right, direction, target, donor_count, session):
+def prefix_changed(left, right, direction, target, donor_count, session):
+    """Re-choose the contrast when the answer token or source output count changes."""
     donor, recipient = slots(left, right, direction)
     return contrast_update(donor, recipient, target, donor_count), *reset(session)
 
@@ -339,7 +340,8 @@ def build(left, right):
         for source in (left, right, direction):
             source.change(sources_changed, [left, right, direction, donor_count, session],
                           [target, contrast, *outputs, revision], queue=False)
-        donor_count.input(count_changed, [left, right, direction, target, donor_count, session],
+        for control in (target, donor_count):
+            control.input(prefix_changed, [left, right, direction, target, donor_count, session],
                           [contrast, *outputs, revision], queue=False)
-        for control in (target, contrast, width):
+        for control in (contrast, width):
             control.input(reset, session, [*outputs, revision], queue=False)
