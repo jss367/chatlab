@@ -39,6 +39,9 @@ from typing import Any
 
 import numpy as np
 
+import kv_cache
+from kv_cache import CacheLayer, LayerShape, recent_positions
+
 logger = logging.getLogger(__name__)
 
 # Where an mlx-lm ``Model`` keeps its decoder stack and its final norm. Most
@@ -620,6 +623,93 @@ class MlxEngine:
                 for index in range(layers)
             ]
         return reading
+
+    @staticmethod
+    def _cache_arrays(cache) -> list[tuple[Any, Any, Any] | None]:
+        """Each layer's keys, values and cache object, ``None`` where it holds none.
+
+        The arrays are cut to the tokens held, in the order they came: a
+        ``KVCache`` grows its buffer in steps and says how much is filled
+        with ``offset``, and a ``RotatingKVCache`` writes round a ring once
+        it is full, which ``_temporal_order`` undoes. A quantized cache keeps
+        packed tuples and a state-space layer keeps no keys, so neither is read.
+        """
+
+        import mlx.core as mx
+
+        arrays: list[tuple[Any, Any, Any] | None] = []
+        for layer in cache or ():
+            keys, values = getattr(layer, "keys", None), getattr(layer, "values", None)
+            if (
+                hasattr(layer, "bits")
+                or not isinstance(keys, mx.array)
+                or not isinstance(values, mx.array)
+                or keys.ndim != 4
+            ):
+                arrays.append(None)
+                continue
+            order = getattr(layer, "_temporal_order", None)
+            offset = getattr(layer, "offset", None)
+            if order is not None:
+                keys, values = order(keys), order(values)
+            elif isinstance(offset, int):
+                keys, values = keys[..., :offset, :], values[..., :offset, :]
+            arrays.append((keys, values, layer) if keys.shape[2] > 0 else None)
+        return arrays
+
+    def cache_shapes(self, cache) -> list[LayerShape | None]:
+        """What every layer of ``cache`` holds, without copying any of it.
+
+        The bytes are what the layer has allocated, which runs a little past
+        the tokens held: a ``KVCache`` grows 256 positions at a time.
+        """
+
+        shapes: list[LayerShape | None] = []
+        for entry in self._cache_arrays(cache):
+            if entry is None:
+                shapes.append(None)
+                continue
+            keys, values, layer = entry
+            allocated = getattr(layer, "nbytes", None)
+            shapes.append(LayerShape(
+                heads=int(keys.shape[1]),
+                positions=int(keys.shape[2]),
+                dim=int(keys.shape[3]),
+                dtype=str(keys.dtype).removeprefix("mlx.core."),
+                nbytes=int(allocated) if isinstance(allocated, int) else keys.nbytes + values.nbytes,
+            ))
+        return shapes
+
+    def cache_layer(self, cache, layer: int, total: int) -> CacheLayer | None:
+        """Layer ``layer`` (from 0) of a cache holding ``total`` tokens, in numpy.
+
+        A rotating cache with ``keep`` set holds its first tokens for good
+        and a window of the latest after them, so its positions are numbered
+        in two runs. Only the latest :data:`kv_cache.MAX_POSITIONS` are
+        copied out; the mean key over every position is reduced in MLX.
+        """
+
+        import mlx.core as mx
+
+        arrays = self._cache_arrays(cache)
+        if not 0 <= layer < len(arrays) or arrays[layer] is None:
+            return None
+        keys, values, owner = arrays[layer]
+        held = int(keys.shape[2])
+        keep = min(int(getattr(owner, "keep", 0) or 0), held)
+        positions = (
+            list(range(keep)) + recent_positions(held - keep, total)
+            if keep and held < total
+            else recent_positions(held, total)
+        )
+        shown = min(held, kv_cache.MAX_POSITIONS)
+        return CacheLayer(
+            keys=np.array(keys[0, :, -shown:].astype(mx.float32)),
+            values=np.array(values[0, :, -shown:].astype(mx.float32)),
+            positions=positions[-shown:],
+            key_mean=np.array(keys[0].astype(mx.float32).mean(axis=1)),
+            held=held,
+        )
 
 
 def _cache_offset(cache) -> int | None:

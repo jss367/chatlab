@@ -554,7 +554,9 @@ body.column-dragging {{ user-select: none; }}
 }}
 #conversation-tools {{ max-height: 40vh; overflow-y: auto; overscroll-behavior-y: contain; }}
 #inspector-pane .block {{ background: transparent; }}
-#inspector-pane input, #inspector-pane textarea {{ background: var(--input-background-fill); }}
+/* Radios and checkboxes keep Gradio's own fill: the shorthand would also clear
+   the checked mark, which Gradio draws as a background image. */
+#inspector-pane input:not([type=radio]):not([type=checkbox]), #inspector-pane textarea {{ background: var(--input-background-fill); }}
 #token-alternatives table {{ font-family: var(--font); font-size: 12px; }}
 #token-alternatives td:nth-child(2) {{ font-family: var(--font-mono); }}
 #inspector-pane > .form {{ flex: 0 0 auto !important; }}
@@ -980,6 +982,19 @@ abbr[title] {{ text-decoration: underline dotted; cursor: help; }}
 .attn-query {{ outline: 1.5px dashed var(--viz-muted); }}
 .attn-predicted {{ outline: 1.5px solid var(--viz-ink); margin-left: 0.3rem; }}
 .attn-top {{ font-size: 0.8rem; columns: 2; margin: 0.3rem 0 0; padding-left: 1.4rem; color: var(--viz-ink); }}
+.kv-grid-wrap {{ overflow: auto; max-height: 420px; margin: 0.3rem 0; border: 1px solid var(--viz-grid); border-radius: 6px; }}
+.kv-grid {{ border-collapse: separate; border-spacing: 0; font-size: 0.74rem; font-variant-numeric: tabular-nums; }}
+.kv-grid th, .kv-grid td {{
+  padding: 0.12rem 0.35rem; white-space: nowrap; color: var(--viz-ink);
+  border-bottom: 1px solid var(--viz-grid); border-right: 1px solid var(--viz-grid);
+}}
+.kv-grid thead th {{ position: sticky; top: 0; z-index: 2; background: var(--background-fill-primary); color: var(--viz-muted); font-weight: 500; }}
+.kv-grid tbody th {{ color: var(--viz-muted); font-weight: 500; text-align: right; background: var(--background-fill-primary); }}
+.kv-grid tbody th.kv-token {{ text-align: left; max-width: 12rem; overflow: hidden; text-overflow: ellipsis; }}
+.kv-grid code {{ background: none; padding: 0; font-size: inherit; color: var(--viz-ink); }}
+.kv-response .kv-token code {{ font-weight: 600; }}
+.kv-cell {{ text-align: right; background: color-mix(in srgb, var(--viz-line) calc(var(--kv-heat, 0) * 70%), transparent); }}
+.kv-query th, .kv-query td {{ border-top: 1.5px dashed var(--viz-muted); border-bottom: 1.5px dashed var(--viz-muted); }}
 """
 
 

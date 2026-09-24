@@ -560,7 +560,7 @@ class ConversationTests(unittest.TestCase):
     def test_ui_records_response_vector_and_inspects_that_snapshot(self):
         from test_app_flow import FIXED, TURNS, TRACE, CONTEXT_IDS, METRICS, PROMPT_METRICS
         from ui.generation import chat
-        from ui.inspection import inspect_layers
+        from ui.inspection import inspect_layers, render_kv_cache
 
         with mock.patch.object(runtime, "MANAGER", manager()):
             frames = list(chat("Hello", [], **FIXED, steering=vector()))
@@ -574,6 +574,11 @@ class ConversationTests(unittest.TestCase):
             target = dict(generation=generation, strip="response", index=0)
             result = list(inspect_layers(target, frame[METRICS], prompt_metrics, context, 0))[0]
             np.testing.assert_allclose(result[3]["layers"][-1]["probability"], rows[0]["raw_probability"], rtol=1e-5)
+            # A steered pass keeps no cache, so the cache view says so
+            # rather than asking for an inspection that would keep none.
+            self.assertTrue(result[3]["steered"])
+            page, _slider = render_kv_cache(result[3], 1, "Key norm")
+            self.assertIn("A steered inspection keeps no key-value cache", page)
             copied = conversation.copy_turns(frame[TURNS])
             copied[-1]["steering"]["layer"] = 999
             self.assertEqual(steering.expand(frame[TURNS][-1]["steering"]), vector())

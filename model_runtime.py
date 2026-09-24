@@ -25,6 +25,7 @@ import numpy as np
 import adapters
 import mlx_runtime
 import jacobian_lens
+import kv_cache
 import settings
 import steering as steering_vectors
 from conversation import THINK_CLOSE, THINK_OPEN
@@ -4017,6 +4018,12 @@ class ModelChanged(RuntimeError):
     """The weights in memory are not the ones the caller's tokens came from."""
 
 
+# Seconds :meth:`ModelManager.read_kv_cache` waits for the model lock. The
+# cache is read in well under this; a longer wait means something else has
+# the model and will release the cache when it starts.
+KV_CACHE_WAIT = 2.0
+
+
 @dataclass(frozen=True)
 class TokenInsight:
     """What every layer predicted for one token, and where the model looked.
@@ -4921,6 +4928,76 @@ class TorchEngine:
             ]
         del outputs
         return reading
+
+    @staticmethod
+    def _cache_tensors(cache) -> list[tuple[Any, Any] | None]:
+        """Each layer's key and value tensors, ``None`` where a layer holds none.
+
+        A ``DynamicCache`` keeps them on its ``layers``, in order, with a
+        sliding-window layer holding only its most recent tokens. A layer
+        without attention (a hybrid model's state-space or linear layers)
+        has no keys, and a quantized layer's ``keys`` are only the part not
+        yet quantized, so neither is read.
+        """
+
+        import torch
+
+        layers = getattr(cache, "layers", None)
+        if layers is None:
+            return []
+        pairs: list[tuple[Any, Any] | None] = []
+        for layer in layers:
+            keys = getattr(layer, "keys", None)
+            values = getattr(layer, "values", None)
+            readable = (
+                "Quantized" not in type(layer).__name__
+                and isinstance(keys, torch.Tensor)
+                and isinstance(values, torch.Tensor)
+                and keys.ndim == 4
+                and values.ndim == 4
+                and keys.shape[2] > 0
+            )
+            pairs.append((keys, values) if readable else None)
+        return pairs
+
+    def cache_shapes(self, cache) -> list[kv_cache.LayerShape | None]:
+        """What every layer of ``cache`` holds, without copying any of it."""
+
+        return [
+            None
+            if pair is None
+            else kv_cache.LayerShape(
+                heads=int(pair[0].shape[1]),
+                positions=int(pair[0].shape[2]),
+                dim=int(pair[0].shape[3]),
+                dtype=str(pair[0].dtype).removeprefix("torch."),
+                nbytes=sum(tensor.numel() * tensor.element_size() for tensor in pair),
+            )
+            for pair in self._cache_tensors(cache)
+        ]
+
+    def cache_layer(self, cache, layer: int, total: int) -> kv_cache.CacheLayer | None:
+        """Layer ``layer`` (from 0) of a cache holding ``total`` tokens, in numpy.
+
+        Only the latest :data:`kv_cache.MAX_POSITIONS` positions are copied
+        off the device; the mean key over every position is reduced there.
+        """
+
+        import torch
+
+        pairs = self._cache_tensors(cache)
+        if not 0 <= layer < len(pairs) or pairs[layer] is None:
+            return None
+        keys, values = (tensor[0].detach() for tensor in pairs[layer])
+        held = int(keys.shape[1])
+        shown = min(held, kv_cache.MAX_POSITIONS)
+        return kv_cache.CacheLayer(
+            keys=keys[:, -shown:].float().cpu().numpy(),
+            values=values[:, -shown:].float().cpu().numpy(),
+            positions=kv_cache.recent_positions(shown, total),
+            key_mean=keys.mean(dim=1, dtype=torch.float32).cpu().numpy(),
+            held=held,
+        )
 
 
 class ExclusiveLoad(NamedTuple):
@@ -8094,3 +8171,51 @@ class ModelManager:
                 attention=attention,
                 decided_at=decided_at,
             )
+
+    def read_kv_cache(
+        self, token_ids: Sequence[int], layer: int, *, load_id: str | None = None
+    ) -> dict:
+        """One layer of the key-value cache the last inspection kept.
+
+        ``token_ids`` is the sequence the caller's readout covers, through
+        the query token, and ``layer`` counts from 1. The cache is read only
+        while it holds exactly those tokens from the load named, so the
+        numbers describe the readout they are shown beside and never a later
+        click's. Nothing is run through the model.
+
+        The lock is waited on briefly rather than for as long as it is held:
+        a reply keeps it for the whole of its stream, and gives the cache
+        back when it starts, so waiting would end in :class:`CacheGone`
+        anyway. :class:`kv_cache.CacheBusy` says to try again instead.
+        """
+
+        if not self._lock.acquire(timeout=KV_CACHE_WAIT):
+            raise kv_cache.CacheBusy("The model is busy. Wait for it to finish, then try again.")
+        try:
+            if not self.loaded:
+                raise kv_cache.CacheGone("Download and load a model before reading its cache.")
+            if load_id is not None and load_id != self.load_id:
+                raise ModelChanged(
+                    "The model has been reloaded since these tokens were produced."
+                )
+            ids = [int(value) for value in token_ids]
+            kept = self._inspect_cache
+            if kept is None or kept[0] != self.load_id or kept[1] != ids:
+                raise kv_cache.CacheGone(
+                    "The cache from this inspection is no longer in memory. A reply, a "
+                    "scoring pass and another inspection each release it; press "
+                    "Inspect layers again."
+                )
+            engine = self._engine()
+            cache = kept[2]
+            shapes = engine.cache_shapes(cache)
+            chosen = min(max(int(layer or 1), 1), max(len(shapes), 1))
+            reading = engine.cache_layer(cache, chosen - 1, len(ids)) if shapes else None
+            return {
+                "summary": kv_cache.summarize(shapes, len(ids)),
+                "layer": chosen,
+                "backend": engine.backend,
+                "reading": kv_cache.read_layer(reading) if reading is not None else None,
+            }
+        finally:
+            self._lock.release()

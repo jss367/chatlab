@@ -678,6 +678,141 @@ def attention_strip(insight: dict, layer: int = 0) -> str:
     )
 
 
+EMPTY_KV_CACHE = ""
+
+# What the metric control offers, and the reading each draws from.
+KV_METRICS = {
+    "Key norm": "key_norm",
+    "Value norm": "value_norm",
+    "Key similarity": "key_similarity",
+}
+
+_KV_NOTES = {
+    "key_norm": (
+        "Length of each head's key vector at each position. Shading runs from the "
+        "layer's shortest key to its longest, leaving out the first token, which is "
+        "often an outlier (the attention sink)."
+    ),
+    "value_norm": (
+        "Length of each head's value vector at each position: how much a token can "
+        "add to a head's output when it is attended to. Shading leaves out the first "
+        "token, as for keys."
+    ),
+    "key_similarity": (
+        "Cosine between each key and the query position's key (dashed row) in the "
+        "same head, after taking out the head's mean key, which shifts every "
+        "attention score equally and would make all keys look alike. Only positive "
+        "similarity is shaded. Keys are stored after the rotary position embedding, "
+        "so positions near the query tend to look alike partly because they are near."
+    ),
+}
+
+
+def _bytes_label(count: int) -> str:
+    for unit, size in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if count >= size:
+            return f"{count / size:,.1f} {unit}"
+    return f"{count:,} bytes"
+
+
+def kv_cache_summary(summary: dict) -> str:
+    """The whole cache in a sentence or two, from its per-layer shapes."""
+
+    positions = [count for count in summary.get("positions") or [] if count]
+    if not summary.get("attention_layers") or not positions:
+        return "This model's cache stores no keys and values that can be read."
+    tokens = int(summary.get("tokens") or max(positions))
+
+    def listed(values) -> str:
+        return " or ".join(str(value) for value in values)
+
+    parts = [
+        f"The cache covers {tokens:,} tokens across {summary['layers']} layers: "
+        f"{listed(summary['heads'])} key-value heads of {listed(summary['dims'])} "
+        f"dimensions per layer, {listed(summary['dtypes'])}, "
+        f"{_bytes_label(summary['nbytes'])} in all."
+    ]
+    if summary["attention_layers"] < summary["layers"]:
+        parts.append(
+            f"{summary['attention_layers']} of the layers store keys and values; "
+            "the others keep a running state instead."
+        )
+    if min(positions) < tokens:
+        parts.append(
+            f"Layers with a sliding window keep only their latest {min(positions):,}."
+        )
+    return " ".join(parts)
+
+
+def kv_cache_grid(view: dict, tokens: list[dict], metric: str = "Key norm") -> str:
+    """One layer of the cache: a row per position held, a column per head."""
+
+    summary = kv_cache_summary(view.get("summary") or {})
+    reading = view.get("reading")
+    layer = int(view.get("layer") or 1)
+    if not reading:
+        return (
+            '<div class="viz-root" id="kv-cache-view">'
+            f'<div class="viz-note">{html.escape(summary)}</div>'
+            f'<div class="viz-empty">Layer {layer} stores no keys and values.</div></div>'
+        )
+    key = KV_METRICS.get(metric, "key_norm")
+    grid = reading[key]
+    positions = reading["positions"]
+    heads = reading["heads"]
+    query = positions[-1]
+    similarity = key == "key_similarity"
+    if similarity:
+        low, high = 0.0, 1.0
+    else:
+        # The first token leaves the range when there is anything else to set it.
+        columns = [column for column, position in enumerate(positions) if position > 0]
+        columns = columns or list(range(len(positions)))
+        values = [row[column] for row in grid for column in columns]
+        low, high = min(values), max(values)
+    spread = (high - low) or 1.0
+
+    rows = []
+    for column, position in enumerate(positions):
+        token = tokens[position] if 0 <= position < len(tokens) else {"text": "", "token_id": ""}
+        segment = token.get("segment", "prompt")
+        cells = []
+        for head in range(heads):
+            value = grid[head][column]
+            heat = min(1.0, max(0.0, (value - low) / spread))
+            shown = f"{value:+.2f}" if similarity else f"{value:.1f}"
+            cells.append(f'<td class="kv-cell" style="--kv-heat: {heat:.2f}">{shown}</td>')
+        classes = ["kv-query"] if position == query else []
+        if segment != "prompt":
+            classes.append("kv-response")
+        rows.append(
+            f'<tr class="{" ".join(classes)}"><th>{position + 1}</th>'
+            f'<th class="kv-token" title="{segment} token"><code>{_token_label(token)}</code></th>'
+            f'{"".join(cells)}</tr>'
+        )
+    header = "".join(f"<th>head {head + 1}</th>" for head in range(heads))
+    held = reading.get("held", len(positions))
+    notes = [summary]
+    if held < int((view.get("summary") or {}).get("tokens") or held):
+        notes.append(
+            f"Layer {layer} has a sliding window and holds only the latest {held:,} tokens."
+        )
+    if len(positions) < held:
+        notes.append(f"Showing the latest {len(positions):,} of the {held:,} positions it holds.")
+    return (
+        '<div class="viz-root" id="kv-cache-view">'
+        f'<div class="viz-title">Key-value cache, layer {layer}'
+        f'<span class="viz-sub">{html.escape(metric)}, {heads} heads of '
+        f'{reading["dim"]} dimensions</span></div>'
+        f'<div class="viz-note">{html.escape(" ".join(notes))}</div>'
+        '<div class="kv-grid-wrap"><table class="kv-grid">'
+        f'<thead><tr><th>#</th><th>Token</th>{header}</tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table></div>'
+        f'<div class="viz-note">{html.escape(_KV_NOTES[key])} Dashed row: the query, '
+        "the position whose output made the prediction. Response tokens are in bold.</div></div>"
+    )
+
+
 # ------------------------------------------------------- denoising a picture
 
 EMPTY_DENOISING_CHART = (

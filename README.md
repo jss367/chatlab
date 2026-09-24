@@ -49,6 +49,7 @@ drove.
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
 - An optional Jacobian lens reading concepts after a token as a layer × position grid, with lenses fetched from the Hub or imported from disk, click-to-pin tokens, and rank shading
 - An attention view showing which earlier tokens the model looked at when predicting it
+- A key-value cache view laying out each layer's cached keys and values per head and position: key norms, value norms, and key similarity to the query
 - A hardware panel naming the device, the memory ChatLab judges a load against, the Metal cap, and what the process is holding
 - Apple Metal, NVIDIA CUDA, and CPU loading
 - 8-bit and 4-bit weights on Apple Metal, so a 7B model fits a 16 GB Mac
@@ -842,6 +843,14 @@ The model is run again over everything before the token, one extra pass. That co
 **Attention.** The prediction for a token is made at the position *before* it, so that earlier token is the query, drawn with a dashed outline. Every token it could see is shaded by how much attention it received, averaged over heads, and the strongest are listed underneath. The **Attention layer** slider picks one layer or, at 0, the mean of all of them; moving it repaints from the stored readout without another pass. A layer with a sliding window (most of OLMo 3's, and Mistral's) sees only the most recent tokens, so the ones it could not see are shown with no weight. The first token of a sequence almost always takes a large share regardless of content (the attention sink), so shading is scaled to the strongest token after it and the sink's share is stated in words.
 
 Attention weights need the model's eager attention kernel, which is switched on for the inspection step only and switched back afterwards. A model that cannot return them still gets the logit lens. Only the first token of a sequence has nothing to show: nothing came before it.
+
+**Key-value cache.** Under the attention strip, the cache the inspection pass kept is laid out one layer at a time: a row per position, a column per key-value head. The caption gives the whole cache's shape: tokens, layers, heads, head dimension, dtype and memory. **Cache readout** picks what the cells show:
+
+- **Key norm**: the length of each head's key vector at each position.
+- **Value norm**: the length of each value vector, which bounds how much a token can add to a head's output when it is attended to.
+- **Key similarity**: the cosine between each key and the query position's key in the same head, after taking out the head's mean key. That mean adds the same amount to every score a query gives the head, so it changes nothing the query sees, and in many models it is large enough that every raw key points almost the same way. Keys are stored after the rotary position embedding, so positions near the query also look alike partly because they are near.
+
+The cache is read from memory, so moving **Cache layer** or changing the readout costs no pass. A reply, a scoring pass or another inspection releases it, and the view then asks for **Inspect layers** again. A steered inspection keeps no cache at all, so its view says so and asks for steering to be turned off instead. A sliding-window layer holds only its latest tokens and shows only those rows. A hybrid model's state-space layers hold no keys and say so. A layer holding more than 1,024 positions shows the latest 1,024. On MLX the memory figure is what each layer has allocated, which runs a little past the tokens held.
 
 ## Reasoning blocks
 
