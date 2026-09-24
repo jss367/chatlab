@@ -258,7 +258,14 @@ class AdapterCacheStatusTests(unittest.TestCase):
 class AdapterLoadTests(unittest.TestCase):
     """A real tiny Llama and a real LoRA, merged by the loader ChatLab runs."""
 
-    def build(self, root: Path, extra_token: str | None = None) -> tuple[Path, object]:
+    def build(
+        self, root: Path, extra_token: str | None = None,
+        padding: int = 0, trained_rows: int | None = None,
+    ) -> tuple[Path, object]:
+        """``padding`` pads the base's embeddings past the tokenizer, and
+        ``trained_rows`` resizes them before training and saves them whole
+        through ``modules_to_save``, the way a run that added tokens does."""
+
         import torch
         from peft import LoraConfig, get_peft_model
         from transformers import LlamaConfig, LlamaForCausalLM
@@ -266,17 +273,21 @@ class AdapterLoadTests(unittest.TestCase):
         tokenizer = tiny_tokenizer.build()
         torch.manual_seed(0)
         base = LlamaForCausalLM(LlamaConfig(
-            vocab_size=len(tokenizer), hidden_size=16, intermediate_size=32,
+            vocab_size=len(tokenizer) + padding, hidden_size=16, intermediate_size=32,
             num_hidden_layers=2, num_attention_heads=2, num_key_value_heads=1,
             max_position_embeddings=64,
         ))
         base_path = snapshot(root, BASE, {})
         base.save_pretrained(base_path)
         tokenizer.save_pretrained(base_path)
+        saved = {}
+        if trained_rows is not None:
+            base.resize_token_embeddings(trained_rows)
+            saved = {"modules_to_save": ["embed_tokens", "lm_head"]}
         # Nonzero B matrices, so the merge visibly changes the weights.
         lora = get_peft_model(base, LoraConfig(
             r=4, lora_alpha=8, target_modules=["q_proj", "v_proj"],
-            task_type="CAUSAL_LM", init_lora_weights=False,
+            task_type="CAUSAL_LM", init_lora_weights=False, **saved,
         ))
         ids = torch.tensor([tokenizer.encode("the cat sat on the mat")])
         with torch.no_grad():
@@ -353,6 +364,24 @@ class AdapterLoadTests(unittest.TestCase):
 
         self.assertIn("<persona>", tokenizer.get_vocab())
         self.assertEqual(model.get_input_embeddings().weight.shape[0], len(tokenizer))
+
+    def test_saved_embeddings_set_the_base_size_in_either_direction(self):
+        import torch
+
+        tokenizer = tiny_tokenizer.build()
+        # Down: a base padded past its tokenizer, trained at the tokenizer's
+        # length. Up: a tokenizer grown past the base's rows.
+        for padding, rows in ((16, len(tokenizer)), (0, len(tokenizer) + 8)):
+            with self.subTest(padding=padding, rows=rows), tempfile.TemporaryDirectory() as root:
+                path, (ids, expected) = self.build(Path(root), padding=padding, trained_rows=rows)
+                model, _tokenizer, _pipeline, _device = model_runtime._read_text_model(
+                    path, torch, "cpu", torch.float32, None, "full"
+                )
+                with torch.no_grad():
+                    logits = model(ids).logits
+
+                self.assertEqual(model.get_input_embeddings().weight.shape[0], rows)
+                torch.testing.assert_close(logits, expected)
 
     def test_a_quantized_choice_loads_the_adapter_at_full_precision(self):
         import torch

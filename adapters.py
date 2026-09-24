@@ -162,21 +162,66 @@ def has_tokenizer(snapshot: Path) -> bool:
     return (snapshot / "tokenizer_config.json").is_file()
 
 
+def saved_embedding_rows(model, adapter_path: Path) -> int | None:
+    """How many token rows the adapter saved its own embedding matrix with.
+
+    An adapter trained with the embeddings in ``modules_to_save``, or with
+    LoRA on them, saves the whole matrix, input side or output side, keyed
+    by the module's name in the model under PEFT's ``base_model.model.``
+    prefix (``.base_layer`` between the two for the LoRA case). Only the
+    shapes are read, not the tensors. ``None`` when it saved neither.
+    """
+
+    names = {module: name for name, module in model.named_modules()}
+    keys = set()
+    for module in (model.get_input_embeddings(), model.get_output_embeddings()):
+        if module in names:
+            prefix = f"base_model.model.{names[module]}"
+            keys.update((f"{prefix}.weight", f"{prefix}.base_layer.weight"))
+    safetensors = Path(adapter_path) / ADAPTER_WEIGHTS[0]
+    if safetensors.is_file():
+        from safetensors import safe_open
+
+        with safe_open(str(safetensors), framework="pt") as weights:
+            for key in keys.intersection(weights.keys()):
+                return weights.get_slice(key).get_shape()[0]
+        return None
+    import torch
+
+    weights = torch.load(
+        Path(adapter_path) / ADAPTER_WEIGHTS[1], map_location="cpu",
+        weights_only=True, mmap=True,
+    )
+    for key in keys.intersection(weights):
+        return weights[key].shape[0]
+    return None
+
+
 def merge_adapter(model, adapter_path: Path, vocabulary: int | None = None):
     """``model`` with the adapter at ``adapter_path`` merged into its weights.
 
+    An adapter that saved its own embedding matrix fits only a base whose
+    matrix has as many rows, so the base is resized to the saved count
+    first, in whichever direction: a tokenizer that grew within a padded
+    vocabulary is usually resized down to its own length before training,
+    and one that grew past it up. The saved matrix then replaces the rows
+    either way, so nothing of the base's is lost that the adapter kept.
+
     ``vocabulary`` is the size of the tokenizer the adapter was trained
-    with, when it shipped one. A tokenizer that grew during training grew
-    the embeddings with it, and the adapter's saved embedding rows fit only
-    a matrix that has grown to match, so the base is resized first. Only
-    ever upwards: many checkpoints pad the matrix past the tokenizer's
-    length, and cutting those rows off would break the model.
+    with, when it shipped one, and counts only where the adapter saved no
+    embedding matrix. Then the base is resized only ever upwards: many
+    checkpoints pad the matrix past the tokenizer's length, and cutting
+    those rows off, with nothing saved to put in their place, would break
+    the model.
     """
 
     from peft import PeftModel
 
     rows = model.get_input_embeddings().weight.shape[0]
-    if vocabulary is not None and vocabulary > rows:
+    saved = saved_embedding_rows(model, adapter_path)
+    if saved is not None and saved != rows:
+        model.resize_token_embeddings(saved)
+    elif saved is None and vocabulary is not None and vocabulary > rows:
         model.resize_token_embeddings(vocabulary)
     wrapped = PeftModel.from_pretrained(model, str(adapter_path), is_trainable=False)
     return wrapped.merge_and_unload()
