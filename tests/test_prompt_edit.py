@@ -5,11 +5,11 @@ import json
 import unittest
 from unittest import mock
 
-import app
+from chatlab import app
 import gradio as gr
-from text_generation import ModelChanged
-from ui import runtime, token_menu
-from conversation import forget_measurements, to_json, turn_entries
+from chatlab.text_generation import ModelChanged
+from chatlab.ui import runtime, token_menu
+from chatlab.conversation import forget_measurements, to_json, turn_entries
 from test_app_flow import (
     CONTEXT_IDS, FIXED, METRICS, PROMPT_METRICS, PROMPT_NOTE, PROMPT_STRIP,
     SETTINGS, STATUS, TRACE, TURNS, metrics_of, select, strip_of, token_span,

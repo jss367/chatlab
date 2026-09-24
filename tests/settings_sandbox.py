@@ -12,8 +12,8 @@ import os
 import tempfile
 from pathlib import Path
 
-import library
-import settings
+from chatlab import library
+from chatlab import settings
 
 _directory: tempfile.TemporaryDirectory | None = None
 _previous: dict[str, str | None] = {}

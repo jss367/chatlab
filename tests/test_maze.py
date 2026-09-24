@@ -8,14 +8,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from extensions.maze_experiments.maze import PASSAGES, Maze, apply_call, call_text, default_instruction, generate, parse_call
-from extensions.maze_experiments.runner import Episode, TERMINAL, context_messages, fork_token_edit, from_payload, stream_episode
-from model_loading import LoadedModel
-from model_runtime import GENERATING, ModelManager
-from extension_api import ModelService
-from extension_api import TokenInspector
-from token_metrics import unscored_metric
-from extensions.maze_experiments.page import board, build_page, context_view, export_run, scenario_values, status, views, timeline, transport_text
+from chatlab.extensions.maze_experiments.maze import PASSAGES, Maze, apply_call, call_text, default_instruction, generate, parse_call
+from chatlab.extensions.maze_experiments.runner import Episode, TERMINAL, context_messages, fork_token_edit, from_payload, stream_episode
+from chatlab.model_loading import LoadedModel
+from chatlab.model_runtime import GENERATING, ModelManager
+from chatlab.extension_api import ModelService
+from chatlab.extension_api import TokenInspector
+from chatlab.token_metrics import unscored_metric
+from chatlab.extensions.maze_experiments.page import board, build_page, context_view, export_run, scenario_values, status, views, timeline, transport_text
 import gradio as gr
 
 CONFIG = dict(supplied_moves=0, interrupt_after=0, interruption_text="Distracted", prefix_tokens=2,
@@ -872,7 +872,7 @@ class MazeTests(unittest.TestCase):
                     replies = [call_text(maze_id, "south"), call_text("wrong", "east"),
                                '<tool_call>{}</tool_call>'] + [call_text(maze_id, "east")] * (2 - supplied)
                     manager = Manager([(reply, [8, 0]) for reply in replies])
-                    with mock.patch('extensions.maze_experiments.runner.time.sleep'):
+                    with mock.patch('chatlab.extensions.maze_experiments.runner.time.sleep'):
                         list(stream_episode(ep, manager))
                     self.assertEqual(ep.phase, "arrived")
                     self.assertEqual(ep.position, MAZE.goal)
@@ -956,14 +956,14 @@ class MazeTests(unittest.TestCase):
                 self.assertEqual([selected(list(forward(replay, False, session))[-1]) for _ in range(3)], [0, 1, 1])
                 self.assertEqual([selected(back(replay, False, session)) for _ in range(3)], [0, -1, -1])
                 playback = callbacks['play_back']
-                with mock.patch('extensions.maze_experiments.page.time.sleep') as sleep:
+                with mock.patch('chatlab.extensions.maze_experiments.page.time.sleep') as sleep:
                     frames = list(playback.fn(replay, False, session, .4))
                 self.assertEqual(sleep.call_args_list, [mock.call(.05)] * 16)
                 self.assertEqual([selected(frame) for frame in frames], [-1, 0, 1, 1])
                 self.assertTrue(all(len(frame) == len(playback.outputs) for frame in frames))
                 for frame, column in zip(frames, (0, 1, 2)):
                     self.assertIn(f'Character at row 0, column {column}', frame[0])
-                with mock.patch('extensions.maze_experiments.page.time.sleep') as sleep:
+                with mock.patch('chatlab.extensions.maze_experiments.page.time.sleep') as sleep:
                     self.assertEqual([selected(frame) for frame in playback.fn(replay, False, session, .4)], [1, 1])
                 sleep.assert_not_called()
                 # Starting playback again supersedes the run already going, so
@@ -974,7 +974,7 @@ class MazeTests(unittest.TestCase):
                 replay.viewing = -1
                 current = playback.fn(replay, False, session, .4)
                 self.assertEqual(selected(next(current)), -1)
-                with mock.patch('extensions.maze_experiments.page.time.sleep'):
+                with mock.patch('chatlab.extensions.maze_experiments.page.time.sleep'):
                     self.assertEqual(list(superseded), [])
                     self.assertEqual([selected(frame) for frame in current], [0, 1, 1])
                 self.assertFalse(replay.playing)
@@ -1022,7 +1022,7 @@ class MazeTests(unittest.TestCase):
                 self.assertEqual(len(manager.calls), before)
                 # Play traverses the same history, then generates at its end.
                 ep.viewing = -1
-                with mock.patch('extensions.maze_experiments.page.time.sleep'):
+                with mock.patch('chatlab.extensions.maze_experiments.page.time.sleep'):
                     frames = list(playback(ep, False, session, .1))
                 self.assertEqual(ep.phase, 'arrived')
                 self.assertEqual(len(manager.calls), before + 1)
@@ -1037,7 +1037,7 @@ class MazeTests(unittest.TestCase):
                 next(stream)
                 before = len(manager.calls)
                 pause(ep)
-                with mock.patch('extensions.maze_experiments.page.time.sleep'):
+                with mock.patch('chatlab.extensions.maze_experiments.page.time.sleep'):
                     self.assertEqual(list(stream), [])
                 self.assertEqual(len(manager.calls), before)
                 self.assertEqual(ep.phase, 'paused')
@@ -1068,7 +1068,7 @@ class MazeTests(unittest.TestCase):
                 list(forward(ep, False, session))
                 replay = from_payload(json.loads(json.dumps(ep.payload())))
                 before = len(manager.calls)
-                with mock.patch('extensions.maze_experiments.page.time.sleep'):
+                with mock.patch('chatlab.extensions.maze_experiments.page.time.sleep'):
                     list(playback(replay, False, session, .1))
                 list(forward(replay, False, session))
                 self.assertEqual(len(manager.calls), before)
@@ -1105,7 +1105,7 @@ class MazeTests(unittest.TestCase):
                     self.assertEqual(frame[8]['value'], row - 1)
                     self.assertEqual(frame[3], replies[row - 1] if row else '')
                     self.assertTrue(frame[6][row][0].startswith('▶'))
-                with mock.patch('extensions.maze_experiments.page.time.sleep'):
+                with mock.patch('chatlab.extensions.maze_experiments.page.time.sleep'):
                     self.assertEqual(list(stream), [])
                 ep.interrupt_next = True
                 self.assertIn('Interruption queued', transport_text(ep))
@@ -1644,7 +1644,7 @@ class MazeTests(unittest.TestCase):
     def test_browser_sessions_have_independent_episode_state(self):
         original = Episode(MAZE, CONFIG)
         original.created_at = 100.
-        with mock.patch('extensions.maze_experiments.runner.time.time', return_value=200.):
+        with mock.patch('chatlab.extensions.maze_experiments.runner.time.time', return_value=200.):
             duplicate = copy.deepcopy(original)
         duplicate.request_stop()
         self.assertEqual(original.phase, "ready")
@@ -1874,7 +1874,7 @@ class MazeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             archive = Path(directory) / 'not-a-directory'
             archive.write_text('blocked')
-            with mock.patch('extensions.maze_experiments.page.gr.Warning') as warning:
+            with mock.patch('chatlab.extensions.maze_experiments.page.gr.Warning') as warning:
                 path = Path(export_run(ep, archive))
             warning.assert_called_once()
         try:
@@ -1948,7 +1948,7 @@ class MazeTests(unittest.TestCase):
     def test_stop_during_response_gap_does_not_generate_more_tokens(self):
         ep = Episode(MAZE, CONFIG)
         manager = Manager([('\n' + call_text(MAZE.maze_id, 'east'), [8, 0])])
-        with mock.patch('extensions.maze_experiments.runner.time.sleep', side_effect=lambda _: ep.request_stop()):
+        with mock.patch('chatlab.extensions.maze_experiments.runner.time.sleep', side_effect=lambda _: ep.request_stop()):
             list(stream_episode(ep, manager))
         self.assertEqual(ep.phase, 'stopped')
         self.assertEqual(len(manager.calls), 1)
@@ -1964,7 +1964,7 @@ class MazeTests(unittest.TestCase):
                     ep.request_pause()
                     if also_stop:
                         ep.request_stop()
-                with mock.patch('extensions.maze_experiments.runner.time.sleep', side_effect=request_during_gap):
+                with mock.patch('chatlab.extensions.maze_experiments.runner.time.sleep', side_effect=request_during_gap):
                     list(stream_episode(ep, manager))
                 self.assertEqual(ep.phase, 'stopped' if also_stop else 'paused')
                 self.assertEqual(len(manager.calls), 1)
@@ -2152,7 +2152,7 @@ class MazeTests(unittest.TestCase):
         move = call_text(MAZE.maze_id, 'east')
         manager = Manager([(move, list(move.encode()) + [0])] * 2)
         ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
-        with self.assertLogs('extensions.maze_experiments.runner', level='INFO') as logged:
+        with self.assertLogs('chatlab.extensions.maze_experiments.runner', level='INFO') as logged:
             list(stream_episode(ep, manager))
         self.assertEqual(ep.phase, 'arrived')
         responses = [line for line in logged.output if 'response' in line and ' stop ' in line]
@@ -2170,7 +2170,7 @@ class MazeTests(unittest.TestCase):
             yield
         manager.replies = iter([])
         manager.generate = explode
-        with self.assertLogs('extensions.maze_experiments.runner', level='ERROR') as failed:
+        with self.assertLogs('chatlab.extensions.maze_experiments.runner', level='ERROR') as failed:
             list(stream_episode(broken, manager))
         self.assertEqual(broken.phase, 'error')
         self.assertIn('MPS backend out of memory', failed.output[0])
@@ -2185,7 +2185,7 @@ class MazeTests(unittest.TestCase):
         manager = Manager([(move, list(move.encode()) + [0])])
         manager.generate = scored(manager.generate)
         stopped = Episode(MAZE, CONFIG | {'interruption_text': ''})
-        with self.assertLogs('extensions.maze_experiments.runner', level='INFO') as logged:
+        with self.assertLogs('chatlab.extensions.maze_experiments.runner', level='INFO') as logged:
             stream = stream_episode(stopped, manager)
             next(stream)
             # Between the opening frame and generation, which is the window
@@ -2208,7 +2208,7 @@ class MazeTests(unittest.TestCase):
             raise RuntimeError('MPS backend out of memory')
             yield
         manager.generate = explode
-        with self.assertLogs('extensions.maze_experiments.runner', level='INFO') as logged:
+        with self.assertLogs('chatlab.extensions.maze_experiments.runner', level='INFO') as logged:
             list(stream_episode(broken, manager))
         self.assertEqual(broken.phase, 'error')
         (response,) = [line for line in logged.output if ' response 1:' in line]
@@ -2223,7 +2223,7 @@ class MazeTests(unittest.TestCase):
         manager = Manager([(move, list(move.encode()) + [0])] * 2)
         manager.generate = scored(manager.generate)
         ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
-        with self.assertLogs('extensions.maze_experiments.runner', level='INFO') as logged:
+        with self.assertLogs('chatlab.extensions.maze_experiments.runner', level='INFO') as logged:
             list(stream_episode(ep, manager))
         self.assertEqual(ep.phase, 'arrived')
         responses = [line for line in logged.output if ' response ' in line]
@@ -2249,8 +2249,8 @@ class MazeTests(unittest.TestCase):
             try:
                 playback = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}['play_back']
                 ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
-                with mock.patch('extensions.maze_experiments.page.gr.Warning') as warning:
-                    with self.assertLogs('extensions.maze_experiments.page', level='INFO') as logged:
+                with mock.patch('chatlab.extensions.maze_experiments.page.gr.Warning') as warning:
+                    with self.assertLogs('chatlab.extensions.maze_experiments.page', level='INFO') as logged:
                         list(playback(ep, False, session, .1))
                 warning.assert_called_once()
                 self.assertTrue(any('Play on run' in line and ep.run_id in line for line in logged.output))
@@ -2280,7 +2280,7 @@ class MazeTests(unittest.TestCase):
             try:
                 load = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}['load']
                 fresh = Episode(MAZE, CONFIG)
-                with self.assertLogs('extensions.maze_experiments.page', level='INFO') as logged:
+                with self.assertLogs('chatlab.extensions.maze_experiments.page', level='INFO') as logged:
                     loaded = load(str(ep.export()), fresh, False, session, None)
                 self.assertTrue(loaded[0].replay_only)
                 (line,) = logged.output
@@ -2288,12 +2288,12 @@ class MazeTests(unittest.TestCase):
                     self.assertIn(part, line)
                 # A widget cleared, or one whose file Gradio took as unchanged,
                 # replaces nothing and says which run stayed on screen.
-                with self.assertLogs('extensions.maze_experiments.page', level='INFO') as empty:
+                with self.assertLogs('chatlab.extensions.maze_experiments.page', level='INFO') as empty:
                     self.assertTrue(all(value == gr.skip() for value in load(None, fresh, False, session, None)))
                 self.assertIn(fresh.run_id, empty.output[0])
                 path = Path(directory) / 'broken.json'
                 path.write_text('{"format": "chatlab-maze-run-1"}')
-                with self.assertLogs('extensions.maze_experiments.page', level='WARNING') as failed:
+                with self.assertLogs('chatlab.extensions.maze_experiments.page', level='WARNING') as failed:
                     with self.assertRaisesRegex(gr.Error, 'Could not load run'):
                         load(str(path), fresh, False, session, None)
                 self.assertIn('broken.json', failed.output[0])

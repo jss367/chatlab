@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from conversation import (
+from chatlab.conversation import (
     MAIN_BRANCH,
     REASONING_TITLE,
     SAVE_FORMAT,

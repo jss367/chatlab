@@ -5,14 +5,14 @@ from unittest import mock
 
 import gradio as gr
 
-import charts
-import compare
+from chatlab import charts
+from chatlab import compare
 import settings_sandbox
-from model_loading import LoadedModel
-from text_generation import ModelChanged
+from chatlab.model_loading import LoadedModel
+from chatlab.text_generation import ModelChanged
 from test_streaming import EOS_ID, loaded_manager
-from ui import compare as controls
-from ui import runtime
+from chatlab.ui import compare as controls
+from chatlab.ui import runtime
 
 
 def setUpModule():
@@ -734,7 +734,7 @@ class ReadingTests(unittest.TestCase):
         json.dumps(document)
 
     def test_the_export_writes_the_steering_vector_out_in_full(self):
-        import steering
+        from chatlab import steering
 
         held = steering.compact(steering.normalize({
             "model_id": "fake/model", "layer": 1, "vector": [1.0, -2.0, 3.0],
@@ -750,7 +750,7 @@ class ReadingTests(unittest.TestCase):
         json.dumps(document)
 
     def test_an_unresolvable_vector_leaves_its_reference_rather_than_failing(self):
-        import steering
+        from chatlab import steering
 
         held = steering.compact(steering.normalize({
             "model_id": "fake/model", "layer": 1, "vector": [1.0, -2.0, 3.0],

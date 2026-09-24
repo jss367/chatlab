@@ -6,7 +6,7 @@ import sys
 from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
 sys.path.insert(0, SPECPATH)
-from version import BUNDLE_IDENTIFIER, __version__  # noqa: E402
+from chatlab.version import BUNDLE_IDENTIFIER, __version__  # noqa: E402
 
 
 datas = []
@@ -88,15 +88,15 @@ hiddenimports += collect_submodules("diffusers.pipelines", on_error="warn once")
 hiddenimports += collect_submodules("diffusers.schedulers", on_error="warn once")
 hiddenimports += collect_submodules("diffusers.models", on_error="warn once")
 # Optional first-party pages are imported only when enabled at runtime.
-hiddenimports += collect_submodules("extensions")
+hiddenimports += collect_submodules("chatlab.extensions")
 hiddenimports += [
     "transformers.integrations.metal_quantization",
     "transformers.integrations.hub_kernels",
 ]
 
 a = Analysis(
-    ["desktop_launcher.py"],
-    pathex=[],
+    [os.path.join(SPECPATH, "scripts", "desktop_entry.py")],
+    pathex=[SPECPATH],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

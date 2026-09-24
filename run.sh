@@ -10,4 +10,5 @@ fi
 
 "$VENV_DIR/bin/python" -m pip install --upgrade pip
 "$VENV_DIR/bin/python" -m pip install -r "$SCRIPT_DIR/requirements.txt"
-exec "$VENV_DIR/bin/python" "$SCRIPT_DIR/app.py"
+cd "$SCRIPT_DIR"
+exec "$VENV_DIR/bin/python" -m chatlab

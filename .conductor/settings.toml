@@ -6,7 +6,7 @@ run_mode = "concurrent"
 
 [scripts.run.chatlab]
 available_in = [ "local" ]
-command = ".venv/bin/python app.py"
+command = ".venv/bin/python -m chatlab"
 default = true
 icon = "play"
 

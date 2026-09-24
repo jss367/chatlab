@@ -11,9 +11,9 @@ from unittest import mock
 import gradio as gr
 from PIL import Image
 
-from extensions.os_harm import page
-from extensions.os_harm import results
-from extensions.os_harm.results import (
+from chatlab.extensions.os_harm import page
+from chatlab.extensions.os_harm import results
+from chatlab.extensions.os_harm.results import (
     CATEGORIES, OSWORLD, UNKNOWN, cohen_kappa, compare_runs, filtered, import_results, judge_agreement, summaries,
 )
 
@@ -453,11 +453,11 @@ class ResultTests(unittest.TestCase):
 
 class ExtensionIntegrationTests(unittest.TestCase):
     def test_extension_builds_with_host_contract_and_no_loaded_model(self):
-        import app
-        from extensions.registry import load_enabled
+        from chatlab import app
+        from chatlab.extensions.registry import load_enabled
         enabled, errors = load_enabled(['os_harm'])
         self.assertFalse(errors)
-        with mock.patch('ui.layout.load_enabled', return_value=(enabled, [])):
+        with mock.patch('chatlab.ui.layout.load_enabled', return_value=(enabled, [])):
             demo = app.build_app()
         try:
             nav = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'nav')
@@ -477,10 +477,10 @@ class ExtensionIntegrationTests(unittest.TestCase):
             demo.close()
 
     def test_disabled_startup_does_not_import_viewer(self):
-        import settings
+        from chatlab import settings
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run([sys.executable, '-c',
-                "import app,sys; demo=app.build_app(); assert not any(n.startswith('extensions.os_harm') for n in tuple(sys.modules)); demo.close()"],
+                "from chatlab import app; import sys; demo=app.build_app(); assert not any(n.startswith('chatlab.extensions.os_harm') for n in tuple(sys.modules)); demo.close()"],
                 env=os.environ | {settings.SETTINGS_PATH_ENV: str(Path(directory) / 'settings.json'),
                                   'GRADIO_ANALYTICS_ENABLED': 'False'},
                 capture_output=True, text=True, timeout=60)

@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import logs
+from chatlab import logs
 import settings_sandbox
 
 
@@ -115,7 +115,7 @@ class ClaimTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "import sys;from pathlib import Path;import logs;"
+                "import sys;from pathlib import Path;from chatlab import logs;"
                 "print(logs.claim(Path(sys.argv[1])),flush=True);sys.stdin.read()",
                 str(self.path),
             ],
@@ -251,7 +251,7 @@ class EnvironmentRecordTests(unittest.TestCase):
             self.assertIn("not-a-real-distribution absent", logs.package_versions())
 
     def test_settings_that_cannot_be_read_do_not_stop_the_record(self):
-        with mock.patch("settings.load", side_effect=ValueError("bad json")):
+        with mock.patch("chatlab.settings.load", side_effect=ValueError("bad json")):
             self.assertIn("unreadable", logs.settings_note())
 
 

@@ -11,19 +11,19 @@ from unittest import mock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import api
-import model_runtime
-import device_memory
-import model_cache
-import model_loading
-import text_generation
-import settings
+from chatlab import api
+from chatlab import model_runtime
+from chatlab import device_memory
+from chatlab import model_cache
+from chatlab import model_loading
+from chatlab import text_generation
+from chatlab import settings
 import settings_sandbox
-from conversation import split_reasoning
-from model_cache import CachedModel, CacheStatus
-from model_inspection import ScoredText
-from text_generation import GenerationUpdate
-from ui import runtime
+from chatlab.conversation import split_reasoning
+from chatlab.model_cache import CachedModel, CacheStatus
+from chatlab.model_inspection import ScoredText
+from chatlab.text_generation import GenerationUpdate
+from chatlab.ui import runtime
 
 from test_streaming import loaded_manager
 

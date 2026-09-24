@@ -6,7 +6,7 @@ Extensions add specialized pages while sharing ChatLab's model runtime and token
 
 Open **Settings → Extensions**, check or uncheck an extension, and restart ChatLab. The choice saves immediately, survives browser refreshes, and takes effect when the server/app next starts. Refreshing the browser alone does not restart the server. Current pages and running trials remain available until that restart.
 
-In the macOS app, **Restart ChatLab** appears beside that note while the saved choice differs from the pages on screen. It asks first, because restarting unloads the model and stops anything running; answering **Restart now** closes the window and opens a fresh copy. A ChatLab served to a browser by `python app.py` has no window to reopen, so it shows the note without the button and the server is restarted by hand.
+In the macOS app, **Restart ChatLab** appears beside that note while the saved choice differs from the pages on screen. It asks first, because restarting unloads the model and stops anything running; answering **Restart now** closes the window and opens a fresh copy. A ChatLab served to a browser by `python -m chatlab` has no window to reopen, so it shows the note without the button and the server is restarted by hand.
 
 When enabled, **Maze**, **OS-Harm**, **Safety** or **Hangman** appears in the sidebar. When disabled, an extension's Python module and stylesheet are not loaded, its page and callbacks are not registered, and existing saved results remain on disk. The rest of ChatLab works without it. Import or API-version failures appear in Settings and do not prevent the core app from starting.
 
@@ -15,9 +15,9 @@ This version provides **bundled, optional modules**. It does not yet install ext
 For importing computer-use safety evaluations, comparing recorded judgments,
 and replaying screenshots in **OS-Harm**, see the [results viewer guide](OS_HARM_RESULTS.md).
 
-The **Computer-use safety benchmark** extension adds **Safety** to the sidebar. It implements case imports, text-only local action evaluation by label probability or free-text judgment, the blocking threshold curve, token inspection, external prediction scoring and execution-result review for OSGuard. Its interchange format and limitations are documented in [the computer-use safety guide](COMPUTER_USE_SAFETY.md). Its code lives in `extensions/osguard/` and uses the same host services as Maze.
+The **Computer-use safety benchmark** extension adds **Safety** to the sidebar. It implements case imports, text-only local action evaluation by label probability or free-text judgment, the blocking threshold curve, token inspection, external prediction scoring and execution-result review for OSGuard. Its interchange format and limitations are documented in [the computer-use safety guide](COMPUTER_USE_SAFETY.md). Its code lives in `chatlab/extensions/osguard/` and uses the same host services as Maze.
 
-The **Hangman** extension has the loaded model host a game of hangman. You guess, and each reply is shown token by token and checked against the replies before it. Any token can be branched from. A trial file plays many games with nobody guessing and can ask for the word after every response. See [the hangman guide](HANGMAN.md). Its code lives in `extensions/hangman/`.
+The **Hangman** extension has the loaded model host a game of hangman. You guess, and each reply is shown token by token and checked against the replies before it. Any token can be branched from. A trial file plays many games with nobody guessing and can ask for the word after every response. See [the hangman guide](HANGMAN.md). Its code lives in `chatlab/extensions/hangman/`.
 
 ## Ownership
 
@@ -29,13 +29,13 @@ The **Hangman** extension has the loaded model host a game of hangman. You guess
 | Cancellation and model-session lifecycle | Page layout, controls, run format and replay |
 | Navigation, enable preferences and module loading | Data written beneath its assigned data directory |
 
-ChatLab’s HTTP API continues to serve outside clients. In-process extensions use `extension_api.py` to access the loaded model directly; both interfaces respect the same model-generation reservation.
+ChatLab’s HTTP API continues to serve outside clients. In-process extensions use `chatlab/extension_api.py` to access the loaded model directly; both interfaces respect the same model-generation reservation.
 
-The Maze implementation lives entirely in `extensions/maze_experiments/`. Core layout code knows only the extension contract. The catalogue in `extensions/registry.py` contains its descriptive metadata and import path; it does not import the implementation until enabled.
+The Maze implementation lives entirely in `chatlab/extensions/maze_experiments/`. Core layout code knows only the extension contract. The catalogue in `chatlab/extensions/registry.py` contains its descriptive metadata and import path; it does not import the implementation until enabled.
 
 ## Extension contract: API version 1
 
-A catalogue entry declares an identifier, title, description, sidebar label, icon, module path and required API version. Extension tiles sit below Chat, Images and Models and above Settings, under a hairline that separates them from the pages that ship with the app, so enabling or removing one never moves a built-in page. The icon is a name in `ui/icons.py`, not a glyph: the host masks that drawing onto the extension's sidebar tile so it is stroked at the same weight as the pages around it, and a name this build does not have falls back to the default. `extension_api.icon_classes(name)` gives the same treatment to an extension's own buttons. The module exports:
+A catalogue entry declares an identifier, title, description, sidebar label, icon, module path and required API version. Extension tiles sit below Chat, Images and Models and above Settings, under a hairline that separates them from the pages that ship with the app, so enabling or removing one never moves a built-in page. The icon is a name in `chatlab/ui/icons.py`, not a glyph: the host masks that drawing onto the extension's sidebar tile so it is stroked at the same weight as the pages around it, and a name this build does not have falls back to the default. `extension_api.icon_classes(name)` gives the same treatment to an extension's own buttons. The module exports:
 
 ```python
 CSS = "..."  # Scope selectors to this extension's page.

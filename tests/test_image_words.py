@@ -9,14 +9,14 @@ from unittest import mock
 import gradio as gr
 import numpy as np
 
-import app
-import image_runtime
+from chatlab import app
+from chatlab import image_runtime
 import settings_sandbox
 from fake_pipeline import FakePipeline
-from image_runtime import ImageRequest, ImageRun
-from model_cache import IMAGE_KIND
-from model_runtime import ModelManager
-from ui import image_words, images_page, runtime
+from chatlab.image_runtime import ImageRequest, ImageRun
+from chatlab.model_cache import IMAGE_KIND
+from chatlab.model_runtime import ModelManager
+from chatlab.ui import image_words, images_page, runtime
 
 
 def setUpModule():

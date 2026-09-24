@@ -70,13 +70,13 @@ git -C "$root/origin.git" symbolic-ref HEAD refs/heads/main
 git clone -q "$root/origin.git" "$root/work" 2>/dev/null
 cd "$root/work"
 git config user.email t@example.invalid; git config user.name Test
-mkdir -p scripts tests .desktop-venv/bin
-printf '__version__ = "0.15.0"\nBUNDLE_IDENTIFIER = "build.chatlab.app"\n' > version.py
+mkdir -p chatlab scripts tests .desktop-venv/bin
+printf '__version__ = "0.15.0"\nBUNDLE_IDENTIFIER = "build.chatlab.app"\n' > chatlab/version.py
 cp "$real" scripts/release.sh; chmod +x scripts/release.sh
 cat > scripts/build_macos_app.sh <<'B'
 #!/bin/sh
 set -eu
-version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' version.py)
+version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' chatlab/version.py)
 rm -rf dist/ChatLab.app
 mkdir -p dist/ChatLab.app/Contents/MacOS
 cat > dist/ChatLab.app/Contents/Info.plist <<PLIST
@@ -106,15 +106,15 @@ check() { if [ "$2" = "$3" ]; then echo "  ok   $1"; pass=$((pass+1)); else echo
 run() { ./scripts/release.sh --skip-install "$@" > "$root/out.txt" 2> "$root/err.txt"; echo $?; }
 
 echo "== 1. dirty tree aborts =="
-echo x >> version.py
+echo x >> chatlab/version.py
 code=$(run); check "exit 1" "$code" 1
 check "message" "$(grep -c 'working tree has changes' "$root/err.txt")" 1
-git checkout -- version.py
+git checkout -- chatlab/version.py
 
 echo "== 2. normal release bumps the minor version =="
 code=$(run); check "exit 0" "$code" 0
 git fetch -q origin main
-check "version on main" "$(git show origin/main:version.py | sed -n 's/^__version__ = "\(.*\)"$/\1/p')" 0.16.0
+check "version on main" "$(git show origin/main:chatlab/version.py | sed -n 's/^__version__ = "\(.*\)"$/\1/p')" 0.16.0
 check "commit subject" "$(git log -1 --format=%s origin/main)" "Release ChatLab 0.16.0"
 check "tag on remote" "$(git ls-remote --tags "$root/origin.git" 'v0.16.0^{}' | wc -l | tr -d ' ')" 1
 check "tag points at main" "$(git ls-remote --tags "$root/origin.git" 'v0.16.0^{}' | awk '{print $1}')" "$(git rev-parse origin/main)"
@@ -124,12 +124,12 @@ check "asset uploaded" "$(grep -c 'ChatLab-macos-arm64.zip' "$root/err.txt")" 1
 echo "== 3. rerun bumps again from the published release =="
 code=$(run); check "exit 0" "$code" 0
 git fetch -q origin main
-check "version on main" "$(git show origin/main:version.py | sed -n 's/^__version__ = "\(.*\)"$/\1/p')" 0.17.0
+check "version on main" "$(git show origin/main:chatlab/version.py | sed -n 's/^__version__ = "\(.*\)"$/\1/p')" 0.17.0
 
 echo "== 4. an interrupted release is finished, not bumped past =="
 # main carries 0.18.0 with no tag and no release, as if a build had failed
 git checkout -q --detach origin/main
-sed -i '' 's/^__version__ = .*/__version__ = "0.18.0"/' version.py
+sed -i '' 's/^__version__ = .*/__version__ = "0.18.0"/' chatlab/version.py
 git commit -qam "Release ChatLab 0.18.0" && git push -q origin HEAD:main
 before=$(git rev-parse HEAD)
 code=$(run); check "exit 0" "$code" 0
@@ -144,7 +144,7 @@ check "message" "$(grep -c 'already published' "$root/err.txt")" 1
 
 echo "== 6. a local commit that is not on main aborts =="
 git checkout -q --detach origin/main
-echo "# local" >> version.py; git commit -qam "local work"
+echo "# local" >> chatlab/version.py; git commit -qam "local work"
 code=$(run); check "exit 1" "$code" 1
 check "message" "$(grep -c 'not on origin/main' "$root/err.txt")" 1
 
@@ -178,7 +178,7 @@ rm -f .git/hooks/pre-push
 
 echo "== 8. a lightweight tag from an earlier hand-made release is accepted =="
 git checkout -q --detach origin/main
-sed -i '' 's/^__version__ = .*/__version__ = "0.20.0"/' version.py
+sed -i '' 's/^__version__ = .*/__version__ = "0.20.0"/' chatlab/version.py
 git commit -qam "Release ChatLab 0.20.0" && git push -q origin HEAD:main
 git tag v0.20.0 && git push -q origin v0.20.0
 before=$(git rev-parse HEAD)
@@ -216,7 +216,7 @@ check "the override ran the tests" "$([ -e "$root/altvenv-ran" ] && echo yes || 
 
 release_from_main() {  # <version>: land it on main as an interrupted run would
     git checkout -q --detach origin/main
-    sed -i '' "s/^__version__ = .*/__version__ = \"$1\"/" version.py
+    sed -i '' "s/^__version__ = .*/__version__ = \"$1\"/" chatlab/version.py
     git commit -qam "Release ChatLab $1"
     git push -q origin HEAD:main
 }

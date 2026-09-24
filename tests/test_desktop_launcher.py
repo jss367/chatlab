@@ -11,12 +11,12 @@ from types import SimpleNamespace
 from unittest import mock
 from urllib.request import urlopen
 
-import desktop
-import desktop_launcher
-import logs
-import device_memory
-import updater
-from desktop_launcher import (
+from chatlab import desktop
+from chatlab import desktop_launcher
+from chatlab import logs
+from chatlab import device_memory
+from chatlab import updater
+from chatlab.desktop_launcher import (
     DESKTOP_PORT,
     LOOPBACK_ADDRESS,
     find_available_port,

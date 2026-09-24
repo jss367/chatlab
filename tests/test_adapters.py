@@ -10,11 +10,11 @@ from unittest import mock
 import settings_sandbox
 import tiny_tokenizer
 
-import adapters
-import model_runtime
-import model_cache
-import model_loading
-from model_cache import (
+from chatlab import adapters
+from chatlab import model_runtime
+from chatlab import model_cache
+from chatlab import model_loading
+from chatlab.model_cache import (
     BASE_MODEL,
     MLX_KIND,
     TEXT_KIND,
@@ -219,10 +219,10 @@ class AdapterCacheStatusTests(unittest.TestCase):
             snapshot(Path(root), BASE, BASE_FILES)
             with (
                 mock.patch(
-                    "model_cache.is_mlx_snapshot",
+                    "chatlab.model_cache.is_mlx_snapshot",
                     side_effect=lambda path: BASE.replace("/", "--") in str(path),
                 ),
-                mock.patch("model_cache.mlx_available", return_value=True),
+                mock.patch("chatlab.model_cache.mlx_available", return_value=True),
             ):
                 self.assertEqual(cache_status(BASE, Path(root)).kind, MLX_KIND)
                 status = cache_status(ADAPTER, Path(root))
@@ -399,14 +399,14 @@ class AdapterLoadTests(unittest.TestCase):
             path = snapshot(Path(root), ADAPTER, adapter_files())
             snapshot(Path(root), BASE, BASE_FILES)
             with (
-                mock.patch("device_memory.detect_backend", return_value="mps"),
+                mock.patch("chatlab.device_memory.detect_backend", return_value="mps"),
                 mock.patch.object(manager, "_unload_locked"),
                 mock.patch.object(manager, "_cap_mps_memory", return_value=None),
                 mock.patch.object(manager, "_check_memory", return_value=(None, None)) as check,
-                mock.patch("device_memory.allocated_bytes", return_value=None),
-                mock.patch("device_memory.reserved_bytes", return_value=None),
-                mock.patch("model_loading._read_text_model", side_effect=read),
-                self.assertLogs("model_loading", level=logging.INFO) as logs,
+                mock.patch("chatlab.device_memory.allocated_bytes", return_value=None),
+                mock.patch("chatlab.device_memory.reserved_bytes", return_value=None),
+                mock.patch("chatlab.model_loading._read_text_model", side_effect=read),
+                self.assertLogs("chatlab.model_loading", level=logging.INFO) as logs,
             ):
                 manager._load_locked(ADAPTER, path, torch, precision="4-bit")
 
@@ -430,7 +430,7 @@ class AdapterLoadTests(unittest.TestCase):
 
 class AdapterDownloadTests(unittest.TestCase):
     def test_downloading_an_adapter_fetches_its_base_next(self):
-        from ui import models_page
+        from chatlab.ui import models_page
 
         fetched = []
 
@@ -462,7 +462,7 @@ class AdapterDownloadTests(unittest.TestCase):
         self.assertTrue(any("trained on" in card for card in cards))
 
     def test_a_pinned_base_is_fetched_and_measured_at_its_revision(self):
-        from ui import models_page
+        from chatlab.ui import models_page
 
         fetched = []
 
@@ -494,7 +494,7 @@ class AdapterDownloadTests(unittest.TestCase):
         self.assertEqual(fetch.call_args.kwargs["revision"], PINNED)
 
     def test_a_model_that_is_not_an_adapter_fetches_nothing_more(self):
-        from ui import models_page
+        from chatlab.ui import models_page
 
         with tempfile.TemporaryDirectory() as root:
             path = snapshot(Path(root), BASE, BASE_FILES)
@@ -515,7 +515,7 @@ class AdapterDownloadTests(unittest.TestCase):
         download.assert_called_once()
 
     def test_a_missing_base_is_named_among_the_missing_files(self):
-        from ui import models_page
+        from chatlab.ui import models_page
 
         status = model_cache.CacheStatus(
             cached_bytes=10, missing_files=(BASE_MODEL,), base_model=BASE

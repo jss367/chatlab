@@ -8,13 +8,13 @@ from types import SimpleNamespace
 
 import gradio as gr
 
-from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
-from extensions.hangman.game import (
+from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
+from chatlab.extensions.hangman.game import (
     SYSTEM, answer_of, check, finish_turn, fitting_words, guess_of, load, messages_for, new_game,
     read_board, read_word, reasoning_of, reopened, rewound, saved,
 )
-from extensions.hangman.page import build_page, turn_note
-from model_runtime import GENERATING
+from chatlab.extensions.hangman.page import build_page, turn_note
+from chatlab.model_runtime import GENERATING
 
 STOP = 0
 
@@ -300,7 +300,7 @@ class PageTests(unittest.TestCase):
             list(self.fn["play"](opened, "a", "owner", 1.0, 7, 64))
 
     def test_a_game_too_large_to_open_again_is_not_saved(self):
-        with mock.patch("extensions.hangman.page.MAX_FILE_BYTES", 10), mock.patch("gradio.Warning") as warned:
+        with mock.patch("chatlab.extensions.hangman.page.MAX_FILE_BYTES", 10), mock.patch("gradio.Warning") as warned:
             frames = list(self.fn["start_game"](SYSTEM, "go", "owner", 1.0, 7, 64))
         self.assertIn("not saved", warned.call_args.args[0])
         self.assertEqual(frames[-1][8], gr.skip())

@@ -8,15 +8,15 @@ import numpy as np
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM, Qwen3Config, Qwen3ForCausalLM
 
-import charts
-import kv_cache
-import model_inspection
-from kv_cache import CacheLayer
-from model_runtime import ModelManager
-from text_generation import ModelChanged
+from chatlab import charts
+from chatlab import kv_cache
+from chatlab import model_inspection
+from chatlab.kv_cache import CacheLayer
+from chatlab.model_runtime import ModelManager
+from chatlab.text_generation import ModelChanged
 from test_mlx_runtime import needs_mlx, tiny_llama
 from tiny_tokenizer import build
-from ui import inspection, runtime
+from chatlab.ui import inspection, runtime
 
 try:
     import mlx.core as mx
@@ -214,7 +214,7 @@ class TorchCacheTests(unittest.TestCase):
 @needs_mlx
 class MlxCacheTests(unittest.TestCase):
     def test_the_view_matches_the_mlx_cache(self):
-        from mlx_runtime import MlxEngine
+        from chatlab.mlx_runtime import MlxEngine
         from test_streaming import FakeTokenizer
 
         model = tiny_llama()
@@ -242,7 +242,7 @@ class MlxCacheTests(unittest.TestCase):
         self.assertEqual(view["summary"]["tokens"], 5)
 
     def test_a_rotating_cache_that_has_wrapped_is_read_in_order(self):
-        from mlx_runtime import MlxEngine
+        from chatlab.mlx_runtime import MlxEngine
 
         cache = RotatingKVCache(max_size=4)
         for position in range(6):
@@ -255,7 +255,7 @@ class MlxCacheTests(unittest.TestCase):
 
     def test_a_long_layer_copies_only_its_latest_positions_but_centers_on_all(self):
         from mlx_lm.models.cache import KVCache
-        from mlx_runtime import MlxEngine
+        from chatlab.mlx_runtime import MlxEngine
 
         cache = KVCache()
         for position in range(6):
@@ -271,7 +271,7 @@ class MlxCacheTests(unittest.TestCase):
         np.testing.assert_allclose(layer.key_mean, [[3.5, 3.5]])
 
     def test_a_rotating_cache_keeps_its_numbering_when_cut_short(self):
-        from mlx_runtime import MlxEngine
+        from chatlab.mlx_runtime import MlxEngine
 
         cache = RotatingKVCache(max_size=4, keep=1)
         for position in range(6):
@@ -290,7 +290,7 @@ class MlxCacheTests(unittest.TestCase):
 
     def test_a_quantized_cache_is_not_read(self):
         from mlx_lm.models.cache import QuantizedKVCache
-        from mlx_runtime import MlxEngine
+        from chatlab.mlx_runtime import MlxEngine
 
         cache = QuantizedKVCache(group_size=32, bits=4)
         step = mx.ones((1, 1, 1, 32))

@@ -8,13 +8,13 @@ from unittest import mock
 
 import gradio as gr
 
-from extensions.maze_experiments.dynamic_maze import changing
-from extensions.maze_experiments.maze import Maze, call_text, generate
-from extensions.maze_experiments.page import (board, build_page, cell_text, checkpoint_values, parse_cell, status,
+from chatlab.extensions.maze_experiments.dynamic_maze import changing
+from chatlab.extensions.maze_experiments.maze import Maze, call_text, generate
+from chatlab.extensions.maze_experiments.page import (board, build_page, cell_text, checkpoint_values, parse_cell, status,
                                               timeline)
-from extensions.maze_experiments.runner import Episode, fork_token_edit, from_payload, stream_episode
-from extensions.maze_experiments.trials import FORMAT as TRIALS_FORMAT, prepare_trial, read_trials
-from extension_api import ModelService, SteeringError, TokenInspector, normalize_steering
+from chatlab.extensions.maze_experiments.runner import Episode, fork_token_edit, from_payload, stream_episode
+from chatlab.extensions.maze_experiments.trials import FORMAT as TRIALS_FORMAT, prepare_trial, read_trials
+from chatlab.extension_api import ModelService, SteeringError, TokenInspector, normalize_steering
 
 from test_maze import CONFIG, NO_CHECKPOINT, Manager
 
@@ -311,7 +311,7 @@ class TrialTests(unittest.TestCase):
             widths.append(len(value["vector"]))
             return normalize_steering(value)
 
-        with mock.patch("extensions.maze_experiments.runner.normalize_steering", counting):
+        with mock.patch("chatlab.extensions.maze_experiments.runner.normalize_steering", counting):
             data = read_trials(self.write(trials, vectors={"penguins": wide}))
         self.assertEqual(widths.count(4096), 1)
         self.assertEqual(prepare_trial(data, "t7", Episode(ROOM, BASE)).config["steering"], dict(wide, strength=7.0))

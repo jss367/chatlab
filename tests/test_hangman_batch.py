@@ -9,12 +9,12 @@ from unittest import mock
 
 import gradio as gr
 
-from extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
-from extensions.hangman import batch
-from extensions.hangman.batch import BatchControl, next_guess, read_trials, run_trials
-from extensions.hangman.game import GIVE_UP, SYSTEM, finish_turn, load, new_game, read_left, word_problems
-from extensions.hangman.page import build_page, turn_note
-from model_runtime import GENERATING
+from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
+from chatlab.extensions.hangman import batch
+from chatlab.extensions.hangman.batch import BatchControl, next_guess, read_trials, run_trials
+from chatlab.extensions.hangman.game import GIVE_UP, SYSTEM, finish_turn, load, new_game, read_left, word_problems
+from chatlab.extensions.hangman.page import build_page, turn_note
+from chatlab.model_runtime import GENERATING
 
 STOP = 0
 WORDS = ("crane", "crate", "grape", "slate", "stone")
@@ -106,7 +106,7 @@ class Fixture(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
-        for target in ("extensions.hangman.game.dictionary", "extensions.hangman.batch.dictionary"):
+        for target in ("chatlab.extensions.hangman.game.dictionary", "chatlab.extensions.hangman.batch.dictionary"):
             patcher = mock.patch(target, return_value=WORDS)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -285,7 +285,7 @@ class BatchTests(Fixture):
                 raise OSError("disk full")
             return batch_write(path, text, **options)
         batch_write = batch.write_private_text
-        with mock.patch("extensions.hangman.batch.write_private_text", side_effect=write):
+        with mock.patch("chatlab.extensions.hangman.batch.write_private_text", side_effect=write):
             data = read_trials(trial_file(self.root, [dict(id="a", seed=1)]))
             with self.assertRaisesRegex(OSError, "could not be saved: disk full"):
                 list(run_trials(data, ModelService(lambda: host), self.root, BatchControl()))

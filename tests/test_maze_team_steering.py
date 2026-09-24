@@ -8,11 +8,11 @@ from types import SimpleNamespace
 
 import gradio as gr
 
-from extension_api import SteeringError, TokenInspector
-from extensions.maze_experiments.maze import Maze, generate, unavoidable_cells
-from extensions.maze_experiments.page import build_page
-from extensions.maze_experiments.team import TeamEpisode, from_payload, stream_team
-from extensions.maze_experiments.team_page import response_view, team_board, team_status, team_timeline
+from chatlab.extension_api import SteeringError, TokenInspector
+from chatlab.extensions.maze_experiments.maze import Maze, generate, unavoidable_cells
+from chatlab.extensions.maze_experiments.page import build_page
+from chatlab.extensions.maze_experiments.team import TeamEpisode, from_payload, stream_team
+from chatlab.extensions.maze_experiments.team_page import response_view, team_board, team_status, team_timeline
 from test_maze import Manager, scored
 from test_maze_steering import SteeringManager, VECTOR
 from test_maze_team import call

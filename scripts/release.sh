@@ -74,8 +74,8 @@ git checkout --quiet --detach origin/main
 echo "at $(git log --oneline -1)"
 
 step "Choosing the version"
-current=$(version_in version.py)
-[ -n "$current" ] || die "Could not read __version__ from version.py."
+current=$(version_in chatlab/version.py)
+[ -n "$current" ] || die "Could not read __version__ from chatlab/version.py."
 if [ -n "$target" ]; then
     :
 elif released "$current"; then
@@ -104,16 +104,16 @@ if [ "$target" = "$current" ] && [ -n "$tag_commit" ] && [ "$tag_commit" != "$(g
     git merge-base --is-ancestor "$tag_commit" origin/main \
         || die "$tag names $tag_commit, which is not on main; resolve that before releasing."
     git checkout --quiet --detach "$tag_commit"
-    [ "$(version_in version.py)" = "$target" ] \
-        || die "$tag names a commit whose version.py says $(version_in version.py), not $target."
+    [ "$(version_in chatlab/version.py)" = "$target" ] \
+        || die "$tag names a commit whose chatlab/version.py says $(version_in chatlab/version.py), not $target."
     echo "resuming at $(git log --oneline -1), which $tag already names"
 fi
 
 if [ "$target" != "$current" ]; then
     step "Landing $tag on main"
-    sed -i '' "s/^__version__ = \".*\"$/__version__ = \"$target\"/" version.py
-    [ "$(version_in version.py)" = "$target" ] || die "Failed to write the version into version.py."
-    git add version.py
+    sed -i '' "s/^__version__ = \".*\"$/__version__ = \"$target\"/" chatlab/version.py
+    [ "$(version_in chatlab/version.py)" = "$target" ] || die "Failed to write the version into chatlab/version.py."
+    git add chatlab/version.py
     git commit --quiet -m "Release ChatLab $target"
     attempt=1
     until git push --quiet origin HEAD:main; do
@@ -121,7 +121,7 @@ if [ "$target" != "$current" ]; then
         echo "main moved while we were preparing; rebasing onto it and pushing again"
         git fetch --quiet origin main
         git rebase --quiet origin/main \
-            || { git rebase --abort; die "Someone else changed version.py; sort that out first."; }
+            || { git rebase --abort; die "Someone else changed chatlab/version.py; sort that out first."; }
         attempt=$((attempt + 1))
     done
 fi

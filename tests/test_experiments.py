@@ -4,13 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest import mock
 
-import compare
-import experiment_runs as runs
+from chatlab import compare
+from chatlab import experiment_runs as runs
 import settings_sandbox
-from model_loading import LoadedModel
+from chatlab.model_loading import LoadedModel
 from test_compare import metric, run
 from test_streaming import EOS_ID, loaded_manager
-from ui import experiment_compare, experiments, runtime
+from chatlab.ui import experiment_compare, experiments, runtime
 
 
 class SavedRunsTests(unittest.TestCase):
@@ -267,7 +267,7 @@ class AutomatedComparisonTests(unittest.TestCase):
             self.assertIn("stored in their repository", frames[-1][2])
 
     def test_model_swap_before_claim_is_refused(self):
-        from ui.compare import fill_slot
+        from chatlab.ui.compare import fill_slot
         frames = list(fill_slot("A", *self.shared, expected_load_id="old/model#1"))
         self.assertIn("model changed", frames[-1][1])
         self.assertFalse(self.manager.busy)
@@ -290,7 +290,7 @@ class AutomatedComparisonTests(unittest.TestCase):
         item = runs.save(run([metric(1, 0, 1)]))
         other = runs.save(item["run"])
         for selection in (other["id"], None):
-            with self.subTest(selection=selection), mock.patch("ui.compare._write_reply") as writing:
+            with self.subTest(selection=selection), mock.patch("chatlab.ui.compare._write_reply") as writing:
                 frames = list(experiments.rerun_saved(item, selection))
                 self.assertEqual(len(frames), 1)
                 self.assertIn("Wait for the selected experiment", frames[0][1])
@@ -300,7 +300,7 @@ class AutomatedComparisonTests(unittest.TestCase):
                 self.assertFalse(self.manager.busy)
 
     def test_rerun_preserves_literal_prefix_provenance(self):
-        from ui.compare import _write_reply
+        from chatlab.ui.compare import _write_reply
         original = list(_write_reply("Hello", "", "Hello", 0, 1, 0, 0, 8, 1, False,
                                     "default", None, self.manager.loaded_model()))[-1][0]
         original["settings"]["forced_prefix_tokens"] = 1
@@ -323,7 +323,7 @@ class AutomatedComparisonTests(unittest.TestCase):
 
     def test_saved_branch_rerun_keeps_applied_thinking_mode_and_prompt(self):
         from test_thinking import manager_for_thinking
-        from ui.compare import _write_reply
+        from chatlab.ui.compare import _write_reply
         manager = manager_for_thinking()
         manager._loaded = LoadedModel("fake/model", "CPU", "full", manager.load_id)
         with mock.patch.object(runtime, "MANAGER", manager):

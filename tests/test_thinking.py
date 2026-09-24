@@ -8,16 +8,16 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-import app
-import settings
+from chatlab import app
+from chatlab import settings
 import settings_sandbox
 import tiny_tokenizer
-from conversation import turn_entries, turns_from_entries
-from model_runtime import ModelManager
-from thinking import supports_thinking
-from trace_export import trace_to_csv, trace_to_json
-from ui import runtime
-from ui.settings_page import refresh_thinking_mode
+from chatlab.conversation import turn_entries, turns_from_entries
+from chatlab.model_runtime import ModelManager
+from chatlab.thinking import supports_thinking
+from chatlab.trace_export import trace_to_csv, trace_to_json
+from chatlab.ui import runtime
+from chatlab.ui.settings_page import refresh_thinking_mode
 from test_app_flow import FIXED, SETTINGS, TURNS, TRACE, METRICS, click_token, cell
 from test_streaming import loaded_manager
 

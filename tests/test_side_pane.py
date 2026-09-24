@@ -16,16 +16,16 @@ from unittest import mock
 
 import gradio as gr
 
-import app
-from ui import common, icons, models_page, runtime
-import model_runtime
-import device_memory
-import hub_search
-import model_cache
-import progress_bars
-import settings
-from hub_search import HubModel
-from model_cache import (
+from chatlab import app
+from chatlab.ui import common, icons, models_page, runtime
+from chatlab import model_runtime
+from chatlab import device_memory
+from chatlab import hub_search
+from chatlab import model_cache
+from chatlab import progress_bars
+from chatlab import settings
+from chatlab.hub_search import HubModel
+from chatlab.model_cache import (
     IMAGE_KIND,
     MODEL_WEIGHTS,
     TEXT_KIND,
@@ -36,8 +36,8 @@ from model_cache import (
     remove_cached_model,
     sort_cached_models,
 )
-from model_runtime import ModelManager
-from progress_bars import DownloadProgress
+from chatlab.model_runtime import ModelManager
+from chatlab.progress_bars import DownloadProgress
 
 import settings_sandbox
 
@@ -1173,7 +1173,7 @@ class MyModelsPaneTests(unittest.TestCase):
     def test_an_image_row_carries_its_kind_and_its_fit_verdict(self):
         # #45 put a fit verdict on every row and this branch put a kind on
         # the image ones; a row has to say both.
-        from device_memory import FITS, Fit
+        from chatlab.device_memory import FITS, Fit
 
         label = models_page.cached_model_label(PIPELINE, Fit(FITS))
 
@@ -1654,7 +1654,7 @@ class ManageMyModelsTests(unittest.TestCase):
         self.manager._lock.acquire()
         self.addCleanup(self.manager._lock.release)
 
-        with self.assertLogs("ui.models_page", level="INFO") as logged:
+        with self.assertLogs("chatlab.ui.models_page", level="INFO") as logged:
             app.remove_my_model("org/partial")
 
         self.assertIn("Removal confirmed for org/partial", logged.output[0])
@@ -1992,7 +1992,7 @@ class ModelSearchPaneTests(unittest.TestCase):
         # message, so a line without the stack would only repeat it.
         self.results = ConnectionError("hub unreachable")
 
-        with self.assertLogs("ui.models_page", level="WARNING") as logged:
+        with self.assertLogs("chatlab.ui.models_page", level="WARNING") as logged:
             app.search_models("olmo", "")
 
         self.assertIn("Hub search for 'olmo' failed", logged.output[0])
@@ -2745,7 +2745,7 @@ class ModelBadgeTests(unittest.TestCase):
     def progress_for(self, model_id, steps_done=0, steps_total=0):
         """Claim a load of ``model_id`` and publish a bar that far along."""
 
-        from progress_bars import LoadProgress
+        from chatlab.progress_bars import LoadProgress
 
         _checked_id, claim = self.manager.reserve_load(model_id)
         progress = LoadProgress()
@@ -5214,7 +5214,7 @@ class MlxModelsPaneTests(unittest.TestCase):
         self.assertNotIn("Unsupported", detail)
 
     def test_an_mlx_row_carries_its_kind_before_its_fit_verdict(self):
-        from device_memory import FITS, Fit
+        from chatlab.device_memory import FITS, Fit
 
         label = models_page.cached_model_label(MLX, Fit(FITS))
 
@@ -5226,7 +5226,7 @@ class MlxModelsPaneTests(unittest.TestCase):
         # Load cached at a new precision is how a Transformers model is
         # requantized; an MLX model loads at its own width whatever the radio
         # says, so the loaded one has nothing to be judged again for.
-        from device_memory import DeviceProfile
+        from chatlab.device_memory import DeviceProfile
 
         self.manager.model_id = MLX.model_id
         self.manager.precision = "4-bit"
@@ -5256,9 +5256,9 @@ class MlxModelsPaneTests(unittest.TestCase):
         self.assertNotIn("Choosing 4-bit or 8-bit", detail)
 
     def test_an_mlx_result_is_sized_from_the_width_in_its_name(self):
-        from device_memory import DeviceProfile
-        from hub_search import HubModel
-        from model_cache import estimate_parameter_bytes
+        from chatlab.device_memory import DeviceProfile
+        from chatlab.hub_search import HubModel
+        from chatlab.model_cache import estimate_parameter_bytes
 
         profile = DeviceProfile(backend="mps", dtype="float16", total=10**11, available=10**11)
         four_bit = HubModel(
