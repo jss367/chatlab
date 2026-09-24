@@ -33,9 +33,14 @@ Then say in one sentence whether the guess was in the word. When the player gues
 Word: the secret word"""
 
 OPENING = "Let's play. Think of your word and show me the empty board."
+# What a batch says to end a game that never revealed its word, and what the
+# reveal probe asks before it writes the answer's first word for the model.
+GIVE_UP = "I give up. What was the word?"
+PROBE_PREFILL = "Word:"
 
 BOARD_LINE = re.compile(r"^[\s>*_`#-]*board[\s*_`]*:(.*)$", re.I | re.M)
 WORD_LINE = re.compile(r"^[\s>*_`#-]*word[\s*_`]*:[\s*_`]*([A-Za-z]+)[\s*_`.!]*$", re.I | re.M)
+LEFT_LINE = re.compile(r"^[\s>*_`#-]*wrong guesses left[\s*_`]*:[\s*_`]*(\d+)", re.I | re.M)
 HIDDEN = "_"
 
 
@@ -113,6 +118,26 @@ def read_word(answer):
     return found[-1].lower() if found else None
 
 
+def read_left(answer):
+    """The wrong guesses left on the reply's last such line, or None."""
+    found = LEFT_LINE.findall(answer)
+    return int(found[-1]) if found else None
+
+
+def probe_word(probe):
+    """The word a reveal probe wrote, or None when it wrote none it finished.
+
+    The probe's answer starts at ``Word:``, so only its first line is read: a
+    model that goes on to a second ``Word:`` line has not answered once. A
+    probe cut off by its token limit on that line may have been cut off mid-word.
+    """
+    answer = answer_of(probe["text"], probe.get("reasoning_prefilled", False))
+    line, *rest = answer.split("\n", 1)
+    if probe.get("finish_reason") == "length" and not rest:
+        return None
+    return read_word(line)
+
+
 def guess_of(text):
     """("letter", "e"), ("word", "apple") or ("other", None)."""
     value = text.strip().strip(".!?\"'").strip()
@@ -140,6 +165,32 @@ def check(game):
     as a change of size and checked only for letters nobody guessed. The
     first revealed word is held to every board and word that follows it.
     """
+    problems, _ = _walk(game)
+    # A word revealed again on every later turn contradicts the boards the
+    # same way each time; the first turn that said so is the one to read.
+    seen = set()
+    return [(number, message) for number, message in problems
+            if message not in seen and not seen.add(message)]
+
+
+def word_problems(game, word):
+    """How ``word`` contradicts what the game's boards and revealed word say.
+
+    Empty when the word could be the one the game has been describing. A word
+    is held to the boards exactly as a revealed word is, and to the first word
+    the game revealed.
+    """
+    _, (length, shown, placed, first) = _walk(game)
+    word = word.lower()
+    found = [f"The game revealed {first[1].upper()} at response {first[0]}; this is {word.upper()}."] \
+        if first and word != first[1] else []
+    return found + list(_word_problems(word, length, shown, placed))
+
+
+def _walk(game):
+    """The contradictions ``check`` reports, before it drops repeats, and the
+    board state they leave: the length, the letter shown at each position,
+    where each guessed letter was placed, and the first word revealed."""
     problems = []
     length, shown, placed = None, {}, {}
     guessed, moved, pending = set(), set(), set()
@@ -203,11 +254,7 @@ def check(game):
             problems.extend((number, message) for message in _word_problems(held, length, shown, placed))
         if word and not first:
             first = (number, word)
-    # A word revealed again on every later turn contradicts the boards the
-    # same way each time; the first turn that said so is the one to read.
-    seen = set()
-    return [(number, message) for number, message in problems
-            if message not in seen and not seen.add(message)]
+    return problems, (length, shown, placed, first)
 
 
 def _positions(positions):
@@ -294,6 +341,13 @@ def _readable_metric(metric):
         and _probability(c.get("probability")) for c in candidates)
 
 
+def _readable_probes(probes):
+    return isinstance(probes, list) and all(
+        isinstance(p, dict) and isinstance(p.get("text"), str) and _integer(p.get("seed"))
+        and isinstance(p.get("reasoning_prefilled", False), bool)
+        and isinstance(p.get("finish_reason"), (str, type(None))) for p in probes)
+
+
 def _probability(value):
     """A finite number. JSON reads ``1e309`` as infinity and ``NaN`` as NaN, and
     the token menu serializes either into markup its script cannot parse."""
@@ -323,11 +377,16 @@ def load(path):
         if (not isinstance(metrics, list) or not all(map(_readable_metric, metrics))
                 or not isinstance(turn.get("sampling", {}), dict)
                 or not isinstance(turn.get("branch") or {}, dict)
-                or not isinstance(turn.get("forced_prefix_tokens", 0), int)):
+                or not isinstance(turn.get("forced_prefix_tokens", 0), int)
+                or not _readable_probes(turn.get("probes", []))):
             raise ValueError(f"Response {number} of the saved game is malformed.")
     for turn in turns:
         turn.setdefault("metrics", [])
         finish_turn(turn)
+        # Read again from the text, as the board is, so the note shows what
+        # the probe wrote rather than what the file says it wrote.
+        for probe in turn.get("probes", []):
+            probe["word"] = probe_word(probe)
     return value
 
 
