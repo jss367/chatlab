@@ -4977,17 +4977,26 @@ class TorchEngine:
         ]
 
     def cache_layer(self, cache, layer: int, total: int) -> kv_cache.CacheLayer | None:
-        """Layer ``layer`` (from 0) of a cache holding ``total`` tokens, in numpy."""
+        """Layer ``layer`` (from 0) of a cache holding ``total`` tokens, in numpy.
+
+        Only the latest :data:`kv_cache.MAX_POSITIONS` positions are copied
+        off the device; the mean key over every position is reduced there.
+        """
+
+        import torch
 
         pairs = self._cache_tensors(cache)
         if not 0 <= layer < len(pairs) or pairs[layer] is None:
             return None
-        keys, values = (
-            tensor[0].detach().float().cpu().numpy() for tensor in pairs[layer]
-        )
+        keys, values = (tensor[0].detach() for tensor in pairs[layer])
+        held = int(keys.shape[1])
+        shown = min(held, kv_cache.MAX_POSITIONS)
         return kv_cache.CacheLayer(
-            keys=keys, values=values,
-            positions=kv_cache.recent_positions(keys.shape[1], total),
+            keys=keys[:, -shown:].float().cpu().numpy(),
+            values=values[:, -shown:].float().cpu().numpy(),
+            positions=kv_cache.recent_positions(shown, total),
+            key_mean=keys.mean(dim=1, dtype=torch.float32).cpu().numpy(),
+            held=held,
         )
 
 

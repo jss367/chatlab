@@ -83,6 +83,14 @@ class ReadLayerTests(unittest.TestCase):
         self.assertEqual(reading["held"], 6)
         self.assertEqual(len(reading["key_norm"][0]), 3)
 
+    def test_a_given_mean_key_is_the_one_taken_out(self):
+        keys = np.array([[[1.0, 0.0], [0.0, 1.0]]])
+        mean = np.array([[1.0, 1.0]])
+        reading = kv_cache.read_layer(CacheLayer(keys, keys, [8, 9], key_mean=mean, held=10))
+        # Centered on (1, 1), the two keys are (0, -1) and (-1, 0): at right angles.
+        self.assertAlmostEqual(reading["key_similarity"][0][0], 0.0, places=5)
+        self.assertEqual(reading["held"], 10)
+
 
 class TorchCacheTests(unittest.TestCase):
     def setUp(self):
@@ -109,6 +117,30 @@ class TorchCacheTests(unittest.TestCase):
         self.assertEqual(reading["positions"], list(range(self.index)))
         np.testing.assert_allclose(reading["key_norm"], norms(reference.keys[0]), rtol=1e-4)
         np.testing.assert_allclose(reading["value_norm"], norms(reference.values[0]), rtol=1e-4)
+
+    def test_a_long_layer_copies_only_its_latest_positions_but_centers_on_all(self):
+        held = self.inspect()
+        with torch.inference_mode():
+            reference = self.manager.model(
+                torch.tensor([self.ids[: self.index]]), use_cache=True
+            ).past_key_values.layers[1].keys[0].numpy()
+        with mock.patch.object(kv_cache, "MAX_POSITIONS", 3):
+            layer = self.manager._engine().cache_layer(
+                self.manager._inspect_cache[2], 1, self.index
+            )
+            reading = self.manager.read_kv_cache(held, 2)["reading"]
+
+        self.assertEqual(layer.keys.shape[1], 3)
+        self.assertEqual(layer.values.shape[1], 3)
+        self.assertEqual(layer.held, self.index)
+        np.testing.assert_allclose(layer.key_mean, reference.mean(axis=1), rtol=1e-5, atol=1e-6)
+        self.assertEqual(reading["positions"], list(range(self.index - 3, self.index)))
+        self.assertEqual(reading["held"], self.index)
+        centered = reference[:, -3:] - reference.mean(axis=1, keepdims=True)
+        expected = np.einsum("hpd,hd->hp", centered, centered[:, -1]) / (
+            np.linalg.norm(centered, axis=-1) * np.linalg.norm(centered[:, -1], axis=-1)[:, None]
+        )
+        np.testing.assert_allclose(reading["key_similarity"], expected, rtol=1e-4, atol=1e-5)
 
     def test_the_summary_counts_every_layer(self):
         summary = self.manager.read_kv_cache(self.inspect(), 1)["summary"]
@@ -219,6 +251,41 @@ class MlxCacheTests(unittest.TestCase):
 
         self.assertEqual(layer.positions, [2, 3, 4, 5])
         np.testing.assert_allclose(layer.keys[0, :, 0], [3.0, 4.0, 5.0, 6.0])
+
+    def test_a_long_layer_copies_only_its_latest_positions_but_centers_on_all(self):
+        from mlx_lm.models.cache import KVCache
+        from mlx_runtime import MlxEngine
+
+        cache = KVCache()
+        for position in range(6):
+            step = mx.full((1, 1, 1, 2), float(position + 1))
+            cache.update_and_fetch(step, step)
+        with mock.patch.object(kv_cache, "MAX_POSITIONS", 3):
+            layer = MlxEngine(object(), {}).cache_layer([cache], 0, 6)
+
+        self.assertEqual(layer.positions, [3, 4, 5])
+        self.assertEqual(layer.held, 6)
+        np.testing.assert_allclose(layer.keys[0, :, 0], [4.0, 5.0, 6.0])
+        np.testing.assert_allclose(layer.values[0, :, 0], [4.0, 5.0, 6.0])
+        np.testing.assert_allclose(layer.key_mean, [[3.5, 3.5]])
+
+    def test_a_rotating_cache_keeps_its_numbering_when_cut_short(self):
+        from mlx_runtime import MlxEngine
+
+        cache = RotatingKVCache(max_size=4, keep=1)
+        for position in range(6):
+            step = mx.full((1, 1, 1, 2), float(position + 1))
+            cache.update_and_fetch(step, step)
+        engine = MlxEngine(object(), {})
+        whole = engine.cache_layer([cache], 0, 6)
+        with mock.patch.object(kv_cache, "MAX_POSITIONS", 2):
+            cut = engine.cache_layer([cache], 0, 6)
+
+        self.assertEqual(whole.positions, [0, 3, 4, 5])
+        self.assertEqual(cut.positions, [4, 5])
+        self.assertEqual(cut.held, 4)
+        np.testing.assert_allclose(cut.keys[0, :, 0], [5.0, 6.0])
+        np.testing.assert_allclose(cut.key_mean, whole.keys.mean(axis=1))
 
     def test_a_quantized_cache_is_not_read(self):
         from mlx_lm.models.cache import QuantizedKVCache

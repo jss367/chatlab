@@ -51,11 +51,19 @@ class CacheLayer:
     ``positions`` numbers each column of the arrays in the sequence. A
     sliding-window layer holds only its most recent tokens, so its numbers
     need not start at 0.
+
+    An engine copies no more than the latest :data:`MAX_POSITIONS` columns
+    out of a long layer, so the arrays can be shorter than the layer.
+    ``held`` is then how many positions the layer holds, and ``key_mean``,
+    ``(heads, dim)``, is each head's mean key over all of them, reduced
+    where the cache lives. Left out, both are taken from the arrays.
     """
 
     keys: np.ndarray
     values: np.ndarray
     positions: list[int]
+    key_mean: np.ndarray | None = None
+    held: int | None = None
 
 
 def recent_positions(held: int, total: int) -> list[int]:
@@ -81,8 +89,9 @@ def read_layer(layer: CacheLayer) -> dict:
     """
 
     keys = layer.keys.astype(np.float32, copy=False)
-    centered = (keys - keys.mean(axis=1, keepdims=True))[:, -MAX_POSITIONS:, :]
+    mean = keys.mean(axis=1) if layer.key_mean is None else layer.key_mean
     keys = keys[:, -MAX_POSITIONS:, :]
+    centered = keys - np.asarray(mean, dtype=np.float32)[:, None, :]
     values = layer.values[:, -MAX_POSITIONS:, :].astype(np.float32, copy=False)
     positions = list(layer.positions)[-MAX_POSITIONS:]
     key_norm = np.linalg.norm(keys, axis=-1)
@@ -95,7 +104,7 @@ def read_layer(layer: CacheLayer) -> dict:
         "heads": int(keys.shape[0]),
         "dim": int(keys.shape[2]),
         "positions": positions,
-        "held": len(layer.positions),
+        "held": len(layer.positions) if layer.held is None else layer.held,
         "key_norm": key_norm.tolist(),
         "value_norm": value_norm.tolist(),
         "key_similarity": similarity.tolist(),

@@ -39,6 +39,7 @@ from typing import Any
 
 import numpy as np
 
+import kv_cache
 from kv_cache import CacheLayer, LayerShape, recent_positions
 
 logger = logging.getLogger(__name__)
@@ -684,7 +685,8 @@ class MlxEngine:
 
         A rotating cache with ``keep`` set holds its first tokens for good
         and a window of the latest after them, so its positions are numbered
-        in two runs.
+        in two runs. Only the latest :data:`kv_cache.MAX_POSITIONS` are
+        copied out; the mean key over every position is reduced in MLX.
         """
 
         import mlx.core as mx
@@ -700,10 +702,13 @@ class MlxEngine:
             if keep and held < total
             else recent_positions(held, total)
         )
+        shown = min(held, kv_cache.MAX_POSITIONS)
         return CacheLayer(
-            keys=np.array(keys[0].astype(mx.float32)),
-            values=np.array(values[0].astype(mx.float32)),
-            positions=positions,
+            keys=np.array(keys[0, :, -shown:].astype(mx.float32)),
+            values=np.array(values[0, :, -shown:].astype(mx.float32)),
+            positions=positions[-shown:],
+            key_mean=np.array(keys[0].astype(mx.float32).mean(axis=1)),
+            held=held,
         )
 
 
