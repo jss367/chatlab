@@ -430,7 +430,7 @@ class AdapterLoadTests(unittest.TestCase):
 
 class AdapterDownloadTests(unittest.TestCase):
     def test_downloading_an_adapter_fetches_its_base_next(self):
-        from chatlab.ui import models_page
+        from chatlab.ui import model_streams
 
         fetched = []
 
@@ -445,10 +445,10 @@ class AdapterDownloadTests(unittest.TestCase):
                 BASE: snapshot(Path(root), BASE, BASE_FILES),
             }
             with (
-                mock.patch.object(models_page, "stream_download", side_effect=fake_download),
-                mock.patch.object(models_page, "cache_status", return_value=model_cache.CacheStatus()),
+                mock.patch.object(model_streams, "stream_download", side_effect=fake_download),
+                mock.patch.object(model_streams, "cache_status", return_value=model_cache.CacheStatus()),
             ):
-                stream = models_page.stream_download_with_base(ADAPTER, "token")
+                stream = model_streams.stream_download_with_base(ADAPTER, "token")
                 cards = []
                 try:
                     while True:
@@ -462,7 +462,7 @@ class AdapterDownloadTests(unittest.TestCase):
         self.assertTrue(any("trained on" in card for card in cards))
 
     def test_a_pinned_base_is_fetched_and_measured_at_its_revision(self):
-        from chatlab.ui import models_page
+        from chatlab.ui import model_streams
 
         fetched = []
 
@@ -474,12 +474,12 @@ class AdapterDownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             path = snapshot(Path(root), ADAPTER, adapter_files(revision=PINNED))
             with (
-                mock.patch.object(models_page, "stream_download", side_effect=fake_download),
+                mock.patch.object(model_streams, "stream_download", side_effect=fake_download),
                 mock.patch.object(
-                    models_page, "cache_status", return_value=model_cache.CacheStatus()
+                    model_streams, "cache_status", return_value=model_cache.CacheStatus()
                 ) as status,
             ):
-                list(models_page.stream_download_with_base(ADAPTER, ""))
+                list(model_streams.stream_download_with_base(ADAPTER, ""))
 
         self.assertEqual(fetched, [(ADAPTER, None), (BASE, PINNED)])
         for call in status.call_args_list:
@@ -494,7 +494,7 @@ class AdapterDownloadTests(unittest.TestCase):
         self.assertEqual(fetch.call_args.kwargs["revision"], PINNED)
 
     def test_a_model_that_is_not_an_adapter_fetches_nothing_more(self):
-        from chatlab.ui import models_page
+        from chatlab.ui import model_streams
 
         with tempfile.TemporaryDirectory() as root:
             path = snapshot(Path(root), BASE, BASE_FILES)
@@ -503,8 +503,8 @@ class AdapterDownloadTests(unittest.TestCase):
                 yield "card"
                 return path
 
-            with mock.patch.object(models_page, "stream_download", side_effect=fake_download) as download:
-                stream = models_page.stream_download_with_base(BASE, "")
+            with mock.patch.object(model_streams, "stream_download", side_effect=fake_download) as download:
+                stream = model_streams.stream_download_with_base(BASE, "")
                 try:
                     while True:
                         next(stream)
@@ -515,13 +515,13 @@ class AdapterDownloadTests(unittest.TestCase):
         download.assert_called_once()
 
     def test_a_missing_base_is_named_among_the_missing_files(self):
-        from chatlab.ui import models_page
+        from chatlab.ui import model_streams
 
         status = model_cache.CacheStatus(
             cached_bytes=10, missing_files=(BASE_MODEL,), base_model=BASE
         )
         self.assertEqual(
-            models_page.describe_missing(status), f"the base model `{BASE}` is missing"
+            model_streams.describe_missing(status), f"the base model `{BASE}` is missing"
         )
 
 

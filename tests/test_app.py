@@ -10,7 +10,7 @@ import gradio as gr
 import numpy as np
 
 from chatlab import app
-from chatlab.ui import models_page, panel, runtime
+from chatlab.ui import model_streams, models_page, panel, runtime
 from chatlab import settings
 from chatlab.model_cache import MODEL_WEIGHTS, CacheStatus
 from chatlab.model_inspection import ScoredText
@@ -570,10 +570,10 @@ class DownloadCardTests(unittest.TestCase):
 
     def setUp(self):
         self.original = runtime.MANAGER
-        self.original_poll = models_page.DOWNLOAD_POLL_SECONDS
-        models_page.DOWNLOAD_POLL_SECONDS = 0.01
+        self.original_poll = model_streams.DOWNLOAD_POLL_SECONDS
+        model_streams.DOWNLOAD_POLL_SECONDS = 0.01
         self.addCleanup(setattr, runtime, "MANAGER", self.original)
-        self.addCleanup(setattr, models_page, "DOWNLOAD_POLL_SECONDS", self.original_poll)
+        self.addCleanup(setattr, model_streams, "DOWNLOAD_POLL_SECONDS", self.original_poll)
 
     def test_bytes_are_shown_in_decimal_units(self):
         self.assertEqual(app.format_bytes(512), "512 B")
@@ -1036,10 +1036,10 @@ class LoadCardTests(unittest.TestCase):
     def setUp(self):
         self.addCleanup(setattr, runtime, "MANAGER", runtime.MANAGER)
         self.addCleanup(setattr, models_page, "cache_status", models_page.cache_status)
-        self.addCleanup(setattr, models_page, "LOAD_POLL_SECONDS", models_page.LOAD_POLL_SECONDS)
+        self.addCleanup(setattr, model_streams, "LOAD_POLL_SECONDS", model_streams.LOAD_POLL_SECONDS)
         runtime.MANAGER = self.Manager(lambda progress: "CPU")
         models_page.cache_status = lambda model_id: CacheStatus(cached_bytes=14_600_000_000)
-        models_page.LOAD_POLL_SECONDS = 0.01
+        model_streams.LOAD_POLL_SECONDS = 0.01
 
     def test_the_first_frame_says_the_weights_are_being_read_not_fetched(self):
         # The old card named the size and the folder and then sat there, which
@@ -1442,7 +1442,7 @@ class DownloadStatusTests(unittest.TestCase):
                 self.subTest(handler=handler.__name__),
                 mock.patch.object(runtime, "MANAGER", ModelManager()),
                 mock.patch.object(models_page, "cache_status", side_effect=PermissionError("Permission denied: <cache>")),
-                mock.patch.object(models_page, "stream_download") as download,
+                mock.patch.object(model_streams, "stream_download") as download,
                 mock.patch.object(models_page, "stream_load") as load,
             ):
                 cards = list(handler(self.MODEL, *args))
@@ -1461,7 +1461,7 @@ class DownloadStatusTests(unittest.TestCase):
     def test_download_reports_cache_io_failure_after_fetching(self):
         with (
             mock.patch.object(models_page, "cache_status", side_effect=[CacheStatus(), OSError("Cache drive disconnected")]),
-            mock.patch.object(models_page, "stream_download", side_effect=self.fetched_to),
+            mock.patch.object(model_streams, "stream_download", side_effect=self.fetched_to),
         ):
             cards = list(models_page.download_model(self.MODEL, ""))
         self.assertIn("Download failed", cards[-1])
@@ -1897,7 +1897,7 @@ class DefaultModelSelectionTests(unittest.TestCase):
                 runtime.MANAGER, "find_cached", return_value=Path("/unused/cache")
             ),
             mock.patch.object(models_page, "stream_load", side_effect=load),
-            mock.patch.object(models_page, "stream_download") as download,
+            mock.patch.object(model_streams, "stream_download") as download,
         ):
             cards = list(app.load_cached_model(settings.DEFAULT_MODEL_ID))
             download.assert_not_called()
@@ -1938,7 +1938,7 @@ class DefaultModelSelectionTests(unittest.TestCase):
 
         with (
             mock.patch.object(models_page, "cache_status", return_value=CacheStatus()),
-            mock.patch.object(models_page, "stream_download", side_effect=download),
+            mock.patch.object(model_streams, "stream_download", side_effect=download),
             mock.patch.object(models_page, "stream_load", side_effect=load),
         ):
             cards = list(app.download_and_load_model(settings.DEFAULT_MODEL_ID, ""))

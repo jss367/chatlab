@@ -14,7 +14,7 @@ from chatlab.ui import runtime
 from chatlab.ui.common import failure_status
 from chatlab.ui.compare import fill_slot
 from chatlab.ui.generation import resolve_seed
-from chatlab.ui.models_page import stream_load
+from chatlab.ui.model_streams import stream_load
 from chatlab.ui.panel import as_plain_text
 
 _PAIR_LOCK = threading.Lock()

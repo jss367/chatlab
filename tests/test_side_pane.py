@@ -17,7 +17,17 @@ from unittest import mock
 import gradio as gr
 
 from chatlab import app
-from chatlab.ui import common, icons, models_page, runtime
+from chatlab.ui import (
+    common,
+    icons,
+    memory_fit,
+    model_search,
+    model_streams,
+    model_switch,
+    models_page,
+    my_models,
+    runtime,
+)
 from chatlab import model_runtime
 from chatlab import device_memory
 from chatlab import hub_search
@@ -73,9 +83,9 @@ def roomy(
         pool="this machine",
         held=held_gb * 1024**3,
     )
-    original = models_page.device_profile
-    models_page.device_profile = lambda torch=None: profile
-    test.addCleanup(lambda: setattr(models_page, "device_profile", original))
+    original = memory_fit.device_profile
+    memory_fit.device_profile = lambda torch=None: profile
+    test.addCleanup(lambda: setattr(memory_fit, "device_profile", original))
     return profile
 
 
@@ -1031,14 +1041,14 @@ class MyModelsPaneTests(unittest.TestCase):
     def setUp(self):
         self.entries = [cached(OLMO), PARTIAL]
         self.manager = ModelManager()
-        originals = (runtime.MANAGER, models_page.list_cached_models, models_page.cache_root)
+        originals = (runtime.MANAGER, my_models.list_cached_models, my_models.cache_root)
         runtime.MANAGER = self.manager
-        models_page.list_cached_models = lambda: list(self.entries)
-        models_page.cache_root = lambda: Path("/cache")
+        my_models.list_cached_models = lambda: list(self.entries)
+        my_models.cache_root = lambda: Path("/cache")
         self.addCleanup(
             lambda: setattr(runtime, "MANAGER", originals[0])
-            or setattr(models_page, "list_cached_models", originals[1])
-            or setattr(models_page, "cache_root", originals[2])
+            or setattr(my_models, "list_cached_models", originals[1])
+            or setattr(my_models, "cache_root", originals[2])
         )
 
     def test_every_cached_model_is_listed_with_its_size(self):
@@ -1175,7 +1185,7 @@ class MyModelsPaneTests(unittest.TestCase):
         # the image ones; a row has to say both.
         from chatlab.device_memory import FITS, Fit
 
-        label = models_page.cached_model_label(PIPELINE, Fit(FITS))
+        label = my_models.cached_model_label(PIPELINE, Fit(FITS))
 
         self.assertIn("· image", label)
         self.assertIn("· fits", label)
@@ -1198,10 +1208,10 @@ class MyModelsPaneTests(unittest.TestCase):
             measured.append((kind, bits))
             return 5 * 1024**3
 
-        with mock.patch.object(models_page, "estimate_snapshot_bytes", estimate):
-            with mock.patch.object(models_page, "snapshot_folder", lambda path: path):
-                pipeline = models_page.cached_fit(PIPELINE, "4-bit", profile)
-                text = models_page.cached_fit(cached("org/text"), "4-bit", profile)
+        with mock.patch.object(memory_fit, "estimate_snapshot_bytes", estimate):
+            with mock.patch.object(memory_fit, "snapshot_folder", lambda path: path):
+                pipeline = memory_fit.cached_fit(PIPELINE, "4-bit", profile)
+                text = memory_fit.cached_fit(cached("org/text"), "4-bit", profile)
 
         self.assertEqual(measured, [(IMAGE_KIND, None), (TEXT_KIND, 4)])
         self.assertIn("of full 16-bit weights", pipeline.note)
@@ -1310,14 +1320,14 @@ class ModelFitTests(unittest.TestCase):
         self.manager = ModelManager()
         self.profile = roomy(self)
         root = self.cache({OLMO: 15 * self.GB, "org/huge": 200 * self.GB})
-        originals = (runtime.MANAGER, models_page.list_cached_models, models_page.cache_root)
+        originals = (runtime.MANAGER, my_models.list_cached_models, my_models.cache_root)
         runtime.MANAGER = self.manager
-        models_page.list_cached_models = lambda: list_cached_models(root)
-        models_page.cache_root = lambda: root
+        my_models.list_cached_models = lambda: list_cached_models(root)
+        my_models.cache_root = lambda: root
         self.addCleanup(
             lambda: setattr(runtime, "MANAGER", originals[0])
-            or setattr(models_page, "list_cached_models", originals[1])
-            or setattr(models_page, "cache_root", originals[2])
+            or setattr(my_models, "list_cached_models", originals[1])
+            or setattr(my_models, "cache_root", originals[2])
         )
 
     def labels(self, precision=None):
@@ -1363,16 +1373,16 @@ class ModelFitTests(unittest.TestCase):
         # first verdicts are given without knowing the device. The badge's
         # timer corrects them once, and then leaves the list alone.
         roomy(self, total_gb=24, available_gb=18, backend=None, dtype=None)
-        original = models_page.imported_torch
-        models_page.imported_torch = lambda: None
-        self.addCleanup(lambda: setattr(models_page, "imported_torch", original))
+        original = model_search.imported_torch
+        model_search.imported_torch = lambda: None
+        self.addCleanup(lambda: setattr(model_search, "imported_torch", original))
 
         # Nothing to correct yet: torch is still importing.
         self.assertEqual(
             app.refresh_after_device(False, None, "Name", "4-bit"), (gr.skip(),) * 7
         )
 
-        models_page.imported_torch = lambda: object()
+        model_search.imported_torch = lambda: object()
         radio, _detail, _summary, _results, _search_detail, _selected, known = (
             app.refresh_after_device(False, None, "Name", "4-bit")
         )
@@ -1391,9 +1401,9 @@ class ModelFitTests(unittest.TestCase):
             )
         }
         roomy(self, total_gb=24, available_gb=18, backend=None, dtype=None)
-        original = models_page.imported_torch
-        models_page.imported_torch = lambda: object()
-        self.addCleanup(lambda: setattr(models_page, "imported_torch", original))
+        original = model_search.imported_torch
+        model_search.imported_torch = lambda: object()
+        self.addCleanup(lambda: setattr(model_search, "imported_torch", original))
 
         _radio, _detail, _summary, results, _search, _selected, known = (
             app.refresh_after_device(
@@ -1506,7 +1516,7 @@ class ModelFitTests(unittest.TestCase):
         self.assertNotIn("tight", self.labels("4-bit")[OLMO])
 
     def test_an_incomplete_model_has_no_size_to_judge(self):
-        models_page.list_cached_models = lambda: [PARTIAL]
+        my_models.list_cached_models = lambda: [PARTIAL]
 
         label = self.labels()["org/partial"]
         self.assertIn("· incomplete", label)
@@ -1523,21 +1533,21 @@ class ManageMyModelsTests(unittest.TestCase):
         self.removed = []
         originals = (
             runtime.MANAGER,
-            models_page.list_cached_models,
+            my_models.list_cached_models,
             model_cache.remove_cached_model,
-            models_page.download_model,
+            my_models.download_model,
         )
         runtime.MANAGER = self.manager
-        models_page.list_cached_models = lambda: list(self.entries)
+        my_models.list_cached_models = lambda: list(self.entries)
         # The manager deletes through the module-level function, so that is
         # what stands in: the manager's own checks stay real.
         model_cache.remove_cached_model = self.remove
-        models_page.download_model = self.download
+        my_models.download_model = self.download
         self.addCleanup(
             lambda: setattr(runtime, "MANAGER", originals[0])
-            or setattr(models_page, "list_cached_models", originals[1])
+            or setattr(my_models, "list_cached_models", originals[1])
             or setattr(model_cache, "remove_cached_model", originals[2])
-            or setattr(models_page, "download_model", originals[3])
+            or setattr(my_models, "download_model", originals[3])
         )
 
     def remove(self, model_id, cache_dir=None):
@@ -1654,7 +1664,7 @@ class ManageMyModelsTests(unittest.TestCase):
         self.manager._lock.acquire()
         self.addCleanup(self.manager._lock.release)
 
-        with self.assertLogs("chatlab.ui.models_page", level="INFO") as logged:
+        with self.assertLogs("chatlab.ui.my_models", level="INFO") as logged:
             app.remove_my_model("org/partial")
 
         self.assertIn("Removal confirmed for org/partial", logged.output[0])
@@ -1754,12 +1764,12 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.results = [INSTRUCT, GATED]
         self.queries = []
         roomy(self)
-        original_search, original_status = models_page.search_hub_models, models_page.cache_status
-        models_page.search_hub_models = self.search
-        models_page.cache_status = lambda model_id: CacheStatus()
+        original_search, original_status = model_search.search_hub_models, model_search.cache_status
+        model_search.search_hub_models = self.search
+        model_search.cache_status = lambda model_id: CacheStatus()
         self.addCleanup(
-            lambda: setattr(models_page, "search_hub_models", original_search)
-            or setattr(models_page, "cache_status", original_status)
+            lambda: setattr(model_search, "search_hub_models", original_search)
+            or setattr(model_search, "cache_status", original_status)
         )
 
     def search(self, query, hf_token, kind=TEXT_KIND, order="Popular", limit=100):
@@ -1863,26 +1873,26 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertEqual(cells(table, "Model"), [INSTRUCT.model_id])
         self.assertEqual(len(state), 27)
         self.assertIn("unknown sizes are hidden", detail)
-        table, _, _ = models_page.refresh_search_results(None, state, fits_only=False)
+        table, _, _ = model_search.refresh_search_results(None, state, fits_only=False)
         self.assertEqual(len(cells(table, "Model")), 20)
         self.assertEqual(len(self.queries), 1)
 
     def test_filtered_selection_clears_and_returns_after_precision_change(self):
         roomy(self, total_gb=16, available_gb=10, backend="mps", dtype="float16")
         state = {INSTRUCT.model_id: INSTRUCT, GATED.model_id: GATED}
-        table, detail, selected = models_page.refresh_search_results(
+        table, detail, selected = model_search.refresh_search_results(
             INSTRUCT.model_id, state, "full", True
         )
         self.assertEqual(cells(table, "Model"), [])
         self.assertIsNone(selected)
         self.assertIn("No estimated fits", detail)
-        table, _, selected = models_page.refresh_search_results(None, state, "4-bit", True)
+        table, _, selected = model_search.refresh_search_results(None, state, "4-bit", True)
         self.assertEqual(cells(table, "Model"), [INSTRUCT.model_id])
         self.assertIsNone(selected)
 
     def test_a_selection_survives_a_filter_that_keeps_it(self):
         state = {INSTRUCT.model_id: INSTRUCT, GATED.model_id: GATED}
-        table, detail, selected = models_page.refresh_search_results(
+        table, detail, selected = model_search.refresh_search_results(
             INSTRUCT.model_id, state, "full", True
         )
         self.assertEqual(cells(table, "Model"), [INSTRUCT.model_id])
@@ -1968,10 +1978,10 @@ class ModelSearchPaneTests(unittest.TestCase):
     def test_image_recommendations_are_separate_and_do_not_guess_memory(self):
         table, _, state, _ = app.search_models("", "", kind=IMAGE_KIND, order="Recommended")
         self.assertEqual(list(state), ["stabilityai/sd-turbo"])
-        self.assertEqual(models_page.results_kind(state), IMAGE_KIND)
+        self.assertEqual(model_search.results_kind(state), IMAGE_KIND)
         # No parameter count, so no Params column either.
         self.assertNotIn("Params", painted(table)["headers"])
-        table, detail, _ = models_page.refresh_search_results(None, state, "4-bit", True)
+        table, detail, _ = model_search.refresh_search_results(None, state, "4-bit", True)
         self.assertEqual(cells(table, "Model"), [])
         self.assertIn("unknown sizes are hidden", detail)
 
@@ -1992,7 +2002,7 @@ class ModelSearchPaneTests(unittest.TestCase):
         # message, so a line without the stack would only repeat it.
         self.results = ConnectionError("hub unreachable")
 
-        with self.assertLogs("chatlab.ui.models_page", level="WARNING") as logged:
+        with self.assertLogs("chatlab.ui.model_search", level="WARNING") as logged:
             app.search_models("olmo", "")
 
         self.assertIn("Hub search for 'olmo' failed", logged.output[0])
@@ -2037,7 +2047,7 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertIn("token", detail)
 
     def test_a_result_already_on_disk_says_so(self):
-        models_page.cache_status = lambda model_id: CacheStatus(cached_bytes=15_000_000_000)
+        model_search.cache_status = lambda model_id: CacheStatus(cached_bytes=15_000_000_000)
         _, _, state, _ = app.search_models("olmo", "")
 
         _, detail, _ = app.select_search_result(state, None, picked(INSTRUCT.model_id))
@@ -2048,7 +2058,7 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertNotIn("Download and load", detail)
 
     def test_a_cached_result_of_another_kind_is_not_called_partly_cached(self):
-        models_page.cache_status = lambda model_id: CacheStatus(
+        model_search.cache_status = lambda model_id: CacheStatus(
             cached_bytes=5_500_000_000, kind=""
         )
         _, _, state, _ = app.search_models("olmo", "")
@@ -2061,7 +2071,7 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertNotIn("Download and load", detail)
 
     def test_a_partly_downloaded_result_says_so(self):
-        models_page.cache_status = lambda model_id: CacheStatus(
+        model_search.cache_status = lambda model_id: CacheStatus(
             cached_bytes=100, missing_files=(MODEL_WEIGHTS,)
         )
         _, _, state, _ = app.search_models("olmo", "")
@@ -2074,7 +2084,7 @@ class ModelSearchPaneTests(unittest.TestCase):
         def refuse(model_id):
             raise PermissionError(13, "Permission denied")
 
-        models_page.cache_status = refuse
+        model_search.cache_status = refuse
         _, _, state, _ = app.search_models("olmo", "")
 
         box, detail, _ = app.select_search_result(state, None, picked(INSTRUCT.model_id))
@@ -2106,14 +2116,14 @@ class ModelSwitchTests(unittest.TestCase):
         roomy(self)
         root = self.cache({OLMO: 15 * self.GB, "org/huge": 200 * self.GB, "org/small": self.GB})
         self.extra = [PARTIAL, UNSUPPORTED, PIPELINE]
-        originals = (runtime.MANAGER, models_page.list_cached_models, models_page.cache_root)
+        originals = (runtime.MANAGER, model_switch.list_cached_models, my_models.cache_root)
         runtime.MANAGER = self.manager
-        models_page.list_cached_models = lambda: list_cached_models(root) + list(self.extra)
-        models_page.cache_root = lambda: root
+        model_switch.list_cached_models = lambda: list_cached_models(root) + list(self.extra)
+        my_models.cache_root = lambda: root
         self.addCleanup(
             lambda: setattr(runtime, "MANAGER", originals[0])
-            or setattr(models_page, "list_cached_models", originals[1])
-            or setattr(models_page, "cache_root", originals[2])
+            or setattr(model_switch, "list_cached_models", originals[1])
+            or setattr(my_models, "cache_root", originals[2])
         )
 
     def load(self, model_id=OLMO):
@@ -2220,7 +2230,7 @@ class ModelSwitchTests(unittest.TestCase):
         self.assertIn((OLMO, OLMO), app.switch_choices("full"))
 
     def test_an_empty_cache_hides_the_switcher(self):
-        models_page.list_cached_models = lambda: [PARTIAL, PIPELINE]
+        model_switch.list_cached_models = lambda: [PARTIAL, PIPELINE]
 
         self.assertFalse(self.painted()["visible"])
 
@@ -2298,7 +2308,7 @@ class ModelSwitchTests(unittest.TestCase):
         self.load()
         self.assertTrue(self.manager.reserve_generation())
         self.addCleanup(self.manager.release_generation)
-        with mock.patch.object(models_page, "alarm") as alarm:
+        with mock.patch.object(model_switch, "alarm") as alarm:
             frames = list(app.switch_model("org/small"))
 
         self.assertEqual(frames, [(gr.update(value=OLMO), gr.skip(), gr.skip())])
@@ -2307,7 +2317,7 @@ class ModelSwitchTests(unittest.TestCase):
 
     def test_a_pick_during_another_load_is_refused_and_put_back(self):
         self.manager.reserve_load(OLMO)
-        with mock.patch.object(models_page, "alarm") as alarm:
+        with mock.patch.object(model_switch, "alarm") as alarm:
             frames = list(app.switch_model("org/small"))
 
         self.assertEqual(frames, [(gr.update(value=OLMO), gr.skip(), gr.skip())])
@@ -2330,7 +2340,7 @@ class ModelSwitchTests(unittest.TestCase):
 
         with mock.patch.object(
             self.manager, "claim_exclusive_load", then_the_load_ends
-        ), mock.patch.object(models_page, "alarm") as alarm:
+        ), mock.patch.object(model_switch, "alarm") as alarm:
             frames = list(app.switch_model("org/small"))
 
         self.assertIsNone(self.manager.occupant, "the load ended in between")
@@ -2363,7 +2373,7 @@ class ModelSwitchTests(unittest.TestCase):
         self.load()
         cards = iter(["loading card", "ready card"])
         with mock.patch.object(
-            models_page, "load_cached_model", side_effect=lambda *args: cards
+            model_switch, "load_cached_model", side_effect=lambda *args: cards
         ) as load:
             frames = list(app.switch_model("org/small", "4-bit"))
 
@@ -2395,12 +2405,12 @@ class ModelSwitchTests(unittest.TestCase):
 
         def cards(*args):
             during["claimed"] = self.manager.loading_id
-            with mock.patch.object(models_page, "alarm") as alarm:
+            with mock.patch.object(model_switch, "alarm") as alarm:
                 during["second"] = list(app.switch_model("org/small"))
             during["told"] = alarm.call_args.args
             yield "card"
 
-        with mock.patch.object(models_page, "load_cached_model", side_effect=cards):
+        with mock.patch.object(model_switch, "load_cached_model", side_effect=cards):
             frames = list(app.switch_model("org/small"))
 
         self.assertEqual(during["claimed"], "org/small", "claimed before any card")
@@ -2422,7 +2432,7 @@ class ModelSwitchTests(unittest.TestCase):
         def refusal(*args):
             yield "not cached card"
 
-        with mock.patch.object(models_page, "load_cached_model", side_effect=refusal):
+        with mock.patch.object(model_switch, "load_cached_model", side_effect=refusal):
             list(app.switch_model("org/small"))
 
         self.assertIsNone(self.manager.loading_id)
@@ -2449,7 +2459,7 @@ class ModelSwitchTests(unittest.TestCase):
             during["frames"] = list(real("org/huge"))
             yield "card"
 
-        with mock.patch.object(models_page, "load_cached_model", side_effect=cards):
+        with mock.patch.object(model_switch, "load_cached_model", side_effect=cards):
             list(app.switch_model("org/small"))
 
         self.assertEqual(len(during["frames"]), 1, "refused before any other card")
@@ -2467,7 +2477,7 @@ class ModelSwitchTests(unittest.TestCase):
             during["reserved"] = self.manager.reserve_generation()
             yield "card"
 
-        with mock.patch.object(models_page, "load_cached_model", side_effect=cards):
+        with mock.patch.object(model_switch, "load_cached_model", side_effect=cards):
             list(app.switch_model("org/small"))
 
         self.assertFalse(during["reserved"], "a reply was admitted beside the load")
@@ -2574,14 +2584,14 @@ class ModelSwitchTests(unittest.TestCase):
         # sees the badge fall back to "No model loaded" and nothing anywhere
         # saying why.
         self.load()
-        card = models_page.status_card(
+        card = common.status_card(
             "Not cached", "Nothing for `org/small` is in the cache.", "error"
         )
 
         with mock.patch.object(
-            models_page, "load_cached_model", side_effect=lambda *args: iter([card])
+            model_switch, "load_cached_model", side_effect=lambda *args: iter([card])
         ):
-            with mock.patch.object(models_page, "alarm") as alarm:
+            with mock.patch.object(model_switch, "alarm") as alarm:
                 frames = list(app.switch_model("org/small"))
 
         self.assertEqual([frame[:2] for frame in frames], [
@@ -2597,7 +2607,7 @@ class ModelSwitchTests(unittest.TestCase):
         # the model goes, and the pick lands on a cache without it.
         self.load()
 
-        with mock.patch.object(models_page, "alarm") as alarm:
+        with mock.patch.object(model_switch, "alarm") as alarm:
             frames = list(app.switch_model("org/gone"))
 
         self.assertIn("Not cached", frames[-2][1])
@@ -2611,11 +2621,11 @@ class ModelSwitchTests(unittest.TestCase):
         self.load()
 
         with mock.patch.object(gr, "Warning") as warning:
-            card = models_page.failure_card(
+            card = common.failure_card(
                 "Could not load cached model", "It did not fit."
             )
             with mock.patch.object(
-                models_page, "load_cached_model", side_effect=lambda *args: iter([card])
+                model_switch, "load_cached_model", side_effect=lambda *args: iter([card])
             ):
                 list(app.switch_model("org/small"))
 
@@ -2623,14 +2633,14 @@ class ModelSwitchTests(unittest.TestCase):
 
     def test_a_switch_that_works_says_nothing_extra(self):
         self.load()
-        card = models_page.status_card(
+        card = common.status_card(
             "Model ready", "`org/small` is loaded on **CPU**.", "success"
         )
 
         with mock.patch.object(
-            models_page, "load_cached_model", side_effect=lambda *args: iter([card])
+            model_switch, "load_cached_model", side_effect=lambda *args: iter([card])
         ):
-            with mock.patch.object(models_page, "alarm") as alarm:
+            with mock.patch.object(model_switch, "alarm") as alarm:
                 list(app.switch_model("org/small"))
 
         alarm.assert_not_called()
@@ -3570,7 +3580,7 @@ class PageLayoutTests(unittest.TestCase):
             if item["trigger_after"] == download._id
         )
         refresh = self.demo.fns[dependency["id"]]
-        self.assertEqual(refresh.fn, models_page.refresh_my_models)
+        self.assertEqual(refresh.fn, my_models.refresh_my_models)
         self.assertEqual(refresh.inputs[-1], self.labelled("Hugging Face model ID"))
 
         def fetch(model_id, token):
@@ -3584,13 +3594,13 @@ class PageLayoutTests(unittest.TestCase):
 
         with (
             mock.patch.object(runtime, "MANAGER", manager),
-            mock.patch.object(models_page, "list_cached_models", side_effect=lambda: list(entries)),
+            mock.patch.object(my_models, "list_cached_models", side_effect=lambda: list(entries)),
             mock.patch.object(models_page, "cache_status", side_effect=lambda model_id: next((entry.status for entry in entries if entry.model_id == model_id), CacheStatus())),
-            mock.patch.object(models_page, "stream_download", side_effect=fetch),
+            mock.patch.object(model_streams, "stream_download", side_effect=fetch),
             mock.patch.object(manager, "find_cached", return_value=Path("/cache/new-model")),
             mock.patch.object(models_page, "stream_load", side_effect=read_weights) as stream_load,
         ):
-            selected = models_page.clear_my_model_selection()[0]["value"]
+            selected = my_models.clear_my_model_selection()[0]["value"]
             cards = list(download.fn(typed_id, "", selected))
             self.assertIn("Download complete", cards[-1])
             self.assertEqual(manager.model_id, OLMO)
@@ -5190,14 +5200,14 @@ class MlxModelsPaneTests(unittest.TestCase):
     def setUp(self):
         self.entries = [cached(OLMO), MLX]
         self.manager = ModelManager()
-        originals = (runtime.MANAGER, models_page.list_cached_models, models_page.cache_root)
+        originals = (runtime.MANAGER, my_models.list_cached_models, my_models.cache_root)
         runtime.MANAGER = self.manager
-        models_page.list_cached_models = lambda: list(self.entries)
-        models_page.cache_root = lambda: Path("/cache")
+        my_models.list_cached_models = lambda: list(self.entries)
+        my_models.cache_root = lambda: Path("/cache")
         self.addCleanup(
             lambda: setattr(runtime, "MANAGER", originals[0])
-            or setattr(models_page, "list_cached_models", originals[1])
-            or setattr(models_page, "cache_root", originals[2])
+            or setattr(my_models, "list_cached_models", originals[1])
+            or setattr(my_models, "cache_root", originals[2])
         )
 
     def test_an_mlx_model_is_listed_as_one_and_points_at_the_chat_page(self):
@@ -5216,7 +5226,7 @@ class MlxModelsPaneTests(unittest.TestCase):
     def test_an_mlx_row_carries_its_kind_before_its_fit_verdict(self):
         from chatlab.device_memory import FITS, Fit
 
-        label = models_page.cached_model_label(MLX, Fit(FITS))
+        label = my_models.cached_model_label(MLX, Fit(FITS))
 
         self.assertIn("· MLX", label)
         self.assertIn("· fits", label)
@@ -5232,8 +5242,8 @@ class MlxModelsPaneTests(unittest.TestCase):
         self.manager.precision = "4-bit"
         profile = DeviceProfile(backend="mps", dtype="float16", total=10**11, available=10**11)
 
-        self.assertIsNone(models_page.cached_fit(MLX, "full", profile))
-        self.assertIsNone(models_page.cached_fit(MLX, "8-bit", profile))
+        self.assertIsNone(memory_fit.cached_fit(MLX, "full", profile))
+        self.assertIsNone(memory_fit.cached_fit(MLX, "8-bit", profile))
 
     def test_mlx_recommendations_are_their_own_list_and_judged_at_their_width(self):
         _, _, state, _ = app.search_models(
@@ -5248,8 +5258,8 @@ class MlxModelsPaneTests(unittest.TestCase):
                 "mlx-community/Olmo-3-7B-Think-4bit",
             ],
         )
-        self.assertEqual(models_page.results_kind(state), model_cache.MLX_KIND)
-        _, detail, _ = models_page.select_search_result(
+        self.assertEqual(model_search.results_kind(state), model_cache.MLX_KIND)
+        _, detail, _ = model_search.select_search_result(
             state, "full", picked("mlx-community/Qwen3-4B-4bit")
         )
         self.assertIn("quantized already", detail)
@@ -5269,8 +5279,8 @@ class MlxModelsPaneTests(unittest.TestCase):
         )
 
         # The radio says full; the name says 4 bits, and the name wins.
-        packed = models_page.hub_fit(four_bit, "full", profile, model_cache.MLX_KIND)
-        whole = models_page.hub_fit(unnamed, "4-bit", profile, model_cache.MLX_KIND)
+        packed = memory_fit.hub_fit(four_bit, "full", profile, model_cache.MLX_KIND)
+        whole = memory_fit.hub_fit(unnamed, "4-bit", profile, model_cache.MLX_KIND)
 
         self.assertEqual(packed.estimated, estimate_parameter_bytes(7_000_000_000, "float16", 4))
         self.assertEqual(whole.estimated, estimate_parameter_bytes(7_000_000_000, "float16", None))
@@ -5307,7 +5317,7 @@ class MlxModelsPaneTests(unittest.TestCase):
             backend="mps", dtype="float16", total=48 * GB, available=40 * GB
         )
 
-        fit = models_page.cached_fit(entry, "full", profile)
+        fit = memory_fit.cached_fit(entry, "full", profile)
 
         self.assertIn("2.0 GB of 4-bit weights", fit.note)
 
@@ -5342,7 +5352,7 @@ class MlxModelsPaneTests(unittest.TestCase):
             ceiling=16 * GB,
             pool="Metal on this machine",
         )
-        with mock.patch.object(models_page, "device_profile", lambda torch=None: capped):
+        with mock.patch.object(memory_fit, "device_profile", lambda torch=None: capped):
             with mock.patch.object(
                 device_memory, "system_memory", lambda: (48 * GB, 30 * GB)
             ):
