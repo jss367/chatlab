@@ -112,6 +112,8 @@ def run_pair(*values):
                 raise ValueError("MLX models use the precision stored in their repository. Choose Current or compare two different conversions.")
             if condition[1] == "Current":
                 condition[1] = initial.precision if initial.precision in settings.WEIGHT_PRECISIONS else "full"
+            if status.base_model is not None and condition[1] != "full":
+                raise ValueError(f"{condition[0]} is a LoRA adapter, which merges into full-precision weights. Choose full precision for it.")
             kinds.append(status.kind)
         yield frame("Starting comparison…")
         for side, condition, kind in zip(("A", "B"), conditions, kinds, strict=True):

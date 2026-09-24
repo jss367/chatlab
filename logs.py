@@ -75,6 +75,7 @@ RECORDED_PACKAGES = (
     "mlx",
     "mlx-lm",
     "diffusers",
+    "peft",
     "huggingface-hub",
     "gradio",
 )

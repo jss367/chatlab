@@ -18,6 +18,7 @@ import pandas as pd
 import settings
 from model_discovery import recommended_models
 from model_runtime import (
+    BASE_MODEL,
     DEFAULT_MODEL_SORT,
     DISCOVERY_CANDIDATES,
     FITS,
@@ -47,6 +48,7 @@ from model_runtime import (
     device_profile,
     estimate_parameter_bytes,
     imported_torch,
+    is_adapter_snapshot,
     estimate_snapshot_bytes,
     format_bytes,
     format_count,
@@ -60,6 +62,7 @@ from model_runtime import (
     sort_cached_models,
     validate_model_id,
 )
+import adapters
 from ui import runtime
 from ui.model_repository import matching_repository
 from ui.common import (
@@ -228,6 +231,51 @@ def stream_download(model_id: str, hf_token: str):
     return outcome["path"]
 
 
+def adapter_base(path: Path) -> str | None:
+    """The base model the adapter snapshot at ``path`` needs, or ``None``.
+
+    ``None`` for a snapshot that is not an adapter, and for an adapter
+    ChatLab cannot load at all: fetching a base for one of those would
+    download a model nobody asked for and leave the adapter as unloadable
+    as before.
+    """
+
+    if not is_adapter_snapshot(path):
+        return None
+    config = adapters.read_adapter_config(path) or {}
+    if adapters.adapter_problem(config) is not None:
+        return None
+    return adapters.base_model_id(config)
+
+
+def stream_download_with_base(model_id: str, hf_token: str):
+    """:func:`stream_download`, followed by the base model when it is an adapter.
+
+    Returns the adapter's snapshot path and a sentence on what the base
+    download did, which is empty for anything that is not an adapter. The
+    adapter comes first because only its config says which base it needs.
+    The token goes to both: the popular bases are gated, and a reader who
+    can see the adapter usually has access to the base it was trained on.
+    """
+
+    path = yield from stream_download(model_id, hf_token)
+    base = adapter_base(Path(path))
+    if base is None:
+        return path, ""
+    logger.info("%s is a LoRA adapter for %s; fetching the base too", model_id, base)
+    started = time.monotonic()
+    before = cache_status(base)
+    yield status_card(
+        "Downloading base model",
+        f"`{model_id.strip()}` is a LoRA adapter trained on `{base}`, which is "
+        "fetched next. " + describe_cache(base, before)[1],
+        "working",
+    )
+    yield from stream_download(base, hf_token)
+    fetched = describe_fetched(before, cache_status(base), time.monotonic() - started)
+    return path, f" Base model `{base}`: {fetched[0].lower()}{fetched[1:]}"
+
+
 def load_detail(
     model_id: str, snap: LoadSnapshot, rate: float | None, remaining: float | None
 ) -> str:
@@ -334,7 +382,9 @@ def describe_missing(status: CacheStatus) -> str:
     """``config.json and the model weights are missing``, for a card."""
 
     names = [
-        "the model weights" if name == MODEL_WEIGHTS else f"`{name}`"
+        "the model weights" if name == MODEL_WEIGHTS
+        else f"the base model `{status.base_model}`" if name == BASE_MODEL
+        else f"`{name}`"
         for name in status.missing_files
     ]
     if len(names) > 3:
@@ -475,13 +525,19 @@ def refresh_model_actions(
         )
     if cached.complete:
         detail = f"**Downloaded** · Ready to load from disk. {where_to_use(cached.kind)}"
+        if cached.base_model is not None:
+            detail += (
+                f" A LoRA adapter for `{cached.base_model}`, merged in at full precision."
+            )
         if runtime.MANAGER.model_id == cleaned:
             detail = (
                 "**Downloaded · Loaded now** · Load cached again to apply a new "
                 f"precision. {where_to_use(cached.kind)}"
             )
     elif cached.unsupported:
-        detail = "**Downloaded · Unsupported** · ChatLab cannot load this model's format."
+        detail = "**Downloaded · Unsupported** · " + (
+            cached.unsupported_reason or "ChatLab cannot load this model's format."
+        )
     elif cached.present:
         detail = "**Download incomplete** · Download and load will fetch the remaining files."
     else:
@@ -551,7 +607,7 @@ def download_model(model_id: str, hf_token: str, selected: str | None = None):
         return
     yield status_card(*describe_cache(model_id, before), "working")
     try:
-        path = yield from stream_download(model_id, hf_token)
+        path, base_note = yield from stream_download_with_base(model_id, hf_token)
         elapsed = time.monotonic() - started
         fetched = describe_fetched(before, cache_status(model_id), elapsed)
     except Exception as error:
@@ -561,7 +617,7 @@ def download_model(model_id: str, hf_token: str, selected: str | None = None):
 
     yield status_card(
         "Download complete",
-        f"{fetched} `{model_id.strip()}` is cached in `{path}`. "
+        f"{fetched} `{model_id.strip()}` is cached in `{path}`.{base_note} "
         "Use **Load cached** when ready.",
         "success",
     )
@@ -621,7 +677,7 @@ def download_and_load_model(
         return
     yield status_card(*describe_cache(model_id, before), "working")
     try:
-        path = yield from stream_download(model_id, hf_token)
+        path, base_note = yield from stream_download_with_base(model_id, hf_token)
         claimed, held = runtime.MANAGER.claim_exclusive_load(model_id)
         if claimed is None:
             # The download is the slow half and the claim is only taken after
@@ -645,7 +701,8 @@ def download_and_load_model(
             )
             yield status_card(
                 "Loading model",
-                f"{fetched} Moving `{model_id.strip()}` onto the best available device…",
+                f"{fetched}{base_note} Moving `{model_id.strip()}` onto the best "
+                "available device…",
                 "working",
             )
             # Read after the download rather than before it: what the repo turns
@@ -664,10 +721,27 @@ def download_and_load_model(
     elapsed = time.monotonic() - started
     yield status_card(
         "Model ready",
-        f"`{model_id.strip()}` is loaded on **{device}** ({elapsed:.1f} seconds "
-        f"total). {where_to_use(fetched_status.kind)}",
+        f"`{model_id.strip()}`{adapter_note(fetched_status, precision)} is loaded "
+        f"on **{device}** ({elapsed:.1f} seconds total). "
+        f"{where_to_use(fetched_status.kind)}",
         "success",
     )
+
+
+def adapter_note(status: CacheStatus, precision: str) -> str:
+    """`` (a LoRA adapter merged into `base`)``, for a ready card, or nothing.
+
+    Says too when the precision radio was passed over, since the card is the
+    one place a reader who chose 4-bit would otherwise find out only from
+    the memory figures.
+    """
+
+    if status.base_model is None:
+        return ""
+    note = f" (a LoRA adapter merged into `{status.base_model}`"
+    if precision in QUANTIZED_BITS:
+        note += f", at full precision: an adapter cannot merge into {precision} weights"
+    return note + ")"
 
 
 MISSING_FILES_PATTERN = re.compile(r"(\d+) file\(s\) are missing \((.*?)\)\. ")
@@ -780,7 +854,8 @@ def _load_cached_model(cleaned: str, precision: str):
     if status.unsupported:
         yield status_card(
             "Unsupported model",
-            f"{name} is on disk ({describe_on_disk(status)}) but is {UNSUPPORTED_REASON}",
+            f"{name} is on disk ({describe_on_disk(status)}) but "
+            + (status.unsupported_reason or f"is {UNSUPPORTED_REASON}"),
             "error",
         )
         return
@@ -800,7 +875,7 @@ def _load_cached_model(cleaned: str, precision: str):
         return
     yield status_card(
         "Model ready",
-        f"{name} is loaded on **{device}** "
+        f"{name}{adapter_note(status, precision)} is loaded on **{device}** "
         f"({time.monotonic() - started:.1f} seconds). {where_to_use(status.kind)}",
         "success",
     )
@@ -1477,7 +1552,9 @@ UNSUPPORTED_REASON = (
     "that wants a picture, a video frame or a sound alongside the prompt, "
     "because the Images page has only a prompt to give it. An MLX model on a "
     "machine without Apple silicon and the mlx-lm package is unsupported for "
-    "the same reason: nothing here runs it."
+    "the same reason: nothing here runs it. A LoRA adapter for a Transformers "
+    "language model, which has an `adapter_config.json`, loads too, merged "
+    "into the base model it names."
 )
 
 
@@ -1566,6 +1643,9 @@ def packed_bits(
     over a 4-bit conversion's figure would misread it by four times.
     """
 
+    if kind == TEXT_KIND and is_adapter_snapshot(snapshot):
+        # Merged into full-precision weights whatever the radio says.
+        return None
     if kind != MLX_KIND or snapshot is None:
         return requested
     return mlx_snapshot_bits(snapshot)
@@ -1723,6 +1803,8 @@ def cached_model_label(entry: CachedModel, fit: Fit | None = None) -> str:
         label += " · image"
     elif entry.status.kind == MLX_KIND:
         label += " · MLX"
+    elif entry.status.base_model is not None:
+        label += " · LoRA"
     verdict = fit_word(fit)
     if verdict:
         label += f" · {verdict}"
@@ -1744,7 +1826,7 @@ def describe_cached_model(entry: CachedModel, fit: Fit | None = None) -> str:
             "Use **Download and load** to fetch the rest."
         )
     elif entry.status.unsupported:
-        verdict = f"**Unsupported:** {UNSUPPORTED_REASON}"
+        verdict = f"**Unsupported:** {entry.status.unsupported_reason or UNSUPPORTED_REASON}"
     else:
         verdict = (
             "**Downloaded · Ready to load.** Use **Load cached** to bring it "
@@ -1756,6 +1838,10 @@ def describe_cached_model(entry: CachedModel, fit: Fit | None = None) -> str:
     if entry.files:
         facts.append(("Files", f"{entry.files} in the current snapshot"))
     facts.append(("Kind", KIND_NAMES.get(entry.status.kind, "not loadable here")))
+    if entry.status.base_model is not None:
+        facts.append(
+            ("Adapter", f"LoRA for `{entry.status.base_model}`, merged in at full precision")
+        )
     if entry.architecture:
         model_type = entry.architecture
         if entry.dtype:

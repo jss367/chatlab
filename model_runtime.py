@@ -22,6 +22,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
+import adapters
 import mlx_runtime
 import jacobian_lens
 import settings
@@ -168,6 +169,9 @@ def validate_model_id(model_id: str) -> str:
 # Stands in for the weight file names when a snapshot has none at all: without
 # an index or a weights file there is no way to know what the repo would ship.
 MODEL_WEIGHTS = "model weights"
+# Stands in for a whole repository among an adapter's missing files: the base
+# model it was trained on, which :attr:`CacheStatus.base_model` names.
+BASE_MODEL = "base model"
 
 # A causal LM's weights come as a single file or as the shards an index lists,
 # in one of these formats. ``from_pretrained`` looks for them in this order and
@@ -229,6 +233,13 @@ class CacheStatus:
     belong to another revision or to a file the model never loads, and a
     partial the snapshot does need already shows up in ``missing_files``,
     since the hub links a file into the snapshot only once it has finished.
+
+    A LoRA adapter is a text model whose weights are another repository's:
+    ``base_model`` names that repository, and :data:`BASE_MODEL` stands among
+    the missing files until it is whole on disk too, so an adapter is only
+    ``complete`` when both halves are. ``unsupported_reason`` says why an
+    adapter ChatLab cannot load is unsupported, where the general account of
+    what ChatLab loads would not.
     """
 
     cached_bytes: int = 0
@@ -236,6 +247,8 @@ class CacheStatus:
     partial_bytes: int = 0
     missing_files: tuple[str, ...] = ()
     kind: str = TEXT_KIND
+    base_model: str | None = None
+    unsupported_reason: str = ""
 
     @property
     def present(self) -> bool:
@@ -309,6 +322,41 @@ def is_mlx_snapshot(snapshot: Path) -> bool:
     """
 
     return mlx_runtime.read_mlx_config(snapshot) is not None
+
+
+def has_root_checkpoint(snapshot: Path) -> bool:
+    """Whether a Transformers checkpoint, single or sharded, sits at the root."""
+
+    return any((snapshot / name).is_file() for pair in WEIGHT_FORMATS for name in pair)
+
+
+def is_adapter_snapshot(snapshot: Path | None) -> bool:
+    """Whether the snapshot is a LoRA adapter repository rather than a model.
+
+    A repo that ships a whole checkpoint beside its ``adapter_config.json``
+    (a merged export that kept the config) is the model it holds.
+    """
+
+    return (
+        snapshot is not None
+        and adapters.is_adapter(snapshot)
+        and not has_root_checkpoint(snapshot)
+    )
+
+
+def adapter_base_snapshot(snapshot: Path) -> Path | None:
+    """The cached snapshot of the model an adapter snapshot was trained on.
+
+    Looked up in the cache the adapter itself sits in, which its path says:
+    a snapshot is ``<cache>/models--org--name/snapshots/<commit>``. ``None``
+    when the adapter names no Hub repository or the base has no snapshot.
+    """
+
+    base = adapters.base_model_id(adapters.read_adapter_config(snapshot) or {})
+    if base is None:
+        return None
+    root = snapshot.parents[2] if snapshot.parent.name == "snapshots" else None
+    return snapshot_folder(cache_folder(base, root))
 
 
 def mlx_available() -> bool:
@@ -425,15 +473,18 @@ def judge_snapshot(snapshot: Path | None) -> tuple[tuple[str, ...], str]:
             # ChatLab has no way to give it. See pipeline_draws_from_text.
             return (), ""
         return pipeline_missing_files(snapshot), IMAGE_KIND
-    has_checkpoint = any(
-        (snapshot / name).is_file() for pair in WEIGHT_FORMATS for name in pair
-    )
+    has_checkpoint = has_root_checkpoint(snapshot)
     if has_checkpoint and is_mlx_snapshot(snapshot):
         # Whole files that Transformers cannot read: the weights are packed
         # for mlx-lm. Loadable where mlx is installed, which is Apple
         # silicon; anywhere else the verdict is the one a CTranslate2 export
         # gets, since nothing is missing and nothing here runs it.
         return missing_files(snapshot), MLX_KIND if mlx_available() else ""
+    if not has_checkpoint and adapters.is_adapter(snapshot):
+        # A text model once its base is read in: only the adapter's own
+        # files are judged here, and cache_status judges the base, since
+        # that needs the cache the two share.
+        return adapters.missing_adapter_files(snapshot), TEXT_KIND
     if not has_checkpoint and foreign_weights(
         snapshot, transformers_config=is_transformers_config(snapshot / "config.json")
     ):
@@ -1005,6 +1056,18 @@ def missing_files(snapshot: Path) -> tuple[str, ...]:
 def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
     """Measure what is already on disk for ``model_id``, without touching the network."""
 
+    return _cache_status(model_id, cache_dir, follow_base=True)
+
+
+def _cache_status(model_id: str, cache_dir: Path | None, follow_base: bool) -> CacheStatus:
+    """:func:`cache_status`, judging an adapter's base only when ``follow_base``.
+
+    The base is judged one level deep. Its own status is read without
+    following further, which is enough to see that it is an adapter too and
+    to refuse the pair, and it means two adapters naming each other cannot
+    send the scan round in a circle.
+    """
+
     folder = cache_folder(model_id, cache_dir)
     snapshot = snapshot_folder(folder)
     cached = partial_files = partial_bytes = 0
@@ -1030,7 +1093,61 @@ def cache_status(model_id: str, cache_dir: Path | None = None) -> CacheStatus:
     if cached == 0 and partial_files == 0:
         return CacheStatus()
     missing, kind = judge_snapshot(snapshot)
-    return CacheStatus(cached, partial_files, partial_bytes, missing, kind)
+    status = CacheStatus(cached, partial_files, partial_bytes, missing, kind)
+    if kind == TEXT_KIND and is_adapter_snapshot(snapshot):
+        return _adapter_status(model_id, snapshot, cache_dir, status, follow_base)
+    return status
+
+
+def _adapter_status(
+    model_id: str,
+    snapshot: Path,
+    cache_dir: Path | None,
+    status: CacheStatus,
+    follow_base: bool,
+) -> CacheStatus:
+    """An adapter's :class:`CacheStatus`: its own files, and its base's."""
+
+    config = adapters.read_adapter_config(snapshot) or {}
+    problem = adapters.adapter_problem(config, validate_model_id(model_id))
+    if problem is not None:
+        return replace(status, kind="", unsupported_reason=f"This adapter {problem}")
+    base = adapters.base_model_id(config)
+    status = replace(status, base_model=base)
+    if not follow_base:
+        return status
+    base_status = _cache_status(base, cache_dir, follow_base=False)
+    if base_status.base_model is not None:
+        return replace(
+            status,
+            kind="",
+            unsupported_reason=(
+                f"This adapter was trained on `{base}`, which is itself an "
+                "adapter. ChatLab merges one adapter into a whole model."
+            ),
+        )
+    if base_status.complete and base_status.kind != TEXT_KIND:
+        what = "an image model" if base_status.kind == IMAGE_KIND else "quantized for MLX"
+        return replace(
+            status,
+            kind="",
+            unsupported_reason=(
+                f"This adapter was trained on `{base}`, which is {what}. A LoRA "
+                "adapter merges into a Transformers text model's weights."
+            ),
+        )
+    if base_status.unsupported:
+        return replace(
+            status,
+            kind="",
+            unsupported_reason=(
+                f"This adapter was trained on `{base}`, which is on disk but is "
+                "not a model ChatLab loads."
+            ),
+        )
+    if not base_status.complete:
+        return replace(status, missing_files=(*status.missing_files, BASE_MODEL))
+    return status
 
 
 def folder_bytes(folder: Path) -> int:
@@ -1699,6 +1816,15 @@ def estimate_snapshot_bytes(
 
     if kind == IMAGE_KIND:
         return pipeline_loaded_bytes(snapshot, load_dtype_name)
+    if kind == TEXT_KIND and is_adapter_snapshot(snapshot):
+        # What a merged adapter takes is what its base takes: the merge adds
+        # each low-rank product into a weight already there, and the adapter
+        # file itself, tens of megabytes, is gone again once it has. At full
+        # precision whatever the radio says, as the load itself is.
+        snapshot = adapter_base_snapshot(snapshot)
+        if snapshot is None:
+            return None
+        bits = None
     weight_bytes = snapshot_weight_bytes(snapshot)
     if weight_bytes is None:
         return None
@@ -4313,22 +4439,83 @@ def _explaining_tokenizer_failure(snapshot: Path | None) -> Iterator[None]:
         raise RuntimeError(message) from error
 
 
+def adapter_base_for_load(adapter_path: Path) -> Path:
+    """The base snapshot to read an adapter onto, or why there is none.
+
+    The same verdicts :func:`cache_status` gives the Models page, raised as
+    the ``RuntimeError`` a load reports, for a load reached some other way
+    than through a page that asked first.
+    """
+
+    config = adapters.read_adapter_config(adapter_path) or {}
+    problem = adapters.adapter_problem(config)
+    if problem is not None:
+        raise RuntimeError(f"This adapter {problem}")
+    base = adapters.base_model_id(config)
+    snapshot = adapter_base_snapshot(adapter_path)
+    missing, kind = judge_snapshot(snapshot)
+    if missing:
+        raise RuntimeError(
+            f"This adapter was trained on `{base}`, which is not fully downloaded. "
+            "Use Download and load on the adapter to fetch it."
+        )
+    if kind != TEXT_KIND or is_adapter_snapshot(snapshot):
+        raise RuntimeError(
+            f"This adapter was trained on `{base}`, which is not a Transformers "
+            "text model, so there are no weights to merge it into."
+        )
+    return snapshot
+
+
 def _read_text_model(
     local_path: Path, torch, backend: str, dtype, bits: int | None, precision: str
 ) -> ReadWeights:
-    """Read one causal-LM checkpoint out of ``local_path`` onto ``backend``."""
+    """Read one causal-LM checkpoint out of ``local_path`` onto ``backend``.
+
+    ``local_path`` can also be a LoRA adapter, in which case the checkpoint
+    read is the base it names and the adapter is merged into it before the
+    model goes anywhere it would have to be copied from; see
+    :mod:`adapters`. The caller has cleared ``bits`` for an adapter, since
+    only full-precision weights can take the merge.
+    """
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
+    adapter = None
+    if is_adapter_snapshot(local_path):
+        if bits is not None:
+            raise RuntimeError(
+                f"A LoRA adapter merges into full-precision weights, not {precision} ones."
+            )
+        adapter, local_path = local_path, adapter_base_for_load(local_path)
+    # The adapter's own tokenizer where it ships one: it is the one its
+    # embeddings were trained against, added tokens and chat template both.
+    own_tokenizer = adapter is not None and adapters.has_tokenizer(adapter)
+    tokenizer = AutoTokenizer.from_pretrained(
+        adapter if own_tokenizer else local_path, local_files_only=True
+    )
+
+    def merged(model):
+        if adapter is None:
+            return model
+        try:
+            return adapters.merge_adapter(
+                model, adapter, len(tokenizer) if own_tokenizer else None
+            )
+        except ImportError as error:
+            raise RuntimeError(
+                "LoRA adapters need the peft package: run `pip install peft` "
+                f"and load again. ({error})"
+            ) from error
+
     if backend == "cuda":
-        model = AutoModelForCausalLM.from_pretrained(
+        model = merged(AutoModelForCausalLM.from_pretrained(
             local_path,
             local_files_only=True,
             dtype=dtype,
             device_map="auto",
             low_cpu_mem_usage=True,
-        )
+        ))
         device_name = f"CUDA ({torch.cuda.get_device_name(0)})"
     elif backend == "mps" and bits is not None:
         # The quantizer packs each weight as it lands, and wants to land it
@@ -4374,21 +4561,22 @@ def _read_text_model(
         # way in, and Metal does that conversion with one cast kernel per
         # tensor: on torch 2.14, Olmo-3-7B loaded in 15 seconds this way (12
         # to read and convert, 3 to copy across) and had not finished after
-        # seven minutes the other way.
-        model = AutoModelForCausalLM.from_pretrained(
+        # seven minutes the other way. An adapter is merged before the copy
+        # too, in host memory, for the same reason.
+        model = merged(AutoModelForCausalLM.from_pretrained(
             local_path,
             local_files_only=True,
             dtype=dtype,
             low_cpu_mem_usage=True,
-        ).to("mps")
+        )).to("mps")
         device_name = "Apple Metal (MPS)"
     else:
-        model = AutoModelForCausalLM.from_pretrained(
+        model = merged(AutoModelForCausalLM.from_pretrained(
             local_path,
             local_files_only=True,
             dtype=dtype,
             low_cpu_mem_usage=True,
-        )
+        ))
         device_name = "CPU"
     return model, tokenizer, None, device_name
 
@@ -5378,6 +5566,18 @@ class ModelManager:
                 precision,
             )
             bits = None
+        adapter = kind == TEXT_KIND and is_adapter_snapshot(local_path)
+        if bits is not None and adapter:
+            # A packed 4-bit or 8-bit matrix has nothing to add the adapter's
+            # product to, so the base is read whole and merged; see
+            # adapters. Said here, as the image case above says its own.
+            logger.info(
+                "Loading %s with full weights: a LoRA adapter merges into "
+                "full-precision weights, not %s ones",
+                model_id,
+                precision,
+            )
+            bits = None
         precision = precision if bits is not None else "full"
         if kind == MLX_KIND:
             # The repo was quantized when it was converted, and that is the
@@ -5471,6 +5671,7 @@ class ModelManager:
                         lower_precision=(
                             backend == "mps"
                             and kind == TEXT_KIND
+                            and not adapter
                             and (bits is None or bits > min(QUANTIZED_BITS.values()))
                         ),
                         error=error,
@@ -5498,6 +5699,12 @@ class ModelManager:
         with self._loaded_lock:
             self._loaded = LoadedModel(
                 model_id, device_name, precision, f"{model_id}#{self.load_count}"
+            )
+        if adapter:
+            logger.info(
+                "Merged LoRA adapter %s into %s",
+                model_id,
+                adapters.base_model_id(adapters.read_adapter_config(local_path) or {}),
             )
         # The one record of what a load cost. Without it a later memory
         # failure cannot be told from a leak, a second copy of the weights, or

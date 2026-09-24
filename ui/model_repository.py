@@ -124,6 +124,13 @@ def check_model_repository(model_id: str, hf_token: str | None):
     elif info.library_name == "diffusers":
         format_name = "Image model"
         compatibility = "Use the Images page after loading."
+    elif "adapter_config.json" in filenames and "config.json" not in filenames:
+        format_name = "LoRA adapter"
+        compatibility = (
+            "Downloading also fetches the base model the adapter was trained on. "
+            "The adapter is merged into that model's full-precision weights, so it "
+            "needs the memory of the whole base model."
+        )
     else:
         format_name = "Transformers" if info.library_name == "transformers" or (mlx_tagged and config is not None) else "Format not confirmed"
         compatibility = "Repository existence is confirmed; loading compatibility has not been tested."
