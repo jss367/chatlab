@@ -222,10 +222,8 @@ from chatlab.ui.inspection import (
     render_attention,
     reset_inspection,
 )
-from chatlab.ui.layout import (
-    CONVERSATION_PANE_QUEUE,
-    build_app,
-)
+from chatlab.ui.layout import build_app
+from chatlab.ui.layout.common import CONVERSATION_PANE_QUEUE
 from chatlab.ui.models_page import (
     BADGE_REFRESH_SECONDS,
     MISSING_FILES_PATTERN,
