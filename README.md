@@ -25,7 +25,7 @@ drove.
 - A **Score text** tab for measuring text the model did not write
 - A **Prompts** tab that runs a list of prompts, each in a conversation of its own, and writes one trace per prompt plus a table of every token
 - A **Compare** tab holding two runs side by side — two models, two precisions, a vector on and off, two seeds — with the tokens aligned, colored by how far the two runs' measurements sat apart, and the settings that differed named
-- **Activation patching** in Compare: transplant a residual activation between two runs and inspect a layer-by-token heatmap of the change in an answer token's probability
+- **Activation patching** in Compare: transplant a residual activation between two runs and inspect a layer-by-token heatmap of how much of the source run's effect each patch recovers, measured as a logit difference or as the answer token's probability
 - Perplexity, mean surprise, and a surprise trace for each response
 - Full metric-trace export as JSON or CSV
 - An OpenAI-compatible HTTP API on the same port, so the measurements can be scripted
@@ -259,6 +259,15 @@ contexts, or fill them identically as a control. Open **Activation patching**,
 choose the source and recipient, then choose an answer token from the
 recipient run. Both generated replies and measured text can supply runs.
 
+**Contrast token from source** chooses a second token to measure against.
+With one, the metric is log p(answer) − log p(contrast), which equals the
+raw logit difference between the two tokens and cancels any shift that moves
+every token alike. It defaults to the token the source produced right after
+its prefix, which is the source's answer when both runs answer the same
+question, and to none when that token is the answer itself. The default is
+re-chosen whenever the runs, the answer token, or the source output count
+change. With no contrast, the metric is log p(answer).
+
 **Source output tokens to include** controls the source prefix: zero uses
 only its recorded prompt/context; a positive number includes that many output
 tokens. The recipient always reads only the tokens before the selected answer
@@ -270,14 +279,20 @@ the cell tooltips or exact-measurements table.
 
 Press **Patch activations**. Each cell is a separate experiment: replace the
 recipient's residual vector after one decoder block at one token position
-with the source vector, then measure the selected answer token's raw
-probability. The other cells' changes are not carried forward. Blue increases
-the probability, orange decreases it, and numbers show the change in
-percentage points from the unpatched recipient. The color scale is symmetric
-around zero and adjusts to the largest measured effect; a dash is unmeasured.
-**Download patching JSON** saves the exact prefixes, model/load identifiers,
-run identifiers, token pairing, baseline and intervention measurements,
-including log probabilities. An export taken during a run is marked incomplete.
+with the source vector, then measure the next-token distribution. The other
+cells' changes are not carried forward. The **Recovery** heatmap scales the
+metric so 0 is the unpatched recipient and 1 is the source run itself: a cell
+at 0.8 moved the metric 80% of the way to the source, and a negative cell
+moved it away. Its color range covers at least −1 to 1, so heatmaps from
+different prompt pairs read alike. When the two runs' metrics differ by less
+than 0.01, as in an identical-slot control, recovery would divide by noise
+and is reported as undefined. The **Probability change** heatmap shows the
+answer token's raw probability change in percentage points, scaled to the
+largest measured effect. In both, blue is positive, orange negative, and a
+dash is unmeasured. **Download patching JSON** saves the exact prefixes,
+model/load identifiers, run identifiers, token pairing, the metric, baseline
+and intervention measurements, including log probabilities and recovery. An
+export taken during a run is marked incomplete.
 Stop or Escape ends the experiment and clears its partial display. Changing
 the slots or patching controls invalidates old measurements.
 

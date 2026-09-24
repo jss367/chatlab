@@ -114,6 +114,43 @@ class PatchingTests(unittest.TestCase):
         self.assertTrue(all(not use_cache and inference for _, use_cache, inference in self.manager.model.calls))
         self.assertEqual([ids for ids, _, _ in self.manager.model.calls][1:], [[1, 4, 4]] * 7)
 
+    def test_recovery_is_zero_at_recipient_and_one_at_source(self):
+        baseline, *cells = patching.measure(self.manager.model, self.plan())
+        self.assertTrue(baseline["recovery_defined"])
+        self.assertAlmostEqual(baseline["recovery_gap"],
+                               baseline["donor_baseline"]["metric"] - baseline["baseline"]["metric"])
+        self.assertEqual(cells[4]["recovery"], 0)
+        self.assertAlmostEqual(cells[-1]["recovery"], 1, places=6)
+        # Without a contrast the metric is the answer's log probability.
+        self.assertEqual(self.plan()["metric"], "answer_log_probability")
+        self.assertEqual(cells[1]["delta_metric"], cells[1]["delta_log_probability"])
+
+    def test_contrast_token_measures_logit_difference(self):
+        plan = patching.experiment(self.donor, self.recipient, 0, 0, 3, 1)
+        self.assertEqual((plan["contrast_index"], plan["contrast_id"], plan["metric"]), (1, 3, "logit_difference"))
+        baseline, *cells = patching.measure(self.manager.model, plan)
+        for reading in (baseline["baseline"], baseline["donor_baseline"], *cells):
+            self.assertAlmostEqual(reading["metric"],
+                                   reading["log_probability"] - reading["contrast_log_probability"], places=9)
+        # With identity embeddings and head the logit difference is readable directly.
+        with torch.no_grad():
+            hidden = self.manager.model.embedding(torch.tensor([plan["recipient_ids"]]))
+            for layer in self.manager.model.model.layers:
+                hidden = layer(hidden)[0]
+        logits = hidden[0, -1]
+        self.assertAlmostEqual(baseline["baseline"]["metric"], float(logits[2] - logits[3]), places=5)
+        self.assertAlmostEqual(cells[-1]["recovery"], 1, places=6)
+        self.assertIsNone(patching.experiment(self.donor, self.recipient, 0, 0, 3, -1)["contrast_id"])
+        for index, message in ((0, "differs from the answer"), (2, "from the source run"), (0.5, "whole number")):
+            with self.subTest(index=index), self.assertRaisesRegex(ValueError, message):
+                patching.experiment(self.donor, self.recipient, 0, 0, 3, index)
+
+    def test_recovery_undefined_when_runs_agree(self):
+        plan = patching.experiment(self.donor, self.donor, 0, 0, 3, 1)
+        baseline, *cells = patching.measure(self.manager.model, plan)
+        self.assertFalse(baseline["recovery_defined"])
+        self.assertTrue(all(cell["recovery"] is None for cell in cells))
+
     def test_failure_and_cancellation_remove_hooks(self):
         for fail_at in (1, 3):
             model = CausalModel()
@@ -234,12 +271,12 @@ class ControlsTests(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
 
-    def stream(self):
-        return controls.run(self.donor, self.recipient, "A → B", 0, 0, 2, self.session, 0)
+    def stream(self, contrast=controls.NO_CONTRAST):
+        return controls.run(self.donor, self.recipient, "A → B", 0, contrast, 0, 2, self.session, 0)
 
     def test_result_and_export_include_provenance_probabilities_and_pairing(self):
         frames = list(self.stream())
-        status, chart, rows, result, _run, _stop = frames[-1]
+        status, recovery, chart, rows, result, _run, _stop = frames[-1]
         self.assertIn("Complete", status)
         self.assertTrue(result["complete"])
         self.assertEqual(len(rows), 4)
@@ -247,6 +284,8 @@ class ControlsTests(unittest.TestCase):
         self.assertEqual(result["recipient_ids"], [1, 4, 4])
         self.assertEqual(result["pairs"][0]["donor_position"], 1)
         self.assertIn("aria-label", chart)
+        self.assertIn("Fraction of the source", recovery)
+        self.assertEqual(len(rows[0]), len(controls.HEADERS))
         self.assertFalse(self.manager.busy)
         path = Path(controls.download(result))
         try:
@@ -264,7 +303,7 @@ class ControlsTests(unittest.TestCase):
         controls.stop(self.session)
         cleanup = list(stream)
         self.assertEqual(len(cleanup), 1)
-        self.assertIsNone(cleanup[0][3])
+        self.assertIsNone(cleanup[0][4])
         self.assertFalse(self.manager.busy)
         self.assertFalse(self.manager._lock.locked())
         self.assertEqual(len(list(self.stream())), 1)  # stale queued request
@@ -278,7 +317,7 @@ class ControlsTests(unittest.TestCase):
         self.manager.model.fail_at = 3
         frames = list(self.stream())
         self.assertIn("Could not patch", frames[-1][0])
-        self.assertTrue(frames[-1][4]["interactive"])
+        self.assertTrue(frames[-1][5]["interactive"])
         self.assertFalse(self.manager.busy)
         self.assertFalse(self.manager._lock.locked())
 
@@ -293,13 +332,38 @@ class ControlsTests(unittest.TestCase):
 
     def test_heatmap_escapes_model_text_and_marks_unmeasured_cells(self):
         frames = list(self.stream())
-        result = copy.deepcopy(frames[-1][3])
+        result = copy.deepcopy(frames[-1][4])
         result["pairs"][0]["recipient_text"] = '<img src=x onerror="bad()">'
         result["cells"] = result["cells"][:1]
         chart = controls.heatmap(result)
         self.assertNotIn("<img", chart)
         self.assertIn("&lt;img", chart)
         self.assertIn("Not measured", chart)
+
+    def test_contrast_reaches_status_and_recovery_view(self):
+        status, recovery, *_rest, result, _run, _stop = list(self.stream(contrast=1))[-1]
+        self.assertEqual(result["contrast_text"], self.manager._decode_token(3) or self.manager._token_fallback(3))
+        self.assertIn("− log p(", status)
+        self.assertIn("+1.00", recovery)
+        undefined = dict(result, recovery_defined=False)
+        self.assertIn("Recovery is undefined", controls.heatmap(undefined, controls.RECOVERY))
+
+    def test_default_contrast_is_source_next_token_unless_it_is_the_answer(self):
+        self.assertEqual(controls.default_contrast(self.donor, self.recipient, 1, 0), 0)
+        # The source's first token equals the recipient's first answer token.
+        self.assertEqual(controls.default_contrast(self.donor, self.recipient, 0, 0), controls.NO_CONTRAST)
+        self.assertEqual(controls.default_contrast(self.donor, self.recipient, 0, 1), 1)
+        self.assertEqual(controls.default_contrast(self.donor, self.recipient, 0, 2), controls.NO_CONTRAST)
+        self.assertEqual(controls.default_contrast(None, None, None, 0), controls.NO_CONTRAST)
+
+    def test_changing_answer_token_rechooses_contrast(self):
+        def contrast(target, donor_count=0):
+            update, *_reset = controls.prefix_changed(
+                self.donor, self.recipient, "A → B", target, donor_count, self.session)
+            return update["value"]
+        self.assertEqual(contrast(1), 0)
+        self.assertEqual(contrast(0), controls.NO_CONTRAST)
+        self.assertEqual(contrast(0, donor_count=1), 1)
 
 
 if __name__ == "__main__":
