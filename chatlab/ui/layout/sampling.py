@@ -28,7 +28,6 @@ from chatlab.ui.steering import (
 )
 from chatlab.ui.styles import set_message_box_keys
 
-
 # What wraps one sampling slider so its ↺ has somewhere to sit: the button is
 # taken out of the flow and put against the slider's head, and an absolute
 # position needs a positioned ancestor to measure from. The minimum width is

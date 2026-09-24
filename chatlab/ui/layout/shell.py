@@ -11,7 +11,7 @@ from chatlab.ui.extensions_page import restore_extensions
 from chatlab.ui.fork_tree import TREE_JS, render_fork_tree, select_tree_branch
 from chatlab.ui.inspection import JACOBIAN_JS
 from chatlab.ui.layout.common import CONVERSATION_PANE_QUEUE
-from chatlab.ui.models_page import go_to_models, select_model_to_load
+from chatlab.ui.model_switch import go_to_models, select_model_to_load
 from chatlab.ui.settings_page import refresh_hardware
 from chatlab.ui.styles import (
     COLUMN_JS,

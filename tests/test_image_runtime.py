@@ -875,7 +875,7 @@ class KindAwareFitTests(unittest.TestCase):
         reclamation under test are reached on a machine that has no card.
         """
 
-        from chatlab.ui import models_page, runtime
+        from chatlab.ui import memory_fit, runtime
 
         host = host or self.HOST
         on_cuda = device_memory.DeviceProfile(
@@ -892,12 +892,12 @@ class KindAwareFitTests(unittest.TestCase):
                 device_memory, "cuda_device_memory", return_value=self.ONE_CARD
             ),
             mock.patch.object(device_memory, "system_memory", return_value=host),
-            mock.patch.object(models_page, "device_profile", return_value=on_cuda),
+            mock.patch.object(memory_fit, "device_profile", return_value=on_cuda),
             mock.patch.object(runtime.MANAGER, "loaded_bytes", estimated),
         ):
             return (
-                models_page.replacement_profile(TEXT_KIND),
-                models_page.replacement_profile(IMAGE_KIND),
+                memory_fit.replacement_profile(TEXT_KIND),
+                memory_fit.replacement_profile(IMAGE_KIND),
             )
 
     def test_switching_pool_keeps_what_the_unload_gives_back(self):

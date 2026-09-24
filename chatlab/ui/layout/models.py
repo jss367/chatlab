@@ -12,35 +12,41 @@ from chatlab.model_discovery import DISCOVERY_ORDERS
 from chatlab.ui.icons import icon_classes
 from chatlab.ui.layout.common import QUIET_TICK
 from chatlab.ui.model_repository import UNCHECKED, check_model_repository, repository_view
-from chatlab.ui.models_page import (
-    ALL_KINDS,
-    MODEL_KIND_FILTERS,
+from chatlab.ui.model_search import (
     SEARCH_HINT,
     SEARCH_KINDS,
-    ask_remove_my_model,
-    clear_my_model_selection,
-    download_and_load_model,
-    download_model,
-    go_to_image_models,
-    hide_remove_confirm,
-    load_cached_model,
-    redownload_my_model,
     refresh_after_device,
-    refresh_current_model,
-    refresh_model_actions,
-    refresh_model_badge,
-    refresh_model_switch,
-    refresh_my_models,
     refresh_search_results,
-    refresh_stale_model_actions,
-    remove_my_model,
     search_models,
     search_table,
-    select_default_model,
-    select_my_model,
     select_search_result,
+)
+from chatlab.ui.model_switch import (
+    go_to_image_models,
+    refresh_current_model,
+    refresh_model_badge,
+    refresh_model_switch,
+    select_default_model,
     switch_model,
+)
+from chatlab.ui.models_page import (
+    download_and_load_model,
+    download_model,
+    load_cached_model,
+    refresh_model_actions,
+    refresh_stale_model_actions,
     unload_model,
+)
+from chatlab.ui.my_models import (
+    ALL_KINDS,
+    MODEL_KIND_FILTERS,
+    ask_remove_my_model,
+    clear_my_model_selection,
+    hide_remove_confirm,
+    redownload_my_model,
+    refresh_my_models,
+    remove_my_model,
+    select_my_model,
 )
 from chatlab.ui.scoring import SCORE_BUDGET_QUEUE, score_token_count
 from chatlab.ui.settings_page import refresh_hardware, refresh_thinking_mode

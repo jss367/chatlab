@@ -45,7 +45,7 @@ from chatlab.ui.layout.compare import build_compare_tab
 from chatlab.ui.layout.inspector import build_inspector_pane
 from chatlab.ui.layout.prompts import build_prompts_tab, build_score_tab
 from chatlab.ui.layout.sampling import build_sampling_controls, build_steering_controls
-from chatlab.ui.models_page import (
+from chatlab.ui.model_switch import (
     BADGE_REFRESH_SECONDS,
     loaded_model_badge,
     refresh_model_badge,

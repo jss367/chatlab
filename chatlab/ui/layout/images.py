@@ -24,7 +24,7 @@ from chatlab.ui.images_page import (
     stop_drawing,
 )
 from chatlab.ui.layout.common import QUIET_TICK
-from chatlab.ui.models_page import loaded_model_badge, refresh_image_badge
+from chatlab.ui.model_switch import loaded_model_badge, refresh_image_badge
 from chatlab.ui.styles import pane_handle
 
 
