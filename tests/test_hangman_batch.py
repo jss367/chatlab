@@ -180,6 +180,10 @@ class GuesserTests(Fixture):
         game = game_of(("go", "Board: _ _ _ _ _"), ("x", "Board: A _ _ _ _"), ("y", "Board: _ _ _ _ _"))
         self.assertIn("The revealed word STONE has S at position 1, where the board showed A.",
                       word_problems(game, "stone"))
+        # No word has the length of two boards of different lengths.
+        game = game_of(("go", "Board: _ _ _ _ _"), ("x", "Board: _ _ _ _ _ _"))
+        self.assertIn("The revealed word CRANE has 5 letters; the board had 6.", word_problems(game, "crane"))
+        self.assertIn("The revealed word CRANES has 6 letters; the board had 5.", word_problems(game, "cranes"))
         game = game_of(("go", "Board: _ _ _ _ _"), ("?", "Word: crane"))
         self.assertIn("The game revealed CRANE at response 2; this is GRAPE.", word_problems(game, "grape"))
 

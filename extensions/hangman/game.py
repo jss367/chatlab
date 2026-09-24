@@ -193,13 +193,14 @@ def word_problems(game, word):
 
 def _walk(game):
     """The contradictions ``check`` reports, before it drops repeats, and the
-    board state they leave: the length, every letter any board of that length
+    board state they leave: the length, every letter each length of board
     showed at each position, where each guessed letter was placed, and the
     first word revealed.
 
-    A word is held to every letter shown, not only to the latest board's: a
-    board that later hides a cell again contradicts the one before it, and a
-    word agreeing with the later board still disagrees with the earlier one.
+    A word is held to every board, not only to the latest one: a board that
+    later hides a cell again, or is drawn at another length, contradicts the
+    one before it, and a word agreeing with the later board still disagrees
+    with the earlier one.
     """
     problems = []
     length, shown, placed, cells = None, {}, {}, {}
@@ -224,6 +225,10 @@ def _walk(game):
                         placed[letter] = {i for i, character in enumerate(value) if character == letter}
                         pending.discard(letter)
         if board is not None:
+            drawn = cells.setdefault(len(board), {})
+            for position, cell in enumerate(board):
+                if cell != HIDDEN:
+                    drawn.setdefault(position, {})[cell] = None
             if length is not None and len(board) != length:
                 problems.append((number, f"The board went from {length} letters to {len(board)}."))
                 # Its positions line up with no other board, so it neither
@@ -243,7 +248,6 @@ def _walk(game):
                         shown.pop(position, None)
                     else:
                         shown[position] = cell
-                        cells.setdefault(position, {})[cell] = None
                         if cell != before and cell not in guessed:
                             problems.append((number, f"{cell.upper()} is on the board but was never guessed."))
                 for letter, positions in placed.items():
@@ -273,14 +277,17 @@ def _positions(positions):
 
 
 def _word_problems(word, length, cells, placed):
+    for size, shown in cells.items():
+        if len(word) != size:
+            yield f"The revealed word {word.upper()} has {len(word)} letters; the board had {size}."
+            continue
+        for position, letters in shown.items():
+            for letter in letters:
+                if word[position] != letter:
+                    yield (f"The revealed word {word.upper()} has {word[position].upper()} at position "
+                           f"{position + 1}, where the board showed {letter.upper()}.")
     if length is not None and len(word) != length:
-        yield f"The revealed word {word.upper()} has {len(word)} letters; the board had {length}."
         return
-    for position, letters in cells.items():
-        for letter in letters:
-            if position < len(word) and word[position] != letter:
-                yield (f"The revealed word {word.upper()} has {word[position].upper()} at position {position + 1}, "
-                       f"where the board showed {letter.upper()}.")
     for letter, positions in placed.items():
         actual = {i for i, character in enumerate(word) if character == letter}
         if actual != positions:
