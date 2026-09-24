@@ -311,6 +311,37 @@ class AdapterLoadTests(unittest.TestCase):
         self.assertIsNone(pipeline)
         self.assertEqual(device, "CPU")
 
+    def test_a_new_adapter_commit_over_the_same_base_is_a_new_revision(self):
+        import torch
+
+        with tempfile.TemporaryDirectory() as root:
+            first, _ = self.build(Path(root))
+            second = other_snapshot(
+                Path(root), ADAPTER, PINNED,
+                {path.name: path.read_bytes() for path in first.iterdir()},
+            )
+            managers = []
+            for path in (first, second):
+                manager = model_runtime.ModelManager()
+                manager.model, manager.tokenizer, _pipeline, _device = (
+                    model_runtime._read_text_model(path, torch, "cpu", torch.float32, None, "full")
+                )
+                manager.model_id, manager.precision = ADAPTER, "full"
+                managers.append(manager)
+            old, new = managers
+            self.assertEqual(old.model_revision(), f"{COMMIT}+{COMMIT}")
+            self.assertEqual(new.model_revision(), f"{COMMIT}+{PINNED}")
+
+            # A lens fitted to the first commit's weights is refused over the second.
+            lens = Path(root) / "lens.pt"
+            torch.save({
+                "J": {0: torch.eye(16)}, "source_layers": [0], "n_prompts": 1,
+                "d_model": 16, "model_revision": old.model_revision(),
+            }, lens)
+            self.assertEqual(old.import_jacobian_lens(str(lens), ADAPTER)["model_revision"], f"{COMMIT}+{COMMIT}")
+            with self.assertRaisesRegex(ValueError, "revision"):
+                new.import_jacobian_lens(str(lens), ADAPTER)
+
     def test_an_adapter_that_ships_a_grown_tokenizer_gets_embeddings_to_match(self):
         import torch
 

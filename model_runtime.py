@@ -4531,7 +4531,7 @@ def _read_text_model(
         if adapter is None:
             return model
         try:
-            return adapters.merge_adapter(
+            model = adapters.merge_adapter(
                 model, adapter, len(tokenizer) if own_tokenizer else None
             )
         except ImportError as error:
@@ -4539,6 +4539,21 @@ def _read_text_model(
                 "LoRA adapters need the peft package: run `pip install peft` "
                 f"and load again. ({error})"
             ) from error
+        # The config came from the base, so its commit hash is the base's,
+        # and a new commit of the adapter over the same base would read as
+        # the same weights to everything that asks which weights these are:
+        # ModelManager.model_revision, and through it a remembered lens, and
+        # the revision a lens file itself records. So the revision becomes
+        # both commits, the base's and the adapter's, and either changing
+        # changes it. Rewritten on the config rather than kept beside it so
+        # there is still one place to read it from. Transformers only reads
+        # the field while it resolves files for a load, and the merged
+        # model's are all read by now. Unrecorded when either half is, since
+        # a half-known revision would vouch for weights it cannot tell apart.
+        base = getattr(model.config, "_commit_hash", None)
+        own = adapter.name if adapter.parent.name == "snapshots" else None
+        model.config._commit_hash = f"{base}+{own}" if base and own else None
+        return model
 
     if backend == "cuda":
         model = merged(AutoModelForCausalLM.from_pretrained(
