@@ -15,9 +15,7 @@ from gradio.context import LocalContext
 from conversation import (
     turn_tokens,
 )
-from model_runtime import (
-    PROMPT_SCORE_LIMIT,
-)
+from text_generation import PROMPT_SCORE_LIMIT
 from token_metrics import (
     COLOR_SCALES,
     DEFAULT_COLOR_SCALE,

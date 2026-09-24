@@ -26,7 +26,8 @@ import charts
 import compare
 from experiment_runs import SESSION_ID
 from conversation import make_turn, model_messages
-from model_runtime import LOADING, ModelChanged
+from model_runtime import LOADING
+from text_generation import ModelChanged
 from steering import SteeringError, compact as compact_steering, from_controls
 from trace_export import write_private_text
 from ui import runtime
@@ -509,7 +510,7 @@ def _decoded_spans(
     the alignment falls back to standalone lengths and says so.
     """
 
-    from model_runtime import IncrementalDecoder
+    from tokenization import IncrementalDecoder
 
     tokenizer = runtime.MANAGER.tokenizer
     if tokenizer is None:

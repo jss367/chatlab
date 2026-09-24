@@ -10,9 +10,10 @@ from transformers import LlamaConfig, LlamaForCausalLM, Qwen3Config, Qwen3ForCau
 
 import charts
 import kv_cache
-import model_runtime
+import model_inspection
 from kv_cache import CacheLayer
-from model_runtime import ModelChanged, ModelManager
+from model_runtime import ModelManager
+from text_generation import ModelChanged
 from test_mlx_runtime import needs_mlx, tiny_llama
 from tiny_tokenizer import build
 from ui import inspection, runtime
@@ -205,7 +206,7 @@ class TorchCacheTests(unittest.TestCase):
         self.addCleanup(holder.join)
         self.addCleanup(finish.set)
         started.wait(5)
-        with mock.patch.object(model_runtime, "KV_CACHE_WAIT", 0.05):
+        with mock.patch.object(model_inspection, "KV_CACHE_WAIT", 0.05):
             with self.assertRaises(kv_cache.CacheBusy):
                 self.manager.read_kv_cache(held, 1)
 

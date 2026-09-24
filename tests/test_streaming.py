@@ -8,11 +8,16 @@ import numpy as np
 import torch
 
 import model_runtime
+import device_memory
+import text_generation
+import tokenization
 import settings
 import settings_sandbox
 import tiny_tokenizer
 from conversation import split_reasoning
-from model_runtime import IncrementalDecoder, ModelChanged, ModelManager
+from model_runtime import ModelManager
+from text_generation import ModelChanged
+from tokenization import IncrementalDecoder
 
 
 def setUpModule():
@@ -239,7 +244,7 @@ class IncrementalDecoderTests(unittest.TestCase):
     def test_a_long_unbroken_run_is_flushed(self):
         tokenizer = FakeTokenizer(pieces=["x"])
         decoder = IncrementalDecoder(tokenizer)
-        count = model_runtime.DECODE_CACHE_LIMIT * 3
+        count = tokenization.DECODE_CACHE_LIMIT * 3
         for _ in range(count):
             decoder.push(0)
         self.assertEqual(decoder.text, "x" * count)
@@ -251,7 +256,7 @@ class IncrementalDecoderTests(unittest.TestCase):
         pieces = [b"x"] + [bytes([byte]) for byte in emoji.encode("utf-8")]
         tokenizer = BytePieceTokenizer(pieces)
         # Walk the emoji across every offset a flush could cut it at.
-        for filler in range(model_runtime.DECODE_CACHE_LIMIT + 4):
+        for filler in range(tokenization.DECODE_CACHE_LIMIT + 4):
             with self.subTest(filler=filler):
                 run = [0] * filler + [1, 2, 3, 4]
                 self.assert_matches_full_decode(
@@ -289,7 +294,7 @@ class IncrementalDecoderTests(unittest.TestCase):
 
         text = "\U0001f3b2\U0001f9e0\U0001f501\u21a9\ufe0f\U0001f4be\U0001f4c2" * 8
         token_ids = tokenizer.encode(text)
-        self.assertGreater(len(token_ids), model_runtime.DECODE_CACHE_LIMIT)
+        self.assertGreater(len(token_ids), tokenization.DECODE_CACHE_LIMIT)
 
         decoder = IncrementalDecoder(tokenizer)
         for position, token_id in enumerate(token_ids, start=1):
@@ -301,11 +306,11 @@ class IncrementalDecoderTests(unittest.TestCase):
         tokenizer = FakeTokenizer(pieces=["x"])
         decoder = IncrementalDecoder(tokenizer)
         ceiling = (
-            model_runtime.DECODE_CACHE_LIMIT
-            + model_runtime.DECODE_FLUSH_GRACE
-            + model_runtime.DECODE_CONTEXT_TOKENS
+            tokenization.DECODE_CACHE_LIMIT
+            + tokenization.DECODE_FLUSH_GRACE
+            + tokenization.DECODE_CONTEXT_TOKENS
         )
-        for _ in range(model_runtime.DECODE_CACHE_LIMIT * 10):
+        for _ in range(tokenization.DECODE_CACHE_LIMIT * 10):
             decoder.push(0)
             self.assertLessEqual(len(decoder._cache), ceiling)
 
@@ -340,7 +345,7 @@ class GenerateStreamingTests(unittest.TestCase):
                     return torch.is_inference_mode_enabled(), torch.is_grad_enabled()
 
                 with (
-                    mock.patch.object(model_runtime, "STREAM_BATCH_TOKENS", 1),
+                    mock.patch.object(text_generation, "STREAM_BATCH_TOKENS", 1),
                     ThreadPoolExecutor(1) as first,
                     ThreadPoolExecutor(1) as second,
                 ):
@@ -413,7 +418,7 @@ class GenerateStreamingTests(unittest.TestCase):
         # The log is the only record of what a response cost, and it is what
         # makes a later memory failure readable. One line, never one a token.
         manager = loaded_manager([0, 1, EOS_ID])
-        with self.assertLogs("model_runtime", level="INFO") as logged:
+        with self.assertLogs("text_generation", level="INFO") as logged:
             self.collect(manager, max_new_tokens=40)
         lines = [line for line in logged.output if "Generated" in line]
         self.assertEqual(len(lines), 1)
@@ -424,7 +429,7 @@ class GenerateStreamingTests(unittest.TestCase):
         # metrics, but max_new_tokens bounds the continuation alone, so
         # counting both would log "3 tokens of at most 1".
         manager = loaded_manager([0, 1, 2, EOS_ID])
-        with self.assertLogs("model_runtime", level="INFO") as logged:
+        with self.assertLogs("text_generation", level="INFO") as logged:
             for _ in manager.generate(
                 [{"role": "user", "content": "hi"}],
                 temperature=0.0,
@@ -449,8 +454,8 @@ class GenerateStreamingTests(unittest.TestCase):
             raise RuntimeError("MPS backend out of memory")
 
         manager._prefill = explode
-        with self.assertLogs("model_runtime", level="INFO") as logged:
-            with self.assertRaises(model_runtime.OutOfMemoryError):
+        with self.assertLogs("text_generation", level="INFO") as logged:
+            with self.assertRaises(device_memory.OutOfMemoryError):
                 for _ in manager.generate(
                     [{"role": "user", "content": "hi"}],
                     temperature=0.0,
@@ -475,11 +480,11 @@ class GenerateStreamingTests(unittest.TestCase):
             held.append(manager._lock.locked())
             return 3 * 1024**3
 
-        saved = model_runtime.reserved_bytes
-        model_runtime.reserved_bytes = watched
+        saved = device_memory.reserved_bytes
+        device_memory.reserved_bytes = watched
         self.addCleanup(setattr, model_runtime, "reserved_bytes", saved)
 
-        with self.assertLogs("model_runtime", level="INFO") as logged:
+        with self.assertLogs("text_generation", level="INFO") as logged:
             self.collect(manager, max_new_tokens=8)
 
         self.assertTrue(held, "the figure was never read")
@@ -498,7 +503,7 @@ class GenerateStreamingTests(unittest.TestCase):
             seed=1,
         )
         next(stream)
-        with self.assertLogs("model_runtime", level="INFO") as logged:
+        with self.assertLogs("text_generation", level="INFO") as logged:
             stream.close()
         self.assertTrue(any("Generated" in line for line in logged.output))
 
@@ -506,7 +511,7 @@ class GenerateStreamingTests(unittest.TestCase):
         manager = loaded_manager([0, 1, 2, 4, 5, 6, 7, 2])
         updates = self.collect(manager, max_new_tokens=40)
         self.assertEqual(updates[-1][1], 40)
-        self.assertLessEqual(len(updates), 40 // model_runtime.STREAM_BATCH_TOKENS + 1)
+        self.assertLessEqual(len(updates), 40 // text_generation.STREAM_BATCH_TOKENS + 1)
 
     def test_the_final_update_holds_the_whole_response(self):
         manager = loaded_manager([0, 1, 2])

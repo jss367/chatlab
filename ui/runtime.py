@@ -5,9 +5,7 @@ put a stub in its place with ``runtime.MANAGER = ...``."""
 
 from __future__ import annotations
 
-from model_runtime import (
-    ModelManager,
-)
+from model_runtime import ModelManager
 
 
 MANAGER = ModelManager()

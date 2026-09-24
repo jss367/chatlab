@@ -21,7 +21,7 @@ import charts
 import image_runtime
 import settings
 from image_runtime import ImageRequest, NeedsMoreThanAPrompt, Unwatchable
-from model_runtime import ModelBusy
+from model_cache import ModelBusy
 from token_metrics import PROMPT_ATTENTION_SCALE, UNSCORED_LABEL
 from ui import runtime
 from ui.common import (

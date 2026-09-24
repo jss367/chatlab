@@ -9,7 +9,7 @@ import gradio as gr
 
 import experiment_runs
 import settings
-from model_runtime import MLX_KIND, TEXT_KIND, cache_status
+from model_cache import MLX_KIND, TEXT_KIND, cache_status
 from ui import runtime
 from ui.common import failure_status
 from ui.compare import fill_slot

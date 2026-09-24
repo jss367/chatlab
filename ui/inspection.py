@@ -14,10 +14,8 @@ import charts
 import jacobian_lens
 import kv_cache
 import steering as steering_vectors
-from model_runtime import (
-    LOADING,
-    ModelChanged,
-)
+from model_runtime import LOADING
+from text_generation import ModelChanged
 from ui import icons, runtime
 from ui.common import (
     NAV_ICONS,

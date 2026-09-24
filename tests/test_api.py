@@ -13,10 +13,16 @@ from fastapi.testclient import TestClient
 
 import api
 import model_runtime
+import device_memory
+import model_cache
+import model_loading
+import text_generation
 import settings
 import settings_sandbox
 from conversation import split_reasoning
-from model_runtime import CachedModel, CacheStatus, GenerationUpdate, ScoredText
+from model_cache import CachedModel, CacheStatus
+from model_inspection import ScoredText
+from text_generation import GenerationUpdate
 from ui import runtime
 
 from test_streaming import loaded_manager
@@ -63,7 +69,7 @@ class Recorder:
         return self.model_id is not None
 
     def loaded_model(self):
-        return model_runtime.LoadedModel(
+        return model_loading.LoadedModel(
             self.model_id, self.device_name, self.precision, self.load_id
         )
 
@@ -197,7 +203,7 @@ class ModelListTests(ApiTestCase):
             ),
             CachedModel(
                 model_id="org/pipe",
-                status=CacheStatus(cached_bytes=2000, kind=model_runtime.IMAGE_KIND),
+                status=CacheStatus(cached_bytes=2000, kind=model_cache.IMAGE_KIND),
                 architecture="StableDiffusionPipeline",
             ),
         ]
@@ -223,7 +229,7 @@ class ModelListTests(ApiTestCase):
 
         def loaded_model():
             reads.append(True)
-            return model_runtime.LoadedModel("fake/model", "CPU", "full", "fake/model#1")
+            return model_loading.LoadedModel("fake/model", "CPU", "full", "fake/model#1")
 
         self.manager.loaded_model = loaded_model
 
@@ -300,7 +306,7 @@ class ModelListTests(ApiTestCase):
 
         def loaded_model():
             torn.append(True)
-            return model_runtime.LoadedModel(
+            return model_loading.LoadedModel(
                 "fake/model", "Apple Metal (MPS), 4-bit weights", "4-bit", "fake/model#2"
             )
 
@@ -558,7 +564,7 @@ class RefusalTests(ApiTestCase):
                 self.assertFalse(runtime.MANAGER.busy)
 
     def test_a_model_that_will_not_fit_is_its_own_status(self):
-        self.use(Recorder(raises=model_runtime.OutOfMemoryError("no room")))
+        self.use(Recorder(raises=device_memory.OutOfMemoryError("no room")))
 
         response = self.post(messages=[{"role": "user", "content": "hi"}])
 
@@ -690,7 +696,7 @@ class RequestPlumbingTests(ApiTestCase):
 
     def test_a_load_that_landed_in_between_is_refused(self):
         self.use(
-            Recorder(raises=model_runtime.ModelChanged("the model has changed"))
+            Recorder(raises=text_generation.ModelChanged("the model has changed"))
         )
 
         response = self.post(messages=[{"role": "user", "content": "hi"}])
@@ -1498,7 +1504,7 @@ class ScoreTests(ApiTestCase):
 
     def test_a_score_whose_model_changed_underneath_it_is_refused(self):
         def changed(text, **kwargs):
-            raise model_runtime.ModelChanged("the model in memory is another")
+            raise text_generation.ModelChanged("the model in memory is another")
 
         self.manager.score_text = changed
 

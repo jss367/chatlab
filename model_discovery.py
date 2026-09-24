@@ -5,7 +5,8 @@ repository files, including alternate formats. Keep these separate from loaded
 weight sizes. Model IDs link to the source cards in the UI.
 """
 
-from model_runtime import HubModel, TEXT_KIND, IMAGE_KIND, MLX_KIND
+from hub_search import HubModel
+from model_cache import IMAGE_KIND, MLX_KIND, TEXT_KIND
 
 
 DISCOVERY_ORDERS = ("Recommended", "Popular", "Trending", "New")
