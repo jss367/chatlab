@@ -253,7 +253,7 @@ def package_versions() -> str:
 def machine_note() -> str:
     """The machine's own memory, which is the pool every backend here draws on."""
 
-    from model_runtime import memory_note, system_memory
+    from device_memory import memory_note, system_memory
 
     total, available = system_memory()
     return f"{memory_note(total)} of memory, {memory_note(available)} available"
@@ -290,7 +290,7 @@ def log_environment(target: Path | None = None) -> None:
     were. Without it a memory kill reported a week later cannot even be
     matched to a release. The device itself is not here - torch has not
     finished importing this early - and is recorded by
-    :func:`model_runtime.warm_device` as soon as it can be read.
+    :func:`device_memory.warm_device` as soon as it can be read.
     """
 
     logger = logging.getLogger(__name__)

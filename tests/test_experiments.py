@@ -7,7 +7,7 @@ from unittest import mock
 import compare
 import experiment_runs as runs
 import settings_sandbox
-from model_runtime import LoadedModel
+from model_loading import LoadedModel
 from test_compare import metric, run
 from test_streaming import EOS_ID, loaded_manager
 from ui import experiment_compare, experiments, runtime

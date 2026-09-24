@@ -13,16 +13,16 @@ import numpy
 import torch
 
 import image_runtime
-import model_runtime
+import device_memory
+import model_cache
 import settings_sandbox
 from fake_pipeline import FakePipeline, FakeTokenizer
 from image_runtime import ImageRequest
-from model_runtime import (
+from model_cache import (
     IMAGE_KIND,
     MODEL_WEIGHTS,
     TEXT_KIND,
     ModelBusy,
-    ModelManager,
     cache_status,
     is_pipeline,
     pipeline_class,
@@ -32,6 +32,7 @@ from model_runtime import (
     pipeline_weight_bytes,
     weight_bytes_for,
 )
+from model_runtime import ModelManager
 
 
 def setUpModule():
@@ -358,7 +359,7 @@ class PipelineLayoutTests(unittest.TestCase):
 
             # Both ship both, so either would load; the choice is stable.
             self.assertEqual(pipeline_variant(snapshot), "bf16")
-            self.assertFalse(model_runtime.pipeline_variant_missing(snapshot))
+            self.assertFalse(model_cache.pipeline_variant_missing(snapshot))
             self.assertEqual(cache_status(MODEL, Path(root)).missing_files, ())
 
     def test_components_sharing_no_variant_are_reported_incomplete(self):
@@ -376,7 +377,7 @@ class PipelineLayoutTests(unittest.TestCase):
             snapshot = self.snapshot(root, files)
             status = cache_status(MODEL, Path(root))
 
-            self.assertTrue(model_runtime.pipeline_variant_missing(snapshot))
+            self.assertTrue(model_cache.pipeline_variant_missing(snapshot))
             self.assertIsNone(pipeline_variant(snapshot))
             self.assertEqual(status.missing_files, (MODEL_WEIGHTS,))
             self.assertFalse(status.complete)
@@ -390,7 +391,7 @@ class PipelineLayoutTests(unittest.TestCase):
             snapshot = self.snapshot(root, files)
 
             self.assertIsNone(pipeline_variant(snapshot))
-            self.assertFalse(model_runtime.pipeline_variant_missing(snapshot))
+            self.assertFalse(model_cache.pipeline_variant_missing(snapshot))
 
     def test_shards_are_checked_against_the_variant_the_pipeline_loads(self):
         """from_pretrained takes one variant for the whole pipeline, so a
@@ -597,7 +598,7 @@ class PipelineLayoutTests(unittest.TestCase):
     def test_the_pipeline_class_stands_in_for_an_architecture(self):
         with tempfile.TemporaryDirectory() as root:
             self.snapshot(root, self.whole())
-            from model_runtime import list_cached_models
+            from model_cache import list_cached_models
 
             (entry,) = list_cached_models(Path(root))
 
@@ -644,7 +645,7 @@ class PipelineDtypeTests(unittest.TestCase):
             snapshot = self.pipeline(Path(root), {"unet": ("float16", 32)})
             weights = snapshot / "unet" / "diffusion_pytorch_model.safetensors"
 
-            self.assertEqual(model_runtime.safetensors_dtype(weights), "float16")
+            self.assertEqual(model_cache.safetensors_dtype(weights), "float16")
 
     def test_each_component_is_measured_in_its_own_dtype(self):
         """A pipeline's components need not agree, and one dtype applied to
@@ -655,28 +656,28 @@ class PipelineDtypeTests(unittest.TestCase):
                 Path(root),
                 {"unet": ("float16", 200), "text_encoder": ("float32", 100)},
             )
-            unet = model_runtime._loaded_variant_bytes(
-                model_runtime._component_weights(snapshot / "unet")
+            unet = model_cache._loaded_variant_bytes(
+                model_cache._component_weights(snapshot / "unet")
             )
-            encoder = model_runtime._loaded_variant_bytes(
-                model_runtime._component_weights(snapshot / "text_encoder")
+            encoder = model_cache._loaded_variant_bytes(
+                model_cache._component_weights(snapshot / "text_encoder")
             )
 
             self.assertEqual(
-                model_runtime.component_dtype(snapshot / "unet"), "float16"
+                model_cache.component_dtype(snapshot / "unet"), "float16"
             )
             self.assertEqual(
-                model_runtime.component_dtype(snapshot / "text_encoder"), "float32"
+                model_cache.component_dtype(snapshot / "text_encoder"), "float32"
             )
             # A float32 load doubles the fp16 unet and leaves the fp32
             # encoder alone; a single dtype over the sum would scale both.
             self.assertEqual(
-                model_runtime.pipeline_loaded_bytes(snapshot, "float32"),
+                model_cache.pipeline_loaded_bytes(snapshot, "float32"),
                 unet * 2 + encoder,
             )
             # And a float16 load halves the encoder, leaving the unet alone.
             self.assertEqual(
-                model_runtime.pipeline_loaded_bytes(snapshot, "float16"),
+                model_cache.pipeline_loaded_bytes(snapshot, "float16"),
                 unet + encoder // 2,
             )
 
@@ -685,7 +686,7 @@ class PipelineDtypeTests(unittest.TestCase):
             path = Path(root) / "weights.safetensors"
             path.write_bytes(b"nowhere near a header")
 
-            self.assertIsNone(model_runtime.safetensors_dtype(path))
+            self.assertIsNone(model_cache.safetensors_dtype(path))
 
     def test_a_header_claiming_an_absurd_length_is_refused(self):
         # A truncated or hostile file, not something to allocate for.
@@ -693,7 +694,7 @@ class PipelineDtypeTests(unittest.TestCase):
             path = Path(root) / "weights.safetensors"
             path.write_bytes((2**60).to_bytes(8, "little") + b"{}")
 
-            self.assertIsNone(model_runtime.safetensors_dtype(path))
+            self.assertIsNone(model_cache.safetensors_dtype(path))
 
     def test_a_half_precision_pipeline_is_doubled_for_a_float32_load(self):
         """The bug this closes: on the CPU the loader asks for float32, so an
@@ -703,10 +704,10 @@ class PipelineDtypeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             snapshot = self.pipeline(Path(root), {"unet": ("float16", 200)})
-            stored = model_runtime.pipeline_weight_bytes(snapshot)
+            stored = model_cache.pipeline_weight_bytes(snapshot)
 
             with mock.patch.object(
-                model_runtime, "system_memory", return_value=(64 * 1024**3, 32 * 1024**3)
+                device_memory, "system_memory", return_value=(64 * 1024**3, 32 * 1024**3)
             ):
                 as_float32, _ = ModelManager._check_memory(
                     "org/pipe", snapshot, "float32", "cpu", kind=IMAGE_KIND
@@ -728,11 +729,11 @@ class PipelineDtypeTests(unittest.TestCase):
             stored = weights.stat().st_size
             weights.rename(snapshot / "unet" / "diffusion_pytorch_model.bin")
 
-            self.assertIsNone(model_runtime.component_dtype(snapshot / "unet"))
-            self.assertEqual(model_runtime.ASSUMED_PIPELINE_DTYPE, "float16")
+            self.assertIsNone(model_cache.component_dtype(snapshot / "unet"))
+            self.assertEqual(model_cache.ASSUMED_PIPELINE_DTYPE, "float16")
             # Assumed fp16, so a float32 load is estimated at twice the file.
             self.assertEqual(
-                model_runtime.pipeline_loaded_bytes(snapshot, "float32"), stored * 2
+                model_cache.pipeline_loaded_bytes(snapshot, "float32"), stored * 2
             )
 
     def test_a_pipeline_on_cuda_has_to_fit_the_card_and_the_machine(self):
@@ -761,12 +762,12 @@ class PipelineDtypeTests(unittest.TestCase):
             )
             (snapshot / "config.json").write_text('{"model_type": "olmo3"}')
             with (
-                mock.patch.object(model_runtime, "cuda_memory", return_value=all_cards),
+                mock.patch.object(device_memory, "cuda_memory", return_value=all_cards),
                 mock.patch.object(
-                    model_runtime, "cuda_device_memory", return_value=one_card
+                    device_memory, "cuda_device_memory", return_value=one_card
                 ),
-                mock.patch.object(model_runtime, "system_memory", return_value=host),
-                mock.patch.object(model_runtime, "check_memory_for_load") as checked,
+                mock.patch.object(device_memory, "system_memory", return_value=host),
+                mock.patch.object(device_memory, "check_memory_for_load") as checked,
             ):
                 ModelManager._check_memory(
                     "org/pipe", snapshot, "float16", "cuda", kind=IMAGE_KIND
@@ -806,11 +807,11 @@ class KindAwareFitTests(unittest.TestCase):
                 Path(root), {"unet": ("float16", 64)}
             )
 
-            as_image = model_runtime.estimate_snapshot_bytes(
+            as_image = model_cache.estimate_snapshot_bytes(
                 snapshot, "float16", None, IMAGE_KIND
             )
-            as_text = model_runtime.estimate_snapshot_bytes(snapshot, "float16")
-            summed = model_runtime.pipeline_loaded_bytes(snapshot, "float16")
+            as_text = model_cache.estimate_snapshot_bytes(snapshot, "float16")
+            summed = model_cache.pipeline_loaded_bytes(snapshot, "float16")
 
         self.assertEqual(as_image, summed)
         # A pipeline has no checkpoint at its root, so the text reading has
@@ -826,10 +827,10 @@ class KindAwareFitTests(unittest.TestCase):
                 Path(root), {"unet": ("float16", 64)}
             )
 
-            whole = model_runtime.estimate_snapshot_bytes(
+            whole = model_cache.estimate_snapshot_bytes(
                 snapshot, "float16", None, IMAGE_KIND
             )
-            asked_for_4bit = model_runtime.estimate_snapshot_bytes(
+            asked_for_4bit = model_cache.estimate_snapshot_bytes(
                 snapshot, "float16", 4, IMAGE_KIND
             )
 
@@ -841,18 +842,18 @@ class KindAwareFitTests(unittest.TestCase):
 
     def memory(self):
         return (
-            mock.patch.object(model_runtime, "cuda_memory", return_value=self.ALL_CARDS),
+            mock.patch.object(device_memory, "cuda_memory", return_value=self.ALL_CARDS),
             mock.patch.object(
-                model_runtime, "cuda_device_memory", return_value=self.ONE_CARD
+                device_memory, "cuda_device_memory", return_value=self.ONE_CARD
             ),
-            mock.patch.object(model_runtime, "system_memory", return_value=self.HOST),
+            mock.patch.object(device_memory, "system_memory", return_value=self.HOST),
         )
 
     def profile(self, backend):
         cards, card, host = self.memory()
         with cards, card, host:
-            total, available, pool = model_runtime.memory_pool(backend)
-        return model_runtime.DeviceProfile(
+            total, available, pool = device_memory.memory_pool(backend)
+        return device_memory.DeviceProfile(
             backend=backend, total=total, available=available, pool=pool
         )
 
@@ -877,7 +878,7 @@ class KindAwareFitTests(unittest.TestCase):
         from ui import models_page, runtime
 
         host = host or self.HOST
-        on_cuda = model_runtime.DeviceProfile(
+        on_cuda = device_memory.DeviceProfile(
             backend="cuda",
             total=self.ALL_CARDS[0] + host[0],
             available=self.ALL_CARDS[1] + host[1],
@@ -886,11 +887,11 @@ class KindAwareFitTests(unittest.TestCase):
             held_here=held if held_here is None else held_here,
         )
         with (
-            mock.patch.object(model_runtime, "cuda_memory", return_value=self.ALL_CARDS),
+            mock.patch.object(device_memory, "cuda_memory", return_value=self.ALL_CARDS),
             mock.patch.object(
-                model_runtime, "cuda_device_memory", return_value=self.ONE_CARD
+                device_memory, "cuda_device_memory", return_value=self.ONE_CARD
             ),
-            mock.patch.object(model_runtime, "system_memory", return_value=host),
+            mock.patch.object(device_memory, "system_memory", return_value=host),
             mock.patch.object(models_page, "device_profile", return_value=on_cuda),
             mock.patch.object(runtime.MANAGER, "loaded_bytes", estimated),
         ):
@@ -1834,7 +1835,7 @@ class ManagerImageRunTests(unittest.TestCase):
     def test_running_out_of_memory_advises_something_a_reader_can_see(self):
         # A conversation and a response length mean nothing to someone who
         # was drawing a picture.
-        from model_runtime import OutOfMemoryError
+        from device_memory import OutOfMemoryError
 
         class Full(FakePipeline):
             def __call__(self, *args, **kwargs):
@@ -1982,7 +1983,7 @@ class PipelineLoaderTests(unittest.TestCase):
             mock.patch.object(manager, "_cap_mps_memory", return_value=None),
             mock.patch.object(manager, "_check_memory", return_value=(None, None)) as check,
             mock.patch.object(manager, "_release_device_cache"),
-            mock.patch("model_runtime.allocated_bytes", return_value=None),
+            mock.patch("device_memory.allocated_bytes", return_value=None),
         ):
             device = manager._load_locked(
                 "org/pipe", Path("/snap"), fake_torch, precision=precision, kind=IMAGE_KIND
@@ -2009,13 +2010,13 @@ class PipelineLoaderTests(unittest.TestCase):
         self.assertIsNone(check.call_args.kwargs["bits"])
 
     def test_the_variant_a_repo_needs_reaches_diffusers(self):
-        with mock.patch.object(model_runtime, "pipeline_variant", return_value="fp16"):
+        with mock.patch.object(model_cache, "pipeline_variant", return_value="fp16"):
             _manager, _device, calls, _check = self.load_pipeline()
 
         self.assertEqual(calls[0]["variant"], "fp16")
 
     def test_a_plain_repo_is_not_given_a_variant_to_look_for(self):
-        with mock.patch.object(model_runtime, "pipeline_variant", return_value=None):
+        with mock.patch.object(model_cache, "pipeline_variant", return_value=None):
             _manager, _device, calls, _check = self.load_pipeline()
 
         self.assertNotIn("variant", calls[0])

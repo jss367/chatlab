@@ -8,9 +8,8 @@ import library
 import settings
 import themes
 from conversation import MAIN_BRANCH, branch_sampling
-from model_runtime import (
+from device_memory import (
     MEMORY_HEADROOM_BYTES,
-    QUANTIZED_BITS,
     DeviceProfile,
     allocated_bytes,
     device_label,
@@ -20,6 +19,7 @@ from model_runtime import (
     memory_note,
     reserved_bytes,
 )
+from model_loading import QUANTIZED_BITS
 from ui import runtime
 from ui.conversations import remember_branch_sampling
 

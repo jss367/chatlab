@@ -10,7 +10,8 @@ from unittest import mock
 
 from extensions.maze_experiments.maze import PASSAGES, Maze, apply_call, call_text, default_instruction, generate, parse_call
 from extensions.maze_experiments.runner import Episode, TERMINAL, context_messages, fork_token_edit, from_payload, stream_episode
-from model_runtime import GENERATING, LoadedModel, ModelManager
+from model_loading import LoadedModel
+from model_runtime import GENERATING, ModelManager
 from extension_api import ModelService
 from extension_api import TokenInspector
 from token_metrics import unscored_metric

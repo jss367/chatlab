@@ -16,9 +16,9 @@ logit lens by wrapping each layer for the one step an inspection takes,
 and the attention weights can be recovered by standing in for the
 attention kernel during that same step. What is different is hidden behind
 :class:`MlxEngine`, which answers the same questions
-:class:`model_runtime.TorchEngine` does.
+:class:`torch_engine.TorchEngine` does.
 
-Imported lazily by :mod:`model_runtime`, and only when an MLX repository is
+Imported lazily by :mod:`model_loading`, and only when an MLX repository is
 loaded: mlx installs on Apple silicon alone, and nothing here is needed to
 list the cache or to run a Transformers model.
 """
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 # Where an mlx-lm ``Model`` keeps its decoder stack and its final norm. Most
 # architectures wrap them in ``model``; the GPT-2 family in ``transformer``.
-# The same containers :data:`model_runtime.FINAL_NORM_CONTAINERS` lists, and
+# The same containers :data:`torch_engine.FINAL_NORM_CONTAINERS` lists, and
 # the same norm names, so the two lenses look in the same places. The stack
 # itself is ``layers`` almost everywhere, ``h`` in the GPT-2 family (gpt2,
 # gpt_bigcode, gpt_neox, exaone, qwen, phixtral, nanochat) and ``blocks`` in

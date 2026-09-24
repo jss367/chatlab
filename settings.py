@@ -57,11 +57,11 @@ PREFILL_TOKEN_LIMIT_RANGE = (256, 131072)
 # The share of Metal's recommended working set PyTorch may allocate before it
 # raises rather than letting macOS page the machine into a freeze. Its own
 # default is 1.7, well past physical memory. A null in the file means the
-# model runtime's default of 1.0; see model_runtime.mps_memory_fraction.
+# model runtime's default of 1.0; see device_memory.mps_memory_fraction.
 MPS_MEMORY_FRACTION_RANGE = (0.1, 2.0)
 # How the weights are held in memory. "full" is the checkpoint's own
 # half-precision; the other two quantize the linear layers on the way in,
-# which Apple Metal alone supports (see model_runtime.QUANTIZED_BITS).
+# which Apple Metal alone supports (see model_loading.QUANTIZED_BITS).
 WEIGHT_PRECISIONS = ("full", "8-bit", "4-bit")
 
 # How an image run is set up. The step count is where the denoising

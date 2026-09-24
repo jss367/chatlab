@@ -7,7 +7,7 @@ from unittest import mock
 
 import app
 import gradio as gr
-from model_runtime import ModelChanged
+from text_generation import ModelChanged
 from ui import runtime, token_menu
 from conversation import forget_measurements, to_json, turn_entries
 from test_app_flow import (

@@ -29,10 +29,8 @@ from conversation import (
     turn_tokens,
     user_index_at_or_before,
 )
-from model_runtime import (
-    LOADING,
-    ModelChanged,
-)
+from model_runtime import LOADING
+from text_generation import ModelChanged
 from token_metrics import (
     DEFAULT_COLOR_SCALE,
     summarize,

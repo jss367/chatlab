@@ -12,17 +12,16 @@ import numpy as np
 import app
 from ui import models_page, panel, runtime
 import settings
+from model_cache import MODEL_WEIGHTS, CacheStatus
+from model_inspection import ScoredText
 from model_runtime import (
     GENERATING,
     LOADING,
-    MODEL_WEIGHTS,
-    PROMPT_SCORE_LIMIT,
-    CacheStatus,
-    DownloadProgress,
     ExclusiveLoad,
     ModelManager,
-    ScoredText,
 )
+from progress_bars import DownloadProgress
+from text_generation import PROMPT_SCORE_LIMIT
 from token_metrics import UNSCORED_BEYOND_LIMIT, build_metric, unscored_metric
 
 

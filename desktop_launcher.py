@@ -16,7 +16,7 @@ import api
 import branding
 import desktop
 import logs
-import model_runtime
+import device_memory
 import updater
 from app import build_app
 from desktop_smoke import smoke_test_metal, smoke_test_mlx, smoke_test_pipelines
@@ -454,7 +454,7 @@ def run_desktop() -> int:
     # Only once the window is really opening. A smoke test runs for seconds
     # and has nothing to watch; this records the run-up to a memory kill,
     # which is a thing that happens to sessions, not to checks.
-    model_runtime.watch_memory()
+    device_memory.watch_memory()
 
     try:
         window = webview.create_window(

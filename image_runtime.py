@@ -936,7 +936,7 @@ def refuse_unusable(pipeline) -> None:
     other than the prompt itself, is something the caller must supply, and
     this page has only a prompt. That is what separates a text-to-image
     pipeline from an img2img, an upscaler or a subject-driven one, and it is
-    exact where :func:`model_runtime.pipeline_draws_from_text` can only
+    exact where :func:`model_cache.pipeline_draws_from_text` can only
     guess from the class name - a cache scan reads folders without importing
     anything, so it has no signature to look at and its list of markers will
     always be one family behind.

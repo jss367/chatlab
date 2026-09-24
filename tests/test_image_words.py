@@ -14,7 +14,8 @@ import image_runtime
 import settings_sandbox
 from fake_pipeline import FakePipeline
 from image_runtime import ImageRequest, ImageRun
-from model_runtime import IMAGE_KIND, ModelManager
+from model_cache import IMAGE_KIND
+from model_runtime import ModelManager
 from ui import image_words, images_page, runtime
 
 

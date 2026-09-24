@@ -10,7 +10,7 @@ from unittest import mock
 import httpx
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
-from model_runtime import CacheStatus, cache_status, list_cached_models
+from model_cache import CacheStatus, cache_status, list_cached_models
 from ui import model_repository as repository, models_page
 
 

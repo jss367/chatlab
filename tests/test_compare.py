@@ -8,7 +8,8 @@ import gradio as gr
 import charts
 import compare
 import settings_sandbox
-from model_runtime import LoadedModel, ModelChanged
+from model_loading import LoadedModel
+from text_generation import ModelChanged
 from test_streaming import EOS_ID, loaded_manager
 from ui import compare as controls
 from ui import runtime

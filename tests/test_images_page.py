@@ -9,7 +9,8 @@ import settings
 import settings_sandbox
 from fake_pipeline import FakePipeline
 from image_runtime import ImageRequest
-from model_runtime import IMAGE_KIND, TEXT_KIND, ModelManager
+from model_cache import IMAGE_KIND, TEXT_KIND
+from model_runtime import ModelManager
 from token_metrics import PROMPT_ATTENTION_SCALE
 from ui import images_page, runtime
 

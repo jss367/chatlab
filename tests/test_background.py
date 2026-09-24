@@ -282,7 +282,7 @@ class BackgroundConversationTests(unittest.TestCase):
 
         self.manager.generate = slow_tokens
         self.addCleanup(advance.set)
-        with mock.patch("model_runtime.STREAM_BATCH_TOKENS", 1):
+        with mock.patch("text_generation.STREAM_BATCH_TOKENS", 1):
             self.call("chat", {0: "hi", **dict(enumerate(SETTINGS, 2))})
             self.assertTrue(partial.wait(2))
             self.call("poll")

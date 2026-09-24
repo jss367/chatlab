@@ -18,7 +18,8 @@ from transformers import (
 import charts
 import jacobian_lens
 from jacobian_lens import FittedLens
-from model_runtime import ModelChanged, ModelManager
+from model_runtime import ModelManager
+from text_generation import ModelChanged
 from test_mlx_runtime import needs_mlx
 from tiny_tokenizer import build
 

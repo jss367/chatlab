@@ -34,7 +34,9 @@ from conversation import (
     put_branch_sampling,
     to_json,
 )
-from model_runtime import GENERATING, GenerationUpdate, ModelChanged, TokenInsight
+from model_inspection import TokenInsight
+from model_runtime import GENERATING
+from text_generation import GenerationUpdate, ModelChanged
 from token_metrics import DEFAULT_COLOR_SCALE
 from steering import SteeringError
 
@@ -270,7 +272,7 @@ class PanelSessionTests(unittest.TestCase):
         self.assertTrue(all(frame[STRIP] == gr.skip() for frame in self.respond(1)))
 
     def test_a_queued_toggle_reads_the_published_final_or_cleared_conversation(self):
-        with mock.patch("model_runtime.STREAM_BATCH_TOKENS", 1):
+        with mock.patch("text_generation.STREAM_BATCH_TOKENS", 1):
             frames = self.respond(0)
         queued_turns = frames[1][TURNS]
         final_turns = frames[-1][TURNS]

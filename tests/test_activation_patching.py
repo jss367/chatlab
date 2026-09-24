@@ -8,7 +8,9 @@ from unittest import mock
 import torch
 
 import activation_patching as patching
-from model_runtime import ModelChanged, ModelManager, OutOfMemoryError
+from device_memory import OutOfMemoryError
+from model_runtime import ModelManager
+from text_generation import ModelChanged
 from test_streaming import FakeTokenizer, PIECES
 from ui import activation_patching as controls
 

@@ -14,10 +14,11 @@ from transformers import GPT2Config, GPT2LMHeadModel, LlamaConfig, LlamaForCausa
 
 import conversation
 import library
-import model_runtime
+import model_inspection
 import settings_sandbox
 import steering
-from model_runtime import ModelChanged, ModelManager
+from model_runtime import ModelManager
+from text_generation import ModelChanged
 from test_streaming import FakeTokenizer, PIECES, EOS_ID
 from ui import runtime
 from ui import steering as controls
@@ -692,7 +693,7 @@ class ExtractionTests(unittest.TestCase):
 
     def test_an_example_above_the_ceiling_is_refused(self):
         held = self.manager()
-        with mock.patch.object(model_runtime, "STEERING_EXAMPLE_TOKEN_LIMIT", 1):
+        with mock.patch.object(model_inspection, "STEERING_EXAMPLE_TOKEN_LIMIT", 1):
             with self.assertRaisesRegex(ValueError, "above the 1 "):
                 held.extract_steering(["Hello world"], ["How are"])
 

@@ -12,7 +12,9 @@ import tiny_tokenizer
 
 import adapters
 import model_runtime
-from model_runtime import (
+import model_cache
+import model_loading
+from model_cache import (
     BASE_MODEL,
     MLX_KIND,
     TEXT_KIND,
@@ -185,10 +187,10 @@ class AdapterCacheStatusTests(unittest.TestCase):
             # main has moved on: the base is whole there, but not at the pin.
             snapshot(Path(root), BASE, BASE_FILES)
             before = cache_status(ADAPTER, Path(root))
-            self.assertIsNone(model_runtime.adapter_base_snapshot(adapter))
+            self.assertIsNone(model_cache.adapter_base_snapshot(adapter))
             pinned = other_snapshot(Path(root), BASE, PINNED, BASE_FILES)
             after = cache_status(ADAPTER, Path(root))
-            found = model_runtime.adapter_base_snapshot(adapter)
+            found = model_cache.adapter_base_snapshot(adapter)
 
         self.assertEqual(before.missing_files, (BASE_MODEL,))
         self.assertTrue(after.complete)
@@ -199,7 +201,7 @@ class AdapterCacheStatusTests(unittest.TestCase):
             adapter = snapshot(Path(root), ADAPTER, adapter_files(revision="v1"))
             snapshot(Path(root), BASE, BASE_FILES)
             pinned = other_snapshot(Path(root), BASE, PINNED, BASE_FILES, ref="v1")
-            found = model_runtime.adapter_base_snapshot(adapter)
+            found = model_cache.adapter_base_snapshot(adapter)
 
         self.assertEqual(found, pinned)
 
@@ -217,10 +219,10 @@ class AdapterCacheStatusTests(unittest.TestCase):
             snapshot(Path(root), BASE, BASE_FILES)
             with (
                 mock.patch(
-                    "model_runtime.is_mlx_snapshot",
+                    "model_cache.is_mlx_snapshot",
                     side_effect=lambda path: BASE.replace("/", "--") in str(path),
                 ),
-                mock.patch("model_runtime.mlx_available", return_value=True),
+                mock.patch("model_cache.mlx_available", return_value=True),
             ):
                 self.assertEqual(cache_status(BASE, Path(root)).kind, MLX_KIND)
                 status = cache_status(ADAPTER, Path(root))
@@ -310,7 +312,7 @@ class AdapterLoadTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             path, (ids, expected) = self.build(Path(root))
-            model, tokenizer, pipeline, device = model_runtime._read_text_model(
+            model, tokenizer, pipeline, device = model_loading._read_text_model(
                 path, torch, "cpu", torch.float32, None, "full"
             )
             with torch.no_grad():
@@ -335,7 +337,7 @@ class AdapterLoadTests(unittest.TestCase):
             for path in (first, second):
                 manager = model_runtime.ModelManager()
                 manager.model, manager.tokenizer, _pipeline, _device = (
-                    model_runtime._read_text_model(path, torch, "cpu", torch.float32, None, "full")
+                    model_loading._read_text_model(path, torch, "cpu", torch.float32, None, "full")
                 )
                 manager.model_id, manager.precision = ADAPTER, "full"
                 managers.append(manager)
@@ -358,7 +360,7 @@ class AdapterLoadTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             path, _ = self.build(Path(root), extra_token="<persona>")
-            model, tokenizer, _pipeline, _device = model_runtime._read_text_model(
+            model, tokenizer, _pipeline, _device = model_loading._read_text_model(
                 path, torch, "cpu", torch.float32, None, "full"
             )
 
@@ -374,7 +376,7 @@ class AdapterLoadTests(unittest.TestCase):
         for padding, rows in ((16, len(tokenizer)), (0, len(tokenizer) + 8)):
             with self.subTest(padding=padding, rows=rows), tempfile.TemporaryDirectory() as root:
                 path, (ids, expected) = self.build(Path(root), padding=padding, trained_rows=rows)
-                model, _tokenizer, _pipeline, _device = model_runtime._read_text_model(
+                model, _tokenizer, _pipeline, _device = model_loading._read_text_model(
                     path, torch, "cpu", torch.float32, None, "full"
                 )
                 with torch.no_grad():
@@ -397,14 +399,14 @@ class AdapterLoadTests(unittest.TestCase):
             path = snapshot(Path(root), ADAPTER, adapter_files())
             snapshot(Path(root), BASE, BASE_FILES)
             with (
-                mock.patch("model_runtime.detect_backend", return_value="mps"),
+                mock.patch("device_memory.detect_backend", return_value="mps"),
                 mock.patch.object(manager, "_unload_locked"),
                 mock.patch.object(manager, "_cap_mps_memory", return_value=None),
                 mock.patch.object(manager, "_check_memory", return_value=(None, None)) as check,
-                mock.patch("model_runtime.allocated_bytes", return_value=None),
-                mock.patch("model_runtime.reserved_bytes", return_value=None),
-                mock.patch("model_runtime._read_text_model", side_effect=read),
-                self.assertLogs("model_runtime", level=logging.INFO) as logs,
+                mock.patch("device_memory.allocated_bytes", return_value=None),
+                mock.patch("device_memory.reserved_bytes", return_value=None),
+                mock.patch("model_loading._read_text_model", side_effect=read),
+                self.assertLogs("model_loading", level=logging.INFO) as logs,
             ):
                 manager._load_locked(ADAPTER, path, torch, precision="4-bit")
 
@@ -420,7 +422,7 @@ class AdapterLoadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             path = snapshot(Path(root), ADAPTER, adapter_files())
             with self.assertRaises(RuntimeError) as caught:
-                model_runtime._read_text_model(path, torch, "cpu", torch.float32, None, "full")
+                model_loading._read_text_model(path, torch, "cpu", torch.float32, None, "full")
 
         self.assertIn(BASE, str(caught.exception))
         self.assertIn("Download and load", str(caught.exception))
@@ -444,7 +446,7 @@ class AdapterDownloadTests(unittest.TestCase):
             }
             with (
                 mock.patch.object(models_page, "stream_download", side_effect=fake_download),
-                mock.patch.object(models_page, "cache_status", return_value=model_runtime.CacheStatus()),
+                mock.patch.object(models_page, "cache_status", return_value=model_cache.CacheStatus()),
             ):
                 stream = models_page.stream_download_with_base(ADAPTER, "token")
                 cards = []
@@ -474,7 +476,7 @@ class AdapterDownloadTests(unittest.TestCase):
             with (
                 mock.patch.object(models_page, "stream_download", side_effect=fake_download),
                 mock.patch.object(
-                    models_page, "cache_status", return_value=model_runtime.CacheStatus()
+                    models_page, "cache_status", return_value=model_cache.CacheStatus()
                 ) as status,
             ):
                 list(models_page.stream_download_with_base(ADAPTER, ""))
@@ -515,7 +517,7 @@ class AdapterDownloadTests(unittest.TestCase):
     def test_a_missing_base_is_named_among_the_missing_files(self):
         from ui import models_page
 
-        status = model_runtime.CacheStatus(
+        status = model_cache.CacheStatus(
             cached_bytes=10, missing_files=(BASE_MODEL,), base_model=BASE
         )
         self.assertEqual(

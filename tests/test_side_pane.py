@@ -19,21 +19,25 @@ import gradio as gr
 import app
 from ui import common, icons, models_page, runtime
 import model_runtime
+import device_memory
+import hub_search
+import model_cache
+import progress_bars
 import settings
-from model_runtime import (
+from hub_search import HubModel
+from model_cache import (
     IMAGE_KIND,
     MODEL_WEIGHTS,
     TEXT_KIND,
     CachedModel,
     CacheStatus,
-    DownloadProgress,
-    HubModel,
-    ModelManager,
     format_count,
     list_cached_models,
     remove_cached_model,
     sort_cached_models,
 )
+from model_runtime import ModelManager
+from progress_bars import DownloadProgress
 
 import settings_sandbox
 
@@ -61,7 +65,7 @@ def roomy(
     gives back before it checks whether the next model fits.
     """
 
-    profile = model_runtime.DeviceProfile(
+    profile = device_memory.DeviceProfile(
         backend=backend,
         dtype=dtype,
         total=total_gb * 1024**3,
@@ -105,7 +109,7 @@ class ModelActionTests(unittest.TestCase):
             self.assertFalse(load["visible"])
             cached.assert_not_called()
 
-            with mock.patch.object(progress, "snapshot", return_value=model_runtime.DownloadSnapshot(
+            with mock.patch.object(progress, "snapshot", return_value=progress_bars.DownloadSnapshot(
                 files_done=1, files_total=3, bytes_done=500_000_000, bytes_total=1_000_000_000,
             )):
                 detail, *_ = models_page.refresh_model_actions("org/old-id", "org/model")
@@ -290,14 +294,14 @@ class CachedModelListTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             lay_out(root, OLMO, {"config.json": b"{}", "model.safetensors": b"x"})
             broken = lay_out(root, "org/broken", {"config.json": b"{}"})
-            newest_write = model_runtime._newest_write
+            newest_write = model_cache._newest_write
 
             def refuse_one(folder, snapshot):
                 if folder == broken:
                     raise OSError(5, "Input/output error")
                 return newest_write(folder, snapshot)
 
-            with mock.patch.object(model_runtime, "_newest_write", refuse_one):
+            with mock.patch.object(model_cache, "_newest_write", refuse_one):
                 listed = [entry.model_id for entry in list_cached_models(Path(root))]
 
         self.assertEqual(listed, [OLMO])
@@ -458,7 +462,7 @@ class RemoveCachedModelTests(unittest.TestCase):
             )
             try:
                 self.assertEqual(other.stdout.readline().strip(), "held")
-                with self.assertRaises(model_runtime.ModelDownloading) as caught:
+                with self.assertRaises(model_cache.ModelDownloading) as caught:
                     remove_cached_model(OLMO, Path(root))
                 self.assertIn("another process", str(caught.exception))
                 self.assertTrue(folder.is_dir())
@@ -510,21 +514,21 @@ class ManagerRemoveTests(unittest.TestCase):
 
     def test_a_refused_removal_leaves_the_cache_revision_alone(self):
         self.manager.model_id = OLMO
-        with self.assertRaises(model_runtime.ModelLoaded):
+        with self.assertRaises(model_cache.ModelLoaded):
             self.manager.remove(OLMO, Path(self.root.name))
 
         self.assertEqual(self.manager.cache_revision, 0)
 
     def test_the_loaded_model_is_refused(self):
         self.manager.model_id = OLMO
-        with self.assertRaises(model_runtime.ModelLoaded):
+        with self.assertRaises(model_cache.ModelLoaded):
             self.manager.remove(OLMO, Path(self.root.name))
         self.assertTrue(self.folder.is_dir())
         self.assertFalse(self.manager._lock.locked())
 
     def test_a_model_being_downloaded_is_refused(self):
         self.manager.active_downloads[OLMO] = DownloadProgress()
-        with self.assertRaises(model_runtime.ModelDownloading):
+        with self.assertRaises(model_cache.ModelDownloading):
             self.manager.remove(OLMO, Path(self.root.name))
         self.assertTrue(self.folder.is_dir())
         self.assertFalse(self.manager._downloads_lock.locked())
@@ -532,19 +536,19 @@ class ManagerRemoveTests(unittest.TestCase):
     def test_a_busy_manager_is_refused_without_waiting(self):
         self.manager._lock.acquire()
         self.addCleanup(self.manager._lock.release)
-        with self.assertRaises(model_runtime.ModelBusy):
+        with self.assertRaises(model_cache.ModelBusy):
             self.manager.remove(OLMO, Path(self.root.name))
         self.assertTrue(self.folder.is_dir())
 
     def test_every_refusal_is_a_model_in_use(self):
-        for error in (model_runtime.ModelLoaded, model_runtime.ModelDownloading, model_runtime.ModelBusy):
-            self.assertTrue(issubclass(error, model_runtime.ModelInUse))
+        for error in (model_cache.ModelLoaded, model_cache.ModelDownloading, model_cache.ModelBusy):
+            self.assertTrue(issubclass(error, model_cache.ModelInUse))
 
     def test_a_load_claimed_on_another_thread_is_refused(self):
         # The load's own thread has not reached the model lock yet, so the
         # lock is free and would let the deletion through.
         _model_id, claim = self.manager.reserve_load(OLMO)
-        with self.assertRaises(model_runtime.ModelBusy):
+        with self.assertRaises(model_cache.ModelBusy):
             self.manager.remove(OLMO, Path(self.root.name))
         self.assertTrue(self.folder.is_dir())
         self.assertFalse(self.manager._lock.locked())
@@ -1069,10 +1073,10 @@ class MyModelsPaneTests(unittest.TestCase):
 
         every, _, all_summary = app.refresh_my_models(None, "Name", None, app.ALL_KINDS)
         images, _, image_summary = app.refresh_my_models(
-            None, "Name", None, model_runtime.IMAGE_KIND
+            None, "Name", None, model_cache.IMAGE_KIND
         )
-        texts, _, _ = app.refresh_my_models(None, "Name", None, model_runtime.TEXT_KIND)
-        mlx, _, _ = app.refresh_my_models(None, "Name", None, model_runtime.MLX_KIND)
+        texts, _, _ = app.refresh_my_models(None, "Name", None, model_cache.TEXT_KIND)
+        mlx, _, _ = app.refresh_my_models(None, "Name", None, model_cache.MLX_KIND)
 
         self.assertEqual(len(every["choices"]), 3)
         self.assertEqual([v for _, v in images["choices"]], [PIPELINE.model_id])
@@ -1091,7 +1095,7 @@ class MyModelsPaneTests(unittest.TestCase):
         self.entries = [cached(OLMO)]
 
         radio, detail, summary = app.refresh_my_models(
-            None, "Name", None, model_runtime.IMAGE_KIND
+            None, "Name", None, model_cache.IMAGE_KIND
         )
 
         self.assertEqual(radio["choices"], [])
@@ -1103,7 +1107,7 @@ class MyModelsPaneTests(unittest.TestCase):
         self.entries = [cached(OLMO), PIPELINE]
 
         radio, detail, _ = app.refresh_my_models(
-            OLMO, "Name", None, model_runtime.IMAGE_KIND
+            OLMO, "Name", None, model_cache.IMAGE_KIND
         )
 
         self.assertIsNone(radio["value"])
@@ -1115,7 +1119,7 @@ class MyModelsPaneTests(unittest.TestCase):
         self.entries = [UNSUPPORTED]
 
         every, _, _ = app.refresh_my_models(None, "Name", None, app.ALL_KINDS)
-        texts, _, _ = app.refresh_my_models(None, "Name", None, model_runtime.TEXT_KIND)
+        texts, _, _ = app.refresh_my_models(None, "Name", None, model_cache.TEXT_KIND)
 
         self.assertEqual([v for _, v in every["choices"]], [UNSUPPORTED.model_id])
         self.assertEqual(texts["choices"], [])
@@ -1169,7 +1173,7 @@ class MyModelsPaneTests(unittest.TestCase):
     def test_an_image_row_carries_its_kind_and_its_fit_verdict(self):
         # #45 put a fit verdict on every row and this branch put a kind on
         # the image ones; a row has to say both.
-        from model_runtime import FITS, Fit
+        from device_memory import FITS, Fit
 
         label = models_page.cached_model_label(PIPELINE, Fit(FITS))
 
@@ -1182,7 +1186,7 @@ class MyModelsPaneTests(unittest.TestCase):
         # quantizer is Transformers' own and the load clears the choice for
         # one - so carrying the bits into the verdict would put a quantized
         # label on a full-size figure.
-        profile = model_runtime.DeviceProfile(
+        profile = device_memory.DeviceProfile(
             backend="mps",
             dtype="float16",
             total=48 * 1024**3,
@@ -1382,7 +1386,7 @@ class ModelFitTests(unittest.TestCase):
 
     def test_a_search_run_before_the_device_was_read_is_repainted_too(self):
         held = {
-            "org/small": model_runtime.HubModel(
+            "org/small": hub_search.HubModel(
                 model_id="org/small", parameters=1_000_000_000
             )
         }
@@ -1520,19 +1524,19 @@ class ManageMyModelsTests(unittest.TestCase):
         originals = (
             runtime.MANAGER,
             models_page.list_cached_models,
-            model_runtime.remove_cached_model,
+            model_cache.remove_cached_model,
             models_page.download_model,
         )
         runtime.MANAGER = self.manager
         models_page.list_cached_models = lambda: list(self.entries)
         # The manager deletes through the module-level function, so that is
         # what stands in: the manager's own checks stay real.
-        model_runtime.remove_cached_model = self.remove
+        model_cache.remove_cached_model = self.remove
         models_page.download_model = self.download
         self.addCleanup(
             lambda: setattr(runtime, "MANAGER", originals[0])
             or setattr(models_page, "list_cached_models", originals[1])
-            or setattr(model_runtime, "remove_cached_model", originals[2])
+            or setattr(model_cache, "remove_cached_model", originals[2])
             or setattr(models_page, "download_model", originals[3])
         )
 
@@ -1692,7 +1696,7 @@ class ManageMyModelsTests(unittest.TestCase):
         def refuse(model_id, cache_dir=None):
             raise PermissionError(13, "Permission denied: <blobs>")
 
-        model_runtime.remove_cached_model = refuse
+        model_cache.remove_cached_model = refuse
 
         status, confirm, pending = app.remove_my_model("org/partial")
 
@@ -1705,7 +1709,7 @@ class ManageMyModelsTests(unittest.TestCase):
         def gone(model_id, cache_dir=None):
             raise FileNotFoundError(model_id)
 
-        model_runtime.remove_cached_model = gone
+        model_cache.remove_cached_model = gone
 
         status, _, _ = app.remove_my_model("org/partial")
         self.assertIn("no longer in the cache", status)
@@ -2172,7 +2176,7 @@ class ModelSwitchTests(unittest.TestCase):
         # switcher stale and repaint it under the reader.
         self.extra.append(MLX)
         self.load(MLX.model_id)
-        self.manager.kind = model_runtime.MLX_KIND
+        self.manager.kind = model_cache.MLX_KIND
 
         update = self.painted()
         self.assertEqual(update["value"], MLX.model_id)
@@ -2741,7 +2745,7 @@ class ModelBadgeTests(unittest.TestCase):
     def progress_for(self, model_id, steps_done=0, steps_total=0):
         """Claim a load of ``model_id`` and publish a bar that far along."""
 
-        from model_runtime import LoadProgress
+        from progress_bars import LoadProgress
 
         _checked_id, claim = self.manager.reserve_load(model_id)
         progress = LoadProgress()
@@ -4571,7 +4575,7 @@ class HardwarePanelTests(unittest.TestCase):
         self.addCleanup(lambda: setattr(runtime, "MANAGER", original))
 
     def card(self, **profile):
-        return app.hardware_card(model_runtime.DeviceProfile(**profile))
+        return app.hardware_card(device_memory.DeviceProfile(**profile))
 
     def test_a_device_not_read_yet_shows_the_memory_and_says_to_wait(self):
         card = self.card(total=48 * self.GB, available=40 * self.GB)
@@ -5174,7 +5178,7 @@ if __name__ == "__main__":
 
 MLX = cached(
     "mlx-community/Qwen3-4B-4bit",
-    status=CacheStatus(cached_bytes=2_300_000_000, kind=model_runtime.MLX_KIND),
+    status=CacheStatus(cached_bytes=2_300_000_000, kind=model_cache.MLX_KIND),
     architecture="Qwen3ForCausalLM",
     dtype="4-bit MLX",
 )
@@ -5210,7 +5214,7 @@ class MlxModelsPaneTests(unittest.TestCase):
         self.assertNotIn("Unsupported", detail)
 
     def test_an_mlx_row_carries_its_kind_before_its_fit_verdict(self):
-        from model_runtime import FITS, Fit
+        from device_memory import FITS, Fit
 
         label = models_page.cached_model_label(MLX, Fit(FITS))
 
@@ -5222,7 +5226,7 @@ class MlxModelsPaneTests(unittest.TestCase):
         # Load cached at a new precision is how a Transformers model is
         # requantized; an MLX model loads at its own width whatever the radio
         # says, so the loaded one has nothing to be judged again for.
-        from model_runtime import DeviceProfile
+        from device_memory import DeviceProfile
 
         self.manager.model_id = MLX.model_id
         self.manager.precision = "4-bit"
@@ -5233,7 +5237,7 @@ class MlxModelsPaneTests(unittest.TestCase):
 
     def test_mlx_recommendations_are_their_own_list_and_judged_at_their_width(self):
         _, _, state, _ = app.search_models(
-            "", "", kind=model_runtime.MLX_KIND, order="Recommended"
+            "", "", kind=model_cache.MLX_KIND, order="Recommended"
         )
 
         self.assertEqual(
@@ -5244,7 +5248,7 @@ class MlxModelsPaneTests(unittest.TestCase):
                 "mlx-community/Olmo-3-7B-Think-4bit",
             ],
         )
-        self.assertEqual(models_page.results_kind(state), model_runtime.MLX_KIND)
+        self.assertEqual(models_page.results_kind(state), model_cache.MLX_KIND)
         _, detail, _ = models_page.select_search_result(
             state, "full", picked("mlx-community/Qwen3-4B-4bit")
         )
@@ -5252,19 +5256,21 @@ class MlxModelsPaneTests(unittest.TestCase):
         self.assertNotIn("Choosing 4-bit or 8-bit", detail)
 
     def test_an_mlx_result_is_sized_from_the_width_in_its_name(self):
-        from model_runtime import DeviceProfile, HubModel, estimate_parameter_bytes
+        from device_memory import DeviceProfile
+        from hub_search import HubModel
+        from model_cache import estimate_parameter_bytes
 
         profile = DeviceProfile(backend="mps", dtype="float16", total=10**11, available=10**11)
         four_bit = HubModel(
-            model_id="mlx-community/Some-7B-4bit", parameters=7_000_000_000, kind=model_runtime.MLX_KIND
+            model_id="mlx-community/Some-7B-4bit", parameters=7_000_000_000, kind=model_cache.MLX_KIND
         )
         unnamed = HubModel(
-            model_id="mlx-community/Some-7B", parameters=7_000_000_000, kind=model_runtime.MLX_KIND
+            model_id="mlx-community/Some-7B", parameters=7_000_000_000, kind=model_cache.MLX_KIND
         )
 
         # The radio says full; the name says 4 bits, and the name wins.
-        packed = models_page.hub_fit(four_bit, "full", profile, model_runtime.MLX_KIND)
-        whole = models_page.hub_fit(unnamed, "4-bit", profile, model_runtime.MLX_KIND)
+        packed = models_page.hub_fit(four_bit, "full", profile, model_cache.MLX_KIND)
+        whole = models_page.hub_fit(unnamed, "4-bit", profile, model_cache.MLX_KIND)
 
         self.assertEqual(packed.estimated, estimate_parameter_bytes(7_000_000_000, "float16", 4))
         self.assertEqual(whole.estimated, estimate_parameter_bytes(7_000_000_000, "float16", None))
@@ -5294,10 +5300,10 @@ class MlxModelsPaneTests(unittest.TestCase):
             weights.truncate(2 * GB)
         entry = cached(
             MLX.model_id,
-            status=CacheStatus(cached_bytes=2 * GB, kind=model_runtime.MLX_KIND),
+            status=CacheStatus(cached_bytes=2 * GB, kind=model_cache.MLX_KIND),
             path=folder,
         )
-        profile = model_runtime.DeviceProfile(
+        profile = device_memory.DeviceProfile(
             backend="mps", dtype="float16", total=48 * GB, available=40 * GB
         )
 
@@ -5318,7 +5324,7 @@ class MlxModelsPaneTests(unittest.TestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
         config = json.dumps({"architectures": ["Qwen3ForCausalLM"], "dtype": "float16"})
         entries = []
-        for model_id, kind in ((MLX.model_id, model_runtime.MLX_KIND), (OLMO, TEXT_KIND)):
+        for model_id, kind in ((MLX.model_id, model_cache.MLX_KIND), (OLMO, TEXT_KIND)):
             folder = lay_out(
                 root, model_id, {"config.json": config.encode(), "model.safetensors": b""}
             )
@@ -5328,7 +5334,7 @@ class MlxModelsPaneTests(unittest.TestCase):
                 cached(model_id, status=CacheStatus(cached_bytes=20 * GB, kind=kind), path=folder)
             )
         self.entries = entries
-        capped = model_runtime.DeviceProfile(
+        capped = device_memory.DeviceProfile(
             backend="mps",
             dtype="float16",
             total=16 * GB,
@@ -5338,7 +5344,7 @@ class MlxModelsPaneTests(unittest.TestCase):
         )
         with mock.patch.object(models_page, "device_profile", lambda torch=None: capped):
             with mock.patch.object(
-                model_runtime, "system_memory", lambda: (48 * GB, 30 * GB)
+                device_memory, "system_memory", lambda: (48 * GB, 30 * GB)
             ):
                 yield
 

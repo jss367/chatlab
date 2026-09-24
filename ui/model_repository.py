@@ -11,7 +11,13 @@ from tempfile import TemporaryDirectory
 import gradio as gr
 
 import mlx_runtime
-from model_runtime import cache_folder, format_bytes, mlx_snapshot_bits, snapshot_folder, validate_model_id
+from model_cache import (
+    cache_folder,
+    format_bytes,
+    mlx_snapshot_bits,
+    snapshot_folder,
+    validate_model_id,
+)
 
 
 UNCHECKED = "**Repository not checked** · Choose **Check model** to verify this ID on Hugging Face."

@@ -38,18 +38,15 @@ from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import settings
-from model_runtime import (
-    GENERATING,
-    LOADING,
-    MLX_KIND,
-    TEXT_KIND,
+from device_memory import (
     InsufficientMemoryError,
-    ModelChanged,
     OutOfMemoryError,
     device_label,
     device_profile,
-    list_cached_models,
 )
+from model_cache import MLX_KIND, TEXT_KIND, list_cached_models
+from model_runtime import GENERATING, LOADING
+from text_generation import ModelChanged
 from token_metrics import summarize
 from ui import runtime
 from ui.generation import resolve_seed, split_response_text

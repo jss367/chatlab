@@ -12,7 +12,7 @@ unmerged PEFT wrapper would put another layer of names in front of them.
 
 Merging needs the full-precision weights, because a packed 4-bit or 8-bit
 matrix has nothing to add the product to, so an adapter always loads at full
-precision. Nothing here knows about the cache; :mod:`model_runtime` finds the
+precision. Nothing here knows about the cache; :mod:`model_cache` finds the
 base checkpoint on disk and calls in.
 """
 
@@ -36,7 +36,7 @@ MERGEABLE_TYPES = frozenset({"LORA"})
 # the one ChatLab runs. A classifier head on a sequence model is not a chat.
 CAUSAL_TASKS = frozenset({"CAUSAL_LM"})
 
-# The same form model_runtime.MODEL_ID_PATTERN checks, repeated so this module
+# The same form model_cache.MODEL_ID_PATTERN checks, repeated so this module
 # imports nothing of the runtime's.
 HUB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 

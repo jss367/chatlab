@@ -14,7 +14,7 @@ from urllib.request import urlopen
 import desktop
 import desktop_launcher
 import logs
-import model_runtime
+import device_memory
 import updater
 from desktop_launcher import (
     DESKTOP_PORT,
@@ -170,7 +170,7 @@ class RestartOfferTests(unittest.TestCase):
                 mock.patch.dict(sys.modules, {"webview": webview, "webview.menu": menu}), \
                 mock.patch.object(desktop_launcher, "app_support_directory", return_value=Path(support)), \
                 mock.patch.object(desktop_launcher, "start_local_server", return_value=(mock.Mock(), "http://127.0.0.1:47890/")), \
-                mock.patch.object(model_runtime, "watch_memory"), \
+                mock.patch.object(device_memory, "watch_memory"), \
                 mock.patch.object(updater, "running_app_bundle", return_value=bundle), \
                 mock.patch.object(updater, "remove_previous_bundles"), \
                 mock.patch.object(updater, "remove_stale_work_dirs"), \
@@ -243,7 +243,7 @@ class RestartOfferTests(unittest.TestCase):
             }), tempfile.TemporaryDirectory() as support, \
                     mock.patch.object(desktop_launcher, "app_support_directory", return_value=Path(support)), \
                     mock.patch.object(desktop_launcher, "start_local_server", return_value=(mock.Mock(), "http://127.0.0.1:47890/")), \
-                    mock.patch.object(model_runtime, "watch_memory"):
+                    mock.patch.object(device_memory, "watch_memory"):
                 self.assertEqual(desktop_launcher.run_desktop(), 0)
             self.assertIsNone(desktop.restart())
         patched.relaunch.assert_called_once_with(Path("/Applications/ChatLab.app"))

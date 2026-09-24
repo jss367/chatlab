@@ -17,7 +17,8 @@ import gradio as gr
 from gradio.utils import get_upload_folder
 
 from conversation import make_turn, model_messages
-from model_runtime import LOADING, ModelChanged
+from model_runtime import LOADING
+from text_generation import ModelChanged
 from prompt_batch import (
     BATCH_CSV_NAME,
     BatchTable,
