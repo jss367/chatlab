@@ -11,9 +11,11 @@ from pathlib import Path
 import gradio as gr
 
 from .dynamic_maze import ChangingMaze, changing, maze_at_turn
-from .maze import GOAL_MODES, PASSAGES, SYSTEM, TOOLS, default_instruction, generate
+from .inserts import CHANNELS
+from .maze import DIRECTIONS, GOAL_MODES, PASSAGES, SYSTEM, TOOLS, default_instruction, generate
 from .batch import BatchControl, cut_short, downloads, run_trials
-from .runner import RECOVERY_DEFAULTS, TERMINAL, Episode, context_messages, fork_token_edit, from_payload, stream_episode
+from .runner import (RECOVERY_DEFAULTS, TERMINAL, Episode, context_messages, fork_token_edit, from_payload,
+                     insert_outcome, stream_episode)
 from .trials import prepare_trial, read_trials
 from extension_api import TokenInspector, icon_classes, read_steering_vector
 
@@ -166,6 +168,26 @@ def board(ep, index=None, reveal=False, animate=False):
     if start is not None and (index is None or index >= start):
         x, y = center(ep.turns[start]["position_before"])
         parts.append(f'<circle cx="{x}" cy="{y}" r="27" stroke="#7c3aed" stroke-width="3" fill="none"/>')
+    # Shown from the response that read the message, as the interruption's
+    # ring is, at the cell the character stood on when it landed.
+    for insert in ep.config.get("context_inserts", ()):
+        if index is not None and index < insert["before_turn"]:
+            continue
+        x, y = center(insert["position"])
+        parts.append(f'<circle cx="{x}" cy="{y}" r="21" stroke="#db2777" stroke-width="3" stroke-dasharray="4 3" fill="none"/>')
+        if insert.get("advised_direction") in DIRECTIONS:
+            dr, dc = DIRECTIONS[insert["advised_direction"]]
+            tip = (x + dc * 38, y + dr * 38)
+            # Haloed in white, because advice pointing back along the path
+            # would otherwise sit on the path's own line.
+            line = f'x1="{x + dc * 21}" y1="{y + dr * 21}" x2="{tip[0] - dc * 7}" y2="{tip[1] - dr * 7}" stroke-linecap="round"'
+            parts.append(f'<line {line} stroke="#fff" stroke-width="7"/><line {line} stroke="#db2777" stroke-width="3"/>')
+            # The head as a triangle of its own, so the board needs no marker
+            # definition whose id another board on the page could share.
+            base = (tip[0] - dc * 10, tip[1] - dr * 10)
+            corners = [tip, (base[0] + dr * 6, base[1] + dc * 6), (base[0] - dr * 6, base[1] - dc * 6)]
+            parts.append(f'<polygon points="{" ".join(f"{px},{py}" for px, py in corners)}" fill="#db2777" '
+                         'stroke="#fff" stroke-width="1.5"/>')
     x, y = center(position)
     motion = ""
     # Only the displayed response's own move animates. A response that was
@@ -183,6 +205,8 @@ def board(ep, index=None, reveal=False, animate=False):
         legend.append('<span style="color:#7c3aed">○ Steering started</span>')
     if ep.map_changes:
         legend.append('<span style="color:#78350f">▪ Closed during the run</span>')
+    if ep.config.get("context_inserts"):
+        legend.append('<span style="color:#db2777">◌ Inserted message · → advised direction</span>')
     parts.append('<div class="maze-legend">' + "".join(legend) + '</div>')
     return "".join(parts)
 
@@ -323,7 +347,7 @@ def status(ep):
             f"{'' if 'openness' in ep.config else ' · **Open cells:** Unrecorded, so the slider beside this run is not its own'}\n\n"
             f"**Recovery:** {recovery} · **Recovery window:** {window} · "
             f"**Model:** {html.escape(ep.model_id or 'load one on the Models page')}"
-            f"{checkpoint_line(ep)}{map_line(ep)}")
+            f"{checkpoint_line(ep)}{map_line(ep)}{insert_line(ep)}")
 
 
 def checkpoint_line(ep):
@@ -368,21 +392,67 @@ def map_line(ep):
             + (f" · {dropped} closure{'' if dropped == 1 else 's'} dropped, listed in the run JSON" if dropped else ""))
 
 
-def timeline(ep):
+FOLLOWED = {"followed": "followed the advice", "against": "went against it", "other": "went another way"}
+
+
+def insert_line(ep):
+    """Each inserted message, the advice it gave, and what the model did next, for a run that has any."""
+    parts = []
+    for insert in ep.config.get("context_inserts", ()):
+        outcome = insert_outcome(ep, insert)
+        sender = f" from {as_text(insert['sender'])}" if insert.get("sender") else ""
+        if outcome["advised"] is None:
+            advice = "no advised direction"
+        else:
+            advice = (f"advised {outcome['advised']}, "
+                      + ("an open step" if outcome["legal"] else "into a wall")
+                      + (", on a shortest route" if outcome["shortest"] else ", on no shortest route"))
+        move = outcome["move"]
+        if move is None:
+            then = "no accepted model move after it" + ("" if ep.phase in TERMINAL else " yet")
+        else:
+            then = (f"first model move after it: {move['direction']} in response {move['turn'] + 1}"
+                    + (f", which {FOLLOWED[outcome['followed']]}" if outcome["followed"] else ""))
+        parts.append(f"**Inserted before response {insert['before_turn'] + 1}:** "
+                     f"{CHANNELS[insert['channel']]}{sender} · {advice} · {then}")
+    return "".join(f"\n\n{part}" for part in parts)
+
+
+def history_rows(ep):
+    """The movement history's rows, each with the response selecting it shows.
+
+    An inserted message has a row of its own between the two responses it
+    separates, and selecting it shows the response that read it.
+    """
     supplied = [e for e in ep.events if e["source"] == "supplied"]
     position = supplied[-1]["after"] if supplied else ep.maze.start
-    rows = [["Initial / supplied", str(tuple(position)), "—", f"{len(supplied)} supplied moves" if supplied else "Initial position"]]
+    rows = [(-1, ["Initial / supplied", str(tuple(position)), "—", f"{len(supplied)} supplied moves" if supplied else "Initial position"])]
     by_turn = {e["turn"]: e for e in ep.events if e["source"] == "model"}
+    inserts = {insert["before_turn"]: insert for insert in ep.config.get("context_inserts", ())}
     for index, turn in enumerate(ep.turns):
+        insert = inserts.get(index)
+        if insert:
+            sender = f" from {insert['sender']}" if insert.get("sender") else ""
+            rows.append((index, [f"Inserted before response {index + 1}", str(tuple(insert["position"])),
+                                 f"advised {insert['advised_direction']}" if insert.get("advised_direction") else "—",
+                                 f"{CHANNELS[insert['channel']]}{sender}: {insert['text']}"]))
         event = by_turn.get(index)
         if event:
             position = event["after"]
         result = (("Accepted" if event["accepted"] else event["error"].replace("_", " ")) if event
                   else ("Generating…" if turn.get("finish_reason") is None else "No move"))
-        rows.append([f"Response {index + 1}", str(tuple(position)),
-                     event.get("direction") or "—" if event else "—",
-                     result + (" · steered" if turn.get("steered") else "")])
-    selected = max(0, min(ep.viewing + 1, len(rows) - 1))
+        rows.append((index, [f"Response {index + 1}", str(tuple(position)),
+                             event.get("direction") or "—" if event else "—",
+                             result + (" · steered" if turn.get("steered") else "")]))
+    return rows
+
+
+def timeline(ep):
+    rows = history_rows(ep)
+    viewing = max(-1, min(ep.viewing, len(ep.turns) - 1))
+    # The response's own row, never the message row sharing its index.
+    selected = max(i for i, (index, row) in enumerate(rows) if index == viewing and not row[0].startswith("Inserted"))
+    rows = [list(row) for _, row in rows]
     rows[selected][0] = "▶ " + rows[selected][0]
     return rows
 
@@ -406,6 +476,8 @@ def transport_text(ep):
     queued = " · **Interruption queued**" if ep.interrupt_next and not ep.interrupted else ""
     if ep.close_next:
         queued += f" · **Closing ({ep.close_next[0]}, {ep.close_next[1]})**"
+    if ep.insert_next:
+        queued += f" · **{CHANNELS[ep.insert_next['channel']]} queued**"
     return f"**{mode}** · {selected} · ({position[0]}, {position[1]}){queued}\n\n{end}"
 
 
@@ -468,6 +540,39 @@ def reads_back(recorded_model, used_model):
     prompt has no such second witness.
     """
     return bool(recorded_model) and recorded_model == used_model
+
+
+def recorded_prompt(ep, turn, models):
+    """A response's recorded prompt IDs decoded, or None where they may not be read here.
+
+    The rule the Context pane keeps: IDs are read back only by the model that
+    recorded them, named on both sides of the reading.
+    """
+    ids, recorded = turn.get("prompt_ids"), recording_model(ep, turn)
+    if not ids or not reads_back(recorded, models.loaded_model_id()):
+        return None
+    try:
+        text, load_id = models.decode(ids)
+    except Exception:
+        return None
+    return text if text is not None and reads_back(recorded, model_of(load_id)) else None
+
+
+def prompt_reading(ep, turn, context, models):
+    """A response's recorded prompt beside its context put through the same model's template.
+
+    None when the recorded prompt may not be read here. The templated reading
+    is None where the template refuses the messages or a load moved between
+    the two readings, so the pair is never spelled by two models.
+    """
+    recorded = recorded_prompt(ep, turn, models)
+    if recorded is None:
+        return None
+    try:
+        templated, load_id = models.prompt_text(context, TOOLS)
+    except Exception:
+        templated, load_id = None, None
+    return recorded, templated if reads_back(recording_model(ep, turn), model_of(load_id)) else None
 
 
 def unnamed_model(count):
@@ -652,6 +757,7 @@ def views(ep, reveal, selections, session_id, index=None, animate=False):
     metrics = t.get("metrics", [])
     forced = t.get("forced_prefix_tokens", 0)
     stamped, changed = selections.view(session_id, (ep.run_id, id(ep), index), metrics[forced:])
+    inserted = {insert["before_turn"] for insert in ep.config.get("context_inserts", ())}
     origin = "Inside the template's open reasoning block" if t.get("reasoning_prefilled") else "At the beginning of the assistant response"
     note = (f"**Supplied interruption · {forced} tokens** · {origin}.\n\n" if forced else "No supplied interruption in this response.")
     if not forced and t.get("planned_prefix_ids"):
@@ -661,7 +767,7 @@ def views(ep, reveal, selections, session_id, index=None, animate=False):
                 "Earlier token IDs and your replacement are supplied as context; only the new continuation counts toward sampled-token limits.")
     return (board(ep, index, reveal, animate), status(ep), TOKENS.strip(metrics[forced:]),
             t.get("text", ""), note, t.get("prefix_text") or t.get("planned_prefix_text", ""), timeline(ep), stamped,
-            gr.update(choices=[("Initial / supplied history", -1)] + [(f"Response {i+1}" + (" · token edit" if t.get("token_edit") else " · interruption" if t.get("prefix_ids") else "") + (" · steered" if t.get("steered") else ""), i) for i, t in enumerate(ep.turns)], value=index),
+            gr.update(choices=[("Initial / supplied history", -1)] + [(f"Response {i+1}" + (" · token edit" if t.get("token_edit") else " · interruption" if t.get("prefix_ids") else "") + (" · after an inserted message" if i in inserted else "") + (" · steered" if t.get("steered") else ""), i) for i, t in enumerate(ep.turns)], value=index),
             "Select a model-generated token above." if changed else gr.skip(), [] if changed else gr.skip())
 
 
@@ -888,6 +994,21 @@ def _build_page(context):
                             "before the next generated response, and the model meets the change in the simulator's next reply. "
                             "The start, the destination, the cell the character is standing in, and any closure that would cut "
                             "the destination off from the character or from the start are refused.")
+            with gr.Accordion("Insert a message", open=False):
+                insert_channel = gr.Dropdown(choices=[(label, key) for key, label in CHANNELS.items()], value="tool_note",
+                                             label="Channel", elem_id="maze-insert-channel")
+                insert_text = gr.Textbox(label="Message", lines=2, elem_id="maze-insert-text")
+                with gr.Row():
+                    insert_sender = gr.Textbox(label="Sender", placeholder="Teammate messages only",
+                                               elem_id="maze-insert-sender")
+                    insert_direction = gr.Dropdown(choices=[("None", "")] + [(d, d) for d in DIRECTIONS], value="",
+                                                   label="Advised direction", elem_id="maze-insert-direction",
+                                                   info="Recorded for scoring. The model is not told it.")
+                insert_button = gr.Button("Queue this message", size="sm", elem_id="maze-insert")
+                gr.Markdown("The message goes into the model's context before the next generated response. A simulator "
+                            "note becomes the last key of the latest simulator reply, `\"note\"`; a teammate message is "
+                            "added there as `\"messages\"`, as a team run delivers one; a user message is a turn of its "
+                            "own after that reply. One message is queued at a time.")
             with gr.Accordion("Playback & view", open=False):
                 pace = gr.Slider(.1, 4, value=1., step=.1, label="Seconds per recorded response")
                 reveal = gr.Checkbox(label="Show shortest route (viewer only)", value=False)
@@ -1111,6 +1232,16 @@ def _build_page(context):
         gr.Info("The cell closes before the next generated response.")
         return status(ep), transport_text(ep), *transport_buttons(ep)
 
+    def queue_message(ep, channel, text_value, sender, direction):
+        try:
+            ep.request_insert(channel, text_value, sender if channel == "teammate" else None, direction or None)
+        except (TypeError, ValueError, KeyError) as exc:
+            logger.warning("Run %s refused a %s: %s", ep.run_id, channel, exc)
+            raise gr.Error(str(exc)) from exc
+        logger.info("Run %s: a %s goes in before response %s", ep.run_id, channel, len(ep.turns) + 1)
+        gr.Info("The message goes into the context before the next generated response.")
+        return status(ep), transport_text(ep), *transport_buttons(ep)
+
     def inspect(ep, show, i, session_id):
         if ep.busy:
             raise gr.Error("Pause the episode before selecting a response to replay.")
@@ -1184,7 +1315,8 @@ def _build_page(context):
 
     def select_history(ep, show, session_id, evt: gr.SelectData):
         row = evt.index[0] if isinstance(evt.index, (tuple, list)) else evt.index
-        return inspect(ep, show, int(row) - 1, session_id)
+        rows = history_rows(ep)
+        return inspect(ep, show, rows[max(0, min(int(row), len(rows) - 1))][0], session_id)
 
     def change_reveal(ep, show, session_id):
         ep.reveal_route = show
@@ -1211,7 +1343,8 @@ def _build_page(context):
         try:
             if Path(path).stat().st_size > 50_000_000:
                 raise ValueError("Run files must be smaller than 50 MB.")
-            replay = from_payload(json.loads(Path(path).read_text()))
+            replay = from_payload(json.loads(Path(path).read_text()),
+                                  read_prompt=lambda run, turn, messages: prompt_reading(run, turn, messages, context.models))
             # Before the first frame: recovering the open-cell probability writes
             # it onto the run, and Run details reports whichever way that went.
             values = (*checkpoint_values(replay), *scenario_values(replay))
@@ -1403,6 +1536,8 @@ def _build_page(context):
     stop.click(lambda ep: command(ep, "stop"), episode, command_outputs, queue=False)
     interrupt.click(lambda ep: command(ep, "interrupt"), episode, command_outputs, queue=False)
     close_cell_button.click(close_map_cell, [episode, close_row, close_column], command_outputs, queue=False)
+    insert_button.click(queue_message, [episode, insert_channel, insert_text, insert_sender, insert_direction],
+                        command_outputs, queue=False)
     passage.input(lambda name: "" if name == "None" else PASSAGES.get(name, ""), passage, text, queue=False)
     def change_goal_mode(mode, wording):
         # A mode's stock instruction describes that mode, so switching rewrites

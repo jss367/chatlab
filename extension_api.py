@@ -178,6 +178,16 @@ class GenerationSession:
             ids, skip_special_tokens=False, clean_up_tokenization_spaces=False,
         )
 
+    def prompt_text(self, messages, tools=None):
+        """The prompt these messages become under this pinned model's template, decoded.
+
+        Built on the path generation takes, so a caller can compare a recorded
+        prompt with the one these messages would be fed as.
+        """
+        self._check()
+        ids, _ = self._manager._prompt_token_ids(messages, tools)
+        return self.decode(ids)
+
     @property
     def stop_token_ids(self):
         self._check()

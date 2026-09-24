@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from .dynamic_maze import (FORMAT as CHANGING_FORMAT, ChangingMaze, check_closure, close_cell, load_maze,
                            maze_at_turn, validate_drops, validate_pending, validate_updates)
+from .inserts import CHANNELS, FORMAT as INSERT_FORMAT, check_insert, render_insert
 from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call
 from extension_api import normalize_steering, write_private_text
 
@@ -160,6 +161,9 @@ class Episode:
     # that could not happen by the time its response came round.
     close_next: tuple = ()
     dropped_closures: list = field(default_factory=list)
+    # A message queued to go into the context before the next response. Not
+    # written to the run: one still waiting when the episode ends is dropped.
+    insert_next: dict | None = None
     pause_requested: bool = False
     stop_requested: bool = False
     # Why the last write of this run failed, or None once it is on disk. Kept
@@ -284,7 +288,11 @@ class Episode:
         # two apart and write a run carrying an intervention while saying none
         # was made.
         with self.lock:
-            return {"format": CHANGING_FORMAT if self.map_changes else FORMAT, "maze": self.maze.to_dict(), "config": self.config,
+            # A run carrying an insertion is written under a format an older
+            # ChatLab refuses, rather than one it would read with every later
+            # response's context shifted.
+            kind = INSERT_FORMAT if self.config.get("context_inserts") else CHANGING_FORMAT if self.map_changes else FORMAT
+            return {"format": kind, "maze": self.maze.to_dict(), "config": self.config,
                     "exploratory": True, "tokenizer_note": "Every turn records its actual prompt IDs. Later turns are templated from the complete prior response text, including reasoning.",
                     **{k: getattr(self, k) for k in keys}}
 
@@ -318,6 +326,7 @@ class Episode:
                 return  # The active stream owns cleanup and persistence.
             self.phase, self.detail = "stopped", "Stopped by you. This is not scored as model abandonment."
             abandon_closure(self)
+            abandon_insert(self)
             if save_dir:
                 try:
                     self.save(save_dir)
@@ -377,6 +386,110 @@ class Episode:
                 raise ValueError("The map already changed before this response. Generate it before closing another cell.")
             check_checkpoint_closure(self, cell, check_closure(self.current_maze, self.position, cell))
             self.close_next, self.manual_intervention = tuple(cell), True
+
+    def request_insert(self, channel, text, sender=None, advised_direction=None):
+        """Queue one message to go into the context before the next generated response.
+
+        The rules are the closure's. One is queued at a time, and a second
+        request is refused naming the first, which the reader has already been
+        told will land. One lands at a boundary, so a fork carrying an
+        insertion at the boundary it is about to regenerate refuses another.
+        The check and the assignment are one operation under the lock, because
+        the button runs off Gradio's queue and two clicks arrive at once.
+        """
+        with self.lock:
+            if self.phase in TERMINAL or self.replay_only:
+                raise ValueError("Start a new episode to insert a message. This episode is finished or is a saved replay.")
+            if self.insert_next:
+                queued = self.insert_next
+                raise ValueError(f"{describe_insert(queued)} is already queued before the next response. "
+                                 "Let it land before queueing another.")
+            boundary = len(self.turns)
+            if any(record["before_turn"] == boundary for record in self.config.get("context_inserts", ())):
+                raise ValueError("A message was already inserted before this response. Generate it before inserting another.")
+            insert = check_insert(dict(channel=channel, text=text, sender=sender or None,
+                                       advised_direction=advised_direction or None))
+            # A response being generated now will be answered by the
+            # simulator before this lands, so only an idle run is asked.
+            if not self.busy:
+                render_insert(self.messages, insert)
+            self.insert_next, self.manual_intervention = insert, True
+
+
+def describe_insert(insert):
+    """An insertion named for a reader: its channel, its sender, and how it begins."""
+    text = insert["text"] if len(insert["text"]) <= 40 else insert["text"][:39] + "…"
+    sender = f" from {insert['sender']}" if insert.get("sender") else ""
+    return f"The {CHANNELS[insert['channel']].lower()}{sender} “{text}”"
+
+
+def land_insert(episode, insert):
+    """Write one insertion into the history and the record together. The caller holds the lock."""
+    episode.messages = render_insert(episode.messages, insert)
+    episode.config.setdefault("context_inserts", []).append(insert)
+
+
+def apply_insert(episode, manager=None):
+    """Put the queued message into the context, if one is queued, and record where it landed.
+
+    Called with a response about to be appended. Returns the history as it
+    stood before, so the stream can withdraw the message if that response
+    never reaches the model: a message is only kept on the record once a
+    prompt holding it has been fed, as an interruption is only marked once
+    its tokens have been. One that can no longer be rendered is dropped with
+    a note in the detail rather than recorded, and None comes back, as is
+    one ``manager``'s tokenizer reads a special token out of: templates
+    tokenize message text with the specials parsed, so such a message would
+    end or open a turn wherever it sits, whatever spelling the fixed list in
+    inserts.py missed.
+    """
+    with episode.lock:
+        if not episode.insert_next:
+            return None
+        before = episode.messages
+        queued, episode.insert_next = episode.insert_next, None
+        insert = dict(before_turn=len(episode.turns), channel=queued["channel"], text=queued["text"],
+                      sender=queued["sender"], position=list(episode.position),
+                      advised_direction=queued["advised_direction"])
+        try:
+            if manager is not None and any(set(manager.encode(value)) & manager.hidden_token_ids
+                                           for value in (insert["text"], insert["sender"] or "")):
+                raise ValueError("The loaded model reads part of the text or the sender as one of its special tokens.")
+            land_insert(episode, insert)
+        except ValueError as exc:
+            episode.detail = f"{describe_insert(insert)} was dropped. {exc}"
+            logger.warning("Run %s dropped the message queued before response %s: %s",
+                           episode.run_id, insert["before_turn"] + 1, exc)
+            return None
+        episode.detail = f"{describe_insert(insert)} went into the context before this response."
+        logger.info("Run %s inserted a %s before response %s at %s", episode.run_id, insert["channel"],
+                    insert["before_turn"] + 1, insert["position"])
+        return before
+
+
+def withdraw_insert(episode, before):
+    """Take back the message the last apply_insert landed, its response never having been generated.
+
+    A stop at the opening frame, or a model call that fails before its first
+    update, leaves a response the model never read a prompt for, so a record
+    saying that response received the message would describe an
+    intervention nobody made.
+    """
+    with episode.lock:
+        withdrawn = episode.config["context_inserts"].pop()
+        if not episode.config["context_inserts"]:
+            del episode.config["context_inserts"]
+        episode.messages = before
+    logger.warning("Run %s withdrew the %s before response %s: that response was never generated",
+                   episode.run_id, withdrawn["channel"], withdrawn["before_turn"] + 1)
+
+
+def abandon_insert(episode):
+    """Drop a queued message the run will never reach. The caller holds the lock."""
+    if episode.insert_next:
+        logger.warning("Run %s ended %s with a %s still queued; it was dropped", episode.run_id,
+                       episode.phase, episode.insert_next["channel"])
+        episode.insert_next = None
 
 
 def check_checkpoint_closure(episode, cell, changed, boundary=None, position=None):
@@ -477,11 +590,18 @@ def context_messages(episode, index):
     the simulator's reply - for each response that attempted a call, and by
     none for one that ended without attempting anything, so a response's own
     prompt is the history up to the calls the responses before it made. The
-    initial block is the setup plus one such pair per supplied move.
+    initial block is the setup plus one such pair per supplied move. A user
+    message inserted at or before a response's boundary adds one more; a note
+    or a teammate message is written into a reply already counted.
+
+    Counted from the record rather than kept as an index of its own, so the
+    two cannot disagree.
     """
     supplied = sum(event["source"] == "supplied" for event in episode.events)
     attempts = sum("event" in turn for turn in episode.turns[:max(index, 0)])
-    return episode.messages[:2 + 2 * (supplied + attempts)]
+    users = sum(insert["channel"] == "user" and insert["before_turn"] <= index
+                for insert in episode.config.get("context_inserts", ()))
+    return episode.messages[:2 + 2 * (supplied + attempts) + users]
 
 
 def interrupted_prefix(episode, manager):
@@ -673,6 +793,44 @@ def verify_recorded_stops(episode, turn_index, kept, literal_prefill_tokens, sto
                          "different revision; load that snapshot to fork this run.")
 
 
+def verify_carried_inserts(episode, turn_index, manager):
+    """Refuse a fork that would carry a message the loaded model cannot vouch for.
+
+    An uploaded run is checked against its recorded prompts only where the
+    model that recorded them was loaded at upload, and against special tokens
+    only by the fixed list in inserts.py. A fork has that model in memory, so
+    the messages it keeps are asked both questions a live run asks: whether
+    this tokenizer reads a special token out of one, and whether every kept
+    response from the first message on, the edited one included, recorded the
+    prompt its history becomes under this template.
+    """
+    inserts = [i for i in episode.config.get("context_inserts", ()) if i["before_turn"] <= turn_index]
+    if not inserts:
+        return
+    hidden = manager.hidden_token_ids
+    for insert in inserts:
+        if any(set(manager.encode(value)) & hidden for value in (insert["text"], insert.get("sender") or "")):
+            raise ValueError(f"The loaded model reads a special token out of the message inserted before response "
+                             f"{insert['before_turn'] + 1}, so it cannot be carried into a fork.")
+    for index in range(inserts[0]["before_turn"], turn_index + 1):
+        turn = episode.turns[index]
+        if not turn.get("prompt_ids") or (turn.get("model_id") or episode.model_id) != manager.model_id:
+            continue
+        context = context_messages(episode, index)
+        try:
+            prompt = manager.decode(turn["prompt_ids"])
+        except (IndexError, KeyError, OverflowError, TypeError, ValueError):
+            prompt = None
+        try:
+            templated = manager.prompt_text(context, TOOLS)
+        except Exception:
+            templated = None
+        if prompt is None or not (prompt == templated if templated is not None
+                                  else prompt_holds(prompt, context, episode.messages[len(context):])):
+            raise ValueError(f"Response {index + 1}'s recorded prompt is not the history the run records for it "
+                             "with its inserted messages, so those messages cannot be carried into a fork.")
+
+
 def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, candidate_id=None):
     """Fork before one response; replay exact earlier IDs plus a replacement.
 
@@ -705,6 +863,7 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
         literal_prefill_tokens = literal_prefill_of(original)
         verify_recorded_text(episode, turn_index, manager)
         verify_recorded_stops(episode, turn_index, kept, literal_prefill_tokens, stop_ids)
+        verify_carried_inserts(episode, turn_index, manager)
         if candidate_id is None:
             replacement_ids = manager.encode_replacement(
                 kept_ids, replacement, literal_prefill_tokens=literal_prefill_tokens,
@@ -731,6 +890,9 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
         if episode.map_changes:
             carried = [u for u in config.get("map_updates", []) if u["before_turn"] <= turn_index]
             config["map_updates"] = []
+        # Insertions follow the same rule, and one at exactly the edited
+        # boundary stays: the edited response was generated after it.
+        inserts = [i for i in config.pop("context_inserts", []) if i["before_turn"] <= turn_index]
         result = Episode(episode.maze, config)
         # The fork continues under the weights in memory now, not the ones that
         # produced the original; token_edit keeps the original stamp.
@@ -747,6 +909,9 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
         for i, previous in enumerate(episode.turns[:turn_index]):
             if carried:
                 result.config["map_updates"].extend(u for u in carried if u["before_turn"] == i)
+            for insert in inserts:
+                if insert["before_turn"] == i:
+                    land_insert(result, insert)
             turn = copy.deepcopy(previous)
             result.turns.append(turn)
             if episode.interrupted and episode.intervention_turn == i:
@@ -758,6 +923,9 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
             finish_turn(result, turn, stop_ids, result.config["per_turn_tokens"])
         if carried:
             result.config["map_updates"].extend(u for u in carried if u["before_turn"] == turn_index)
+        for insert in inserts:
+            if insert["before_turn"] == turn_index:
+                land_insert(result, insert)
         prefix = kept_ids + replacement_ids
         result.token_edit = dict(parent_run_id=episode.run_id, turn=turn_index,
                                  token_index=token_index, original_token_id=metrics[token_index]["token_id"],
@@ -770,6 +938,21 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
                                    interruption_here=bool(episode.interrupted and episode.intervention_turn == turn_index))
         result.phase, result.detail = "paused", "Token edit prepared. Regeneration will replace this response and its later moves in a new run."
         return result
+
+
+def assistant_content(turn):
+    """A response as the history carries it, with the reasoning a template opened for it restored."""
+    return ("<think>" if turn.get("reasoning_prefilled") else "") + turn["text"]
+
+
+def reply_messages(episode, turn, event):
+    """The response and the simulator's reply to its call, as the next prompt carries them.
+
+    ``episode`` stands where the call left it. Generation and the check of a
+    saved run's history both write the pair through here.
+    """
+    return [{"role": "assistant", "content": assistant_content(turn)},
+            {"role": "tool", "content": json.dumps(episode.model_state(event["error"]), separators=(",", ":"))}]
 
 
 def finish_turn(episode, turn, stop_ids, max_tokens):
@@ -789,10 +972,7 @@ def finish_turn(episode, turn, stop_ids, max_tokens):
         turn["finish_reason"] = "length" if len(sampled) >= max_tokens else "incomplete_stream"
         return
     turn["finish_reason"] = "stop"
-    text = turn["text"]
-    if turn.get("reasoning_prefilled"):
-        text = "<think>" + text
-    assistant_content = text
+    text = assistant_content(turn)
     # Tool-looking text inside reasoning is not an external action.
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
     if "<think>" in text:
@@ -820,10 +1000,7 @@ def finish_turn(episode, turn, stop_ids, max_tokens):
         episode.detail = f"Moved {event['direction']} to row {episode.position[0]}, column {episode.position[1]}."
     else:
         episode.detail = "Rejected call: " + event["error"].replace("_", " ") + ". The position did not change."
-    episode.messages.extend([
-        {"role": "assistant", "content": assistant_content},
-        {"role": "tool", "content": json.dumps(episode.model_state(event["error"]), separators=(",", ":"))},
-    ])
+    episode.messages.extend(reply_messages(episode, turn, event))
     if event["arrived"]:
         episode.phase, episode.detail = "arrived", "The simulator confirmed arrival at the destination."
     elif (episode.interrupted and episode.resumed is None
@@ -867,6 +1044,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                 episode.run_id, episode.model_id, len(episode.turns), episode.sampled_tokens,
                 episode.moves, "one response" if single_step else "until it ends")
     turn = None
+    inserted = None
     autosave_error = None
 
     def record(turn):
@@ -930,6 +1108,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
             if limit <= 0:
                 episode.phase, episode.detail = "budget", "The sampled-token budget is exhausted."
                 break
+            # After the budget is known to allow a response, so an insertion is
+            # only ever recorded with the response that read it.
+            inserted = apply_insert(episode, manager)
             turn = {"text": "", "metrics": [], "prompt_ids": [], "forced_prefix_tokens": 0,
                     "prefix_ids": [], "prefix_text": "",
                     "planned_prefix_ids": forced, "planned_prefix_text": manager.decode(forced),
@@ -949,6 +1130,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
             episode.pending_edit = None
             yield episode
             if episode.stop_requested:
+                if inserted is not None:
+                    withdraw_insert(episode, inserted)
+                    inserted = None
                 finish_turn(episode, turn, set(), limit)
                 record(turn)
                 break
@@ -966,6 +1150,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                     turn.update(text=update.text, metrics=copy.deepcopy(update.metrics), prompt_ids=list(update.prompt_ids),
                                 forced_prefix_tokens=update.forced_prefix_tokens, reasoning_prefilled=update.reasoning_prefilled,
                                 load_id=update.load_id, model_id=update.model_id)
+                    # The prompt holding the message has been fed.
+                    if update.prompt_ids:
+                        inserted = None
                     # The runtime emits prefix metrics only after prefill has
                     # consumed them. An opening frame or a failed model call
                     # alone is not evidence that an interruption was inserted.
@@ -982,6 +1169,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                         break
             finally:
                 generator.close()
+            if inserted is not None:
+                withdraw_insert(episode, inserted)
+                inserted = None
             turn["seconds"] = time.time() - turn["started_at"]
             finish_turn(episode, turn, stop_ids, limit)
             record(turn)
@@ -996,6 +1186,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
             if episode.phase in TERMINAL:
                 with episode.lock:
                     abandon_closure(episode)
+                    abandon_insert(episode)
             autosave()
             yield episode
             if episode.phase in TERMINAL:
@@ -1018,6 +1209,9 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
         logger.exception("Run %s failed while generating", episode.run_id)
         episode.phase, episode.detail = "error", f"{type(exc).__name__}: {exc}"
     finally:
+        # A model call that failed before feeding its prompt.
+        if inserted is not None:
+            withdraw_insert(episode, inserted)
         if turn is not None and turn.get("finish_reason") is None:
             count = max(0, len(turn["metrics"]) - turn["forced_prefix_tokens"])
             episode.sampled_tokens += count
@@ -1031,6 +1225,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
             # will now never reach rather than a queue it emptied silently.
             if episode.phase in TERMINAL:
                 abandon_closure(episode)
+                abandon_insert(episode)
             if session is None:
                 manager.close()
             autosave()
@@ -1098,19 +1293,203 @@ def validate_checkpoint_closures(episode):
                              f"could not have made. {exc}") from None
 
 
-def from_payload(data):
-    if not isinstance(data, dict) or data.get("format") not in (FORMAT, CHANGING_FORMAT):
+OPPOSITE = {"north": "south", "south": "north", "east": "west", "west": "east"}
+
+
+def insert_outcome(episode, insert):
+    """What the run did after one insertion, read off its path and its map and never off the file.
+
+    The advice is judged on the map as the response after it found it, from
+    the cell the character stood on: whether the advised step is open, and
+    whether it is on a shortest route to the destination. The move is the
+    first accepted model move from that response on, and it followed the
+    advice, went against it (the opposite direction), or took another.
+    """
+    boundary, advised = insert["before_turn"], insert.get("advised_direction")
+    move = next((e for e in episode.events
+                 if e["source"] == "model" and e["accepted"] and e["turn"] >= boundary), None)
+    outcome = dict(advised=advised, move=move, legal=None, shortest=None, followed=None)
+    if advised is None:
+        return outcome
+    maze = maze_at_turn(episode.maze, episode.config.get("map_updates", ()), boundary)
+    position = tuple(insert["position"])
+    step = maze.neighbors(position).get(advised)
+    distances = maze.distances(maze.goal)
+    outcome.update(legal=step is not None,
+                   shortest=step is not None and distances.get(step) == distances[position] - 1)
+    if move is not None:
+        outcome["followed"] = ("followed" if move["direction"] == advised
+                               else "against" if move["direction"] == OPPOSITE[advised] else "other")
+    return outcome
+
+
+def path_position(episode, boundary):
+    """Where the run's own transitions put the character before response ``boundary``."""
+    accepted = [e for e in episode.events if e["accepted"] and e.get("turn", -1) < boundary]
+    return list(accepted[-1]["after"]) if accepted else list(episode.maze.start)
+
+
+def validate_inserts(episode, read_prompt=None):
+    """Refuse a saved run whose inserted messages are not the ones its history holds.
+
+    Each insertion has to name a response the run reaches, one to a boundary
+    and in order, meet its channel's rules, and record where the character's
+    path had it standing. The history is then written again from the setup,
+    the responses, the simulator's replies and the recorded insertions, the
+    way generation wrote it, and has to be the saved ``messages`` exactly: a
+    file whose record says one thing and whose history another would be read
+    as the first and replayed as the second.
+
+    The response each insertion landed before has to record the prompt it
+    was fed, since a run only keeps a message once a prompt holding it has
+    been. Every response from the first insertion on that records a prompt is
+    then read. ``read_prompt(episode, turn, context)`` answers for a prompt with
+    two readings, or None when the model that recorded it is not the one
+    loaded: the recorded IDs decoded, and ``context`` - the messages the
+    record gives that response - put through the same model's template, or
+    None where the template cannot render them. The two have to be the same
+    text, the whole prompt and not only the parts the record names, so a
+    message nobody recorded cannot sit anywhere in it. Where the template
+    gives no reading, the decoded prompt is held to :func:`prompt_holds`
+    instead. Without a reader, a run uploads with no tokenizer at all.
+    """
+    inserts = episode.config.get("context_inserts")
+    if not isinstance(inserts, list) or not inserts:
+        raise ValueError(f"A {INSERT_FORMAT} run carries its inserted messages as a non-empty list.")
+    previous = -1
+    for insert in inserts:
+        boundary = insert.get("before_turn") if isinstance(insert, dict) else None
+        if type(boundary) is not int:
+            raise ValueError("Each inserted message names the response it landed before by its index.")
+        if not 0 <= boundary < len(episode.turns):
+            raise ValueError(f"The message inserted before response {boundary + 1} names a response the run "
+                             "never reached.")
+        if boundary <= previous:
+            raise ValueError(f"The message inserted before response {boundary + 1} is out of order or shares its "
+                             "response with another. One message lands before a response, in order.")
+        previous = boundary
+        try:
+            check_insert(insert)
+        except ValueError as exc:
+            raise ValueError(f"The message inserted before response {boundary + 1} is refused. {exc}") from None
+        if insert.get("position") != path_position(episode, boundary):
+            raise ValueError(f"The message inserted before response {boundary + 1} records a position the "
+                             "run's path does not reach there.")
+        if not episode.turns[boundary].get("prompt_ids"):
+            raise ValueError(f"Response {boundary + 1} records no prompt, so nothing says the model read the "
+                             "message inserted before it.")
+    if not episode.manual_intervention:
+        raise ValueError("A run carrying an inserted message cannot report that nobody intervened in it.")
+    validate_history(episode)
+    if read_prompt is None:
+        return
+    # Every response from the first message on, not only the one each landed
+    # before: a message stays in every later context, and a later prompt
+    # without it would credit its response to an intervention it never read.
+    for index in range(inserts[0]["before_turn"], len(episode.turns)):
+        turn = episode.turns[index]
+        if not turn.get("prompt_ids"):
+            continue
+        context = context_messages(episode, index)
+        reading = read_prompt(episode, turn, context)
+        if reading is None:
+            continue
+        prompt, templated = reading
+        if not (prompt == templated if templated is not None
+                else prompt_holds(prompt, context, episode.messages[len(context):])):
+            raise ValueError(f"Response {index + 1}'s recorded prompt is not the history the run records "
+                             "for it, with the messages inserted up to that response.")
+
+
+def prompt_holds(prompt, context, following):
+    """Whether a decoded prompt carries a response's context and nothing after it.
+
+    The fallback for a template that gives no reading, so weaker than the
+    comparison: text between the messages it finds is not read. Read without
+    the template: every user and simulator message has to appear
+    in the prompt as written and in order, and the next one the history holds
+    after this context must not. Templates write those two roles verbatim,
+    where some rewrite an earlier response's reasoning, so they are what can be
+    found. Finding the messages in order pins an insertion to its own
+    boundary: the same note given twice, or a user message whose words
+    already sit in the system prompt, is only found where the order puts it.
+    """
+    position = 0
+    for message in context:
+        if message["role"] in ("user", "tool"):
+            found = prompt.find(message["content"], position)
+            if found < 0:
+                return False
+            position = found + len(message["content"])
+    later = next((m["content"] for m in following if m["role"] in ("user", "tool")), None)
+    return later is None or later not in prompt[position:]
+
+
+def validate_history(episode):
+    """Write a saved run's history again from its record and compare it with the saved one.
+
+    Walks the responses in order on a fresh episode of the same scenario,
+    landing each closure and each insertion at its own boundary and adding the
+    pair each call left, and names the first response whose context disagrees.
+    """
+    config = copy.deepcopy(episode.config)
+    config.pop("context_inserts")
+    config["map_updates"] = []
+    rebuilt = Episode(episode.maze, config)
+    updates = episode.config.get("map_updates", [])
+    by_boundary = {insert["before_turn"]: insert for insert in episode.config["context_inserts"]}
+    by_turn = {e["turn"]: e for e in episode.events if e["source"] == "model"}
+    saved = episode.messages
+    if not isinstance(saved, list):
+        raise ValueError("A run's messages must be a list.")
+    for index, turn in enumerate(episode.turns):
+        if ("event" in turn) != (index in by_turn):
+            raise ValueError(f"Response {index + 1} disagrees with the run's path about whether it made a call.")
+        rebuilt.config["map_updates"].extend(u for u in updates if u["before_turn"] == index)
+        if index in by_boundary:
+            try:
+                rebuilt.messages = render_insert(rebuilt.messages, by_boundary[index])
+            except ValueError as exc:
+                raise ValueError(f"The message inserted before response {index + 1} cannot be placed. {exc}") from None
+        if rebuilt.messages != saved[:len(rebuilt.messages)]:
+            raise ValueError(f"The saved messages disagree with the run's record at response {index + 1}: its "
+                             "context is not the history and the inserted messages the run records.")
+        event = by_turn.get(index)
+        if event is not None:
+            rebuilt.events.append(event)
+            rebuilt.position = tuple(event["after"])
+            rebuilt.messages.extend(reply_messages(rebuilt, turn, event))
+    if rebuilt.messages != saved:
+        raise ValueError("The saved messages disagree with the run's record after its last response.")
+
+
+def from_payload(data, read_prompt=None):
+    """A saved run, checked against itself, ready to replay.
+
+    ``read_prompt`` is handed to :func:`validate_inserts` for a run carrying
+    inserted messages.
+    """
+    if not isinstance(data, dict) or data.get("format") not in (FORMAT, CHANGING_FORMAT, INSERT_FORMAT):
         raise ValueError("Choose a ChatLab maze run JSON file.")
     if not re.fullmatch(r"[a-f0-9]{32}", str(data.get("run_id", ""))):
         raise ValueError("Invalid run identifier.")
     if not isinstance(data.get("maze"), dict) or not isinstance(data.get("config"), dict):
         raise ValueError("The run is missing its map or its configuration.")
-    changing = data["format"] == CHANGING_FORMAT
+    inserted = data["format"] == INSERT_FORMAT
+    # An insertion shifts the context of every response after it, so a run
+    # carrying one is only read under the format that says so.
+    if not inserted and data["config"].get("context_inserts"):
+        raise ValueError(f"A run carrying inserted messages has to be recorded as {INSERT_FORMAT}.")
+    # The format says whether a run carries insertions; whether its map
+    # changes is read off the map itself, which a changing one records with
+    # its environment identifier.
+    changing = data["format"] == CHANGING_FORMAT or (inserted and "environment_id" in data["maze"])
     # A fixed-map run carrying closures would replay as the map it started
     # from, which is not the map its responses were answering.
     if not changing and (data["config"].get("map_updates") or data.get("dropped_closures")
                          or data.get("close_next")):
-        raise ValueError(f"A run whose map changes has to be recorded as {CHANGING_FORMAT}.")
+        raise ValueError(f"A run whose map changes has to be recorded as {CHANGING_FORMAT}." if not inserted else
+                         "A run whose map changes has to record the changing map, with its environment identifier.")
     maze = load_maze(data["maze"]) if changing else Maze.from_dict(data["maze"])
     result = Episode(maze, data["config"])
     allowed = result.payload().keys() - {"format", "maze", "config", "exploratory", "tokenizer_note"}
@@ -1155,5 +1534,7 @@ def from_payload(data):
     validate_steering(result)
     validate_checkpoint_closures(result)
     result.position = position
+    if inserted:
+        validate_inserts(result, read_prompt)
     result.replay_only = True
     return result
