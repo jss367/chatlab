@@ -7922,7 +7922,7 @@ class ModelManager:
                 },
             })
 
-    def patch_activations(self, donor, recipient, target_index, donor_count, width):
+    def patch_activations(self, donor, recipient, target_index, donor_count, width, contrast_index=None):
         """Measure independent residual transplants between exact Compare runs.
 
         The caller holds the generation reservation and closes this iterator
@@ -7934,7 +7934,8 @@ class ModelManager:
 
         with self._lock:
             try:
-                plan = activation_patching.experiment(donor, recipient, target_index, donor_count, width)
+                plan = activation_patching.experiment(donor, recipient, target_index, donor_count, width,
+                                                      contrast_index)
                 if not self.loaded or self.load_id != plan["load_id"] or self.model_id != plan["model_id"]:
                     raise ModelChanged("The model has been reloaded. Fill both Compare slots again.")
                 if getattr(self._engine(), "backend", "torch") != "torch":
@@ -7945,6 +7946,8 @@ class ModelManager:
                     return self._decode_token(token) or self._token_fallback(token)
 
                 plan["target_text"] = label(plan["target_id"])
+                if plan["contrast_id"] is not None:
+                    plan["contrast_text"] = label(plan["contrast_id"])
                 for pair in plan["pairs"]:
                     pair["donor_text"] = label(plan["donor_ids"][pair["donor_position"]])
                     pair["recipient_text"] = label(plan["recipient_ids"][pair["recipient_position"]])

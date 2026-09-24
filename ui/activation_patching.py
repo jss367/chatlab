@@ -22,7 +22,10 @@ from ui.panel import code_span
 
 HINT = "Fill A and B under the same model load, then select an answer token to measure."
 HEADERS = ["Layer (1-based)", "Source position", "Source token", "Recipient position",
-           "Recipient token", "Patched probability (%)", "Change (percentage points)"]
+           "Recipient token", "Patched probability (%)", "Change (percentage points)",
+           "Metric change", "Recovery"]
+RECOVERY, PROBABILITY = "Recovery", "Probability change"
+NO_CONTRAST = -1
 
 
 class Controls:
@@ -63,26 +66,84 @@ def slots(left, right, direction):
 
 def reset(session):
     revision = CONTROLS.change(session)
-    return (HINT, "", [], None, gr.update(interactive=True), gr.update(visible=False), revision)
+    return (HINT, "", "", [], None, gr.update(interactive=True), gr.update(visible=False), revision)
 
 
-def sources_changed(left, right, direction, session):
-    _donor, recipient = slots(left, right, direction)
-    choices = [
+def token_choices(run):
+    return [
         (f"{i + 1}: {repr(m.get('text') or m.get('display_text') or '')} · ID {m['token_id']}", i)
-        for i, m in enumerate((recipient or {}).get("metrics", []))
+        for i, m in enumerate((run or {}).get("metrics", []))
     ]
-    return gr.update(choices=choices, value=0 if choices else None), *reset(session)
 
 
-def heatmap(result):
-    """A diverging, keyboard-focusable table with exact values on each cell."""
+def default_contrast(donor, recipient, target, donor_count):
+    """The token the source run produced right after its patched prefix.
+
+    That is the source's answer when both runs answer the same question.
+    No contrast is chosen when it would equal the recipient's answer.
+    """
+    source, answers = (donor or {}).get("metrics", []), (recipient or {}).get("metrics", [])
+    try:
+        index = int(donor_count or 0)
+        answer = answers[int(target)]["token_id"] if target is not None else None
+    except (TypeError, ValueError, IndexError):
+        return NO_CONTRAST
+    if not 0 <= index < len(source) or source[index]["token_id"] == answer:
+        return NO_CONTRAST
+    return index
+
+
+def contrast_update(donor, recipient, target, donor_count):
+    choices = [("None: measure the answer's log probability alone", NO_CONTRAST), *token_choices(donor)]
+    return gr.update(choices=choices, value=default_contrast(donor, recipient, target, donor_count))
+
+
+def sources_changed(left, right, direction, donor_count, session):
+    donor, recipient = slots(left, right, direction)
+    choices = token_choices(recipient)
+    target = 0 if choices else None
+    return (gr.update(choices=choices, value=target),
+            contrast_update(donor, recipient, target, donor_count), *reset(session))
+
+
+def count_changed(left, right, direction, target, donor_count, session):
+    donor, recipient = slots(left, right, direction)
+    return contrast_update(donor, recipient, target, donor_count), *reset(session)
+
+
+def metric_name(result):
+    if result.get("contrast_id") is None:
+        return f"log p({result['target_text']!r})"
+    return f"log p({result['target_text']!r}) − log p({result['contrast_text']!r})"
+
+
+def views(view):
+    return gr.update(visible=view == RECOVERY), gr.update(visible=view != RECOVERY)
+
+
+def heatmap(result, view=PROBABILITY):
+    """A diverging, keyboard-focusable table with exact values on each cell.
+
+    The probability view scales to the largest measured effect. The recovery
+    view keeps at least the range -1 to 1, so a full recovery is always the
+    deepest blue and heatmaps from different prompt pairs read alike.
+    """
     pairs, cells = result["pairs"], result["cells"]
+    recovery = view == RECOVERY
+    if recovery and not result.get("recovery_defined"):
+        return ('<p>Recovery is undefined: the source and unpatched recipient differ by '
+                f'{result.get("recovery_gap", 0):+.4f} in {html.escape(metric_name(result))}, '
+                'too little to normalize against. Use the probability view.</p>')
     by_position = {(cell["layer"], cell["column"]): cell for cell in cells}
-    scale = max([abs(cell["delta_probability"]) for cell in cells] + [0.0001])
+    if recovery:
+        scale = max([abs(cell["recovery"]) for cell in cells] + [1.0])
+    else:
+        scale = max([abs(cell["delta_probability"]) for cell in cells] + [0.0001])
+    label = ("Fraction of the source run's effect recovered" if recovery
+             else "Change in answer probability") + " after residual activation replacement"
     parts = [
         '<div style="overflow-x:auto"><table style="border-collapse:separate;border-spacing:3px;width:100%" '
-        'aria-label="Change in answer probability after residual activation replacement">',
+        f'aria-label="{label}">',
         '<thead><tr><th scope="col">Layer</th>',
     ]
     for pair in pairs:
@@ -97,18 +158,23 @@ def heatmap(result):
                 parts.append('<td style="text-align:center;opacity:.45" aria-label="Not measured">—</td>')
                 continue
             delta = cell["delta_probability"]
-            color = "45,110,210" if delta >= 0 else "220,115,35"
-            opacity = 0.08 + 0.55 * abs(delta) / scale
+            value = cell["recovery"] if recovery else delta
+            color = "45,110,210" if value >= 0 else "220,115,35"
+            opacity = 0.08 + 0.55 * min(abs(value) / scale, 1)
             description = (
                 f"Layer {layer + 1}; source {pair['donor_position'] + 1} {pair['donor_text']!r} → "
                 f"recipient {pair['recipient_position'] + 1} {pair['recipient_text']!r}; "
-                f"probability {cell['probability']:.8%}; change {100 * delta:+.6f} percentage points"
+                f"probability {cell['probability']:.8%}; change {100 * delta:+.6f} percentage points; "
+                f"metric change {cell['delta_metric']:+.6f}"
             )
+            if cell.get("recovery") is not None:
+                description += f"; recovery {cell['recovery']:+.4f}"
             escaped = html.escape(description, quote=True)
+            shown = f"{value:+.2f}" if recovery else f"{100 * delta:+.3f}"
             parts.append(
                 f'<td tabindex="0" title="{escaped}" aria-label="{escaped}" '
                 f'style="text-align:center;border-radius:4px;padding:7px 4px;font-size:11px;'
-                f'background:rgba({color},{opacity:.3f})">{100 * delta:+.3f}</td>'
+                f'background:rgba({color},{opacity:.3f})">{shown}</td>'
             )
         parts.append("</tr>")
     parts.append("</tbody></table></div>")
@@ -119,30 +185,31 @@ def rows(result):
     return [
         [cell["layer"] + 1, pair["donor_position"] + 1, repr(pair["donor_text"]),
          pair["recipient_position"] + 1, repr(pair["recipient_text"]),
-         cell["probability"] * 100, cell["delta_probability"] * 100]
+         cell["probability"] * 100, cell["delta_probability"] * 100,
+         cell["delta_metric"], cell["recovery"]]
         for cell in result["cells"] for pair in [result["pairs"][cell["column"]]]
     ]
 
 
-def run(left, right, direction, target, donor_count, width, session, revision):
+def run(left, right, direction, target, contrast, donor_count, width, session, revision):
     def cleared():
         # An old frame can arrive after the input-change callback's reset.
         # The reservation prevents a newer experiment publishing before this
         # cleanup. Preserve the reset/Stop message itself.
-        return (gr.skip(), "", [], None, gr.update(interactive=True), gr.update(visible=False))
+        return (gr.skip(), "", "", [], None, gr.update(interactive=True), gr.update(visible=False))
 
     if not CONTROLS.current(session, revision):
-        yield (gr.skip(),) * 6
+        yield (gr.skip(),) * 7
         return
     manager = runtime.MANAGER
     held = manager.claim_generation()
     if held:
         yield ("Wait for the model to finish loading." if held == LOADING else
-               "Wait for the current model operation to finish.", *(gr.skip(),) * 5)
+               "Wait for the current model operation to finish.", *(gr.skip(),) * 6)
         return
     started = time.monotonic()
     try:
-        yield ("Reading source activations and the unpatched answer probability…", "", [], None,
+        yield ("Reading source activations and the unpatched answer probability…", "", "", [], None,
                gr.update(interactive=False), gr.update(visible=True))
         if not CONTROLS.current(session, revision):
             yield cleared()
@@ -150,7 +217,8 @@ def run(left, right, direction, target, donor_count, width, session, revision):
         donor, recipient = slots(left, right, direction)
         result = None
         last_frame = 0
-        with contextlib.closing(manager.patch_activations(donor, recipient, target, donor_count, width)) as stream:
+        with contextlib.closing(manager.patch_activations(donor, recipient, target, donor_count, width,
+                                                                contrast)) as stream:
             for plan, reading in stream:
                 if not CONTROLS.current(session, revision):
                     yield cleared()
@@ -171,13 +239,15 @@ def run(left, right, direction, target, donor_count, width, session, revision):
                     f"{code_span(repr(result['target_text']))} · "
                     f"Unpatched probability **{result['baseline']['probability']:.6%}** · "
                     f"{done:,}/{total:,} interventions · {result['seconds']:.1f}s"
+                    f"\n\n**Metric** {code_span(metric_name(result))}: recipient "
+                    f"{result['baseline']['metric']:+.4f}, source {result['donor_baseline']['metric']:+.4f}"
                 )
                 if result["complete"]:
                     status += " · Complete"
                 # Yield immutable snapshots: later progress must not change an
                 # earlier frame or a download already being serialized.
                 snapshot = {**result, "cells": list(result["cells"])}
-                yield (status, heatmap(snapshot), rows(snapshot), snapshot,
+                yield (status, heatmap(snapshot, RECOVERY), heatmap(snapshot), rows(snapshot), snapshot,
                        gr.update(interactive=result["complete"]),
                        gr.update(visible=not result["complete"]))
                 if not CONTROLS.current(session, revision):
@@ -185,7 +255,7 @@ def run(left, right, direction, target, donor_count, width, session, revision):
                     return
     except Exception as error:
         if CONTROLS.current(session, revision):
-            yield (failure_status("Could not patch activations", str(error)), "", [], None,
+            yield (failure_status("Could not patch activations", str(error)), "", "", [], None,
                    gr.update(interactive=True), gr.update(visible=False))
     finally:
         manager.release_generation()
@@ -208,8 +278,9 @@ def download(result):
 def build(left, right):
     with gr.Accordion("Activation patching", open=False, elem_id="activation-patching"):
         gr.Markdown(
-            "Transplant residual activations between runs and measure one answer token's "
-            "**raw next-token probability**, before sampling. Each heatmap cell replaces "
+            "Transplant residual activations between runs and measure the **raw next-token "
+            "distribution**, before sampling: the answer token's probability and its logit "
+            "difference from a contrast token. Each heatmap cell replaces "
             "one token's activation after one decoder block in an otherwise unchanged recipient pass. "
             "Fill both slots with steering off under the same Transformers model load "
             "(Llama, Qwen2 or OLMo 3). You can change the prompt between A and B."
@@ -219,6 +290,10 @@ def build(left, right):
         result = gr.State(None)
         direction = gr.Radio(["A → B", "B → A"], value="A → B", label="Source → recipient")
         target = gr.Dropdown(choices=[], label="Answer token in recipient", elem_id="patch-target")
+        contrast = gr.Dropdown(
+            choices=[], label="Contrast token from source", elem_id="patch-contrast",
+            info="Measure log p(answer) − log p(contrast), the logit difference. Defaults to the "
+                 "token the source produced after its prefix.")
         with gr.Row():
             donor_count = gr.Number(value=0, precision=0, minimum=0, label="Source output tokens to include",
                                     info="0 uses only the source prompt. N includes its first N output tokens.")
@@ -236,25 +311,35 @@ def build(left, right):
         status = gr.Markdown(HINT)
         gr.Markdown(
             "**Heatmap:** rows are layers; columns are recipient token positions. "
-            "Blue increases and orange decreases the answer probability, in percentage points. "
-            "Hover or focus a cell for its source token and exact measurement. "
-            "A dash means unmeasured. The color range is symmetric and scales to the largest measured effect."
+            "**Recovery** scales the metric so 0 is the unpatched recipient and 1 is the source run: "
+            "a cell at 0.8 moved the metric 80% of the way to the source. "
+            "**Probability change** shows the answer's raw probability change in percentage points. "
+            "Blue is positive and orange negative. "
+            "Hover or focus a cell for its source token and exact measurements. "
+            "A dash means unmeasured."
         )
-        chart = gr.HTML("")
+        view = gr.Radio([RECOVERY, PROBABILITY], value=RECOVERY, label="Heatmap", elem_id="patch-view")
+        recovery_chart = gr.HTML("")
+        chart = gr.HTML("", visible=False)
         with gr.Accordion("Exact measurements and token pairing", open=False):
             table = gr.Dataframe(headers=HEADERS, interactive=False, wrap=True,
-                                 datatype=["number", "number", "str", "number", "str", "number", "number"])
+                                 datatype=["number", "number", "str", "number", "str",
+                                           "number", "number", "number", "number"])
         gr.DownloadButton("Download patching JSON", value=download, inputs=result, size="sm")
         gr.Markdown(
             "This measures the effect of a specific intervention on one token, not the probability "
             "of a whole answer or proof of a complete reasoning mechanism. Cells are independent; "
             "attention-head and sequential interventions are not included in this first version."
         )
-        outputs = [status, chart, table, result, start, cancel]
-        running = start.click(run, [left, right, direction, target, donor_count, width, session, revision], outputs)
+        outputs = [status, recovery_chart, chart, table, result, start, cancel]
+        running = start.click(
+            run, [left, right, direction, target, contrast, donor_count, width, session, revision], outputs)
         cancel.click(stop, session, [*outputs, revision], cancels=[running], queue=False)
+        view.change(views, view, [recovery_chart, chart], queue=False)
         for source in (left, right, direction):
-            source.change(sources_changed, [left, right, direction, session],
-                          [target, *outputs, revision], queue=False)
-        for control in (target, donor_count, width):
+            source.change(sources_changed, [left, right, direction, donor_count, session],
+                          [target, contrast, *outputs, revision], queue=False)
+        donor_count.input(count_changed, [left, right, direction, target, donor_count, session],
+                          [contrast, *outputs, revision], queue=False)
+        for control in (target, contrast, width):
             control.input(reset, session, [*outputs, revision], queue=False)

@@ -17,6 +17,9 @@ SUPPORTED_MODELS = {"llama", "qwen2", "olmo3"}
 MAX_PREFIX = 2048
 MAX_POSITIONS = 32
 MAX_CELLS = 2048
+# Below this gap between the source and recipient metrics, recovery would
+# divide by noise, so it is reported as undefined.
+MIN_RECOVERY_GAP = 0.01
 
 
 def integer(value, label):
@@ -31,8 +34,13 @@ def integer(value, label):
     return converted
 
 
-def experiment(donor, recipient, target_index, donor_count, width):
-    """Build exact prefixes from Compare recordings, never re-tokenize text."""
+def experiment(donor, recipient, target_index, donor_count, width, contrast_index=None):
+    """Build exact prefixes from Compare recordings, never re-tokenize text.
+
+    ``contrast_index`` optionally selects a source output token. The metric is
+    then log p(answer) - log p(contrast), which equals the raw logit
+    difference; without one it is log p(answer).
+    """
     for run in (donor, recipient):
         if not run or "context_ids" not in run or not run.get("run_id"):
             raise ValueError("Fill both Compare slots again to record their exact input tokens.")
@@ -57,6 +65,19 @@ def experiment(donor, recipient, target_index, donor_count, width):
             integer(m["token_id"], "Token ID") for m in run["metrics"][:count]
         ]
 
+    target_id = integer(recipient["metrics"][target_index]["token_id"], "Answer token ID")
+    contrast_id = None
+    if contrast_index is not None:
+        contrast_index = integer(contrast_index, "Contrast token")
+        if contrast_index < 0:
+            contrast_index = None
+        elif contrast_index >= len(donor["metrics"]):
+            raise ValueError("Select a contrast token from the source run.")
+        else:
+            contrast_id = integer(donor["metrics"][contrast_index]["token_id"], "Contrast token ID")
+            if contrast_id == target_id:
+                raise ValueError("Choose a contrast token that differs from the answer token.")
+
     source = prefix(donor, donor_count)
     destination = prefix(recipient, target_index)
     if not source or not destination:
@@ -66,7 +87,7 @@ def experiment(donor, recipient, target_index, donor_count, width):
     if width > min(len(source), len(destination)):
         raise ValueError("Choose fewer token pairs; the requested window is longer than a prefix.")
     return {
-        "format": "chatlab-activation-patching-1",
+        "format": "chatlab-activation-patching-2",
         "site": "decoder_block_output", "intervention": "residual_replacement",
         "alignment": "prefix_end", "independent_cells": True,
         "model_id": donor["model_id"], "load_id": donor["load_id"],
@@ -74,7 +95,9 @@ def experiment(donor, recipient, target_index, donor_count, width):
         "donor_run_id": donor["run_id"], "recipient_run_id": recipient["run_id"],
         "donor_slot": donor.get("slot"), "recipient_slot": recipient.get("slot"),
         "donor_output_count": donor_count, "target_index": target_index,
-        "target_id": integer(recipient["metrics"][target_index]["token_id"], "Answer token ID"),
+        "target_id": target_id,
+        "contrast_index": contrast_index, "contrast_id": contrast_id,
+        "metric": "logit_difference" if contrast_id is not None else "answer_log_probability",
         "donor_ids": source, "recipient_ids": destination,
         "pairs": [
             {"donor_position": len(source) - width + i,
@@ -105,14 +128,15 @@ def measure(model, plan):
 
     layers = model_layers(model)
     source, destination = plan["donor_ids"], plan["recipient_ids"]
-    pairs, target = plan["pairs"], plan["target_id"]
+    pairs, target, contrast = plan["pairs"], plan["target_id"], plan.get("contrast_id")
     if not pairs or len(pairs) > MAX_POSITIONS or len(pairs) * len(layers) > MAX_CELLS:
         raise ValueError("Too many interventions; choose fewer token pairs.")
     if not source or not destination or max(len(source), len(destination)) > MAX_PREFIX:
         raise ValueError("Invalid or overly long patching prefix.")
     vocab = model.get_input_embeddings().weight.shape[0]
     output_vocab = model.get_output_embeddings().weight.shape[0]
-    if any(not 0 <= token < vocab for token in source + destination) or not 0 <= target < output_vocab:
+    if (any(not 0 <= token < vocab for token in source + destination)
+            or any(not 0 <= token < output_vocab for token in (target, contrast) if token is not None)):
         raise ValueError("The recorded token IDs do not fit the loaded model.")
     for pair in pairs:
         if not (0 <= pair["donor_position"] < len(source)
@@ -131,11 +155,20 @@ def measure(model, plan):
             inputs = torch.tensor([ids], dtype=torch.long, device=device)
             out = model(input_ids=inputs, attention_mask=torch.ones_like(inputs),
                         use_cache=False, **({"logits_to_keep": 1} if last_only else {}))
-            logits = out.logits[0, -1].float()
-            log_probability = float(torch.log_softmax(logits, dim=-1)[target].item())
+            log_probs = torch.log_softmax(out.logits[0, -1].float(), dim=-1)
+            log_probability = float(log_probs[target].item())
             if not math.isfinite(log_probability):
                 raise ValueError("The model returned a non-finite answer probability.")
-            return {"probability": math.exp(log_probability), "log_probability": log_probability}
+            reading = {"probability": math.exp(log_probability), "log_probability": log_probability,
+                       "metric": log_probability}
+            if contrast is not None:
+                contrast_log_probability = float(log_probs[contrast].item())
+                if not math.isfinite(contrast_log_probability):
+                    raise ValueError("The model returned a non-finite contrast probability.")
+                reading["contrast_probability"] = math.exp(contrast_log_probability)
+                reading["contrast_log_probability"] = contrast_log_probability
+                reading["metric"] = log_probability - contrast_log_probability
+            return reading
 
     def hidden(output):
         value = output[0] if isinstance(output, tuple) else output
@@ -159,7 +192,11 @@ def measure(model, plan):
         raise ValueError("Not every decoder block was executed during source capture.")
 
     baseline = forward(destination)
-    yield {"baseline": baseline, "donor_baseline": donor_baseline, "layer_count": len(layers)}
+    # Recovery is 0 at the unpatched recipient and 1 at the source run.
+    gap = donor_baseline["metric"] - baseline["metric"]
+    defined = abs(gap) >= MIN_RECOVERY_GAP
+    yield {"baseline": baseline, "donor_baseline": donor_baseline, "layer_count": len(layers),
+           "recovery_gap": gap, "recovery_defined": defined}
     for layer, block in enumerate(layers):
         for column, pair in enumerate(pairs):
             calls = 0
@@ -186,4 +223,6 @@ def measure(model, plan):
                 "layer": layer, "column": column, **patched,
                 "delta_probability": patched["probability"] - baseline["probability"],
                 "delta_log_probability": patched["log_probability"] - baseline["log_probability"],
+                "delta_metric": patched["metric"] - baseline["metric"],
+                "recovery": (patched["metric"] - baseline["metric"]) / gap if defined else None,
             }
