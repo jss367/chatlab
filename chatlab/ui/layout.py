@@ -1591,6 +1591,15 @@ def build_app() -> gr.Blocks:
                                 min_width=120,
                                 elem_classes=["model-sort", "model-kind"],
                             )
+                        # A cache that has grown past a screenful is read by
+                        # family ("every Qwen") more often than by kind, and
+                        # the ID is the only place a family is written.
+                        name_filter = gr.Textbox(
+                            placeholder="Filter by name",
+                            show_label=False,
+                            container=False,
+                            elem_id="my-models-filter",
+                        )
                         my_models = gr.Radio(
                             choices=[],
                             label="Downloaded models",
@@ -1978,7 +1987,9 @@ def build_app() -> gr.Blocks:
         # The typed ID stays last: the model-actions listeners assert it is
         # the input the refresh is given, and a new argument goes before it
         # rather than displacing it.
-        models_inputs = [my_models, sort_models, weight_precision, kind_filter, model_id]
+        models_inputs = [
+            my_models, sort_models, weight_precision, kind_filter, name_filter, model_id
+        ]
         models_outputs = [my_models, my_model_detail, my_models_summary]
         action_inputs = [model_id, my_models, repository_result, hf_token]
         action_outputs = [
@@ -2111,14 +2122,20 @@ def build_app() -> gr.Blocks:
                 [model_switch, model_status, model_badge_view],
             )
         )
-        # A manual refresh, a new sort order and a new kind filter reorder or
-        # narrow a list; none of them changes what is on disk or in memory,
-        # which is all the badge and the count ask about.
+        # A manual refresh, a new sort order, a new kind filter and a typed
+        # name reorder or narrow a list; none of them changes what is on disk
+        # or in memory, which is all the badge and the count ask about.
         refresh_actions(
             refresh_models_button.click(refresh_my_models, models_inputs, models_outputs)
         )
         sort_models.input(refresh_my_models, models_inputs, models_outputs)
         kind_filter.input(refresh_my_models, models_inputs, models_outputs)
+        # The list narrows as the reader types. Only the last keystroke of a
+        # burst is answered, since each answer rescans the cache folder.
+        name_filter.input(
+            refresh_my_models, models_inputs, models_outputs,
+            show_progress="hidden", trigger_mode="always_last",
+        )
         # Before the reader chooses an ID, startup can highlight the loaded model.
         refresh_actions(demo.load(refresh_my_models, [my_models, sort_models], models_outputs))
         # The badge's timer corrects the fit verdicts once torch has finished
@@ -2252,7 +2269,7 @@ def build_app() -> gr.Blocks:
             [*models_inputs, *search_inputs],
             [
                 nav, conversation_pane, chat_page, images_page, models_page,
-                settings_page, kind_filter, *models_outputs, search_kind,
+                settings_page, kind_filter, name_filter, *models_outputs, search_kind,
                 *search_outputs,
             ],
         )

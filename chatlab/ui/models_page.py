@@ -1427,6 +1427,7 @@ def go_to_image_models(
     order: str | None,
     precision: str | None,
     _kind: str | None,
+    _name: str | None,
     model_id: str | None,
     query: str | None,
     hf_token: str,
@@ -1445,14 +1446,20 @@ def go_to_image_models(
     than left to a listener - the controls are written by this handler, and
     a control a handler writes reports no change of its own.
 
-    The two kind choices the page is already showing are taken and ignored,
-    which keeps the wiring the same input lists the two lists take.
+    A name typed in the My Models box is cleared on the way, since the
+    question is now which models draw, and "qwen" left over from an earlier
+    look would hide every one of them.
+
+    The two kind choices and the name the page is already showing are taken
+    and ignored, which keeps the wiring the same input lists the two lists
+    take.
     """
 
     return (
         *go_to_models(),
         gr.update(value=IMAGE_KIND),
-        *refresh_my_models(selected, order, precision, IMAGE_KIND, model_id),
+        gr.update(value=""),
+        *refresh_my_models(selected, order, precision, IMAGE_KIND, None, model_id),
         gr.update(value=IMAGE_KIND),
         *search_models(query, hf_token, precision, IMAGE_KIND, search_order, fits_only),
     )
@@ -1888,18 +1895,34 @@ def cached_models_of_kind(models: list[CachedModel], kind: str | None) -> list[C
     return [entry for entry in models if entry.status.kind == kind]
 
 
+def cached_models_named(models: list[CachedModel], name: str | None) -> list[CachedModel]:
+    """``models`` whose ID holds every word of ``name``, ignoring case.
+
+    Each word is matched on its own, anywhere in the ID, so "qwen 7b" finds
+    ``Qwen/Qwen2.5-7B-Instruct`` without the reader having to know where the
+    organization ends or how the size is spelled. An empty box keeps all.
+    """
+
+    words = (name or "").lower().split()
+    return [
+        entry for entry in models
+        if all(word in entry.model_id.lower() for word in words)
+    ]
+
+
 def my_models_summary(
     models: list[CachedModel],
     shown: list[CachedModel] | None = None,
     kind: str | None = None,
+    name: str | None = None,
 ) -> str:
-    """The line above the list: what the cache holds, and what the filter hides.
+    """The line above the list: what the cache holds, and what the filters hide.
 
     The count and the size stay about the whole cache even while a kind is
-    chosen, because the disk figure is about the folder rather than about
-    what is on screen. A filter that matches nothing says so, and says where
-    to go instead: that is the answer a reader who came from the Images page
-    with no image model downloaded needs.
+    chosen or a name typed, because the disk figure is about the folder
+    rather than about what is on screen. A filter that matches nothing says
+    so, and says where to go instead: that is the answer a reader who came
+    from the Images page with no image model downloaded needs.
     """
 
     root = f"`{cache_root()}`"
@@ -1913,13 +1936,14 @@ def my_models_summary(
     line = f"{count} · {total} on disk in {root}"
     if shown is None or len(shown) == len(models):
         return line
-    named = KIND_FILTER_NAMES.get(kind, "matching")
+    kind_name = KIND_FILTER_NAMES.get(kind)
+    typed = " ".join((name or "").split())
+    matching = f"matching `{typed}`" if typed else ""
     if not shown:
-        return (
-            f"No {named} models among the {line}. "
-            "Find one under **Discover models**."
-        )
-    return f"Showing {len(shown)} {named} · {line}"
+        described = " ".join(filter(None, [kind_name, "models", matching]))
+        return f"No {described} among the {line}. Find one under **Discover models**."
+    described = " ".join(filter(None, [kind_name, matching])) or "matching"
+    return f"Showing {len(shown)} {described} · {line}"
 
 
 def refresh_my_models(
@@ -1927,6 +1951,7 @@ def refresh_my_models(
     order: str | None = DEFAULT_MODEL_SORT,
     precision: str | None = None,
     kind: str | None = ALL_KINDS,
+    name: str | None = None,
     model_id: str | None = None,
 ):
     """Rescan the cache; keep the selected row or typed ID, or the loaded model.
@@ -1937,12 +1962,13 @@ def refresh_my_models(
     to try when a model will not load.
 
     ``kind`` is the **Kind** choice, which narrows the rows to text, image or
-    MLX models. A row the filter hides cannot stay selected, so a selection
-    it hides is dropped the same way one removed from disk is.
+    MLX models, and ``name`` is the box beside it, which narrows them to IDs
+    holding every word typed. A row a filter hides cannot stay selected, so a
+    selection it hides is dropped the same way one removed from disk is.
     """
 
     everything = sort_cached_models(list_cached_models(), order)
-    models = cached_models_of_kind(everything, kind)
+    models = cached_models_named(cached_models_of_kind(everything, kind), name)
     fits = cached_fits(models, precision)
     ids = [entry.model_id for entry in models]
     if selected not in ids:
@@ -1960,7 +1986,7 @@ def refresh_my_models(
     return (
         gr.update(choices=choices, value=selected),
         detail,
-        my_models_summary(everything, models, kind),
+        my_models_summary(everything, models, kind, name),
     )
 
 
@@ -2372,6 +2398,7 @@ def refresh_after_device(
     order: str | None = DEFAULT_MODEL_SORT,
     precision: str | None = None,
     kind: str | None = ALL_KINDS,
+    name: str | None = None,
     model_id: str | None = None,
     result: str | None = None,
     results: dict | None = None,
@@ -2393,7 +2420,7 @@ def refresh_after_device(
     if known or imported_torch() is None:
         return (gr.skip(),) * 7
     return (
-        *refresh_my_models(selected, order, precision, kind, model_id),
+        *refresh_my_models(selected, order, precision, kind, name, model_id),
         *refresh_search_results(result, results or {}, precision, fits_only),
         True,
     )
