@@ -1124,6 +1124,47 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertEqual([v for _, v in every["choices"]], [UNSUPPORTED.model_id])
         self.assertEqual(texts["choices"], [])
 
+    def test_the_name_filter_keeps_ids_holding_every_word_in_any_case(self):
+        qwen_small = cached("Qwen/Qwen3-0.6B")
+        qwen_large = cached("mlx-community/Qwen2.5-7B-Instruct-4bit")
+        self.entries = [cached(OLMO), qwen_small, qwen_large]
+
+        qwen, _, summary = app.refresh_my_models(None, "Name", None, app.ALL_KINDS, "qwen")
+        seven, _, _ = app.refresh_my_models(None, "Name", None, app.ALL_KINDS, " QWEN  7b ")
+        blank, _, blank_summary = app.refresh_my_models(None, "Name", None, app.ALL_KINDS, "  ")
+
+        self.assertEqual(
+            [v for _, v in qwen["choices"]], [qwen_large.model_id, qwen_small.model_id]
+        )
+        self.assertEqual([v for _, v in seven["choices"]], [qwen_large.model_id])
+        self.assertEqual(len(blank["choices"]), 3)
+        self.assertIn("Showing 2 matching `qwen`", summary)
+        self.assertIn("3 models", summary)
+        self.assertNotIn("Showing", blank_summary)
+
+    def test_the_name_filter_narrows_within_the_chosen_kind(self):
+        self.entries = [cached("Qwen/Qwen3-0.6B"), PIPELINE, MLX]
+
+        radio, _, summary = app.refresh_my_models(
+            None, "Name", None, model_cache.IMAGE_KIND, PIPELINE.model_id.split("/")[-1]
+        )
+        _, _, empty = app.refresh_my_models(
+            None, "Name", None, model_cache.IMAGE_KIND, "qwen"
+        )
+
+        self.assertEqual([v for _, v in radio["choices"]], [PIPELINE.model_id])
+        self.assertIn("Showing 1 image matching", summary)
+        self.assertIn("No image models matching `qwen`", empty)
+        self.assertIn("**Discover models**", empty)
+
+    def test_a_name_that_hides_the_selected_row_drops_the_selection(self):
+        self.entries = [cached(OLMO), cached("Qwen/Qwen3-0.6B")]
+
+        radio, detail, _ = app.refresh_my_models(OLMO, "Name", None, app.ALL_KINDS, "qwen")
+
+        self.assertIsNone(radio["value"])
+        self.assertEqual(detail, app.NO_CACHED_MODEL_SELECTED)
+
     def test_the_unfiltered_list_is_what_no_kind_at_all_gives(self):
         # demo.load and the tests that predate the filter pass no kind.
         self.entries = [cached(OLMO), PIPELINE]
@@ -1397,7 +1438,7 @@ class ModelFitTests(unittest.TestCase):
 
         _radio, _detail, _summary, results, _search, _selected, known = (
             app.refresh_after_device(
-                False, None, "Name", "full", app.ALL_KINDS, None, None, held
+                False, None, "Name", "full", app.ALL_KINDS, None, None, None, held
             )
         )
 
@@ -3429,16 +3470,20 @@ class PageLayoutTests(unittest.TestCase):
         self.assertIn(search_kind, listener.inputs)
         self.assertIn(kind_filter, listener.outputs)
         self.assertIn(search_kind, listener.outputs)
+        # A name left in the filter box would hide the image models the
+        # button is there to show, so the box is cleared on the way in.
+        self.assertIn(self.by_id("my-models-filter"), listener.outputs)
         self.assertIn(self.labelled("Downloaded models"), listener.outputs)
         self.assertIn(self.by_id("model-search-results"), listener.outputs)
 
     def test_every_model_change_rescans_the_cache(self):
         # Download, download-and-load, load cached, unload, redownload,
         # confirmed removal, the refresh button, a new sort order, a new kind
-        # filter, a new weight precision, the page load and a pick in the chat
-        # page's switcher each rescan. Selecting the default only navigates,
-        # and the Images page's button rescans inside go_to_image_models.
-        self.assertEqual(len(self.listeners("refresh_my_models")), 12)
+        # filter, a typed name, a new weight precision, the page load and a
+        # pick in the chat page's switcher each rescan. Selecting the default
+        # only navigates, and the Images page's button rescans inside
+        # go_to_image_models.
+        self.assertEqual(len(self.listeners("refresh_my_models")), 13)
 
     def test_model_actions_follow_selections_and_cache_refreshes(self):
         listeners = self.listeners("refresh_model_actions")
@@ -4070,10 +4115,11 @@ class PageLayoutTests(unittest.TestCase):
         # different model has its own limit, so every handler that changes
         # what is loaded recomputes the count rather than leaving the old
         # model's answer under the box.
-        # Five of the rescans change neither: the refresh button, a new sort
-        # order, a new kind filter, a new weight precision, and the page load.
+        # Six of the rescans change neither: the refresh button, a new sort
+        # order, a new kind filter, a typed name, a new weight precision, and
+        # the page load.
         self.assertEqual(
-            len(listeners) - len(typed), len(self.listeners("refresh_my_models")) - 5
+            len(listeners) - len(typed), len(self.listeners("refresh_my_models")) - 6
         )
 
     def test_choosing_a_model_writes_the_id_box(self):
