@@ -15,12 +15,14 @@ import logging
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
 from chatlab import device_memory
 from chatlab.conversation import THINK_CLOSE, THINK_OPEN
 from chatlab.device_memory import memory_note, reraise_out_of_memory
+from chatlab.engine import Engine
 from chatlab.thinking import THINKING_MODES, supports_thinking
 from chatlab.token_metrics import (
     UNSCORED_BEYOND_LIMIT,
@@ -160,6 +162,197 @@ class GenerationUpdate:
 
 class ModelChanged(RuntimeError):
     """The weights in memory are not the ones the caller's tokens came from."""
+
+
+@dataclass
+class _ForcedPrefix:
+    """The tokens a response is made to start with, and which are the reader's.
+
+    What :meth:`GenerationMixin._forced_prefix` makes of a branch's replayed
+    tokens or a typed assistant prefill. ``literal_prefill_tokens`` leading
+    tokens are text the reader supplied, the first
+    ``automatic_reasoning_close_tokens`` of those are the reasoning close the
+    template put in front of it, and ``literal_ranges`` are the token spans of
+    typed branch replacements, sorted and merged. Mutable because the close
+    can only be measured once the prefix is decoded; see
+    :func:`_decode_forced_prefix`.
+    """
+
+    ids: list[int]
+    literal_prefill_tokens: int
+    automatic_reasoning_close_tokens: int
+    literal_ranges: list[tuple[int, int]]
+
+
+def _sampler(
+    temperature: float, top_p: float, top_k: int, skip_top_below: float
+) -> Callable[[np.ndarray], np.ndarray]:
+    """The reader's sampling settings, as one call from log probabilities to a distribution.
+
+    The settings are converted on each call rather than once here, so a value
+    that cannot be converted fails where the distribution is first needed.
+    """
+
+    def sample(log_probs: np.ndarray) -> np.ndarray:
+        return sampling_probabilities(
+            log_probs,
+            temperature=float(temperature),
+            top_p=float(top_p),
+            top_k=int(top_k),
+            skip_top_below=float(skip_top_below),
+        )
+
+    return sample
+
+
+def _merge_literal_ranges(
+    ranges: Sequence[tuple[int, int]], length: int
+) -> list[tuple[int, int]]:
+    """``ranges`` clamped to a prefix of ``length`` tokens, sorted, overlaps merged.
+
+    Empty ranges are dropped. Ranges that touch are joined as well as ones
+    that overlap, so a replacement typed straight after another reads as one
+    literal span.
+    """
+
+    normalized: list[tuple[int, int]] = []
+    for raw_start, raw_end in ranges:
+        start = max(0, min(int(raw_start), length))
+        end = max(start, min(int(raw_end), length))
+        if start < end:
+            normalized.append((start, end))
+    normalized.sort()
+    merged: list[tuple[int, int]] = []
+    for start, end in normalized:
+        if merged and start <= merged[-1][1]:
+            previous_start, previous_end = merged[-1]
+            merged[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _decode_forced_prefix(
+    decoder: IncrementalDecoder,
+    prefix: _ForcedPrefix,
+    metrics: list[dict],
+    *,
+    closes_reasoning: bool,
+) -> tuple[str, tuple[tuple[int, int], ...]]:
+    """Push the forced prefix through ``decoder``; its literal text and spans.
+
+    Returns the stable text of the reader's prefill, which the application
+    protects from the reasoning parser, and the character spans of the typed
+    replacements in the decoded text. ``closes_reasoning`` says the prefill
+    was put after an automatic reasoning close (an assistant prefill on a
+    prompt that ends inside reasoning); the tokens that close turns out to
+    span are marked in ``metrics`` and counted on ``prefix`` here, since only
+    the decoded text shows where it ends.
+    """
+
+    forced = prefix.ids
+    literal_prefill_tokens = prefix.literal_prefill_tokens
+    literal_prefill_text = ""
+    literal_boundaries = {
+        boundary for span in prefix.literal_ranges for boundary in span
+    }
+    boundary_text = {0: ""}
+    for index, token_id in enumerate(forced):
+        decoder.push(
+            token_id, force_visible=index < literal_prefill_tokens
+        )
+        if (
+            closes_reasoning
+            and not prefix.automatic_reasoning_close_tokens
+            and decoder.stable_text.startswith(f"{THINK_CLOSE}\n\n")
+        ):
+            # The last token can straddle the boundary and include the
+            # beginning of the reader's prefill. It still cannot be
+            # replaced independently: doing so would remove part of
+            # the close and leave the continuation inside reasoning.
+            prefix.automatic_reasoning_close_tokens = index + 1
+            for metric in metrics[:prefix.automatic_reasoning_close_tokens]:
+                metric["automatic_reasoning_close"] = True
+        if index + 1 in literal_boundaries:
+            boundary_text[index + 1] = decoder.text
+        if index + 1 == literal_prefill_tokens:
+            # A branch can stop inside a byte-level token sequence for
+            # one character. The replacement-character suffix will be
+            # rewritten when the next token arrives, so it cannot be a
+            # durable prefix for the application's literal-tag guard.
+            literal_prefill_text = decoder.stable_text
+    forced_text = decoder.text
+
+    # A byte-level token boundary can land inside one Unicode
+    # character. Its temporary U+FFFD is rewritten when later bytes
+    # arrive, so use the longest prefix that is actually stable in the
+    # completed forced text. Ordinary word-piece boundaries take the
+    # fast path and keep their full decoded length.
+    def stable_length(at: int) -> int:
+        value = boundary_text.get(at, "")
+        if forced_text.startswith(value):
+            return len(value)
+        for offset, (left, right) in enumerate(zip(value, forced_text)):
+            if left != right:
+                return offset
+        return min(len(value), len(forced_text))
+
+    literal_text_spans = tuple(
+        (stable_length(start), stable_length(end))
+        for start, end in prefix.literal_ranges
+        if stable_length(start) < stable_length(end)
+    )
+    return literal_prefill_text, literal_text_spans
+
+
+@dataclass
+class _Response:
+    """One response while it is being produced, and the frames that publish it.
+
+    Everything but the decoder's text and the metrics is fixed once the
+    prefix is decoded, so it is gathered here once and every
+    :class:`GenerationUpdate` - the forced prefix's and each sampled batch's -
+    is built by :meth:`update` from the same fields. ``metrics`` is the live
+    list the generator appends to; each update carries that list itself,
+    not a copy.
+    """
+
+    decoder: IncrementalDecoder
+    metrics: list[dict]
+    load_id: str
+    model_id: str | None
+    prompt_ids: tuple[int, ...]
+    prompt_metrics: list[dict]
+    prompt_note: str
+    reasoning_prefilled: bool
+    thinking_mode: str | None
+    forced_prefix_tokens: int
+    literal_prefill_tokens: int
+    literal_prefill_text: str
+    literal_text_spans: tuple[tuple[int, int], ...]
+
+    def update(
+        self, *, ends_on_stop_token: bool, ends_on_position_limit: bool = False
+    ) -> GenerationUpdate:
+        """The frame for the response as it stands now."""
+
+        return GenerationUpdate(
+            text=self.decoder.text,
+            metrics=self.metrics,
+            load_id=self.load_id,
+            prompt_metrics=self.prompt_metrics,
+            prompt_note=self.prompt_note,
+            reasoning_prefilled=self.reasoning_prefilled,
+            thinking_mode=self.thinking_mode,
+            forced_prefix_tokens=self.forced_prefix_tokens,
+            literal_prefill_tokens=self.literal_prefill_tokens,
+            literal_prefill_text=self.literal_prefill_text,
+            literal_text_spans=self.literal_text_spans,
+            prompt_ids=self.prompt_ids,
+            model_id=self.model_id,
+            ends_on_stop_token=ends_on_stop_token,
+            ends_on_position_limit=ends_on_position_limit,
+        )
 
 
 class GenerationMixin:
@@ -1009,109 +1202,37 @@ class GenerationMixin:
         load_id: str | None = None,
         steering: dict | None = None,
     ) -> Iterator[GenerationUpdate]:
+        # One response, in the order its steps have to happen: the prompt, the
+        # prefix it is forced to start with, one pass that feeds both, the
+        # prefix decoded, and the continuation sampled. Each step is its own
+        # method; this holds the lock across them and hands each its inputs.
         with self._lock, contextlib.ExitStack() as steering_scope:
             try:
-                if not self.loaded:
-                    raise RuntimeError("Download and load a model before chatting.")
-                if load_id is not None and load_id != self.load_id:
-                    raise ModelChanged(
-                        "The model has been reloaded since these tokens were produced."
-                    )
-
-                # A stale branch must raise ModelChanged before vector/model
-                # compatibility is checked, so its handler restores the reply.
-                steering_scope.enter_context(self._steering(steering))
-
-                assert self.model is not None
-                assert self.tokenizer is not None
-                engine = self._engine()
-                tokenizer = self.tokenizer
-                # A response is where memory runs short, so what the last
-                # inspection kept is given back before the prompt is fed.
-                self._drop_inspect_cache()
-                # Read here, under the lock, alongside the weights: this is the
-                # only place the two are guaranteed to agree, which is what makes
-                # the stamp on each update worth trusting.
-                model_id = self.model_id
-                producing_load_id = self.load_id
-                assert producing_load_id is not None
-
-                if thinking_mode not in THINKING_MODES:
-                    raise ValueError("Thinking mode must be default, on, or off.")
-                recorded_thinking = thinking_mode if self.supports_thinking else None
-                template_args = {"tools": tools} if tools is not None else {}
-                if recorded_thinking is not None:
-                    template_args["thinking_mode"] = recorded_thinking
-                if prompt_override_ids is None:
-                    prompt_ids, reasoning_prefilled = self._prompt_token_ids(
-                        messages, **template_args
-                    )
-                else:
-                    prompt_ids = [int(value) for value in prompt_override_ids]
-                    if not prompt_ids:
-                        raise ValueError("An edited prompt cannot be empty.")
-                    # Only the ids can now say whether the prompt ends inside a
-                    # reasoning block. Asking the template instead would answer
-                    # for the prompt it would have written, which is precisely
-                    # the prompt that is not being fed: an edit that removed
-                    # the opening marker would still be told one was there, and
-                    # the reply's first words would be filed as reasoning.
-                    reasoning_prefilled = (
-                        self._decode_ids(prompt_ids).rstrip().endswith(THINK_OPEN)
-                    )
+                engine, model_id, producing_load_id = self._start_response(
+                    steering_scope, load_id=load_id, steering=steering
+                )
+                prompt_ids, reasoning_prefilled, recorded_thinking = self._response_prompt(
+                    messages,
+                    tools=tools,
+                    thinking_mode=thinking_mode,
+                    prompt_override_ids=prompt_override_ids,
+                )
                 # Noted here rather than left to the first update, because a run
                 # that fails in the prefill below never publishes one and prefill
                 # is where a memory failure is most likely.
                 self._run_note = (model_id, len(prompt_ids))
                 stop_ids = self._stop_token_ids()
 
-                if forced_ids and answer_prefill:
-                    raise ValueError(
-                        "A token branch and an assistant prefill cannot be applied together."
-                    )
-
-                forced = [int(value) for value in forced_ids]
-                if answer_prefill:
-                    forced = self._response_prefix_ids(
-                        answer_prefill, close_reasoning=reasoning_prefilled
-                    )
-                    literal_prefill_tokens = len(forced)
-                    automatic_reasoning_close_tokens = 0
-                else:
-                    literal_prefill_tokens = max(
-                        0, min(int(literal_prefill_tokens), len(forced))
-                    )
-                    automatic_reasoning_close_tokens = max(
-                        0,
-                        min(
-                            int(automatic_reasoning_close_tokens),
-                            literal_prefill_tokens,
-                        ),
-                    )
-
-                normalized_literal_ranges: list[tuple[int, int]] = []
-                for raw_start, raw_end in literal_text_ranges:
-                    start = max(0, min(int(raw_start), len(forced)))
-                    end = max(start, min(int(raw_end), len(forced)))
-                    if start < end:
-                        normalized_literal_ranges.append((start, end))
-                normalized_literal_ranges.sort()
-                literal_ranges: list[tuple[int, int]] = []
-                for start, end in normalized_literal_ranges:
-                    if literal_ranges and start <= literal_ranges[-1][1]:
-                        previous_start, previous_end = literal_ranges[-1]
-                        literal_ranges[-1] = (previous_start, max(previous_end, end))
-                    else:
-                        literal_ranges.append((start, end))
-
-                # A sampled stop token replayed by a branch still ends the old
-                # response where it originally ended. A stop token the reader
-                # typed literally into an assistant prefill is ordinary prefix
-                # content instead: keep it visible and continue after it.
-                for index, token_id in enumerate(forced):
-                    if token_id in stop_ids and index >= literal_prefill_tokens:
-                        forced = forced[: index + 1]
-                        break
+                prefix = self._forced_prefix(
+                    forced_ids=forced_ids,
+                    answer_prefill=answer_prefill,
+                    reasoning_prefilled=reasoning_prefilled,
+                    literal_prefill_tokens=literal_prefill_tokens,
+                    automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
+                    literal_text_ranges=literal_text_ranges,
+                    stop_ids=stop_ids,
+                )
+                forced = prefix.ids
 
                 # Checked here, on the tokens actually about to be fed, rather
                 # than only in validate_generation_prefix(): that one runs for a
@@ -1121,206 +1242,56 @@ class GenerationMixin:
                 # the machine is already out of memory.
                 self._validate_prefix_within_limit(prompt_ids, forced)
 
-                def sample(log_probs: np.ndarray) -> np.ndarray:
-                    return sampling_probabilities(
-                        log_probs,
-                        temperature=float(temperature),
-                        top_p=float(top_p),
-                        top_k=int(top_k),
-                        skip_top_below=float(skip_top_below),
+                sample = _sampler(temperature, top_p, top_k, skip_top_below)
+                prompt_metrics, metrics, past_key_values, raw_log_probs, prompt_note = (
+                    self._prefill_response(
+                        prompt_ids, prefix, analyze_prompt=analyze_prompt, sample=sample
                     )
-
-                # The prompt and the replayed prefix go through the model in one
-                # chunked pass. Feeding the prefix back a token at a time would
-                # cost a full forward step for every token the reader kept.
-                score_from = (
-                    max(1, len(prompt_ids) - PROMPT_SCORE_LIMIT) if analyze_prompt else 0
                 )
-                prefilled_metrics, past_key_values, raw_log_probs = self._prefill(
-                    prompt_ids + forced,
-                    segments=["prompt"] * len(prompt_ids) + ["response"] * len(forced),
-                    positions=list(range(1, len(prompt_ids) + 1))
-                    + list(range(1, len(forced) + 1)),
-                    score_from=score_from,
-                    collect_from=0 if analyze_prompt else len(prompt_ids),
-                    sample=sample,
-                )
-                prompt_metrics = [
-                    metric for metric in prefilled_metrics if metric["segment"] == "prompt"
-                ]
-                metrics: list[dict] = [
-                    metric for metric in prefilled_metrics if metric["segment"] == "response"
-                ]
-                for metric in metrics[:literal_prefill_tokens]:
-                    metric["literal_prefill"] = True
-                for metric in metrics[:automatic_reasoning_close_tokens]:
-                    metric["automatic_reasoning_close"] = True
-                for start, end in literal_ranges:
-                    for metric in metrics[start:end]:
-                        metric["literal_text"] = True
-                prompt_note = ""
-                if analyze_prompt and score_from > 1:
-                    prompt_note = (
-                        f"Only the most recent {PROMPT_SCORE_LIMIT:,} of "
-                        f"{len(prompt_ids):,} prompt tokens were scored."
-                    )
 
                 rng = np.random.default_rng(int(seed))
-                decoder = IncrementalDecoder(tokenizer, self.hidden_token_ids())
-                literal_prefill_text = ""
-                literal_boundaries = {
-                    boundary for span in literal_ranges for boundary in span
-                }
-                boundary_text = {0: ""}
-                for index, token_id in enumerate(forced):
-                    decoder.push(
-                        token_id, force_visible=index < literal_prefill_tokens
-                    )
-                    if (
-                        answer_prefill
-                        and reasoning_prefilled
-                        and not automatic_reasoning_close_tokens
-                        and decoder.stable_text.startswith(f"{THINK_CLOSE}\n\n")
-                    ):
-                        # The last token can straddle the boundary and include the
-                        # beginning of the reader's prefill. It still cannot be
-                        # replaced independently: doing so would remove part of
-                        # the close and leave the continuation inside reasoning.
-                        automatic_reasoning_close_tokens = index + 1
-                        for metric in metrics[:automatic_reasoning_close_tokens]:
-                            metric["automatic_reasoning_close"] = True
-                    if index + 1 in literal_boundaries:
-                        boundary_text[index + 1] = decoder.text
-                    if index + 1 == literal_prefill_tokens:
-                        # A branch can stop inside a byte-level token sequence for
-                        # one character. The replacement-character suffix will be
-                        # rewritten when the next token arrives, so it cannot be a
-                        # durable prefix for the application's literal-tag guard.
-                        literal_prefill_text = decoder.stable_text
-                forced_text = decoder.text
-
-                # A byte-level token boundary can land inside one Unicode
-                # character. Its temporary U+FFFD is rewritten when later bytes
-                # arrive, so use the longest prefix that is actually stable in the
-                # completed forced text. Ordinary word-piece boundaries take the
-                # fast path and keep their full decoded length.
-                def stable_length(at: int) -> int:
-                    value = boundary_text.get(at, "")
-                    if forced_text.startswith(value):
-                        return len(value)
-                    for offset, (left, right) in enumerate(zip(value, forced_text)):
-                        if left != right:
-                            return offset
-                    return min(len(value), len(forced_text))
-
-                literal_text_spans = tuple(
-                    (stable_length(start), stable_length(end))
-                    for start, end in literal_ranges
-                    if stable_length(start) < stable_length(end)
+                decoder = IncrementalDecoder(self.tokenizer, self.hidden_token_ids())
+                literal_prefill_text, literal_text_spans = _decode_forced_prefix(
+                    decoder,
+                    prefix,
+                    metrics,
+                    closes_reasoning=bool(answer_prefill) and reasoning_prefilled,
                 )
-                limit = len(forced) + int(max_new_tokens)
-                # Each sampled token but the last is fed back at position
-                # len(prompt_ids) + position - 1, and a learned position table
-                # has no row at or past its window: on CPU that raises, and on
-                # Metal it reads past the table and the tokens after it are
-                # wrong. The prefix already fits, so at least one token is
-                # always sampled.
-                window = model_position_limit(self.model)
-                position_bound = (
-                    window is not None and window - len(prompt_ids) + 1 < limit
+                limit, position_bound = self._response_limit(
+                    len(prompt_ids), len(forced), max_new_tokens
                 )
-                if position_bound:
-                    limit = window - len(prompt_ids) + 1
-                pending_tokens = 0
-                last_yield = time.monotonic()
-
-                if forced:
-                    yield GenerationUpdate(
-                        text=decoder.text,
-                        metrics=metrics,
-                        load_id=producing_load_id,
-                        prompt_metrics=prompt_metrics,
-                        prompt_note=prompt_note,
-                        reasoning_prefilled=reasoning_prefilled,
-                        thinking_mode=recorded_thinking,
-                        forced_prefix_tokens=len(forced),
-                        literal_prefill_tokens=literal_prefill_tokens,
-                        literal_prefill_text=literal_prefill_text,
-                        literal_text_spans=literal_text_spans,
-                        prompt_ids=tuple(prompt_ids),
-                        model_id=model_id,
-                        ends_on_stop_token=(
-                            forced[-1] in stop_ids
-                            and len(forced) > literal_prefill_tokens
-                        ),
-                    )
-                    if (
-                        forced[-1] in stop_ids
-                        and len(forced) > literal_prefill_tokens
-                    ):
-                        return
-
-                for position in range(len(forced) + 1, limit + 1):
-                    assert raw_log_probs is not None
-                    sampled_probs = sample(raw_log_probs)
-
-                    if temperature <= 0:
-                        token_id = int(np.argmax(sampled_probs))
-                    else:
-                        token_id = int(rng.choice(sampled_probs.size, p=sampled_probs))
-
-                    decoder.push(token_id)
-                    metrics.append(
-                        self._describe_token(
-                            position=position,
-                            token_id=token_id,
-                            raw_log_probabilities=raw_log_probs,
-                            sampled_probabilities=sampled_probs,
-                            segment="response",
-                        )
-                    )
-                    stopping = token_id in stop_ids or position == limit
-                    pending_tokens += 1
-                    now = time.monotonic()
-                    if (
-                        stopping
-                        or pending_tokens >= STREAM_BATCH_TOKENS
-                        or now - last_yield >= STREAM_INTERVAL_SECONDS
-                    ):
-                        pending_tokens = 0
-                        last_yield = now
-                        yield GenerationUpdate(
-                            text=decoder.text,
-                            metrics=metrics,
-                            load_id=producing_load_id,
-                            prompt_metrics=prompt_metrics,
-                            prompt_note=prompt_note,
-                            reasoning_prefilled=reasoning_prefilled,
-                            thinking_mode=recorded_thinking,
-                            forced_prefix_tokens=len(forced),
-                            literal_prefill_tokens=literal_prefill_tokens,
-                            literal_prefill_text=literal_prefill_text,
-                            literal_text_spans=literal_text_spans,
-                            prompt_ids=tuple(prompt_ids),
-                            model_id=model_id,
-                            ends_on_stop_token=token_id in stop_ids,
-                            ends_on_position_limit=(
-                                position_bound
-                                and position == limit
-                                and token_id not in stop_ids
-                            ),
-                        )
-
-                    if stopping:
-                        break
-
-                    # Everything fed so far - the prompt, the replayed prefix
-                    # and the tokens sampled before this one - is in the
-                    # cache; this token goes in after them.
-                    logits, past_key_values = engine.forward(
-                        [token_id], past_key_values, len(prompt_ids) + position - 1
-                    )
-                    raw_log_probs = normalize_log_probabilities(logits.row(-1))
+                response = _Response(
+                    decoder=decoder,
+                    metrics=metrics,
+                    load_id=producing_load_id,
+                    model_id=model_id,
+                    prompt_ids=tuple(prompt_ids),
+                    prompt_metrics=prompt_metrics,
+                    prompt_note=prompt_note,
+                    reasoning_prefilled=reasoning_prefilled,
+                    thinking_mode=recorded_thinking,
+                    forced_prefix_tokens=len(forced),
+                    literal_prefill_tokens=prefix.literal_prefill_tokens,
+                    literal_prefill_text=literal_prefill_text,
+                    literal_text_spans=literal_text_spans,
+                )
+                yield from self._stream_response(
+                    engine,
+                    response,
+                    prefix,
+                    raw_log_probs=raw_log_probs,
+                    past_key_values=past_key_values,
+                    sample=sample,
+                    rng=rng,
+                    temperature=temperature,
+                    stop_ids=stop_ids,
+                    limit=limit,
+                    position_bound=position_bound,
+                    # Taken before the prefix is published, so the time a
+                    # reader spends on that first frame counts toward the
+                    # next one's interval, as it always has.
+                    last_yield=time.monotonic(),
+                )
 
             finally:
                 # Read while the lock is still held. A load queued behind
@@ -1328,3 +1299,305 @@ class GenerationMixin:
                 # be what got measured: its own allocation, or nothing at
                 # all if it unloaded first.
                 self._run_device_bytes = device_memory.reserved_bytes()
+
+    def _start_response(
+        self,
+        steering_scope: contextlib.ExitStack,
+        *,
+        load_id: str | None,
+        steering: dict | None,
+    ) -> tuple[Engine, str | None, str]:
+        """Check the weights can answer, steer them, and say which they are.
+
+        Called with the model lock held. Returns the engine, the model ID and
+        the load ID every update of this response is stamped with. The
+        steering vector is installed on ``steering_scope``, so it comes off
+        when the response ends however it ends.
+        """
+
+        if not self.loaded:
+            raise RuntimeError("Download and load a model before chatting.")
+        if load_id is not None and load_id != self.load_id:
+            raise ModelChanged(
+                "The model has been reloaded since these tokens were produced."
+            )
+
+        # A stale branch must raise ModelChanged before vector/model
+        # compatibility is checked, so its handler restores the reply.
+        steering_scope.enter_context(self._steering(steering))
+
+        assert self.model is not None
+        assert self.tokenizer is not None
+        engine = self._engine()
+        # A response is where memory runs short, so what the last
+        # inspection kept is given back before the prompt is fed.
+        self._drop_inspect_cache()
+        # Read here, under the lock, alongside the weights: this is the
+        # only place the two are guaranteed to agree, which is what makes
+        # the stamp on each update worth trusting.
+        model_id = self.model_id
+        producing_load_id = self.load_id
+        assert producing_load_id is not None
+        return engine, model_id, producing_load_id
+
+    def _response_prompt(
+        self,
+        messages: list[dict],
+        *,
+        tools: list[dict] | None,
+        thinking_mode: str,
+        prompt_override_ids: Sequence[int] | None,
+    ) -> tuple[list[int], bool, str | None]:
+        """The prompt a response is fed, whether it ends inside reasoning, and the mode.
+
+        The mode returned is the one recorded on every update: the reader's
+        choice when the loaded model's template can switch, and ``None`` when
+        it cannot, so a record does not claim a mode the model never saw.
+        """
+
+        if thinking_mode not in THINKING_MODES:
+            raise ValueError("Thinking mode must be default, on, or off.")
+        recorded_thinking = thinking_mode if self.supports_thinking else None
+        template_args = {"tools": tools} if tools is not None else {}
+        if recorded_thinking is not None:
+            template_args["thinking_mode"] = recorded_thinking
+        if prompt_override_ids is None:
+            prompt_ids, reasoning_prefilled = self._prompt_token_ids(
+                messages, **template_args
+            )
+        else:
+            prompt_ids = [int(value) for value in prompt_override_ids]
+            if not prompt_ids:
+                raise ValueError("An edited prompt cannot be empty.")
+            # Only the ids can now say whether the prompt ends inside a
+            # reasoning block. Asking the template instead would answer
+            # for the prompt it would have written, which is precisely
+            # the prompt that is not being fed: an edit that removed
+            # the opening marker would still be told one was there, and
+            # the reply's first words would be filed as reasoning.
+            reasoning_prefilled = (
+                self._decode_ids(prompt_ids).rstrip().endswith(THINK_OPEN)
+            )
+        return prompt_ids, reasoning_prefilled, recorded_thinking
+
+    def _forced_prefix(
+        self,
+        *,
+        forced_ids: Sequence[int],
+        answer_prefill: str,
+        reasoning_prefilled: bool,
+        literal_prefill_tokens: int,
+        automatic_reasoning_close_tokens: int,
+        literal_text_ranges: Sequence[tuple[int, int]],
+        stop_ids: set[int],
+    ) -> _ForcedPrefix:
+        """The tokens a response must start with, and which of them are the reader's.
+
+        Either a branch's replayed tokens (``forced_ids``) or a typed
+        assistant prefill, never both. The counts and ranges the caller
+        passed are clamped to the prefix actually built: a prefill encodes
+        its own tokens, and a branch can be cut short at a stop token.
+        """
+
+        if forced_ids and answer_prefill:
+            raise ValueError(
+                "A token branch and an assistant prefill cannot be applied together."
+            )
+
+        forced = [int(value) for value in forced_ids]
+        if answer_prefill:
+            forced = self._response_prefix_ids(
+                answer_prefill, close_reasoning=reasoning_prefilled
+            )
+            literal_prefill_tokens = len(forced)
+            automatic_reasoning_close_tokens = 0
+        else:
+            literal_prefill_tokens = max(
+                0, min(int(literal_prefill_tokens), len(forced))
+            )
+            automatic_reasoning_close_tokens = max(
+                0,
+                min(
+                    int(automatic_reasoning_close_tokens),
+                    literal_prefill_tokens,
+                ),
+            )
+
+        literal_ranges = _merge_literal_ranges(literal_text_ranges, len(forced))
+
+        # A sampled stop token replayed by a branch still ends the old
+        # response where it originally ended. A stop token the reader
+        # typed literally into an assistant prefill is ordinary prefix
+        # content instead: keep it visible and continue after it.
+        for index, token_id in enumerate(forced):
+            if token_id in stop_ids and index >= literal_prefill_tokens:
+                forced = forced[: index + 1]
+                break
+
+        return _ForcedPrefix(
+            ids=forced,
+            literal_prefill_tokens=literal_prefill_tokens,
+            automatic_reasoning_close_tokens=automatic_reasoning_close_tokens,
+            literal_ranges=literal_ranges,
+        )
+
+    def _prefill_response(
+        self,
+        prompt_ids: list[int],
+        prefix: _ForcedPrefix,
+        *,
+        analyze_prompt: bool,
+        sample: Callable[[np.ndarray], np.ndarray],
+    ) -> tuple[list[dict], list[dict], Any, np.ndarray | None, str]:
+        """Feed the prompt and the forced prefix, and describe what was fed.
+
+        Returns the prompt's metrics, the prefix's (marked with which of its
+        tokens the reader supplied), the cache, the log probabilities the
+        first sampled token is drawn from, and the note that says when the
+        prompt was only partly scored.
+        """
+
+        forced = prefix.ids
+        # The prompt and the replayed prefix go through the model in one
+        # chunked pass. Feeding the prefix back a token at a time would
+        # cost a full forward step for every token the reader kept.
+        score_from = (
+            max(1, len(prompt_ids) - PROMPT_SCORE_LIMIT) if analyze_prompt else 0
+        )
+        prefilled_metrics, past_key_values, raw_log_probs = self._prefill(
+            prompt_ids + forced,
+            segments=["prompt"] * len(prompt_ids) + ["response"] * len(forced),
+            positions=list(range(1, len(prompt_ids) + 1))
+            + list(range(1, len(forced) + 1)),
+            score_from=score_from,
+            collect_from=0 if analyze_prompt else len(prompt_ids),
+            sample=sample,
+        )
+        prompt_metrics = [
+            metric for metric in prefilled_metrics if metric["segment"] == "prompt"
+        ]
+        metrics: list[dict] = [
+            metric for metric in prefilled_metrics if metric["segment"] == "response"
+        ]
+        for metric in metrics[:prefix.literal_prefill_tokens]:
+            metric["literal_prefill"] = True
+        for metric in metrics[:prefix.automatic_reasoning_close_tokens]:
+            metric["automatic_reasoning_close"] = True
+        for start, end in prefix.literal_ranges:
+            for metric in metrics[start:end]:
+                metric["literal_text"] = True
+        prompt_note = ""
+        if analyze_prompt and score_from > 1:
+            prompt_note = (
+                f"Only the most recent {PROMPT_SCORE_LIMIT:,} of "
+                f"{len(prompt_ids):,} prompt tokens were scored."
+            )
+        return prompt_metrics, metrics, past_key_values, raw_log_probs, prompt_note
+
+    def _response_limit(
+        self, prompt_length: int, forced_length: int, max_new_tokens: int
+    ) -> tuple[int, bool]:
+        """The last response position to sample, and whether the model's window set it.
+
+        Each sampled token but the last is fed back at position
+        ``prompt_length + position - 1``, and a learned position table has
+        no row at or past its window: on CPU that raises, and on Metal it
+        reads past the table and the tokens after it are wrong. The prefix
+        already fits, so at least one token is always sampled.
+        """
+
+        limit = forced_length + int(max_new_tokens)
+        window = model_position_limit(self.model)
+        position_bound = (
+            window is not None and window - prompt_length + 1 < limit
+        )
+        if position_bound:
+            limit = window - prompt_length + 1
+        return limit, position_bound
+
+    def _stream_response(
+        self,
+        engine: Engine,
+        response: _Response,
+        prefix: _ForcedPrefix,
+        *,
+        raw_log_probs: np.ndarray | None,
+        past_key_values: Any,
+        sample: Callable[[np.ndarray], np.ndarray],
+        rng: np.random.Generator,
+        temperature: float,
+        stop_ids: set[int],
+        limit: int,
+        position_bound: bool,
+        last_yield: float,
+    ) -> Iterator[GenerationUpdate]:
+        """Publish the forced prefix, then sample the rest a token at a time.
+
+        The prefix, when there is one, goes out as a frame of its own, and a
+        branch that replays a stop token ends there. Sampling starts from the
+        log probabilities the prefill left and ends on a stop token or at
+        ``limit``, a frame going out every :data:`STREAM_BATCH_TOKENS` tokens
+        or :data:`STREAM_INTERVAL_SECONDS`, whichever comes first, and always
+        for the last token.
+        """
+
+        forced = prefix.ids
+        if forced:
+            ends_on_stop = (
+                forced[-1] in stop_ids
+                and len(forced) > prefix.literal_prefill_tokens
+            )
+            yield response.update(ends_on_stop_token=ends_on_stop)
+            if ends_on_stop:
+                return
+
+        prompt_length = len(response.prompt_ids)
+        pending_tokens = 0
+        for position in range(response.forced_prefix_tokens + 1, limit + 1):
+            assert raw_log_probs is not None
+            sampled_probs = sample(raw_log_probs)
+
+            if temperature <= 0:
+                token_id = int(np.argmax(sampled_probs))
+            else:
+                token_id = int(rng.choice(sampled_probs.size, p=sampled_probs))
+
+            response.decoder.push(token_id)
+            response.metrics.append(
+                self._describe_token(
+                    position=position,
+                    token_id=token_id,
+                    raw_log_probabilities=raw_log_probs,
+                    sampled_probabilities=sampled_probs,
+                    segment="response",
+                )
+            )
+            stopping = token_id in stop_ids or position == limit
+            pending_tokens += 1
+            now = time.monotonic()
+            if (
+                stopping
+                or pending_tokens >= STREAM_BATCH_TOKENS
+                or now - last_yield >= STREAM_INTERVAL_SECONDS
+            ):
+                pending_tokens = 0
+                last_yield = now
+                yield response.update(
+                    ends_on_stop_token=token_id in stop_ids,
+                    ends_on_position_limit=(
+                        position_bound
+                        and position == limit
+                        and token_id not in stop_ids
+                    ),
+                )
+
+            if stopping:
+                break
+
+            # Everything fed so far - the prompt, the replayed prefix
+            # and the tokens sampled before this one - is in the
+            # cache; this token goes in after them.
+            logits, past_key_values = engine.forward(
+                [token_id], past_key_values, prompt_length + position - 1
+            )
+            raw_log_probs = normalize_log_probabilities(logits.row(-1))
