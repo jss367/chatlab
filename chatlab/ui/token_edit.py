@@ -4,7 +4,8 @@ import gradio as gr
 
 from chatlab.conversation import display_messages, turn_entries
 from chatlab.token_metrics import DEFAULT_COLOR_SCALE
-from chatlab.ui.generation import CHAT_OUTPUT_NAMES, busy_state, edit_message, occupied
+from chatlab.ui.generation import busy_state, edit_message, occupied
+from chatlab.ui.outputs import TOKEN_EDIT_OUTPUT_NAMES, Frame
 from chatlab.ui.panel import current_metrics_generation, event_index, transcript_entries, transcript_pick
 
 
@@ -52,18 +53,17 @@ def save_token_edit(target, text, prompt_text, turns, *settings):
     """Use the regular edit path, preserving the draft if saving is refused."""
     held = occupied()
     if held:
-        yield (*busy_state(held), gr.skip(), gr.skip())
+        yield Frame(TOKEN_EDIT_OUTPUT_NAMES, busy_state(held))
         return
     if (
         not target
         or target["generation"] != current_metrics_generation()
         or target["turns"] != turn_entries(turns)
     ):
-        frame = [gr.skip() for _ in CHAT_OUTPUT_NAMES]
-        frame[CHAT_OUTPUT_NAMES.index("status")] = (
-            "The conversation changed. Click your message again before editing it."
+        yield Frame(
+            TOKEN_EDIT_OUTPUT_NAMES,
+            status="The conversation changed. Click your message again before editing it.",
         )
-        yield (*frame, gr.skip(), gr.skip())
         return
     messages, _ = display_messages(turns)
     event = gr.EditData(None, {
@@ -72,12 +72,13 @@ def save_token_edit(target, text, prompt_text, turns, *settings):
         "value": text,
     })
     replaced = False
-    for frame in edit_message(event, prompt_text, turns, *settings):
-        updated = frame[CHAT_OUTPUT_NAMES.index("turns")]
+    for chat_frame in edit_message(event, prompt_text, turns, *settings):
+        frame = Frame(TOKEN_EDIT_OUTPUT_NAMES, chat_frame)
+        updated = frame["turns"]
         accepted = isinstance(updated, list) and updated != turns
         if accepted:
             replaced = True
-            yield (*frame, gr.update(visible=False), None)
+            frame.update(token_editor=gr.update(visible=False), token_edit_target=None)
         elif (
             isinstance(updated, list) and updated == turns
             and (replaced or target["generation"] != current_metrics_generation())
@@ -88,6 +89,5 @@ def save_token_edit(target, text, prompt_text, turns, *settings):
             # Validation before the opening frame can advance the stamp too.
             replaced = False
             restored_target = {**target, "generation": current_metrics_generation()}
-            yield (*frame, gr.update(visible=True), restored_target)
-        else:
-            yield (*frame, gr.skip(), gr.skip())
+            frame.update(token_editor=gr.update(visible=True), token_edit_target=restored_target)
+        yield frame

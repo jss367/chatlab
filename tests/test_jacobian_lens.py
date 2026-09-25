@@ -20,7 +20,7 @@ from chatlab import jacobian_lens
 from chatlab.jacobian_lens import FittedLens
 from chatlab.model_runtime import ModelManager
 from chatlab.text_generation import ModelChanged
-from test_mlx_runtime import needs_mlx
+from mlx_support import needs_mlx
 from tiny_tokenizer import build
 
 
@@ -661,8 +661,8 @@ class MlxJacobianLensTests(unittest.TestCase):
         import mlx.core as mx
 
         from chatlab.mlx_runtime import MlxEngine
-        from test_mlx_runtime import HIDDEN, LAYERS, VOCAB, tiny_llama
-        from test_streaming import FakeTokenizer
+        from mlx_support import HIDDEN, LAYERS, VOCAB, tiny_llama
+        from fakes import FakeTokenizer
 
         class Tokenizer(FakeTokenizer):
             def encode(self, text, add_special_tokens=True):

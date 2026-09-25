@@ -27,16 +27,9 @@ from chatlab.mlx_runtime import (
     read_mlx_config,
     read_stop_ids,
 )
-
-try:
-    import mlx.core as mx
-    from mlx_lm.models import gpt2, llama
-except ImportError:  # pragma: no cover - the engine tests skip themselves
-    mx = None
-    gpt2 = None
-    llama = None
-
-needs_mlx = unittest.skipIf(mx is None, "mlx and mlx-lm are installed on Apple silicon only")
+# mx, gpt2 and llama are None where mlx cannot be imported; the tests that
+# use them carry needs_mlx.
+from mlx_support import HEADS, HIDDEN, LAYERS, VOCAB, gpt2, llama, mx, needs_mlx, tiny_llama
 
 
 class ConfigTests(unittest.TestCase):
@@ -200,34 +193,6 @@ class SupportsTests(unittest.TestCase):
         # Remapped by mlx-lm: mistral runs as llama.
         self.assertTrue(mlx_supports("mistral"))
         self.assertFalse(mlx_supports("no-such-architecture"))
-
-
-VOCAB = 32
-HIDDEN = 16
-LAYERS = 2
-HEADS = 2
-
-
-def tiny_llama(tie_word_embeddings: bool = True, seed: int = 0, vocab: int = VOCAB):
-    """A two-layer Llama with random weights, small enough to run in a test."""
-
-    args = llama.ModelArgs(
-        model_type="llama",
-        hidden_size=HIDDEN,
-        num_hidden_layers=LAYERS,
-        intermediate_size=32,
-        num_attention_heads=HEADS,
-        num_key_value_heads=1,
-        rms_norm_eps=1e-5,
-        vocab_size=vocab,
-        max_position_embeddings=64,
-        tie_word_embeddings=tie_word_embeddings,
-    )
-    mx.random.seed(seed)
-    model = llama.Model(args)
-    model.eval()
-    mx.eval(model.parameters())
-    return model
 
 
 def reference_logits(model, ids: list[int]) -> np.ndarray:
@@ -480,7 +445,7 @@ class ManagerTests(unittest.TestCase):
 
     def manager(self):
         from chatlab.model_runtime import ModelManager
-        from test_streaming import FakeTokenizer
+        from fakes import FakeTokenizer
 
         model = tiny_llama()
         manager = ModelManager()

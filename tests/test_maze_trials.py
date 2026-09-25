@@ -14,7 +14,8 @@ from chatlab.extensions.maze_experiments.page import build_page, trial_note_text
 from chatlab.extensions.maze_experiments.runner import Episode, from_payload
 from chatlab.extensions.maze_experiments.maze import SYSTEM, default_instruction
 from chatlab.extensions.maze_experiments.trials import FORMAT, prepare_trial, read_trials
-from test_maze import CONFIG, MAZE
+from maze_support import CONFIG, MAZE
+from ui_support import listeners_by_name, listeners_named
 
 
 class TrialFileTests(unittest.TestCase):
@@ -133,7 +134,7 @@ class TrialFileTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        upload = {fn.fn.__name__: fn for fn in demo.fns.values()}['load_trial_file']
+        upload = listeners_by_name(demo)['load_trial_file']
         bad = Path(self.directory.name) / 'bad.json'
         bad.write_text('{"format": "chatlab-maze-trials-1", "title": "B", "trials": []}')
         with self.assertRaisesRegex(gr.Error, 'Still loaded: Example trials'):
@@ -148,7 +149,7 @@ class TrialFileTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        handlers = [fn for fn in demo.fns.values() if getattr(fn.fn, '__name__', '') == 'load_trial_file']
+        handlers = listeners_named(demo, 'load_trial_file')
         self.assertEqual({event for fn in handlers for _target, event in fn.targets}, {'upload', 'clear'})
         cleared = handlers[0].fn(None, Episode(MAZE, CONFIG), data)
         self.assertIsNone(cleared[0])
@@ -164,7 +165,7 @@ class TrialFileTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        queues = {fn.fn.__name__: fn.concurrency_id for fn in demo.fns.values() if fn.fn is not None}
+        queues = {name: fn.concurrency_id for name, fn in listeners_by_name(demo).items()}
         self.assertEqual(queues['load_trial_file'], queues['load_trial'])
 
     def test_the_note_calls_a_replay_a_replay_and_a_fork_of_one_live(self):
@@ -192,7 +193,7 @@ class TrialFileTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        callbacks = {fn.fn.__name__: fn for fn in demo.fns.values()}
+        callbacks = listeners_by_name(demo)
         loaded = callbacks['load_trial_file'].fn(str(self.path), Episode(MAZE, CONFIG), None)
         self.assertEqual(loaded[1]['value'], 'clean')
         self.assertIn('1 trial.', loaded[2])
@@ -216,7 +217,7 @@ class TrialFileTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        callbacks = {fn.fn.__name__: fn for fn in demo.fns.values()}
+        callbacks = listeners_by_name(demo)
         loaded = callbacks['load_trial'].fn(data, 'clean', Episode(MAZE, CONFIG), False, 'test-session')
         self.assertIn('Clean trial', loaded[-5])
         prepare = callbacks['prepare_episode']
@@ -265,7 +266,7 @@ class TrialFileTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        callbacks = {fn.fn.__name__: fn for fn in demo.fns.values()}
+        callbacks = listeners_by_name(demo)
         live = prepare_trial(data, 'clean', Episode(MAZE, CONFIG))
         live.config['trial'] = dict(id='diagnostics-0049', replica=0, file_sha256='0' * 64)
         path = Path(self.directory.name) / 'diagnostics-0049.json'
@@ -286,7 +287,7 @@ class TrialFileTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        load = {fn.fn.__name__: fn for fn in demo.fns.values()}['load']
+        load = listeners_by_name(demo)['load']
         live = prepare_trial(self.read(), 'clean', Episode(MAZE, CONFIG))
         path = Path(self.directory.name) / 'run.json'
         path.write_text(json.dumps(live.payload()))

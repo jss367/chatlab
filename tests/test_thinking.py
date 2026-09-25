@@ -1,6 +1,5 @@
 """Native thinking modes change prompts and survive chat replay and export."""
 
-import copy
 import csv
 import io
 import json
@@ -11,22 +10,14 @@ from unittest import mock
 from chatlab import app
 from chatlab import settings
 import settings_sandbox
-import tiny_tokenizer
 from chatlab.conversation import turn_entries, turns_from_entries
 from chatlab.model_runtime import ModelManager
 from chatlab.thinking import supports_thinking
 from chatlab.trace_export import trace_to_csv, trace_to_json
 from chatlab.ui import runtime
 from chatlab.ui.settings_page import refresh_thinking_mode
-from test_app_flow import FIXED, SETTINGS, TURNS, TRACE, METRICS, click_token, cell
-from test_streaming import loaded_manager
-
-
-# The switching suffix from Qwen/Qwen3-0.6B's chat template. The off mode
-# supplies an empty, closed think block; default/on leave generation alone.
-TEMPLATE = """{% for m in messages %}{{ m['role'] }}: {{ m['content'] }}\n{% endfor %}
-{% if add_generation_prompt %}assistant:
-{% if enable_thinking is defined and enable_thinking is false %}<think>\n\n</think>\n\n{% endif %}{% endif %}"""
+from fakes import manager_for_thinking, THINKING_TEMPLATE
+from conversation_support import cell, click_token, FIXED, SETTINGS
 
 
 def setUpModule():
@@ -37,28 +28,17 @@ def tearDownModule():
     settings_sandbox.stop()
 
 
-def manager_for_thinking():
-    manager = loaded_manager([0])
-    manager.tokenizer = copy.deepcopy(tiny_tokenizer.build())
-    manager.tokenizer.chat_template = TEMPLATE
-    token = manager.tokenizer.encode("hello")[0]
-    manager.model.script = [token]
-    manager.model.vocab_size = len(manager.tokenizer)
-    manager.model.config = SimpleNamespace(model_type="qwen3")
-    return manager
-
-
 class ThinkingRuntimeTests(unittest.TestCase):
     def test_capability_needs_both_architecture_and_switchable_template(self):
         for model_type in ("qwen3", "qwen3_moe", "olmo3", "qwen3_next", None):
-            for template in (TEMPLATE, "assistant: <think>", "assistant:", None):
+            for template in (THINKING_TEMPLATE, "assistant: <think>", "assistant:", None):
                 for config_field in ("config", "args"):
                     with self.subTest(model_type=model_type, template=template, backend=config_field):
                         model = SimpleNamespace(**{config_field: SimpleNamespace(model_type=model_type)})
                         tokenizer = SimpleNamespace(chat_template=template)
                         self.assertEqual(
                             supports_thinking(model, tokenizer),
-                            model_type in ("qwen3", "qwen3_moe") and template == TEMPLATE,
+                            model_type in ("qwen3", "qwen3_moe") and template == THINKING_TEMPLATE,
                         )
         self.assertFalse(ModelManager().supports_thinking)
 
@@ -126,43 +106,43 @@ class ThinkingChatTests(unittest.TestCase):
 
     def test_mode_survives_saved_conversation_and_json_and_csv_trace(self):
         result = self.reply()
-        restored = turns_from_entries(turn_entries(result[TURNS]))
+        restored = turns_from_entries(turn_entries(result["turns"]))
         self.assertEqual(restored[-1]["thinking_mode"], "off")
-        self.assertEqual(json.loads(trace_to_json(result[TRACE]))["sampling"]["thinking_mode"], "off")
-        rows = list(csv.DictReader(io.StringIO(trace_to_csv(result[TRACE]))))
+        self.assertEqual(json.loads(trace_to_json(result["trace"]))["sampling"]["thinking_mode"], "off")
+        rows = list(csv.DictReader(io.StringIO(trace_to_csv(result["trace"]))))
         self.assertTrue(rows)
         self.assertTrue(all(row["thinking_mode"] == "off" for row in rows))
 
     def test_retry_uses_the_new_choice(self):
         result = self.reply("on")
-        retry = list(app.regenerate_from(0, "", result[TURNS], **(FIXED | {"max_new_tokens": 2, "thinking_mode": "off"})))[-1]
-        self.assertEqual(retry[TURNS][-1]["thinking_mode"], "off")
-        self.assertEqual(retry[TRACE]["sampling"]["thinking_mode"], "off")
+        retry = list(app.regenerate_from(0, "", result["turns"], **(FIXED | {"max_new_tokens": 2, "thinking_mode": "off"})))[-1]
+        self.assertEqual(retry["turns"][-1]["thinking_mode"], "off")
+        self.assertEqual(retry["trace"]["sampling"]["thinking_mode"], "off")
 
     def test_token_branches_keep_the_original_mode_when_control_changes(self):
         result = self.reply()
         selected = click_token(result, 1)
-        metrics = result[METRICS]
-        _, pick = app.choose_alternative(result[TURNS], metrics, app.empty_metrics(), selected, cell(0))
+        metrics = result["metrics"]
+        _, pick = app.choose_alternative(result["turns"], metrics, app.empty_metrics(), selected, cell(0))
         self.assertIsNotNone(pick)
         controls = (*SETTINGS, None, None, None, None, "on")
-        branch = list(app.branch_from(pick, "", result[TURNS], *controls))[-1]
-        self.assertEqual(branch[TURNS][-1]["thinking_mode"], "off")
-        self.assertEqual(branch[TRACE]["sampling"]["thinking_mode"], "off")
+        branch = list(app.branch_from(pick, "", result["turns"], *controls))[-1]
+        self.assertEqual(branch["turns"][-1]["thinking_mode"], "off")
+        self.assertEqual(branch["trace"]["sampling"]["thinking_mode"], "off")
         with mock.patch.object(self.manager, "validate_generation_prefix", wraps=self.manager.validate_generation_prefix) as validate:
-            typed = list(app.branch_with_text(selected, "hello", "", result[TURNS], *controls))[-1]
+            typed = list(app.branch_with_text(selected, "hello", "", result["turns"], *controls))[-1]
         self.assertEqual(validate.call_args.kwargs["thinking_mode"], "off")
-        self.assertEqual(typed[TURNS][-1]["thinking_mode"], "off")
+        self.assertEqual(typed["turns"][-1]["thinking_mode"], "off")
 
     def test_next_token_keeps_the_original_mode_for_validation_and_replay(self):
         result = self.reply("off")
         controls = (*SETTINGS, None, None, None, None, "on")
         with mock.patch.object(self.manager, "validate_generation_prefix", wraps=self.manager.validate_generation_prefix) as validate:
-            stepped = list(app.next_token(None, "", result[TURNS], *controls))[-1]
+            stepped = list(app.next_token(None, "", result["turns"], *controls))[-1]
         self.assertEqual(validate.call_args.kwargs["thinking_mode"], "off")
-        self.assertEqual(stepped[TURNS][-1]["thinking_mode"], "off")
-        self.assertEqual(stepped[TRACE]["sampling"]["thinking_mode"], "off")
-        self.assertEqual(len(stepped[TURNS][-1]["tokens"]), len(result[TURNS][-1]["tokens"]) + 1)
+        self.assertEqual(stepped["turns"][-1]["thinking_mode"], "off")
+        self.assertEqual(stepped["trace"]["sampling"]["thinking_mode"], "off")
+        self.assertEqual(len(stepped["turns"][-1]["tokens"]), len(result["turns"][-1]["tokens"]) + 1)
 
     def test_visibility_follows_loaded_capability_without_resetting_choice(self):
         self.assertTrue(refresh_thinking_mode()["visible"])

@@ -41,10 +41,18 @@ from chatlab.ui.common import (
     NO_TOKEN_SELECTED,
     failure_status,
     finalize_partial,
-    send_stop_buttons,
+    send_stop_values,
 )
 from chatlab.ui.conversations import (
     conversation_list_update,
+    panel_reset,
+)
+from chatlab.ui.outputs import (
+    CHAT_OUTPUT_NAMES,
+    CLEAR_OUTPUT_NAMES,
+    STOP_OUTPUT_NAMES,
+    UNDO_OUTPUT_NAMES,
+    Frame,
 )
 from chatlab.ui.panel import (
     BRANCH_HINT,
@@ -55,7 +63,6 @@ from chatlab.ui.panel import (
     PROMPT_EDIT_MODEL_CHANGED,
     PROMPT_EDIT_NO_MESSAGE,
     branch_target,
-    cleared_panel,
     new_metrics_generation,
     prompt_edit_target,
     prompt_note_text,
@@ -67,33 +74,15 @@ from chatlab.ui.panel import (
 logger = logging.getLogger(__name__)
 
 
-# Every generation handler publishes this tuple, in this order. Naming the rows
-# here keeps the refusal paths - which skip most of them - from counting
-# placeholders by hand.
-CHAT_OUTPUT_NAMES = (
-    "prompt",
-    "chatbot",
-    "turns",
-    "strip",
-    "metrics",
-    "status",
-    "seed",
-    "send",
-    "stop",
-    "detail",
-    "alternatives",
-    "prompt_strip",
-    "prompt_metrics",
-    "prompt_note",
-    "summary",
-    "surprise",
-    "trace",
-    "context_ids",
-    "chat_metrics",
-    "chat_context_ids",
-    "selected_token",
-    "branch_pick",
-)
+def chat_frame(**values) -> Frame:
+    """One frame of a generation handler: the CHAT_OUTPUT_NAMES it changes.
+
+    Every generation handler publishes a Frame over those names rather than a
+    tuple in their order, so the refusal paths - which skip most of them -
+    name the one or two they do change and leave the rest out; see ui.outputs.
+    """
+
+    return Frame(CHAT_OUTPUT_NAMES, **values)
 
 
 def stop_generation(
@@ -115,12 +104,13 @@ def stop_generation(
     turns = copy_turns(turns)
     kept = finalize_partial(turns)
     messages, _ = display_messages(turns)
-    return (
-        messages,
-        turns,
-        transcript_update(turns, scale_name),
-        *send_stop_buttons(False),
-        "Stopped. The partial response was kept."
+    return Frame(
+        STOP_OUTPUT_NAMES,
+        chatbot=messages,
+        turns=turns,
+        strip=transcript_update(turns, scale_name),
+        **send_stop_values(False),
+        status="Stopped. The partial response was kept."
         if kept
         else "Stopped before the model produced anything.",
     )
@@ -162,35 +152,19 @@ def idle_state(
     """
 
     messages, _ = display_messages(turns)
-    panels = (
-        cleared_panel(turns, scale_name)
-        if clear_tokens
-        else (gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip())
+    frame = chat_frame(
+        prompt=prompt_text,
+        chatbot=messages,
+        turns=copy_turns(turns),
+        status=status,
+        **send_stop_values(False),
     )
-    strip, metrics, prompt_strip, prompt_metrics, prompt_note = panels
-    return (
-        prompt_text,
-        messages,
-        copy_turns(turns),
-        strip,
-        metrics,
-        status,
-        gr.skip(),
-        *send_stop_buttons(False),
-        NO_TOKEN_SELECTED if clear_tokens else gr.skip(),
-        [] if clear_tokens else gr.skip(),
-        prompt_strip,
-        prompt_metrics,
-        prompt_note,
-        charts.summary_tiles({}) if clear_tokens else gr.skip(),
-        charts.EMPTY_CHART if clear_tokens else gr.skip(),
-        {} if clear_tokens else gr.skip(),
-        gr.skip(),
-        metrics,
-        gr.skip(),
-        None if clear_tokens else gr.skip(),
-        None if clear_tokens else gr.skip(),
-    )
+    if clear_tokens:
+        reset = panel_reset(turns, scale_name)
+        # The latest reply's own copy of its measurements goes with the
+        # panel's: the two describe the same reply.
+        frame.update(reset, chat_metrics=reset["metrics"])
+    return frame
 
 
 BUSY_STATUS = "A response is already generating. Press Stop first."
@@ -290,11 +264,7 @@ def busy_state(held: str | None = None):
     away by. See :func:`busy_status`.
     """
 
-    return (
-        (gr.skip(),) * 5
-        + (busy_status(held),)
-        + (gr.skip(),) * (len(CHAT_OUTPUT_NAMES) - 6)
-    )
+    return chat_frame(status=busy_status(held))
 
 
 def generate_reply(
@@ -542,33 +512,33 @@ def _stream_reply(
             gr.skip(),
         )
         summary_panel, surprise_panel = charts_panel or (gr.skip(), gr.skip())
-        return (
-            prompt_text,
-            messages,
-            copy_turns(visible_turns),
-            transcript_update(visible_turns, scale_name) if transcript_visible() else gr.skip(),
-            (generation, metrics),
-            status,
-            used_seed,
-            *send_stop_buttons(busy),
-            NO_TOKEN_SELECTED if reset_details else gr.skip(),
+        return chat_frame(
+            prompt=prompt_text,
+            chatbot=messages,
+            turns=copy_turns(visible_turns),
+            strip=transcript_update(visible_turns, scale_name) if transcript_visible() else gr.skip(),
+            metrics=(generation, metrics),
+            status=status,
+            seed=used_seed,
+            **send_stop_values(busy),
+            detail=NO_TOKEN_SELECTED if reset_details else gr.skip(),
             # Gradio applies streaming diffs in place. A raw Dataframe value
             # followed by gr.skip() deletes data/headers from the very object
             # the table still renders, which can crash WebKit's next update.
             # Keep the value inside an update envelope so only that envelope
             # changes when later frames leave the selected token alone.
-            gr.update(value=[]) if reset_details else gr.skip(),
-            prompt_strip,
-            prompt_metrics,
-            prompt_note,
-            summary_panel,
-            surprise_panel,
-            gr.skip() if trace is None else trace,
-            context_ids,
-            (generation, metrics),
-            context_ids,
-            None if reset_details else gr.skip(),
-            None if reset_details else gr.skip(),
+            alternatives=gr.update(value=[]) if reset_details else gr.skip(),
+            prompt_strip=prompt_strip,
+            prompt_metrics=prompt_metrics,
+            prompt_note=prompt_note,
+            summary=summary_panel,
+            surprise=surprise_panel,
+            trace=gr.skip() if trace is None else trace,
+            context_ids=context_ids,
+            chat_metrics=(generation, metrics),
+            chat_context_ids=context_ids,
+            selected_token=None if reset_details else gr.skip(),
+            branch_pick=None if reset_details else gr.skip(),
         )
 
     # Clear diagnostics and branch selections when the new reply appears. For
@@ -597,9 +567,9 @@ def _stream_reply(
     )
 
     def previous_snapshot(status, busy):
-        values = list(idle_state(prompt_text, previous_turns, status, scale_name=scale_name))
-        values[CHAT_OUTPUT_NAMES.index("send")], values[CHAT_OUTPUT_NAMES.index("stop")] = send_stop_buttons(busy)
-        return tuple(values)
+        frame = idle_state(prompt_text, previous_turns, status, scale_name=scale_name)
+        frame.update(send_stop_values(busy))
+        return frame
 
     opening_status = f"{stream_note} Generating…".strip()
     if preserving_previous:
@@ -1669,45 +1639,28 @@ def undo_from(
         # exactly as Stop does. Every other path truncates the partial turn away.
         finalize_partial(turns)
         messages, _ = display_messages(turns)
-        return (
-            gr.skip(),
-            messages,
-            turns,
-            transcript_update(turns, scale_name),
-            gr.skip(),
-            "There is nothing to undo.",
-            gr.skip(),
-            gr.skip(),
-            *send_stop_buttons(False),
-            *(gr.skip(),) * 8,
+        return Frame(
+            UNDO_OUTPUT_NAMES,
+            chatbot=messages,
+            turns=turns,
+            strip=transcript_update(turns, scale_name),
+            status="There is nothing to undo.",
+            **send_stop_values(False),
         )
 
     remaining = turns[:position]
     messages, _ = display_messages(remaining)
-    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_panel(
-        remaining, scale_name
-    )
     # The selected-token details describe the response being removed, so they
     # go with it, exactly as Clear resets them. So do the prompt tokens, the
     # charts and the export: all of them measure the exchange that just left.
-    return (
-        turns[position]["content"],
-        messages,
-        remaining,
-        strip,
-        metrics,
-        "Removed the last exchange.",
-        NO_TOKEN_SELECTED,
-        [],
-        *send_stop_buttons(False),
-        prompt_strip,
-        prompt_metrics,
-        prompt_note,
-        charts.summary_tiles({}),
-        charts.EMPTY_CHART,
-        {},
-        None,
-        None,
+    return Frame(
+        UNDO_OUTPUT_NAMES,
+        prompt=turns[position]["content"],
+        chatbot=messages,
+        turns=remaining,
+        status="Removed the last exchange.",
+        **send_stop_values(False),
+        **panel_reset(remaining, scale_name),
     )
 
 
@@ -1784,9 +1737,7 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE, forks: dict | None = None)
     the one that was cleared.
     """
 
-    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_panel(
-        [], scale_name
-    )
+    reset = panel_reset([], scale_name)
     known = copy_forks(forks)
     forks = new_forks()
     stamp = branch_stamp()
@@ -1794,24 +1745,14 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE, forks: dict | None = None)
     forks["sampling_updated"] = {
         name: stamp for name in (MAIN_BRANCH, *known["sampling"])
     }
-    return (
-        [],
-        [],
-        strip,
-        metrics,
-        "Every conversation cleared.",
-        *send_stop_buttons(False),
-        NO_TOKEN_SELECTED,
-        [],
-        prompt_strip,
-        prompt_metrics,
-        prompt_note,
-        charts.summary_tiles({}),
-        charts.EMPTY_CHART,
-        {},
-        None,
-        None,
-        forks,
-        conversation_list_update(forks, []),
-        gr.update(visible=False),
+    return Frame(
+        CLEAR_OUTPUT_NAMES,
+        chatbot=[],
+        turns=[],
+        status="Every conversation cleared.",
+        **send_stop_values(False),
+        **reset,
+        forks=forks,
+        conversation_list=conversation_list_update(forks, []),
+        clear_confirm=gr.update(visible=False),
     )

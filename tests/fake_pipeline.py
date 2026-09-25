@@ -73,7 +73,7 @@ class FakeUnet(torch.nn.Module):
         return (prediction,)
 
 
-class FakeTokenizer:
+class FakeClipTokenizer:
     """Enough of a CLIP tokenizer to name the tokens a map is keyed by."""
 
     def __init__(self, vocabulary: tuple[str, ...] = ()) -> None:
@@ -96,7 +96,7 @@ class FakePipeline:
         self, *, steps_run: int | None = None, tokenizer=None, watcher=None
     ) -> None:
         self.unet = FakeUnet()
-        self.tokenizer = FakeTokenizer() if tokenizer is None else tokenizer
+        self.tokenizer = FakeClipTokenizer() if tokenizer is None else tokenizer
         # What the scheduler would really run, which need not be what was
         # asked for: a real one can add a step of its own.
         self.steps_run = steps_run

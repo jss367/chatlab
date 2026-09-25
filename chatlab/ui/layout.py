@@ -1,103 +1,67 @@
-"""The page itself: every control and how the handlers are wired to them."""
+"""The page itself: build_app(), and what no one page owns.
+
+build_app() reads as the page's table of contents. It draws each area in the
+order the page lays them out, then wires them in the order their listeners
+have always been bound, which matters: several listeners share a trigger -
+the nav's change, the page load, the badge timer - and Gradio queues the
+listeners on one trigger in the order they were bound.
+
+Each page draws and wires itself from its own module: ui.chat_layout,
+ui.images_layout, ui.models_layout and ui.settings_layout. What stays here is
+what more than one area reads: the shared states, the nav and the
+conversations pane, the extension pages, and the conversation listeners,
+which answer to the pane and the Chat page both.
+"""
 
 from __future__ import annotations
 
-import logging
 import html
+import logging
+from dataclasses import dataclass
 from functools import partial
 
 import gradio as gr
 
-from chatlab.ui.fork_tree import TREE_CSS, TREE_JS, render_fork_tree, select_tree_branch
-
-from chatlab import charts
-from chatlab import settings
-from chatlab import themes
-from chatlab.thinking import THINKING_CHOICES
-from chatlab.conversation import (
-    MAIN_BRANCH,
-    branch_choices,
-    new_forks,
-)
+from chatlab import settings, themes
+from chatlab.conversation import MAIN_BRANCH, branch_choices, new_forks
 from chatlab.device_memory import warm_device
-from chatlab.model_cache import DEFAULT_MODEL_SORT, IMAGE_KIND, MODEL_SORT_ORDERS
-from chatlab.token_metrics import (
-    COLOR_SCALES,
-    DEFAULT_COLOR_SCALE,
-)
-from chatlab.trace_export import write_trace_export
-from chatlab.ui import runtime
-from chatlab.ui import experiments, experiment_compare
-from chatlab.ui.icons import icon_classes
-from chatlab.ui.background import ConversationEvents, ConversationJob
-from chatlab.ui.token_edit import close_token_editor, open_token_editor, save_token_edit
 from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from chatlab.extensions.registry import load_enabled
-from chatlab.ui.extensions_page import build_extension_settings, data_directory, extension_css, restore_extensions
+from chatlab.ui import runtime
+from chatlab.ui.background import ConversationEvents, ConversationJob
+from chatlab.ui.chat_layout import (
+    ChatPage,
+    build_chat_page,
+    wire_compare,
+    wire_inspector,
+    wire_model_bar,
+    wire_prompt_file,
+    wire_sampling,
+    wire_score_and_batch,
+    wire_steering,
+)
 from chatlab.ui.common import (
     CHAT_PAGE,
+    CONVERSATION_PANE_QUEUE,
     CONVERSATION_PANE_WIDTH,
     NAV_PANE_WIDTH,
-    NO_TOKEN_SELECTED,
     PAGES,
-    STOP_LABEL,
-    TRANSCRIPT_LABEL,
+    QUIET_TICK,
     show_page,
-)
-from chatlab.token_metrics import (
-    PROMPT_ATTENTION_SCALE,
 )
 from chatlab.ui.conversations import (
     delete_fork,
     fork_conversation,
     new_conversation,
-    remember_branch_sampling,
     remember_forks,
     remember_message,
-    remember_transcript_message,
     restore_conversations,
     sampling_updates,
     save_conversation,
     switch_fork,
 )
-from chatlab.compare import (
-    CONFIGURATION_HEADERS,
-    EMPTY_SLOT as COMPARE_SLOT_EMPTY,
-    DIVERGENCE_HEADERS,
-    GAP_CAPTION,
-    GAP_COLORS,
-    MEASUREMENT,
-    REPLY,
-)
-from chatlab.ui.activation_patching import build as build_activation_patching
-from chatlab.ui.compare import (
-    COMPARE_EMPTY,
-    clear_slots,
-    download_comparison,
-    fill_slot,
-    mode_controls,
-    render as render_comparison,
-    stop_comparison,
-)
-from chatlab.ui.steering import (
-    EMPTY_STATUS, EXTRACT_EMPTY, EXTRACT_HEADERS, POOL_CHOICES, choose_layer,
-    describe_layer, download_extracted, extract_vector, import_vector,
-    load_with_steering, remember_steering, remove_vector, steering_updates,
-    use_extracted,
-)
-from chatlab.ui.images_page import (
-    NO_ATTENTION,
-    NO_TRAJECTORY,
-    PROMPT_STRIP_LABEL,
-    draw,
-    remember_committed_image_seed,
-    remember_image_settings,
-    remember_token,
-    select_step,
-    select_token,
-    stop_drawing,
-)
-from chatlab.ui.image_words import begin_original, build_word_comparison, start_original
+from chatlab.ui.extensions_page import data_directory, extension_css, restore_extensions
+from chatlab.ui.fork_tree import TREE_CSS, TREE_JS, render_fork_tree, select_tree_branch
 from chatlab.ui.generation import (
     ask_clear_chat,
     branch_from,
@@ -113,101 +77,39 @@ from chatlab.ui.generation import (
     undo_last,
     undo_message,
 )
-from chatlab.ui.inspection import (
-    INSPECT_HINT,
-    INSPECTION_CONTROLS,
-    JACOBIAN_CSS,
-    JACOBIAN_JS,
-    change_lens_mode,
-    change_pinned_token,
-    import_jacobian_lens,
-    inspect_layers,
-    remember_inspect_target,
-    render_attention,
-    render_kv_cache,
-    reset_inspection,
+from chatlab.ui.icons import icon_classes
+from chatlab.ui.images_layout import build_images_page, wire_images_page
+from chatlab.ui.inspection import JACOBIAN_CSS, JACOBIAN_JS
+from chatlab.ui.models_layout import (
+    ModelRefresh,
+    ModelsPage,
+    build_models_page,
+    wire_model_choice,
+    wire_model_lists,
 )
-from chatlab.model_discovery import DISCOVERY_ORDERS
-from chatlab.ui.model_repository import UNCHECKED, check_model_repository, repository_view
-from chatlab.ui.models_page import (
-    ALL_KINDS,
-    BADGE_REFRESH_SECONDS,
-    MODEL_KIND_FILTERS,
-    SEARCH_HINT,
-    SEARCH_KINDS,
-    ask_remove_my_model,
-    clear_my_model_selection,
-    download_and_load_model,
-    download_model,
-    go_to_image_models,
-    go_to_models,
-    hide_remove_confirm,
-    load_cached_model,
-    loaded_model_badge,
-    redownload_my_model,
-    refresh_after_device,
-    refresh_image_badge,
-    refresh_model_actions,
-    refresh_current_model,
-    refresh_model_badge,
-    refresh_model_switch,
-    refresh_my_models,
-    refresh_search_results,
-    refresh_stale_model_actions,
-    refresh_stale_model_switch,
-    remove_my_model,
-    search_models,
-    search_table,
-    select_default_model,
-    select_model_to_load,
-    select_my_model,
-    select_search_result,
-    switch_model,
-    unload_model,
+from chatlab.ui.models_page import go_to_models, select_model_to_load
+from chatlab.ui.outputs import (
+    CHAT_OUTPUT_NAMES,
+    CLEAR_OUTPUT_NAMES,
+    FORK_OUTPUT_NAMES,
+    NEW_CONVERSATION_OUTPUT_NAMES,
+    POLL_OUTPUT_NAMES,
+    RESTORE_OUTPUT_NAMES,
+    STEERED_LOAD_OUTPUT_NAMES,
+    STOP_OUTPUT_NAMES,
+    TOKEN_EDIT_OUTPUT_NAMES,
+    UNDO_OUTPUT_NAMES,
 )
-from chatlab.ui.panel import (
-    choose_alternative,
-    empty_metrics,
-    inspect_token,
-    recolor,
-    remember_strip_selection,
-    select_transcript_token,
-    show_token_view,
+from chatlab.ui.panel import empty_metrics
+from chatlab.ui.scoring import SAMPLING_LABEL_QUEUE
+from chatlab.ui.settings_layout import (
+    SettingsPage,
+    build_settings_page,
+    wire_message_box,
+    wire_settings_persistence,
 )
-from chatlab.ui.prompts import (
-    BATCH_HEADERS,
-    PROMPT_COUNT_HINT,
-    count_prompts,
-    load_prompt_file,
-    run_prompts,
-    stop_batch,
-)
-from chatlab.ui.scoring import (
-    SAMPLING_LABEL_QUEUE,
-    SCORE_BUDGET_QUEUE,
-    SCORE_COUNT_HINT,
-    recover_score_budget,
-    score_text,
-    score_token_count,
-)
-from chatlab.ui.settings_page import (
-    apply_theme,
-    hardware_card,
-    refresh_hardware,
-    refresh_thinking_mode,
-    remember_committed_seed,
-    remember_prefill_limit,
-    remember_settings,
-    reset_sampling,
-    restore_settings,
-    sampling_label,
-    update_sampling_label,
-)
-from chatlab.ui.token_menu import (
-    MENU_BRIDGE_CLASS, MENU_STRIP_CLASS, TOKEN_MENU_CSS, TOKEN_MENU_JS,
-    branch_from_menu, edit_prompt_from_menu, menu_bridge_ids,
-    prompt_menu_payload, token_menu_payload,
-)
+from chatlab.ui.settings_page import refresh_hardware, update_sampling_label
+from chatlab.ui.steering import load_with_steering, steering_updates
 from chatlab.ui.styles import (
     COLUMN_JS,
     CSS,
@@ -216,60 +118,83 @@ from chatlab.ui.styles import (
     RESIZE_JS,
     SHORTCUT_JS,
     WRITING_SUGGESTIONS_JS,
-    pane_handle,
-    message_box_settings,
-    set_message_box_keys,
+)
+from chatlab.ui.token_edit import save_token_edit
+from chatlab.ui.token_menu import (
+    MENU_BRIDGE_CLASS,
+    TOKEN_MENU_CSS,
+    TOKEN_MENU_JS,
+    branch_from_menu,
+    edit_prompt_from_menu,
+    menu_bridge_ids,
 )
 
 
-# One queue for everything that rewrites the forks or the conversation in one
-# step: the branch buttons, the list, Clear all, Undo, Stop, the loaders, and
-# the two listeners on the states. Gradio
-# runs events that share a concurrency id one at a time, in the order they
-# were queued, and reads a State input when the event runs rather than when
-# it was queued. So a redraw queued by a streaming frame can no longer run
-# after a click on New with the forks as they were before the click, and
-# hand that older pane back over the new one. The generation handlers stay
-# out of it: they hold their own slot for the whole reply, and the redraw
-# has to run between their frames.
-CONVERSATION_PANE_QUEUE = "conversation-pane"
+@dataclass(frozen=True)
+class SharedState:
+    """The states, and the hidden bridges a page script writes into, that more than one area reads."""
+
+    conversation: gr.State
+    metrics: gr.State
+    prompt_metrics: gr.State
+    score_metrics: gr.State
+    trace: gr.State
+    menu_request: gr.Textbox
+    menu_response: gr.HTML
+    menu_action: gr.Textbox
+    prompt_menu_request: gr.Textbox
+    prompt_menu_response: gr.HTML
+    prompt_menu_action: gr.Textbox
+    selected_token: gr.State
+    branch_pick: gr.State
+    forks: gr.State
+    tree_selection: gr.State
+    selected_message: gr.State
+    token_edit_target: gr.State
+    context_ids: gr.State
+    score_context_ids: gr.State
+    chat_metrics: gr.State
+    chat_context_ids: gr.State
+    steering: gr.State
+    extract: gr.State
+    compare_a: gr.State
+    compare_b: gr.State
+    compare_export: gr.State
+    inspect_target: gr.State
+    insight: gr.State
+    loaded_prompts: gr.State
+    batch_directory: gr.State
+    score_budget_load: gr.State
 
 
-# What wraps one sampling slider so its ↺ has somewhere to sit: the button is
-# taken out of the flow and put against the slider's head, and an absolute
-# position needs a positioned ancestor to measure from. The minimum width is
-# the one a slider asks for rather than a column's, so the two-up rows still
-# hold two across a narrow pane.
-SAMPLING_FIELD = {"elem_classes": ["sampling-field"], "min_width": 160}
+@dataclass(frozen=True)
+class ConversationPane:
+    """The conversations pane beside the nav: the list, and what acts on it."""
+
+    column: gr.Column
+    conversation_list: gr.Radio
+    new_button: gr.Button
+    fork_button: gr.Button
+    delete_fork_button: gr.Button
+    clear_button: gr.Button
+    clear_confirm: gr.Column
+    clear_question: gr.Markdown
+    confirm_clear_button: gr.Button
+    cancel_clear_button: gr.Button
 
 
-def sampling_reset(name: str) -> gr.Button:
-    """The ↺ that puts one sampling control back to the app's default.
+@dataclass(frozen=True)
+class Pages:
+    """The nav and the columns it chooses between, in the order show_page() names them."""
 
-    The words are in the page for a screen reader to read out - "Reset
-    temperature" says which slider this one belongs to, which a row of
-    identical marks otherwise does not. The stylesheet shows the mark alone,
-    because that is what fits in the corner beside the number box.
-    """
-
-    return gr.Button(
-        f"Reset {name}",
-        elem_classes=["sampling-reset", *icon_classes("rotate-ccw")],
-    )
-
-# What a handler that repaints on a timer passes instead of nothing.
-#
-# Gradio fades every output component of a running event down to 20% opacity
-# for as long as it is in flight, and fades it back when the event lands.
-# show_progress="hidden" does not turn that off: it only hides the spinner and
-# the runtime counter. The fade is a class on the component, and which
-# components get it is show_progress_on, which defaults to every output. So a
-# handler on a timer hands its outputs a fade in and out on every tick, which
-# at the quarter-second the conversation pane polls at reads as a blink
-# several times a second, on text nobody asked to have redrawn. An empty
-# show_progress_on says to mark nothing as pending, which is what a poll the
-# reader did not ask for should be doing.
-QUIET_TICK = {"show_progress": "hidden", "show_progress_on": []}
+    nav: gr.Radio
+    conversations: gr.Column
+    chat: gr.Column
+    images: gr.Column
+    models: gr.Column
+    settings: gr.Column
+    # Each enabled extension's page label and column, below the built-in pages.
+    extensions: list
 
 
 def build_app() -> gr.Blocks:
@@ -317,2873 +242,662 @@ def build_app() -> gr.Blocks:
         theme_style = gr.HTML(
             themes.style_tag(saved.theme), elem_id="theme-style", padding=False
         )
-        conversation_state = gr.State([])
-        metrics_state = gr.State(empty_metrics())
-        prompt_metrics_state = gr.State(empty_metrics())
-        # What the Score text tab's strip is showing. The inspector's own
-        # state moves on to the next reply; this one is rewritten only by
-        # another scoring pass, so it still describes the passage drawn there.
-        score_metrics_state = gr.State(empty_metrics())
-        trace_state = gr.State({})
-        # Branching from a token: the token last clicked - which turn, and
-        # which of its tokens - and the alternative picked for it. Both name a
-        # turn rather than a strip position, so a click keeps meaning what it
-        # meant however the conversation moves under it.
-        # The script names these after the strip they serve, so a second strip
-        # elsewhere - the maze workbench's - carries its own three.
-        request_id, response_id, action_id = menu_bridge_ids("token-strip")
-        menu_request = gr.Textbox(elem_id=request_id, elem_classes=[MENU_BRIDGE_CLASS])
-        menu_response = gr.HTML(elem_id=response_id, elem_classes=[MENU_BRIDGE_CLASS])
-        menu_action = gr.Textbox(elem_id=action_id, elem_classes=[MENU_BRIDGE_CLASS])
-        # The prompt strip carries its own three: the same menu, offering what
-        # could have stood in a prompt position rather than a reply's.
-        request_id, response_id, action_id = menu_bridge_ids("prompt-strip")
-        prompt_menu_request = gr.Textbox(elem_id=request_id, elem_classes=[MENU_BRIDGE_CLASS])
-        prompt_menu_response = gr.HTML(elem_id=response_id, elem_classes=[MENU_BRIDGE_CLASS])
-        prompt_menu_action = gr.Textbox(elem_id=action_id, elem_classes=[MENU_BRIDGE_CLASS])
-        selected_token = gr.State(None)
-        branch_pick = gr.State(None)
-        # Forking: the other transcripts, and the chatbot message last clicked.
-        forks_state = gr.State(new_forks())
-        tree_selection = gr.State({})
-        selected_message = gr.State(None)
-        token_edit_target = gr.State(None)
-        # Layer inspection: the prompt ids behind the strips, the strip
-        # position last clicked, and the last readout for re-rendering.
-        context_ids_state = gr.State((*empty_metrics(), None))
-        score_context_ids_state = gr.State((0, [], None))
-        # The latest reply stays inspectable when scoring replaces the shared
-        # prompt panel. Its measurements and exact input belong to the chat.
-        chat_metrics_state = gr.State((0, []))
-        chat_context_ids_state = gr.State((0, [], None))
-        steering_state = gr.State(None)
-        # What the last extraction read: one direction per decoder block, the
-        # numbers beside each, and the load they were read through. Held
-        # whole so that moving the layer control is instant - the pass that
-        # reads one layer reads them all, and re-reading to change a layer
-        # would cost another pass over every example.
-        extract_state = gr.State(None)
-        # The two comparison slots, and the document a download would write.
-        # A slot holds one whole run - its tokens, its measurements and the
-        # configuration it ran under - because the model that produced it may
-        # be gone by the time the other slot is filled, which is the point.
-        compare_a_state = gr.State(None)
-        compare_b_state = gr.State(None)
-        compare_export_state = gr.State(None)
-        inspect_target = gr.State(None)
-        insight_state = gr.State(None)
-        # The prompts the last file gave, as it gave them. A prompt with a
-        # blank line inside it reads as two once it is in the box, so a run
-        # prefers this list while the box still holds what loading it wrote;
-        # see ui.prompts.resolve_prompts().
-        loaded_prompts_state = gr.State([])
-        # Where the running batch writes its exports, so Stop can publish
-        # what is there; see ui.prompts.stop_batch().
-        batch_directory_state = gr.State(None)
-        # Which load the scored token count on screen was counted against, so
-        # a model swapped out from another tab can be told from this one.
-        score_budget_load = gr.State(None)
+        states = _build_shared_state()
 
         with gr.Row(elem_id="shell"):
-            # The thin pane at the far left picks the page: Chat, Images,
-            # Models, any extension pages, then Settings. The stylesheet stacks
-            # the choices, rules off the extensions from the pages that ship
-            # with the app, and pins Settings to the bottom.
-            with gr.Column(scale=0, min_width=NAV_PANE_WIDTH, elem_id="nav-pane"):
-                nav = gr.Radio(
-                    choices=page_choices,
-                    value=CHAT_PAGE,
-                    show_label=False,
-                    container=False,
-                    elem_id="nav",
-                )
-
-            # The conversations pane sits beside the nav and shows with Chat only.
-            with gr.Column(
-                scale=0, min_width=CONVERSATION_PANE_WIDTH, elem_id="conversation-pane"
-            ) as conversation_pane:
-                gr.Markdown("## Conversations", elem_id="conversations-heading")
-                conversation_list = gr.Radio(
-                    choices=branch_choices(new_forks(), []),
-                    value=MAIN_BRANCH,
-                    show_label=False,
-                    elem_id="conversation-list",
-                )
-                with gr.Row():
-                    # The pane is narrow, so the buttons give up their usual
-                    # minimum width to share one row.
-                    new_button = gr.Button("New", size="sm", min_width=60, elem_classes=icon_classes("plus"))
-                    fork_button = gr.Button("Fork", size="sm", min_width=60, elem_classes=icon_classes("git-branch"))
-                    delete_fork_button = gr.Button("Delete", size="sm", min_width=60, elem_classes=icon_classes("trash"))
-                # Named for what it takes: this empties the conversation on
-                # screen and deletes every other one with it. It stands under
-                # the list of everything it would take rather than under one
-                # conversation's message box, where it read as a control of
-                # that conversation alone. A fourth button would not fit the
-                # row above, so it takes the pane's width on its own line.
-                clear_button = gr.Button("Clear all", size="sm", elem_classes=icon_classes("trash"))
-                with gr.Column(
-                    visible=False,
-                    elem_id="clear-confirm",
-                    elem_classes=["clear-confirm"],
-                ) as clear_confirm:
-                    clear_question = gr.Markdown("")
-                    # The pane is too narrow for the two answers to share a
-                    # row, so they stack.
-                    confirm_clear_button = gr.Button(
-                        "Clear everything", variant="stop", size="sm"
-                    )
-                    cancel_clear_button = gr.Button("Cancel", size="sm")
-
+            nav = _build_nav(page_choices)
+            pane = _build_conversation_pane()
             # The three pages share the rest of the width; one is visible at a
             # time, chosen by the nav.
-            with gr.Column(scale=1, elem_id="chat-page") as chat_page:
-                # Keep the header in the chat column so the token panel can
-                # start at the top of the page beside it.
-                with gr.Row(equal_height=True, elem_id="chat-columns"):
-                    with gr.Column(scale=3, min_width=320, elem_id="chat-workspace"):
-                        gr.Markdown(
-                            "# ChatLab",
-                            elem_id="hero",
-                        )
+            chat_page = build_chat_page(saved, states)
+            extension_pages, extension_model_buttons = _build_extension_pages(
+                extensions, extension_errors
+            )
+            images = build_images_page(saved)
+            models = build_models_page(saved)
+            settings_page = build_settings_page(saved, extensions, extension_errors)
 
-                        # The badge sits above the tabs, so both Chat and Score text
-                        # say which model would answer. Beside it is the switcher,
-                        # a dropdown of the downloaded models that would load now,
-                        # and, while none is loaded, a link to set up the default
-                        # on the Models page.
-                        with gr.Row(elem_id="model-bar"):
-                            model_badge_view = gr.HTML(
-                                loaded_model_badge(), elem_id="model-badge"
-                            )
-                            # Painted empty and filled by demo.load, as My Models
-                            # is: the choices need the cache scanned and the
-                            # machine's memory read, which is not for build time.
-                            model_switch = gr.Dropdown(
-                                choices=[],
-                                value=None,
-                                label="Switch model",
-                                show_label=False,
-                                container=False,
-                                visible=False,
-                                interactive=True,
-                                elem_id="model-switch",
-                            )
-                            default_model_button = gr.Button(
-                                "Set up the default model",
-                                variant="primary",
-                                size="sm",
-                                visible=not runtime.MANAGER.loaded,
-                                elem_id="default-model",
-                            )
-
-                        # What the switcher above was last drawn from, per tab:
-                        # the cache revision, the models it came to, and when
-                        # their fit was read. The timer needs all three to tell
-                        # a list that is merely idle from one that another
-                        # tab's download or removal, or a change in the
-                        # machine's free memory, has left out of date; see
-                        # refresh_stale_model_switch.
-                        switch_stamp = gr.State(None)
-
-                        # Nothing to see: the timer is what makes the badge tell every
-                        # open tab about a load or unload, not just the one that asked
-                        # for it. See BADGE_REFRESH_SECONDS.
-                        badge_timer = gr.Timer(BADGE_REFRESH_SECONDS)
-
-                        with gr.Tabs(elem_id="conversation-tabs") as conversation_tabs:
-                            with gr.Tab("Chat", elem_id="chat-tab"):
-                                # Two views of one conversation, one at a
-                                # time. The chatbot renders the reply as the
-                                # reader would read it - markdown, code
-                                # blocks, a collapsed reasoning block. The
-                                # token view writes the same messages out
-                                # token by token, whitespace shown, painted by
-                                # the scale on the right. Neither is a
-                                # substitute for the other, which is why this
-                                # is a switch and not a replacement.
-                                token_view = gr.Radio(
-                                    choices=["Rendered view", "Token view"],
-                                    value="Rendered view",
-                                    type="index",
-                                    label="Conversation view",
-                                    show_label=False,
-                                    container=False,
-                                    elem_id="token-view",
-                                )
-                                chatbot = gr.Chatbot(
-                                    type="messages",
-                                    label="Conversation",
-                                    height=560,
-                                    show_label=False,
-                                    elem_id="conversation",
-                                    editable="all",
-                                    placeholder="Load a model, then start a conversation.",
-                                )
-                                token_strip = gr.HighlightedText(
-                                    label=TRANSCRIPT_LABEL,
-                                    color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
-                                    show_legend=True,
-                                    combine_adjacent=False,
-                                    visible=False,
-                                    elem_id="token-strip",
-                                    elem_classes=[MENU_STRIP_CLASS],
-                                )
-                                with gr.Group(visible=False, elem_id="token-editor") as token_editor:
-                                    token_edit_text = gr.Textbox(
-                                        label="Edit your message", lines=3,
-                                        info="Saving replaces the replies after this message and generates a new reply.",
-                                    )
-                                    with gr.Row():
-                                        token_edit_save = gr.Button("Save and regenerate", variant="primary")
-                                        token_edit_cancel = gr.Button("Cancel")
-                                # The box and the controls that act on it are
-                                # one bordered composer, the way a message box
-                                # is drawn everywhere else: the stylesheet
-                                # takes the border off the box itself and puts
-                                # it around the pair, so the row below reads as
-                                # part of the box rather than as four loose
-                                # buttons under it.
-                                with gr.Column(elem_id="composer"):
-                                    prompt = gr.Textbox(
-                                        label="Message",
-                                        show_label=False,
-                                        elem_id="message-input",
-                                        **message_box_settings(saved.enter_sends),
-                                    )
-                                    with gr.Row(elem_id="chat-actions"):
-                                        # Send is written first because it is
-                                        # the important one and a keyboard
-                                        # reaches it first; the stylesheet
-                                        # moves it to the end of the row, where
-                                        # the eye leaves the text it just
-                                        # typed.
-                                        send_button = gr.Button("Send", variant="primary", min_width=70)
-                                        # Escape presses this; see SHORTCUT_JS,
-                                        # which finds it by this id.
-                                        stop_button = gr.Button(
-                                            STOP_LABEL,
-                                            variant="stop",
-                                            visible=False,
-                                            elem_id="stop-button",
-                                        )
-                                        # The three that rework the last reply
-                                        # stand together at the left as quiet
-                                        # buttons. Each holds its own width
-                                        # rather than taking an equal share of
-                                        # the row, which had them spread across
-                                        # the page as three unrelated labels.
-                                        retry_button = gr.Button("Retry", min_width=80, elem_classes=icon_classes("rotate-ccw"))
-                                        next_token_button = gr.Button("Next token", min_width=90)
-                                        undo_button = gr.Button("Undo last", min_width=90, elem_classes=icon_classes("undo"))
-
-                                generation_status = gr.Markdown("Ready.", elem_id="generation-status")
-                                with gr.Accordion("Conversation tools", open=False, elem_id="conversation-tools"):
-                                    # Sampling and file controls are available on demand.
-                                    with gr.Accordion(
-                                        sampling_label(
-                                            saved.temperature,
-                                            saved.top_p,
-                                            saved.top_k,
-                                            saved.skip_top_below,
-                                            saved.max_new_tokens,
-                                        ),
-                                        open=False,
-                                    ) as sampling_accordion:
-                                        # show_reset_button=False on all five,
-                                        # and a ↺ of our own in each slider's
-                                        # head instead, in the corner Gradio
-                                        # draws its own in. Gradio's restores
-                                        # the value its slider was built
-                                        # with, which is the saved setting -
-                                        # and the file follows every move of
-                                        # these sliders, so it restored the
-                                        # number already on screen and did
-                                        # nothing whatever it was pressed.
-                                        # Building them with the defaults to
-                                        # give it somewhere to go would put
-                                        # the defaults in the page a reader is
-                                        # answered from until the load lands,
-                                        # and would freeze the length it
-                                        # restores at whatever the context
-                                        # limit was at startup. Ours works out
-                                        # what to restore when it is pressed,
-                                        # which has neither problem. Gradio 6
-                                        # spells the one being turned off
-                                        # buttons=["reset"].
-                                        with gr.Row():
-                                            with gr.Column(**SAMPLING_FIELD):
-                                                temperature = gr.Slider(
-                                                    0,
-                                                    2,
-                                                    value=saved.temperature,
-                                                    step=0.05,
-                                                    label="Temperature",
-                                                    show_reset_button=False,
-                                                )
-                                                temperature_reset = sampling_reset("temperature")
-                                            with gr.Column(**SAMPLING_FIELD):
-                                                top_p = gr.Slider(
-                                                    0.05,
-                                                    1,
-                                                    value=saved.top_p,
-                                                    step=0.01,
-                                                    label="Top-p",
-                                                    show_reset_button=False,
-                                                )
-                                                top_p_reset = sampling_reset("top-p")
-                                        with gr.Row():
-                                            with gr.Column(**SAMPLING_FIELD):
-                                                top_k = gr.Slider(
-                                                    0,
-                                                    200,
-                                                    value=saved.top_k,
-                                                    step=1,
-                                                    label="Top-k (0 disables)",
-                                                    show_reset_button=False,
-                                                )
-                                                top_k_reset = sampling_reset("top-k")
-                                            with gr.Column(**SAMPLING_FIELD):
-                                                # The ceiling is the context
-                                                # limit: a response cannot be
-                                                # longer than a prompt is
-                                                # allowed to be.
-                                                max_new_tokens = gr.Slider(
-                                                    1,
-                                                    saved.prefill_token_limit,
-                                                    value=saved.max_new_tokens,
-                                                    step=1,
-                                                    label="Maximum new tokens",
-                                                    show_reset_button=False,
-                                                )
-                                                max_new_tokens_reset = sampling_reset(
-                                                    "the response length"
-                                                )
-                                        with gr.Row():
-                                            # Alone on its row because it is
-                                            # the one control here that needs
-                                            # a sentence saying what it is
-                                            # for, and that sentence needs
-                                            # the width.
-                                            with gr.Column(**SAMPLING_FIELD):
-                                                skip_top_below = gr.Slider(
-                                                    0,
-                                                    1,
-                                                    value=saved.skip_top_below,
-                                                    step=0.05,
-                                                    label="Skip top choice below (0 disables)",
-                                                    show_reset_button=False,
-                                                    info=(
-                                                        "Take the model's second choice wherever its "
-                                                        "first holds less than this probability. Where "
-                                                        "it is more certain than this, its choice stands."
-                                                    ),
-                                                )
-                                                skip_top_below_reset = sampling_reset(
-                                                    "the top-choice skip"
-                                                )
-                                        with gr.Row():
-                                            seed = gr.Number(
-                                                value=saved.seed,
-                                                precision=0,
-                                                minimum=0,
-                                                label="Random seed",
-                                                info="Updated after each response so you can reproduce it.",
-                                            )
-                                            randomize_seed = gr.Checkbox(
-                                                value=saved.randomize_seed,
-                                                label="New seed each response",
-                                                info="Turn off to lock the seed and reproduce a response exactly.",
-                                            )
-                                    with gr.Accordion("Steering vector", open=False):
-                                        gr.Markdown(
-                                            "Add a vector to a model layer during this conversation. "
-                                            "Import JSON with `model_id`, `layer` (starting at 0), "
-                                            "and `vector` (a list of numbers). Use a vector made for "
-                                            "the same model checkpoint."
-                                        )
-                                        with gr.Row():
-                                            steering_upload = gr.UploadButton(
-                                                "Import vector", file_types=[".json"], type="filepath"
-                                            )
-                                            steering_remove = gr.Button("Remove vector")
-                                        steering_enabled = gr.Checkbox(value=False, label="Enable steering", interactive=False)
-                                        steering_strength = gr.Slider(
-                                            -100, 100, value=1, step=0.05, label="Steering strength", interactive=False,
-                                            info="0 disables the addition; negative values reverse its direction.",
-                                        )
-                                        steering_layer = gr.Number(
-                                            value=0, precision=0, minimum=0, label="Target layer (starting at 0)", interactive=False,
-                                        )
-                                        steering_status = gr.Textbox(
-                                            value=EMPTY_STATUS, label="Vector status", interactive=False,
-                                        )
-                                        with gr.Accordion("Extract from examples", open=False):
-                                            gr.Markdown(
-                                                "Read a direction out of the model instead of importing one. "
-                                                "Each example is run through the model once and every layer's "
-                                                "activation is pooled to a vector; the direction is the wanted "
-                                                "examples' mean minus the unwanted ones'. One example per line."
-                                            )
-                                            extract_positive = gr.Textbox(
-                                                label="Examples of what you want",
-                                                placeholder="One per line.",
-                                                lines=4,
-                                                elem_id="extract-positive",
-                                            )
-                                            extract_negative = gr.Textbox(
-                                                label="Examples of the opposite",
-                                                placeholder="One per line.",
-                                                lines=4,
-                                                elem_id="extract-negative",
-                                            )
-                                            extract_chat = gr.Checkbox(
-                                                value=False,
-                                                label="Read each example as a user turn",
-                                                info=(
-                                                    "Wraps every example in the model's chat template and "
-                                                    "reads it at the position a reply would start from. "
-                                                    "Models without a chat template read plain text, and say so."
-                                                ),
-                                            )
-                                            extract_pool = gr.Radio(
-                                                choices=list(POOL_CHOICES),
-                                                value="last",
-                                                label="Pool each example at",
-                                            )
-                                            extract_button = gr.Button(
-                                                "Extract direction", variant="primary"
-                                            )
-                                            extract_status = gr.Markdown(
-                                                EXTRACT_EMPTY, elem_id="extract-status"
-                                            )
-                                            extract_table = gr.Dataframe(
-                                                headers=EXTRACT_HEADERS,
-                                                datatype=["number"] * 4,
-                                                column_widths=["16%", "28%", "28%", "28%"],
-                                                interactive=False,
-                                                elem_id="extract-layers",
-                                                label="Layer by layer — click a row to choose it",
-                                            )
-                                            extract_layer = gr.Slider(
-                                                0, 0, value=0, step=1,
-                                                label="Layer to take the direction from",
-                                                interactive=False,
-                                            )
-                                            with gr.Row():
-                                                extract_apply = gr.Button(
-                                                    "Use this layer", interactive=False, min_width=110
-                                                )
-                                                gr.DownloadButton(
-                                                    "Download vector",
-                                                    value=download_extracted,
-                                                    inputs=[extract_state, extract_layer],
-                                                    size="sm",
-                                                    min_width=110,
-                                                )
-                                    with gr.Row():
-                                        save_button = gr.Button("Save conversation", elem_classes=icon_classes("download"))
-                                        load_upload = gr.UploadButton(
-                                            "Load conversation",
-                                            file_types=[".json"],
-                                            type="filepath",
-                                            elem_classes=icon_classes("folder-open"),
-                                        )
-                                    saved_file = gr.File(
-                                        label="Saved conversation",
-                                        visible=False,
-                                        interactive=False,
-                                    )
-                                    with gr.Accordion("Export full metric trace", open=False):
-                                        with gr.Row():
-                                            gr.DownloadButton(
-                                                "Download JSON",
-                                                value=lambda trace: write_trace_export(
-                                                    trace, "json"
-                                                ),
-                                                inputs=trace_state,
-                                                size="sm",
-                                            )
-                                            gr.DownloadButton(
-                                                "Download CSV",
-                                                value=lambda trace: write_trace_export(trace, "csv"),
-                                                inputs=trace_state,
-                                                size="sm",
-                                            )
-
-                            with gr.Tab("Score text"):
-                                gr.Markdown(
-                                    "Measure text the model did not write. One forward pass "
-                                    "gives every token the same rank, probability, surprise, "
-                                    "and entropy the chat view shows."
-                                )
-                                score_context = gr.Textbox(
-                                    label="Context (optional)",
-                                    placeholder="Text that comes before the part you want scored.",
-                                    lines=3,
-                                )
-                                use_chat_template = gr.Checkbox(
-                                    value=False,
-                                    label="Treat the context as a chat message",
-                                    info=(
-                                        "Wraps the context in the model's chat template, so the "
-                                        "scored text is measured as a reply. Models without a "
-                                        "chat template score the context as plain text, and say so."
-                                    ),
-                                )
-                                score_input = gr.Textbox(
-                                    label="Text to score",
-                                    placeholder="Paste the text you want measured…",
-                                    lines=8,
-                                )
-                                # Scoring refuses a passage above the model's
-                                # limit. This is the same count, made while
-                                # the passage is still being written.
-                                score_budget = gr.Markdown(
-                                    SCORE_COUNT_HINT,
-                                    elem_id="score-budget",
-                                    elem_classes=["token-budget"],
-                                )
-                                score_button = gr.Button("Score text", variant="primary")
-                                score_status = gr.Markdown("Nothing scored yet.")
-                                # The scored tokens are shown here rather than
-                                # beside the chat: this tab has no conversation
-                                # to paint, and the inspector's business is
-                                # whichever token was last clicked, wherever
-                                # it was clicked.
-                                score_strip = gr.HighlightedText(
-                                    label="Scored tokens — click one",
-                                    color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
-                                    show_legend=True,
-                                    combine_adjacent=False,
-                                    elem_id="score-strip",
-                                )
-
-                            with gr.Tab("Prompts", elem_id="prompts-tab"):
-                                gr.Markdown(
-                                    "Run a list of prompts, each in a conversation of its "
-                                    "own, and keep every token's measurements. The system "
-                                    "prompt and prefill come from Settings, the sampling "
-                                    "controls from the Chat tab, so a batch is measured "
-                                    "exactly as a reply typed by hand would be."
-                                )
-                                prompts_box = gr.Textbox(
-                                    label="Prompts",
-                                    placeholder=(
-                                        "One prompt per block, with a blank line between "
-                                        "them, so a prompt can run to several lines."
-                                    ),
-                                    lines=8,
-                                    elem_id="prompts-box",
-                                )
-                                prompt_count = gr.Markdown(
-                                    PROMPT_COUNT_HINT,
-                                    elem_id="prompt-count",
-                                    elem_classes=["token-budget"],
-                                )
-                                with gr.Row():
-                                    run_prompts_button = gr.Button(
-                                        "Run prompts", variant="primary", min_width=110
-                                    )
-                                    # Escape presses this while a batch runs;
-                                    # see SHORTCUT_JS, which finds whichever
-                                    # stop button is on screen by these ids.
-                                    stop_prompts_button = gr.Button(
-                                        "Stop",
-                                        variant="stop",
-                                        visible=False,
-                                        elem_id="stop-batch-button",
-                                        min_width=70,
-                                    )
-                                    prompts_upload = gr.UploadButton(
-                                        "Load prompts",
-                                        # "text" is any text file, which is
-                                        # what the parser's fallback reads: a
-                                        # prompt set arrives as often in a
-                                        # .md or a file with no extension at
-                                        # all as in a .txt, and a filter
-                                        # narrower than the parser would put
-                                        # those out of reach of a tab that
-                                        # says it takes them. The two JSON
-                                        # forms are named because a browser
-                                        # does not always call them text.
-                                        file_types=["text", ".json", ".jsonl"],
-                                        type="filepath",
-                                        min_width=130,
-                                    )
-                                batch_status = gr.Markdown(
-                                    "Nothing run yet.", elem_id="batch-status"
-                                )
-                                batch_results = gr.Dataframe(
-                                    headers=BATCH_HEADERS,
-                                    datatype=[
-                                        "number",
-                                        "str",
-                                        "str",
-                                        "number",
-                                        "number",
-                                        "number",
-                                        "number",
-                                    ],
-                                    column_widths=["5%", "27%", "32%", "9%", "9%", "9%", "9%"],
-                                    wrap=True,
-                                    interactive=False,
-                                    elem_id="batch-results",
-                                    label="Results — one row per prompt",
-                                )
-                                batch_files = gr.File(
-                                    label="One trace per prompt, and a table of every token",
-                                    file_count="multiple",
-                                    visible=False,
-                                    interactive=False,
-                                    elem_id="batch-files",
-                                )
-
-                            with gr.Tab("Fork tree", elem_id="fork-tree-tab"):
-                                gr.Markdown(
-                                    "### Conversation forks\n"
-                                    "Follow each fork back to its message or token. "
-                                    "Choose **A** and **B** on two branches to compare them below."
-                                )
-                                tree_action = gr.Textbox(
-                                    elem_id="fork-tree-action", elem_classes=[MENU_BRIDGE_CLASS]
-                                )
-                                tree_view = gr.HTML(
-                                    render_fork_tree([], new_forks(), {})[0],
-                                    elem_id="fork-tree-view",
-                                )
-                                tree_comparison = gr.HTML(
-                                    render_fork_tree([], new_forks(), {})[1],
-                                    elem_id="fork-tree-comparison",
-                                )
-
-                            with gr.Tab("Compare", elem_id="compare-tab"):
-                                gr.Markdown(
-                                    "Two runs, side by side. Fill slot A, change one "
-                                    "thing — the model, the precision, a steering "
-                                    "vector, the seed — and fill slot B. Each slot "
-                                    "keeps its own model and settings, so the two can "
-                                    "be filled a model load apart. The system prompt "
-                                    "and prefill come from Settings, the sampling "
-                                    "controls and the steering vector from the Chat tab."
-                                )
-                                pair_conditions, pair_button, pair_load_status = experiment_compare.build()
-                                compare_mode = gr.Radio(
-                                    choices=[
-                                        ("Writing a reply", REPLY),
-                                        ("Measuring fixed text", MEASUREMENT),
-                                    ],
-                                    value=REPLY,
-                                    label="Fill a slot by",
-                                    info=(
-                                        "Two replies part company somewhere in the "
-                                        "answer and only their shared opening can be "
-                                        "compared. Two runs over one fixed passage "
-                                        "never part, so every token is comparable — "
-                                        "and a measurement reads the context and the "
-                                        "passage alone, so put a measurement's framing "
-                                        "in the context box rather than in the system "
-                                        "prompt."
-                                    ),
-                                )
-                                compare_prompt = gr.Textbox(
-                                    label="Prompt for both runs",
-                                    placeholder="The message both runs answer.",
-                                    lines=4,
-                                    elem_id="compare-prompt",
-                                )
-                                compare_template = gr.Checkbox(
-                                    value=False,
-                                    visible=False,
-                                    label="Read the context as a chat message",
-                                )
-                                compare_text = gr.Textbox(
-                                    label="Text to measure",
-                                    placeholder="The passage both runs read…",
-                                    lines=6,
-                                    visible=False,
-                                    elem_id="compare-text",
-                                )
-                                with gr.Row():
-                                    compare_run_a = gr.Button(
-                                        "Run into A", variant="primary", min_width=110
-                                    )
-                                    compare_run_b = gr.Button(
-                                        "Run into B", variant="primary", min_width=110
-                                    )
-                                    # Escape presses this while a slot is being
-                                    # filled; see SHORTCUT_JS.
-                                    compare_stop = gr.Button(
-                                        "Stop",
-                                        variant="stop",
-                                        visible=False,
-                                        elem_id="stop-compare",
-                                        min_width=70,
-                                    )
-                                    compare_clear = gr.Button(
-                                        "Clear both", min_width=110
-                                    )
-                                compare_status = gr.Markdown(
-                                    COMPARE_EMPTY, elem_id="compare-status"
-                                )
-                                compare_tiles = gr.HTML(
-                                    charts.comparison_tiles({}), elem_id="compare-tiles"
-                                )
-                                compare_headline = gr.Markdown(
-                                    "", elem_id="compare-headline"
-                                )
-                                compare_a_heading = gr.Markdown(f"**A** · {COMPARE_SLOT_EMPTY}")
-                                compare_a_strip = gr.HighlightedText(
-                                    label="Slot A",
-                                    color_map=GAP_COLORS,
-                                    show_legend=True,
-                                    combine_adjacent=False,
-                                    elem_id="compare-a-strip",
-                                )
-                                compare_b_heading = gr.Markdown(f"**B** · {COMPARE_SLOT_EMPTY}")
-                                compare_b_strip = gr.HighlightedText(
-                                    label="Slot B",
-                                    color_map=GAP_COLORS,
-                                    show_legend=True,
-                                    combine_adjacent=False,
-                                    elem_id="compare-b-strip",
-                                )
-                                gr.Markdown(
-                                    GAP_CAPTION, elem_classes=["scale-caption"]
-                                )
-                                compare_chart = gr.HTML(
-                                    charts.EMPTY_CHART, elem_id="compare-chart"
-                                )
-                                compare_settings = gr.Dataframe(
-                                    headers=CONFIGURATION_HEADERS,
-                                    datatype=["str", "str", "str"],
-                                    column_widths=["26%", "37%", "37%"],
-                                    wrap=True,
-                                    interactive=False,
-                                    elem_id="compare-settings",
-                                    label="What differed between the two runs",
-                                )
-                                compare_rows = gr.Dataframe(
-                                    headers=DIVERGENCE_HEADERS,
-                                    datatype=["number", "str", "number", "number",
-                                              "number", "str", "str"],
-                                    column_widths=["6%", "16%", "14%", "14%", "12%",
-                                                   "19%", "19%"],
-                                    wrap=True,
-                                    interactive=False,
-                                    elem_id="compare-divergences",
-                                    label="Where the two runs read a shared token most differently",
-                                )
-                                difference_position = gr.State(None)
-                                next_difference = gr.Button("Next largest difference", size="sm")
-                                difference_detail = gr.Markdown("")
-                                gr.DownloadButton(
-                                    "Download comparison JSON",
-                                    value=download_comparison,
-                                    inputs=compare_export_state,
-                                    size="sm",
-                                )
-                                build_activation_patching(compare_a_state, compare_b_state)
-
-                            experiments_view = experiments.build()
-
-                    # The seam between the transcript and the readings is a
-                    # handle: drag it to give either pane the other's room.
-                    # See RESIZE_JS.
-                    inspector_resizer = gr.HTML(
-                        pane_handle("inspector-pane"),
-                        elem_id="inspector-resizer",
-                        container=False,
-                        padding=False,
-                    )
-
-                    with gr.Column(scale=2, min_width=300, elem_id="inspector-pane") as inspector_pane:
-                        gr.Markdown("## Under the hood", elem_id="inspector-heading")
-                        color_scale = gr.Dropdown(
-                            choices=list(COLOR_SCALES),
-                            value=saved.color_scale,
-                            label="Color tokens by",
-                        )
-                        scale_caption = gr.Markdown(
-                            COLOR_SCALES[saved.color_scale].caption,
-                            visible=False,
-                            elem_classes=["scale-caption"],
-                        )
-                        token_detail = gr.Markdown(NO_TOKEN_SELECTED)
-                        alternatives = gr.Dataframe(
-                            headers=["Token ID", "Token", "Raw probability"],
-                            column_widths=["22%", "30%", "48%"],
-                            wrap=True,
-                            elem_id="token-alternatives",
-                            datatype=["number", "str", "number"],
-                            interactive=False,
-                            label="Most likely alternatives — click one to branch into it",
-                        )
-                        with gr.Accordion("Branch response", open=False, elem_classes=["inspector-section"]):
-                            with gr.Row():
-                                branch_button = gr.Button("Branch from token", size="sm", elem_classes=icon_classes("git-branch"))
-                            gr.Markdown(
-                                "For one step, choose an alternative and press **Next token** "
-                                "below the message box. Keep pressing it to extend the reply."
-                            )
-                            with gr.Row():
-                                branch_text = gr.Textbox(
-                                    label="Or type your own replacement",
-                                    placeholder=(
-                                        "Text to put where the selected token was. Include a "
-                                        "leading space if the word needs one."
-                                    ),
-                                    lines=1,
-                                    scale=3,
-                                    min_width=160,
-                                )
-                                branch_text_button = gr.Button(
-                                    "Branch with text", size="sm", scale=0, min_width=160,
-                                    elem_classes=icon_classes("pencil"),
-                                )
-                        with gr.Accordion("Layers and attention", open=False, elem_classes=["inspector-section"]):
-                            lens_mode = gr.Radio(
-                                ["Logit", "Jacobian"], value="Logit", label="Lens",
-                                info="Logit: the prediction before a token. Jacobian: concept readouts after it.",
-                            )
-                            imported_lens = gr.State(None)
-                            inspection_session = gr.State(
-                                value=lambda: INSPECTION_CONTROLS.new_session(),
-                                delete_callback=INSPECTION_CONTROLS.forget,
-                            )
-                            with gr.Column(visible=False) as jacobian_controls:
-                                with gr.Accordion("Lens setup", open=True) as lens_setup:
-                                    gr.Markdown(
-                                        "Import a lens fitted for the loaded checkpoint, from a Hugging Face "
-                                        "repository or a saved file. Fitted lenses are published for many "
-                                        "open models; the [reference tools](https://github.com/anthropics/jacobian-lens#fit) "
-                                        "fit new ones. Supports Llama, Mistral, Qwen, Gemma, OLMo, GLM-4, Phi-3, "
-                                        "Granite, Cohere, and SmolLM3 text models, as Transformers weights or MLX conversions."
-                                    )
-                                    with gr.Row():
-                                        lens_repository = gr.Textbox(
-                                            label="Hub repository", placeholder="For example, mhough/olmo3-jacobian-lenses",
-                                            scale=1,
-                                        )
-                                        lens_filename = gr.Textbox(
-                                            label="File in the repository", placeholder="For example, lenses/olmo-3-7b-think.pt",
-                                            scale=1,
-                                        )
-                                    lens_file = gr.File(label="Or a saved lens.pt file", file_types=[".pt"], type="filepath")
-                                    fitted_model_id = gr.Textbox(
-                                        label="Model ID the lens was fitted for",
-                                        placeholder="For example, Qwen/Qwen3-0.6B",
-                                        info="For an MLX conversion, the full-precision model it was made from.",
-                                    )
-                                    import_lens_button = gr.Button("Import lens", size="sm")
-                                import_lens_status = gr.Markdown("No lens imported for this session.")
-                                pinned_concept = gr.Textbox(
-                                    label="Pin a vocabulary token (optional)",
-                                    placeholder="Click a cell in the grid, or type a token, then inspect again",
-                                    info="Use the exact text, including any leading space. One vocabulary token at a time.",
-                                    elem_id="jacobian-pin",
-                                )
-                                # A clicked cell writes its exact token ID here beside the
-                                # visible text, so a token whose text does not tokenize back
-                                # to itself is still pinned as the token it is. Hidden by the
-                                # bridge class, not visible=False, which would take the box
-                                # out of the DOM where the page script has to find it.
-                                pinned_token_id = gr.Textbox(elem_id="jacobian-pin-id", elem_classes=[MENU_BRIDGE_CLASS])
-                            with gr.Row():
-                                inspect_button = gr.Button(
-                                    "Inspect layers", size="sm", scale=0, min_width=160,
-                                    elem_classes=icon_classes("layers"), elem_id="inspect-layers",
-                                )
-                                inspect_status = gr.Markdown(
-                                    INSPECT_HINT, elem_classes=["scale-caption"]
-                                )
-                            lens_panel = gr.HTML(charts.EMPTY_LENS)
-                            attention_layer = gr.Slider(
-                                0,
-                                1,
-                                value=0,
-                                step=1,
-                                label="Attention layer",
-                                info="0 averages every layer. Release the slider to repaint.",
-                            )
-                            attention_panel = gr.HTML(charts.EMPTY_ATTENTION)
-                            with gr.Row():
-                                kv_layer = gr.Slider(
-                                    1,
-                                    1,
-                                    value=1,
-                                    step=1,
-                                    label="Cache layer",
-                                    info="Release the slider to read another layer.",
-                                    scale=2,
-                                )
-                                kv_metric = gr.Radio(
-                                    list(charts.KV_METRICS), value="Key norm",
-                                    label="Cache readout", scale=1,
-                                )
-                            kv_panel = gr.HTML(charts.EMPTY_KV_CACHE)
-                        with gr.Accordion("Response statistics", open=False, elem_classes=["inspector-section"]):
-                            summary_panel = gr.HTML(charts.summary_tiles({}))
-                            surprise_panel = gr.HTML(charts.EMPTY_CHART)
-                        with gr.Accordion("Prompt and context tokens", open=False, elem_classes=["inspector-section"]):
-                            prompt_note = gr.Markdown("", elem_classes=["scale-caption"])
-                            prompt_strip = gr.HighlightedText(
-                                label="Prompt tokens — click one, right-click to replace it",
-                                color_map=COLOR_SCALES[DEFAULT_COLOR_SCALE].color_map,
-                                show_legend=True,
-                                combine_adjacent=False,
-                                elem_id="prompt-strip",
-                                elem_classes=[MENU_STRIP_CLASS],
-                            )
-
-            extension_pages = []
-            extension_model_buttons = []
-            navigation = NavigationService(
-                lambda button, model_id: extension_model_buttons.append((button, model_id)))
-            for extension in extensions:
-                with gr.Column(scale=1, visible=False, elem_classes=["extension-page"]) as extension_page:
-                    context = ExtensionContext(
-                        models=ModelService(lambda: runtime.MANAGER), tokens=TokenInspector(),
-                        data_dir=data_directory(extension.spec.id), navigation=navigation,
-                    )
-                    try:
-                        extension.build_page(context)
-                    except Exception as exc:
-                        logging.getLogger(__name__).exception("Extension page failed: %s", extension.spec.id)
-                        message = f"{extension.spec.title}: {exc}"
-                        extension_errors.append(message)
-                        gr.Markdown("This extension could not open. " + html.escape(message))
-                extension_pages.append((extension.spec.page_label, extension_page))
-
-            with gr.Column(
-                scale=1, visible=False, elem_id="images-page"
-            ) as images_page:
-                image_run_state = gr.State(None)
-                with gr.Row(equal_height=True, elem_id="images-columns"):
-                    with gr.Column(scale=3, min_width=320, elem_id="images-workspace"):
-                        gr.Markdown(
-                            "# Images\nDraw a picture with a diffusion model, and "
-                            "watch what it did while it drew.",
-                            elem_id="images-hero",
-                        )
-                        # The same badge the Chat page carries, asking about the
-                        # same one model in memory; this one asks whether it is
-                        # a model that can draw.
-                        with gr.Row(elem_id="image-model-bar"):
-                            image_badge_view = gr.HTML(
-                                loaded_model_badge(kind=IMAGE_KIND),
-                                elem_id="image-model-badge",
-                            )
-                            image_load_button = gr.Button(
-                                "Choose an image model",
-                                variant="primary",
-                                size="sm",
-                                visible=not runtime.MANAGER.image_loaded,
-                                elem_id="image-load-model",
-                            )
-                        image_prompt = gr.Textbox(
-                            label="Prompt",
-                            lines=2,
-                            placeholder="A red bicycle leaning on a harbour wall at dawn",
-                            elem_id="image-prompt",
-                        )
-                        image_negative = gr.Textbox(
-                            value=saved.image_negative_prompt,
-                            label="Negative prompt",
-                            lines=1,
-                            placeholder="What to steer away from — blurry, watermark…",
-                            info=(
-                                "What the unconditional half of every step is "
-                                "prompted with. The guidance pull is measured "
-                                "against it, so this changes the trace as well "
-                                "as the picture."
-                            ),
-                        )
-                        with gr.Row():
-                            draw_button = gr.Button(
-                                "Draw", variant="primary", min_width=70
-                            )
-                            stop_draw_button = gr.Button(
-                                "Stop",
-                                variant="stop",
-                                visible=False,
-                                elem_id="stop-drawing",
-                            )
-                        image_status = gr.Markdown(
-                            "Ready.", elem_id="image-status"
-                        )
-                        image_output = gr.Image(
-                            label="Picture",
-                            type="pil",
-                            interactive=False,
-                            show_label=False,
-                            elem_id="image-output",
-                        )
-                        with gr.Accordion("Drawing settings", open=False):
-                            with gr.Row():
-                                image_steps = gr.Slider(
-                                    settings.IMAGE_STEPS_RANGE[0],
-                                    settings.IMAGE_STEPS_RANGE[1],
-                                    value=saved.image_steps,
-                                    step=1,
-                                    label="Denoising steps",
-                                )
-                                image_guidance = gr.Slider(
-                                    settings.IMAGE_GUIDANCE_RANGE[0],
-                                    settings.IMAGE_GUIDANCE_RANGE[1],
-                                    value=saved.image_guidance,
-                                    step=0.5,
-                                    label="Guidance scale",
-                                    info="At 1 or below there is no guidance, and no pull to measure.",
-                                )
-                            with gr.Row():
-                                image_size = gr.Dropdown(
-                                    choices=[
-                                        (f"{size} × {size}", size)
-                                        for size in settings.IMAGE_SIZES
-                                    ],
-                                    value=saved.image_size,
-                                    label="Size",
-                                )
-                                image_seed = gr.Number(
-                                    value=saved.image_seed,
-                                    label="Seed",
-                                    precision=0,
-                                    # Bounded at both ends, unlike the Chat
-                                    # page's: torch's generator raises above
-                                    # its own maximum where NumPy would take
-                                    # any non-negative integer.
-                                    minimum=settings.IMAGE_SEED_RANGE[0],
-                                    maximum=settings.IMAGE_SEED_RANGE[1],
-                                )
-                                image_randomize = gr.Checkbox(
-                                    value=saved.image_randomize_seed,
-                                    label="Randomize seed",
-                                )
-                            image_record_attention = gr.Checkbox(
-                                value=saved.image_record_attention,
-                                label="Record cross-attention",
-                                info=(
-                                    "The one reading that costs time: the "
-                                    "pipeline's own attention kernel never "
-                                    "builds the probabilities, so they are "
-                                    "computed again alongside. Turn it off for "
-                                    "the pipeline's own speed and keep the "
-                                    "trajectory and the guidance trace."
-                                ),
-                            )
-
-                        image_word_outputs = build_word_comparison()
-
-                    # The Images page carries the same handle on its own seam.
-                    gr.HTML(
-                        pane_handle("image-inspector"),
-                        elem_id="image-inspector-resizer",
-                        container=False,
-                        padding=False,
-                    )
-
-                    with gr.Column(scale=2, min_width=300, elem_id="image-inspector"):
-                        # Which run the readouts belong to, the step being
-                        # looked at, and the prompt token last clicked.
-                        image_token_state = gr.State(None)
-                        with gr.Accordion(
-                            "Denoising trajectory",
-                            open=True,
-                            elem_classes=["inspector-section"],
-                        ):
-                            image_step = gr.Slider(
-                                1,
-                                1,
-                                value=1,
-                                step=1,
-                                label="Step",
-                                interactive=False,
-                                elem_id="image-step",
-                                info="Scrub through the run. The token shading and the map follow.",
-                            )
-                            image_trajectory = gr.HTML(
-                                NO_TRAJECTORY, elem_id="image-trajectory"
-                            )
-                        with gr.Accordion(
-                            "Guidance and movement",
-                            open=True,
-                            elem_classes=["inspector-section"],
-                        ):
-                            image_tiles = gr.HTML(
-                                charts.EMPTY_IMAGE_TILES, elem_id="image-tiles"
-                            )
-                            image_chart = gr.HTML(
-                                charts.EMPTY_DENOISING_CHART, elem_id="image-chart"
-                            )
-                        with gr.Accordion(
-                            "Prompt attention",
-                            open=True,
-                            elem_classes=["inspector-section"],
-                        ):
-                            image_strip = gr.HighlightedText(
-                                label=PROMPT_STRIP_LABEL,
-                                color_map=PROMPT_ATTENTION_SCALE.color_map,
-                                show_legend=True,
-                                combine_adjacent=False,
-                                elem_id="image-prompt-strip",
-                            )
-                            image_note = gr.Markdown(
-                                "",
-                                elem_id="image-attention-note",
-                                elem_classes=["scale-caption"],
-                            )
-                            image_overlay = gr.HTML(
-                                NO_ATTENTION, elem_id="image-attention"
-                            )
-
-            with gr.Column(
-                scale=1, visible=False, elem_id="models-page"
-            ) as models_page:
-                gr.Markdown(
-                    "# Models\nDownload a model from Hugging Face, or load one "
-                    "already on disk. Files are kept in your normal Hugging Face cache.",
-                    elem_id="models-hero",
-                )
-                with gr.Row(elem_id="models-columns"):
-                    with gr.Column(min_width=360, elem_id="model-controls"):
-                        with gr.Column(elem_classes=["model-card"]):
-                            gr.Markdown("## Currently loaded")
-                            with gr.Row(elem_id="current-model-row"):
-                                current_model = gr.HTML(refresh_current_model(), elem_id="currently-loaded-model", container=False, padding=False)
-                                unload_button = gr.Button("Unload", size="sm", scale=0, min_width=80)
-                        with gr.Column(elem_classes=["model-card"]):
-                            gr.Markdown("## Choose a model")
-                            with gr.Row(elem_id="model-id-row"):
-                                model_id = gr.Textbox(
-                                    value=settings.model_id_at_startup(saved),
-                                    label="Hugging Face model ID",
-                                    placeholder="organization/model-name",
-                                    info="Paste an ID or select a model below.",
-                                    scale=4,
-                                )
-                                check_model_button = gr.Button("Check model", size="sm", scale=1, min_width=100)
-                            repository_result = gr.State(None)
-                            # What the timer's refresh last painted this card
-                            # from; see refresh_stale_model_actions.
-                            action_stamp = gr.State(None)
-                            repository_detail = gr.Markdown(UNCHECKED, elem_id="model-repository")
-                            with gr.Accordion("Access token", open=False, elem_classes=["model-access"]):
-                                hf_token = gr.Textbox(
-                                    label="Hugging Face token (optional)",
-                                    type="password",
-                                    placeholder="Only needed for gated or private models",
-                                )
-                            weight_precision = gr.Radio(
-                                choices=[
-                                    ("Full (16-bit)", "full"),
-                                    ("8-bit", "8-bit"),
-                                    ("4-bit", "4-bit"),
-                                ],
-                                value=saved.weight_precision,
-                                label="Weight precision",
-                                info=(
-                                    "Lower precision saves memory with some loss of accuracy. "
-                                    "Applies to the next Transformers load on Apple Metal; "
-                                    "MLX checkpoints use their existing precision."
-                                ),
-                            )
-                            model_availability = gr.Markdown(
-                                "Checking downloaded files…", elem_id="model-availability"
-                            )
-                            with gr.Column(elem_classes=["model-activity"]):
-                                gr.Markdown("### Latest model action")
-                                model_status = gr.Markdown(
-                                    "No downloads or loads started in this tab.",
-                                    elem_id="model-status",
-                                )
-                            with gr.Row():
-                                download_load_button = gr.Button(
-                                    "Download and load", variant="primary", size="sm"
-                                )
-                                download_button = gr.Button("Download only", size="sm")
-                                cached_button = gr.Button("Load cached", size="sm")
-
-                        with gr.Column(elem_id="model-search", elem_classes=["model-card"]):
-                            gr.Markdown("## Discover models")
-                            gr.Markdown(
-                                "Search Hugging Face by name, or leave the box empty to browse. "
-                                "A sort reorders the results rather than narrowing what is searched. "
-                                "The exception is an empty box under Recommended, which lists the "
-                                "bundled starters without going online. "
-                                "Selecting a model shows its details before you download.",
-                                elem_classes=["scale-caption"],
-                            )
-                            # One kind at a time, because the hub's own filters
-                            # are; see SEARCH_KINDS.
-                            search_kind = gr.Radio(
-                                choices=list(SEARCH_KINDS),
-                                value=SEARCH_KINDS[0][1],
-                                show_label=False,
-                                container=False,
-                                elem_id="search-kind",
-                            )
-                            with gr.Row():
-                                search_order = gr.Dropdown(
-                                    choices=list(DISCOVERY_ORDERS), value="Recommended",
-                                    label="Sort", interactive=True,
-                                    info="Recommended lists ChatLab’s starters first, then the Hub.",
-                                )
-                                fits_only = gr.Checkbox(
-                                    label="Fits this computer", value=False,
-                                    info="Estimated at the chosen weight precision. Unknown sizes are hidden.",
-                                )
-                            with gr.Row(elem_id="model-search-row"):
-                                search_query = gr.Textbox(
-                                    label="Search Hugging Face",
-                                    placeholder="Model name or organization; leave blank to browse…",
-                                    max_lines=1,
-                                    scale=3,
-                                    elem_id="model-search-query",
-                                )
-                                search_button = gr.Button(
-                                    "Search / refresh", variant="primary", size="sm", scale=0, min_width=120,
-                                    elem_id="model-search-button",
-                                )
-                            # A table rather than a list, so the results can
-                            # be sorted by any column: clicking a heading
-                            # sorts in the browser, and a click on a row is
-                            # traced back to its model by the row's own ID.
-                            search_results = gr.Dataframe(
-                                value=search_table([])["value"],
-                                column_widths=search_table([])["column_widths"],
-                                label="Search results",
-                                show_label=False,
-                                interactive=False,
-                                wrap=True,
-                                elem_id="model-search-results",
-                                elem_classes=["model-table"],
-                            )
-                            search_detail = gr.Markdown(SEARCH_HINT, elem_classes=["model-detail"])
-                            search_results_state = gr.State({})
-                            # The model ID of the selected row, kept apart from
-                            # the table: its own highlight is a cell, and a
-                            # sort moves it.
-                            search_selection = gr.State(None)
-
-                    with gr.Column(min_width=320, elem_classes=["model-card"]):
-                        gr.Markdown("## My Models")
-                        my_models_summary = gr.Markdown("", elem_classes=["scale-caption"])
-                        with gr.Row():
-                            sort_models = gr.Dropdown(
-                                choices=list(MODEL_SORT_ORDERS),
-                                value=DEFAULT_MODEL_SORT,
-                                label="Sort by",
-                                min_width=120,
-                                elem_classes=["model-sort"],
-                            )
-                            # Beside the sort rather than above the list,
-                            # because the two do the same job: they decide
-                            # what the reader is looking at rather than what
-                            # is on disk. Image models are the ones worth
-                            # finding this way - they are the minority, they
-                            # are the kind a row has to say out loud, and the
-                            # Images page sends a reader here for one.
-                            kind_filter = gr.Dropdown(
-                                choices=list(MODEL_KIND_FILTERS),
-                                value=ALL_KINDS,
-                                label="Kind",
-                                min_width=120,
-                                elem_classes=["model-sort", "model-kind"],
-                            )
-                        # A cache that has grown past a screenful is read by
-                        # family ("every Qwen") more often than by kind, and
-                        # the ID is the only place a family is written.
-                        name_filter = gr.Textbox(
-                            placeholder="Filter by name",
-                            show_label=False,
-                            container=False,
-                            elem_id="my-models-filter",
-                        )
-                        my_models = gr.Radio(
-                            choices=[],
-                            label="Downloaded models",
-                            show_label=False,
-                            elem_classes=["model-list"],
-                        )
-                        my_model_detail = gr.Markdown(
-                            "", elem_id="my-model-detail", elem_classes=["model-detail"]
-                        )
-                        with gr.Row():
-                            redownload_button = gr.Button("Redownload", size="sm", elem_classes=icon_classes("download"))
-                            remove_button = gr.Button("Remove", size="sm", elem_classes=icon_classes("trash"))
-                            refresh_models_button = gr.Button("Refresh", size="sm", elem_classes=icon_classes("refresh"))
-                        with gr.Column(
-                            visible=False, elem_classes=["remove-confirm"]
-                        ) as remove_confirm:
-                            remove_question = gr.Markdown("", elem_classes=["model-detail"])
-                            with gr.Row():
-                                confirm_remove_button = gr.Button(
-                                    "Remove from disk", variant="stop", size="sm"
-                                )
-                                cancel_remove_button = gr.Button("Cancel", size="sm")
-                        # The model the open confirmation is about; None when closed.
-                        pending_removal = gr.State(None)
-                        # Whether the fit verdicts on screen were given with
-                        # the device known; see refresh_after_device.
-                        device_read = gr.State(False)
-
-            with gr.Column(
-                scale=1, visible=False, elem_id="settings-page"
-            ) as settings_page:
-                # Sampling lives on the Chat page: temperature and the
-                # response length are what a reader moves between one retry
-                # and the next, and leaving the conversation to reach them
-                # broke that loop. What is left here is what is set once and
-                # then left alone.
-                gr.Markdown(
-                    "# Settings\nHow every reply is prompted and measured. The "
-                    "sampling controls are on the Chat page, under the message "
-                    "box, because they are moved between one reply and the next.",
-                    elem_id="settings-hero",
-                )
-                # One card per subject, the same cards the Models page is
-                # built from. The long text boxes take the left column on
-                # their own; the short readings stack beside them, which is
-                # what keeps either column from running far past the other.
-                with gr.Row(elem_id="settings-columns"):
-                    with gr.Column(min_width=360, elem_id="settings-prompting"):
-                        with gr.Column(elem_classes=["settings-card"]):
-                            gr.Markdown("## Prompting")
-                            system_prompt = gr.Textbox(
-                                value=saved.system_prompt,
-                                label="System prompt",
-                                placeholder="You are a careful assistant that answers concisely.",
-                                lines=3,
-                                info="Sent as a system message ahead of the conversation. Leave empty to use the model's default behavior.",
-                            )
-                            assistant_prefill = gr.Textbox(
-                                value=saved.assistant_prefill,
-                                label="Assistant prefill (optional)",
-                                placeholder="Start every reply with these exact words…",
-                                lines=2,
-                                info=(
-                                    "Replays this text as the start of each answer, then lets the "
-                                    "model continue. For reasoning models, ChatLab closes the "
-                                    "reasoning block first so this remains visible answer text."
-                                ),
-                            )
-                            thinking_mode = gr.Radio(
-                                choices=THINKING_CHOICES,
-                                value=saved.thinking_mode,
-                                label="Thinking mode",
-                                info=(
-                                    "Applies to the next chat reply. Model default uses the model's "
-                                    "normal behavior. Token branches keep the original reply's mode. "
-                                    "An assistant prefill starts directly in the answer."
-                                ),
-                                visible=runtime.MANAGER.supports_thinking,
-                            )
-                            keep_reasoning = gr.Checkbox(
-                                value=saved.keep_reasoning,
-                                label="Send previous reasoning back to the model",
-                                info="Off by default. Think models write a fresh reasoning block each turn, so replaying old ones burns context and usually hurts the next answer.",
-                            )
-
-                        with gr.Column(elem_classes=["settings-card"]):
-                            gr.Markdown("## Input")
-                            enter_sends = gr.Checkbox(
-                                value=saved.enter_sends,
-                                label="Enter sends the message",
-                                info="Shift+Enter starts a new line. Turn off to swap the two.",
-                            )
-                            writing_suggestions = gr.Checkbox(
-                                value=saved.writing_suggestions,
-                                label="Let the system suggest text while typing",
-                                info=(
-                                    "macOS offers the rest of a sentence in grey as you type, "
-                                    "from its own predictions rather than the loaded model. "
-                                    "Turn off to type without them."
-                                ),
-                            )
-                            gr.Markdown(
-                                "Escape stops a response that is still being written, "
-                                "from anywhere on the Chat page - including the message "
-                                "box and the Score text tab.",
-                                elem_classes=["scale-caption"],
-                            )
-
-                        with gr.Column(elem_classes=["settings-card"]):
-                            gr.Markdown("## Analysis")
-                            analyze_prompt = gr.Checkbox(
-                                value=saved.analyze_prompt,
-                                label="Measure prompt tokens",
-                                info="Scores every prompt token during the same pass that warms the cache.",
-                            )
-
-                    with gr.Column(min_width=360, elem_id="settings-machine"):
-                        with gr.Column(elem_classes=["settings-card"]):
-                            gr.Markdown("## Appearance")
-                            theme_choice = gr.Dropdown(
-                                choices=themes.THEME_CHOICES,
-                                value=saved.theme,
-                                label="Color theme",
-                                info=(
-                                    "The colors the whole interface is drawn in. "
-                                    "Every one of them is drawn both light and "
-                                    "dark."
-                                ),
-                            )
-                            appearance_choice = gr.Radio(
-                                choices=themes.APPEARANCE_CHOICES,
-                                value=saved.appearance,
-                                label="Light or dark",
-                                info=(
-                                    "Which of the two the chosen theme is drawn "
-                                    "in. Following the system means the page "
-                                    "turns with it, at whatever hour it does."
-                                ),
-                            )
-
-                        with gr.Column(elem_classes=["settings-card"]):
-                            gr.Markdown("## Memory")
-                            prefill_token_limit = gr.Number(
-                                value=saved.prefill_token_limit,
-                                precision=0,
-                                minimum=settings.PREFILL_TOKEN_LIMIT_RANGE[0],
-                                maximum=settings.PREFILL_TOKEN_LIMIT_RANGE[1],
-                                label="Context limit (tokens)",
-                                info=(
-                                    "The most tokens one prompt may carry, and the "
-                                    "ceiling on the response length. Every token in "
-                                    "the conversation costs memory for as long as the "
-                                    "answer runs, so this is the control to lower when "
-                                    "a model runs out of it."
-                                ),
-                            )
-                            gr.Markdown(
-                                f"Settings are saved to `{settings.settings_path()}` as "
-                                "you change them, and read from there at startup. The "
-                                "Metal memory cap lives in that file as "
-                                "`mps_memory_fraction`.",
-                                elem_classes=["scale-caption"],
-                            )
-
-                        # What the memory guard is reading when it refuses a
-                        # load. These figures were in the log alone, which
-                        # made a refusal something to look up afterwards
-                        # rather than something to check first.
-                        with gr.Column(elem_classes=["settings-card"]):
-                            gr.Markdown("## Hardware")
-                            hardware_view = gr.Markdown(
-                                hardware_card(),
-                                elem_id="hardware",
-                                elem_classes=["model-detail", "hardware-panel"],
-                            )
-                            with gr.Row(elem_id="hardware-footer"):
-                                gr.Markdown(
-                                    "Estimates, not guarantees: they are what ChatLab "
-                                    "judges a load against, and each load and reply is "
-                                    "recorded in the log with the same figures.",
-                                    elem_classes=["scale-caption"],
-                                )
-                                refresh_hardware_button = gr.Button(
-                                    "Refresh", size="sm", scale=0, min_width=110,
-                                    elem_classes=icon_classes("refresh"),
-                                )
-
-                        with gr.Column(elem_classes=["settings-card"]):
-                            extension_settings, active_extensions = build_extension_settings([ext.spec.id for ext in extensions], extension_errors)
-
-        nav.change(
-            show_page,
-            nav,
-            [conversation_pane, chat_page, images_page, models_page, settings_page],
+        pages = Pages(
+            nav=nav,
+            conversations=pane.column,
+            chat=chat_page.column,
+            images=images.column,
+            models=models.column,
+            settings=settings_page.column,
+            extensions=extension_pages,
         )
-        # On the way to the page rather than on a timer: nothing here changes
-        # while it is not being looked at, and reading it costs a subprocess.
-        nav.change(refresh_hardware, None, hardware_view)
-        demo.load(refresh_hardware, None, hardware_view)
-        refresh_hardware_button.click(refresh_hardware, None, hardware_view)
-        demo.load(restore_extensions, active_extensions, extension_settings)
-        for label, extension_page in extension_pages:
-            def show_extension(page, expected=label):
-                return gr.update(visible=page == expected)
-            nav.change(show_extension, nav, extension_page)
-        # Every page container go_to_models() publishes an update for, in the
-        # order show_page() returns them.
-        extension_page_outputs = [nav, conversation_pane, chat_page, images_page,
-                                  models_page, settings_page,
-                                  *(page for _, page in extension_pages)]
-        # The ID box and everything that has to move with it, in the order
-        # select_model_to_load() returns them.
-        extension_model_outputs = [model_id, my_models, my_model_detail,
-                                   search_selection, search_detail, model_status,
-                                   remove_confirm, pending_removal]
-        def open_models_from_extension():
-            return (*go_to_models(), *(gr.update(visible=False) for _ in extension_pages))
-        def open_named_model_from_extension(wanted):
-            # An extension names the model its own view needs - a saved run
-            # names the one that recorded it - and the reader still presses
-            # Load. Nothing to name, or something no model ID could be, opens
-            # the page with the box untouched rather than writing nonsense
-            # into it.
+        badge_timer = chat_page.bar.badge_timer
+        _wire_pages(demo, pages, settings_page, models, extension_model_buttons)
+        wire_model_bar(
+            demo, nav, chat_page, settings_page.thinking_mode, models.weight_precision,
+        )
+        wire_images_page(demo, images, nav, badge_timer)
+        refresh = ModelRefresh(
+            models, chat_page.bar.switch_outputs, chat_page.bar.badge_outputs,
+            chat_page.score.budget_inputs, chat_page.score.budget_outputs,
+            settings_page.hardware_view, settings_page.thinking_mode,
+        )
+        wire_model_lists(
+            demo, pages, badge_timer, models, refresh, chat_page.bar.switch,
+            chat_page.bar.badge_view,
+        )
+        _wire_page_scripts(demo, chat_page, states, settings_page.writing_suggestions)
+        wire_model_choice(
+            demo, pages, models, refresh, chat_page.bar.default_model_button, images.load_button,
+        )
+        wire_message_box(settings_page, chat_page.chat.prompt)
+        wire_sampling(chat_page.sampling, states)
+        wire_steering(chat_page.steering, states)
+        settings_inputs, chat_inputs = _request_inputs(chat_page, settings_page, states)
+        wire_settings_persistence(
+            demo, saved, theme_style, settings_page, models, chat_page.sampling,
+            chat_page.inspector.color_scale, states.forks, settings_inputs,
+        )
+        _wire_conversations(demo, states, pane, chat_page, settings_page, chat_inputs)
+        wire_score_and_batch(
+            chat_page, states, settings_page.system_prompt, settings_page.assistant_prefill,
+        )
+        wire_compare(
+            demo, chat_page, states, settings_page.system_prompt,
+            settings_page.assistant_prefill, settings_page.thinking_mode,
+        )
+        wire_prompt_file(chat_page.prompts, states)
+        wire_inspector(chat_page, states)
+    return demo
+
+
+def _build_shared_state() -> SharedState:
+    """Every state the page's listeners share, drawn before the page itself."""
+
+    conversation_state = gr.State([])
+    metrics_state = gr.State(empty_metrics())
+    prompt_metrics_state = gr.State(empty_metrics())
+    # What the Score text tab's strip is showing. The inspector's own
+    # state moves on to the next reply; this one is rewritten only by
+    # another scoring pass, so it still describes the passage drawn there.
+    score_metrics_state = gr.State(empty_metrics())
+    trace_state = gr.State({})
+    # Branching from a token: the token last clicked - which turn, and
+    # which of its tokens - and the alternative picked for it. Both name a
+    # turn rather than a strip position, so a click keeps meaning what it
+    # meant however the conversation moves under it.
+    # The script names these after the strip they serve, so a second strip
+    # elsewhere - the maze workbench's - carries its own three.
+    request_id, response_id, action_id = menu_bridge_ids("token-strip")
+    menu_request = gr.Textbox(elem_id=request_id, elem_classes=[MENU_BRIDGE_CLASS])
+    menu_response = gr.HTML(elem_id=response_id, elem_classes=[MENU_BRIDGE_CLASS])
+    menu_action = gr.Textbox(elem_id=action_id, elem_classes=[MENU_BRIDGE_CLASS])
+    # The prompt strip carries its own three: the same menu, offering what
+    # could have stood in a prompt position rather than a reply's.
+    request_id, response_id, action_id = menu_bridge_ids("prompt-strip")
+    prompt_menu_request = gr.Textbox(elem_id=request_id, elem_classes=[MENU_BRIDGE_CLASS])
+    prompt_menu_response = gr.HTML(elem_id=response_id, elem_classes=[MENU_BRIDGE_CLASS])
+    prompt_menu_action = gr.Textbox(elem_id=action_id, elem_classes=[MENU_BRIDGE_CLASS])
+    selected_token = gr.State(None)
+    branch_pick = gr.State(None)
+    # Forking: the other transcripts, and the chatbot message last clicked.
+    forks_state = gr.State(new_forks())
+    tree_selection = gr.State({})
+    selected_message = gr.State(None)
+    token_edit_target = gr.State(None)
+    # Layer inspection: the prompt ids behind the strips, the strip
+    # position last clicked, and the last readout for re-rendering.
+    context_ids_state = gr.State((*empty_metrics(), None))
+    score_context_ids_state = gr.State((0, [], None))
+    # The latest reply stays inspectable when scoring replaces the shared
+    # prompt panel. Its measurements and exact input belong to the chat.
+    chat_metrics_state = gr.State((0, []))
+    chat_context_ids_state = gr.State((0, [], None))
+    steering_state = gr.State(None)
+    # What the last extraction read: one direction per decoder block, the
+    # numbers beside each, and the load they were read through. Held
+    # whole so that moving the layer control is instant - the pass that
+    # reads one layer reads them all, and re-reading to change a layer
+    # would cost another pass over every example.
+    extract_state = gr.State(None)
+    # The two comparison slots, and the document a download would write.
+    # A slot holds one whole run - its tokens, its measurements and the
+    # configuration it ran under - because the model that produced it may
+    # be gone by the time the other slot is filled, which is the point.
+    compare_a_state = gr.State(None)
+    compare_b_state = gr.State(None)
+    compare_export_state = gr.State(None)
+    inspect_target = gr.State(None)
+    insight_state = gr.State(None)
+    # The prompts the last file gave, as it gave them. A prompt with a
+    # blank line inside it reads as two once it is in the box, so a run
+    # prefers this list while the box still holds what loading it wrote;
+    # see ui.prompts.resolve_prompts().
+    loaded_prompts_state = gr.State([])
+    # Where the running batch writes its exports, so Stop can publish
+    # what is there; see ui.prompts.stop_batch().
+    batch_directory_state = gr.State(None)
+    # Which load the scored token count on screen was counted against, so
+    # a model swapped out from another tab can be told from this one.
+    score_budget_load = gr.State(None)
+    return SharedState(
+        conversation=conversation_state,
+        metrics=metrics_state,
+        prompt_metrics=prompt_metrics_state,
+        score_metrics=score_metrics_state,
+        trace=trace_state,
+        menu_request=menu_request,
+        menu_response=menu_response,
+        menu_action=menu_action,
+        prompt_menu_request=prompt_menu_request,
+        prompt_menu_response=prompt_menu_response,
+        prompt_menu_action=prompt_menu_action,
+        selected_token=selected_token,
+        branch_pick=branch_pick,
+        forks=forks_state,
+        tree_selection=tree_selection,
+        selected_message=selected_message,
+        token_edit_target=token_edit_target,
+        context_ids=context_ids_state,
+        score_context_ids=score_context_ids_state,
+        chat_metrics=chat_metrics_state,
+        chat_context_ids=chat_context_ids_state,
+        steering=steering_state,
+        extract=extract_state,
+        compare_a=compare_a_state,
+        compare_b=compare_b_state,
+        compare_export=compare_export_state,
+        inspect_target=inspect_target,
+        insight=insight_state,
+        loaded_prompts=loaded_prompts_state,
+        batch_directory=batch_directory_state,
+        score_budget_load=score_budget_load,
+    )
+
+
+def _build_nav(page_choices: list[str]) -> gr.Radio:
+    """The nav pane at the far left, and the choice of page in it."""
+
+    # The thin pane at the far left picks the page: Chat, Images,
+    # Models, any extension pages, then Settings. The stylesheet stacks
+    # the choices, rules off the extensions from the pages that ship
+    # with the app, and pins Settings to the bottom.
+    with gr.Column(scale=0, min_width=NAV_PANE_WIDTH, elem_id="nav-pane"):
+        nav = gr.Radio(
+            choices=page_choices,
+            value=CHAT_PAGE,
+            show_label=False,
+            container=False,
+            elem_id="nav",
+        )
+    return nav
+
+
+def _build_conversation_pane() -> ConversationPane:
+    """The conversations pane, which shows with the Chat page only."""
+
+    with gr.Column(
+        scale=0, min_width=CONVERSATION_PANE_WIDTH, elem_id="conversation-pane"
+    ) as conversation_pane:
+        gr.Markdown("## Conversations", elem_id="conversations-heading")
+        conversation_list = gr.Radio(
+            choices=branch_choices(new_forks(), []),
+            value=MAIN_BRANCH,
+            show_label=False,
+            elem_id="conversation-list",
+        )
+        with gr.Row():
+            # The pane is narrow, so the buttons give up their usual
+            # minimum width to share one row.
+            new_button = gr.Button("New", size="sm", min_width=60, elem_classes=icon_classes("plus"))
+            fork_button = gr.Button("Fork", size="sm", min_width=60, elem_classes=icon_classes("git-branch"))
+            delete_fork_button = gr.Button("Delete", size="sm", min_width=60, elem_classes=icon_classes("trash"))
+        # Named for what it takes: this empties the conversation on
+        # screen and deletes every other one with it. It stands under
+        # the list of everything it would take rather than under one
+        # conversation's message box, where it read as a control of
+        # that conversation alone. A fourth button would not fit the
+        # row above, so it takes the pane's width on its own line.
+        clear_button = gr.Button("Clear all", size="sm", elem_classes=icon_classes("trash"))
+        with gr.Column(
+            visible=False,
+            elem_id="clear-confirm",
+            elem_classes=["clear-confirm"],
+        ) as clear_confirm:
+            clear_question = gr.Markdown("")
+            # The pane is too narrow for the two answers to share a
+            # row, so they stack.
+            confirm_clear_button = gr.Button(
+                "Clear everything", variant="stop", size="sm"
+            )
+            cancel_clear_button = gr.Button("Cancel", size="sm")
+    return ConversationPane(
+        column=conversation_pane,
+        conversation_list=conversation_list,
+        new_button=new_button,
+        fork_button=fork_button,
+        delete_fork_button=delete_fork_button,
+        clear_button=clear_button,
+        clear_confirm=clear_confirm,
+        clear_question=clear_question,
+        confirm_clear_button=confirm_clear_button,
+        cancel_clear_button=cancel_clear_button,
+    )
+
+
+def _build_extension_pages(extensions: list, extension_errors: list[str]) -> tuple[list, list]:
+    """A hidden column per enabled extension, each built by the extension itself.
+
+    An extension whose page fails to build has its error added to
+    ``extension_errors``, which the Settings page lists, and a note drawn in
+    its place. Returns the ``(label, column)`` pairs, and the ``(button,
+    model ID)`` pairs the pages asked to have open the Models page.
+    """
+
+    extension_pages = []
+    extension_model_buttons = []
+    navigation = NavigationService(
+        lambda button, model_id: extension_model_buttons.append((button, model_id)))
+    for extension in extensions:
+        with gr.Column(scale=1, visible=False, elem_classes=["extension-page"]) as extension_page:
+            context = ExtensionContext(
+                models=ModelService(lambda: runtime.MANAGER), tokens=TokenInspector(),
+                data_dir=data_directory(extension.spec.id), navigation=navigation,
+            )
             try:
-                filled = select_model_to_load(wanted)
-            except (ValueError, AttributeError):
-                return (*(gr.skip() for _ in extension_model_outputs),
-                        *open_models_from_extension())
-            return (*filled, *(gr.update(visible=False) for _ in extension_pages))
-        for button, wanted_model in extension_model_buttons:
-            if wanted_model is None:
-                button.click(open_models_from_extension, None, extension_page_outputs)
-            else:
-                button.click(open_named_model_from_extension, wanted_model,
-                             [*extension_model_outputs, *extension_page_outputs])
-        # The scored token count follows the boxes as they are typed into.
-        # always_last coalesces a burst of keystrokes into the one count that
-        # matters, and the progress bar is hidden because a spinner on every
-        # keystroke would be worse than the number is good.
-        score_budget_inputs = [score_context, score_input, use_chat_template]
-        # The count travels with the load it was counted against; see
-        # recover_score_budget for what that is for.
-        score_budget_outputs = [score_budget, score_budget_load]
-        for control in score_budget_inputs:
-            control.change(
-                score_token_count,
-                score_budget_inputs,
-                score_budget_outputs,
-                trigger_mode="always_last",
-                show_progress="hidden",
-                concurrency_id=SCORE_BUDGET_QUEUE,
-            )
+                extension.build_page(context)
+            except Exception as exc:
+                logging.getLogger(__name__).exception("Extension page failed: %s", extension.spec.id)
+                message = f"{extension.spec.title}: {exc}"
+                extension_errors.append(message)
+                gr.Markdown("This extension could not open. " + html.escape(message))
+        extension_pages.append((extension.spec.page_label, extension_page))
+    return extension_pages, extension_model_buttons
 
-        # The badge is refreshed on the way to the chat page as well, so a
-        # load started a moment ago shows as one in progress rather than as
-        # the "no model" state the page was left in.
-        nav.change(refresh_thinking_mode, None, thinking_mode, show_progress="hidden")
-        demo.load(refresh_thinking_mode, None, thinking_mode)
-        badge_timer.tick(refresh_thinking_mode, None, thinking_mode, **QUIET_TICK)
-        badge_outputs = [model_badge_view, default_model_button]
-        nav.change(refresh_model_badge, None, badge_outputs)
-        demo.load(refresh_model_badge, None, badge_outputs)
-        # The switcher is drawn on the same two occasions. Its choices cost a
-        # cache scan and a memory reading, so the timer only redraws it once
-        # what it shows, what is on disk, or what would now fit has moved; see
-        # refresh_stale_model_switch. Every draw hands back the stamp it read,
-        # which is how the next tick knows the difference.
-        switch_outputs = [model_switch, switch_stamp]
-        nav.change(refresh_model_switch, weight_precision, switch_outputs)
-        demo.load(refresh_model_switch, weight_precision, switch_outputs)
-        badge_timer.tick(
-            refresh_stale_model_switch,
-            [model_switch, switch_stamp, weight_precision],
-            switch_outputs,
-            **QUIET_TICK,
-        )
-        # And on a timer, so a tab that did not start the load hears about it
-        # too. demo.load stays: it draws the badge at once rather than leaving
-        # the value baked in when the page was built there for a tick.
-        # QUIET_TICK because this one runs on its own: the default fades a
-        # handler's outputs in and out, which every couple of seconds would
-        # have the badge flickering at a reader who never asked it anything.
-        badge_timer.tick(refresh_model_badge, None, badge_outputs, **QUIET_TICK)
-        # The same timer un-sticks the scored token count. A count asked for
-        # during a reply gives up, and nothing about that message corrects
-        # itself once the reply ends; see recover_score_budget, which is why
-        # this is one listener rather than one on every path out of a
-        # generation.
-        badge_timer.tick(
-            recover_score_budget,
-            [score_budget, score_budget_load, *score_budget_inputs],
-            score_budget_outputs,
-            concurrency_id=SCORE_BUDGET_QUEUE,
-            **QUIET_TICK,
-        )
-        # ------------------------------------------------------------- Images
-        # Every image handler publishes in this order; see IMAGE_OUTPUT_NAMES.
-        image_outputs = [
-            image_status,
-            draw_button,
-            stop_draw_button,
-            image_seed,
-            image_output,
-            image_run_state,
-            image_step,
-            image_trajectory,
-            image_tiles,
-            image_chart,
-            image_strip,
-            image_note,
-            image_overlay,
-            image_token_state,
-        ]
-        image_inputs = [
-            image_prompt,
-            image_negative,
-            image_steps,
-            image_guidance,
-            image_size,
-            image_seed,
-            image_randomize,
-            image_record_attention,
-        ]
-        # Clear the previous experiment before inference, including its selected
-        # word, so it cannot enqueue an obsolete comparison during a new draw.
-        # Restore from the run state after completion or refusal; a refused draw
-        # keeps the last original available for a fresh word selection.
-        draw_button.click(begin_original, None, image_word_outputs, queue=False).then(
-            draw, image_inputs, image_outputs,
-        ).then(start_original, image_run_state, image_word_outputs)
-        # Stop is not a cancel. The pipeline runs on its own thread and would
-        # keep running with the generator gone, so the button sets the event
-        # the run checks between steps and the generator publishes the
-        # stopped run itself, trajectory and all. Cancelling it would throw
-        # away the steps that had been recorded.
-        stop_draw_button.click(stop_drawing, None, image_status)
 
-        # The step slider moves the frame, the shading and the map together;
-        # see select_step for why they cannot be allowed to disagree.
-        image_step.release(
-            select_step,
-            [image_run_state, image_step, image_token_state],
-            [image_trajectory, image_strip, image_note, image_overlay],
-        )
-        image_strip.select(remember_token, None, image_token_state).then(
-            select_token,
-            [image_run_state, image_token_state, image_step],
-            image_overlay,
-        )
+def _wire_pages(
+    demo: gr.Blocks,
+    pages: Pages,
+    settings_page: SettingsPage,
+    models: ModelsPage,
+    extension_model_buttons: list,
+) -> None:
+    """The nav, the hardware panel read on the way to a page, and the extensions' ways out."""
 
-        # The Images badge is refreshed on the same three occasions the Chat
-        # one is, and for the same reasons: arriving at the page, opening it,
-        # and the timer that tells a tab which did not start a load about it.
-        image_badge_outputs = [image_badge_view, image_load_button]
-        nav.change(refresh_image_badge, None, image_badge_outputs)
-        demo.load(refresh_image_badge, None, image_badge_outputs)
-        badge_timer.tick(refresh_image_badge, None, image_badge_outputs, **QUIET_TICK)
+    pages.nav.change(
+        show_page,
+        pages.nav,
+        [pages.conversations, pages.chat, pages.images, pages.models, pages.settings],
+    )
+    # On the way to the page rather than on a timer: nothing here changes
+    # while it is not being looked at, and reading it costs a subprocess.
+    pages.nav.change(refresh_hardware, None, settings_page.hardware_view)
+    demo.load(refresh_hardware, None, settings_page.hardware_view)
+    settings_page.refresh_hardware_button.click(refresh_hardware, None, settings_page.hardware_view)
+    demo.load(restore_extensions, settings_page.active_extensions, settings_page.extension_settings)
+    for label, extension_page in pages.extensions:
+        def show_extension(page, expected=label):
+            return gr.update(visible=page == expected)
+        pages.nav.change(show_extension, pages.nav, extension_page)
+    # Every page container go_to_models() publishes an update for, in the
+    # order show_page() returns them.
+    extension_page_outputs = [pages.nav, pages.conversations, pages.chat, pages.images,
+                              pages.models, pages.settings,
+                              *(page for _, page in pages.extensions)]
+    # The ID box and everything that has to move with it, in the order
+    # select_model_to_load() returns them.
+    extension_model_outputs = [models.model_id, models.my_models, models.my_model_detail,
+                               models.search_selection, models.search_detail, models.model_status,
+                               models.remove_confirm, models.pending_removal]
+    def open_models_from_extension():
+        return (*go_to_models(), *(gr.update(visible=False) for _ in pages.extensions))
+    def open_named_model_from_extension(wanted):
+        # An extension names the model its own view needs - a saved run
+        # names the one that recorded it - and the reader still presses
+        # Load. Nothing to name, or something no model ID could be, opens
+        # the page with the box untouched rather than writing nonsense
+        # into it.
+        try:
+            filled = select_model_to_load(wanted)
+        except (ValueError, AttributeError):
+            return (*(gr.skip() for _ in extension_model_outputs),
+                    *open_models_from_extension())
+        return (*filled, *(gr.update(visible=False) for _ in pages.extensions))
+    for button, wanted_model in extension_model_buttons:
+        if wanted_model is None:
+            button.click(open_models_from_extension, None, extension_page_outputs)
+        else:
+            button.click(open_named_model_from_extension, wanted_model,
+                         [*extension_model_outputs, *extension_page_outputs])
 
-        image_settings_inputs = [
-            image_negative,
-            image_steps,
-            image_guidance,
-            image_size,
-            image_seed,
-            image_randomize,
-            image_record_attention,
-        ]
-        for control in (
-            image_negative,
-            image_steps,
-            image_guidance,
-            image_size,
-            image_randomize,
-            image_record_attention,
-        ):
-            control.change(remember_image_settings, image_settings_inputs, None)
-        # The seed box is written to by a finished picture, so only the
-        # reader being done editing it commits what it holds; the Chat page's
-        # seed follows the same rule for the same reason.
-        for event in (image_seed.blur, image_seed.submit):
-            event(remember_committed_image_seed, image_settings_inputs, None)
 
-        # Every handler that can change what is on disk or in memory rescans
-        # the cache afterwards, so My Models never shows a stale list.
-        # The typed ID stays last: the model-actions listeners assert it is
-        # the input the refresh is given, and a new argument goes before it
-        # rather than displacing it.
-        models_inputs = [
-            my_models, sort_models, weight_precision, kind_filter, name_filter, model_id
-        ]
-        models_outputs = [my_models, my_model_detail, my_models_summary]
-        action_inputs = [model_id, my_models, repository_result, hf_token]
-        action_outputs = [
-            model_availability, download_load_button, download_button, cached_button
-        ]
+def _wire_page_scripts(
+    demo: gr.Blocks, chat_page: ChatPage, states: SharedState, writing_suggestions: gr.Checkbox
+) -> None:
+    """The page's own scripts, run on load, and the fork tree's two listeners.
 
-        # Include programmatic selections (search, default, and rescans).
-        # The selected row takes precedence, just as it does for a load.
-        for control in action_inputs:
-            control.change(
-                refresh_model_actions, action_inputs, action_outputs,
-                show_progress="hidden", trigger_mode="always_last",
-                concurrency_id="model-actions",
-            )
-        # Downloads run in worker threads, so selections alone cannot keep the
-        # local-file status current while files arrive (or in another tab).
-        # The timer covers that, but an idle tick paints nothing rather than
-        # scanning the cache every couple of seconds forever in every open
-        # session; see refresh_stale_model_actions, which hands back the stamp
-        # the next tick compares against.
-        badge_timer.tick(
-            refresh_stale_model_actions,
-            [*action_inputs, action_stamp],
-            [*action_outputs, action_stamp],
-            show_progress="hidden", show_progress_on=[], trigger_mode="always_last",
-            concurrency_id="model-actions",
-        )
+    The fork tree is the Chat page's, but its listeners were bound among
+    the scripts, after the menu's and the tree's own, and are bound there
+    still.
+    """
 
-        # Slow network requests scope state to the ID and credentials; rendering
-        # reads both again so an old request cannot verify a newer selection.
-        # Keep checks explicit: clicking the button also blurs the textbox,
-        # which would otherwise enqueue a second request for the same ID.
-        for event in (check_model_button.click, model_id.submit):
-            event(
-                check_model_repository, [model_id, hf_token], repository_result,
-                show_progress="hidden", concurrency_id="model-repository-check",
-                trigger_mode="always_last",
-            )
-        repository_inputs = [model_id, repository_result, hf_token, my_models]
-        repository_outputs = [repository_detail, weight_precision]
-        for event in (
-            *(control.change for control in repository_inputs), demo.load, nav.change,
-        ):
-            event(
-                repository_view, repository_inputs, repository_outputs, show_progress="hidden",
-                concurrency_id="model-repository-view", trigger_mode="always_last",
-            )
-        hf_token.input(lambda: None, None, repository_result, show_progress="hidden")
-        for event in (demo.load, nav.change, badge_timer.tick):
-            event(refresh_current_model, None, current_model, **QUIET_TICK)
+    # The menu handles Escape before the global generation shortcut.
+    demo.load(None, None, None, js=TOKEN_MENU_JS)
+    demo.load(None, None, None, js=TREE_JS)
+    demo.load(None, None, None, js=JACOBIAN_JS)
+    chat_page.tree.action.input(
+        select_tree_branch,
+        [chat_page.tree.action, states.conversation, states.forks, states.tree_selection],
+        [states.tree_selection, chat_page.tree.view, chat_page.tree.comparison],
+        concurrency_id=CONVERSATION_PANE_QUEUE,
+        trigger_mode="always_last",
+    )
+    states.forks.change(
+        render_fork_tree,
+        [states.conversation, states.forks, states.tree_selection],
+        [chat_page.tree.view, chat_page.tree.comparison],
+        concurrency_id=CONVERSATION_PANE_QUEUE,
+        trigger_mode="always_last",
+    )
+    # Escape stops a running generation, from anywhere on the page.
+    demo.load(None, None, None, js=SHORTCUT_JS)
+    # The two readings panes are dragged wider or narrower by the handle
+    # on their seam, and remember the width they were left at.
+    demo.load(None, None, None, js=RESIZE_JS)
+    # A table column is dragged wider by the seam on its header, for the
+    # text Gradio's own measurement clips.
+    demo.load(None, None, None, js=COLUMN_JS)
+    # A box that only shows text is read-only rather than dead, so text
+    # too long for it can be scrolled to and taken out.
+    demo.load(None, None, None, js=READ_ONLY_TEXT_JS)
+    # The system's own typing predictions, on or off from the first paint
+    # and whenever the setting is changed after it. The change fires when
+    # a reload restores the file's value as well as when it is clicked.
+    demo.load(None, writing_suggestions, None, js=WRITING_SUGGESTIONS_JS)
+    writing_suggestions.change(
+        None, writing_suggestions, None, js=WRITING_SUGGESTIONS_JS
+    )
 
-        def refresh_actions(event):
-            return event.then(
-                refresh_model_actions, action_inputs, action_outputs,
-                show_progress="hidden", concurrency_id="model-actions",
-            ).then(
-                repository_view, repository_inputs, repository_outputs,
-                show_progress="hidden", concurrency_id="model-repository-view",
-            )
 
-        # Refresh model-dependent displays after explicit model actions.
-        # The timer also catches changes from other tabs, but this updates
-        # the badge and token count immediately in the tab that acted.
-        def rescan(event, *, reloads: bool = True):
-            """Rescan the cache after ``event``, and re-read what the model feeds."""
+def _request_inputs(
+    chat_page: ChatPage, settings_page: SettingsPage, states: SharedState
+) -> tuple[list, list]:
+    """What a reply reads: the settings, and the whole request around them.
 
-            event = event.then(refresh_my_models, models_inputs, models_outputs)
-            event = refresh_actions(event)
-            event = event.then(refresh_current_model, None, current_model, show_progress="hidden")
-            # What is on disk is what the switcher offers, so it follows every
-            # rescan, download-only included.
-            event = event.then(
-                refresh_model_switch,
-                weight_precision,
-                switch_outputs,
-                show_progress="hidden",
-            )
-            if not reloads:
-                return event
-            return (
-                event.then(refresh_model_badge, None, badge_outputs)
-                .then(
-                    score_token_count,
-                    score_budget_inputs,
-                    score_budget_outputs,
-                    show_progress="hidden",
-                    concurrency_id=SCORE_BUDGET_QUEUE,
-                )
-                # A load or an unload is the largest change the machine's
-                # memory sees, so the hardware panel is re-read after it
-                # rather than left showing what was true before.
-                .then(refresh_hardware, None, hardware_view)
-                .then(refresh_thinking_mode, None, thinking_mode)
-            )
+    The settings are in the order the generation handlers take them; the
+    request is the message, the conversation, those settings, the steering
+    vector and the thinking mode.
+    """
 
-        # Download-only changes the cache without changing the loaded model.
-        rescan(
-            download_button.click(
-                download_model, [model_id, hf_token, my_models], model_status
-            )
-        )
-        rescan(
-            download_load_button.click(
-                download_and_load_model,
-                [model_id, hf_token, my_models, weight_precision],
-                model_status,
-            )
-        )
-        rescan(
-            cached_button.click(
-                load_cached_model,
-                [model_id, my_models, weight_precision],
-                model_status,
-            )
-        )
-        rescan(unload_button.click(unload_model, outputs=model_status))
-        # A pick in the chat page's switcher is a load from the cache, and is
-        # followed by the same rescan as the button. Its status goes to the
-        # Models page's card, where the switcher's own repaint would
-        # otherwise drop the progress the load is reporting. That page is not
-        # the one the reader is on, so the badge beside the switcher is
-        # written from the same handler - it is what shows the reader the
-        # load and how far it has come - and switch_model also toasts an
-        # ending the card alone would have kept to itself; see
-        # announce_switch_outcome.
-        rescan(
-            model_switch.input(
-                switch_model,
-                [model_switch, weight_precision],
-                [model_switch, model_status, model_badge_view],
-            )
-        )
-        # A manual refresh, a new sort order, a new kind filter and a typed
-        # name reorder or narrow a list; none of them changes what is on disk
-        # or in memory, which is all the badge and the count ask about.
-        refresh_actions(
-            refresh_models_button.click(refresh_my_models, models_inputs, models_outputs)
-        )
-        sort_models.input(refresh_my_models, models_inputs, models_outputs)
-        kind_filter.input(refresh_my_models, models_inputs, models_outputs)
-        # The list narrows as the reader types. Only the last keystroke of a
-        # burst is answered, since each answer rescans the cache folder.
-        name_filter.input(
-            refresh_my_models, models_inputs, models_outputs,
-            show_progress="hidden", trigger_mode="always_last",
-        )
-        # Before the reader chooses an ID, startup can highlight the loaded model.
-        refresh_actions(demo.load(refresh_my_models, [my_models, sort_models], models_outputs))
-        # The badge's timer corrects the fit verdicts once torch has finished
-        # importing: the page is painted before that, so the first verdicts
-        # are given without knowing the device. It repaints once and then
-        # does nothing for the rest of the session.
-        badge_timer.tick(
-            refresh_after_device,
-            [device_read, *models_inputs, search_selection, search_results_state, fits_only],
-            [*models_outputs, search_results, search_detail, search_selection, device_read],
-            **QUIET_TICK,
-        )
-        # The menu handles Escape before the global generation shortcut.
-        demo.load(None, None, None, js=TOKEN_MENU_JS)
-        demo.load(None, None, None, js=TREE_JS)
-        demo.load(None, None, None, js=JACOBIAN_JS)
-        tree_action.input(
-            select_tree_branch,
-            [tree_action, conversation_state, forks_state, tree_selection],
-            [tree_selection, tree_view, tree_comparison],
+    settings_inputs = [
+        settings_page.system_prompt,
+        settings_page.keep_reasoning,
+        settings_page.assistant_prefill,
+        chat_page.sampling.temperature,
+        chat_page.sampling.top_p,
+        chat_page.sampling.top_k,
+        chat_page.sampling.skip_top_below,
+        chat_page.sampling.max_new_tokens,
+        chat_page.sampling.seed,
+        chat_page.sampling.randomize_seed,
+        settings_page.analyze_prompt,
+        chat_page.inspector.color_scale,
+    ]
+    # Persistence runs separately; every request must snapshot the controls
+    # the reader sees, even while remember_steering is still queued.
+    chat_inputs = [chat_page.chat.prompt, states.conversation, *settings_inputs, *chat_page.steering.inputs, settings_page.thinking_mode]
+    return settings_inputs, chat_inputs
+
+
+def _wire_conversations(
+    demo: gr.Blocks,
+    states: SharedState,
+    pane: ConversationPane,
+    chat_page: ChatPage,
+    settings_page: SettingsPage,
+    chat_inputs: list,
+) -> None:
+    """Every listener that starts, stops, changes or switches a conversation.
+
+    They answer to the conversations pane and the Chat page both, and are
+    bound through one ConversationEvents, which is what knows whether the
+    conversation on screen is still being written.
+    """
+
+    def brings_its_sampling(event):
+        """Put the newly active conversation's sampling onto the controls.
+
+        Every path that changes which conversation is on screen ends
+        here, so the sliders describe the conversation in front of the
+        reader rather than the one they just left. The label follows the
+        controls, as it does when they are moved by hand.
+        """
+
+        return event.then(
+            sampling_updates,
+            states.forks,
+            chat_page.sampling.controls,
             concurrency_id=CONVERSATION_PANE_QUEUE,
-            trigger_mode="always_last",
-        )
-        forks_state.change(
-            render_fork_tree,
-            [conversation_state, forks_state, tree_selection],
-            [tree_view, tree_comparison],
-            concurrency_id=CONVERSATION_PANE_QUEUE,
-            trigger_mode="always_last",
-        )
-        # Escape stops a running generation, from anywhere on the page.
-        demo.load(None, None, None, js=SHORTCUT_JS)
-        # The two readings panes are dragged wider or narrower by the handle
-        # on their seam, and remember the width they were left at.
-        demo.load(None, None, None, js=RESIZE_JS)
-        # A table column is dragged wider by the seam on its header, for the
-        # text Gradio's own measurement clips.
-        demo.load(None, None, None, js=COLUMN_JS)
-        # A box that only shows text is read-only rather than dead, so text
-        # too long for it can be scrolled to and taken out.
-        demo.load(None, None, None, js=READ_ONLY_TEXT_JS)
-        # The system's own typing predictions, on or off from the first paint
-        # and whenever the setting is changed after it. The change fires when
-        # a reload restores the file's value as well as when it is clicked.
-        demo.load(None, writing_suggestions, None, js=WRITING_SUGGESTIONS_JS)
-        writing_suggestions.change(
-            None, writing_suggestions, None, js=WRITING_SUGGESTIONS_JS
-        )
-
-        # Selecting a default is navigation only. The Models page owns the
-        # explicit download and load actions, including their errors.
-        #
-        # The search table is not among the outputs. Its highlight is kept
-        # by the browser, and the click on this button is itself a click
-        # outside the table, which Gradio's Dataframe answers by clearing
-        # that highlight (Table.svelte, handle_click_outside). Repainting
-        # the table would not clear it: a new value leaves the selected
-        # cells alone, and an identical value is not applied at all.
-        default_model_button.click(
-            select_default_model,
-            None,
-            [
-                model_id,
-                my_models,
-                my_model_detail,
-                search_selection,
-                search_detail,
-                model_status,
-                remove_confirm,
-                pending_removal,
-                nav,
-                conversation_pane,
-                chat_page,
-                images_page,
-                models_page,
-                settings_page,
-            ],
-        )
-        # .input rather than .change: the refresh above also sets the radio,
-        # and a .change listener would rewrite the model ID box on each rescan.
-        my_models.input(
-            select_my_model,
-            [my_models, weight_precision],
-            [model_id, my_model_detail],
-        )
-        # .input again, for the same reason: only the reader's own typing
-        # withdraws the selection, never a refresh writing the box.
-        model_id.input(clear_my_model_selection, None, [my_models, my_model_detail])
-        # A pending removal is about the model that was selected when it was
-        # asked for, so changing the selection withdraws it.
-        confirm_outputs = [remove_confirm, pending_removal]
-        my_models.input(hide_remove_confirm, None, confirm_outputs)
-        model_id.input(hide_remove_confirm, None, confirm_outputs)
-        rescan(
-            redownload_button.click(
-                redownload_my_model, [my_models, hf_token], model_status
-            )
-        )
-        remove_button.click(
-            ask_remove_my_model,
-            my_models,
-            [model_status, remove_confirm, remove_question, pending_removal],
-        )
-        # The confirm button deletes the model the question named, never the
-        # radio's current value: see ask_remove_my_model.
-        rescan(
-            confirm_remove_button.click(
-                remove_my_model, pending_removal, [model_status, *confirm_outputs]
-            )
-        )
-        cancel_remove_button.click(hide_remove_confirm, None, confirm_outputs)
-
-        search_outputs = [
-            search_results, search_detail, search_results_state, search_selection
-        ]
-        search_inputs = [
-            search_query, hf_token, weight_precision, search_kind, search_order, fits_only
-        ]
-        # The page loads with an empty box, and Recommended answers that from
-        # the bundled starters, so the first paint does not go online.
-        demo.load(search_models, search_inputs, search_outputs)
-        search_button.click(search_models, search_inputs, search_outputs)
-        search_query.submit(search_models, search_inputs, search_outputs)
-        search_kind.input(search_models, search_inputs, search_outputs)
-        # The Images page's own way in. It is wired here rather than beside
-        # the button because it sets both of this page's kind controls and
-        # repaints both lists from them, which needs the two input lists
-        # above; see go_to_image_models.
-        image_load_button.click(
-            go_to_image_models,
-            [*models_inputs, *search_inputs],
-            [
-                nav, conversation_pane, chat_page, images_page, models_page,
-                settings_page, kind_filter, name_filter, *models_outputs, search_kind,
-                *search_outputs,
-            ],
-        )
-        search_order.input(search_models, search_inputs, search_outputs)
-        fits_only.input(
-            refresh_search_results,
-            [search_selection, search_results_state, weight_precision, fits_only],
-            [search_results, search_detail, search_selection],
-        )
-        # Picking a search result names a model too, so it withdraws the My
-        # Models selection the same way typing an ID does.
-        search_results.select(
-            select_search_result,
-            [search_results_state, weight_precision],
-            [model_id, search_detail, search_selection],
-        ).then(clear_my_model_selection, None, [my_models, my_model_detail])
-        # Whether a model fits depends on how its weights would be held, so
-        # both lists are repainted when that choice changes. Neither touches
-        # the cache or the model in memory, so neither is a rescan.
-        weight_precision.change(
-            refresh_my_models, models_inputs, models_outputs
-        ).then(
-            refresh_search_results,
-            [search_selection, search_results_state, weight_precision, fits_only],
-            [search_results, search_detail, search_selection],
-        ).then(refresh_model_switch, weight_precision, switch_outputs)
-        enter_sends.change(set_message_box_keys, enter_sends, prompt)
-
-        # The sampling accordion wears its own values.
-        #
-        # On change rather than on release, even though a slider fires
-        # continuously while it is dragged. Gradio dispatches release from
-        # pointerup alone, so a slider moved with the arrow keys - which is
-        # how it is moved without a mouse - changes its value and never
-        # reports a release, and the summary would sit there describing the
-        # settings as they were. always_last is what makes change affordable
-        # instead: a drag's worth of them collapses to the one that matters,
-        # and the label only has to be right once the slider stops.
-        sampling_controls = [temperature, top_p, top_k, skip_top_below, max_new_tokens]
-        # In the order settings.CONVERSATION_SAMPLING names them, which is
-        # what pairs each ↺ with the setting it restores.
-        sampling_resets = [
-            temperature_reset,
-            top_p_reset,
-            top_k_reset,
-            skip_top_below_reset,
-            max_new_tokens_reset,
-        ]
-        for control in sampling_controls:
-            control.change(
-                update_sampling_label,
-                sampling_controls,
-                sampling_accordion,
-                trigger_mode="always_last",
-                show_progress="hidden",
-                concurrency_id=SAMPLING_LABEL_QUEUE,
-            )
-            # These four belong to the conversation on screen, so a move of
-            # one is written into it as well as into the settings file - the
-            # file being what the next new conversation starts from.
-            #
-            # .input rather than .change: switching conversations sets these
-            # controls too, and a write from that would stamp a conversation
-            # nobody had touched. input is the reader's own move, keyboard
-            # included. always_last for the same reason as above: a drag is
-            # one write.
-            control.input(
-                remember_branch_sampling,
-                [forks_state, *sampling_controls],
-                forks_state,
-                trigger_mode="always_last",
-                show_progress="hidden",
-                concurrency_id=CONVERSATION_PANE_QUEUE,
-            )
-
-        steering_outputs = [
-            steering_state, steering_enabled, steering_strength, steering_layer, steering_status,
-        ]
-        steering_upload.upload(
-            import_vector, [steering_upload, forks_state], [forks_state, *steering_outputs],
-            concurrency_id=CONVERSATION_PANE_QUEUE,
-        )
-        steering_remove.click(
-            remove_vector, forks_state, [forks_state, *steering_outputs],
-            concurrency_id=CONVERSATION_PANE_QUEUE,
-        )
-        extract_button.click(
-            extract_vector,
-            [extract_positive, extract_negative, extract_chat, extract_pool],
-            [extract_state, extract_table, extract_layer, extract_apply, extract_status],
-        )
-        extract_table.select(
-            choose_layer, extract_state, [extract_layer, extract_status]
-        )
-        # input rather than change: the extraction writes the layer control
-        # itself, with a fuller status beside it, and a change listener would
-        # fire on that write and replace the status with the shorter line.
-        extract_layer.input(
-            describe_layer,
-            [extract_state, extract_layer],
-            extract_status,
-            show_progress="hidden",
-        )
-        extract_apply.click(
-            use_extracted,
-            [forks_state, extract_state, extract_layer],
-            [forks_state, *steering_outputs],
-            concurrency_id=CONVERSATION_PANE_QUEUE,
-        )
-        for control in (steering_enabled, steering_strength, steering_layer):
-            control.input(
-                remember_steering,
-                [forks_state, steering_state, steering_enabled, steering_strength, steering_layer],
-                [forks_state, steering_state, steering_status],
-                trigger_mode="always_last", show_progress="hidden",
-                concurrency_id=CONVERSATION_PANE_QUEUE,
-            )
-
-        def brings_its_sampling(event):
-            """Put the newly active conversation's sampling onto the controls.
-
-            Every path that changes which conversation is on screen ends
-            here, so the sliders describe the conversation in front of the
-            reader rather than the one they just left. The label follows the
-            controls, as it does when they are moved by hand.
-            """
-
-            return event.then(
-                sampling_updates,
-                forks_state,
-                sampling_controls,
-                concurrency_id=CONVERSATION_PANE_QUEUE,
-            ).then(
-                update_sampling_label,
-                sampling_controls,
-                sampling_accordion,
-                concurrency_id=SAMPLING_LABEL_QUEUE,
-            ).then(
-                steering_updates, forks_state, steering_outputs,
-                concurrency_id=CONVERSATION_PANE_QUEUE,
-            )
-
-        settings_inputs = [
-            system_prompt,
-            keep_reasoning,
-            assistant_prefill,
-            temperature,
-            top_p,
-            top_k,
-            skip_top_below,
-            max_new_tokens,
-            seed,
-            randomize_seed,
-            analyze_prompt,
-            color_scale,
-        ]
-        # Persistence runs separately; every request must snapshot the controls
-        # the reader sees, even while remember_steering is still queued.
-        steering_inputs = [steering_state, steering_enabled, steering_strength, steering_layer]
-        chat_inputs = [prompt, conversation_state, *settings_inputs, *steering_inputs, thinking_mode]
-
-        # Everything saved between sessions, in PERSISTED_SETTING_NAMES order.
-        persisted_inputs = [
-            *settings_inputs,
-            thinking_mode,
-            enter_sends,
-            writing_suggestions,
-            theme_choice,
-            appearance_choice,
-            model_id,
-            weight_precision,
-        ]
-        for control in (
-            thinking_mode,
-            system_prompt,
-            keep_reasoning,
-            assistant_prefill,
-            randomize_seed,
-            analyze_prompt,
-            color_scale,
-            enter_sends,
-            writing_suggestions,
-            model_id,
-            weight_precision,
-        ):
-            control.change(remember_settings, persisted_inputs, None)
-        # The theme is wired apart from the loop above because it takes two
-        # listeners rather than one: saving it, and repainting the page, which
-        # has to follow the dropdown whether the change came from the reader
-        # or from the file being read back on a reload.
-        #
-        # always_last on both, and on both for the same reason. A reader
-        # trying the themes on picks one while the one before it is still in
-        # flight, and with Gradio's default the pick behind is dropped. On one
-        # listener alone that is worse than on neither: the page would be
-        # painted in the theme last picked while the file kept an earlier one,
-        # and a reload would undo a choice that was there on screen.
-        theme_choice.change(
-            remember_settings, persisted_inputs, None, trigger_mode="always_last"
-        )
-        theme_choice.change(
-            apply_theme,
-            theme_choice,
-            theme_style,
-            trigger_mode="always_last",
-        )
-        # Light or dark is wired the same way and for the same reasons, except
-        # that the repaint is the browser's own work rather than a round trip:
-        # the class it toggles is already what every dark-mode rule reads.
-        appearance_choice.change(
-            remember_settings, persisted_inputs, None, trigger_mode="always_last"
-        )
-        appearance_choice.change(None, appearance_choice, None, js=themes.APPEARANCE_JS)
-        # The four that belong to a conversation are saved on input, like the
-        # write into the conversation itself. Switching conversations sets
-        # them, and a save from that would put the sampling of the
-        # conversation merely being looked at into the settings file - which
-        # is what an unpinned conversation answers with, so looking at a
-        # branch pinned to temperature 0 would quietly move every unpinned
-        # one to 0 as well.
-        # On the conversation queue, so the file is written before a switch
-        # that follows reads it: a conversation carrying no sampling of its
-        # own answers with what that file says, and a slider moved and then a
-        # switch in quick succession must not read the older value.
-        #
-        # always_last for the same reason the branch write has it, and more
-        # so now that this shares a queue: with Gradio's default, a slider
-        # still moving while this is pending drops the newer values and the
-        # file keeps one from part way through the drag.
-        for control in sampling_controls:
-            control.input(
-                remember_settings,
-                persisted_inputs,
-                None,
-                trigger_mode="always_last",
-                concurrency_id=CONVERSATION_PANE_QUEUE,
-            )
-        # A ↺ writes itself down the way a hand on that slider does, and in
-        # the same order: the control first, then the conversation and the
-        # file from what the five now hold, then the summary. The handlers
-        # are the ones the sliders already use, so a reset is stored, pinned
-        # and described exactly as the same move by hand would have been -
-        # there is nothing about it for them to tell apart.
-        for button, name, control in zip(
-            sampling_resets, settings.CONVERSATION_SAMPLING, sampling_controls, strict=True
-        ):
-            button.click(
-                partial(reset_sampling, name, saved.prefill_token_limit),
-                None,
-                control,
-                concurrency_id=CONVERSATION_PANE_QUEUE,
-            ).then(
-                remember_branch_sampling,
-                [forks_state, *sampling_controls],
-                forks_state,
-                show_progress="hidden",
-                concurrency_id=CONVERSATION_PANE_QUEUE,
-            ).then(
-                remember_settings,
-                persisted_inputs,
-                None,
-                concurrency_id=CONVERSATION_PANE_QUEUE,
-            ).then(
-                update_sampling_label,
-                sampling_controls,
-                sampling_accordion,
-                show_progress="hidden",
-                concurrency_id=SAMPLING_LABEL_QUEUE,
-            )
-        # The seed box is the one control the app writes to itself: a finished
-        # response leaves the seed that produced it there, and saving that
-        # would overwrite the seed the reader chose. Blur and submit are the
-        # two ways a person is done editing a number, and they are the only
-        # events that write the box's contents down; every other control
-        # leaves the saved seed where it is. See remember_settings().
-        for event in (seed.blur, seed.submit):
-            event(remember_committed_seed, persisted_inputs, None)
-        # The context limit is committed rather than saved as it is typed: the
-        # handler writes a clamped value back, which mid-word would fight the
-        # typing.
-        # Lowering it can pull the response length down with it, which the
-        # sampling summary names, so the label follows that too.
-        # A lowered limit can pull the response length down with it, which
-        # the sampling summary names and the conversation on screen has to
-        # be told about - that clamp is the reader's own doing, and the
-        # conversation would otherwise put the longer length back the next
-        # time it was switched to. The handler writes the conversation only
-        # when it actually clamped, so a limit tabbed through or raised does
-        # not pin a conversation that was following the settings file.
-        for event in (prefill_token_limit.blur, prefill_token_limit.submit):
-            event(
-                remember_prefill_limit,
-                [prefill_token_limit, max_new_tokens, forks_state, *sampling_controls],
-                [prefill_token_limit, max_new_tokens, forks_state],
-                concurrency_id=CONVERSATION_PANE_QUEUE,
-            ).then(
-                update_sampling_label,
-                sampling_controls,
-                sampling_accordion,
-                concurrency_id=SAMPLING_LABEL_QUEUE,
-            )
-        # A page load is where the file is read back, so reloading the browser
-        # shows what was saved rather than what the app started with. The
-        # sampling summary is rebuilt from whatever came back, since the label
-        # the accordion was built with describes the file as it was read at
-        # startup, not as it is now.
-        demo.load(
-            restore_settings, None, [*persisted_inputs, prefill_token_limit]
-        ).then(
-            apply_theme, theme_choice, theme_style
-        ).then(
-            None, appearance_choice, None, js=themes.APPEARANCE_JS
         ).then(
             update_sampling_label,
-            sampling_controls,
-            sampling_accordion,
+            chat_page.sampling.controls,
+            chat_page.sampling.accordion,
             concurrency_id=SAMPLING_LABEL_QUEUE,
-        )
-        # The order every generation handler publishes in; see
-        # CHAT_OUTPUT_NAMES.
-        chat_outputs = [
-            prompt,
-            chatbot,
-            conversation_state,
-            token_strip,
-            metrics_state,
-            generation_status,
-            seed,
-            send_button,
-            stop_button,
-            token_detail,
-            alternatives,
-            prompt_strip,
-            prompt_metrics_state,
-            prompt_note,
-            summary_panel,
-            surprise_panel,
-            trace_state,
-            context_ids_state,
-            chat_metrics_state,
-            chat_context_ids_state,
-            selected_token,
-            branch_pick,
-        ]
-        undo_outputs = [
-            prompt,
-            chatbot,
-            conversation_state,
-            token_strip,
-            metrics_state,
-            generation_status,
-            token_detail,
-            alternatives,
-            send_button,
-            stop_button,
-            prompt_strip,
-            prompt_metrics_state,
-            prompt_note,
-            summary_panel,
-            surprise_panel,
-            trace_state,
-            selected_token,
-            branch_pick,
-        ]
-
-        background_state = gr.State(ConversationJob())
-        conversation_events = ConversationEvents(
-            background_state, conversation_state, forks_state, conversation_list,
-            color_scale, [*chat_outputs, token_editor, token_edit_target],
-            CONVERSATION_PANE_QUEUE,
-        )
-        response_timer = gr.Timer(0.25)
-        response_timer.tick(
-            conversation_events.poll,
-            [background_state, conversation_state, forks_state, color_scale],
-            [*chat_outputs, token_editor, token_edit_target, forks_state, conversation_list],
+        ).then(
+            steering_updates, states.forks, chat_page.steering.outputs,
             concurrency_id=CONVERSATION_PANE_QUEUE,
-            **QUIET_TICK,
         )
 
-        start_response = partial(conversation_events.bind, generation=True)
-        navigate = partial(conversation_events.bind, navigation=True)
-        start_response(menu_action.input, branch_from_menu, [menu_action, *chat_inputs], chat_outputs)
-        start_response(
-            prompt_menu_action.input, edit_prompt_from_menu,
-            [prompt_menu_action, context_ids_state, prompt_metrics_state, *chat_inputs],
-            chat_outputs,
-        )
-        start_response(send_button.click, chat, chat_inputs, chat_outputs)
-        start_response(prompt.submit, chat, chat_inputs, chat_outputs)
-        start_response(retry_button.click, retry_last, chat_inputs, chat_outputs)
-        start_response(next_token_button.click, next_token, [branch_pick, *chat_inputs], chat_outputs)
-        start_response(chatbot.retry, retry_message, chat_inputs, chat_outputs)
-        start_response(chatbot.edit, edit_message, chat_inputs, chat_outputs)
-        start_response(
-            token_edit_save.click, save_token_edit,
-            [token_edit_target, token_edit_text, *chat_inputs],
-            [*chat_outputs, token_editor, token_edit_target],
-        )
-        start_response(
-            branch_button.click, branch_from, [branch_pick, *chat_inputs], chat_outputs,
-        )
-        start_response(
-            branch_text_button.click, branch_with_text,
-            [selected_token, branch_text, *chat_inputs], chat_outputs,
-        )
+    # The one table from the names the conversation handlers publish
+    # under to the components those names are drawn in; see ui.outputs.
+    # Every listener bound through conversation_events names its outputs
+    # from here, so a handler and its listener cannot disagree about
+    # which value goes where.
+    conversation_outputs = {
+        "prompt": chat_page.chat.prompt,
+        "chatbot": chat_page.chat.chatbot,
+        "turns": states.conversation,
+        "strip": chat_page.chat.token_strip,
+        "metrics": states.metrics,
+        "status": chat_page.chat.generation_status,
+        "seed": chat_page.sampling.seed,
+        "send": chat_page.chat.send_button,
+        "stop": chat_page.chat.stop_button,
+        "detail": chat_page.inspector.token_detail,
+        "alternatives": chat_page.inspector.alternatives,
+        "prompt_strip": chat_page.inspector.prompt_strip,
+        "prompt_metrics": states.prompt_metrics,
+        "prompt_note": chat_page.inspector.prompt_note,
+        "summary": chat_page.inspector.summary_panel,
+        "surprise": chat_page.inspector.surprise_panel,
+        "trace": states.trace,
+        "context_ids": states.context_ids,
+        "chat_metrics": states.chat_metrics,
+        "chat_context_ids": states.chat_context_ids,
+        "selected_token": states.selected_token,
+        "branch_pick": states.branch_pick,
+        "token_editor": chat_page.chat.token_editor,
+        "token_edit_target": states.token_edit_target,
+        "forks": states.forks,
+        "conversation_list": pane.conversation_list,
+        "clear_confirm": pane.clear_confirm,
+        "branch_text": chat_page.inspector.branch_text,
+        "system_prompt": settings_page.system_prompt,
+        "steering_state": states.steering,
+        "steering_enabled": chat_page.steering.enabled,
+        "steering_strength": chat_page.steering.strength,
+        "steering_layer": chat_page.steering.layer,
+        "steering_status": chat_page.steering.status,
+    }
+    # Where tests, and anything else holding the page, look a component
+    # up by the name its handlers publish it under.
+    demo.conversation_outputs = conversation_outputs
 
-        conversation_events.bind(
-            stop_button.click, stop_generation,
-            inputs=[conversation_state, color_scale],
-            outputs=[
-                chatbot, conversation_state, token_strip, send_button,
-                stop_button, generation_status,
+    background_state = gr.State(ConversationJob())
+    conversation_events = ConversationEvents(
+        background_state, conversation_outputs, chat_page.inspector.color_scale, CONVERSATION_PANE_QUEUE,
+    )
+    response_timer = gr.Timer(0.25)
+    response_timer.tick(
+        conversation_events.poll,
+        [background_state, states.conversation, states.forks, chat_page.inspector.color_scale],
+        conversation_events.components(POLL_OUTPUT_NAMES),
+        concurrency_id=CONVERSATION_PANE_QUEUE,
+        **QUIET_TICK,
+    )
+
+    start_response = partial(conversation_events.bind, generation=True)
+    navigate = partial(conversation_events.bind, navigation=True)
+    start_response(states.menu_action.input, branch_from_menu, [states.menu_action, *chat_inputs], CHAT_OUTPUT_NAMES)
+    start_response(
+        states.prompt_menu_action.input, edit_prompt_from_menu,
+        [states.prompt_menu_action, states.context_ids, states.prompt_metrics, *chat_inputs],
+        CHAT_OUTPUT_NAMES,
+    )
+    start_response(chat_page.chat.send_button.click, chat, chat_inputs, CHAT_OUTPUT_NAMES)
+    start_response(chat_page.chat.prompt.submit, chat, chat_inputs, CHAT_OUTPUT_NAMES)
+    start_response(chat_page.chat.retry_button.click, retry_last, chat_inputs, CHAT_OUTPUT_NAMES)
+    start_response(chat_page.chat.next_token_button.click, next_token, [states.branch_pick, *chat_inputs], CHAT_OUTPUT_NAMES)
+    start_response(chat_page.chat.chatbot.retry, retry_message, chat_inputs, CHAT_OUTPUT_NAMES)
+    start_response(chat_page.chat.chatbot.edit, edit_message, chat_inputs, CHAT_OUTPUT_NAMES)
+    start_response(
+        chat_page.chat.token_edit_save.click, save_token_edit,
+        [states.token_edit_target, chat_page.chat.token_edit_text, *chat_inputs],
+        TOKEN_EDIT_OUTPUT_NAMES,
+    )
+    start_response(
+        chat_page.inspector.branch_button.click, branch_from, [states.branch_pick, *chat_inputs], CHAT_OUTPUT_NAMES,
+    )
+    start_response(
+        chat_page.inspector.branch_text_button.click, branch_with_text,
+        [states.selected_token, chat_page.inspector.branch_text, *chat_inputs], CHAT_OUTPUT_NAMES,
+    )
+
+    conversation_events.bind(
+        chat_page.chat.stop_button.click, stop_generation,
+        inputs=[states.conversation, chat_page.inspector.color_scale],
+        outputs=STOP_OUTPUT_NAMES,
+        stop=True,
+    )
+
+    # Mutations of a running conversation ask the reader to Stop first.
+    # Navigation and changes to other conversations leave its job alone.
+    conversation_events.bind(
+        chat_page.chat.undo_button.click, undo_last,
+        [states.conversation, chat_page.inspector.color_scale],
+        UNDO_OUTPUT_NAMES,
+        concurrency_id=CONVERSATION_PANE_QUEUE,
+    )
+    conversation_events.bind(
+        chat_page.chat.chatbot.undo, undo_message,
+        [states.conversation, chat_page.inspector.color_scale],
+        UNDO_OUTPUT_NAMES,
+        concurrency_id=CONVERSATION_PANE_QUEUE,
+    )
+    # Clear asks before it takes anything, so the button that opens the
+    # question leaves the conversations and background job alone. The
+    # confirm button clears them once generation is stopped.
+    pane.clear_button.click(
+        ask_clear_chat,
+        [states.conversation, states.forks],
+        [chat_page.chat.generation_status, pane.clear_confirm, pane.clear_question],
+    )
+    pane.cancel_clear_button.click(hide_clear_confirm, None, pane.clear_confirm)
+    # The question names how many conversations it would take, and that
+    # count is read when it is asked. Anything that adds or removes one
+    # withdraws it rather than leaving a stale promise above a button
+    # that would take more than the promise says - the same reason
+    # choosing another model withdraws the removal question. Pressing
+    # Clear again re-asks with the numbers as they are now.
+    for control in (pane.new_button, pane.fork_button, pane.delete_fork_button):
+        control.click(hide_clear_confirm, None, pane.clear_confirm)
+    pane.conversation_list.input(hide_clear_confirm, None, pane.clear_confirm)
+    brings_its_sampling(conversation_events.bind(
+        pane.confirm_clear_button.click, clear_chat,
+        clear=True,
+        inputs=[chat_page.inspector.color_scale, states.forks],
+        concurrency_id=CONVERSATION_PANE_QUEUE,
+        outputs=CLEAR_OUTPUT_NAMES,
+    ))
+
+    chat_page.chat.chatbot.select(remember_message, states.conversation, states.selected_message)
+
+    # Navigation takes a snapshot of the view; the job keeps its source.
+    brings_its_sampling(
+        navigate(
+            pane.fork_button.click, fork_conversation,
+            [
+                states.conversation,
+                states.forks,
+                states.selected_message,
+                chat_page.inspector.color_scale,
+                *chat_page.sampling.controls,
             ],
-            stop=True,
+            FORK_OUTPUT_NAMES,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
         )
-
-        # Mutations of a running conversation ask the reader to Stop first.
-        # Navigation and changes to other conversations leave its job alone.
+    )
+    brings_its_sampling(
+        navigate(
+            pane.new_button.click, new_conversation,
+            [states.conversation, states.forks, chat_page.inspector.color_scale, *chat_page.sampling.controls],
+            NEW_CONVERSATION_OUTPUT_NAMES,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+        )
+    )
+    # .input rather than .change: the list is also redrawn by the handlers
+    # above and the listener below, and a .change listener would switch a
+    # second time on each.
+    brings_its_sampling(
+        navigate(
+            pane.conversation_list.input, switch_fork,
+            [pane.conversation_list, states.conversation, states.forks, chat_page.inspector.color_scale],
+            FORK_OUTPUT_NAMES,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+        )
+    )
+    brings_its_sampling(
         conversation_events.bind(
-            undo_button.click, undo_last,
-            [conversation_state, color_scale],
-            undo_outputs,
+            pane.delete_fork_button.click, delete_fork,
+            [states.conversation, states.forks, chat_page.inspector.color_scale],
+            FORK_OUTPUT_NAMES,
             concurrency_id=CONVERSATION_PANE_QUEUE,
         )
+    )
+    # Every other path that changes the conversation lands here, and
+    # the list's model tag, running indicator and token count
+    # follow it. Hide the loading overlay so each streaming frame updates
+    # the labels without making the whole list blink.
+    states.conversation.change(
+        conversation_events.refresh_conversation_list,
+        [states.conversation, states.forks, background_state],
+        [pane.conversation_list, states.forks],
+        concurrency_id=CONVERSATION_PANE_QUEUE,
+        show_progress="hidden",
+    )
+    # And the forks' change, which the listener above fires in turn, is
+    # where ordinary view changes are saved. Workers also save independently.
+    states.forks.change(
+        remember_forks,
+        [states.conversation, states.forks],
+        None,
+        concurrency_id=CONVERSATION_PANE_QUEUE,
+    )
+    # The saved conversations come back first, so the listeners above
+    # have something to describe. A page with nothing saved is left as
+    # it was built. Background workers persist to their source independently.
+    brings_its_sampling(
         conversation_events.bind(
-            chatbot.undo, undo_message,
-            [conversation_state, color_scale],
-            undo_outputs,
-            concurrency_id=CONVERSATION_PANE_QUEUE,
-        )
-        # Clear asks before it takes anything, so the button that opens the
-        # question leaves the conversations and background job alone. The
-        # confirm button clears them once generation is stopped.
-        clear_button.click(
-            ask_clear_chat,
-            [conversation_state, forks_state],
-            [generation_status, clear_confirm, clear_question],
-        )
-        cancel_clear_button.click(hide_clear_confirm, None, clear_confirm)
-        # The question names how many conversations it would take, and that
-        # count is read when it is asked. Anything that adds or removes one
-        # withdraws it rather than leaving a stale promise above a button
-        # that would take more than the promise says - the same reason
-        # choosing another model withdraws the removal question. Pressing
-        # Clear again re-asks with the numbers as they are now.
-        for control in (new_button, fork_button, delete_fork_button):
-            control.click(hide_clear_confirm, None, clear_confirm)
-        conversation_list.input(hide_clear_confirm, None, clear_confirm)
-        brings_its_sampling(conversation_events.bind(
-            confirm_clear_button.click, clear_chat,
-            clear=True,
-            inputs=[color_scale, forks_state],
-            concurrency_id=CONVERSATION_PANE_QUEUE,
-            outputs=[
-                chatbot,
-                conversation_state,
-                token_strip,
-                metrics_state,
-                generation_status,
-                send_button,
-                stop_button,
-                token_detail,
-                alternatives,
-                prompt_strip,
-                prompt_metrics_state,
-                prompt_note,
-                summary_panel,
-                surprise_panel,
-                trace_state,
-                selected_token,
-                branch_pick,
-                forks_state,
-                conversation_list,
-                clear_confirm,
-            ],
-        ))
-
-        # Navigation takes a snapshot of the view; the job keeps its source.
-        fork_outputs = [
-            prompt,
-            chatbot,
-            conversation_state,
-            forks_state,
-            conversation_list,
-            generation_status,
-            send_button,
-            stop_button,
-            token_strip,
-            metrics_state,
-            token_detail,
-            alternatives,
-            prompt_strip,
-            prompt_metrics_state,
-            prompt_note,
-            summary_panel,
-            surprise_panel,
-            trace_state,
-            selected_token,
-            branch_pick,
-        ]
-        chatbot.select(remember_message, conversation_state, selected_message)
-
-        brings_its_sampling(
-            navigate(
-                fork_button.click, fork_conversation,
-                [
-                    conversation_state,
-                    forks_state,
-                    selected_message,
-                    color_scale,
-                    *sampling_controls,
-                ],
-                fork_outputs,
-                concurrency_id=CONVERSATION_PANE_QUEUE,
-            )
-        )
-        brings_its_sampling(
-            navigate(
-                new_button.click, new_conversation,
-                [conversation_state, forks_state, color_scale, *sampling_controls],
-                [*fork_outputs, branch_text],
-                concurrency_id=CONVERSATION_PANE_QUEUE,
-            )
-        )
-        # .input rather than .change: the list is also redrawn by the handlers
-        # above and the listener below, and a .change listener would switch a
-        # second time on each.
-        brings_its_sampling(
-            navigate(
-                conversation_list.input, switch_fork,
-                [conversation_list, conversation_state, forks_state, color_scale],
-                fork_outputs,
-                concurrency_id=CONVERSATION_PANE_QUEUE,
-            )
-        )
-        brings_its_sampling(
-            conversation_events.bind(
-                delete_fork_button.click, delete_fork,
-                [conversation_state, forks_state, color_scale],
-                fork_outputs,
-                concurrency_id=CONVERSATION_PANE_QUEUE,
-            )
-        )
-        # Every other path that changes the conversation lands here, and
-        # the list's model tag, running indicator and token count
-        # follow it. Hide the loading overlay so each streaming frame updates
-        # the labels without making the whole list blink.
-        conversation_state.change(
-            conversation_events.refresh_conversation_list,
-            [conversation_state, forks_state, background_state],
-            [conversation_list, forks_state],
-            concurrency_id=CONVERSATION_PANE_QUEUE,
-            show_progress="hidden",
-        )
-        # And the forks' change, which the listener above fires in turn, is
-        # where ordinary view changes are saved. Workers also save independently.
-        forks_state.change(
-            remember_forks,
-            [conversation_state, forks_state],
+            demo.load, restore_conversations,
             None,
+            RESTORE_OUTPUT_NAMES,
             concurrency_id=CONVERSATION_PANE_QUEUE,
         )
-        # The saved conversations come back first, so the listeners above
-        # have something to describe. A page with nothing saved is left as
-        # it was built. Background workers persist to their source independently.
-        brings_its_sampling(
-            conversation_events.bind(
-                demo.load, restore_conversations,
-                None,
-                [chatbot, conversation_state, forks_state, conversation_list, metrics_state],
-                concurrency_id=CONVERSATION_PANE_QUEUE,
-            )
-        )
+    )
 
-        save_button.click(
-            save_conversation,
-            [conversation_state, system_prompt, *steering_inputs],
-            [saved_file, generation_status],
-        )
-        conversation_events.bind(
-            load_upload.upload, load_with_steering,
-            [load_upload, conversation_state, color_scale, forks_state],
-            [
-                chatbot,
-                conversation_state,
-                system_prompt,
-                token_strip,
-                metrics_state,
-                generation_status,
-                token_detail,
-                alternatives,
-                send_button,
-                stop_button,
-                prompt_strip,
-                prompt_metrics_state,
-                prompt_note,
-                summary_panel,
-                surprise_panel,
-                trace_state,
-                selected_token,
-                branch_pick,
-                forks_state,
-                *steering_outputs,
-            ],
-            concurrency_id=CONVERSATION_PANE_QUEUE,
-        )
-
-        score_button.click(
-            score_text,
-            [score_context, score_input, use_chat_template, color_scale],
-            [
-                score_strip,
-                metrics_state,
-                score_metrics_state,
-                prompt_strip,
-                prompt_metrics_state,
-                prompt_note,
-                summary_panel,
-                surprise_panel,
-                score_status,
-                token_detail,
-                alternatives,
-                selected_token,
-                branch_pick,
-                context_ids_state,
-                score_context_ids_state,
-            ],
-        )
-        # A batch reads its prompts from the box and everything else from the
-        # controls the Chat tab and Settings already own, so there is nothing
-        # to set up before running one.
-        batch_outputs = [
-            batch_status,
-            batch_results,
-            run_prompts_button,
-            stop_prompts_button,
-            batch_files,
-            batch_directory_state,
-        ]
-        batch_run = run_prompts_button.click(
-            run_prompts,
-            [
-                prompts_box,
-                loaded_prompts_state,
-                system_prompt,
-                assistant_prefill,
-                temperature,
-                top_p,
-                top_k,
-                skip_top_below,
-                max_new_tokens,
-                seed,
-                randomize_seed,
-            ],
-            batch_outputs,
-        )
-        # Cancelling closes the run at its last yield, which is what returns
-        # the model lock; stop_batch() only puts the buttons back. The rows
-        # and files already published stay on screen, and they describe the
-        # prompts that finished.
-        # Stop reads the run's directory rather than the frame the cancelled
-        # generator published last: the prompt it was in the middle of is
-        # written on the way out, after that frame is gone. See stop_batch().
-        stop_prompts_button.click(
-            stop_batch, batch_directory_state, batch_outputs, cancels=[batch_run]
-        )
-        # ------------------------------------------------------------ Compare
-        compare_outputs = [
-            compare_a_heading,
-            compare_b_heading,
-            compare_a_strip,
-            compare_b_strip,
-            compare_tiles,
-            compare_chart,
-            compare_headline,
-            compare_settings,
-            compare_rows,
-            compare_export_state,
-        ]
-        # Everything a run reads. The sampling controls and the steering
-        # vector are the Chat tab's own, so a slot is filled under exactly
-        # the settings a reply typed by hand would have used - which is what
-        # makes changing one of them between A and B a clean experiment.
-        compare_inputs = [
-            compare_mode,
-            compare_prompt,
-            compare_text,
-            compare_template,
-            system_prompt,
-            assistant_prefill,
-            temperature,
-            top_p,
-            top_k,
-            skip_top_below,
-            max_new_tokens,
-            seed,
-            randomize_seed,
-            thinking_mode,
-            *steering_inputs,
-        ]
-        compare_slot_outputs = [compare_status, compare_run_a, compare_run_b, compare_stop]
-        compare_runs = []
-        for slot, button, held in (
-            ("A", compare_run_a, compare_a_state),
-            ("B", compare_run_b, compare_b_state),
-        ):
-            filling = button.click(
-                partial(fill_slot, slot),
-                compare_inputs,
-                [held, *compare_slot_outputs],
-            )
-            # Drawn after the slot is filled rather than from inside the run:
-            # the comparison needs both slots, and a run knows only its own.
-            filling.then(
-                render_comparison,
-                [compare_a_state, compare_b_state],
-                compare_outputs,
-            )
-            compare_runs.append(filling)
-        paired = pair_button.click(
-            experiment_compare.run_pair, [*pair_conditions, *compare_inputs],
-            [compare_a_state, compare_b_state, *compare_slot_outputs, pair_button, pair_load_status],
-        )
-        compare_runs.append(paired)
-        next_difference.click(experiment_compare.next_difference,
-                              [compare_export_state, difference_position],
-                              [difference_position, difference_detail])
-        compare_export_state.change(lambda: (None, ""), None, [difference_position, difference_detail],
-                                    show_progress="hidden")
-        experiments.wire(experiments_view, demo, trace_state, chat_context_ids_state,
-                         compare_a_state, compare_b_state, insight_state, inspect_target)
-        conversation_tabs.select(experiments.inspector_visibility, None, [inspector_pane, inspector_resizer],
-                                 show_progress="hidden", queue=False)
-        for held in (compare_a_state, compare_b_state):
-            held.change(render_comparison, [compare_a_state, compare_b_state], compare_outputs)
-        # Cancelling closes the run at its last yield, which is what gives the
-        # model lock back; this only puts the buttons right. The slot keeps
-        # whatever it held before, because half a response is not a run.
-        compare_stop.click(
-            stop_comparison, None, compare_slot_outputs, cancels=compare_runs
-        ).then(lambda: gr.update(interactive=True), None, pair_button)
-        # cancels, because clearing during a run is otherwise undone by the
-        # run: its remaining frames would write over the cleared status and
-        # its last one would put the slot back. See clear_slots().
-        compare_clear.click(
-            clear_slots,
-            None,
-            [compare_a_state, compare_b_state, *compare_slot_outputs, *compare_outputs],
-            cancels=compare_runs,
-        ).then(lambda: gr.update(interactive=True), None, pair_button)
-        compare_mode.change(
-            mode_controls,
-            compare_mode,
-            [compare_prompt, compare_text, compare_template],
-        )
-
-        prompts_box.change(
-            count_prompts,
-            [prompts_box, loaded_prompts_state],
-            prompt_count,
-            trigger_mode="always_last",
-            show_progress="hidden",
-        )
-        prompts_upload.upload(
-            load_prompt_file,
-            [prompts_upload, prompts_box, loaded_prompts_state],
-            [prompts_box, batch_status, loaded_prompts_state],
-        )
-        # The conversation is painted from the turns; the two strips are
-        # painted from the measurements they were handed.
-        color_scale.change(
-            recolor,
-            [conversation_state, score_metrics_state, prompt_metrics_state, color_scale],
-            [token_strip, score_strip, prompt_strip, scale_caption],
-        )
-        # Which view of the conversation is on screen. The token view is
-        # redrawn on the way in rather than left to the next frame, since the
-        # conversation may have moved on while it was hidden.
-        token_view.change(
-            partial(show_token_view, conversation_id=conversation_state._id),
-            [token_view, conversation_state, color_scale],
-            [chatbot, token_strip],
-            show_progress="hidden",
-        )
-        editor_outputs = [token_editor, token_edit_text, token_edit_target]
-        token_view.change(close_token_editor, outputs=editor_outputs, show_progress="hidden")
-        token_edit_cancel.click(close_token_editor, outputs=editor_outputs, show_progress="hidden")
-        token_strip.select(
-            open_token_editor,
-            [conversation_state, metrics_state],
-            editor_outputs,
-            show_progress="hidden",
-        )
-
-        # One click in the conversation answers every question the inspector
-        # asks of it, so it is one listener rather than four.
-        token_strip.select(
-            select_transcript_token,
-            [conversation_state, metrics_state],
-            [token_detail, alternatives, selected_token, inspect_target, branch_pick],
-        )
-        token_strip.select(
-            token_menu_payload,
-            [conversation_state, metrics_state, menu_request],
-            menu_response,
-            show_progress="hidden",
-            queue=False,
-        )
-        # Also keep the message it landed in, so Fork works from
-        # the token view exactly as it does from the chatbot.
-        token_strip.select(
-            remember_transcript_message, conversation_state, selected_message
-        )
-
-        for strip, strip_metrics, source, where in (
-            (score_strip, score_metrics_state, "score", "score"),
-            (prompt_strip, prompt_metrics_state, "prompt", "prompt"),
-        ):
-            strip.select(
-                inspect_token(source),
-                inputs=strip_metrics,
-                outputs=[token_detail, alternatives],
-            )
-            # A second listener keeps the clicked position for the
-            # alternatives table, and a third the position the layer
-            # inspector would explain. Neither strip is part of a
-            # conversation, so clicking one disarms whatever branch the
-            # conversation had armed, and a row chosen in either is told it
-            # has nothing to branch rather than pairing with the token last
-            # clicked in the chat.
-            strip.select(
-                remember_strip_selection(source),
-                strip_metrics,
-                [selected_token, branch_pick],
-            )
-            strip.select(remember_inspect_target(where), strip_metrics, inspect_target)
-        # Only the prompt strip's tokens can be replaced: they are the ones a
-        # reply was actually generated from, and the ids behind them are kept.
-        prompt_strip.select(
-            prompt_menu_payload,
-            [prompt_metrics_state, context_ids_state, prompt_menu_request],
-            prompt_menu_response,
-            show_progress="hidden",
-            queue=False,
-        )
-        alternatives.select(
-            choose_alternative,
-            [conversation_state, score_metrics_state, prompt_metrics_state, selected_token],
-            [token_detail, branch_pick],
-        )
-        inspection_outputs = [lens_panel, attention_panel, insight_state, inspect_status]
-        inspect_button.click(
-            inspect_layers,
-            [
-                inspect_target,
-                metrics_state,
-                prompt_metrics_state,
-                context_ids_state,
-                attention_layer,
-                score_metrics_state,
-                score_context_ids_state,
-                chat_metrics_state,
-                chat_context_ids_state,
-                lens_mode,
-                imported_lens,
-                pinned_concept,
-                inspection_session,
-                pinned_token_id,
-            ],
-            [lens_panel, attention_panel, attention_layer, insight_state, inspect_status],
-        )
-        attention_layer.release(
-            render_attention, [insight_state, attention_layer], attention_panel
-        )
-        # Every readout, and every reset that takes one away, passes through
-        # the insight state, so the cache view follows it there. The cache is
-        # read from memory rather than rebuilt, so each control reads again.
-        kv_inputs = [insight_state, kv_layer, kv_metric]
-        insight_state.change(render_kv_cache, kv_inputs, [kv_panel, kv_layer], **QUIET_TICK)
-        kv_layer.release(render_kv_cache, kv_inputs, [kv_panel, kv_layer])
-        kv_metric.change(render_kv_cache, kv_inputs, [kv_panel, kv_layer])
-        lens_mode.change(
-            change_lens_mode, [lens_mode, inspection_session],
-            [jacobian_controls, attention_layer, *inspection_outputs],
-            queue=False,
-        )
-        import_lens_button.click(
-            import_jacobian_lens, [lens_file, fitted_model_id, lens_repository, lens_filename],
-            [imported_lens, import_lens_status],
-        )
-        # QUIET_TICK for the same reason as the metrics_state handler below:
-        # clearing a stale readout is instant, so the panel should not flash a
-        # spinner over itself on the way.
-        imported_lens.change(
-            reset_inspection, insight_state, inspection_outputs, **QUIET_TICK,
-        )
-        imported_lens.change(
-            lambda imported: gr.update(open=False) if imported else gr.skip(),
-            imported_lens, lens_setup,
-        )
-        pinned_concept.input(
-            change_pinned_token, [pinned_concept, inspection_session], inspection_outputs,
-            queue=False,
-        )
-        # Every path that redraws the strips writes the metrics state, so this
-        # is where a readout of a token that is no longer on screen goes away.
-        #
-        # Streaming writes that state on every frame, and reset_inspection
-        # skips its outputs once there is nothing left to clear. Gradio marks
-        # them pending regardless, so without QUIET_TICK the inspector blinks
-        # its way through every reply: see the note above for what the two
-        # arguments each take away.
-        metrics_state.change(
-            reset_inspection, insight_state, inspection_outputs, **QUIET_TICK,
-        )
-    return demo
+    chat_page.chat.save_button.click(
+        save_conversation,
+        [states.conversation, settings_page.system_prompt, *chat_page.steering.inputs],
+        [chat_page.chat.saved_file, chat_page.chat.generation_status],
+    )
+    conversation_events.bind(
+        chat_page.chat.load_upload.upload, load_with_steering,
+        [chat_page.chat.load_upload, states.conversation, chat_page.inspector.color_scale, states.forks],
+        STEERED_LOAD_OUTPUT_NAMES,
+        concurrency_id=CONVERSATION_PANE_QUEUE,
+    )

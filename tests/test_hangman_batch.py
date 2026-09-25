@@ -15,6 +15,7 @@ from chatlab.extensions.hangman.batch import BatchControl, next_guess, read_tria
 from chatlab.extensions.hangman.game import GIVE_UP, SYSTEM, finish_turn, load, new_game, read_left, word_problems
 from chatlab.extensions.hangman.page import build_page, turn_note
 from chatlab.model_runtime import GENERATING
+from ui_support import handlers_by_name
 
 STOP = 0
 WORDS = ("crane", "crate", "grape", "slate", "stone")
@@ -313,7 +314,7 @@ class PageBatchTests(Fixture):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        self.fn = {f.fn.__name__: f.fn for f in demo.fns.values() if f.fn}
+        self.fn = handlers_by_name(demo)
 
     def test_the_pane_plays_a_file_and_offers_its_summary(self):
         path = trial_file(self.root, [dict(id="a", seed=1, label="First")], guesser=["c", "r", "a", "n", "e"])

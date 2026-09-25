@@ -14,9 +14,10 @@ from chatlab.extensions.maze_experiments.page import (board, build_page, cell_te
                                               timeline)
 from chatlab.extensions.maze_experiments.runner import Episode, fork_token_edit, from_payload, stream_episode
 from chatlab.extensions.maze_experiments.trials import FORMAT as TRIALS_FORMAT, prepare_trial, read_trials
-from chatlab.extension_api import ModelService, SteeringError, TokenInspector, normalize_steering
+from chatlab.extension_api import ModelService, TokenInspector, normalize_steering
+from maze_support import CONFIG, NO_CHECKPOINT, SteeringManager, VECTOR
+from ui_support import listeners_by_name
 
-from test_maze import CONFIG, NO_CHECKPOINT, Manager
 
 # An open room: from the start in the corner the character can walk down,
 # across and back up to the destination at the end of the top row.
@@ -28,8 +29,6 @@ POCKET = Maze(("....", ".###", "....", "...."), (2, 0), (3, 3))
 # destination beside it, so sealing (1, 0) leaves only the second, which the
 # run ends on.
 CORNER = Maze(("....", ".##.", "....", "...."), (2, 2), (0, 1))
-VECTOR = {"format": "chatlab-steering-1", "model_id": "test/model", "layer": 3,
-          "vector": [1.0, -2.0, 0.5], "strength": 4.0, "enabled": True}
 BASE = CONFIG | {"interruption_text": "", "per_turn_tokens": 200, "token_budget": 4000, "attempt_budget": 20}
 # Down, across, the waypoint at (1, 1), then across and up to the destination.
 WALK = ["south", "east", "east", "north", "east"]
@@ -38,20 +37,6 @@ WALK = ["south", "east", "east", "north", "east"]
 def reply(maze, direction):
     text = call_text(maze.tool_id(), direction)
     return text, list(text.encode()) + [0]
-
-
-class SteeringManager(Manager):
-    """The maze fixture manager, answering the steering pre-flight."""
-
-    def __init__(self, replies, refuse=None):
-        super().__init__(replies)
-        self.refuse = refuse
-        self.checked = []
-
-    def check_steering(self, value):
-        self.checked.append(copy.deepcopy(value))
-        if self.refuse:
-            raise SteeringError(self.refuse)
 
 
 def checkpoint(**changes):
@@ -339,7 +324,7 @@ class PageTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        return {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+        return listeners_by_name(demo)
 
     def test_parse_cell_reads_the_ways_a_cell_is_typed(self):
         for text in ("3, 3", "3 3", "(3,3)", " [3, 3] "):

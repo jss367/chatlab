@@ -19,10 +19,11 @@ import settings_sandbox
 from chatlab import steering
 from chatlab.model_runtime import ModelManager
 from chatlab.text_generation import ModelChanged
-from test_streaming import FakeTokenizer, PIECES, EOS_ID
+from fakes import FakeTokenizer, PIECES, EOS_ID
 from chatlab.ui import runtime
 from chatlab.ui import steering as controls
 from chatlab.ui.conversations import fork_conversation, new_conversation, save_conversation
+from ui_support import listener_named
 
 
 def setUpModule():
@@ -280,7 +281,7 @@ class RuntimeTests(unittest.TestCase):
 class ConversationTests(unittest.TestCase):
     def test_incompatible_steering_preserves_response_on_retry_edit_and_branches(self):
         import gradio as gr
-        from test_app_flow import FIXED, TURNS, STATUS
+        from conversation_support import FIXED
         from chatlab.ui.generation import chat, retry_last, edit_message, branch_from, branch_with_text
 
         for route in ("retry", "edit", "branch", "typed_branch"):
@@ -292,28 +293,28 @@ class ConversationTests(unittest.TestCase):
                         before = list(chat("Hello", [], **settings, steering=vector()))[-1]
                         current = (*settings.values(), steering.compact(invalid), True, 1, invalid["layer"])
                         if route == "retry":
-                            stream = retry_last("", before[TURNS], *current)
+                            stream = retry_last("", before["turns"], *current)
                         elif route == "edit":
                             event = gr.EditData(None, dict(index=0, previous_value="Hello", value="Changed question"))
-                            stream = edit_message(event, "", before[TURNS], *current)
+                            stream = edit_message(event, "", before["turns"], *current)
                         elif route == "branch":
-                            stream = branch_from(branch_pick(before[TURNS]), "", before[TURNS], *current)
+                            stream = branch_from(branch_pick(before["turns"]), "", before["turns"], *current)
                         else:
-                            stream = branch_with_text(branch_selection(before[TURNS]), "Hello", "", before[TURNS], *current)
+                            stream = branch_with_text(branch_selection(before["turns"]), "Hello", "", before["turns"], *current)
                         result = list(stream)[-1]
-                        self.assertEqual(result[TURNS], before[TURNS])
-                        self.assertTrue("Steering failed" in result[STATUS] or "Could not branch" in result[STATUS])
+                        self.assertEqual(result["turns"], before["turns"])
+                        self.assertTrue("Steering failed" in result["status"] or "Could not branch" in result["status"])
                         self.assertFalse(held.busy)
                         self.assertFalse(steering.decoder_layers(held.model)[0]._forward_hooks)
 
     def test_incompatible_steering_keeps_new_user_message_without_empty_reply(self):
-        from test_app_flow import FIXED, TURNS, STATUS
+        from conversation_support import FIXED
         from chatlab.ui.generation import chat
 
         with mock.patch.object(runtime, "MANAGER", manager()):
             result = list(chat("Hello", [], **FIXED, steering=dict(vector(), layer=99)))[-1]
-            self.assertEqual(result[TURNS], [conversation.make_turn("user", "Hello")])
-            self.assertIn("Steering failed", result[STATUS])
+            self.assertEqual(result["turns"], [conversation.make_turn("user", "Hello")])
+            self.assertIn("Steering failed", result["status"])
             self.assertFalse(runtime.MANAGER.busy)
 
     def test_queued_pane_actions_read_steering_from_latest_gradio_session_state(self):
@@ -322,10 +323,10 @@ class ConversationTests(unittest.TestCase):
         from chatlab.ui.layout import build_app
 
         demo = build_app().queue(default_concurrency_limit=1)
-        remember = next(fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", "") == "remember_steering")
+        remember = listener_named(demo, "remember_steering")
 
         async def run_pane_action(action):
-            pane = next(fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", "") == action)
+            pane = listener_named(demo, action)
             self.assertEqual(pane.concurrency_id, remember.concurrency_id)
             demo._queue.create_event_queue_for_fn(remember)
             demo._queue.create_event_queue_for_fn(pane)
@@ -362,7 +363,7 @@ class ConversationTests(unittest.TestCase):
                 asyncio.run(run_pane_action(action))
 
     def test_model_reload_during_steered_branch_restores_original_response(self):
-        from test_app_flow import FIXED, TURNS, STATUS
+        from conversation_support import FIXED
         from chatlab.ui.generation import chat, branch_from, branch_with_text, BRANCH_MODEL_CHANGED
 
         for route in ("branch", "typed_branch"):
@@ -373,9 +374,9 @@ class ConversationTests(unittest.TestCase):
                     before = list(chat("Hello", [], **settings, steering=vector()))[-1]
                     current = (*settings.values(), steering.compact(vector()), True, 1, 0)
                     if route == "branch":
-                        stream = branch_from(branch_pick(before[TURNS]), "", before[TURNS], *current)
+                        stream = branch_from(branch_pick(before["turns"]), "", before["turns"], *current)
                     else:
-                        stream = branch_with_text(branch_selection(before[TURNS]), "Hello", "", before[TURNS], *current)
+                        stream = branch_with_text(branch_selection(before["turns"]), "Hello", "", before["turns"], *current)
                     generate = held.generate
 
                     def reloaded_before_generation(*args, **kwargs):
@@ -384,14 +385,14 @@ class ConversationTests(unittest.TestCase):
 
                     with mock.patch.object(held, "generate", side_effect=reloaded_before_generation):
                         result = list(stream)[-1]
-                    self.assertEqual(result[STATUS], BRANCH_MODEL_CHANGED)
-                    self.assertEqual(result[TURNS], before[TURNS])
+                    self.assertEqual(result["status"], BRANCH_MODEL_CHANGED)
+                    self.assertEqual(result["turns"], before["turns"])
                     self.assertFalse(steering.decoder_layers(held.model)[0]._forward_hooks)
                     self.assertFalse(held.busy)
 
     def test_large_vector_is_stored_once_and_not_copied_into_streamed_turns(self):
-        from test_app_flow import FIXED, TURNS, TRACE
-        from test_streaming import loaded_manager
+        from conversation_support import FIXED
+        from fakes import loaded_manager
         from chatlab.ui.generation import chat
         from chatlab.trace_export import trace_to_json
 
@@ -416,16 +417,16 @@ class ConversationTests(unittest.TestCase):
         with mock.patch.object(runtime, "MANAGER", held), mock.patch.object(held, "generate", side_effect=generate):
             frames = list(chat("Hi", turns, **FIXED, steering=reference))
         for frame in frames:
-            self.assertLess(len(json.dumps(frame[TURNS])), 8_000)
-            for turn in frame[TURNS]:
+            self.assertLess(len(json.dumps(frame["turns"])), 8_000)
+            for turn in frame["turns"]:
                 if turn.get("steering"):
                     self.assertNotIn("vector", turn["steering"])
-            seen = library.as_seen(forks, frame[TURNS])
+            seen = library.as_seen(forks, frame["turns"])
             self.assertLess(len(library.dump(seen)), 12_000)
             self.assertIsNotNone(library.write(seen))
             self.assertEqual(path.stat().st_mtime_ns, original_stamp)
-        self.assertNotIn("vector", frames[-1][TRACE]["sampling"]["steering"])
-        exported = json.loads(trace_to_json(frames[-1][TRACE]))
+        self.assertNotIn("vector", frames[-1]["trace"]["sampling"]["steering"])
+        exported = json.loads(trace_to_json(frames[-1]["trace"]))
         self.assertEqual(exported["sampling"]["steering"], large)
 
     def test_portable_conversation_deduplicates_and_restores_into_empty_storage(self):
@@ -465,7 +466,7 @@ class ConversationTests(unittest.TestCase):
             steering.normalize(dict(reference, vector_id="../../not-a-vector"))
 
     def test_generation_paths_use_visible_controls_before_persistence_catches_up(self):
-        from test_app_flow import FIXED, TURNS, TRACE
+        from conversation_support import FIXED
         from chatlab.ui.generation import chat, retry_last, branch_from, branch_with_text
 
         for route in ("send", "retry", "branch", "typed_branch"):
@@ -484,16 +485,16 @@ class ConversationTests(unittest.TestCase):
                         if route == "send":
                             stream = chat("Hello", [], *current)
                         elif route == "retry":
-                            stream = retry_last("", before[TURNS], *current)
+                            stream = retry_last("", before["turns"], *current)
                         elif route == "branch":
-                            stream = branch_from(branch_pick(before[TURNS]), "", before[TURNS], *current)
+                            stream = branch_from(branch_pick(before["turns"]), "", before["turns"], *current)
                         else:
-                            stream = branch_with_text(branch_selection(before[TURNS]), "Hello", "", before[TURNS], *current)
+                            stream = branch_with_text(branch_selection(before["turns"]), "Hello", "", before["turns"], *current)
                         with mock.patch.object(held, "generate", wraps=held.generate) as generate:
                             result = list(stream)[-1]
                         self.assertEqual(steering.expand(generate.call_args.kwargs["steering"]), expected)
-                        self.assertEqual(steering.expand(result[TURNS][-1]["steering"]), expected)
-                        self.assertEqual(steering.expand(result[TRACE]["sampling"]["steering"]), expected)
+                        self.assertEqual(steering.expand(result["turns"][-1]["steering"]), expected)
+                        self.assertEqual(steering.expand(result["trace"]["sampling"]["steering"]), expected)
                         self.assertEqual(stale, original)
 
     def test_generation_and_save_listeners_capture_all_visible_steering_controls(self):
@@ -524,7 +525,7 @@ class ConversationTests(unittest.TestCase):
     def test_fork_switch_new_chat_and_library_roundtrip(self):
         forks = controls.store(conversation.new_forks(), vector())
         turns = [conversation.make_turn("user", "Hello")]
-        forked = fork_conversation(turns, forks, None)[3]
+        forked = fork_conversation(turns, forks, None)["forks"]
         self.assertEqual(steering.expand(controls.steering_updates(forked)[0]), vector())
         changed, state, _ = controls.remember_steering(forked, vector(), True, -2, 1)
         self.assertEqual(state["strength"], -2)
@@ -532,7 +533,7 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(steering.expand(controls.steering_updates(changed)[0]), vector())
         restored = library.parse(library.dump(changed))
         self.assertEqual(steering.expand(controls.steering_updates(restored)[0]), vector())
-        fresh = new_conversation(turns, restored)[3]
+        fresh = new_conversation(turns, restored)["forks"]
         self.assertIsNone(controls.steering_updates(fresh)[0])
         copied = conversation.copy_forks(forks)
         copied["sampling"][conversation.MAIN_BRANCH]["steering"]["layer"] = 99
@@ -544,45 +545,45 @@ class ConversationTests(unittest.TestCase):
             path = Path(directory) / "conversation.json"
             path.write_text(conversation.to_json(turns, steering=vector()))
             loaded = controls.load_with_steering(str(path), [], "Raw rank", conversation.new_forks())
-            self.assertEqual(conversation.turn_entries(loaded[1]), conversation.turn_entries(turns))
-            self.assertEqual(steering.expand(loaded[-5]), vector())
-            self.assertEqual(steering.expand(controls.steering_updates(loaded[-6])[0]), vector())
+            self.assertEqual(conversation.turn_entries(loaded["turns"]), conversation.turn_entries(turns))
+            self.assertEqual(steering.expand(loaded["steering_state"]), vector())
+            self.assertEqual(steering.expand(controls.steering_updates(loaded["forks"])[0]), vector())
             path.write_text(conversation.to_json(turns))
-            loaded = controls.load_with_steering(str(path), turns, "Raw rank", loaded[-6])
-            self.assertIsNone(loaded[-5])
+            loaded = controls.load_with_steering(str(path), turns, "Raw rank", loaded["forks"])
+            self.assertIsNone(loaded["steering_state"])
             path.write_text(json.dumps({"format": conversation.SAVE_FORMAT, "turns": [], "steering": {}}))
-            refused = controls.load_with_steering(str(path), turns, "Raw rank", loaded[-6])
-            self.assertEqual(conversation.turn_entries(refused[1]), conversation.turn_entries(turns))
-            self.assertEqual(refused[-5], {"__type__": "update"})
+            refused = controls.load_with_steering(str(path), turns, "Raw rank", loaded["forks"])
+            self.assertEqual(conversation.turn_entries(refused["turns"]), conversation.turn_entries(turns))
+            self.assertEqual(refused["steering_state"], {"__type__": "update"})
         saved, _ = save_conversation(turns, "", vector())
         self.addCleanup(Path(saved["value"]).unlink)
         self.assertEqual(steering.expand(json.loads(Path(saved["value"]).read_text())["steering"]), vector())
 
     def test_ui_records_response_vector_and_inspects_that_snapshot(self):
-        from test_app_flow import FIXED, TURNS, TRACE, CONTEXT_IDS, METRICS, PROMPT_METRICS
+        from conversation_support import FIXED
         from chatlab.ui.generation import chat
         from chatlab.ui.inspection import inspect_layers, render_kv_cache
 
         with mock.patch.object(runtime, "MANAGER", manager()):
             frames = list(chat("Hello", [], **FIXED, steering=vector()))
             frame = frames[-1]
-            self.assertEqual(steering.expand(frame[TURNS][-1]["steering"]), vector())
-            self.assertEqual(steering.expand(frame[TRACE]["sampling"]["steering"]), vector())
-            generation, rows = frame[METRICS]
-            context = next(row[CONTEXT_IDS] for row in frames if isinstance(row[CONTEXT_IDS], tuple) and len(row[CONTEXT_IDS]) == 4)
-            prompt_metrics = next(row[PROMPT_METRICS] for row in frames[1:] if isinstance(row[PROMPT_METRICS], tuple))
+            self.assertEqual(steering.expand(frame["turns"][-1]["steering"]), vector())
+            self.assertEqual(steering.expand(frame["trace"]["sampling"]["steering"]), vector())
+            generation, rows = frame["metrics"]
+            context = next(row["context_ids"] for row in frames if isinstance(row["context_ids"], tuple) and len(row["context_ids"]) == 4)
+            prompt_metrics = next(row["prompt_metrics"] for row in frames[1:] if isinstance(row["prompt_metrics"], tuple))
             self.assertEqual(steering.expand(context[3]), vector())
             target = dict(generation=generation, strip="response", index=0)
-            result = list(inspect_layers(target, frame[METRICS], prompt_metrics, context, 0))[0]
+            result = list(inspect_layers(target, frame["metrics"], prompt_metrics, context, 0))[0]
             np.testing.assert_allclose(result[3]["layers"][-1]["probability"], rows[0]["raw_probability"], rtol=1e-5)
             # A steered pass keeps no cache, so the cache view says so
             # rather than asking for an inspection that would keep none.
             self.assertTrue(result[3]["steered"])
             page, _slider = render_kv_cache(result[3], 1, "Key norm")
             self.assertIn("A steered inspection keeps no key-value cache", page)
-            copied = conversation.copy_turns(frame[TURNS])
+            copied = conversation.copy_turns(frame["turns"])
             copied[-1]["steering"]["layer"] = 999
-            self.assertEqual(steering.expand(frame[TURNS][-1]["steering"]), vector())
+            self.assertEqual(steering.expand(frame["turns"][-1]["steering"]), vector())
 
 
 class ExtractionTests(unittest.TestCase):

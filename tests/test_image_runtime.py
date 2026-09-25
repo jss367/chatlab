@@ -16,7 +16,7 @@ from chatlab import image_runtime
 from chatlab import device_memory
 from chatlab import model_cache
 import settings_sandbox
-from fake_pipeline import FakePipeline, FakeTokenizer
+from fake_pipeline import FakePipeline, FakeClipTokenizer
 from chatlab.image_runtime import ImageRequest
 from chatlab.model_cache import (
     IMAGE_KIND,
@@ -2034,7 +2034,7 @@ class TokenizerTests(unittest.TestCase):
     """Reading the prompt's tokens off a pipeline."""
 
     def test_a_tokenizer_that_will_not_answer_costs_the_maps_only(self):
-        class Broken(FakeTokenizer):
+        class Broken(FakeClipTokenizer):
             def __call__(self, text, truncation=True, **kwargs):
                 raise ValueError("no vocabulary")
 

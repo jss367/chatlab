@@ -14,7 +14,7 @@ from chatlab import model_inspection
 from chatlab.kv_cache import CacheLayer
 from chatlab.model_runtime import ModelManager
 from chatlab.text_generation import ModelChanged
-from test_mlx_runtime import needs_mlx, tiny_llama
+from mlx_support import needs_mlx, tiny_llama
 from tiny_tokenizer import build
 from chatlab.ui import inspection, runtime
 
@@ -215,7 +215,7 @@ class TorchCacheTests(unittest.TestCase):
 class MlxCacheTests(unittest.TestCase):
     def test_the_view_matches_the_mlx_cache(self):
         from chatlab.mlx_runtime import MlxEngine
-        from test_streaming import FakeTokenizer
+        from fakes import FakeTokenizer
 
         model = tiny_llama()
         manager = ModelManager()

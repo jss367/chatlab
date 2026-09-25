@@ -13,9 +13,10 @@ from chatlab.extensions.maze_experiments.maze import Maze, generate, unavoidable
 from chatlab.extensions.maze_experiments.page import build_page
 from chatlab.extensions.maze_experiments.team import TeamEpisode, from_payload, stream_team
 from chatlab.extensions.maze_experiments.team_page import response_view, team_board, team_status, team_timeline
-from test_maze import Manager, scored
-from test_maze_steering import SteeringManager, VECTOR
-from test_maze_team import call
+from maze_support import Manager, scored
+from maze_support import SteeringManager, VECTOR
+from maze_support import call
+from ui_support import listeners_by_name
 
 CORRIDOR = Maze((".....", "#####", "#####", "#####", "#####"), (0, 0), (0, 4))
 ROOM = Maze(("...", "...", "..."), (0, 0), (0, 2))
@@ -205,7 +206,7 @@ class TeamSteeringPageTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = listeners_by_name(demo)
                 vector_path = Path(directory) / "vector.json"
                 vector_path.write_text(json.dumps(VECTOR))
                 imported = callbacks["team_import_vector"].fn(str(vector_path))

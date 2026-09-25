@@ -10,11 +10,8 @@ import gradio as gr
 from chatlab.text_generation import ModelChanged
 from chatlab.ui import runtime, token_menu
 from chatlab.conversation import forget_measurements, to_json, turn_entries
-from test_app_flow import (
-    CONTEXT_IDS, FIXED, METRICS, PROMPT_METRICS, PROMPT_NOTE, PROMPT_STRIP,
-    SETTINGS, STATUS, TRACE, TURNS, metrics_of, select, strip_of, token_span,
-)
-from test_streaming import FakeTokenizer, SentencePieceTokenizer, loaded_manager
+from conversation_support import FIXED, SETTINGS, metrics_of, select, strip_of, token_span
+from fakes import FakeTokenizer, SentencePieceTokenizer, loaded_manager
 import settings_sandbox
 
 
@@ -63,12 +60,12 @@ def settled(frames):
     them; a test reading only the last frame would not.
     """
 
-    final = list(frames[-1])
-    for slot, value in enumerate(final):
-        if value == gr.skip():
-            final[slot] = next(
-                (frame[slot] for frame in reversed(frames) if frame[slot] != gr.skip()),
-                value,
+    final = frames[-1].copy()
+    for name in final.names:
+        if final[name] == gr.skip():
+            final[name] = next(
+                (frame[name] for frame in reversed(frames) if frame[name] != gr.skip()),
+                final[name],
             )
     return final
 
@@ -86,13 +83,13 @@ class PromptEditTests(unittest.TestCase):
         self.frame = respond()
 
     def prompt_ids(self, frame=None):
-        _generation, ids, _load_id, *_steering = (frame or self.frame)[CONTEXT_IDS]
+        _generation, ids, _load_id, *_steering = (frame or self.frame)["context_ids"]
         return list(ids)
 
     def payload(self, index=MESSAGE_AT, frame=None, request="open-1"):
         frame = frame or self.frame
         markup = token_menu.prompt_menu_payload(
-            frame[PROMPT_METRICS], frame[CONTEXT_IDS], request, select(index)
+            frame["prompt_metrics"], frame["context_ids"], request, select(index)
         )
         return json.loads(
             html.unescape(markup.split('data-token-menu="')[1].split('"')[0])
@@ -105,10 +102,10 @@ class PromptEditTests(unittest.TestCase):
         runtime.MANAGER.model.step = 0
         return settled(list(token_menu.edit_prompt_from_menu(
             json.dumps(action),
-            frame[CONTEXT_IDS],
-            frame[PROMPT_METRICS],
+            frame["context_ids"],
+            frame["prompt_metrics"],
             "",
-            self.frame[TURNS] if turns is None else turns,
+            self.frame["turns"] if turns is None else turns,
             *settings,
         )))
 
@@ -129,7 +126,7 @@ class PromptEditTests(unittest.TestCase):
         self.assertEqual(payload["error"], "")
 
     def test_the_menu_escapes_token_text_and_keeps_the_request_id(self):
-        self.frame[PROMPT_METRICS][1][MESSAGE_AT]["text"] = '<img src=x onerror="bad()">'
+        self.frame["prompt_metrics"][1][MESSAGE_AT]["text"] = '<img src=x onerror="bad()">'
         payload = self.payload(request='"<request>')
         self.assertEqual(payload["text"], '<img src=x onerror="bad()">')
         self.assertEqual(payload["request"], '"<request>')
@@ -142,7 +139,7 @@ class PromptEditTests(unittest.TestCase):
 
     def test_the_menu_refuses_a_prompt_that_is_no_longer_on_screen(self):
         stale = self.frame
-        self.frame = settled(list(app.retry_last("", stale[TURNS], *SETTINGS)))
+        self.frame = settled(list(app.retry_last("", stale["turns"], *SETTINGS)))
         payload = self.payload(frame=stale)
         self.assertIsNone(payload["selection"])
         self.assertEqual(payload["error"], app.PROMPT_EDIT_UNAVAILABLE)
@@ -153,8 +150,8 @@ class PromptEditTests(unittest.TestCase):
         # with one generated from the scored text.
         runtime.MANAGER.model.step = 0
         scored = list(app.score_text("Hello world", "hi", False, app.DEFAULT_COLOR_SCALE))[-1]
-        frame = list(self.frame)
-        frame[PROMPT_METRICS], frame[CONTEXT_IDS] = scored[4], scored[-1]
+        frame = self.frame.copy()
+        frame["prompt_metrics"], frame["context_ids"] = scored[4], scored[-1]
 
         payload = self.payload(index=0, frame=frame)
         self.assertIsNone(payload["selection"])
@@ -162,8 +159,8 @@ class PromptEditTests(unittest.TestCase):
 
         selection = {"source": "prompt", "generation": scored[4][0], "index": 0}
         final = self.edit(dict(kind="text", text="bye", selection=selection), frame=frame)
-        self.assertIn(app.PROMPT_EDIT_SCORED, final[STATUS])
-        self.assertEqual(final[TURNS], self.frame[TURNS])
+        self.assertIn(app.PROMPT_EDIT_SCORED, final["status"])
+        self.assertEqual(final["turns"], self.frame["turns"])
 
     # -------------------------------------------------------------- editing
 
@@ -175,9 +172,9 @@ class PromptEditTests(unittest.TestCase):
         expected[MESSAGE_AT] = chosen["token_id"]
         self.assertEqual(self.prompt_ids(final), expected)
         self.assertEqual(
-            strip_of(final[PROMPT_STRIP])[MESSAGE_AT][0], chosen["text"]
+            strip_of(final["prompt_strip"])[MESSAGE_AT][0], chosen["text"]
         )
-        self.assertIn(f"Prompt token {MESSAGE_AT + 1}", final[STATUS])
+        self.assertIn(f"Prompt token {MESSAGE_AT + 1}", final["status"])
 
     def test_typed_text_is_encoded_at_that_position(self):
         final = self.replace_with_text("Hello")
@@ -187,13 +184,13 @@ class PromptEditTests(unittest.TestCase):
 
     def test_text_the_tokenizer_cannot_place_exactly_is_refused(self):
         final = self.replace_with_text("unspellable")
-        self.assertIn("cannot be inserted exactly", final[STATUS])
-        self.assertEqual(final[TURNS], self.frame[TURNS])
+        self.assertIn("cannot be inserted exactly", final["status"])
+        self.assertEqual(final["turns"], self.frame["turns"])
 
     def test_an_empty_replacement_is_refused(self):
         final = self.replace_with_text("")
-        self.assertIn(app.PROMPT_EDIT_EMPTY, final[STATUS])
-        self.assertEqual(final[TURNS], self.frame[TURNS])
+        self.assertIn(app.PROMPT_EDIT_EMPTY, final["status"])
+        self.assertEqual(final["turns"], self.frame["turns"])
 
     def test_the_replacement_can_be_longer_than_the_token_it_replaces(self):
         final = self.replace_with_text("Hello world")
@@ -218,7 +215,7 @@ class PromptEditTests(unittest.TestCase):
         # The ids are the exact record: the messages beside them would be
         # rendered by the template, which is what the edit stepped around.
         self.assertEqual(
-            final[TRACE]["sampling"]["edited_prompt"],
+            final["trace"]["sampling"]["edited_prompt"],
             {
                 "position": MESSAGE_AT + 1,
                 "original": "hi",
@@ -227,27 +224,27 @@ class PromptEditTests(unittest.TestCase):
             },
         )
         self.assertEqual(self.prompt_ids(final), expected)
-        self.assertIn("was replaced with 'Hello'", final[PROMPT_NOTE])
-        self.assertIn("Prompt token 3: 'Hello' instead of 'hi'", final[STATUS])
+        self.assertIn("was replaced with 'Hello'", final["prompt_note"])
+        self.assertIn("Prompt token 3: 'Hello' instead of 'hi'", final["status"])
 
     def test_the_conversation_still_says_what_was_asked(self):
         final = self.replace_with_text("Hello")
         self.assertEqual(
-            [turn["content"] for turn in final[TURNS]][:1],
-            [turn["content"] for turn in self.frame[TURNS]][:1],
+            [turn["content"] for turn in final["turns"]][:1],
+            [turn["content"] for turn in self.frame["turns"]][:1],
         )
-        self.assertEqual(len(final[TURNS]), len(self.frame[TURNS]))
+        self.assertEqual(len(final["turns"]), len(self.frame["turns"]))
 
     def test_the_next_message_is_prompted_from_the_conversation_again(self):
         # The edit answers one reply. Nothing about it survives into the next
         # prompt, which the chat template renders as it always would.
         edited = self.replace_with_text("Hello")
-        after = respond(turns=edited[TURNS])
+        after = respond(turns=edited["turns"])
         self.assertEqual(
             runtime.MANAGER.tokenizer.decode(self.prompt_ids(after)),
-            f"User: hi\nAssistant: {edited[TURNS][-1]['content']}\nUser: hi\nAssistant:",
+            f"User: hi\nAssistant: {edited["turns"][-1]['content']}\nUser: hi\nAssistant:",
         )
-        self.assertIsNone(after[TRACE]["sampling"].get("edited_prompt"))
+        self.assertIsNone(after["trace"]["sampling"].get("edited_prompt"))
 
     def test_the_system_prompt_setting_does_not_rebuild_the_edited_prompt(self):
         # A setting changed after the reply cannot quietly re-render the
@@ -262,8 +259,8 @@ class PromptEditTests(unittest.TestCase):
         # Only the prompt was replayed, so the response controls are live.
         settings = tuple((FIXED | {"assistant_prefill": " world"}).values())
         final = self.replace_with_text("Hello", settings=settings)
-        self.assertEqual(final[TRACE]["sampling"]["assistant_prefill"], " world")
-        self.assertEqual(metrics_of(final[METRICS])[0]["token_id"], WORLD)
+        self.assertEqual(final["trace"]["sampling"]["assistant_prefill"], " world")
+        self.assertEqual(metrics_of(final["metrics"])[0]["token_id"], WORLD)
 
     # ------------------------------------------- branching the edited reply
 
@@ -272,14 +269,14 @@ class PromptEditTests(unittest.TestCase):
 
         payload = json.loads(html.unescape(
             token_menu.token_menu_payload(
-                frame[TURNS], frame[METRICS], "branch",
-                token_span(frame[TURNS], index),
+                frame["turns"], frame["metrics"], "branch",
+                token_span(frame["turns"], index),
             ).split('data-token-menu="')[1].split('"')[0]
         ))
         runtime.MANAGER.model.step = 0
         return settled(list(token_menu.branch_from_menu(
             json.dumps(action | {"selection": payload["selection"]}),
-            "", frame[TURNS], *SETTINGS,
+            "", frame["turns"], *SETTINGS,
         )))
 
     def test_branching_the_reply_replays_the_prompt_it_was_given(self):
@@ -289,7 +286,7 @@ class PromptEditTests(unittest.TestCase):
         edited = self.replace_with_text("Hello")
         branched = self.branch(edited, {"kind": "regenerate"})
         self.assertEqual(self.prompt_ids(branched), self.prompt_ids(edited))
-        self.assertIn("Regenerating from token 1", branched[STATUS])
+        self.assertIn("Regenerating from token 1", branched["status"])
 
     def test_a_typed_branch_of_the_reply_replays_it_too(self):
         edited = self.replace_with_text("Hello")
@@ -300,15 +297,15 @@ class PromptEditTests(unittest.TestCase):
         edited = self.replace_with_text("Hello")
         payload = json.loads(html.unescape(
             token_menu.token_menu_payload(
-                edited[TURNS], edited[METRICS], "next", token_span(edited[TURNS], 0),
+                edited["turns"], edited["metrics"], "next", token_span(edited["turns"], 0),
             ).split('data-token-menu="')[1].split('"')[0]
         ))
         _detail, pick = app.choose_alternative(
-            edited[TURNS], app.empty_metrics(), edited[PROMPT_METRICS],
+            edited["turns"], app.empty_metrics(), edited["prompt_metrics"],
             payload["selection"], select(0),
         )
         runtime.MANAGER.model.step = 0
-        stepped = settled(list(app.next_token(pick, "", edited[TURNS], *SETTINGS)))
+        stepped = settled(list(app.next_token(pick, "", edited["turns"], *SETTINGS)))
         self.assertEqual(self.prompt_ids(stepped), self.prompt_ids(edited))
 
     def test_an_ordinary_reply_is_still_branched_against_its_template(self):
@@ -319,11 +316,11 @@ class PromptEditTests(unittest.TestCase):
         # It is only ever read beside them, and replaying it without them
         # would feed a prompt for a reply nothing is left to replay.
         edited = self.replace_with_text("Hello")
-        self.assertIn("prompt_edit", edited[TURNS][-1])
-        forgotten = forget_measurements(edited[TURNS], len(edited[TURNS]) - 1)
+        self.assertIn("prompt_edit", edited["turns"][-1])
+        forgotten = forget_measurements(edited["turns"], len(edited["turns"]) - 1)
         self.assertNotIn("prompt_edit", forgotten[-1])
-        self.assertNotIn("prompt_edit", json.dumps(turn_entries(edited[TURNS])))
-        self.assertNotIn("prompt_edit", to_json(edited[TURNS]))
+        self.assertNotIn("prompt_edit", json.dumps(turn_entries(edited["turns"])))
+        self.assertNotIn("prompt_edit", to_json(edited["turns"]))
 
     # ------------------------------------------------------------ refusals
 
@@ -333,15 +330,15 @@ class PromptEditTests(unittest.TestCase):
             final = self.replace_with_text("Hello")
         finally:
             runtime.MANAGER.release_generation()
-        self.assertEqual(final[TURNS], gr.skip())
-        self.assertEqual(final[STATUS], app.BUSY_STATUS)
+        self.assertEqual(final["turns"], gr.skip())
+        self.assertEqual(final["status"], app.BUSY_STATUS)
 
     def test_an_edit_is_refused_after_a_model_reload(self):
         payload = self.payload()
         runtime.MANAGER.load_count += 1
         final = self.edit(dict(kind="text", text="Hello", selection=payload["selection"]))
-        self.assertIn(app.PROMPT_EDIT_MODEL_CHANGED, final[STATUS])
-        self.assertEqual(final[TURNS], self.frame[TURNS])
+        self.assertIn(app.PROMPT_EDIT_MODEL_CHANGED, final["status"])
+        self.assertEqual(final["turns"], self.frame["turns"])
 
     def test_a_reload_between_the_check_and_the_encoding_is_refused(self):
         payload = self.payload()
@@ -357,46 +354,46 @@ class PromptEditTests(unittest.TestCase):
             final = self.edit(
                 dict(kind="text", text="Hello", selection=payload["selection"])
             )
-        self.assertIn(app.PROMPT_EDIT_MODEL_CHANGED, final[STATUS])
-        self.assertEqual(final[TURNS], self.frame[TURNS])
+        self.assertIn(app.PROMPT_EDIT_MODEL_CHANGED, final["status"])
+        self.assertEqual(final["turns"], self.frame["turns"])
 
     def test_an_old_selection_cannot_edit_a_newer_prompt(self):
         stale = self.frame
-        newer = settled(list(app.retry_last("", stale[TURNS], *SETTINGS)))
+        newer = settled(list(app.retry_last("", stale["turns"], *SETTINGS)))
         payload = self.payload(frame=stale)
         final = self.edit(
             dict(kind="text", text="Hello", selection={"source": "prompt",
-                                                       "generation": stale[PROMPT_METRICS][0],
+                                                       "generation": stale["prompt_metrics"][0],
                                                        "index": MESSAGE_AT}),
-            turns=newer[TURNS],
+            turns=newer["turns"],
             frame=stale,
         )
         self.assertIsNone(payload["selection"])
-        self.assertIn(app.PROMPT_EDIT_UNAVAILABLE, final[STATUS])
-        self.assertEqual(final[TURNS], newer[TURNS])
+        self.assertIn(app.PROMPT_EDIT_UNAVAILABLE, final["status"])
+        self.assertEqual(final["turns"], newer["turns"])
 
     def test_an_alternative_that_is_not_the_tokens_own_is_refused(self):
         payload = self.payload()
         final = self.edit(dict(kind="candidate", index=99, selection=payload["selection"]))
-        self.assertIn("not one of this token", final[STATUS])
-        self.assertEqual(final[TURNS], self.frame[TURNS])
+        self.assertIn("not one of this token", final["status"])
+        self.assertEqual(final["turns"], self.frame["turns"])
 
     def test_an_invalid_action_is_a_refusal(self):
         for action in ("not json", "{}", "null", '{"kind": "regenerate"}'):
             with self.subTest(action=action):
                 final = settled(list(token_menu.edit_prompt_from_menu(
-                    action, self.frame[CONTEXT_IDS], self.frame[PROMPT_METRICS],
-                    "", self.frame[TURNS], *SETTINGS,
+                    action, self.frame["context_ids"], self.frame["prompt_metrics"],
+                    "", self.frame["turns"], *SETTINGS,
                 )))
-                self.assertIn(app.PROMPT_EDIT_UNAVAILABLE, final[STATUS])
-                self.assertEqual(final[TURNS], self.frame[TURNS])
+                self.assertIn(app.PROMPT_EDIT_UNAVAILABLE, final["status"])
+                self.assertEqual(final["turns"], self.frame["turns"])
 
     def test_an_edit_with_nothing_to_answer_is_refused(self):
         payload = self.payload()
         final = self.edit(
             dict(kind="text", text="Hello", selection=payload["selection"]), turns=[]
         )
-        self.assertIn(app.PROMPT_EDIT_NO_MESSAGE, final[STATUS])
+        self.assertIn(app.PROMPT_EDIT_NO_MESSAGE, final["status"])
 
 
 class PromptReplacementEncodingTests(unittest.TestCase):

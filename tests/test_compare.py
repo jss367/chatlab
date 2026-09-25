@@ -10,9 +10,10 @@ from chatlab import compare
 import settings_sandbox
 from chatlab.model_loading import LoadedModel
 from chatlab.text_generation import ModelChanged
-from test_streaming import EOS_ID, loaded_manager
 from chatlab.ui import compare as controls
 from chatlab.ui import runtime
+from fakes import EOS_ID, loaded_manager
+from compare_support import metric, run
 
 
 def setUpModule():
@@ -21,56 +22,6 @@ def setUpModule():
 
 def tearDownModule():
     settings_sandbox.stop()
-
-
-def metric(position, token_id, surprise, *, top="a", top_id=1, scored=True, entropy=1.0, rank=1):
-    """One token's measurements, in the shape the runtime publishes them."""
-
-    return {
-        "position": position,
-        "token_id": token_id,
-        "text": f"t{token_id}",
-        "display_text": f"t{token_id}",
-        "category": "Top choice",
-        "raw_rank": rank,
-        "raw_probability": 0.5,
-        "sampling_probability": 0.5,
-        "surprise_bits": surprise,
-        "probability_mass_above": 0.0,
-        "entropy_bits": entropy,
-        "top1_margin": 0.1,
-        "sampling_shift_bits": 0.0,
-        "top_candidates": [{"token_id": top_id, "text": top, "probability": 0.5}],
-        "scored": scored,
-        "segment": "response",
-        "unscored_reason": "",
-    }
-
-
-def run(metrics, *, kind=compare.REPLY, model_id="fake/model", **settings):
-    return {
-        "kind": kind,
-        "model_id": model_id,
-        "load_id": f"{model_id}#1",
-        "device_name": "CPU",
-        "precision": "float32",
-        "prompt": "hello",
-        "text": "hello",
-        "metrics": metrics,
-        "settings": {
-            "system_prompt": "",
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "top_k": 0,
-            "skip_top_below": 0.0,
-            "max_new_tokens": 8,
-            "seed": 1,
-            "assistant_prefill": "",
-            "thinking_mode": "default",
-            "steering": None,
-        } | settings,
-        "seconds": 0.1,
-    }
 
 
 class ReadingTests(unittest.TestCase):
@@ -851,7 +802,7 @@ class HandlerTests(unittest.TestCase):
         # Generation decodes without these, so a decode that kept them would
         # disagree with the reply's own text — and two models spelling their
         # stop token differently would part at their last character.
-        from test_streaming import EOS_ID
+        from fakes import EOS_ID
 
         metrics = [metric(1, 0, 1.0), metric(2, EOS_ID, 1.0)]
         decoded, ends = controls._decoded_spans(metrics)
@@ -887,7 +838,7 @@ class HandlerTests(unittest.TestCase):
     def test_a_measured_special_token_stays_in_the_recorded_passage(self):
         # Every measured token is the reader's own; score_text scores a
         # literal end marker as written, so the decode must keep it.
-        from test_streaming import EOS_ID
+        from fakes import EOS_ID
 
         metrics = [metric(1, 0, 1.0), metric(2, EOS_ID, 1.0)]
         kept, ends = controls._decoded_spans(metrics, literal_prefix=len(metrics))
@@ -926,7 +877,7 @@ class HandlerTests(unittest.TestCase):
         # stop marker adds no characters. Decoded on its own it comes back as
         # the marker's name, which is what made the earlier fix a no-op.
         import numpy as np
-        from test_streaming import EOS_ID, PIECES
+        from fakes import EOS_ID, PIECES
 
         probabilities = np.full(len(PIECES), 0.01)
         probabilities[EOS_ID] = 0.9

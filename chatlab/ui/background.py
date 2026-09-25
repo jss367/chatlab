@@ -3,6 +3,10 @@
 Only the worker advances or closes a model iterator. It never writes Gradio
 components. Navigation and polling share a queue, so a frame cannot land in a
 conversation selected between the handler and Gradio's state update.
+
+Frames are held and rendered by output name (see ui.outputs); the listeners
+bound here are the one place those names are turned into components, through
+the table the layout hands ``ConversationEvents``.
 """
 
 from __future__ import annotations
@@ -24,29 +28,28 @@ from chatlab.conversation import (
     display_messages, put_branch, put_branch_sampling,
 )
 from chatlab.ui.common import STOP_LABEL, finalize_partial
-from chatlab.ui.generation import CHAT_OUTPUT_NAMES
+from chatlab.ui.outputs import EDITOR_OUTPUT_NAMES, POLL_OUTPUT_NAMES, positional, skipped
 from chatlab.ui.panel import restore_chat_metrics_generation, transcript_update
 
 logger = logging.getLogger(__name__)
-NAMES = {name: i for i, name in enumerate(CHAT_OUTPUT_NAMES)}
 
-
-def skipped(value):
-    return isinstance(value, dict) and value == gr.skip()
+# The frame entries that are a stamp and a list of token measurements. The
+# measurements are never changed once published, so a copy shares them.
+MEASUREMENT_OUTPUTS = ("metrics", "prompt_metrics", "chat_metrics")
 
 
 def copy_frame(values):
     """Copy mutable UI containers while sharing immutable token measurements."""
 
     copied = {}
-    for index, value in values.items():
-        if index == NAMES["turns"] and isinstance(value, list):
-            copied[index] = copy_turns(value)
-        elif index in (NAMES["metrics"], NAMES["prompt_metrics"], NAMES["chat_metrics"]):
+    for name, value in values.items():
+        if name == "turns" and isinstance(value, list):
+            copied[name] = copy_turns(value)
+        elif name in MEASUREMENT_OUTPUTS:
             generation, metrics = value
-            copied[index] = generation, list(metrics)
+            copied[name] = generation, list(metrics)
         else:
-            copied[index] = copy.deepcopy(value)
+            copied[name] = copy.deepcopy(value)
     return copied
 
 
@@ -72,9 +75,9 @@ class ConversationJob:
 
     def _publish(self, frame):
         with self.lock:
-            changed = {i: value for i, value in enumerate(frame) if not skipped(value)}
+            changed = {name: value for name, value in frame.items() if not skipped(value)}
             snapshot = copy_frame(changed)
-            turns = snapshot.get(NAMES["turns"])
+            turns = snapshot.get("turns")
             origin = turns[-1].pop("_fork_origin", None) if turns else None
             if origin and not self.fork_created:
                 parent = self.owner
@@ -106,7 +109,7 @@ class ConversationJob:
             self.frame.update(snapshot)
             self.pending.update(snapshot)
             self.version += 1
-            turns = self.frame.get(NAMES["turns"])
+            turns = self.frame.get("turns")
             if isinstance(turns, list):
                 put_branch(self.saved, self.owner, turns)
                 # Persist even if the browser is hidden or disconnected. This
@@ -151,9 +154,10 @@ class ConversationJob:
                     frame = next(iterator, None)
                     if frame is None:
                         break
-                    frame = list(frame)
-                    frame[NAMES["prompt"]] = gr.skip()
-                    self._publish(frame)
+                    # Only the opening frame may write the message box: it
+                    # empties it for the message just sent, and a later frame
+                    # putting it back would erase what the reader typed since.
+                    self._publish({name: value for name, value in frame.items() if name != "prompt"})
         except Exception:
             logger.exception("Conversation generation failed")
             error = "Generation failed. Any partial response was kept."
@@ -162,18 +166,15 @@ class ConversationJob:
 
     def _finish(self, error=None):
         with self.lock:
-            frame = [
-                gr.skip()
-                for _ in range(max(len(CHAT_OUTPUT_NAMES), max(self.frame, default=0) + 1))
-            ]
-            turns = self.frame.get(NAMES["turns"])
+            frame = {}
+            turns = self.frame.get("turns")
             if isinstance(turns, list):
                 turns = copy_turns(turns)
                 finalize_partial(turns)
-                frame[NAMES["turns"]] = turns
-                frame[NAMES["chatbot"]] = display_messages(turns)[0]
+                frame["turns"] = turns
+                frame["chatbot"] = display_messages(turns)[0]
             if error or self.cancel.is_set():
-                frame[NAMES["status"]] = error or "Stopped. Any partial response was kept."
+                frame["status"] = error or "Stopped. Any partial response was kept."
             self.running = False
             self._publish(frame)
 
@@ -252,39 +253,51 @@ class ConversationJob:
             )
             if current:
                 values = copy_frame(self.frame if switched else self.pending)
-                metrics = self.frame.get(NAMES["metrics"])
+                metrics = self.frame.get("metrics")
                 if metrics is not None:
                     restore_chat_metrics_generation(metrics[0])
-                values[NAMES["strip"]] = transcript_update(turns, scale)
+                values["strip"] = transcript_update(turns, scale)
                 # Navigation must never resurrect the prompt that launched a job.
                 if switched and self.rendered is not None:
-                    values.pop(NAMES["prompt"], None)
+                    values.pop("prompt", None)
                 # Editor controls and token selections are local to the view.
                 if switched and self.rendered is not None:
-                    for i in range(len(CHAT_OUTPUT_NAMES), len(CHAT_OUTPUT_NAMES) + 2):
-                        values.pop(i, None)
+                    for name in EDITOR_OUTPUT_NAMES:
+                        values.pop(name, None)
             elif self.running:
-                values[NAMES["status"]] = (
+                values["status"] = (
                     f"{self.owner} is generating. You can browse conversations; "
                     "wait for it to finish or press Stop before sending another message."
                 )
             elif self.rendered is not None and self.rendered[2]:
-                values[NAMES["status"]] = (
-                    f"{self.owner}: {self.frame.get(NAMES['status'], 'Finished.')}"
+                values["status"] = (
+                    f"{self.owner}: {self.frame.get('status', 'Finished.')}"
                 )
-            values[NAMES["send"]], values[NAMES["stop"]] = self.controls(forks)
+            values["send"], values["stop"] = self.controls(forks)
             self.pending = {}
             self.rendered = key
             return values, forks, turns
 
 
 class ConversationEvents:
-    """Adapt existing handlers without moving inference onto the UI event queue."""
+    """Adapt existing handlers without moving inference onto the UI event queue.
 
-    def __init__(self, state, turns, forks, picker, scale, chat_outputs, queue):
-        self.state, self.turns, self.forks = state, turns, forks
-        self.picker, self.scale = picker, scale
-        self.chat_outputs, self.queue = chat_outputs, queue
+    ``outputs`` is the layout's one table from output name to component. The
+    listeners bound here register their outputs as names from ui.outputs, and
+    what their handlers return - a Frame, keyed by those names - reaches the
+    components through this table and nowhere else.
+    """
+
+    def __init__(self, state, outputs, scale, queue):
+        self.state, self.scale, self.queue = state, scale, queue
+        self.outputs = dict(outputs)
+        self.turns, self.forks = self.outputs["turns"], self.outputs["forks"]
+        self.picker = self.outputs["conversation_list"]
+
+    def components(self, names):
+        """The components registered under ``names``, in that order."""
+
+        return [self.outputs[name] for name in names]
 
     def bind(
         self,
@@ -299,8 +312,11 @@ class ConversationEvents:
         clear=False,
         **kwargs,
     ):
+        """Wire ``fn`` to ``trigger``; ``outputs`` names what its frames may publish."""
+
         inputs = list(inputs or [])
-        outputs = list(outputs)
+        names = tuple(outputs)
+        outputs = self.components(names)
         actual_inputs = list(
             dict.fromkeys([*inputs, self.state, self.turns, self.forks, self.scale])
         )
@@ -311,12 +327,11 @@ class ConversationEvents:
                     self.turns,
                     self.forks,
                     self.picker,
-                    self.chat_outputs[NAMES["send"]],
-                    self.chat_outputs[NAMES["stop"]],
-                    self.chat_outputs[NAMES["status"]],
+                    *self.components(("send", "stop", "status")),
                 ]
             )
         )
+        status_output = self.outputs["status"]
         hints = typing.get_type_hints(fn)
         event = next(
             (
@@ -343,13 +358,13 @@ class ConversationEvents:
             result = {}
             if stop:
                 job.stop()
-                result[self.chat_outputs[NAMES["status"]]] = (
+                result[status_output] = (
                     f"Stopping {job.owner}…" if job.running else "No response is running."
                 )
             elif job.running and (
                 generation or (not navigation and (clear or forks["active"] == job.owner))
             ):
-                result[self.chat_outputs[NAMES["status"]]] = (
+                result[status_output] = (
                     f"{job.owner} is generating. Press Stop or wait for it to finish first."
                 )
             else:
@@ -366,14 +381,16 @@ class ConversationEvents:
                             job.running = False
                         raise
                     values, forks, turns = job.render(forks, turns, data[self.scale])
-                    result.update(
-                        {outputs[i]: value for i, value in values.items() if i < len(outputs)}
-                    )
+                    # The render carries whatever the run has published, which
+                    # can be more than this listener registered - the timer's
+                    # listener is the one registered for all of it.
+                    shown = {name: value for name, value in values.items() if name in names}
+                    result.update(zip(outputs, positional(shown, names)))
                 else:
                     returned = fn(
                         *call_args, **({"preserve_source": owns_source} if navigation else {})
                     )
-                    result.update(zip(outputs, returned))
+                    result.update(zip(outputs, positional(returned, names)))
                     if not skipped(result.get(self.forks, gr.skip())):
                         forks = result[self.forks]
                     if not skipped(result.get(self.turns, gr.skip())):
@@ -392,7 +409,7 @@ class ConversationEvents:
                                 )
                                 if forks["active"] == job.owner:
                                     turns = copy_turns(forks["branches"][job.owner])
-                        result[self.chat_outputs[NAMES["chatbot"]]] = display_messages(turns)[0]
+                        result[self.outputs["chatbot"]] = display_messages(turns)[0]
                     else:
                         # Retire completed frames before an edit can be
                         # replayed by the next timer tick.
@@ -407,14 +424,12 @@ class ConversationEvents:
                             job.rendered = ("", -1, job.running, False)
                     put_branch(forks, forks["active"], turns)
                     if navigation and job.running:
-                        result[self.chat_outputs[NAMES["status"]]] = (
+                        result[status_output] = (
                             f"{job.owner} is generating. You can browse conversations or press Stop."
                         )
             result[self.turns], result[self.forks] = turns, forks
             result[self.picker] = job.choices(forks, turns)
-            result[self.chat_outputs[NAMES["send"]]], result[self.chat_outputs[NAMES["stop"]]] = (
-                job.controls(forks)
-            )
+            result[self.outputs["send"]], result[self.outputs["stop"]] = job.controls(forks)
             library.write(library.as_seen(forks, turns))
             return tuple(result.get(component, gr.skip()) for component in actual_outputs)
 
@@ -436,13 +451,15 @@ class ConversationEvents:
         return trigger(handler, actual_inputs, actual_outputs, **kwargs)
 
     def poll(self, job, turns, forks, scale):
+        """The timer's repaint, for a listener registered with POLL_OUTPUT_NAMES."""
+
         values, merged, current = job.render(forks, turns, scale)
         if not values:
-            return (gr.skip(),) * (len(self.chat_outputs) + 2)
-        result = [values.get(i, gr.skip()) for i in range(len(self.chat_outputs))]
-        if merged["active"] == job.owner and NAMES["turns"] in values:
-            result[NAMES["turns"]] = current
-        return (*result, merged, job.choices(merged, current))
+            return positional({}, POLL_OUTPUT_NAMES)
+        if merged["active"] == job.owner and "turns" in values:
+            values["turns"] = current
+        values["forks"], values["conversation_list"] = merged, job.choices(merged, current)
+        return positional(values, POLL_OUTPUT_NAMES)
 
     def refresh_conversation_list(self, turns, forks, job):
         seen = library.as_seen(forks, turns)
