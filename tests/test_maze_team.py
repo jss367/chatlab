@@ -11,19 +11,11 @@ from chatlab.extensions.maze_experiments.maze import Maze, parse_call
 from chatlab.extensions.maze_experiments.page import build_page
 from chatlab.extensions.maze_experiments.team import (MESSAGE_LIMIT, TeamEpisode, from_payload, stream_team, team_tools)
 from chatlab.extensions.maze_experiments.team_page import mail_text, team_board, team_timeline
-from test_maze import MAZE, Manager, scored
+from maze_support import call, Manager, MAZE, MAZE_ID, scored
+from ui_support import listeners_by_name
 
-MAZE_ID = MAZE.tool_id()
 # No walls, so a team placed on its start shares one cell.
 OPEN = Maze(("...", "...", "..."), (1, 1), (0, 2))
-
-
-def call(direction, message=None, maze_id=MAZE_ID):
-    args = {"maze_id": maze_id, "direction": direction}
-    if message is not None:
-        args["message"] = message
-    text = "<tool_call>\n" + json.dumps({"name": "move", "arguments": args}) + "\n</tool_call>"
-    return text, list(text.encode()) + [0]
 
 
 def say(text):
@@ -311,7 +303,7 @@ class TeamPageTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = listeners_by_name(demo)
                 prepare = callbacks["team_prepare_episode"]
                 values = (2, True, "any", 3, 1, 2, .9, "coordinates", "", "Be brief.", "Reach the star.",
                           .7, 1, 200, 1000, 10)

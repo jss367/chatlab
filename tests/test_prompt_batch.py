@@ -25,7 +25,7 @@ from chatlab.prompt_batch import (
 from chatlab.trace_export import build_trace, traces_to_csv
 from chatlab.ui import runtime
 
-from test_streaming import EOS_ID, PIECES, loaded_manager
+from fakes import EOS_ID, PIECES, loaded_manager
 
 
 def setUpModule():

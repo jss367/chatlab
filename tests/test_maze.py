@@ -11,109 +11,19 @@ from unittest import mock
 from chatlab.extensions.maze_experiments.maze import PASSAGES, Maze, apply_call, call_text, default_instruction, generate, parse_call
 from chatlab.extensions.maze_experiments.runner import Episode, TERMINAL, context_messages, fork_token_edit, from_payload, stream_episode
 from chatlab.model_loading import LoadedModel
-from chatlab.model_runtime import GENERATING, ModelManager
+from chatlab.model_runtime import ModelManager
 from chatlab.extension_api import ModelService
 from chatlab.extension_api import TokenInspector
 from chatlab.token_metrics import unscored_metric
 from chatlab.extensions.maze_experiments.page import board, build_page, context_view, export_run, scenario_values, status, views, timeline, transport_text
 import gradio as gr
-
-CONFIG = dict(supplied_moves=0, interrupt_after=0, interruption_text="Distracted", prefix_tokens=2,
-              temperature=.7, sampling_seed=99, per_turn_tokens=100, token_budget=300, attempt_budget=10)
-MAZE = Maze(("...", "##.", "..."), (0, 0), (0, 2))
-# The Waypoint & steering controls as a fresh pane has them: no waypoint, steering off.
-NO_CHECKPOINT = ('', None, 1.0, 0, 'off', '', 3, 1)
-
-
-class Manager:
-    loaded = True
-    model_id = "test/model"
-    load_id = "test/model#1"
-    reasoning_prefilled = False
-    tokenizer = SimpleNamespace(encode=lambda s, **kw: list(s.encode()), decode=lambda ids, **kw: bytes(ids).decode())
-
-    def __init__(self, replies):
-        self.replies = iter(replies)
-        self.busy = False
-        self.calls = []
-
-    def open_session(self):
-        return ModelService(lambda: self).open_session()
-
-    def loaded_model(self):
-        # Published as one reading, the way a finished load publishes it.
-        return LoadedModel(self.model_id, "test-device", "full", self.load_id)
-
-    def decode(self, ids):
-        return ModelService(lambda: self).decode(ids)
-
-    def prompt_text(self, messages, tools=None):
-        return ModelService(lambda: self).prompt_text(messages, tools)
-
-    def loaded_model_id(self):
-        return ModelService(lambda: self).loaded_model_id()
-
-    def _prompt_token_ids(self, messages, tools=None):
-        # Stands in for a chat template: the fixture's vocabulary is UTF-8
-        # bytes, so a rendering the reader can read round-trips through decode.
-        rendered = "".join([f"<tools>{json.dumps(tools)}</tools>" if tools else ""]
-                           + [f"<{m['role']}>{m['content']}" for m in messages] + ["<assistant>"])
-        return list(rendered.encode()), False
-
-    def claim_generation(self):
-        if self.busy:
-            return GENERATING
-        self.busy = True
-        return None
-
-    def reserve_generation(self):
-        return self.claim_generation() is None
-
-    def release_generation(self):
-        self.busy = False
-
-    def _stop_token_ids(self):
-        return {0}
-
-    def hidden_token_ids(self):
-        # The stop token is a special: generate() leaves it out of the response
-        # text the way the runtime's decoder does, and records it in metrics.
-        return {0}
-
-    def encode_replacement(self, kept_ids, text, **kwargs):
-        # This fixture encodes independent UTF-8 bytes; context-sensitive
-        # behavior is exercised separately through the real runtime encoder.
-        return list(text.encode())
-
-    def generate(self, messages, **kwargs):
-        self.calls.append((copy.deepcopy(messages), kwargs))
-        text, ids = next(self.replies)
-        prefix = kwargs["forced_ids"]
-        metrics = [{"token_id": t} for t in prefix + ids]
-        # Prompt IDs come from the template, as the runtime's do, so a reader
-        # decoding them back sees the tools and history the turn was given.
-        prompt_ids, _ = self._prompt_token_ids(messages, kwargs.get("tools"))
-        yield SimpleNamespace(text=self.tokenizer.decode(prefix) + text, metrics=metrics, prompt_ids=prompt_ids,
-                              forced_prefix_tokens=len(prefix), reasoning_prefilled=self.reasoning_prefilled,
-                              load_id=self.load_id, model_id=self.model_id)
-
-
-def scored(generate):
-    """Add the display metrics and alternatives the token strip and edit panel read."""
-    def reply(*args, **kwargs):
-        for frame in generate(*args, **kwargs):
-            for position, metric in enumerate(frame.metrics):
-                metric.update(unscored_metric(position=position, token_id=metric['token_id'],
-                                              token_text=chr(metric['token_id']), fallback_text='',
-                                              segment='response').to_dict())
-                metric['top_candidates'] = [{'token_id': 120, 'text': 'x', 'probability': .1}]
-            yield frame
-    return reply
+from maze_support import CONFIG, Manager, MAZE, NO_CHECKPOINT, scored
+from ui_support import handlers_by_name, listeners_by_name, listeners_named
 
 
 class MazeTests(unittest.TestCase):
     def test_typed_edit_preserves_sentencepiece_boundary_and_literal_prefix(self):
-        from test_streaming import sentencepiece_manager, SP_HELLO, SP_SPACE_WORLD, SP_WORLD
+        from fakes import sentencepiece_manager, SP_HELLO, SP_SPACE_WORLD, SP_WORLD
         for text, expected_id in [('world', SP_WORLD), (' world', SP_SPACE_WORLD)]:
             with self.subTest(replacement=text):
                 manager = sentencepiece_manager()
@@ -139,7 +49,7 @@ class MazeTests(unittest.TestCase):
         same ID reads " world" under one and "world" under the other, which is
         the retained prefix silently changing under the fork.
         """
-        from test_streaming import SP_HELLO, SP_SPACE_WORLD, SP_WORLD, SP_PIECES, sentencepiece_manager
+        from fakes import SP_HELLO, SP_SPACE_WORLD, SP_WORLD, SP_PIECES, sentencepiece_manager
         recorded = ['Hello', 'world', '!']
         bang = SP_PIECES.index('!')
         revised_pieces = [piece if index != SP_SPACE_WORLD else 'world'
@@ -190,7 +100,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = listeners_by_name(demo)
                 metrics = views(ep, False, selections, session_id)[7]
                 selected = callbacks['select_token'].fn(ep, session_id, metrics, SimpleNamespace(index=1))
                 self.assertEqual(selected[3], 'b')
@@ -226,7 +136,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = listeners_by_name(demo)
                 metrics = views(ep, False, selections, session_id)[7]
                 selected = callbacks['select_token'].fn(ep, session_id, metrics, SimpleNamespace(index=1))
                 branch = callbacks['branch_alternative']
@@ -263,7 +173,7 @@ class MazeTests(unittest.TestCase):
                                       navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
             with gr.Blocks() as demo:
                 build_page(context)
-            callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+            callbacks = listeners_by_name(demo)
             metrics = views(ep, False, selections, session_id)[7]
             markup = callbacks["offer_menu"].fn(ep, session_id, metrics, 'open-1',
                                                  SimpleNamespace(index=1))
@@ -649,8 +559,7 @@ class MazeTests(unittest.TestCase):
         under the loaded one. Nothing recorded separates the two, so the
         alternative is applied only in the session that offered it.
         """
-        from test_streaming import (sentencepiece_manager, SP_HELLO, SP_SPACE_WORLD, SP_WORLD,
-                                    SP_PIECES)
+        from fakes import sentencepiece_manager, SP_HELLO, SP_SPACE_WORLD, SP_WORLD, SP_PIECES
         bang = SP_PIECES.index('!')
         respelled_pieces = [piece if index != SP_SPACE_WORLD else 'world'
                             for index, piece in enumerate(SP_PIECES)]
@@ -796,7 +705,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = listeners_by_name(demo)
                 metrics = views(replay, False, selections, session_id)[7]
                 selected = callbacks["select_token"].fn(replay, session_id, metrics, SimpleNamespace(index=index))
                 edit = callbacks["edit_token"]
@@ -828,7 +737,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = listeners_by_name(demo)
                 metrics = views(ep, False, selections, session_id)[7]
                 resolve = selections.resolve
 
@@ -946,7 +855,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = listeners_by_name(demo)
                 forward, back = callbacks['step_forward'].fn, callbacks['step_back'].fn
                 begin = callbacks['step_first'].fn
                 selected = lambda frame: frame[8]['value']
@@ -1008,7 +917,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = listeners_by_name(demo)
                 pause_button = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'maze-pause')
                 pause = next(fn.fn for fn in demo.fns.values() if fn.targets == [(pause_button._id, 'click')])
                 forward, playback = callbacks['step_forward'].fn, callbacks['play_back'].fn
@@ -1092,7 +1001,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = handlers_by_name(demo)
                 rows = timeline(ep)
                 self.assertEqual(len(rows), 4)
                 self.assertEqual([row[1] for row in rows], ['(0, 0)', '(0, 1)', '(0, 1)', '(0, 1)'])
@@ -1477,7 +1386,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                shown = [fn.fn for fn in demo.fns.values() if fn.fn is not None and fn.fn.__name__ == 'show_context']
+                shown = [fn.fn for fn in listeners_named(demo, 'show_context')]
                 # Opening the accordion and the refresh button reach the same view.
                 self.assertEqual(len(shown), 2)
                 ep = Episode(MAZE, CONFIG)
@@ -1499,7 +1408,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = handlers_by_name(demo)
                 change = callbacks['change_goal_mode']
                 for mode in ('hidden', 'hint', 'coordinates'):
                     self.assertEqual(change(mode, default_instruction('coordinates'))[2], default_instruction(mode))
@@ -1546,7 +1455,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = handlers_by_name(demo)
                 loaded = callbacks['load'](str(ep.export()), Episode(MAZE, CONFIG), False, session, None)
                 self.assertTrue(loaded[0].replay_only)
                 # A saved run opens at its initial history, so Play replays it
@@ -2247,7 +2156,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                playback = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}['play_back']
+                playback = handlers_by_name(demo)['play_back']
                 ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
                 with mock.patch('chatlab.extensions.maze_experiments.page.gr.Warning') as warning:
                     with self.assertLogs('chatlab.extensions.maze_experiments.page', level='INFO') as logged:
@@ -2278,7 +2187,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                load = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}['load']
+                load = handlers_by_name(demo)['load']
                 fresh = Episode(MAZE, CONFIG)
                 with self.assertLogs('chatlab.extensions.maze_experiments.page', level='INFO') as logged:
                     loaded = load(str(ep.export()), fresh, False, session, None)

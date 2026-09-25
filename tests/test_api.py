@@ -25,7 +25,7 @@ from chatlab.model_inspection import ScoredText
 from chatlab.text_generation import GenerationUpdate
 from chatlab.ui import runtime
 
-from test_streaming import loaded_manager
+from fakes import loaded_manager
 
 
 def setUpModule():

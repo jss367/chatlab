@@ -19,7 +19,8 @@ from chatlab.extensions.maze_experiments.runner import (Episode, context_message
 from chatlab.extension_api import TokenInspector
 from chatlab.token_metrics import unscored_metric
 
-from test_maze import CONFIG, Manager
+from maze_support import CONFIG, Manager
+from ui_support import listeners_by_name
 
 # Three moves east along the top row, or the long way round: enough room for a
 # note to advise the shortest step, a worse one, or a wall.
@@ -90,7 +91,7 @@ def page_callbacks(test, models):
     with gr.Blocks() as demo:
         build_page(context)
     test.addCleanup(demo.close)
-    return {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+    return listeners_by_name(demo)
 
 
 class RenderingTests(unittest.TestCase):

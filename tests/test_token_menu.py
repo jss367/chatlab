@@ -8,11 +8,9 @@ from unittest import mock
 from chatlab import app
 import gradio as gr
 from chatlab.ui import runtime, token_menu
-from test_app_flow import (
-    FIXED, SETTINGS, THINK_EOS, THINK_PIECES,
-    token_span, metrics_of,
-)
-from test_streaming import loaded_manager
+from fakes import THINK_EOS, THINK_PIECES
+from conversation_support import FIXED, SETTINGS, token_span, metrics_of
+from fakes import loaded_manager
 import settings_sandbox
 
 

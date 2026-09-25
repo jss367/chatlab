@@ -18,6 +18,10 @@ from chatlab.conversation import split_reasoning
 from chatlab.model_runtime import ModelManager
 from chatlab.text_generation import ModelChanged
 from chatlab.tokenization import IncrementalDecoder
+from fakes import (
+    ChatTemplateTokenizer, Encoding, EOS_ID, FakeModel, FakeTokenizer, loaded_manager, PIECES,
+    sentencepiece_manager, SentencePieceTokenizer, SP_HELLO, SP_PIECES, SP_SPACE_WORLD, SP_WORLD,
+)
 
 
 def setUpModule():
@@ -28,90 +32,6 @@ def setUpModule():
 
 def tearDownModule():
     settings_sandbox.stop()
-
-
-PIECES = [
-    "Hello",
-    " world",
-    "!",
-    "\n",
-    "How",
-    " are",
-    " you",
-    "?",
-    "<eos>",
-]
-EOS_ID = PIECES.index("<eos>")
-
-
-class Encoding(dict):
-    """The subset of a Hugging Face ``BatchEncoding`` the prompt path uses."""
-
-    @property
-    def input_ids(self) -> list[int]:
-        return self["input_ids"]
-
-
-class FakeTokenizer:
-    """A whitespace-joining stand-in for a Hugging Face tokenizer."""
-
-    chat_template = None
-
-    def __init__(self, pieces=PIECES, eos_id=EOS_ID):
-        self.pieces = pieces
-        self.eos_token_id = eos_id
-        self.all_special_ids = [eos_id]
-        self.last_prompt = ""
-
-    def __call__(self, text, **_kwargs):
-        self.last_prompt = text
-        if _kwargs.get("add_special_tokens") is False:
-            # Response-prefill tests need a small but real text-to-token path.
-            # Match the supplied vocabulary greedily; ordinary prompt tests
-            # keep using the single placeholder token below.
-            remaining = text
-            token_ids: list[int] = []
-            pieces = sorted(
-                (
-                    (piece, index)
-                    for index, piece in enumerate(self.pieces)
-                    if piece
-                ),
-                key=lambda item: len(item[0]),
-                reverse=True,
-            )
-            while remaining:
-                match = next(
-                    (
-                        (piece, index)
-                        for piece, index in pieces
-                        if remaining.startswith(piece)
-                    ),
-                    None,
-                )
-                if match is None:
-                    if "<unk>" in self.pieces:
-                        # Real vocabularies have an unknown piece; anything it
-                        # stands in for no longer decodes to what was typed.
-                        token_ids.append(self.pieces.index("<unk>"))
-                        remaining = remaining[1:]
-                        continue
-                    raise ValueError(f"No fake token for {remaining!r}")
-                piece, index = match
-                token_ids.append(index)
-                remaining = remaining[len(piece) :]
-            return Encoding(input_ids=token_ids)
-        return Encoding(input_ids=[0])
-
-    def decode(self, token_ids, skip_special_tokens=False, **_kwargs):
-        return "".join(
-            self.pieces[int(token_id)]
-            for token_id in token_ids
-            if not (skip_special_tokens and int(token_id) in self.all_special_ids)
-        )
-
-    def convert_ids_to_tokens(self, token_id):
-        return self.pieces[int(token_id)]
 
 
 class BytePieceTokenizer:
@@ -139,57 +59,6 @@ class BytePieceTokenizer:
         return repr(self.pieces[int(token_id)])
 
 
-class SentencePieceTokenizer(FakeTokenizer):
-    """A SentencePiece stand-in: the word-boundary space is dropped at the start.
-
-    Encoding prepends the dummy-prefix marker and matches pieces greedily, so
-    a standalone word becomes its ``\u2581word`` piece just as SentencePiece
-    makes it. Decoding turns markers back into spaces and drops the first, so
-    that piece reads without a space on its own and with one after other
-    tokens: ``decode(a + b)`` is not ``decode(a) + decode(b)``.
-    """
-
-    def __init__(self, pieces: list[str], eos_id: int | None = None):
-        super().__init__(pieces, eos_id)
-        self.all_special_ids = [] if eos_id is None else [eos_id]
-
-    def __call__(self, text, **kwargs):
-        if kwargs.get("add_special_tokens") is False:
-            text = "\u2581" + text.replace(" ", "\u2581")
-        return super().__call__(text, **kwargs)
-
-    def decode(self, token_ids, skip_special_tokens=False, **kwargs):
-        text = super().decode(token_ids, skip_special_tokens=skip_special_tokens, **kwargs)
-        return text.replace("\u2581", " ").removeprefix(" ")
-
-
-class FakeModel(torch.nn.Module):
-    """Emits ``script`` one token at a time, whatever the sampler asks for.
-
-    Every input position advances the script by one step and predicts the
-    next scripted token, so a multi-token prefill chunk gets one distribution
-    per position exactly as a real model would give it.
-    """
-
-    def __init__(self, script, vocab_size=None, eos_id=EOS_ID):
-        super().__init__()
-        self.anchor = torch.nn.Parameter(torch.zeros(1))
-        self.script = script
-        self.vocab_size = vocab_size or len(PIECES)
-        self.step = 0
-        self.generation_config = SimpleNamespace(eos_token_id=eos_id)
-
-    def forward(
-        self, input_ids=None, attention_mask=None, past_key_values=None, use_cache=True
-    ):
-        length = 1 if input_ids is None else int(input_ids.shape[-1])
-        logits = torch.full((1, length, self.vocab_size), -20.0)
-        for offset in range(length):
-            logits[0, offset, self.script[self.step % len(self.script)]] = 20.0
-            self.step += 1
-        return SimpleNamespace(logits=logits, past_key_values=None)
-
-
 class UndecidedModel(torch.nn.Module):
     """Offers the same two near-equal choices at every position.
 
@@ -212,14 +81,6 @@ class UndecidedModel(torch.nn.Module):
         length = 1 if input_ids is None else int(input_ids.shape[-1])
         logits = self.row.expand(1, length, self.vocab_size).clone()
         return SimpleNamespace(logits=logits, past_key_values=None)
-
-
-def loaded_manager(script, pieces=PIECES, eos_id=EOS_ID):
-    manager = ModelManager()
-    manager.tokenizer = FakeTokenizer(pieces, eos_id)
-    manager.model = FakeModel(script, vocab_size=len(pieces), eos_id=eos_id)
-    manager.model_id = "fake/model"
-    return manager
 
 
 class IncrementalDecoderTests(unittest.TestCase):
@@ -883,17 +744,6 @@ class ForcedPrefixTests(unittest.TestCase):
             self.updates(manager, [], answer_prefill="  Hello")
 
 
-SP_PIECES = ["\u2581Hello", "\u2581world", "world", "\u2581", "!", "<unk>", "<eos>"]
-SP_HELLO, SP_SPACE_WORLD, SP_WORLD, SP_SPACE = 0, 1, 2, 3
-SP_EOS = SP_PIECES.index("<eos>")
-
-
-def sentencepiece_manager(pieces=SP_PIECES):
-    manager = loaded_manager([SP_HELLO], pieces, pieces.index("<eos>"))
-    manager.tokenizer = SentencePieceTokenizer(pieces, pieces.index("<eos>"))
-    return manager
-
-
 class ReplacementEncodingTests(unittest.TestCase):
     """Typed branch text must read, after the kept tokens, exactly as typed.
 
@@ -1243,25 +1093,6 @@ class ReplacementEncodingTests(unittest.TestCase):
         self.assertEqual(
             manager.encode_replacement([0], " world", load_id=manager.load_id), [1]
         )
-
-
-class ChatTemplateTokenizer(FakeTokenizer):
-    """A tokenizer whose chat template can pre-fill the opening <think> tag."""
-
-    chat_template = "{{ messages }}"
-
-    def __init__(self, suffix, pieces=PIECES, eos_id=EOS_ID):
-        super().__init__(pieces, eos_id)
-        self.suffix = suffix
-
-    def apply_chat_template(self, messages, add_generation_prompt=True, **kwargs):
-        rendered = (
-            "\n".join(f"{m['role']}: {m['content']}" for m in messages) + self.suffix
-        )
-        if not kwargs.get("tokenize", True):
-            return rendered
-        self.last_prompt = rendered
-        return [0]
 
 
 class PrefilledReasoningTests(unittest.TestCase):

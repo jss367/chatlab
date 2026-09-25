@@ -23,6 +23,7 @@ from chatlab.model_runtime import (
 from chatlab.progress_bars import DownloadProgress
 from chatlab.text_generation import PROMPT_SCORE_LIMIT
 from chatlab.token_metrics import UNSCORED_BEYOND_LIMIT, build_metric, unscored_metric
+from ui_support import listeners_named
 
 
 class Selection:
@@ -861,7 +862,7 @@ class DownloadCardTests(unittest.TestCase):
     def test_unload_is_refused_while_a_reply_is_running(self):
         # Waiting on the model lock would pull the model out between the end
         # of the stream and the reply's trace, which then names no tokenizer.
-        from test_streaming import loaded_manager
+        from fakes import loaded_manager
 
         manager = loaded_manager([0])
         runtime.MANAGER = manager
@@ -875,7 +876,7 @@ class DownloadCardTests(unittest.TestCase):
         self.assertTrue(manager.loaded)
 
     def test_unload_is_refused_while_a_load_stands(self):
-        from test_streaming import loaded_manager
+        from fakes import loaded_manager
 
         manager = loaded_manager([0])
         runtime.MANAGER = manager
@@ -906,7 +907,7 @@ class DownloadCardTests(unittest.TestCase):
         manager.release_generation()
 
     def test_unload_gives_the_slot_back(self):
-        from test_streaming import loaded_manager
+        from fakes import loaded_manager
 
         manager = loaded_manager([0])
         runtime.MANAGER = manager
@@ -1752,11 +1753,7 @@ class ScoreBudgetRecoveryTests(unittest.TestCase):
     def test_recovery_reads_the_boxes_it_would_score(self):
         # The recomputed count has to describe what is in the boxes now, not
         # what was there when the count gave up.
-        (listener,) = [
-            fn
-            for fn in app.build_app().fns.values()
-            if getattr(fn.fn, "__name__", None) == "recover_score_budget"
-        ]
+        (listener,) = listeners_named(app.build_app(), "recover_score_budget")
 
         self.assertEqual(len(listener.inputs), 5)
         self.assertEqual(listener.outputs, listener.inputs[:2])

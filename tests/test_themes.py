@@ -7,6 +7,7 @@ from chatlab import app
 from chatlab import settings
 import settings_sandbox
 from chatlab import themes
+from ui_support import css_rule, css_rule_list, listeners_named
 
 
 def setUpModule():
@@ -186,14 +187,18 @@ class StylesheetTests(unittest.TestCase):
         for ramp in ("primary", "neutral"):
             for step, color in theme.ramp(ramp).items():
                 with self.subTest(ramp=ramp, step=step):
-                    self.assertIn(f"--{ramp}-{step}: {color} !important;", css)
+                    self.assertEqual(
+                        css_rule(css, ":root").get(f"--{ramp}-{step}"), f"{color} !important"
+                    )
 
     def test_the_ramps_reach_the_dark_body_as_well_as_the_page(self):
         # Gradio writes its own copy of every variable under ``.dark``, and a
         # value set on that element beats one inherited from the page however
         # important the inherited one is. So the ramps have to name both.
         css = themes.stylesheet("nebula")
-        self.assertIn(":root, :root body.dark {", css)
+        self.assertIn(
+            (":root", ":root body.dark"), [rule.selectors for rule in css_rule_list(css)]
+        )
 
     def test_the_paper_is_light_mode_s_alone(self):
         # Dark mode's surfaces already read from the neutral ramp, so writing
@@ -268,13 +273,6 @@ class ThemeControlTests(unittest.TestCase):
         self.assertEqual(len(matches), 1, label)
         return matches[0]
 
-    def listeners(self, name):
-        return [
-            fn
-            for fn in self.demo.fns.values()
-            if getattr(fn.fn, "__name__", None) == name
-        ]
-
     def test_the_dropdown_offers_every_theme_and_starts_on_the_saved_one(self):
         dropdown = self.labelled("Color theme")
         self.assertEqual(
@@ -291,12 +289,12 @@ class ThemeControlTests(unittest.TestCase):
 
     def test_choosing_a_theme_repaints_and_saves_it(self):
         dropdown = self.labelled("Color theme")
-        painting = self.listeners("apply_theme")
+        painting = listeners_named(self.demo, "apply_theme")
         self.assertTrue(
             any(dropdown in fn.inputs for fn in painting),
             "the dropdown drives no repaint",
         )
-        saving = self.listeners("remember_settings")
+        saving = listeners_named(self.demo, "remember_settings")
         triggering = [fn for fn in saving if dropdown in fn.inputs]
         self.assertTrue(triggering, "the dropdown is not one of the saved settings")
         self.assertIn(
@@ -339,12 +337,12 @@ class ThemeControlTests(unittest.TestCase):
     def test_a_reload_paints_the_theme_the_file_now_names(self):
         # restore_settings re-reads the file, so the stylesheet has to follow
         # the dropdown on the way back rather than staying as it was built.
-        restoring = self.listeners("restore_settings")
+        restoring = listeners_named(self.demo, "restore_settings")
         self.assertEqual(len(restoring), 1)
         self.assertIn(self.labelled("Color theme"), restoring[0].outputs)
         self.assertIn(
             self.block("theme-style"),
-            [output for fn in self.listeners("apply_theme") for output in fn.outputs],
+            [output for fn in listeners_named(self.demo, "apply_theme") for output in fn.outputs],
         )
 
     def test_the_radio_offers_the_three_and_starts_on_the_saved_one(self):
@@ -379,7 +377,7 @@ class ThemeControlTests(unittest.TestCase):
 
     def test_a_reload_draws_the_side_the_file_now_names(self):
         radio = self.labelled("Light or dark")
-        restoring = self.listeners("restore_settings")
+        restoring = listeners_named(self.demo, "restore_settings")
         self.assertIn(radio, restoring[0].outputs)
         loading = [
             fn
