@@ -36,7 +36,7 @@ THINK_EOS = 4
 
 
 class Encoding(dict):
-    """The subset of a Hugging Face ``BatchEncoding`` the prompt path uses."""
+    """The subset of a Hugging Face ``BatchEncoding`` the prompt and split paths use."""
 
     @property
     def input_ids(self) -> list[int]:

@@ -38,6 +38,7 @@ from chatlab.tokenization import (
     score_token_limit,
     split_context_and_text,
 )
+from fakes import Encoding
 
 
 def setUpModule():
@@ -467,19 +468,16 @@ class CachedModelsTests(unittest.TestCase):
             self.assertEqual(list_cached_models(missing), [])
 
 
-class Encoding(dict):
-    """The subset of a Hugging Face ``BatchEncoding`` the split helper uses."""
-
-    @property
-    def input_ids(self) -> list[int]:
-        return self["input_ids"]
-
-
-class FakeTokenizer:
+class WordMergingTokenizer:
     """Merges each run of non-space characters into one token, as BPE would.
 
     That merging is the whole point: it makes ``tokenize(a) + tokenize(b)``
     differ from ``tokenize(a + b)`` whenever the seam lands mid-run.
+
+    Not the shared ``fakes.FakeTokenizer``: that one has a fixed vocabulary
+    and encodes every prompt as one placeholder token, while this one grows
+    its vocabulary from what it reads and reports real character offsets,
+    which is what splitting a context from the text it precedes is about.
     """
 
     def __init__(
@@ -549,7 +547,7 @@ class FakeTokenizer:
         ]
 
 
-class EatsTheLeadingSpace(FakeTokenizer):
+class EatsTheLeadingSpace(WordMergingTokenizer):
     """Decodes the way SentencePiece does: the opening space is the marker.
 
     ``decode`` is then not the inverse of ``encode``, so a seam found by
@@ -561,7 +559,7 @@ class EatsTheLeadingSpace(FakeTokenizer):
         return spoken[1:] if spoken.startswith(" ") else spoken
 
 
-class ProbesDifferently(FakeTokenizer):
+class ProbesDifferently(WordMergingTokenizer):
     """Encodes the passage differently when the post-processor is switched off.
 
     A normalizer that only runs alongside the post-processor would look like
@@ -579,7 +577,7 @@ class ProbesDifferently(FakeTokenizer):
         )
 
 
-class RefusesTheProbe(FakeTokenizer):
+class RefusesTheProbe(WordMergingTokenizer):
     """Will not encode anything without its post-processor.
 
     There is no second encoding to compare against at all here.
@@ -595,7 +593,7 @@ class RefusesTheProbe(FakeTokenizer):
         )
 
 
-class SkipsADoubledCloser(FakeTokenizer):
+class SkipsADoubledCloser(WordMergingTokenizer):
     """Appends its closers only where the text does not already end in one.
 
     A post-processor that avoids writing ``</s></s>`` behaves this way, and
@@ -642,7 +640,7 @@ class CutsCharactersInHalf:
 
 class ContextSplitTests(unittest.TestCase):
     def test_the_seam_is_tokenized_as_one_passage(self):
-        tokenizer = FakeTokenizer()
+        tokenizer = WordMergingTokenizer()
         context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo", "bar")
 
         # "foobar" merges into a single token, so scoring the two halves
@@ -651,7 +649,7 @@ class ContextSplitTests(unittest.TestCase):
         self.assertEqual(text_ids, [tokenizer.vocab["foobar"]])
 
     def test_a_clean_seam_keeps_every_context_token(self):
-        tokenizer = FakeTokenizer()
+        tokenizer = WordMergingTokenizer()
         context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo ", "bar")
 
         self.assertEqual(
@@ -660,14 +658,14 @@ class ContextSplitTests(unittest.TestCase):
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
 
     def test_an_empty_context_still_carries_the_special_token(self):
-        tokenizer = FakeTokenizer()
+        tokenizer = WordMergingTokenizer()
         context_ids, text_ids, *_ = split_context_and_text(tokenizer, "", "bar")
 
         self.assertEqual(context_ids, [0])
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
 
     def test_a_trailing_special_token_is_not_scored_as_text(self):
-        tokenizer = FakeTokenizer(trailing_specials=1)
+        tokenizer = WordMergingTokenizer(trailing_specials=1)
         context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo ", "bar")
 
         # The appended EOS sits after the first text token, so the seam search
@@ -678,21 +676,21 @@ class ContextSplitTests(unittest.TestCase):
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
 
     def test_a_trailing_special_token_is_dropped_without_a_context(self):
-        tokenizer = FakeTokenizer(trailing_specials=1)
+        tokenizer = WordMergingTokenizer(trailing_specials=1)
         context_ids, text_ids, *_ = split_context_and_text(tokenizer, "", "bar")
 
         self.assertEqual(context_ids, [0])
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
 
     def test_every_trailing_empty_span_is_dropped(self):
-        tokenizer = FakeTokenizer(trailing_specials=2)
+        tokenizer = WordMergingTokenizer(trailing_specials=2)
         context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo", "bar")
 
         self.assertEqual(context_ids, [0])
         self.assertEqual(text_ids, [tokenizer.vocab["foobar"]])
 
     def test_a_whitespace_only_context_keeps_its_token(self):
-        tokenizer = FakeTokenizer()
+        tokenizer = WordMergingTokenizer()
         context_ids, text_ids, *_ = split_context_and_text(tokenizer, " ", "bar")
 
         # A lone space is what makes the text start with a leading-space token,
@@ -704,14 +702,14 @@ class ContextSplitTests(unittest.TestCase):
         # No offsets to search, so the seam is found by decoding a growing
         # prefix back to text. The passage is still encoded once, so the
         # merged token is the one that gets scored.
-        tokenizer = FakeTokenizer(is_fast=False)
+        tokenizer = WordMergingTokenizer(is_fast=False)
         context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo", "bar")
 
         self.assertEqual(context_ids, [0])
         self.assertEqual(text_ids, [tokenizer.vocab["foobar"]])
 
     def test_a_slow_tokenizer_drops_its_trailing_special_token(self):
-        tokenizer = FakeTokenizer(is_fast=False, trailing_specials=1)
+        tokenizer = WordMergingTokenizer(is_fast=False, trailing_specials=1)
         context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo ", "bar")
 
         self.assertEqual(
@@ -724,7 +722,7 @@ class ContextSplitTests(unittest.TestCase):
         # Nothing was appended here: the reader pasted "</s>" at the end of
         # their own text. Dropping it by id membership would report ranks and
         # perplexity for a passage that stops one token early.
-        tokenizer = FakeTokenizer(is_fast=False)
+        tokenizer = WordMergingTokenizer(is_fast=False)
         context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo ", "</s>")
 
         self.assertEqual(
@@ -736,7 +734,7 @@ class ContextSplitTests(unittest.TestCase):
         # The case that separates a real fix from a plausible one: the text
         # ends in a special the reader wrote *and* the post-processor appends
         # its own after it. Exactly one of the two is the reader's.
-        tokenizer = FakeTokenizer(is_fast=False, trailing_specials=1)
+        tokenizer = WordMergingTokenizer(is_fast=False, trailing_specials=1)
         context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo ", "</s>")
 
         self.assertEqual(
@@ -751,7 +749,7 @@ class ContextSplitTests(unittest.TestCase):
         # two closers is the reader's — every reading of it explains the ids —
         # so the wrapping is measured on the tokenizer instead, and the
         # reader's token is the one that gets scored.
-        tokenizer = FakeTokenizer(is_fast=False, trailing_specials=1)
+        tokenizer = WordMergingTokenizer(is_fast=False, trailing_specials=1)
         context_ids, text_ids, *_ = split_context_and_text(tokenizer, "", "</s>")
 
         self.assertEqual(context_ids, [tokenizer.vocab["<s>"]])
@@ -773,7 +771,7 @@ class ContextSplitTests(unittest.TestCase):
     def test_the_offsets_path_keeps_a_pasted_trailing_special_token(self):
         # The fast path never had to guess, and still does not: the pasted
         # token carries a real span and the appended one carries (0, 0).
-        tokenizer = FakeTokenizer(trailing_specials=1)
+        tokenizer = WordMergingTokenizer(trailing_specials=1)
         context_ids, text_ids, *_ = split_context_and_text(tokenizer, "foo ", "</s>")
 
         self.assertEqual(
@@ -825,7 +823,7 @@ class ContextSplitTests(unittest.TestCase):
         # Both the offsets path and the decoding path cut one joint encoding,
         # so the ids are the passage's own and the caller has nothing to warn
         # about.
-        for tokenizer in (FakeTokenizer(), FakeTokenizer(is_fast=False)):
+        for tokenizer in (WordMergingTokenizer(), WordMergingTokenizer(is_fast=False)):
             with self.subTest(is_fast=tokenizer.is_fast):
                 split = split_context_and_text(tokenizer, "foo", "bar")
 
@@ -855,7 +853,7 @@ class ContextSplitTests(unittest.TestCase):
         # instead. The ids stay the joint encoding's own, which is the whole
         # point: "foobar" is the token the passage produces, and encoding the
         # halves apart would have scored a "bar" the model never sees.
-        tokenizer = FakeTokenizer(is_fast=False)
+        tokenizer = WordMergingTokenizer(is_fast=False)
         tokenizer.decode = None
         split = split_context_and_text(tokenizer, "foo", "bar")
 
@@ -947,14 +945,14 @@ class RealVocabularyTests(unittest.TestCase):
 
 class ScoringEncodeTests(unittest.TestCase):
     def test_a_whitespace_only_context_is_scored_not_discarded(self):
-        tokenizer = FakeTokenizer()
+        tokenizer = WordMergingTokenizer()
         context_ids, text_ids, *_ = encode_for_scoring(tokenizer, "bar", context=" ")
 
         self.assertEqual(context_ids, [0, tokenizer.vocab[" "]])
         self.assertEqual(text_ids, [tokenizer.vocab["bar"]])
 
     def test_an_empty_context_is_unchanged(self):
-        tokenizer = FakeTokenizer()
+        tokenizer = WordMergingTokenizer()
 
         self.assertEqual(
             encode_for_scoring(tokenizer, "bar", context=""),
@@ -965,7 +963,7 @@ class ScoringEncodeTests(unittest.TestCase):
         # The generation prompt is followed by a space here, so the seam
         # cannot merge and the halves come out exactly as the template
         # tokenizes them.
-        tokenizer = FakeTokenizer(
+        tokenizer = WordMergingTokenizer(
             chat_template="{{ messages }}", generation_prompt="<|assistant|> "
         )
         context_ids, text_ids, *_ = encode_for_scoring(
@@ -985,7 +983,7 @@ class ScoringEncodeTests(unittest.TestCase):
         # token, so the marker and the first reply token merge. Encoding the
         # rendered prompt and the reply apart would report ranks for a first
         # token the model never sees.
-        tokenizer = FakeTokenizer(chat_template="{{ messages }}")
+        tokenizer = WordMergingTokenizer(chat_template="{{ messages }}")
         context_ids, text_ids, *_ = encode_for_scoring(
             tokenizer, "bar", context="hello", use_chat_template=True
         )
@@ -1004,7 +1002,7 @@ class ScoringEncodeTests(unittest.TestCase):
     def test_a_slow_tokenizer_splits_the_chat_template_seam_too(self):
         # No offsets, so the seam is found by decoding; the specials the
         # template rendered have to survive that decode to round trip.
-        tokenizer = FakeTokenizer(is_fast=False, chat_template="{{ messages }}")
+        tokenizer = WordMergingTokenizer(is_fast=False, chat_template="{{ messages }}")
         context_ids, text_ids, *_ = encode_for_scoring(
             tokenizer, "bar", context="hello", use_chat_template=True
         )
@@ -1023,7 +1021,7 @@ class ScoringEncodeTests(unittest.TestCase):
     def test_the_chat_template_is_not_given_a_second_beginning_token(self):
         # The template renders its own opening special; asking the tokenizer
         # to add one as well would prepend a second <s> the model never sees.
-        tokenizer = FakeTokenizer(chat_template="{{ messages }}")
+        tokenizer = WordMergingTokenizer(chat_template="{{ messages }}")
         context_ids, *_ = encode_for_scoring(
             tokenizer, "bar", context="hello", use_chat_template=True
         )
@@ -1036,7 +1034,7 @@ class ScoringEncodeTests(unittest.TestCase):
         # send. Dropping the template for it would quietly score the raw
         # characters instead: no role markers, no generation prompt, and no
         # caveat either, because the model has a template all along.
-        tokenizer = FakeTokenizer(chat_template="{{ messages }}")
+        tokenizer = WordMergingTokenizer(chat_template="{{ messages }}")
         split = encode_for_scoring(
             tokenizer, "bar", context=" ", use_chat_template=True
         )
@@ -1048,7 +1046,7 @@ class ScoringEncodeTests(unittest.TestCase):
     def test_an_empty_context_is_not_wrapped_as_a_turn(self):
         # An empty box holds no message for a template to render, so this is
         # the plain path by nature rather than a request that got dropped.
-        tokenizer = FakeTokenizer(chat_template="{{ messages }}")
+        tokenizer = WordMergingTokenizer(chat_template="{{ messages }}")
 
         self.assertEqual(
             encode_for_scoring(tokenizer, "bar", context="", use_chat_template=True),
@@ -1060,7 +1058,7 @@ class ScoringEncodeTests(unittest.TestCase):
         # would drop a measurement the reader asked for to avoid numbers that
         # are not wrong, only differently framed, so the passage is scored
         # verbatim and the flag lets the caller name the framing.
-        tokenizer = FakeTokenizer(chat_template=None)
+        tokenizer = WordMergingTokenizer(chat_template=None)
         split = encode_for_scoring(
             tokenizer, "bar", context="hello", use_chat_template=True
         )
@@ -1072,7 +1070,7 @@ class ScoringEncodeTests(unittest.TestCase):
         )
 
     def test_a_template_that_was_applied_raises_no_caveat(self):
-        tokenizer = FakeTokenizer(chat_template="{{ messages }}")
+        tokenizer = WordMergingTokenizer(chat_template="{{ messages }}")
         split = encode_for_scoring(
             tokenizer, "bar", context="hello", use_chat_template=True
         )
@@ -1085,7 +1083,7 @@ class ScoringEncodeTests(unittest.TestCase):
         for context in ("hello", " ", ""):
             with self.subTest(context=context):
                 split = encode_for_scoring(
-                    FakeTokenizer(chat_template=None), "bar", context=context
+                    WordMergingTokenizer(chat_template=None), "bar", context=context
                 )
 
                 self.assertFalse(split.chat_template_missing)
@@ -1094,7 +1092,7 @@ class ScoringEncodeTests(unittest.TestCase):
         # There is no turn in an empty box for any model to wrap, so this is
         # not the missing-template case and saying it was would misdirect.
         split = encode_for_scoring(
-            FakeTokenizer(chat_template=None),
+            WordMergingTokenizer(chat_template=None),
             "bar",
             context="",
             use_chat_template=True,
@@ -1106,7 +1104,7 @@ class ScoringEncodeTests(unittest.TestCase):
         # The turn was real and the model had nothing to wrap it in, which is
         # exactly what the caveat is for.
         split = encode_for_scoring(
-            FakeTokenizer(chat_template=None),
+            WordMergingTokenizer(chat_template=None),
             "bar",
             context=" ",
             use_chat_template=True,
@@ -1236,7 +1234,7 @@ class ScoreTextGuardTests(unittest.TestCase):
     def manager(self) -> ModelManager:
         manager = ModelManager()
         manager.model = object()
-        manager.tokenizer = FakeTokenizer()
+        manager.tokenizer = WordMergingTokenizer()
         self.prefilled: list[int] = []
 
         def fake_prefill(token_ids, *, segments, positions, score_from, **_options):
@@ -1289,7 +1287,7 @@ class ScoreTextGuardTests(unittest.TestCase):
         self.assertEqual(len(result.metrics), 1)
 
         manager = self.manager()
-        manager.tokenizer = FakeTokenizer(chat_template="{{ messages }}")
+        manager.tokenizer = WordMergingTokenizer(chat_template="{{ messages }}")
         with_template = manager.score_text(
             "bar", context="hello", use_chat_template=True
         )
@@ -1333,7 +1331,7 @@ class ScoreTextGuardTests(unittest.TestCase):
     def test_text_that_tokenizes_to_nothing_still_says_so(self):
         # The narrowed guard hands this case to the ``text_ids`` check, which
         # is the one that knows the tokenizer dropped the input.
-        class DropsEverything(FakeTokenizer):
+        class DropsEverything(WordMergingTokenizer):
             def __call__(self, text, **kwargs):
                 encoding = Encoding(input_ids=[])
                 if kwargs.get("return_offsets_mapping"):
@@ -1349,7 +1347,7 @@ class ScoreTextGuardTests(unittest.TestCase):
 
 
 
-class NeverRoundTrips(FakeTokenizer):
+class NeverRoundTrips(WordMergingTokenizer):
     """Declines both joint paths: no offsets, and a decode that says nothing true.
 
     That combination is the only way to reach a seam nobody can confirm, so it
@@ -1360,7 +1358,7 @@ class NeverRoundTrips(FakeTokenizer):
         return " nope"
 
 
-class RefusesTheWholePassage(FakeTokenizer):
+class RefusesTheWholePassage(WordMergingTokenizer):
     """Encodes either half, but raises on the passage the two make together.
 
     The one case with no joint encoding to cut, and so the one case where the
@@ -3043,7 +3041,7 @@ class OutOfMemoryTests(unittest.TestCase):
 
         manager = ModelManager()
         manager.model = object()
-        manager.tokenizer = FakeTokenizer()
+        manager.tokenizer = WordMergingTokenizer()
         manager.released = 0
         manager._release_device_cache = lambda torch=None: setattr(
             manager, "released", manager.released + 1
@@ -3134,7 +3132,7 @@ class CountScoreTokensTests(unittest.TestCase):
 
     def manager(self, **config) -> ModelManager:
         manager = ModelManager()
-        manager.tokenizer = FakeTokenizer()
+        manager.tokenizer = WordMergingTokenizer()
         manager.model = Model(Config(**config)) if config else Model(Config())
         return manager
 
@@ -3181,7 +3179,7 @@ class CountScoreTokensTests(unittest.TestCase):
         manager = self.manager()
         held = []
 
-        class WatchesTheLock(FakeTokenizer):
+        class WatchesTheLock(WordMergingTokenizer):
             def __call__(self, text, **kwargs):
                 held.append(manager._lock.locked())
                 return super().__call__(text, **kwargs)
@@ -3199,7 +3197,7 @@ class CountScoreTokensTests(unittest.TestCase):
         # and a number from the wrong tokenizer is worse than no number.
         manager = self.manager()
 
-        class LoadsUnderneath(FakeTokenizer):
+        class LoadsUnderneath(WordMergingTokenizer):
             def __call__(self, text, **kwargs):
                 manager.load_count += 1
                 return super().__call__(text, **kwargs)
@@ -3240,7 +3238,7 @@ class CountScoreTokensTests(unittest.TestCase):
         # it as a confident zero would read as room to spare. Pressing Score
         # text explains the refusal properly; a half-typed passage is not yet
         # worth complaining about.
-        class RefusesEverything(FakeTokenizer):
+        class RefusesEverything(WordMergingTokenizer):
             def __call__(self, text, **kwargs):
                 raise ValueError("this tokenizer will not encode that")
 
