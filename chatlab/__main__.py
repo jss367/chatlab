@@ -3,7 +3,7 @@
 import os
 
 from chatlab import api, branding, logs
-from chatlab.app import build_app
+from chatlab.app import build_app, current_manager
 from chatlab.device_memory import watch_memory
 
 # The same rules the desktop app runs under, so a problem reproduced from
@@ -22,5 +22,5 @@ demo.launch(
     prevent_thread_lock=True,
     favicon_path=branding.favicon_path(),
 )
-api.attach(demo.app)
+api.attach(demo.app, current_manager)
 demo.block_thread()

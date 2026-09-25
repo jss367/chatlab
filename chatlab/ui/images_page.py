@@ -534,7 +534,7 @@ def _finished_status(run) -> str:
 
     The size comes from the image rather than from the request, because a
     fixed-size pipeline takes no width or height and draws at its own
-    (see :func:`image_runtime._call_arguments`); reporting what was asked
+    (see :func:`image_runtime.call_arguments`); reporting what was asked
     for would have the only summary of the run claiming 512×512 for a
     256×256 result. A stopped run has no image, so it reports what it was
     asked for and says there is no picture.

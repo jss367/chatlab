@@ -31,7 +31,7 @@ import threading
 import time
 from dataclasses import replace
 from itertools import chain
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from uuid import uuid4
 
 from fastapi import APIRouter, Body
@@ -45,11 +45,11 @@ from chatlab.device_memory import (
     device_profile,
 )
 from chatlab.model_cache import MLX_KIND, TEXT_KIND, list_cached_models
-from chatlab.model_runtime import GENERATING, LOADING
+from chatlab.conversation import split_response_text
+from chatlab.model_runtime import GENERATING, LOADING, ModelManager
+from chatlab.seeds import resolve_seed
 from chatlab.text_generation import ModelChanged
 from chatlab.token_metrics import summarize
-from chatlab.ui import runtime
-from chatlab.ui.generation import resolve_seed, split_response_text
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,14 @@ FRAME_WAIT_SECONDS = 1.0
 ABANDONED_AFTER_SECONDS = 60.0
 
 _DONE = object()
+
+# Where the API finds the model manager: a call that answers with whichever
+# one is current, handed in by whoever attaches the routes. The API does not
+# import the interface, which owns the one manager every page talks to, so
+# the interface's side of the wiring passes it down instead - as a call
+# rather than the object, so a manager put in its place later (a test's stub,
+# say) is the one the next request reaches.
+ManagerSource = Callable[[], ModelManager]
 
 
 class ApiError(Exception):
@@ -135,12 +143,14 @@ class Frames:
     on the update belongs to the generator, which goes on appending to it.
 
     The generation slot is released here too, when the generator is done with
-    the model, rather than by whoever reads the last frame.
+    the model, rather than by whoever reads the last frame - on ``manager``,
+    the one the request claimed it on.
     """
 
-    def __init__(self, stream: Iterator) -> None:
+    def __init__(self, stream: Iterator, manager: ModelManager) -> None:
         self._frames: queue.Queue = queue.Queue(maxsize=FRAME_BUFFER)
         self._stream = stream
+        self._manager = manager
         # Set when the thread has stopped producing, whichever way it
         # stopped. A reader waits on the queue and on this together, so it
         # ends when the thread has: no exit path has to remember to leave a
@@ -194,7 +204,7 @@ class Frames:
                 # truncated answer as a whole one.
                 self._abandoned = True
         finally:
-            runtime.MANAGER.release_generation()
+            self._manager.release_generation()
             self._finished.set()
 
     def _next(self):
@@ -264,7 +274,7 @@ def error_response(error: ApiError) -> JSONResponse:
     )
 
 
-def loaded_model(requested: Any) -> tuple[str, str]:
+def loaded_model(requested: Any, manager: ModelManager) -> tuple[str, str]:
     """The model that will answer and the load it is, or an :class:`ApiError`.
 
     A request may name the loaded model or leave the field out. Naming
@@ -278,12 +288,12 @@ def loaded_model(requested: Any) -> tuple[str, str]:
     then answer from the new weights.
     """
 
-    load_id = runtime.MANAGER.load_id
+    load_id = manager.load_id
     in_memory, _, _count = (load_id or "").rpartition("#")
     # The load names the model it is, so identity comes from that one read;
     # whether anything is loaded at all is asked separately, because a load
     # ID exists for an empty runtime too.
-    if not runtime.MANAGER.loaded or not in_memory:
+    if not manager.loaded or not in_memory:
         raise ApiError(
             409,
             "No model is loaded. Load one on ChatLab's Models page first; the "
@@ -523,8 +533,13 @@ def finish_reason(update, sampling: dict) -> str:
     return "length" if generated >= sampling["max_new_tokens"] else "stop"
 
 
-def build_router() -> APIRouter:
-    """The ``/v1`` routes, ready to be included in the application."""
+def build_router(manager: ManagerSource) -> APIRouter:
+    """The ``/v1`` routes, ready to be included in the application.
+
+    ``manager`` is asked for the model manager wherever the routes read it,
+    so each reading is of the one that is current then; see
+    :data:`ManagerSource`.
+    """
 
     router = APIRouter(prefix=API_PREFIX, tags=["chatlab"])
 
@@ -542,7 +557,7 @@ def build_router() -> APIRouter:
         # One reading of what is in memory for the whole list: a load landing
         # part way through it would otherwise mark two models loaded, and a
         # client could not tell which one will answer.
-        in_memory = runtime.MANAGER.loaded_model()
+        in_memory = manager().loaded_model()
         data = []
         for entry in list_cached_models():
             if not entry.status.complete or entry.status.kind not in (TEXT_KIND, MLX_KIND):
@@ -573,9 +588,10 @@ def build_router() -> APIRouter:
         """
 
         profile = device_profile()
+        current = manager()
         # One reading of the four, so a status asked for while a load is
         # landing cannot describe one model's weights with another's device.
-        in_memory = runtime.MANAGER.loaded_model()
+        in_memory = current.loaded_model()
         # One reading of what has the model, for the same reason. The two
         # flags below are two words for one answer, and asking twice would
         # publish a state the manager was never in: a response ending as a
@@ -586,7 +602,7 @@ def build_router() -> APIRouter:
         # once. Nothing is claimed here - a status reserves nothing - so this
         # is the one read, and by the time the answer is on the wire it is
         # already only a report of the instant it was taken.
-        held = runtime.MANAGER.occupant
+        held = current.occupant
         return JSONResponse(
             {
                 "model": in_memory.model_id,
@@ -625,7 +641,11 @@ def build_router() -> APIRouter:
         # is given back at once when the request turns out not to be
         # answerable - the checks are string and number work, so nothing is
         # held for longer than it takes to read the body.
-        held = runtime.MANAGER.claim_generation()
+        # One manager for the whole request, so the slot is given back on
+        # the manager that granted it even if another is put in its place
+        # part way through.
+        current = manager()
+        held = current.claim_generation()
         if held:
             return error_response(occupied_error(held))
         # True until Frames has the run and the slot with it. Every way out
@@ -638,14 +658,14 @@ def build_router() -> APIRouter:
         handed_on = False
         try:
             try:
-                model_id, load_id = loaded_model(body.get("model"))
+                model_id, load_id = loaded_model(body.get("model"), current)
                 # Read with the load, not after the generation: by then the
                 # model lock is free and a queued load can have replaced both.
                 # A load that lands in between makes the runtime refuse this
                 # request against its load ID, so these can only describe the
                 # weights that answered.
-                device = runtime.MANAGER.device_name
-                precision = runtime.MANAGER.precision
+                device = current.device_name
+                precision = current.precision
                 turns, prefill = conversation_from(body)
                 sampling = sampling_from(body)
                 measured, wants = token_detail(body)
@@ -661,7 +681,7 @@ def build_router() -> APIRouter:
             # token, and without this the answer would come from the new
             # weights while the response named the old ones; the runtime
             # compares it under the lock and refuses instead.
-            stream = runtime.MANAGER.generate(
+            stream = current.generate(
                 turns,
                 temperature=sampling["temperature"],
                 top_p=sampling["top_p"],
@@ -676,11 +696,11 @@ def build_router() -> APIRouter:
             # One thread owns the generator from here on; see Frames. It also
             # gives the generation slot back when the model is done with, so
             # nothing below releases it.
-            produced = Frames(stream)
+            produced = Frames(stream, current)
             handed_on = True
         finally:
             if not handed_on:
-                runtime.MANAGER.release_generation()
+                current.release_generation()
         try:
             first = produced.first()
         except ApiError as error:
@@ -736,7 +756,11 @@ def build_router() -> APIRouter:
         # the reason a completion is: memory stands empty for the weight-
         # reading phase of a load, and a request that validated first would
         # be told to load a model rather than that one is loading.
-        held = runtime.MANAGER.claim_generation()
+        # One manager for the whole request, so the slot is given back on
+        # the manager that granted it even if another is put in its place
+        # part way through.
+        current = manager()
+        held = current.claim_generation()
         if held:
             return error_response(occupied_error(held))
         # Nothing here hands the slot on to a worker, so one finally covers
@@ -747,12 +771,12 @@ def build_router() -> APIRouter:
         # stop and give it back.
         try:
             try:
-                model_id, load_id = loaded_model(body.get("model"))
+                model_id, load_id = loaded_model(body.get("model"), current)
                 # Read with the load, as a completion does: the same model ID
                 # can be loaded at several precisions, and asking afterwards
                 # may describe a load that has since replaced this one.
-                device = runtime.MANAGER.device_name
-                precision = runtime.MANAGER.precision
+                device = current.device_name
+                precision = current.precision
                 text = body.get("text")
                 if not isinstance(text, str):
                     raise ApiError(400, "text must be a string.")
@@ -770,7 +794,7 @@ def build_router() -> APIRouter:
             except ApiError as error:
                 return error_response(error)
             try:
-                scored = runtime.MANAGER.score_text(
+                scored = current.score_text(
                     text,
                     context=context,
                     use_chat_template=use_template,
@@ -781,7 +805,7 @@ def build_router() -> APIRouter:
             except Exception as error:
                 return error_response(refusal(error))
         finally:
-            runtime.MANAGER.release_generation()
+            current.release_generation()
         return JSONResponse(
             {
                 "object": "chatlab.score",
@@ -1058,13 +1082,16 @@ def stream_completion(
         yield "data: [DONE]\n\n"
 
 
-def attach(app) -> None:
+def attach(app, manager: ManagerSource) -> None:
     """Serve the API from ``app``, the interface's own FastAPI application.
 
     One port for both: the interface's routes are all named ones and none of
     them is a catch-all, so ``/v1`` can be added after Gradio has built its
     application and reaches these routes rather than the page.
+
+    ``manager`` answers with the model manager the interface is using; the
+    launcher passes ``chatlab.app.current_manager``.
     """
 
-    app.include_router(build_router())
+    app.include_router(build_router(manager))
     logger.info("Serving the ChatLab API under %s", API_PREFIX)

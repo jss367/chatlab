@@ -150,7 +150,7 @@ class ApiTestCase(unittest.TestCase):
         self.manager = Recorder(self.manager_updates)
         self.use(self.manager)
         app = FastAPI()
-        api.attach(app)
+        api.attach(app, runtime.current_manager)
         self.client = TestClient(app)
 
     def use(self, manager):
@@ -1179,7 +1179,7 @@ class FramesTests(ApiTestCase):
             live.append(metric(2, "two"))
             yield update("one two", metrics=live)
 
-        produced = api.Frames(generate([]))
+        produced = api.Frames(generate([]), runtime.MANAGER)
 
         first = produced.first()
         rest = list(produced.rest())
@@ -1192,7 +1192,7 @@ class FramesTests(ApiTestCase):
             yield update("one")
 
         self.manager.reserve_generation()
-        produced = api.Frames(generate([]))
+        produced = api.Frames(generate([]), runtime.MANAGER)
         produced.first()
         list(produced.rest())
 
@@ -1219,7 +1219,7 @@ class FramesTests(ApiTestCase):
         api.ABANDONED_AFTER_SECONDS = 0.05
 
         self.manager.reserve_generation()
-        produced = api.Frames(generate([]))
+        produced = api.Frames(generate([]), runtime.MANAGER)
         produced.first()  # and then nothing reads the rest
 
         self.assertTrue(closed.wait(timeout=5))
@@ -1241,7 +1241,7 @@ class FramesTests(ApiTestCase):
                 yield update("x" * (index + 1))
 
         self.manager.reserve_generation()
-        produced = api.Frames(generate([]))
+        produced = api.Frames(generate([]), runtime.MANAGER)
         produced.first()  # and then nothing reads the rest
 
         for _ in range(200):
@@ -1260,7 +1260,7 @@ class FramesTests(ApiTestCase):
             raise RuntimeError("the gpu fell over")
 
         self.manager.reserve_generation()
-        produced = api.Frames(generate([]))
+        produced = api.Frames(generate([]), runtime.MANAGER)
         produced.first()
 
         for _ in range(200):
@@ -1290,7 +1290,7 @@ class FramesTests(ApiTestCase):
                 yield update("x" * (index + 1))
 
         self.manager.reserve_generation()
-        produced = api.Frames(generate([]))
+        produced = api.Frames(generate([]), runtime.MANAGER)
         produced.first()
         for _ in range(200):
             if not self.manager.busy:
@@ -1317,7 +1317,7 @@ class FramesTests(ApiTestCase):
                 yield update("x" * (index + 1))
 
         self.manager.reserve_generation()
-        produced = api.Frames(generate([]))
+        produced = api.Frames(generate([]), runtime.MANAGER)
         first = produced.first()
         for _ in range(200):
             if not self.manager.busy:
@@ -1357,7 +1357,7 @@ class FramesTests(ApiTestCase):
             return
             yield  # pragma: no cover - never reached
 
-        produced = api.Frames(generate([]))
+        produced = api.Frames(generate([]), runtime.MANAGER)
 
         with self.assertRaises(api.ApiError) as caught:
             produced.first()
@@ -1530,7 +1530,7 @@ class RealModelTests(unittest.TestCase):
         runtime.MANAGER = loaded_manager([2, 3, THINK_EOS], THINK_PIECES, THINK_EOS)
         self.addCleanup(setattr, runtime, "MANAGER", original)
         app = FastAPI()
-        api.attach(app)
+        api.attach(app, runtime.current_manager)
         self.client = TestClient(app)
 
     def test_a_real_generation_answers_with_its_measurements(self):
@@ -1612,7 +1612,7 @@ class MountTests(unittest.TestCase):
         with gr.Blocks() as demo:
             gr.Markdown("ChatLab")
         app = App.create_app(demo)
-        api.attach(app)
+        api.attach(app, runtime.current_manager)
 
         with TestClient(app) as client:
             self.assertEqual(client.get("/v1/models").status_code, 200)

@@ -18,7 +18,7 @@ from chatlab import desktop
 from chatlab import logs
 from chatlab import device_memory
 from chatlab import updater
-from chatlab.app import build_app
+from chatlab.app import build_app, current_manager
 from chatlab.desktop_smoke import smoke_test_metal, smoke_test_mlx, smoke_test_pipelines
 from chatlab.version import __version__
 
@@ -103,7 +103,7 @@ def start_local_server():
         # The local API shares the window's port. Gradio builds the
         # application inside launch(), so this is the first moment there is
         # one to add routes to.
-        api.attach(demo.app)
+        api.attach(demo.app, current_manager)
     except Exception:
         demo.close(verbose=False)
         raise

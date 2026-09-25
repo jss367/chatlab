@@ -6,6 +6,10 @@ import html
 
 import gradio as gr
 
+# Defined beside resolve_seed, below the interface, so the API can draw a
+# seed without importing a page; the pages still read it from here.
+from chatlab.seeds import SEED_LIMIT as SEED_LIMIT
+
 
 try:
     from huggingface_hub.errors import IncompleteSnapshotError
@@ -73,8 +77,6 @@ NAV_ICONS = {
     SETTINGS_PAGE: "settings",
 }
 
-
-SEED_LIMIT = 2**31 - 1
 
 
 NO_TOKEN_SELECTED = "Select a token to inspect it."

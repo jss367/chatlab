@@ -170,6 +170,102 @@ def split_reasoning(
     return joined_reasoning, "".join(answer).strip(), closed
 
 
+def split_response_text(
+    text: str,
+    *,
+    literal_prefill: str = "",
+    literal_spans: tuple[tuple[int, int], ...] = (),
+    streaming: bool = False,
+    reasoning_prefilled: bool = False,
+) -> tuple[str, str, bool]:
+    """Split reasoning without treating reader-supplied text as syntax.
+
+    The first runtime update for an assistant prefill contains only its forced
+    tokens. Remembering that decoded prefix lets the application protect every
+    ``<`` the reader supplied while leaving the automatic leading ``</think>``
+    visible to the reasoning parser. ``literal_spans`` does the same for typed
+    branch replacements, which can occur after sampled tokens. Tags sampled
+    later by the model keep their normal meaning.
+    """
+
+    protected_spans = [
+        (max(0, int(start_at)), min(len(text), int(end_at)))
+        for start_at, end_at in literal_spans
+        if int(start_at) < len(text) and int(end_at) > 0
+    ]
+    if literal_prefill and text.startswith(literal_prefill):
+        literal_start = 0
+        if reasoning_prefilled:
+            marker_at = literal_prefill.find(THINK_CLOSE)
+            if marker_at >= 0:
+                literal_start = marker_at + len(THINK_CLOSE)
+                # _response_prefix_ids() inserts this separator between the
+                # template's closing reasoning marker and the reader's text.
+                # Leave it outside protection so the parser trims it while
+                # retaining whitespace the reader actually typed after it.
+                if literal_prefill.startswith("\n\n", literal_start):
+                    literal_start += 2
+            else:
+                literal_start = len(literal_prefill)
+        if literal_start < len(literal_prefill):
+            protected_spans.append((literal_start, len(literal_prefill)))
+
+    protected_spans = sorted(
+        (start_at, end_at)
+        for start_at, end_at in protected_spans
+        if start_at < end_at
+    )
+    merged_spans: list[tuple[int, int]] = []
+    for start_at, end_at in protected_spans:
+        if merged_spans and start_at <= merged_spans[-1][1]:
+            old_start, old_end = merged_spans[-1]
+            merged_spans[-1] = (old_start, max(old_end, end_at))
+        else:
+            merged_spans.append((start_at, end_at))
+
+    if not merged_spans:
+        return split_reasoning(
+            text,
+            streaming=streaming,
+            reasoning_prefilled=reasoning_prefilled,
+        )
+
+    placeholder = "\0CHATLAB_LITERAL_LT\0"
+    start = "\0CHATLAB_LITERAL_START\0"
+    end = "\0CHATLAB_LITERAL_END\0"
+    while placeholder in text or start in text or end in text:
+        placeholder += "_"
+        start += "_"
+        end += "_"
+    protected_parts: list[str] = []
+    cursor = 0
+    for start_at, end_at in merged_spans:
+        protected_parts.append(text[cursor:start_at])
+        protected_parts.append(start)
+        protected_parts.append(text[start_at:end_at].replace("<", placeholder))
+        protected_parts.append(end)
+        cursor = end_at
+    protected_parts.append(text[cursor:])
+    reasoning, answer, closed = split_reasoning(
+        "".join(protected_parts),
+        streaming=streaming,
+        reasoning_prefilled=reasoning_prefilled,
+    )
+
+    def restore(value: str) -> str:
+        return (
+            value.replace(placeholder, "<")
+            .replace(start, "")
+            .replace(end, "")
+        )
+
+    return (
+        restore(reasoning),
+        restore(answer),
+        closed,
+    )
+
+
 def make_turn(role: str, content: str, reasoning: str = "") -> dict:
     return {"role": role, "content": content, "reasoning": reasoning}
 

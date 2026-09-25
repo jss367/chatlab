@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import random
 import time
 
 import gradio as gr
@@ -14,7 +13,6 @@ from chatlab.steering import SteeringError, compact as compact_steering, from_co
 from chatlab import charts
 from chatlab.conversation import (
     MAIN_BRANCH,
-    THINK_CLOSE,
     branch_stamp,
     copy_forks,
     copy_turns,
@@ -25,11 +23,12 @@ from chatlab.conversation import (
     make_turn,
     model_messages,
     new_forks,
-    split_reasoning,
+    split_response_text,
     turn_tokens,
     user_index_at_or_before,
 )
 from chatlab.model_runtime import LOADING
+from chatlab.seeds import resolve_seed
 from chatlab.text_generation import ModelChanged
 from chatlab.token_metrics import (
     DEFAULT_COLOR_SCALE,
@@ -40,7 +39,6 @@ from chatlab.ui import runtime
 from chatlab.ui.common import (
     CHART_EVERY,
     NO_TOKEN_SELECTED,
-    SEED_LIMIT,
     failure_status,
     finalize_partial,
     send_stop_buttons,
@@ -98,102 +96,6 @@ CHAT_OUTPUT_NAMES = (
 )
 
 
-def split_response_text(
-    text: str,
-    *,
-    literal_prefill: str = "",
-    literal_spans: tuple[tuple[int, int], ...] = (),
-    streaming: bool = False,
-    reasoning_prefilled: bool = False,
-) -> tuple[str, str, bool]:
-    """Split reasoning without treating reader-supplied text as syntax.
-
-    The first runtime update for an assistant prefill contains only its forced
-    tokens. Remembering that decoded prefix lets the application protect every
-    ``<`` the reader supplied while leaving the automatic leading ``</think>``
-    visible to the reasoning parser. ``literal_spans`` does the same for typed
-    branch replacements, which can occur after sampled tokens. Tags sampled
-    later by the model keep their normal meaning.
-    """
-
-    protected_spans = [
-        (max(0, int(start_at)), min(len(text), int(end_at)))
-        for start_at, end_at in literal_spans
-        if int(start_at) < len(text) and int(end_at) > 0
-    ]
-    if literal_prefill and text.startswith(literal_prefill):
-        literal_start = 0
-        if reasoning_prefilled:
-            marker_at = literal_prefill.find(THINK_CLOSE)
-            if marker_at >= 0:
-                literal_start = marker_at + len(THINK_CLOSE)
-                # _response_prefix_ids() inserts this separator between the
-                # template's closing reasoning marker and the reader's text.
-                # Leave it outside protection so the parser trims it while
-                # retaining whitespace the reader actually typed after it.
-                if literal_prefill.startswith("\n\n", literal_start):
-                    literal_start += 2
-            else:
-                literal_start = len(literal_prefill)
-        if literal_start < len(literal_prefill):
-            protected_spans.append((literal_start, len(literal_prefill)))
-
-    protected_spans = sorted(
-        (start_at, end_at)
-        for start_at, end_at in protected_spans
-        if start_at < end_at
-    )
-    merged_spans: list[tuple[int, int]] = []
-    for start_at, end_at in protected_spans:
-        if merged_spans and start_at <= merged_spans[-1][1]:
-            old_start, old_end = merged_spans[-1]
-            merged_spans[-1] = (old_start, max(old_end, end_at))
-        else:
-            merged_spans.append((start_at, end_at))
-
-    if not merged_spans:
-        return split_reasoning(
-            text,
-            streaming=streaming,
-            reasoning_prefilled=reasoning_prefilled,
-        )
-
-    placeholder = "\0CHATLAB_LITERAL_LT\0"
-    start = "\0CHATLAB_LITERAL_START\0"
-    end = "\0CHATLAB_LITERAL_END\0"
-    while placeholder in text or start in text or end in text:
-        placeholder += "_"
-        start += "_"
-        end += "_"
-    protected_parts: list[str] = []
-    cursor = 0
-    for start_at, end_at in merged_spans:
-        protected_parts.append(text[cursor:start_at])
-        protected_parts.append(start)
-        protected_parts.append(text[start_at:end_at].replace("<", placeholder))
-        protected_parts.append(end)
-        cursor = end_at
-    protected_parts.append(text[cursor:])
-    reasoning, answer, closed = split_reasoning(
-        "".join(protected_parts),
-        streaming=streaming,
-        reasoning_prefilled=reasoning_prefilled,
-    )
-
-    def restore(value: str) -> str:
-        return (
-            value.replace(placeholder, "<")
-            .replace(start, "")
-            .replace(end, "")
-        )
-
-    return (
-        restore(reasoning),
-        restore(answer),
-        closed,
-    )
-
-
 def stop_generation(
     turns: list[dict] | None,
     scale_name: str = DEFAULT_COLOR_SCALE,
@@ -222,28 +124,6 @@ def stop_generation(
         if kept
         else "Stopped before the model produced anything.",
     )
-
-
-def resolve_seed(seed, randomize: bool) -> int:
-    """Pick the seed for one generation, inside the range NumPy will accept.
-
-    ``np.random.default_rng()`` rejects negative integers, so a locked seed of
-    ``-1`` used to fail every generation with "expected non-negative integer"
-    and produce no reply at all. The number input is constrained to 0 and above,
-    but the clamp lives here as well: this is the only place the value is turned
-    into the one the generator is handed, and it can still arrive out of range
-    from the API, from a browser that ignores the constraint, or from a float
-    the input rounded. Non-numeric and missing values keep falling back to 0.
-    """
-
-    if randomize:
-        return random.randrange(SEED_LIMIT)
-    try:
-        # OverflowError covers infinities, which int() refuses to convert.
-        value = int(seed)
-    except (OverflowError, TypeError, ValueError):
-        return 0
-    return max(value, 0)
 
 
 POSITION_LIMIT_NOTE = (

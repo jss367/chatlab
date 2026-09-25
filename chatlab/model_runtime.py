@@ -22,6 +22,7 @@ from chatlab import device_memory
 from chatlab import model_cache
 from chatlab import steering as steering_vectors
 from chatlab.device_memory import first_line, memory_note, reraise_out_of_memory
+from chatlab.engine import Engine
 from chatlab.model_cache import (
     IMAGE_KIND,
     ModelBusy,
@@ -47,6 +48,14 @@ logger = logging.getLogger(__name__)
 # from one of these; see ModelManager.claim_generation.
 GENERATING = "generating"
 LOADING = "loading"
+
+# Why a vector is refused on an MLX model, in one wording whether the refusal
+# comes ahead of a run (check_steering) or as it starts (_steering), so a
+# reader told twice is told the same thing.
+STEERING_NEEDS_TORCH = (
+    "Steering is not supported for MLX models. Load the model's "
+    "unquantized Transformers version to steer it, or turn steering off."
+)
 
 
 class ExclusiveLoad(NamedTuple):
@@ -85,7 +94,7 @@ class ModelManager(LoadingMixin, GenerationMixin, InspectionMixin):
         # :meth:`_engine` wraps in a :class:`TorchEngine` on demand. Left
         # unset for a Transformers model so that anything that puts a model
         # in ``model`` by hand - the tests do - is run the way it always was.
-        self.engine = None
+        self.engine: Engine | None = None
         self.kind: str | None = None
         self.model_id: str | None = None
         self.local_path: Path | None = None
@@ -677,7 +686,7 @@ class ModelManager(LoadingMixin, GenerationMixin, InspectionMixin):
         finally:
             self._lock.release()
 
-    def _engine(self):
+    def _engine(self) -> Engine:
         """What runs the model in memory; see :attr:`engine`."""
 
         return self.engine if self.engine is not None else TorchEngine(self.model)
@@ -695,11 +704,8 @@ class ModelManager(LoadingMixin, GenerationMixin, InspectionMixin):
         """
 
         engine = self._engine()
-        if getattr(engine, "backend", "torch") != "torch" and steering_vectors.active(steering):
-            raise steering_vectors.SteeringError(
-                "Steering is not supported for MLX models. Load the model's "
-                "unquantized Transformers version to steer it, or turn steering off."
-            )
+        if engine.backend != "torch" and steering_vectors.active(steering):
+            raise steering_vectors.SteeringError(STEERING_NEEDS_TORCH)
         return steering_vectors.applied(self.model, self.model_id, steering)
 
     def check_steering(self, steering: dict | None) -> None:
@@ -714,11 +720,8 @@ class ModelManager(LoadingMixin, GenerationMixin, InspectionMixin):
 
         if not steering_vectors.active(steering):
             return
-        if getattr(self._engine(), "backend", "torch") != "torch":
-            raise steering_vectors.SteeringError(
-                "Steering is not supported for MLX models. Load the model's "
-                "unquantized Transformers version to steer it, or turn steering off."
-            )
+        if self._engine().backend != "torch":
+            raise steering_vectors.SteeringError(STEERING_NEEDS_TORCH)
         steering_vectors.validate_model(self.model, self.model_id, steering_vectors.expand(steering))
 
     def start_image_run(self) -> threading.Event:
@@ -823,7 +826,7 @@ class ModelManager(LoadingMixin, GenerationMixin, InspectionMixin):
                         raise image_runtime.Unwatchable(
                             "The loaded model changed. Draw a new original before testing a word."
                         )
-                    if "generator" not in image_runtime._call_arguments(
+                    if "generator" not in image_runtime.call_arguments(
                         self.pipeline, request, None, None
                     ):
                         raise image_runtime.Unwatchable(

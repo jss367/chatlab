@@ -509,7 +509,7 @@ class InspectionMixin:
                     "examples were to be read through. Ask again."
                 )
             engine = self._engine()
-            if getattr(engine, "backend", "torch") != "torch":
+            if engine.backend != "torch":
                 raise steering_vectors.SteeringError(
                     "Extracting a vector needs a PyTorch model: the reading is "
                     "taken through a forward hook, which an MLX checkpoint has "
@@ -742,7 +742,7 @@ class InspectionMixin:
                                                       contrast_index)
                 if not self.loaded or self.load_id != plan["load_id"] or self.model_id != plan["model_id"]:
                     raise ModelChanged("The model has been reloaded. Fill both Compare slots again.")
-                if getattr(self._engine(), "backend", "torch") != "torch":
+                if self._engine().backend != "torch":
                     raise ValueError("Activation patching requires a Transformers model; MLX is not supported yet.")
                 activation_patching.model_layers(self.model)
 

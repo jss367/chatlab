@@ -9,3 +9,16 @@ from chatlab.model_runtime import ModelManager
 
 
 MANAGER = ModelManager()
+
+
+def current_manager() -> ModelManager:
+    """Whatever :data:`MANAGER` is at the moment of asking.
+
+    What the local API is handed instead of the module: the API sits below
+    the interface and does not import it, so whoever wires the two together
+    passes this in. It reads the name on every call rather than holding the
+    object, which is what lets a test's ``runtime.MANAGER = ...`` reach the
+    API's routes as it reaches the pages.
+    """
+
+    return MANAGER
