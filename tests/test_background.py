@@ -16,7 +16,7 @@ import settings_sandbox
 from chatlab.ui import conversations
 from chatlab.conversation import MAIN_BRANCH, make_turn, new_forks, put_branch
 from chatlab.ui import runtime
-from chatlab.ui.background import ConversationJob, NAMES
+from chatlab.ui.background import ConversationJob
 from test_app_flow import SETTINGS, THINK_EOS, THINK_PIECES
 from test_streaming import loaded_manager
 
@@ -55,7 +55,7 @@ class BackgroundConversationTests(unittest.TestCase):
 
         self.manager.generate = slow
         self.chat = self.named("chat")
-        self.turns = self.chat.outputs[NAMES["turns"]]
+        self.turns = self.demo.conversation_outputs["turns"]
         self.forks = self.named("remember_forks").inputs[1]
         self.job_state = next(c for c in self.chat.inputs if isinstance(c.value, ConversationJob))
         self.job = self.state[self.job_state._id]
@@ -162,7 +162,7 @@ class BackgroundConversationTests(unittest.TestCase):
         self.call("chat", {0: "Keep this draft", **dict(enumerate(SETTINGS, 2))})
         self.assertIs(self.job.worker, worker)
         self.assertEqual(len(self.state[self.turns._id]), 1)
-        status = self.view[self.chat.outputs[NAMES["status"]]._id]
+        status = self.view[self.demo.conversation_outputs["status"]._id]
         self.assertIn("Main", status)
         self.assertIn("Stop", status)
 
@@ -246,16 +246,16 @@ class BackgroundConversationTests(unittest.TestCase):
 
     def test_rapid_return_restores_metrics_even_without_a_new_frame(self):
         self.start()
-        epoch = self.state[self.chat.outputs[NAMES["metrics"]]._id][0]
+        epoch = self.state[self.demo.conversation_outputs["metrics"]._id][0]
         self.switch("Chat 1")
         self.switch(MAIN_BRANCH)
         self.call("poll")
-        self.assertEqual(self.state[self.chat.outputs[NAMES["metrics"]]._id][0], epoch)
+        self.assertEqual(self.state[self.demo.conversation_outputs["metrics"]._id][0], epoch)
 
     def test_background_frames_do_not_replace_a_draft_after_returning(self):
         self.start()
         self.switch("Chat 1")
-        prompt = self.chat.outputs[NAMES["prompt"]]
+        prompt = self.demo.conversation_outputs["prompt"]
         self.view[prompt._id] = "My next question"
         self.finish()
         self.call("poll")
@@ -484,11 +484,11 @@ class BackgroundSnapshotTests(unittest.TestCase):
         metrics = [metric] * 2000
         turns = [make_turn("assistant", "word", "")]
         turns[0]["tokens"] = list(metrics)
-        frame = [gr.skip() for _ in app.CHAT_OUTPUT_NAMES]
-        frame[NAMES["turns"]] = turns
+        frame = app.Frame(app.CHAT_OUTPUT_NAMES)
+        frame["turns"] = turns
         for name in ("metrics", "prompt_metrics", "chat_metrics"):
-            frame[NAMES[name]] = (123, list(metrics))
-        frame[NAMES["alternatives"]] = gr.update(value=[["choice"]])
+            frame[name] = (123, list(metrics))
+        frame["alternatives"] = gr.update(value=[["choice"]])
         job = ConversationJob()
         job.owner = MAIN_BRANCH
         job.saved = new_forks()
@@ -497,18 +497,66 @@ class BackgroundSnapshotTests(unittest.TestCase):
         # The producer can reuse its lists without altering a published frame.
         turns[0]["content"] = "changed"
         turns[0]["tokens"].clear()
-        frame[NAMES["metrics"]][1].clear()
-        frame[NAMES["alternatives"]]["value"].clear()
-        self.assertEqual(job.frame[NAMES["turns"]][0]["content"], "word")
-        self.assertEqual(len(job.frame[NAMES["metrics"]][1]), 2000)
+        frame["metrics"][1].clear()
+        frame["alternatives"]["value"].clear()
+        self.assertEqual(job.frame["turns"][0]["content"], "word")
+        self.assertEqual(len(job.frame["metrics"][1]), 2000)
         shown, _, _ = job.render(new_forks(), [], "Raw rank")
-        self.assertIs(shown[NAMES["turns"]][0]["tokens"][0], metric)
+        self.assertIs(shown["turns"][0]["tokens"][0], metric)
         for name in ("metrics", "prompt_metrics", "chat_metrics"):
-            self.assertIs(shown[NAMES[name]][1][0], metric)
+            self.assertIs(shown[name][1][0], metric)
         # Gradio may change returned containers without changing the cached run.
-        shown[NAMES["turns"]][0]["tokens"].clear()
-        shown[NAMES["metrics"]][1].clear()
-        shown[NAMES["alternatives"]]["value"].clear()
-        self.assertEqual(len(job.frame[NAMES["turns"]][0]["tokens"]), 2000)
-        self.assertEqual(len(job.frame[NAMES["metrics"]][1]), 2000)
-        self.assertEqual(job.frame[NAMES["alternatives"]]["value"], [["choice"]])
+        shown["turns"][0]["tokens"].clear()
+        shown["metrics"][1].clear()
+        shown["alternatives"]["value"].clear()
+        self.assertEqual(len(job.frame["turns"][0]["tokens"]), 2000)
+        self.assertEqual(len(job.frame["metrics"][1]), 2000)
+        self.assertEqual(job.frame["alternatives"]["value"], [["choice"]])
+
+
+class NamedOutputTests(unittest.TestCase):
+    """Conversation handlers publish by name, and only the adapter counts positions."""
+
+    def test_a_frame_reads_an_unset_output_as_skipped(self):
+        frame = app.Frame(app.UNDO_OUTPUT_NAMES, status="Removed.")
+        self.assertEqual(frame["status"], "Removed.")
+        self.assertEqual(frame["turns"], gr.skip())
+        self.assertNotIn("turns", frame)
+
+    def test_a_frame_refuses_a_name_its_family_does_not_publish(self):
+        # "seed" is a reply's output, not an undo's; "stauts" is nobody's.
+        for name in ("seed", "stauts"):
+            with self.subTest(name=name):
+                with self.assertRaises(KeyError):
+                    app.Frame(app.UNDO_OUTPUT_NAMES, **{name: 1})
+                with self.assertRaises(KeyError):
+                    app.Frame(app.UNDO_OUTPUT_NAMES)[name]
+
+    def test_a_frame_survives_a_copy(self):
+        frame = app.Frame(app.STOP_OUTPUT_NAMES, status="Stopped.")
+        for copied in (frame.copy(), copy.deepcopy(frame), copy.copy(frame)):
+            self.assertEqual(copied.names, app.STOP_OUTPUT_NAMES)
+            self.assertEqual(copied, frame)
+
+    def test_positions_follow_the_names_the_listener_registered(self):
+        frame = app.Frame(app.STOP_OUTPUT_NAMES, status="Stopped.", turns=[])
+        values = app.positional(frame, app.STOP_OUTPUT_NAMES)
+        self.assertEqual(len(values), len(app.STOP_OUTPUT_NAMES))
+        self.assertEqual(values[app.STOP_OUTPUT_NAMES.index("status")], "Stopped.")
+        self.assertEqual(values[app.STOP_OUTPUT_NAMES.index("turns")], [])
+        self.assertEqual(values[app.STOP_OUTPUT_NAMES.index("chatbot")], gr.skip())
+
+    def test_an_output_the_listener_did_not_register_is_refused_not_dropped(self):
+        frame = app.Frame(app.CHAT_OUTPUT_NAMES, seed=7)
+        with self.assertRaises(ValueError):
+            app.positional(frame, app.UNDO_OUTPUT_NAMES)
+
+    def test_the_page_has_a_component_for_every_published_name(self):
+        demo = app.build_app()
+        self.assertEqual(
+            set(demo.conversation_outputs), set(app.CONVERSATION_OUTPUT_NAMES)
+        )
+        # One component per name: two names drawn in one place would be two
+        # outputs of one listener writing over each other.
+        components = [id(component) for component in demo.conversation_outputs.values()]
+        self.assertEqual(len(components), len(set(components)))

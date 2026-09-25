@@ -9,6 +9,7 @@ import gradio as gr
 from chatlab.conversation import MAIN_BRANCH, branch_sampling, copy_forks, put_branch_sampling
 from chatlab.steering import compact, from_controls, normalize, read_vector
 from chatlab.ui.conversations import load_conversation
+from chatlab.ui.outputs import STEERED_LOAD_OUTPUT_NAMES, STEERING_OUTPUT_NAMES, Frame, skipped
 
 
 EMPTY_STATUS = "Import a JSON vector to steer this conversation. Layers count from 0."
@@ -73,11 +74,17 @@ def remember_steering(forks, value, enabled, strength, layer):
 
 
 def load_with_steering(path, turns, scale_name, forks):
-    *result, value = load_conversation(path, turns, scale_name, include_steering=True)
-    # The core loader preserves the system-prompt control on failure.
-    if not isinstance(result[2], str):
-        return (*result, *((gr.skip(),) * 6))
-    return (*result, store(forks, value), *controls(value))
+    loaded, value = load_conversation(path, turns, scale_name, include_steering=True)
+    frame = Frame(STEERED_LOAD_OUTPUT_NAMES, loaded)
+    # A failed load leaves the forks and the controls as they were, as it
+    # leaves the system prompt.
+    if skipped(value):
+        return frame
+    frame.update(
+        dict(zip(STEERING_OUTPUT_NAMES, controls(value), strict=True)),
+        forks=store(forks, value),
+    )
+    return frame
 
 
 # ---------------------------------------------------------------- extraction

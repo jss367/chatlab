@@ -41,7 +41,14 @@ from chatlab.ui.common import (
     NO_TOKEN_SELECTED,
     failure_status,
     finalize_partial,
-    send_stop_buttons,
+    send_stop_values,
+)
+from chatlab.ui.outputs import (
+    FORK_OUTPUT_NAMES,
+    LOAD_OUTPUT_NAMES,
+    NEW_CONVERSATION_OUTPUT_NAMES,
+    RESTORE_OUTPUT_NAMES,
+    Frame,
 )
 from chatlab.ui.panel import (
     cleared_panel,
@@ -119,10 +126,17 @@ def restore_conversations():
     # during restore so clicks on saved user messages match the live session.
     metrics = empty_metrics()
     if forks is None:
-        return (*(gr.skip(),) * 4, metrics)
+        return Frame(RESTORE_OUTPUT_NAMES, metrics=metrics)
     turns = copy_turns(forks["branches"][forks["active"]])
     messages, _ = display_messages(turns)
-    return messages, turns, forks, conversation_list_update(forks, turns), metrics
+    return Frame(
+        RESTORE_OUTPUT_NAMES,
+        chatbot=messages,
+        turns=turns,
+        forks=forks,
+        conversation_list=conversation_list_update(forks, turns),
+        metrics=metrics,
+    )
 
 
 def sampling_on_screen(values) -> dict:
@@ -265,23 +279,20 @@ def panel_reset(turns: list[dict] | None, scale_name: str):
     strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_panel(
         turns, scale_name
     )
-    return (
-        strip,
-        metrics,
-        NO_TOKEN_SELECTED,
-        [],
-        prompt_strip,
-        prompt_metrics,
-        prompt_note,
-        charts.summary_tiles({}),
-        charts.EMPTY_CHART,
-        {},
-        None,
-        None,
-    )
-
-
-PANEL_KEPT = (gr.skip(),) * 12
+    return {
+        "strip": strip,
+        "metrics": metrics,
+        "detail": NO_TOKEN_SELECTED,
+        "alternatives": [],
+        "prompt_strip": prompt_strip,
+        "prompt_metrics": prompt_metrics,
+        "prompt_note": prompt_note,
+        "summary": charts.summary_tiles({}),
+        "surprise": charts.EMPTY_CHART,
+        "trace": {},
+        "selected_token": None,
+        "branch_pick": None,
+    }
 
 
 def fork_refused(turns: list[dict], forks: dict, status: str):
@@ -295,15 +306,13 @@ def fork_refused(turns: list[dict], forks: dict, status: str):
     turns = copy_turns(turns)
     finalize_partial(turns)
     messages, _ = display_messages(turns)
-    return (
-        gr.skip(),
-        messages,
-        turns,
-        gr.skip(),
-        conversation_list_update(forks, turns),
-        status,
-        *send_stop_buttons(False),
-        *PANEL_KEPT,
+    return Frame(
+        FORK_OUTPUT_NAMES,
+        chatbot=messages,
+        turns=turns,
+        conversation_list=conversation_list_update(forks, turns),
+        status=status,
+        **send_stop_values(False),
     )
 
 
@@ -385,15 +394,16 @@ def fork_conversation(
             f"Copied the conversation into {name}. Edit or undo a message, or "
             "send a new one, to take it somewhere else."
         )
-    return (
-        gr.skip() if box_text is None else box_text,
-        messages,
-        forked,
-        forks,
-        conversation_list_update(forks, forked),
-        status,
-        *send_stop_buttons(False),
-        *(panel_reset(forked, scale_name) if truncated else PANEL_KEPT),
+    return Frame(
+        FORK_OUTPUT_NAMES,
+        prompt=gr.skip() if box_text is None else box_text,
+        chatbot=messages,
+        turns=forked,
+        forks=forks,
+        conversation_list=conversation_list_update(forks, forked),
+        status=status,
+        **send_stop_values(False),
+        **(panel_reset(forked, scale_name) if truncated else {}),
     )
 
 
@@ -423,15 +433,15 @@ def switch_fork(
     target = copy_turns(forks["branches"][name])
     messages, _ = display_messages(target)
     count = len(target)
-    return (
-        gr.skip(),
-        messages,
-        target,
-        forks,
-        conversation_list_update(forks, target),
-        f"Switched to {name} ({count} message{'s' if count != 1 else ''}).",
-        *send_stop_buttons(False),
-        *panel_reset(target, scale_name),
+    return Frame(
+        FORK_OUTPUT_NAMES,
+        chatbot=messages,
+        turns=target,
+        forks=forks,
+        conversation_list=conversation_list_update(forks, target),
+        status=f"Switched to {name} ({count} message{'s' if count != 1 else ''}).",
+        **send_stop_values(False),
+        **panel_reset(target, scale_name),
     )
 
 
@@ -456,15 +466,15 @@ def delete_fork(
     forks["active"] = MAIN_BRANCH
     target = copy_turns(forks["branches"].setdefault(MAIN_BRANCH, []))
     messages, _ = display_messages(target)
-    return (
-        gr.skip(),
-        messages,
-        target,
-        forks,
-        conversation_list_update(forks, target),
-        f"Deleted {name}. Back on {MAIN_BRANCH}.",
-        *send_stop_buttons(False),
-        *panel_reset(target, scale_name),
+    return Frame(
+        FORK_OUTPUT_NAMES,
+        chatbot=messages,
+        turns=target,
+        forks=forks,
+        conversation_list=conversation_list_update(forks, target),
+        status=f"Deleted {name}. Back on {MAIN_BRANCH}.",
+        **send_stop_values(False),
+        **panel_reset(target, scale_name),
     )
 
 
@@ -499,16 +509,16 @@ def new_conversation(
     # touched on any other conversation.
     put_branch_sampling(forks, name, sampling_on_screen(sampling))
     forks["active"] = name
-    return (
-        gr.skip(),
-        [],
-        [],
-        forks,
-        conversation_list_update(forks, []),
-        f"Started {name}. Send a message to begin it.",
-        *send_stop_buttons(False),
-        *panel_reset([], scale_name),
-        "",  # Replacement text belongs to the previous conversation's token.
+    return Frame(
+        NEW_CONVERSATION_OUTPUT_NAMES,
+        chatbot=[],
+        turns=[],
+        forks=forks,
+        conversation_list=conversation_list_update(forks, []),
+        status=f"Started {name}. Send a message to begin it.",
+        **send_stop_values(False),
+        **panel_reset([], scale_name),
+        branch_text="",  # Replacement text belongs to the previous conversation's token.
     )
 
 
@@ -549,6 +559,10 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE, *
     finalized like Stop does - the cancelled generator left its last turn with
     a pending reasoning block, which would spin for the rest of the session,
     or empty if the cancel landed before the first token.
+
+    With ``include_steering`` the steering vector the file carried comes back
+    beside the frame, as ``(frame, steering)``, for ui.steering to put on the
+    controls; ``gr.skip()`` in its place says the load failed.
     """
 
     def keep_current(status):
@@ -557,19 +571,14 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE, *
         kept = copy_turns(turns)
         finalize_partial(kept)
         messages, _ = display_messages(kept)
-        return (
-            messages,
-            kept,
-            gr.skip(),
-            gr.skip(),
-            gr.skip(),
-            status,
-            gr.skip(),
-            gr.skip(),
-            *send_stop_buttons(False),
-            *(gr.skip(),) * 8,
-            *((gr.skip(),) if include_steering else ()),
+        frame = Frame(
+            LOAD_OUTPUT_NAMES,
+            chatbot=messages,
+            turns=kept,
+            status=status,
+            **send_stop_values(False),
         )
+        return (frame, gr.skip()) if include_steering else frame
 
     if not file_path:
         return keep_current("No file chosen.")
@@ -585,32 +594,19 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE, *
     # cancelled generator left behind goes with it and needs no finalizing.
     turns = loaded
     messages, _ = display_messages(turns)
-    strip, metrics, prompt_strip, prompt_metrics, prompt_note = cleared_panel(
-        turns, scale_name
-    )
     # The selected token described a response from the conversation being
     # replaced, so it goes with it, exactly as Clear and Undo reset it. The
     # charts and the export measured that response too, and a loaded
     # conversation has no measurements of its own to put in their place: a
     # saved file holds the text and the counts, not the distributions, so its
     # replies come back as plain text in the token view.
-    return (
-        messages,
-        turns,
-        system_prompt,
-        strip,
-        metrics,
-        f"Loaded {len(turns)} message{'s' if len(turns) != 1 else ''}.",
-        NO_TOKEN_SELECTED,
-        [],
-        *send_stop_buttons(False),
-        prompt_strip,
-        prompt_metrics,
-        prompt_note,
-        charts.summary_tiles({}),
-        charts.EMPTY_CHART,
-        {},
-        None,
-        None,
-        *((steering,) if include_steering else ()),
+    frame = Frame(
+        LOAD_OUTPUT_NAMES,
+        chatbot=messages,
+        turns=turns,
+        system_prompt=system_prompt,
+        status=f"Loaded {len(turns)} message{'s' if len(turns) != 1 else ''}.",
+        **send_stop_values(False),
+        **panel_reset(turns, scale_name),
     )
+    return (frame, steering) if include_steering else frame

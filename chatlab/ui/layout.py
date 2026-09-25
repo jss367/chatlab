@@ -30,6 +30,18 @@ from chatlab.ui import runtime
 from chatlab.ui import experiments, experiment_compare
 from chatlab.ui.icons import icon_classes
 from chatlab.ui.background import ConversationEvents, ConversationJob
+from chatlab.ui.outputs import (
+    CHAT_OUTPUT_NAMES,
+    CLEAR_OUTPUT_NAMES,
+    FORK_OUTPUT_NAMES,
+    NEW_CONVERSATION_OUTPUT_NAMES,
+    POLL_OUTPUT_NAMES,
+    RESTORE_OUTPUT_NAMES,
+    STEERED_LOAD_OUTPUT_NAMES,
+    STOP_OUTPUT_NAMES,
+    TOKEN_EDIT_OUTPUT_NAMES,
+    UNDO_OUTPUT_NAMES,
+)
 from chatlab.ui.token_edit import close_token_editor, open_token_editor, save_token_edit
 from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from chatlab.extensions.registry import load_enabled
@@ -2588,102 +2600,95 @@ def build_app() -> gr.Blocks:
             sampling_accordion,
             concurrency_id=SAMPLING_LABEL_QUEUE,
         )
-        # The order every generation handler publishes in; see
-        # CHAT_OUTPUT_NAMES.
-        chat_outputs = [
-            prompt,
-            chatbot,
-            conversation_state,
-            token_strip,
-            metrics_state,
-            generation_status,
-            seed,
-            send_button,
-            stop_button,
-            token_detail,
-            alternatives,
-            prompt_strip,
-            prompt_metrics_state,
-            prompt_note,
-            summary_panel,
-            surprise_panel,
-            trace_state,
-            context_ids_state,
-            chat_metrics_state,
-            chat_context_ids_state,
-            selected_token,
-            branch_pick,
-        ]
-        undo_outputs = [
-            prompt,
-            chatbot,
-            conversation_state,
-            token_strip,
-            metrics_state,
-            generation_status,
-            token_detail,
-            alternatives,
-            send_button,
-            stop_button,
-            prompt_strip,
-            prompt_metrics_state,
-            prompt_note,
-            summary_panel,
-            surprise_panel,
-            trace_state,
-            selected_token,
-            branch_pick,
-        ]
+        # The one table from the names the conversation handlers publish
+        # under to the components those names are drawn in; see ui.outputs.
+        # Every listener bound through conversation_events names its outputs
+        # from here, so a handler and its listener cannot disagree about
+        # which value goes where.
+        conversation_outputs = {
+            "prompt": prompt,
+            "chatbot": chatbot,
+            "turns": conversation_state,
+            "strip": token_strip,
+            "metrics": metrics_state,
+            "status": generation_status,
+            "seed": seed,
+            "send": send_button,
+            "stop": stop_button,
+            "detail": token_detail,
+            "alternatives": alternatives,
+            "prompt_strip": prompt_strip,
+            "prompt_metrics": prompt_metrics_state,
+            "prompt_note": prompt_note,
+            "summary": summary_panel,
+            "surprise": surprise_panel,
+            "trace": trace_state,
+            "context_ids": context_ids_state,
+            "chat_metrics": chat_metrics_state,
+            "chat_context_ids": chat_context_ids_state,
+            "selected_token": selected_token,
+            "branch_pick": branch_pick,
+            "token_editor": token_editor,
+            "token_edit_target": token_edit_target,
+            "forks": forks_state,
+            "conversation_list": conversation_list,
+            "clear_confirm": clear_confirm,
+            "branch_text": branch_text,
+            "system_prompt": system_prompt,
+            "steering_state": steering_state,
+            "steering_enabled": steering_enabled,
+            "steering_strength": steering_strength,
+            "steering_layer": steering_layer,
+            "steering_status": steering_status,
+        }
+        # Where tests, and anything else holding the page, look a component
+        # up by the name its handlers publish it under.
+        demo.conversation_outputs = conversation_outputs
 
         background_state = gr.State(ConversationJob())
         conversation_events = ConversationEvents(
-            background_state, conversation_state, forks_state, conversation_list,
-            color_scale, [*chat_outputs, token_editor, token_edit_target],
-            CONVERSATION_PANE_QUEUE,
+            background_state, conversation_outputs, color_scale, CONVERSATION_PANE_QUEUE,
         )
         response_timer = gr.Timer(0.25)
         response_timer.tick(
             conversation_events.poll,
             [background_state, conversation_state, forks_state, color_scale],
-            [*chat_outputs, token_editor, token_edit_target, forks_state, conversation_list],
+            conversation_events.components(POLL_OUTPUT_NAMES),
             concurrency_id=CONVERSATION_PANE_QUEUE,
             **QUIET_TICK,
         )
 
         start_response = partial(conversation_events.bind, generation=True)
         navigate = partial(conversation_events.bind, navigation=True)
-        start_response(menu_action.input, branch_from_menu, [menu_action, *chat_inputs], chat_outputs)
+        start_response(menu_action.input, branch_from_menu, [menu_action, *chat_inputs], CHAT_OUTPUT_NAMES)
         start_response(
             prompt_menu_action.input, edit_prompt_from_menu,
             [prompt_menu_action, context_ids_state, prompt_metrics_state, *chat_inputs],
-            chat_outputs,
+            CHAT_OUTPUT_NAMES,
         )
-        start_response(send_button.click, chat, chat_inputs, chat_outputs)
-        start_response(prompt.submit, chat, chat_inputs, chat_outputs)
-        start_response(retry_button.click, retry_last, chat_inputs, chat_outputs)
-        start_response(next_token_button.click, next_token, [branch_pick, *chat_inputs], chat_outputs)
-        start_response(chatbot.retry, retry_message, chat_inputs, chat_outputs)
-        start_response(chatbot.edit, edit_message, chat_inputs, chat_outputs)
+        start_response(send_button.click, chat, chat_inputs, CHAT_OUTPUT_NAMES)
+        start_response(prompt.submit, chat, chat_inputs, CHAT_OUTPUT_NAMES)
+        start_response(retry_button.click, retry_last, chat_inputs, CHAT_OUTPUT_NAMES)
+        start_response(next_token_button.click, next_token, [branch_pick, *chat_inputs], CHAT_OUTPUT_NAMES)
+        start_response(chatbot.retry, retry_message, chat_inputs, CHAT_OUTPUT_NAMES)
+        start_response(chatbot.edit, edit_message, chat_inputs, CHAT_OUTPUT_NAMES)
         start_response(
             token_edit_save.click, save_token_edit,
             [token_edit_target, token_edit_text, *chat_inputs],
-            [*chat_outputs, token_editor, token_edit_target],
+            TOKEN_EDIT_OUTPUT_NAMES,
         )
         start_response(
-            branch_button.click, branch_from, [branch_pick, *chat_inputs], chat_outputs,
+            branch_button.click, branch_from, [branch_pick, *chat_inputs], CHAT_OUTPUT_NAMES,
         )
         start_response(
             branch_text_button.click, branch_with_text,
-            [selected_token, branch_text, *chat_inputs], chat_outputs,
+            [selected_token, branch_text, *chat_inputs], CHAT_OUTPUT_NAMES,
         )
 
         conversation_events.bind(
             stop_button.click, stop_generation,
             inputs=[conversation_state, color_scale],
-            outputs=[
-                chatbot, conversation_state, token_strip, send_button,
-                stop_button, generation_status,
-            ],
+            outputs=STOP_OUTPUT_NAMES,
             stop=True,
         )
 
@@ -2692,13 +2697,13 @@ def build_app() -> gr.Blocks:
         conversation_events.bind(
             undo_button.click, undo_last,
             [conversation_state, color_scale],
-            undo_outputs,
+            UNDO_OUTPUT_NAMES,
             concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         conversation_events.bind(
             chatbot.undo, undo_message,
             [conversation_state, color_scale],
-            undo_outputs,
+            UNDO_OUTPUT_NAMES,
             concurrency_id=CONVERSATION_PANE_QUEUE,
         )
         # Clear asks before it takes anything, so the button that opens the
@@ -2724,55 +2729,12 @@ def build_app() -> gr.Blocks:
             clear=True,
             inputs=[color_scale, forks_state],
             concurrency_id=CONVERSATION_PANE_QUEUE,
-            outputs=[
-                chatbot,
-                conversation_state,
-                token_strip,
-                metrics_state,
-                generation_status,
-                send_button,
-                stop_button,
-                token_detail,
-                alternatives,
-                prompt_strip,
-                prompt_metrics_state,
-                prompt_note,
-                summary_panel,
-                surprise_panel,
-                trace_state,
-                selected_token,
-                branch_pick,
-                forks_state,
-                conversation_list,
-                clear_confirm,
-            ],
+            outputs=CLEAR_OUTPUT_NAMES,
         ))
 
-        # Navigation takes a snapshot of the view; the job keeps its source.
-        fork_outputs = [
-            prompt,
-            chatbot,
-            conversation_state,
-            forks_state,
-            conversation_list,
-            generation_status,
-            send_button,
-            stop_button,
-            token_strip,
-            metrics_state,
-            token_detail,
-            alternatives,
-            prompt_strip,
-            prompt_metrics_state,
-            prompt_note,
-            summary_panel,
-            surprise_panel,
-            trace_state,
-            selected_token,
-            branch_pick,
-        ]
         chatbot.select(remember_message, conversation_state, selected_message)
 
+        # Navigation takes a snapshot of the view; the job keeps its source.
         brings_its_sampling(
             navigate(
                 fork_button.click, fork_conversation,
@@ -2783,7 +2745,7 @@ def build_app() -> gr.Blocks:
                     color_scale,
                     *sampling_controls,
                 ],
-                fork_outputs,
+                FORK_OUTPUT_NAMES,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
         )
@@ -2791,7 +2753,7 @@ def build_app() -> gr.Blocks:
             navigate(
                 new_button.click, new_conversation,
                 [conversation_state, forks_state, color_scale, *sampling_controls],
-                [*fork_outputs, branch_text],
+                NEW_CONVERSATION_OUTPUT_NAMES,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
         )
@@ -2802,7 +2764,7 @@ def build_app() -> gr.Blocks:
             navigate(
                 conversation_list.input, switch_fork,
                 [conversation_list, conversation_state, forks_state, color_scale],
-                fork_outputs,
+                FORK_OUTPUT_NAMES,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
         )
@@ -2810,7 +2772,7 @@ def build_app() -> gr.Blocks:
             conversation_events.bind(
                 delete_fork_button.click, delete_fork,
                 [conversation_state, forks_state, color_scale],
-                fork_outputs,
+                FORK_OUTPUT_NAMES,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
         )
@@ -2840,7 +2802,7 @@ def build_app() -> gr.Blocks:
             conversation_events.bind(
                 demo.load, restore_conversations,
                 None,
-                [chatbot, conversation_state, forks_state, conversation_list, metrics_state],
+                RESTORE_OUTPUT_NAMES,
                 concurrency_id=CONVERSATION_PANE_QUEUE,
             )
         )
@@ -2853,28 +2815,7 @@ def build_app() -> gr.Blocks:
         conversation_events.bind(
             load_upload.upload, load_with_steering,
             [load_upload, conversation_state, color_scale, forks_state],
-            [
-                chatbot,
-                conversation_state,
-                system_prompt,
-                token_strip,
-                metrics_state,
-                generation_status,
-                token_detail,
-                alternatives,
-                send_button,
-                stop_button,
-                prompt_strip,
-                prompt_metrics_state,
-                prompt_note,
-                summary_panel,
-                surprise_panel,
-                trace_state,
-                selected_token,
-                branch_pick,
-                forks_state,
-                *steering_outputs,
-            ],
+            STEERED_LOAD_OUTPUT_NAMES,
             concurrency_id=CONVERSATION_PANE_QUEUE,
         )
 

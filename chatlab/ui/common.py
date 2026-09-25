@@ -328,6 +328,13 @@ def send_stop_buttons(busy: bool):
     return gr.update(visible=not busy), gr.update(visible=busy)
 
 
+def send_stop_values(busy: bool) -> dict:
+    """The same pair, named as a conversation frame names them; see ui.outputs."""
+
+    send, stop = send_stop_buttons(busy)
+    return {"send": send, "stop": stop}
+
+
 def finalize_partial(turns: list[dict]) -> bool:
     """Close out a half-written assistant turn, dropping it when it holds nothing.
 

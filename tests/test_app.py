@@ -1834,8 +1834,8 @@ class ClearConfirmationTests(unittest.TestCase):
     def test_confirming_clears_and_closes_the_question(self):
         result = app.clear_chat()
 
-        self.assertEqual(result[-1], {"visible": False, "__type__": "update"})
-        self.assertEqual(result[0], [])
+        self.assertEqual(result["clear_confirm"], {"visible": False, "__type__": "update"})
+        self.assertEqual(result["chatbot"], [])
 
     def test_cancelling_only_closes_the_question(self):
         self.assertEqual(app.hide_clear_confirm(), {"visible": False, "__type__": "update"})
