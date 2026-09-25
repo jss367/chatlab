@@ -505,6 +505,76 @@ def _read_pipeline(
     return None, None, pipeline, device_name
 
 
+def _load_precision(
+    model_id: str, local_path: Path, precision: str, kind: str, backend: str
+) -> tuple[int | None, str, bool]:
+    """The width a load will really read its weights at, its name, and whether it is an adapter.
+
+    The radio's choice is only a request. Quantized weights need Apple Metal,
+    a text model rather than a pipeline, and a base that is not about to have
+    a LoRA adapter merged into it; wherever one of those fails the load reads
+    full weights instead and says why in the log. An MLX repository ignores
+    the radio altogether: it loads at the width it was converted to. Returns
+    ``bits`` (``None`` for full weights), the precision label the badge and
+    the log will show, and whether ``local_path`` is an adapter snapshot.
+    """
+
+    bits = QUANTIZED_BITS.get(precision)
+    if bits is not None and backend != "mps":
+        logger.info(
+            "Loading %s with full weights: %s weights need Apple Metal, not %s",
+            model_id,
+            precision,
+            backend,
+        )
+        bits = None
+    if bits is not None and kind == IMAGE_KIND:
+        # The Metal quantizer is Transformers' own, and a pipeline is
+        # several models of which only some are Transformers ones. Rather
+        # than quantize a part of it and report a precision that only
+        # held for the text encoder, an image load takes its weights
+        # whole and says so.
+        logger.info(
+            "Loading %s with full weights: %s weights are for text models, "
+            "not diffusers pipelines",
+            model_id,
+            precision,
+        )
+        bits = None
+    adapter = kind == TEXT_KIND and is_adapter_snapshot(local_path)
+    if bits is not None and adapter:
+        # A packed 4-bit or 8-bit matrix has nothing to add the adapter's
+        # product to, so the base is read whole and merged; see
+        # adapters. Said here, as the image case above says its own.
+        logger.info(
+            "Loading %s with full weights: a LoRA adapter merges into "
+            "full-precision weights, not %s ones",
+            model_id,
+            precision,
+        )
+        bits = None
+    precision = precision if bits is not None else "full"
+    if kind == MLX_KIND:
+        # The repo was quantized when it was converted, and that is the
+        # precision it loads at; the radio has nothing to add. Named
+        # from the config so the badge says what is really running.
+        precision = mlx_runtime.precision_label(mlx_runtime.read_mlx_config(local_path))
+        # The config's width, not the radio's: the memory estimate reads
+        # the packed file as it stands and the MLX reader takes no bits
+        # at all, so this rides along only to let the refusal, the log
+        # and the fit panel name the width the weights really are. Zero
+        # it out and a 4-bit conversion would be refused for wanting
+        # "full 16-bit weights".
+        bits = mlx_snapshot_bits(local_path)
+        logger.info(
+            "Loading %s at the %s precision it was converted to: MLX weights "
+            "are packed already",
+            model_id,
+            precision,
+        )
+    return bits, precision, adapter
+
+
 class LoadingMixin:
     """The load and unload methods of :class:`model_runtime.ModelManager`.
 
@@ -603,61 +673,11 @@ class LoadingMixin:
 
         progress = progress or LoadProgress()
         self._unload_locked(torch)
-        bits = QUANTIZED_BITS.get(precision)
         backend = device_memory.detect_backend(torch)
         dtype = load_dtype(backend, torch)
-        if bits is not None and backend != "mps":
-            logger.info(
-                "Loading %s with full weights: %s weights need Apple Metal, not %s",
-                model_id,
-                precision,
-                backend,
-            )
-            bits = None
-        if bits is not None and kind == IMAGE_KIND:
-            # The Metal quantizer is Transformers' own, and a pipeline is
-            # several models of which only some are Transformers ones. Rather
-            # than quantize a part of it and report a precision that only
-            # held for the text encoder, an image load takes its weights
-            # whole and says so.
-            logger.info(
-                "Loading %s with full weights: %s weights are for text models, "
-                "not diffusers pipelines",
-                model_id,
-                precision,
-            )
-            bits = None
-        adapter = kind == TEXT_KIND and is_adapter_snapshot(local_path)
-        if bits is not None and adapter:
-            # A packed 4-bit or 8-bit matrix has nothing to add the adapter's
-            # product to, so the base is read whole and merged; see
-            # adapters. Said here, as the image case above says its own.
-            logger.info(
-                "Loading %s with full weights: a LoRA adapter merges into "
-                "full-precision weights, not %s ones",
-                model_id,
-                precision,
-            )
-            bits = None
-        precision = precision if bits is not None else "full"
-        if kind == MLX_KIND:
-            # The repo was quantized when it was converted, and that is the
-            # precision it loads at; the radio has nothing to add. Named
-            # from the config so the badge says what is really running.
-            precision = mlx_runtime.precision_label(mlx_runtime.read_mlx_config(local_path))
-            # The config's width, not the radio's: the estimate below reads
-            # the packed file as it stands and the MLX reader takes no bits
-            # at all, so this rides along only to let the refusal, the log
-            # and the fit panel name the width the weights really are. Zero
-            # it out and a 4-bit conversion would be refused for wanting
-            # "full 16-bit weights".
-            bits = mlx_snapshot_bits(local_path)
-            logger.info(
-                "Loading %s at the %s precision it was converted to: MLX weights "
-                "are packed already",
-                model_id,
-                precision,
-            )
+        bits, precision, adapter = _load_precision(
+            model_id, local_path, precision, kind, backend
+        )
         # The cap goes on before the check rather than before the load, so
         # the check can refuse a model that fits the machine but not the
         # allocator's half of it. Otherwise a 25 GB checkpoint on an idle
@@ -697,47 +717,20 @@ class LoadingMixin:
                     local_path, torch, backend, dtype, bits, precision
                 )
         except (RuntimeError, MemoryError) as error:
-            # Before the cache goes back, so the figure is what the device was
-            # holding when the load gave up rather than what survived cleanup.
-            reached, taken = device_memory.allocated_bytes(backend, torch), device_memory.reserved_bytes(torch)
-            logger.warning(
-                "Load of %s as %s (%s weights) on %s failed: %s estimated, %s held "
-                "on the device, %s estimated available beforehand, device ceiling %s (%s)",
-                model_id,
-                str(dtype).replace("torch.", ""),
-                precision,
-                backend,
-                memory_note(estimated),
-                memory_note(taken),
-                memory_note(available),
-                memory_note(ceiling),
-                first_line(error),
+            self._explain_failed_load(
+                error,
+                torch,
+                model_id=model_id,
+                backend=backend,
+                dtype=dtype,
+                precision=precision,
+                bits=bits,
+                kind=kind,
+                adapter=adapter,
+                estimated=estimated,
+                available=available,
+                ceiling=ceiling,
             )
-            self._release_device_cache(torch)
-            if is_out_of_memory_error(error):
-                raise OutOfMemoryError(
-                    load_out_of_memory_message(
-                        model_id.strip(),
-                        estimated=estimated,
-                        reached=reached,
-                        taken=taken,
-                        ceiling=ceiling,
-                        weights=weights_note(dtype_name(dtype), bits),
-                        # Only a Metal text load has a narrower width to
-                        # fall back on, and only one already wider than the
-                        # narrowest: everything else would repeat the load
-                        # it just failed. ``bits`` is what this load really
-                        # used, the radio's choice having been cleared
-                        # above wherever it could not be honoured.
-                        lower_precision=(
-                            backend == "mps"
-                            and kind == TEXT_KIND
-                            and not adapter
-                            and (bits is None or bits > min(QUANTIZED_BITS.values()))
-                        ),
-                        error=error,
-                    )
-                ) from error
             raise
 
         if model is not None:
@@ -783,6 +776,73 @@ class LoadingMixin:
             memory_note(ceiling),
         )
         return device_name
+
+    def _explain_failed_load(
+        self,
+        error: RuntimeError | MemoryError,
+        torch,
+        *,
+        model_id: str,
+        backend: str,
+        dtype,
+        precision: str,
+        bits: int | None,
+        kind: str,
+        adapter: bool,
+        estimated: int | None,
+        available: int | None,
+        ceiling: int | None,
+    ) -> None:
+        """Record why a load failed and give the device back; raise if memory ran out.
+
+        Called from the handler around the weight reading, with ``error``
+        still being handled. A failure that is the device running out of
+        memory is raised again as an :class:`OutOfMemoryError` that says what
+        was asked for and what was held; any other returns, and the caller
+        re-raises it as it was.
+        """
+
+        # Before the cache goes back, so the figure is what the device was
+        # holding when the load gave up rather than what survived cleanup.
+        reached, taken = device_memory.allocated_bytes(backend, torch), device_memory.reserved_bytes(torch)
+        logger.warning(
+            "Load of %s as %s (%s weights) on %s failed: %s estimated, %s held "
+            "on the device, %s estimated available beforehand, device ceiling %s (%s)",
+            model_id,
+            str(dtype).replace("torch.", ""),
+            precision,
+            backend,
+            memory_note(estimated),
+            memory_note(taken),
+            memory_note(available),
+            memory_note(ceiling),
+            first_line(error),
+        )
+        self._release_device_cache(torch)
+        if is_out_of_memory_error(error):
+            raise OutOfMemoryError(
+                load_out_of_memory_message(
+                    model_id.strip(),
+                    estimated=estimated,
+                    reached=reached,
+                    taken=taken,
+                    ceiling=ceiling,
+                    weights=weights_note(dtype_name(dtype), bits),
+                    # Only a Metal text load has a narrower width to
+                    # fall back on, and only one already wider than the
+                    # narrowest: everything else would repeat the load
+                    # it just failed. ``bits`` is what this load really
+                    # used, the radio's choice having been cleared by
+                    # _load_precision wherever it could not be honoured.
+                    lower_precision=(
+                        backend == "mps"
+                        and kind == TEXT_KIND
+                        and not adapter
+                        and (bits is None or bits > min(QUANTIZED_BITS.values()))
+                    ),
+                    error=error,
+                )
+            ) from error
 
     def unload(self) -> None:
         import torch
