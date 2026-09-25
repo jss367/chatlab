@@ -1937,8 +1937,8 @@ def wire_inspector(page: ChatPage, states: SharedState) -> None:
     # Streaming writes that state on every frame, and reset_inspection
     # skips its outputs once there is nothing left to clear. Gradio marks
     # them pending regardless, so without QUIET_TICK the inspector blinks
-    # its way through every reply: see the note above for what the two
-    # arguments each take away.
+    # its way through every reply: see QUIET_TICK in ui.common for what
+    # the two arguments each take away.
     states.metrics.change(
         reset_inspection, states.insight, inspection_outputs, **QUIET_TICK,
     )

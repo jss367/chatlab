@@ -599,7 +599,7 @@ label.{ICON_CLASS} {{ display: inline-flex; }}
 /* Each sampling slider carries its own ↺, in the corner Gradio draws one in.
    It is a button of ours rather than Gradio's, which restores the value its
    slider was built with - here the saved setting already on screen; see
-   ui/layout.py. Gradio has no way to put a button inside a slider's head, so
+   ui/chat_layout.py. Gradio has no way to put a button inside a slider's head, so
    this one is a sibling taken out of the column's flow and laid over that
    corner, and the number box gives up the width it sits in. The label is in
    the page for a screen reader and drawn at no size, so only the mark shows. */
