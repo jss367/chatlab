@@ -19,7 +19,7 @@ import settings_sandbox
 from chatlab import steering
 from chatlab.model_runtime import ModelManager
 from chatlab.text_generation import ModelChanged
-from test_streaming import FakeTokenizer, PIECES, EOS_ID
+from fakes import FakeTokenizer, PIECES, EOS_ID
 from chatlab.ui import runtime
 from chatlab.ui import steering as controls
 from chatlab.ui.conversations import fork_conversation, new_conversation, save_conversation
@@ -280,7 +280,7 @@ class RuntimeTests(unittest.TestCase):
 class ConversationTests(unittest.TestCase):
     def test_incompatible_steering_preserves_response_on_retry_edit_and_branches(self):
         import gradio as gr
-        from test_app_flow import FIXED
+        from conversation_support import FIXED
         from chatlab.ui.generation import chat, retry_last, edit_message, branch_from, branch_with_text
 
         for route in ("retry", "edit", "branch", "typed_branch"):
@@ -307,7 +307,7 @@ class ConversationTests(unittest.TestCase):
                         self.assertFalse(steering.decoder_layers(held.model)[0]._forward_hooks)
 
     def test_incompatible_steering_keeps_new_user_message_without_empty_reply(self):
-        from test_app_flow import FIXED
+        from conversation_support import FIXED
         from chatlab.ui.generation import chat
 
         with mock.patch.object(runtime, "MANAGER", manager()):
@@ -362,7 +362,7 @@ class ConversationTests(unittest.TestCase):
                 asyncio.run(run_pane_action(action))
 
     def test_model_reload_during_steered_branch_restores_original_response(self):
-        from test_app_flow import FIXED
+        from conversation_support import FIXED
         from chatlab.ui.generation import chat, branch_from, branch_with_text, BRANCH_MODEL_CHANGED
 
         for route in ("branch", "typed_branch"):
@@ -390,8 +390,8 @@ class ConversationTests(unittest.TestCase):
                     self.assertFalse(held.busy)
 
     def test_large_vector_is_stored_once_and_not_copied_into_streamed_turns(self):
-        from test_app_flow import FIXED
-        from test_streaming import loaded_manager
+        from conversation_support import FIXED
+        from fakes import loaded_manager
         from chatlab.ui.generation import chat
         from chatlab.trace_export import trace_to_json
 
@@ -465,7 +465,7 @@ class ConversationTests(unittest.TestCase):
             steering.normalize(dict(reference, vector_id="../../not-a-vector"))
 
     def test_generation_paths_use_visible_controls_before_persistence_catches_up(self):
-        from test_app_flow import FIXED
+        from conversation_support import FIXED
         from chatlab.ui.generation import chat, retry_last, branch_from, branch_with_text
 
         for route in ("send", "retry", "branch", "typed_branch"):
@@ -559,7 +559,7 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(steering.expand(json.loads(Path(saved["value"]).read_text())["steering"]), vector())
 
     def test_ui_records_response_vector_and_inspects_that_snapshot(self):
-        from test_app_flow import FIXED
+        from conversation_support import FIXED
         from chatlab.ui.generation import chat
         from chatlab.ui.inspection import inspect_layers, render_kv_cache
 

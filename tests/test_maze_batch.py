@@ -15,8 +15,8 @@ from chatlab.extensions.maze_experiments.maze import call_text
 from chatlab.extensions.maze_experiments.page import build_page
 from chatlab.extensions.maze_experiments.runner import from_payload
 from chatlab.extensions.maze_experiments.trials import FORMAT, read_trials
-from test_maze import CONFIG, MAZE, Manager
-from test_maze_steering import VECTOR
+from maze_support import CONFIG, MAZE, Manager
+from maze_support import VECTOR
 
 MOVE = call_text(MAZE.maze_id, "east")
 ARRIVE = (MOVE, list(MOVE.encode()) + [0])

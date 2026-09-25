@@ -16,11 +16,11 @@ from chatlab import desktop
 from chatlab import settings
 import settings_sandbox
 from chatlab.extension_api import ModelService, NavigationService, TokenInspector
-from chatlab.model_runtime import GENERATING, LOADING
 from chatlab.extensions.maze_experiments.maze import default_instruction
 from chatlab.extensions.registry import ExtensionSpec, LoadedExtension, load_enabled
 from chatlab.ui.extensions_page import (extension_css, nav_divider_css, restart_now,
                                 restore_extensions, save_extensions)
+from fakes import FakeManager
 
 
 def setUpModule():
@@ -29,53 +29,6 @@ def setUpModule():
 
 def tearDownModule():
     settings_sandbox.stop()
-
-
-class FakeManager:
-    loaded = True
-    model_id = "test/model"
-    load_id = "first"
-    tokenizer = SimpleNamespace(encode=lambda text, **kw: [ord(c) for c in text], decode=lambda ids, **kw: ''.join(map(chr, ids)))
-
-    def __init__(self):
-        self.busy = False
-        # A load claimed but not finished: the weights on their way out are
-        # still in memory, so the session passes its loaded check.
-        self.loading = False
-        self.releases = 0
-        self.closed_streams = 0
-        self.options = None
-
-    def claim_generation(self):
-        if self.loading:
-            return LOADING
-        if self.busy:
-            return GENERATING
-        self.busy = True
-        return None
-
-    def reserve_generation(self):
-        return self.claim_generation() is None
-
-    def release_generation(self):
-        self.busy = False
-        self.releases += 1
-
-    def _stop_token_ids(self):
-        return {0}
-
-    def encode_replacement(self, kept_ids, text, *, literal_prefill_tokens=0, load_id=None):
-        return [ord(character) for character in text]
-
-    def generate(self, messages, **options):
-        self.options = options
-        metrics = []
-        try:
-            for value in (1, 2, 3):
-                metrics.append({'token_id': value})
-                yield SimpleNamespace(metrics=metrics)
-        finally:
-            self.closed_streams += 1
 
 
 OPTIONS = dict(temperature=.7, top_p=1., top_k=0, max_new_tokens=10, seed=7)

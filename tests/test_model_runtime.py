@@ -3609,7 +3609,10 @@ class DeviceProfileTests(unittest.TestCase):
         with mock.patch.object(device_memory, "_torch_ready", threading.Event()) as flag:
             device_memory.warm_device()
             self.assertTrue(flag.wait(timeout=60))
-        self.assertIsNotNone(device_memory.imported_torch())
+            # Asked while the flag the thread set is still the one in place:
+            # once the patch is undone, the module's own flag answers, and it
+            # is only set if an earlier test module happened to warm the device.
+            self.assertIsNotNone(device_memory.imported_torch())
 
     def test_the_device_names_itself_the_way_a_loaded_model_does(self):
         from chatlab.device_memory import device_label

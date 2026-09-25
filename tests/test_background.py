@@ -17,8 +17,9 @@ from chatlab.ui import conversations
 from chatlab.conversation import MAIN_BRANCH, make_turn, new_forks, put_branch
 from chatlab.ui import runtime
 from chatlab.ui.background import ConversationJob
-from test_app_flow import SETTINGS, THINK_EOS, THINK_PIECES
-from test_streaming import loaded_manager
+from fakes import THINK_EOS, THINK_PIECES
+from conversation_support import SETTINGS
+from fakes import loaded_manager
 
 
 def setUpModule():

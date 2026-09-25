@@ -19,7 +19,7 @@ from chatlab.extensions.maze_experiments.runner import (Episode, context_message
 from chatlab.extension_api import TokenInspector
 from chatlab.token_metrics import unscored_metric
 
-from test_maze import CONFIG, Manager
+from maze_support import CONFIG, Manager
 
 # Three moves east along the top row, or the long way round: enough room for a
 # note to advise the shortest step, a worse one, or a wall.

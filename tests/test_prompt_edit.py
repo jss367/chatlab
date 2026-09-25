@@ -10,10 +10,8 @@ import gradio as gr
 from chatlab.text_generation import ModelChanged
 from chatlab.ui import runtime, token_menu
 from chatlab.conversation import forget_measurements, to_json, turn_entries
-from test_app_flow import (
-    FIXED, SETTINGS, metrics_of, select, strip_of, token_span,
-)
-from test_streaming import FakeTokenizer, SentencePieceTokenizer, loaded_manager
+from conversation_support import FIXED, SETTINGS, metrics_of, select, strip_of, token_span
+from fakes import FakeTokenizer, SentencePieceTokenizer, loaded_manager
 import settings_sandbox
 
 

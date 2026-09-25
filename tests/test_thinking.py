@@ -1,6 +1,5 @@
 """Native thinking modes change prompts and survive chat replay and export."""
 
-import copy
 import csv
 import io
 import json
@@ -11,22 +10,14 @@ from unittest import mock
 from chatlab import app
 from chatlab import settings
 import settings_sandbox
-import tiny_tokenizer
 from chatlab.conversation import turn_entries, turns_from_entries
 from chatlab.model_runtime import ModelManager
 from chatlab.thinking import supports_thinking
 from chatlab.trace_export import trace_to_csv, trace_to_json
 from chatlab.ui import runtime
 from chatlab.ui.settings_page import refresh_thinking_mode
-from test_app_flow import FIXED, SETTINGS, click_token, cell
-from test_streaming import loaded_manager
-
-
-# The switching suffix from Qwen/Qwen3-0.6B's chat template. The off mode
-# supplies an empty, closed think block; default/on leave generation alone.
-TEMPLATE = """{% for m in messages %}{{ m['role'] }}: {{ m['content'] }}\n{% endfor %}
-{% if add_generation_prompt %}assistant:
-{% if enable_thinking is defined and enable_thinking is false %}<think>\n\n</think>\n\n{% endif %}{% endif %}"""
+from fakes import manager_for_thinking, THINKING_TEMPLATE
+from conversation_support import cell, click_token, FIXED, SETTINGS
 
 
 def setUpModule():
@@ -37,28 +28,17 @@ def tearDownModule():
     settings_sandbox.stop()
 
 
-def manager_for_thinking():
-    manager = loaded_manager([0])
-    manager.tokenizer = copy.deepcopy(tiny_tokenizer.build())
-    manager.tokenizer.chat_template = TEMPLATE
-    token = manager.tokenizer.encode("hello")[0]
-    manager.model.script = [token]
-    manager.model.vocab_size = len(manager.tokenizer)
-    manager.model.config = SimpleNamespace(model_type="qwen3")
-    return manager
-
-
 class ThinkingRuntimeTests(unittest.TestCase):
     def test_capability_needs_both_architecture_and_switchable_template(self):
         for model_type in ("qwen3", "qwen3_moe", "olmo3", "qwen3_next", None):
-            for template in (TEMPLATE, "assistant: <think>", "assistant:", None):
+            for template in (THINKING_TEMPLATE, "assistant: <think>", "assistant:", None):
                 for config_field in ("config", "args"):
                     with self.subTest(model_type=model_type, template=template, backend=config_field):
                         model = SimpleNamespace(**{config_field: SimpleNamespace(model_type=model_type)})
                         tokenizer = SimpleNamespace(chat_template=template)
                         self.assertEqual(
                             supports_thinking(model, tokenizer),
-                            model_type in ("qwen3", "qwen3_moe") and template == TEMPLATE,
+                            model_type in ("qwen3", "qwen3_moe") and template == THINKING_TEMPLATE,
                         )
         self.assertFalse(ModelManager().supports_thinking)
 

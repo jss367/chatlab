@@ -14,7 +14,7 @@ from chatlab.extensions.maze_experiments.page import build_page, trial_note_text
 from chatlab.extensions.maze_experiments.runner import Episode, from_payload
 from chatlab.extensions.maze_experiments.maze import SYSTEM, default_instruction
 from chatlab.extensions.maze_experiments.trials import FORMAT, prepare_trial, read_trials
-from test_maze import CONFIG, MAZE
+from maze_support import CONFIG, MAZE
 
 
 class TrialFileTests(unittest.TestCase):

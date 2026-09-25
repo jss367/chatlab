@@ -13,9 +13,9 @@ from chatlab.extensions.maze_experiments.maze import Maze, generate, unavoidable
 from chatlab.extensions.maze_experiments.page import build_page
 from chatlab.extensions.maze_experiments.team import TeamEpisode, from_payload, stream_team
 from chatlab.extensions.maze_experiments.team_page import response_view, team_board, team_status, team_timeline
-from test_maze import Manager, scored
-from test_maze_steering import SteeringManager, VECTOR
-from test_maze_team import call
+from maze_support import Manager, scored
+from maze_support import SteeringManager, VECTOR
+from maze_support import call
 
 CORRIDOR = Maze((".....", "#####", "#####", "#####", "#####"), (0, 0), (0, 4))
 ROOM = Maze(("...", "...", "..."), (0, 0), (0, 2))

@@ -23,7 +23,7 @@ from chatlab.extensions.osguard.benchmark import (
 from chatlab.extensions.osguard.chart import tradeoff_chart
 from chatlab.extensions.osguard.page import build_page
 from chatlab.extensions.osguard.runner import REASONING_LEAD, Runner, StreamingResponse
-from test_extensions import FakeManager
+from fakes import FakeManager
 
 
 def setUpModule():

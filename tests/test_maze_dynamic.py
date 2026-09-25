@@ -17,7 +17,7 @@ from chatlab.extensions.maze_experiments import runner
 from chatlab.extensions.maze_experiments.runner import TERMINAL, Episode, fork_token_edit, from_payload, stream_episode
 from chatlab.extension_api import TokenInspector
 
-from test_maze import CONFIG, Manager
+from maze_support import CONFIG, Manager
 
 # A short corridor and one long way round, so a single closure can send the
 # character the long way without cutting it off, and a second one strands it.

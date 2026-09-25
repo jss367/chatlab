@@ -8,8 +8,8 @@ from chatlab import compare
 from chatlab import experiment_runs as runs
 import settings_sandbox
 from chatlab.model_loading import LoadedModel
-from test_compare import metric, run
-from test_streaming import EOS_ID, loaded_manager
+from compare_support import metric, run
+from fakes import EOS_ID, loaded_manager
 from chatlab.ui import experiment_compare, experiments, runtime
 
 
@@ -322,7 +322,7 @@ class AutomatedComparisonTests(unittest.TestCase):
         self.assertEqual(len(runs.search()), 1)
 
     def test_saved_branch_rerun_keeps_applied_thinking_mode_and_prompt(self):
-        from test_thinking import manager_for_thinking
+        from fakes import manager_for_thinking
         from chatlab.ui.compare import _write_reply
         manager = manager_for_thinking()
         manager._loaded = LoadedModel("fake/model", "CPU", "full", manager.load_id)

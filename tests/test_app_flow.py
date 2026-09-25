@@ -43,7 +43,13 @@ from chatlab.steering import SteeringError
 from chatlab import library
 from chatlab import settings
 import settings_sandbox
-from test_streaming import ChatTemplateTokenizer, FakeTokenizer, SentencePieceTokenizer, loaded_manager
+from fakes import (
+    ChatTemplateTokenizer, FakeTokenizer, loaded_manager, SentencePieceTokenizer, THINK_EOS,
+    THINK_PIECES,
+)
+from conversation_support import (
+    cell, click_token, FIXED, metrics_of, select, SETTINGS, strip_of, token_span,
+)
 
 
 def setUpModule():
@@ -53,26 +59,6 @@ def setUpModule():
 def tearDownModule():
     settings_sandbox.stop()
 
-
-# "Hello" and " world" are the answer; the reasoning tags are their own tokens.
-THINK_PIECES = ["<think>", "</think>", "Hello", " world", "<eos>"]
-THINK_EOS = 4
-
-FIXED = {
-    "system_prompt": "",
-    "keep_reasoning": False,
-    "assistant_prefill": "",
-    "temperature": 0.0,
-    "top_p": 1.0,
-    "top_k": 0,
-    "skip_top_below": 0.0,
-    "max_new_tokens": 8,
-    "seed": 42,
-    "randomize_seed": False,
-    "analyze_prompt": True,
-    "scale_name": DEFAULT_COLOR_SCALE,
-}
-SETTINGS = tuple(FIXED.values())
 
 # The conversation handlers return frames keyed by output name, over the
 # names their family declares in chatlab.ui.outputs: app.CHAT_OUTPUT_NAMES
@@ -98,19 +84,6 @@ def components(demo, names):
     return [demo.conversation_outputs[name] for name in names]
 
 
-def metrics_of(payload):
-    """The metrics half of a metrics_state payload, dropping its stamp."""
-
-    _generation, metrics = payload
-    return metrics
-
-
-def strip_of(value):
-    """The tokens in a strip output, whether it is a value or a gr.update."""
-
-    return value["value"] if isinstance(value, dict) else value
-
-
 def painted(value):
     """The measured tokens in a token-view value: the spans that carry a color.
 
@@ -122,28 +95,6 @@ def painted(value):
     # An empty categorized span keeps plain restored messages clickable;
     # it is only a renderer hint, never a measured token.
     return [span for span in strip_of(value) if span[0] and span[1] is not None]
-
-
-def select(index):
-    return gr.SelectData(None, {"index": index, "value": "x"})
-
-
-def token_span(turns, token_index, turn=-1):
-    """A click on one token of one reply in the conversation's token view."""
-
-    _spans, index = app.transcript_entries(turns, DEFAULT_COLOR_SCALE)
-    position = turn if turn >= 0 else len(turns) + turn
-    return select(index.index((position, token_index)))
-
-
-def click_token(frame, token_index, turn=-1):
-    """The selection a click on a reply's token publishes."""
-
-    turns = frame["turns"]
-    _detail, _rows, selection, _target, _pick = app.select_transcript_token(
-        turns, frame["metrics"], token_span(turns, token_index, turn)
-    )
-    return selection
 
 
 def score_known_passage(context="Hello", text=" world"):
@@ -2518,12 +2469,6 @@ def names_of(list_update):
 
 def labels_of(list_update):
     return [label for label, _name in list_update["choices"]]
-
-
-def cell(row):
-    """A click on one row of the alternatives table."""
-
-    return gr.SelectData(None, {"index": [row, 1], "value": "x"})
 
 
 class BranchFromTokenTests(unittest.TestCase):

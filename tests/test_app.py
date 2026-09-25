@@ -861,7 +861,7 @@ class DownloadCardTests(unittest.TestCase):
     def test_unload_is_refused_while_a_reply_is_running(self):
         # Waiting on the model lock would pull the model out between the end
         # of the stream and the reply's trace, which then names no tokenizer.
-        from test_streaming import loaded_manager
+        from fakes import loaded_manager
 
         manager = loaded_manager([0])
         runtime.MANAGER = manager
@@ -875,7 +875,7 @@ class DownloadCardTests(unittest.TestCase):
         self.assertTrue(manager.loaded)
 
     def test_unload_is_refused_while_a_load_stands(self):
-        from test_streaming import loaded_manager
+        from fakes import loaded_manager
 
         manager = loaded_manager([0])
         runtime.MANAGER = manager
@@ -906,7 +906,7 @@ class DownloadCardTests(unittest.TestCase):
         manager.release_generation()
 
     def test_unload_gives_the_slot_back(self):
-        from test_streaming import loaded_manager
+        from fakes import loaded_manager
 
         manager = loaded_manager([0])
         runtime.MANAGER = manager
