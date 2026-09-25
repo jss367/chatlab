@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,8 +10,10 @@ import gradio as gr
 from chatlab.extension_api import TokenInspector
 from chatlab.extensions.maze_experiments.maze import Maze, parse_call
 from chatlab.extensions.maze_experiments.page import build_page
-from chatlab.extensions.maze_experiments.team import (MESSAGE_LIMIT, TeamEpisode, from_payload, stream_team, team_tools)
-from chatlab.extensions.maze_experiments.team_page import mail_text, team_board, team_timeline
+from chatlab.extensions.maze_experiments.team import (MAX_AGENTS, MESSAGE_LIMIT, TeamEpisode, format_agents,
+                                                      from_payload, parse_agents, stream_team, team_tools)
+from chatlab.extensions.maze_experiments.team_page import (agent_color, mail_text, response_view, team_board,
+                                                           team_status, team_timeline)
 from maze_support import call, Manager, MAZE, MAZE_ID, scored
 from ui_support import listeners_by_name
 
@@ -124,7 +127,44 @@ class TeamEpisodeTests(unittest.TestCase):
         list(stream_team(ep, manager))
         self.assertEqual((ep.phase, ep.detail), ("budget", "The team reached its round limit."))
 
-    def test_the_budget_left_is_split_evenly_before_the_round(self):
+    def test_each_agent_is_capped_by_what_it_has_left(self):
+        chatty = call("south", "the south is walled off")
+        manager = Manager([chatty, call("south"), call("west"), call("west")])
+        ep = team(agent_token_budget=500, per_turn_tokens=1000, round_limit=2)
+        list(stream_team(ep, manager))
+        self.assertEqual([kwargs["max_new_tokens"] for _, kwargs in manager.calls],
+                         [500, 500, 500 - len(chatty[1]), 500 - len(call("south")[1])])
+        self.assertEqual(ep.agent_tokens(), [len(chatty[1]) + len(call("west")[1]), len(call("south")[1] + call("west")[1])])
+        self.assertIn("at most 500 per agent", team_status(ep))
+        replay = from_payload(json.loads(json.dumps(ep.payload())))
+        self.assertEqual(json.loads(json.dumps(replay.payload())), json.loads(json.dumps(ep.payload())))
+        # The chatty agent's second response only fit what it had left before
+        # the limit was lowered.
+        tighter = json.loads(json.dumps(ep.payload()))
+        tighter["config"]["agent_token_budget"] = len(chatty[1]) + 10
+        with self.assertRaisesRegex(ValueError, "more tokens than its round allowed"):
+            from_payload(tighter)
+
+    def test_an_agent_that_spends_its_limit_stops_while_its_teammate_continues(self):
+        spent = len(call("south")[1])
+        # west is a letter shorter than south, which leaves agent-2 one token.
+        manager = Manager([call("south"), call("west"), call("west")])
+        ep = team(agent_token_budget=spent, per_turn_tokens=1000)
+        list(stream_team(ep, manager))
+        self.assertEqual([kwargs["max_new_tokens"] for _, kwargs in manager.calls], [spent, spent, 1])
+        self.assertEqual([turn["agent"] for turn in ep.turns], [0, 1, 1])
+        self.assertIn("agent-1 · out of tokens", team_board(ep, 0))
+        self.assertIn("agent-2 · active", team_board(ep, 0))
+        self.assertEqual(ep.phase, "budget")
+        self.assertEqual(ep.detail, "No agent is still moving: agent-1 out of tokens, agent-2 out of tokens.")
+
+    def test_a_team_out_of_tokens_beside_one_that_gave_up_has_abandoned(self):
+        spent = len(call("south")[1])
+        ep = team(agent_token_budget=spent)
+        list(stream_team(ep, Manager([call("south"), say("I give up.")])))
+        self.assertEqual(ep.phase, "abandoned")
+
+    def test_a_run_saved_under_one_limit_for_the_team_still_splits_it_evenly(self):
         manager = Manager([call("south"), call("south")])
         ep = team(token_budget=30, per_turn_tokens=100)
         list(stream_team(ep, manager))
@@ -132,12 +172,23 @@ class TeamEpisodeTests(unittest.TestCase):
         # left the second agent nothing.
         self.assertEqual([kwargs["max_new_tokens"] for _, kwargs in manager.calls], [15, 15])
 
-    def test_a_budget_too_small_for_every_agent_runs_no_round(self):
+    def test_a_team_budget_too_small_for_every_agent_runs_no_round(self):
         manager = Manager([])
         ep = team(token_budget=1)
         list(stream_team(ep, manager))
         self.assertEqual(manager.calls, [])
         self.assertEqual((ep.phase, ep.rounds), ("budget", 0))
+        self.assertEqual(from_payload(json.loads(json.dumps(ep.payload()))).phase, "budget")
+
+    def test_a_run_saved_under_one_limit_for_the_team_replays_under_it(self):
+        ep = team(token_budget=1000)
+        list(stream_team(ep, Manager([call("east"), call("south"), call("east"), call("north")])))
+        self.assertNotIn("agent_token_budget", ep.config)
+        self.assertIn("of 1,000 sampled tokens", team_status(ep))
+        replay = from_payload(json.loads(json.dumps(ep.payload())))
+        self.assertEqual(json.loads(json.dumps(replay.payload())), json.loads(json.dumps(ep.payload())))
+        with self.assertRaisesRegex(ValueError, "not both"):
+            team(token_budget=1000, agent_token_budget=500)
 
     def test_a_failure_mid_round_marks_every_answered_response_not_applied(self):
         # The fixture runs out of replies on agent-2, which fails its response.
@@ -288,9 +339,59 @@ class TeamEpisodeTests(unittest.TestCase):
         self.assertNotIn("**loud**", shown)
         self.assertIn("\\*\\*loud\\*\\*", shown)
 
-    def test_config_refuses_a_team_of_one(self):
-        with self.assertRaisesRegex(ValueError, "2 to 4 agents"):
-            team(agents=1)
+    def test_config_refuses_a_team_of_one_or_more_than_the_cap(self):
+        for count in (1, MAX_AGENTS + 1):
+            with self.subTest(count), self.assertRaisesRegex(ValueError, "2 to 100 agents"):
+                team(agents=count)
+
+    def test_a_hundred_agents_play_a_round_and_fit_on_the_board(self):
+        ep = team(maze=OPEN, agents=MAX_AGENTS)
+        self.assertIn("Your teammates are agent-2, agent-3", ep.agents[0]["messages"][1]["content"])
+        self.assertIn("agent-99 and agent-100", ep.agents[0]["messages"][1]["content"])
+        drawn = team_board(ep)
+        # Every agent starts on one cell, drawn as one marker with their count.
+        self.assertEqual(drawn.count("×100<"), 1)
+        self.assertNotIn('font-weight="700">1<', drawn)
+        self.assertIn("agent-1, agent-2", drawn)
+        self.assertIn("agent-100 · active", drawn)
+        manager = Manager([call("east", maze_id=OPEN.tool_id())] * MAX_AGENTS)
+        manager.generate = scored(manager.generate)
+        list(stream_team(ep, manager, single_step=True))
+        self.assertEqual((ep.rounds, ep.moves), (1, MAX_AGENTS))
+        self.assertEqual(len({kwargs["seed"] for _, kwargs in manager.calls}), MAX_AGENTS)
+        # Each path is drawn off the row's centre line, never out of its cell.
+        centre = 28 + 1.5 * 56
+        rows = [float(y) for y in re.findall(r'<line x1="[^"]+" y1="([^"]+)"', team_board(ep))]
+        self.assertEqual(len(rows), MAX_AGENTS)
+        self.assertTrue(all(abs(y - centre) <= 20 for y in rows))
+        ep.selected_turn = MAX_AGENTS - 1
+        self.assertIn(f"{len(ep.turns[-1]['prompt_ids']):,} prompt tokens", response_view(ep)[0])
+
+    def test_a_small_group_on_one_cell_is_still_fanned_out(self):
+        ep = team(maze=OPEN, agents=5)
+        ep.events.append(dict(accepted=True, round=0, agent=4, before=[1, 1], after=[1, 2]))
+        drawn = team_board(ep, 0)
+        self.assertEqual(drawn.count('r="13"'), 4)
+        self.assertEqual(drawn.count('r="16"'), 1)
+        self.assertNotIn("×", drawn)
+
+    def test_every_agent_has_its_own_colour_and_none_is_the_destinations_green(self):
+        colors = [agent_color(k) for k in range(MAX_AGENTS)]
+        self.assertEqual(len(set(colors)), MAX_AGENTS)
+        hues = [float(c[4:].split()[0]) for c in colors if c.startswith("hsl")]
+        self.assertTrue(all(not 95 <= hue <= 175 for hue in hues))
+
+    def test_agents_to_steer_are_read_as_numbers_and_ranges(self):
+        self.assertEqual(parse_agents("1, 3, 5-8", 10), [0, 2, 4, 5, 6, 7])
+        self.assertEqual(format_agents([0, 2, 4, 5, 6, 7], 10), "1, 3, 5-8")
+        self.assertEqual(parse_agents(format_agents([9, 0], 10), 10), [0, 9])
+        for every in ("", " all ", "ALL", "1-10", "1-5, 6-10"):
+            with self.subTest(every):
+                self.assertIsNone(parse_agents(every, 10))
+        self.assertEqual(format_agents(None, 10), "all")
+        for bad in ("0", "11", "3-1", "x", "1,,2", "1 2"):
+            with self.subTest(bad), self.assertRaises(ValueError):
+                parse_agents(bad, 10)
 
 
 class TeamPageTests(unittest.TestCase):
@@ -322,6 +423,10 @@ class TeamPageTests(unittest.TestCase):
                 load = callbacks["team_load"]
                 loaded = load.fn(str(ep.export()), team(), False)
                 self.assertEqual(len(loaded), len(load.outputs))
+                # The per-agent limit field comes back as it was set.
+                self.assertEqual(loaded[25], 1000)
+                legacy = team(token_budget=3000)
+                self.assertEqual(load.fn(str(legacy.export()), team(), False)[25], 1500)
                 self.assertTrue(loaded[0].replay_only)
                 select = callbacks["team_select_history"]
                 shown = select.fn(loaded[0], False, SimpleNamespace(index=[1, 0]))

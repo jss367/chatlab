@@ -11,15 +11,32 @@ import gradio as gr
 
 from .page import MARKDOWN, STEER_MODES, checkpoint_values, steering_config, vector_note
 from .maze import GOAL_MODES, SYSTEM, default_instruction, generate, unavoidable_cells
-from .team import MAX_AGENTS, TEAM_GOALS, TERMINAL, TeamEpisode, from_payload, stream_team
+from .team import (MAX_AGENTS, TEAM_GOALS, TERMINAL, TeamEpisode, format_agents, from_payload, parse_agents,
+                   stream_team)
 from chatlab.extension_api import TokenInspector, icon_classes, read_steering_vector
 
 TOKENS = TokenInspector()
 logger = logging.getLogger(__name__)
 
-# One colour per agent, none of them the destination's green.
+# The first four agents' colours, none of them the destination's green.
 COLORS = ("#4f46e5", "#db2777", "#0891b2", "#ea580c")
+# A cell holding more agents than this shows one marker with their count.
+FANNED = 4
 OUTCOMES = {"no_call": "No call · stopped", "cut_off": "Cut off · stopped", "not_applied": "Not applied"}
+
+
+def agent_color(k):
+    """Agent k's colour: the fixed four, then hues spread by the golden ratio over every hue but green.
+
+    Two lightnesses, both dark enough for the white number on the marker,
+    keep neighbouring hues apart.
+    """
+    if k < len(COLORS):
+        return COLORS[k]
+    hue = (k * .618034 % 1) * 279
+    if hue >= 95:
+        hue += 81
+    return f"hsl({hue:.1f} 70% {(36, 44)[k % 2]}%)"
 
 
 def positions_after(ep, index):
@@ -66,32 +83,44 @@ def team_board(ep, index=None, reveal=False):
                          f'fill="none" stroke="{color}" stroke-width="3" stroke-dasharray="5 3">'
                          f'<title>{label}</title></rect>')
     # Each agent's path is drawn a little off the cell centre, so two agents
-    # walking the same corridor stay two lines.
-    offsets = [((k % 2) * 2 - 1) * 5 * (k // 2 + 1) if len(ep.agents) > 1 else 0 for k in range(len(ep.agents))]
+    # walking the same corridor stay two lines. The offsets repeat every eight
+    # agents so that no path leaves its own cells.
+    offsets = [((k % 2) * 2 - 1) * 5 * (k // 2 % 4 + 1) if len(ep.agents) > 1 else 0 for k in range(len(ep.agents))]
     for event in ep.events:
         if event["accepted"] and event["round"] <= index:
             k = event["agent"]
             (x1, y1), (x2, y2) = center(event["before"]), center(event["after"])
             d = offsets[k]
-            parts.append(f'<line x1="{x1+d}" y1="{y1+d}" x2="{x2+d}" y2="{y2+d}" stroke="{COLORS[k]}" '
+            parts.append(f'<line x1="{x1+d}" y1="{y1+d}" x2="{x2+d}" y2="{y2+d}" stroke="{agent_color(k)}" '
                          'stroke-width="5" stroke-linecap="round" opacity=".75"/>')
     x, y = center(maze.start)
     parts.append(f'<text x="{x}" y="{y+5}" text-anchor="middle" fill="#64748b" font-size="14" font-weight="700">S</text>')
     x, y = center(maze.goal)
     parts.append(f'<circle cx="{x}" cy="{y}" r="17" fill="#d1fae5"/><text x="{x}" y="{y+7}" text-anchor="middle" font-size="23" fill="#047857">★</text>')
-    # Agents sharing a cell are fanned out around it rather than stacked.
+    # Up to four agents sharing a cell are fanned out around it rather than
+    # stacked. More than that would not fit, so the cell shows how many there
+    # are and names them on hover.
+    by_cell = {}
     for k, position in enumerate(positions):
-        sharing = [j for j, other in enumerate(positions) if other == position]
+        by_cell.setdefault(tuple(position), []).append(k)
+    for position, sharing in by_cell.items():
         x, y = center(position)
-        if len(sharing) > 1:
-            slot = sharing.index(k)
-            x += (-9 if slot % 2 == 0 else 9)
-            y += (-9 if slot < 2 else 9)
-        radius = 13 if len(sharing) > 1 else 16
-        parts.append(f'<circle cx="{x}" cy="{y}" r="{radius}" fill="{COLORS[k]}" stroke="white" stroke-width="3"/>'
-                     f'<text x="{x}" y="{y+5}" text-anchor="middle" fill="white" font-size="13" font-weight="700">{k+1}</text>')
+        if len(sharing) > FANNED:
+            names = html.escape(", ".join(ep.agents[k]["name"] for k in sharing))
+            parts.append(f'<g><title>{names}</title><circle cx="{x}" cy="{y}" r="19" fill="#334155" stroke="white" '
+                         f'stroke-width="3"/><text x="{x}" y="{y+5}" text-anchor="middle" fill="white" font-size="13" '
+                         f'font-weight="700">×{len(sharing)}</text></g>')
+            continue
+        for slot, k in enumerate(sharing):
+            dx = (-9 if slot % 2 == 0 else 9) if len(sharing) > 1 else 0
+            dy = (-9 if slot < 2 else 9) if len(sharing) > 1 else 0
+            radius = 13 if len(sharing) > 1 else 16
+            font = 13 if k < 9 else 11 if k < 99 else 9
+            parts.append(f'<circle cx="{x+dx}" cy="{y+dy}" r="{radius}" fill="{agent_color(k)}" stroke="white" '
+                         f'stroke-width="3"/><text x="{x+dx}" y="{y+dy+5}" text-anchor="middle" fill="white" '
+                         f'font-size="{font}" font-weight="700">{k+1}</text>')
     parts.append("</svg>")
-    legend = [f'<span style="color:{COLORS[k]}">● {html.escape(a["name"])} · {status.replace("_", " ")}</span>'
+    legend = [f'<span style="color:{agent_color(k)}">● {html.escape(a["name"])} · {status.replace("_", " ")}</span>'
               for k, (a, status) in enumerate(zip(ep.agents, statuses_after(ep, index)))]
     legend.append('<span>★ Destination</span>')
     if checkpoint is not None:
@@ -112,7 +141,9 @@ def team_status(ep):
             f"**Team goal:** {TEAM_GOALS[config['team_goal']]}\n\n"
             f"{ep.maze.size} × {ep.maze.size} · shortest route {len(ep.maze.route()) - 1} moves · "
             f"{ep.rounds} of {config['round_limit']} rounds · {ep.moves} moves · "
-            f"{ep.sampled_tokens + partial:,} of {config['token_budget']:,} sampled tokens · {ep.tool_attempts} calls · "
+            + (f"{ep.sampled_tokens + partial:,} of {config['token_budget']:,} sampled tokens · " if "token_budget" in config
+               else f"{ep.sampled_tokens + partial:,} sampled tokens, at most {config['agent_token_budget']:,} per agent · ")
+            + f"{ep.tool_attempts} calls · "
             f"{len(ep.mail)} message{'' if len(ep.mail) == 1 else 's'}\n\n"
             f"**Goal information:** {GOAL_MODES[config['goal_mode']]} · "
             f"**Model:** {html.escape(ep.model_id or 'load one on the Models page')}" + steering_status(ep))
@@ -174,14 +205,20 @@ def as_text(value):
 def statuses_after(ep, index):
     """Each agent's status as of round ``index``, so a replay's start is not told how it ended."""
     statuses = ["active"] * len(ep.agents)
+    spent = [0] * len(ep.agents)
     for turn in ep.turns:
         if turn["round"] > index:
             continue
+        spent[turn["agent"]] += turn.get("sampled_tokens", 0)
         event = turn.get("event")
         if event and event["arrived"]:
             statuses[turn["agent"]] = "arrived"
         elif turn.get("outcome") in ("no_call", "cut_off"):
             statuses[turn["agent"]] = "abandoned" if turn["outcome"] == "no_call" else "cut_off"
+    limit = ep.config.get("agent_token_budget")
+    if limit is not None:
+        statuses = ["out_of_tokens" if status == "active" and used >= limit else status
+                    for status, used in zip(statuses, spent)]
     return statuses
 
 
@@ -219,7 +256,11 @@ def response_view(ep):
         return "Select a response in the history to read it.", [], ""
     turn = ep.turns[index]
     name = ep.agents[turn["agent"]]["name"]
-    return (f"**Round {turn['round'] + 1} · {html.escape(name)}** · {turn.get('sampled_tokens', len(turn['metrics'])):,} sampled tokens"
+    # The prompt grows with every round and, with messaging on, with every
+    # teammate's message, so its length is what shows a team outgrowing the
+    # model's context.
+    return (f"**Round {turn['round'] + 1} · {html.escape(name)}** · {len(turn.get('prompt_ids') or []):,} prompt tokens · "
+            f"{turn.get('sampled_tokens', len(turn['metrics'])):,} sampled tokens"
             + (" · **Steered**" if turn.get("steered") else ""),
             TOKENS.strip(turn["metrics"]), turn["text"])
 
@@ -313,9 +354,8 @@ def build_team_page(context, runs_dir):
                 steer_after = gr.Number(value=3, precision=0, minimum=0, maximum=255, label="After moves per agent")
                 steer_responses = gr.Number(value=0, precision=0, minimum=0, maximum=256,
                                             label="Steered responses per agent", info="0 steers to the end. Starts only once per agent.")
-                steer_agents = gr.Dropdown(choices=[("Every agent", "all")] +
-                                           [(f"Agent {i+1} only", str(i)) for i in range(MAX_AGENTS)],
-                                           value="all", label="Agents to steer")
+                steer_agents = gr.Textbox(value="all", label="Agents to steer",
+                                          info="all, or agent numbers and ranges such as 1, 3, 5-8.")
             with gr.Accordion("Setup prompt", open=False):
                 system_prompt = gr.Textbox(value=SYSTEM, label="System prompt", lines=2)
                 instruction = gr.Textbox(value=default_instruction("coordinates"), label="Task instruction", lines=6,
@@ -326,7 +366,8 @@ def build_team_page(context, runs_dir):
                 sampling_seed = gr.Number(value=20260914, precision=0, minimum=0, maximum=2147483647, label="Sampling seed",
                                           info="Each agent samples under its own seed derived from this one.")
                 per_turn = gr.Number(value=1024, precision=0, minimum=1, maximum=8192, label="Tokens per response")
-                budget = gr.Number(value=16384, precision=0, minimum=1, maximum=131072, label="Team sampled-token limit")
+                budget = gr.Number(value=8192, precision=0, minimum=1, maximum=131072, label="Sampled-token limit per agent",
+                                   info="An agent that spends it stops moving; its teammates continue.")
                 round_limit = gr.Number(value=24, precision=0, minimum=1, maximum=256, label="Round limit")
             with gr.Accordion("Export the run", open=False):
                 save = gr.Button("Export run JSON", size="sm")
@@ -397,12 +438,13 @@ def build_team_page(context, runs_dir):
             checkpoint.update(steering_config(vector, strength, layer, steer, cell, after, responses, chosen))
             if chosen is not None and steer == "cell" and checkpoint["steer_when"]["cell"] != chosen:
                 raise ValueError("Leave Steering cell blank to steer at the generated unavoidable checkpoint.")
-            if targets != "all":
-                checkpoint["steer_agents"] = [int(target) for target in targets.split(",")]
+            chosen_agents = parse_agents(targets, int(count))
+            if chosen_agents is not None:
+                checkpoint["steer_agents"] = chosen_agents
             new = TeamEpisode(maze, dict(
                 agents=int(count), communication=bool(talk), team_goal=goal, goal_mode=mode, goal_hint=hint,
                 system_prompt=system_text, instruction=instruction_text, temperature=float(temp),
-                sampling_seed=int(sample_seed), per_turn_tokens=int(per), token_budget=int(total),
+                sampling_seed=int(sample_seed), per_turn_tokens=int(per), agent_token_budget=int(total),
                 round_limit=int(rounds), openness=float(o), **checkpoint))
         except (ValueError, TypeError) as exc:
             logger.warning("Refused the settings for a new team episode: %s", exc)
@@ -531,19 +573,18 @@ def build_team_page(context, runs_dir):
                   len(maze.route()) - 1, config.get("openness", gr.skip()), config["goal_mode"],
                   gr.update(value=config["goal_hint"], visible=config["goal_mode"] == "hint"),
                   config["system_prompt"], config["instruction"], config["temperature"], config["sampling_seed"],
-                  config["per_turn_tokens"], config["token_budget"], config["round_limit"])
+                  # A run saved under one limit for the team offers each agent its
+                  # even share of it for a new episode.
+                  config["per_turn_tokens"], config.get("agent_token_budget") or max(1, config["token_budget"] // config["agents"]),
+                  config["round_limit"])
         checkpoint = checkpoint_values(replay)
-        targets = config.get("steer_agents") or list(range(len(replay.agents)))
         # Imports can select a subset; retain it rather than silently steering everyone.
-        target_value = "all" if targets == list(range(len(replay.agents))) else ",".join(map(str, targets))
-        target_choices = [("Every agent", "all")] + [(f"Agent {i+1} only", str(i)) for i in range(MAX_AGENTS)]
-        if len(targets) > 1 and target_value != "all":
-            target_choices.append((", ".join(replay.agents[i]["name"] for i in targets), target_value))
+        target_value = format_agents(config.get("steer_agents"), len(replay.agents))
         steering_values = list(checkpoint[1:-1])
         if (config.get("steer_when") or {}).get("cell") == config.get("required_checkpoint"):
             steering_values[4] = ""
         return (replay, *rendered, *values, config.get("required_checkpoint") is not None,
-                *steering_values, gr.update(choices=target_choices, value=target_value), checkpoint[-1])
+                *steering_values, target_value, checkpoint[-1])
 
     def team_import_vector(path):
         if not path:
