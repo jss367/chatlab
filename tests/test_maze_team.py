@@ -164,6 +164,25 @@ class TeamEpisodeTests(unittest.TestCase):
         list(stream_team(ep, Manager([call("south"), say("I give up.")])))
         self.assertEqual(ep.phase, "abandoned")
 
+    def test_a_response_cut_off_at_the_last_of_its_limit_leaves_its_agent_out_of_tokens(self):
+        # Without its stop token each reply fills the cap its agent's limit set.
+        text, ids = call("south")
+        cut = (text, ids[:-1])
+        ep = team(agent_token_budget=len(ids) - 1, per_turn_tokens=1000)
+        list(stream_team(ep, Manager([cut, cut])))
+        self.assertEqual([turn["finish_reason"] for turn in ep.turns], ["length", "length"])
+        self.assertEqual([agent["status"] for agent in ep.agents], ["out_of_tokens", "out_of_tokens"])
+        self.assertEqual(ep.phase, "budget")
+        self.assertIn("agent-1 · out of tokens", team_board(ep, 0))
+        self.assertEqual([row[4] for row in team_timeline(ep)[1:]], ["Out of tokens · stopped"] * 2)
+        replay = from_payload(json.loads(json.dumps(ep.payload())))
+        self.assertEqual(json.loads(json.dumps(replay.payload())), json.loads(json.dumps(ep.payload())))
+        # A cut-off with tokens still to spend is only cut off.
+        ep = team(agent_token_budget=1000, per_turn_tokens=len(ids) - 1)
+        list(stream_team(ep, Manager([cut, cut])))
+        self.assertEqual((ep.phase, ep.agents[0]["status"]), ("abandoned", "cut_off"))
+        self.assertEqual(team_timeline(ep)[1][4], "Cut off · stopped")
+
     def test_a_run_saved_under_one_limit_for_the_team_still_splits_it_evenly(self):
         manager = Manager([call("south"), call("south")])
         ep = team(token_budget=30, per_turn_tokens=100)

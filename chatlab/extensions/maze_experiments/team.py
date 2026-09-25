@@ -416,8 +416,10 @@ def resolve_round(episode, actions):
         if event["arrived"]:
             agent["status"] = "arrived"
     if "agent_token_budget" in episode.config:
+        # A response cut off at the last of its agent's limit was stopped by
+        # the limit, so that agent is out of tokens rather than cut off.
         for agent, spent in zip(episode.agents, episode.agent_tokens()):
-            if agent["status"] == "active" and spent >= episode.config["agent_token_budget"]:
+            if agent["status"] in ("active", "cut_off") and spent >= episode.config["agent_token_budget"]:
                 agent["status"] = "out_of_tokens"
     readers = [action["agent"] for action in actions]
     for sender, text in sent:

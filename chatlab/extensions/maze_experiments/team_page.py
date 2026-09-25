@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 COLORS = ("#4f46e5", "#db2777", "#0891b2", "#ea580c")
 # A cell holding more agents than this shows one marker with their count.
 FANNED = 4
-OUTCOMES = {"no_call": "No call · stopped", "cut_off": "Cut off · stopped", "not_applied": "Not applied"}
+OUTCOMES = {"no_call": "No call · stopped", "cut_off": "Cut off · stopped", "out_of_tokens": "Out of tokens · stopped",
+            "not_applied": "Not applied"}
 
 
 def agent_color(k):
@@ -176,13 +177,20 @@ def steering_status(ep):
 def team_timeline(ep):
     """One row for the start, then one for each response, in the order they were given."""
     rows = [["Start", "All", str(tuple(ep.maze.start)), "—", "Initial position", "—"]]
+    limit = ep.config.get("agent_token_budget")
+    spent = [0] * len(ep.agents)
     for turn in ep.turns:
+        spent[turn["agent"]] += turn.get("sampled_tokens", 0)
         event = turn.get("event")
         position = tuple(event["after"]) if event else tuple(turn["position_before"])
         if event:
             result = "Accepted" if event["accepted"] else event["error"].replace("_", " ")
         elif turn.get("outcome"):
-            result = OUTCOMES[turn["outcome"]]
+            # A cut-off that spent the last of its agent's limit was stopped by the limit.
+            outcome = turn["outcome"]
+            if outcome == "cut_off" and limit is not None and spent[turn["agent"]] >= limit:
+                outcome = "out_of_tokens"
+            result = OUTCOMES[outcome]
         else:
             result = "Generating…" if turn["finish_reason"] is None else "Waiting for the round"
         rows.append([f"Round {turn['round'] + 1}", ep.agents[turn["agent"]]["name"], str(position),
@@ -217,7 +225,7 @@ def statuses_after(ep, index):
             statuses[turn["agent"]] = "abandoned" if turn["outcome"] == "no_call" else "cut_off"
     limit = ep.config.get("agent_token_budget")
     if limit is not None:
-        statuses = ["out_of_tokens" if status == "active" and used >= limit else status
+        statuses = ["out_of_tokens" if status in ("active", "cut_off") and used >= limit else status
                     for status, used in zip(statuses, spent)]
     return statuses
 
