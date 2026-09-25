@@ -18,6 +18,7 @@ from chatlab.extensions.maze_experiments.runner import TERMINAL, Episode, fork_t
 from chatlab.extension_api import TokenInspector
 
 from maze_support import CONFIG, Manager
+from ui_support import listeners_by_name
 
 # A short corridor and one long way round, so a single closure can send the
 # character the long way without cutting it off, and a second one strands it.
@@ -595,7 +596,7 @@ class ChangingMapTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                close = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}["close_map_cell"]
+                close = listeners_by_name(demo)["close_map_cell"]
                 for row, column, message in ((0, 0, "standing in"), (0, 3, "start and the destination"),
                                              (3, 0, "no route from the start"), (None, 1, "Enter the row")):
                     with self.subTest(cell=(row, column)):

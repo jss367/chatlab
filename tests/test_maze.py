@@ -18,6 +18,7 @@ from chatlab.token_metrics import unscored_metric
 from chatlab.extensions.maze_experiments.page import board, build_page, context_view, export_run, scenario_values, status, views, timeline, transport_text
 import gradio as gr
 from maze_support import CONFIG, Manager, MAZE, NO_CHECKPOINT, scored
+from ui_support import handlers_by_name, listeners_by_name, listeners_named
 
 
 class MazeTests(unittest.TestCase):
@@ -99,7 +100,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = listeners_by_name(demo)
                 metrics = views(ep, False, selections, session_id)[7]
                 selected = callbacks['select_token'].fn(ep, session_id, metrics, SimpleNamespace(index=1))
                 self.assertEqual(selected[3], 'b')
@@ -135,7 +136,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = listeners_by_name(demo)
                 metrics = views(ep, False, selections, session_id)[7]
                 selected = callbacks['select_token'].fn(ep, session_id, metrics, SimpleNamespace(index=1))
                 branch = callbacks['branch_alternative']
@@ -172,7 +173,7 @@ class MazeTests(unittest.TestCase):
                                       navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
             with gr.Blocks() as demo:
                 build_page(context)
-            callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+            callbacks = listeners_by_name(demo)
             metrics = views(ep, False, selections, session_id)[7]
             markup = callbacks["offer_menu"].fn(ep, session_id, metrics, 'open-1',
                                                  SimpleNamespace(index=1))
@@ -704,7 +705,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = listeners_by_name(demo)
                 metrics = views(replay, False, selections, session_id)[7]
                 selected = callbacks["select_token"].fn(replay, session_id, metrics, SimpleNamespace(index=index))
                 edit = callbacks["edit_token"]
@@ -736,7 +737,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = listeners_by_name(demo)
                 metrics = views(ep, False, selections, session_id)[7]
                 resolve = selections.resolve
 
@@ -854,7 +855,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = listeners_by_name(demo)
                 forward, back = callbacks['step_forward'].fn, callbacks['step_back'].fn
                 begin = callbacks['step_first'].fn
                 selected = lambda frame: frame[8]['value']
@@ -916,7 +917,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = listeners_by_name(demo)
                 pause_button = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'maze-pause')
                 pause = next(fn.fn for fn in demo.fns.values() if fn.targets == [(pause_button._id, 'click')])
                 forward, playback = callbacks['step_forward'].fn, callbacks['play_back'].fn
@@ -1000,7 +1001,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = handlers_by_name(demo)
                 rows = timeline(ep)
                 self.assertEqual(len(rows), 4)
                 self.assertEqual([row[1] for row in rows], ['(0, 0)', '(0, 1)', '(0, 1)', '(0, 1)'])
@@ -1385,7 +1386,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                shown = [fn.fn for fn in demo.fns.values() if fn.fn is not None and fn.fn.__name__ == 'show_context']
+                shown = [fn.fn for fn in listeners_named(demo, 'show_context')]
                 # Opening the accordion and the refresh button reach the same view.
                 self.assertEqual(len(shown), 2)
                 ep = Episode(MAZE, CONFIG)
@@ -1407,7 +1408,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = handlers_by_name(demo)
                 change = callbacks['change_goal_mode']
                 for mode in ('hidden', 'hint', 'coordinates'):
                     self.assertEqual(change(mode, default_instruction('coordinates'))[2], default_instruction(mode))
@@ -1454,7 +1455,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                callbacks = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}
+                callbacks = handlers_by_name(demo)
                 loaded = callbacks['load'](str(ep.export()), Episode(MAZE, CONFIG), False, session, None)
                 self.assertTrue(loaded[0].replay_only)
                 # A saved run opens at its initial history, so Play replays it
@@ -2155,7 +2156,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                playback = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}['play_back']
+                playback = handlers_by_name(demo)['play_back']
                 ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
                 with mock.patch('chatlab.extensions.maze_experiments.page.gr.Warning') as warning:
                     with self.assertLogs('chatlab.extensions.maze_experiments.page', level='INFO') as logged:
@@ -2186,7 +2187,7 @@ class MazeTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             try:
-                load = {fn.fn.__name__: fn.fn for fn in demo.fns.values() if fn.fn is not None}['load']
+                load = handlers_by_name(demo)['load']
                 fresh = Episode(MAZE, CONFIG)
                 with self.assertLogs('chatlab.extensions.maze_experiments.page', level='INFO') as logged:
                     loaded = load(str(ep.export()), fresh, False, session, None)

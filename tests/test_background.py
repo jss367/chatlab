@@ -20,6 +20,7 @@ from chatlab.ui.background import ConversationJob
 from fakes import THINK_EOS, THINK_PIECES
 from conversation_support import SETTINGS
 from fakes import loaded_manager
+from ui_support import listener_named
 
 
 def setUpModule():
@@ -55,9 +56,9 @@ class BackgroundConversationTests(unittest.TestCase):
             yield from self.generate(*args, **kwargs)
 
         self.manager.generate = slow
-        self.chat = self.named("chat")
+        self.chat = listener_named(self.demo, "chat")
         self.turns = self.demo.conversation_outputs["turns"]
-        self.forks = self.named("remember_forks").inputs[1]
+        self.forks = listener_named(self.demo, "remember_forks").inputs[1]
         self.job_state = next(c for c in self.chat.inputs if isinstance(c.value, ConversationJob))
         self.job = self.state[self.job_state._id]
         self.addCleanup(self.finish)
@@ -65,11 +66,8 @@ class BackgroundConversationTests(unittest.TestCase):
         put_branch(forks, "Chat 1", [make_turn("user", "Another conversation")])
         self.state[self.forks._id] = forks
 
-    def named(self, name):
-        return next(fn for fn in self.demo.fns.values() if getattr(fn.fn, "__name__", "") == name)
-
     def call(self, name, overrides=None, event_data=None):
-        fn = self.named(name)
+        fn = listener_named(self.demo, name)
         inputs = []
         for component in fn.inputs:
             inputs.append(
@@ -346,7 +344,7 @@ class BackgroundConversationTests(unittest.TestCase):
         self.call("poll")
         original = copy.deepcopy(self.state[self.turns._id])
         for parent, child in (("Main", "Fork 1"), ("Fork 1", "Fork 2")):
-            fn = self.named("branch_from")
+            fn = listener_named(self.demo, "branch_from")
             self.state[fn.inputs[0]._id] = self.token_pick()
             self.call("branch_from", dict(enumerate(SETTINGS, 3)))
             self.finish()
@@ -372,7 +370,7 @@ class BackgroundConversationTests(unittest.TestCase):
         self.start()
         self.finish()
         self.call("poll")
-        fn = self.named("branch_with_text")
+        fn = listener_named(self.demo, "branch_with_text")
         self.state[fn.inputs[0]._id] = self.token_pick()
         self.call("branch_with_text", {1: " world", **dict(enumerate(SETTINGS, 4))})
         self.finish()
@@ -399,7 +397,7 @@ class BackgroundConversationTests(unittest.TestCase):
         self.assertEqual(forks["origins"]["Fork 1"]["parent"], "Main")
         self.call("select_tree_branch", {0: json.dumps({"slot": "A", "name": "Main"})})
         self.call("select_tree_branch", {0: json.dumps({"slot": "B", "name": "Fork 1"})})
-        fn = self.named("select_tree_branch")
+        fn = listener_named(self.demo, "select_tree_branch")
         self.assertEqual(self.state[fn.outputs[0]._id], {"A": "Main", "B": "Fork 1"})
         self.assertIn("compared with", self.view[fn.outputs[2]._id])
         self.assertEqual(self.state[self.forks._id]["active"], "Fork 1")
@@ -410,7 +408,7 @@ class BackgroundConversationTests(unittest.TestCase):
         self.call("poll")
         pick = self.token_pick()
         pick["token_id"], pick["text"] = pick["original_id"], pick["original"]
-        fn = self.named("next_token")
+        fn = listener_named(self.demo, "next_token")
         self.state[fn.inputs[0]._id] = pick
         self.call("next_token", dict(enumerate(SETTINGS, 3)))
         self.finish()
@@ -426,7 +424,7 @@ class BackgroundConversationTests(unittest.TestCase):
         self.finish()
         self.call("poll")
         original = copy.deepcopy(self.state[self.turns._id])
-        fn = self.named("branch_from")
+        fn = listener_named(self.demo, "branch_from")
         self.state[fn.inputs[0]._id] = self.token_pick()
 
         def broken(*args, **kwargs):
@@ -447,7 +445,7 @@ class BackgroundConversationTests(unittest.TestCase):
         self.call("poll")
         self.release.clear()
         self.entered.clear()
-        fn = self.named("branch_from")
+        fn = listener_named(self.demo, "branch_from")
         self.state[fn.inputs[0]._id] = self.token_pick()
         self.call("branch_from", dict(enumerate(SETTINGS, 3)))
         self.assertTrue(self.entered.wait(2))
@@ -464,7 +462,7 @@ class BackgroundConversationTests(unittest.TestCase):
         self.start()
         self.finish()
         self.call("poll")
-        fn = self.named("branch_from")
+        fn = listener_named(self.demo, "branch_from")
         self.state[fn.inputs[0]._id] = self.token_pick()
         self.call("branch_from", dict(enumerate(SETTINGS, 3)))
         self.finish()

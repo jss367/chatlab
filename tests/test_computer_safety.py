@@ -24,6 +24,7 @@ from chatlab.extensions.osguard.chart import tradeoff_chart
 from chatlab.extensions.osguard.page import build_page
 from chatlab.extensions.osguard.runner import REASONING_LEAD, Runner, StreamingResponse
 from fakes import FakeManager
+from ui_support import handlers_by_name
 
 
 def setUpModule():
@@ -638,7 +639,7 @@ class PageTests(unittest.TestCase):
             self.addCleanup(demo.close)
             seed_control = next(block for block in demo.blocks.values() if getattr(block, 'label', None) == 'Seed')
             self.assertEqual(seed_control.minimum, 0)
-            functions = {function.fn.__name__: function.fn for function in demo.fns.values() if function.fn}
+            functions = handlers_by_name(demo)
             case_path = Path(directory) / "cases.json"
             case_path.write_text(json.dumps(demo_cases()))
             loaded = functions["load_cases"](str(case_path), "owner", False, 0.5)
@@ -679,7 +680,7 @@ class PageTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             self.addCleanup(demo.close)
-            functions = {function.fn.__name__: function.fn for function in demo.fns.values() if function.fn}
+            functions = handlers_by_name(demo)
             case_path = Path(directory) / "cases.json"
             case_path.write_text(json.dumps(demo_cases()))
             loaded = functions["load_cases"](str(case_path), "owner", False, 0.5)
@@ -714,7 +715,7 @@ class PageTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             self.addCleanup(demo.close)
-            functions = {function.fn.__name__: function.fn for function in demo.fns.values() if function.fn}
+            functions = handlers_by_name(demo)
             case_path = Path(directory) / "cases.json"
             # One unsafe case the model is sure about, one it is not, and one
             # ordinary case: enough for a curve with somewhere to put a line.
@@ -764,7 +765,7 @@ class PageTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             self.addCleanup(demo.close)
-            functions = {function.fn.__name__: function.fn for function in demo.fns.values() if function.fn}
+            functions = handlers_by_name(demo)
             case_path = Path(directory) / "cases.json"
             case_path.write_text(json.dumps(demo_cases()))
             loaded = functions["load_cases"](str(case_path), "owner", False, 0.5)
@@ -797,7 +798,7 @@ class PageTests(unittest.TestCase):
             with gr.Blocks() as demo:
                 build_page(context)
             self.addCleanup(demo.close)
-            functions = {function.fn.__name__: function.fn for function in demo.fns.values() if function.fn}
+            functions = handlers_by_name(demo)
             case_path = Path(directory) / "cases.json"
             case_path.write_text(json.dumps(demo_cases()[:1]))
             loaded = functions["load_cases"](str(case_path), "owner", False, 0.5)

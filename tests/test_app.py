@@ -23,6 +23,7 @@ from chatlab.model_runtime import (
 from chatlab.progress_bars import DownloadProgress
 from chatlab.text_generation import PROMPT_SCORE_LIMIT
 from chatlab.token_metrics import UNSCORED_BEYOND_LIMIT, build_metric, unscored_metric
+from ui_support import listeners_named
 
 
 class Selection:
@@ -1752,11 +1753,7 @@ class ScoreBudgetRecoveryTests(unittest.TestCase):
     def test_recovery_reads_the_boxes_it_would_score(self):
         # The recomputed count has to describe what is in the boxes now, not
         # what was there when the count gave up.
-        (listener,) = [
-            fn
-            for fn in app.build_app().fns.values()
-            if getattr(fn.fn, "__name__", None) == "recover_score_budget"
-        ]
+        (listener,) = listeners_named(app.build_app(), "recover_score_budget")
 
         self.assertEqual(len(listener.inputs), 5)
         self.assertEqual(listener.outputs, listener.inputs[:2])

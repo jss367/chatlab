@@ -16,6 +16,7 @@ from chatlab.extensions.maze_experiments.runner import Episode, fork_token_edit,
 from chatlab.extensions.maze_experiments.trials import FORMAT as TRIALS_FORMAT, prepare_trial, read_trials
 from chatlab.extension_api import ModelService, TokenInspector, normalize_steering
 from maze_support import CONFIG, NO_CHECKPOINT, SteeringManager, VECTOR
+from ui_support import listeners_by_name
 
 
 # An open room: from the start in the corner the character can walk down,
@@ -323,7 +324,7 @@ class PageTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        return {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+        return listeners_by_name(demo)
 
     def test_parse_cell_reads_the_ways_a_cell_is_typed(self):
         for text in ("3, 3", "3 3", "(3,3)", " [3, 3] "):

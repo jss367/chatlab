@@ -40,6 +40,7 @@ from chatlab.model_runtime import ModelManager
 from chatlab.progress_bars import DownloadProgress
 
 import settings_sandbox
+from ui_support import listeners_named
 
 COMMIT = "d97e442d7cc678210054dbcc9b440894d62c89a4"
 OLMO = "allenai/Olmo-3-7B-Think"
@@ -3261,7 +3262,7 @@ class PageLayoutTests(unittest.TestCase):
         self.assertFalse(self.by_id("settings-page").visible)
 
     def test_picking_a_page_shows_it_alone(self):
-        (listener,) = self.listeners("show_page")
+        (listener,) = listeners_named(self.demo, "show_page")
         self.assertEqual(listener.targets, [(self.by_id("nav")._id, "change")])
         self.assertEqual(
             listener.outputs,
@@ -3279,13 +3280,6 @@ class PageLayoutTests(unittest.TestCase):
         self.assertEqual(shown("Images"), [False, False, True, False, False])
         self.assertEqual(shown("Models"), [False, False, False, True, False])
         self.assertEqual(shown("Settings"), [False, False, False, False, True])
-
-    def listeners(self, name):
-        return [
-            fn
-            for fn in self.demo.fns.values()
-            if getattr(fn.fn, "__name__", None) == name
-        ]
 
     def follows(self, listener, name) -> bool:
         """Whether a handler called ``name`` runs, sooner or later, after ``listener``."""
@@ -3339,7 +3333,7 @@ class PageLayoutTests(unittest.TestCase):
         # The four that change memory (the switcher included), the download
         # that only changes what is on disk, redownload and a confirmed
         # removal, plus the page load, the nav and the timer.
-        self.assertEqual(len(self.listeners("refresh_model_badge")), 10)
+        self.assertEqual(len(listeners_named(self.demo, "refresh_model_badge")), 10)
 
     def test_the_timer_also_un_sticks_the_scored_token_count(self):
         # A count asked for during a reply gives up and says so, and that
@@ -3349,7 +3343,7 @@ class PageLayoutTests(unittest.TestCase):
         timers = [
             block for block in self.demo.blocks.values() if isinstance(block, gr.Timer)
         ]
-        (recovery,) = self.listeners("recover_score_budget")
+        (recovery,) = listeners_named(self.demo, "recover_score_budget")
 
         self.assertEqual(recovery.targets, [(timers[0]._id, "tick")])
         self.assertEqual(recovery.inputs[0], self.by_id("score-budget"))
@@ -3386,7 +3380,7 @@ class PageLayoutTests(unittest.TestCase):
         self.assertLessEqual(app.BADGE_REFRESH_SECONDS, 5)
         ticks = [
             listener
-            for listener in self.listeners("refresh_model_badge")
+            for listener in listeners_named(self.demo, "refresh_model_badge")
             if listener.targets == [(timers[0]._id, "tick")]
         ]
         self.assertEqual(len(ticks), 1)
@@ -3425,7 +3419,7 @@ class PageLayoutTests(unittest.TestCase):
         # a second. It skips its outputs once there is nothing left to clear,
         # but Gradio marks them pending either way, which puts a spinner and a
         # queue counter over the panel that is already saying to wait.
-        resets = self.listeners("reset_inspection")
+        resets = listeners_named(self.demo, "reset_inspection")
         self.assertTrue(resets)
         for fn in resets:
             with self.subTest(handler=fn):
@@ -3444,7 +3438,7 @@ class PageLayoutTests(unittest.TestCase):
             self.by_id("models-page"),
             self.by_id("settings-page"),
         ]
-        (listener,) = self.listeners("go_to_image_models")
+        (listener,) = listeners_named(self.demo, "go_to_image_models")
         ((block_id, event),) = listener.targets
         self.assertEqual(event, "click")
         self.assertEqual(self.demo.blocks[block_id].elem_id, "image-load-model")
@@ -3463,7 +3457,7 @@ class PageLayoutTests(unittest.TestCase):
         # The list it lands on is the whole cache, where the kind is a word
         # mid-row and the majority of rows do not carry it at all. Both kind
         # controls are set on the way in, and both lists repainted from them.
-        (listener,) = self.listeners("go_to_image_models")
+        (listener,) = listeners_named(self.demo, "go_to_image_models")
         kind_filter = self.labelled("Kind")
         search_kind = self.by_id("search-kind")
         self.assertIn(kind_filter, listener.inputs)
@@ -3483,10 +3477,10 @@ class PageLayoutTests(unittest.TestCase):
         # pick in the chat page's switcher each rescan. Selecting the default
         # only navigates, and the Images page's button rescans inside
         # go_to_image_models.
-        self.assertEqual(len(self.listeners("refresh_my_models")), 13)
+        self.assertEqual(len(listeners_named(self.demo, "refresh_my_models")), 13)
 
     def test_model_actions_follow_selections_and_cache_refreshes(self):
-        listeners = self.listeners("refresh_model_actions")
+        listeners = listeners_named(self.demo, "refresh_model_actions")
         radio = self.labelled("Downloaded models")
         model_id = self.labelled("Hugging Face model ID")
         token = self.labelled("Hugging Face token (optional)")
@@ -3501,7 +3495,7 @@ class PageLayoutTests(unittest.TestCase):
                 [button.value for button in fn.outputs[1:]],
                 ["Download and load", "Download only", "Load cached"],
             )
-        refresh_ids = {fn._id for fn in self.listeners("refresh_my_models")}
+        refresh_ids = {fn._id for fn in listeners_named(self.demo, "refresh_my_models")}
         chained = [
             dependency for dependency in self.demo.config["dependencies"]
             if dependency["id"] in {fn._id for fn in listeners}
@@ -3515,7 +3509,7 @@ class PageLayoutTests(unittest.TestCase):
     def test_the_timer_refreshes_the_actions_through_the_gated_handler(self):
         # The timer ticks in every open session for the life of the app, so
         # it goes through the stamped refresh rather than the scanning one.
-        (fn,) = self.listeners("refresh_stale_model_actions")
+        (fn,) = listeners_named(self.demo, "refresh_stale_model_actions")
         ((block_id, event),) = fn.targets
         self.assertEqual(event, "tick")
         self.assertIsInstance(self.demo.blocks[block_id], gr.Timer)
@@ -3530,7 +3524,7 @@ class PageLayoutTests(unittest.TestCase):
             ["Download and load", "Download only", "Load cached"],
         )
         self.assertFalse(any(
-            event == "tick" for other in self.listeners("refresh_model_actions")
+            event == "tick" for other in listeners_named(self.demo, "refresh_model_actions")
             for _, event in other.targets
         ))
 
@@ -3544,7 +3538,7 @@ class PageLayoutTests(unittest.TestCase):
             parent = parent.parent
         activity = status.parent
         for name in ("download_model", "download_and_load_model", "load_cached_model"):
-            listener = self.listeners(name)[0]
+            listener = listeners_named(self.demo, name)[0]
             button = self.demo.blocks[listener.targets[0][0]]
             self.assertTrue(self.within(button, card))
             self.assertLess(card.children.index(activity), card.children.index(button.parent))
@@ -3555,7 +3549,7 @@ class PageLayoutTests(unittest.TestCase):
             block for block in self.demo.blocks.values()
             if isinstance(block, gr.Button) and block.value == "Check model"
         ]
-        checks = self.listeners("check_model_repository")
+        checks = listeners_named(self.demo, "check_model_repository")
         info = mock.Mock(
             tags=[], config={}, library_name="transformers", siblings=[],
             private=False, gated=False,
@@ -3578,7 +3572,7 @@ class PageLayoutTests(unittest.TestCase):
                 self.assertEqual(request.call_count, expected)
 
     def test_repository_precision_refreshes_for_cached_selections_and_rescans(self):
-        views = self.listeners("repository_view")
+        views = listeners_named(self.demo, "repository_view")
         selected = self.labelled("Downloaded models")
         self.assertTrue(any(fn.targets == [(selected._id, "change")] for fn in views))
         self.assertTrue(any(event == "load" for fn in views for _, event in fn.targets))
@@ -3586,7 +3580,7 @@ class PageLayoutTests(unittest.TestCase):
             self.assertEqual(fn.inputs[-1], selected)
             self.assertEqual(fn.inputs[0], self.labelled("Hugging Face model ID"))
             self.assertEqual(fn.inputs[2], self.labelled("Hugging Face token (optional)"))
-        action_ids = {fn._id for fn in self.listeners("refresh_model_actions")}
+        action_ids = {fn._id for fn in listeners_named(self.demo, "refresh_model_actions")}
         chained = [
             dependency for dependency in self.demo.config["dependencies"]
             if dependency["id"] in {fn._id for fn in views}
@@ -3600,7 +3594,7 @@ class PageLayoutTests(unittest.TestCase):
         # the 15 GB default. Each load takes the radio as well and prefers it.
         radio = self.labelled("Downloaded models")
         for name in ("load_cached_model", "download_model", "download_and_load_model"):
-            (fn,) = self.listeners(name)
+            (fn,) = listeners_named(self.demo, name)
             self.assertIn(radio, fn.inputs, name)
 
     def test_download_then_load_keeps_the_typed_model_when_another_model_is_loaded(self):
@@ -3608,8 +3602,8 @@ class PageLayoutTests(unittest.TestCase):
         manager.model_id = OLMO
         entries = [cached(OLMO)]
         typed_id = "org/new-model"
-        (download,) = self.listeners("download_model")
-        (load,) = self.listeners("load_cached_model")
+        (download,) = listeners_named(self.demo, "download_model")
+        (load,) = listeners_named(self.demo, "load_cached_model")
         dependency = next(
             item for item in self.demo.config["dependencies"]
             if item["trigger_after"] == download._id
@@ -3663,7 +3657,7 @@ class PageLayoutTests(unittest.TestCase):
     def test_naming_a_model_another_way_withdraws_the_selection(self):
         # Typing an ID or picking a search result names its own model, so the
         # highlighted row cannot outrank it.
-        listeners = self.listeners("clear_my_model_selection")
+        listeners = listeners_named(self.demo, "clear_my_model_selection")
         self.assertEqual(len(listeners), 2)
         radio = self.labelled("Downloaded models")
         for fn in listeners:
@@ -3673,8 +3667,8 @@ class PageLayoutTests(unittest.TestCase):
         # The Remove button only opens the question; deleting is the
         # confirm button's job. Cancelling withdraws it, and so does naming
         # another model, whether by choosing a row or by typing an ID.
-        (ask,) = self.listeners("ask_remove_my_model")
-        (remove,) = self.listeners("remove_my_model")
+        (ask,) = listeners_named(self.demo, "ask_remove_my_model")
+        (remove,) = listeners_named(self.demo, "remove_my_model")
         buttons = {
             self.demo.blocks[block_id].value: fn
             for fn in (ask, remove)
@@ -3682,13 +3676,13 @@ class PageLayoutTests(unittest.TestCase):
         }
         self.assertIs(buttons["Remove"], ask)
         self.assertIs(buttons["Remove from disk"], remove)
-        self.assertEqual(len(self.listeners("hide_remove_confirm")), 3)
+        self.assertEqual(len(listeners_named(self.demo, "hide_remove_confirm")), 3)
 
     def test_the_confirm_button_deletes_the_model_the_question_named(self):
         # The confirm handler reads the stored pending ID, not the radio, so
         # a selection moved after the question opened cannot redirect it.
-        (ask,) = self.listeners("ask_remove_my_model")
-        (remove,) = self.listeners("remove_my_model")
+        (ask,) = listeners_named(self.demo, "ask_remove_my_model")
+        (remove,) = listeners_named(self.demo, "remove_my_model")
         radio = self.labelled("Downloaded models")
         (pending,) = remove.inputs
         self.assertIsInstance(pending, gr.State)
@@ -3700,11 +3694,11 @@ class PageLayoutTests(unittest.TestCase):
         # Clear reaches past the conversation on screen: it deletes every
         # other one too, and nothing brings them back. The button only opens
         # the question; the confirm button clears once a running job stops.
-        (ask,) = self.listeners("ask_clear_chat")
-        (clear,) = self.listeners("clear_chat")
+        (ask,) = listeners_named(self.demo, "ask_clear_chat")
+        (clear,) = listeners_named(self.demo, "clear_chat")
         cancel = next(
             fn
-            for fn in self.listeners("hide_clear_confirm")
+            for fn in listeners_named(self.demo, "hide_clear_confirm")
             if self.demo.blocks[fn.targets[0][0]].value == "Cancel"
         )
         buttons = {
@@ -3725,7 +3719,7 @@ class PageLayoutTests(unittest.TestCase):
         # when it was asked. Left open across a New or a Fork it would
         # promise less than "Clear everything" would take - and that promise
         # is the whole reason the question exists.
-        withdrawals = self.listeners("hide_clear_confirm")
+        withdrawals = listeners_named(self.demo, "hide_clear_confirm")
         triggered_by = {fn.targets[0][0] for fn in withdrawals}
         buttons = {
             self.demo.blocks[block_id].value
@@ -3742,7 +3736,7 @@ class PageLayoutTests(unittest.TestCase):
     def test_the_clear_button_is_named_for_everything_it_takes(self):
         # "Clear" alone reads as emptying the chat on screen, which is what
         # Delete does. This one takes the lot.
-        (ask,) = self.listeners("ask_clear_chat")
+        (ask,) = listeners_named(self.demo, "ask_clear_chat")
         ((block_id, _),) = ask.targets
 
         self.assertEqual(self.demo.blocks[block_id].value, "Clear all")
@@ -3752,7 +3746,7 @@ class PageLayoutTests(unittest.TestCase):
         # which act on the one conversation on screen, and read as another
         # of them. It takes every conversation, so it belongs under the list
         # of them, beside New, Fork and Delete.
-        (ask,) = self.listeners("ask_clear_chat")
+        (ask,) = listeners_named(self.demo, "ask_clear_chat")
         ((block_id, _),) = ask.targets
         pane = self.by_id("conversation-pane")
 
@@ -3766,7 +3760,7 @@ class PageLayoutTests(unittest.TestCase):
 
         self.assertTrue(self.within(offer, self.by_id("chat-page")))
         self.assertTrue(self.within(offer, self.by_id("model-bar")))
-        (setup,) = self.listeners("select_default_model")
+        (setup,) = listeners_named(self.demo, "select_default_model")
         self.assertEqual(setup.targets, [(offer._id, "click")])
         self.assertEqual(offer.value, "Set up the default model")
         # No chained handler may turn this navigation back into automatic I/O.
@@ -3786,11 +3780,11 @@ class PageLayoutTests(unittest.TestCase):
                 self.by_id("my-model-detail"),
                 # The search selection is a State beside the table, so it is
                 # found through the handler that writes it.
-                self.listeners("select_search_result")[0].outputs[2],
-                self.listeners("select_search_result")[0].outputs[1],
+                listeners_named(self.demo, "select_search_result")[0].outputs[2],
+                listeners_named(self.demo, "select_search_result")[0].outputs[1],
                 self.by_id("model-status"),
-                self.listeners("hide_remove_confirm")[0].outputs[0],
-                self.listeners("hide_remove_confirm")[0].outputs[1],
+                listeners_named(self.demo, "hide_remove_confirm")[0].outputs[0],
+                listeners_named(self.demo, "hide_remove_confirm")[0].outputs[1],
                 self.by_id("nav"),
                 self.by_id("conversation-pane"),
                 self.by_id("chat-page"),
@@ -3802,7 +3796,7 @@ class PageLayoutTests(unittest.TestCase):
 
     def test_the_offer_is_published_wherever_the_badge_is(self):
         # Setup links share the badge's visibility decision in every tab.
-        listeners = self.listeners("refresh_model_badge")
+        listeners = listeners_named(self.demo, "refresh_model_badge")
         self.assertTrue(listeners)
         for listener in listeners:
             self.assertEqual(
@@ -3816,7 +3810,7 @@ class PageLayoutTests(unittest.TestCase):
         # closed under the reader every couple of seconds.
         switch = self.by_id("model-switch")
         precision = self.labelled("Weight precision")
-        listeners = self.listeners("refresh_model_switch")
+        listeners = listeners_named(self.demo, "refresh_model_switch")
         triggers = {listener.targets[0] for listener in listeners}
         self.assertIn((self.by_id("nav")._id, "change"), triggers)
         self.assertIn((self.demo._id, "load"), triggers)
@@ -3832,13 +3826,13 @@ class PageLayoutTests(unittest.TestCase):
         for name in ("load_cached_model", "download_and_load_model", "unload_model",
                      "download_model", "switch_model"):
             with self.subTest(handler=name):
-                action = self.listeners(name)[0]
+                action = listeners_named(self.demo, name)[0]
                 self.assertTrue(self.follows(action, "refresh_model_switch"))
 
         timers = [
             block for block in self.demo.blocks.values() if isinstance(block, gr.Timer)
         ]
-        ticks = self.listeners("refresh_stale_model_switch")
+        ticks = listeners_named(self.demo, "refresh_stale_model_switch")
         self.assertEqual(len(ticks), 1)
         self.assertEqual(ticks[0].targets, [(timers[0]._id, "tick")])
         self.assertEqual(ticks[0].inputs, [switch, revision, precision])
@@ -3847,7 +3841,7 @@ class PageLayoutTests(unittest.TestCase):
 
     def test_a_pick_in_the_switcher_loads_at_the_chosen_precision(self):
         switch = self.by_id("model-switch")
-        listeners = self.listeners("switch_model")
+        listeners = listeners_named(self.demo, "switch_model")
         self.assertEqual(len(listeners), 1)
         self.assertEqual(listeners[0].targets, [(switch._id, "input")])
         self.assertEqual(listeners[0].inputs, [switch, self.labelled("Weight precision")])
@@ -3864,7 +3858,7 @@ class PageLayoutTests(unittest.TestCase):
     def test_the_images_badge_is_refreshed_on_the_same_three_occasions(self):
         # Arriving at the page, opening it, and the timer that tells a tab
         # which did not start a load about it.
-        listeners = self.listeners("refresh_image_badge")
+        listeners = listeners_named(self.demo, "refresh_image_badge")
         outputs = [self.by_id("image-model-badge"), self.by_id("image-load-model")]
         for listener in listeners:
             self.assertEqual(listener.outputs, outputs)
@@ -3890,20 +3884,20 @@ class PageLayoutTests(unittest.TestCase):
         # generator gone, taking every recorded step with it. So Stop sets an
         # event the run checks between steps, and the generator itself
         # publishes the stopped run.
-        (stop,) = [listener for listener in self.listeners("stop_drawing")
+        (stop,) = [listener for listener in listeners_named(self.demo, "stop_drawing")
                    if listener.targets == [(self.by_id("stop-drawing")._id, "click")]]
         ((block_id, event),) = stop.targets
 
         self.assertEqual(event, "click")
         self.assertEqual(self.demo.blocks[block_id].elem_id, "stop-drawing")
         self.assertEqual(stop.cancels, [])
-        (draw,) = self.listeners("draw")
+        (draw,) = listeners_named(self.demo, "draw")
         self.assertNotIn(draw._id, self.cancelled_by((block_id, event)))
 
     def test_moving_the_step_repaints_the_frame_the_shading_and_the_map(self):
         # Attention moves between steps as much as the picture does, so these
         # cannot be allowed to disagree about which step is on screen.
-        (select,) = self.listeners("select_step")
+        (select,) = listeners_named(self.demo, "select_step")
 
         self.assertEqual(select.targets, [(self.by_id("image-step")._id, "release")])
         self.assertEqual(
@@ -3920,10 +3914,10 @@ class PageLayoutTests(unittest.TestCase):
     def test_clicking_a_prompt_token_is_remembered_before_the_map_is_drawn(self):
         # The click's index has to land in the state the map reads, so the
         # map follows the step slider afterwards without another click.
-        (remember,) = [listener for listener in self.listeners("remember_token")
+        (remember,) = [listener for listener in listeners_named(self.demo, "remember_token")
                        if listener.targets == [(self.by_id("image-prompt-strip")._id, "select")]]
         (token_state,) = remember.outputs
-        (paint,) = self.listeners("select_token")
+        (paint,) = listeners_named(self.demo, "select_token")
 
         self.assertEqual(
             remember.targets, [(self.by_id("image-prompt-strip")._id, "select")]
@@ -4033,7 +4027,7 @@ class PageLayoutTests(unittest.TestCase):
                 "Maximum new tokens",
             )
         ]
-        listeners = self.listeners("update_sampling_label")
+        listeners = listeners_named(self.demo, "update_sampling_label")
         # A page load's target has no block, so look the ids up by hand.
         by_id = {slider._id: slider for slider in sliders}
         moved = [fn for fn in listeners if fn.targets[0][0] in by_id]
@@ -4089,7 +4083,7 @@ class PageLayoutTests(unittest.TestCase):
             )
         }
 
-        for fn in self.listeners("update_sampling_label"):
+        for fn in listeners_named(self.demo, "update_sampling_label"):
             block_id, event = fn.targets[0]
             if block_id in sliders:
                 with self.subTest(slider=self.demo.blocks[block_id].label):
@@ -4105,7 +4099,7 @@ class PageLayoutTests(unittest.TestCase):
             self.labelled("Text to score"),
             self.labelled("Treat the context as a chat message"),
         ]
-        listeners = self.listeners("score_token_count")
+        listeners = listeners_named(self.demo, "score_token_count")
         typed = [fn for fn in listeners if fn.trigger_mode == "always_last"]
 
         self.assertEqual([self.demo.blocks[fn.targets[0][0]] for fn in typed], boxes)
@@ -4119,14 +4113,14 @@ class PageLayoutTests(unittest.TestCase):
         # order, a new kind filter, a typed name, a new weight precision, and
         # the page load.
         self.assertEqual(
-            len(listeners) - len(typed), len(self.listeners("refresh_my_models")) - 6
+            len(listeners) - len(typed), len(listeners_named(self.demo, "refresh_my_models")) - 6
         )
 
     def test_choosing_a_model_writes_the_id_box(self):
         box = self.labelled("Hugging Face model ID")
         for name in ("select_my_model", "select_search_result"):
             with self.subTest(handler=name):
-                (listener,) = self.listeners(name)
+                (listener,) = listeners_named(self.demo, name)
                 self.assertIs(listener.outputs[0], box)
 
 
@@ -4711,13 +4705,6 @@ class SavedSettingsTests(unittest.TestCase):
         self.assertEqual(len(matches), 1, label)
         return matches[0]
 
-    def listeners(self, name):
-        return [
-            fn
-            for fn in self.demo.fns.values()
-            if getattr(fn.fn, "__name__", None) == name
-        ]
-
     # In the order settings.CONVERSATION_SAMPLING names them, which is the
     # order the resets are built in and the order every handler here reads
     # them in.
@@ -4844,8 +4831,8 @@ class SavedSettingsTests(unittest.TestCase):
     def saving_listeners(self):
         """Every handler that writes the whole set, however it was reached."""
 
-        return self.listeners("remember_settings") + self.listeners(
-            "remember_committed_seed"
+        return listeners_named(self.demo, "remember_settings") + listeners_named(
+            self.demo, "remember_committed_seed"
         )
 
     @staticmethod
@@ -4919,7 +4906,7 @@ class SavedSettingsTests(unittest.TestCase):
             self.assertEqual(events[self.labelled(label)], {"input"}, label)
         self.assertEqual(events[self.labelled("Measure prompt tokens")], {"change"})
         # And only the seed box's own events are allowed to write it down.
-        for fn in self.listeners("remember_committed_seed"):
+        for fn in listeners_named(self.demo, "remember_committed_seed"):
             self.assertEqual(
                 {self.demo.blocks[block_id] for block_id, _ in fn.targets},
                 {self.labelled("Random seed")},
@@ -5112,7 +5099,7 @@ class SavedSettingsTests(unittest.TestCase):
                 self.assertEqual(by_name["remember_branch_sampling"].inputs[-5:], sliders)
                 self.assertEqual(
                     by_name["remember_settings"].inputs,
-                    self.listeners("remember_settings")[0].inputs,
+                    listeners_named(self.demo, "remember_settings")[0].inputs,
                 )
                 for slider in sliders:
                     self.assertIn(slider, by_name["remember_settings"].inputs)
@@ -5156,7 +5143,7 @@ class SavedSettingsTests(unittest.TestCase):
 
     def test_a_page_load_puts_the_saved_settings_back_into_the_controls(self):
         self.build_with(temperature=0.4, max_new_tokens=64, prefill_token_limit=2048)
-        (restore,) = self.listeners("restore_settings")
+        (restore,) = listeners_named(self.demo, "restore_settings")
 
         self.assertEqual(restore.targets, [(self.demo._id, "load")])
         self.assertEqual(

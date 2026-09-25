@@ -50,6 +50,7 @@ from fakes import (
 from conversation_support import (
     cell, click_token, FIXED, metrics_of, select, SETTINGS, strip_of, token_span,
 )
+from ui_support import listener_named, listeners_named
 
 
 def setUpModule():
@@ -478,7 +479,7 @@ class ChatFlowTests(unittest.TestCase):
         # Exercise real postprocessing and diffs: a bare [] reset used to
         # turn into delete(data), delete(headers), then crash the table render.
         demo = app.build_app()
-        listener = next(fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", None) == "chat")
+        listener = listener_named(demo, "chat")
         frames = self.last(app.chat("hi", [], *SETTINGS))
 
         async def wire_frames():
@@ -915,11 +916,7 @@ class TokenSelectionTests(unittest.TestCase):
         """The value a fresh session starts inspect_token()'s input with."""
 
         demo = app.build_app()
-        listener = next(
-            fn
-            for fn in demo.fns.values()
-            if getattr(fn.fn, "__name__", None) == "inspect"
-        )
+        listener = listener_named(demo, "inspect")
         (state_block,) = listener.inputs
         return state_block.value
 
@@ -1300,12 +1297,12 @@ class TokenViewTests(unittest.TestCase):
     def test_token_editor_is_wired_to_click_save_and_stop(self):
         demo = app.build_app()
         opener = next(fn for fn in demo.fns.values() if fn.fn is open_token_editor)
-        saver = next(fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", None) == "save_token_edit")
+        saver = listener_named(demo, "save_token_edit")
         self.assertEqual(opener.outputs[0].elem_id, "token-editor")
         self.assertEqual(saver.outputs[3].elem_id, "token-strip")
         self.assertIn(demo.conversation_outputs["token_editor"], saver.outputs)
         self.assertEqual(demo.conversation_outputs["token_editor"].elem_id, "token-editor")
-        restore = next(fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", None) == "restore_conversations")
+        restore = listener_named(demo, "restore_conversations")
         self.assertIs(restore.outputs[4], opener.inputs[1])
 
     def test_a_reply_is_drawn_token_by_token_under_its_heading(self):
@@ -1509,11 +1506,7 @@ class TokenViewTests(unittest.TestCase):
         # The Score text tab has no conversation to paint, and the
         # conversation must not be overwritten by a passage scored beside it.
         demo = app.build_app()
-        listener = next(
-            fn
-            for fn in demo.fns.values()
-            if getattr(fn.fn, "__name__", None) == "score_text"
-        )
+        listener = listener_named(demo, "score_text")
         self.assertEqual(listener.outputs[0].elem_id, "score-strip")
 
     def test_the_toggle_swaps_the_two_views(self):
@@ -1684,11 +1677,7 @@ class ClearCancelsGenerationTests(unittest.TestCase):
     def cancelled_by(self, demo, name):
         """Event indices that the listener triggering ``name`` cancels."""
 
-        trigger = next(
-            fn.targets[0]
-            for fn in demo.fns.values()
-            if getattr(fn.fn, "__name__", None) == name
-        )
+        trigger = listener_named(demo, name).targets[0]
         return {
             index
             for fn in demo.fns.values()
@@ -3358,21 +3347,13 @@ class BranchFromTokenTests(unittest.TestCase):
 
     def test_the_branch_text_button_is_wired_as_a_generation(self):
         demo = app.build_app()
-        listener = next(
-            fn
-            for fn in demo.fns.values()
-            if getattr(fn.fn, "__name__", None) == "branch_with_text"
-        )
+        listener = listener_named(demo, "branch_with_text")
         self.assertEqual(len(listener.inputs), 2 + 2 + len(SETTINGS) + 5 + 2)
         self.assertEqual(listener.outputs, components(demo, (*app.CHAT_OUTPUT_NAMES, "forks", "conversation_list")))
 
     def test_the_branch_button_is_wired_as_a_generation(self):
         demo = app.build_app()
-        listener = next(
-            fn
-            for fn in demo.fns.values()
-            if getattr(fn.fn, "__name__", None) == "branch_from"
-        )
+        listener = listener_named(demo, "branch_from")
         self.assertEqual(len(listener.inputs), 1 + 2 + len(SETTINGS) + 5 + 2)
         self.assertEqual(listener.outputs, components(demo, (*app.CHAT_OUTPUT_NAMES, "forks", "conversation_list")))
 
@@ -3627,7 +3608,7 @@ class NextTokenTests(unittest.TestCase):
 
     def test_button_is_wired_as_a_cancellable_generation(self):
         demo = app.build_app()
-        listener = next(fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", None) == "next_token")
+        listener = listener_named(demo, "next_token")
         self.assertEqual(len(listener.inputs), 1 + 2 + len(SETTINGS) + 5 + 2)
         self.assertEqual(listener.outputs, components(demo, (*app.CHAT_OUTPUT_NAMES, "forks", "conversation_list")))
 
@@ -3976,13 +3957,6 @@ class ConversationListWiringTests(unittest.TestCase):
     def setUp(self):
         self.demo = app.build_app()
 
-    def named(self, name):
-        return next(
-            fn
-            for fn in self.demo.fns.values()
-            if getattr(fn.fn, "__name__", None) == name
-        )
-
     def conversation_list(self):
         return next(
             block
@@ -4010,14 +3984,14 @@ class ConversationListWiringTests(unittest.TestCase):
         self.assertEqual(radio.value, MAIN_BRANCH)
 
     def test_a_change_to_the_conversation_state_redraws_the_list(self):
-        refresh = self.named("refresh_conversation_list")
-        state, _scale = self.named("stop_generation").inputs[:2]
-        forks = self.named("remember_forks").inputs[1]
+        refresh = listener_named(self.demo, "refresh_conversation_list")
+        state, _scale = listener_named(self.demo, "stop_generation").inputs[:2]
+        forks = listener_named(self.demo, "remember_forks").inputs[1]
         self.assertEqual(refresh.targets, [(state._id, "change")])
         self.assertEqual(refresh.outputs, [self.conversation_list(), forks])
 
     def test_picking_an_entry_switches_to_it(self):
-        switch = self.named("switch_fork")
+        switch = listener_named(self.demo, "switch_fork")
         radio = self.conversation_list()
         self.assertEqual(switch.targets, [(radio._id, "input")])
         self.assertIs(switch.inputs[0], radio)
@@ -4027,12 +4001,12 @@ class ConversationListWiringTests(unittest.TestCase):
         radio = self.conversation_list()
         for name in ("fork_conversation", "delete_fork", "new_conversation", "clear_chat"):
             with self.subTest(handler=name):
-                self.assertIn(radio, self.named(name).outputs)
+                self.assertIn(radio, listener_named(self.demo, name).outputs)
 
     def test_the_saved_conversations_come_back_when_the_page_loads(self):
-        restore = self.named("restore_conversations")
-        state, _scale = self.named("stop_generation").inputs[:2]
-        forks = self.named("remember_forks").inputs[1]
+        restore = listener_named(self.demo, "restore_conversations")
+        state, _scale = listener_named(self.demo, "stop_generation").inputs[:2]
+        forks = listener_named(self.demo, "remember_forks").inputs[1]
         self.assertEqual(restore.targets, [(self.demo._id, "load")])
         self.assertEqual(len(restore.inputs), 4)
         self.assertEqual(restore.outputs[1:4], [state, forks, self.conversation_list()])
@@ -4047,8 +4021,8 @@ class ConversationListWiringTests(unittest.TestCase):
         # state and is not a streaming handler is on the queue, and every
         # streaming handler is off it, since the redraw has to run between
         # its frames.
-        state, _scale = self.named("stop_generation").inputs[:2]
-        forks = self.named("remember_forks").inputs[1]
+        state, _scale = listener_named(self.demo, "stop_generation").inputs[:2]
+        forks = listener_named(self.demo, "remember_forks").inputs[1]
         writers = [fn for fn in self.demo.fns.values() if state in fn.outputs or forks in fn.outputs]
         self.assertTrue(writers)
         for fn in writers:
@@ -4058,11 +4032,11 @@ class ConversationListWiringTests(unittest.TestCase):
                     self.assertNotEqual(fn.concurrency_id, app.CONVERSATION_PANE_QUEUE)
                 else:
                     self.assertEqual(fn.concurrency_id, app.CONVERSATION_PANE_QUEUE)
-        self.assertEqual(self.named("remember_forks").concurrency_id, app.CONVERSATION_PANE_QUEUE)
+        self.assertEqual(listener_named(self.demo, "remember_forks").concurrency_id, app.CONVERSATION_PANE_QUEUE)
 
     def test_a_change_to_the_forks_saves_them(self):
-        remember = self.named("remember_forks")
-        state, _scale = self.named("stop_generation").inputs[:2]
+        remember = listener_named(self.demo, "remember_forks")
+        state, _scale = listener_named(self.demo, "stop_generation").inputs[:2]
         forks = remember.inputs[1]
         self.assertEqual(remember.targets, [(forks._id, "change")])
         self.assertEqual(remember.inputs, [state, forks])
@@ -4075,11 +4049,6 @@ class WeightPrecisionWiringTests(unittest.TestCase):
     def setUp(self):
         self.demo = app.build_app()
 
-    def named(self, name):
-        return next(
-            fn for fn in self.demo.fns.values() if getattr(fn.fn, "__name__", None) == name
-        )
-
     def radio(self):
         return next(
             block
@@ -4091,7 +4060,7 @@ class WeightPrecisionWiringTests(unittest.TestCase):
         radio = self.radio()
         for name in ("download_and_load_model", "load_cached_model"):
             with self.subTest(handler=name):
-                self.assertIs(self.named(name).inputs[-1], radio)
+                self.assertIs(listener_named(self.demo, name).inputs[-1], radio)
 
     def test_the_radio_offers_the_three_precisions_and_starts_on_the_saved_one(self):
         radio = self.radio()
@@ -4099,7 +4068,7 @@ class WeightPrecisionWiringTests(unittest.TestCase):
         self.assertEqual(radio.value, settings.current().weight_precision)
 
     def test_the_radio_is_one_of_the_persisted_settings(self):
-        self.assertIn(self.radio(), self.named("restore_settings").outputs)
+        self.assertIn(self.radio(), listener_named(self.demo, "restore_settings").outputs)
         self.assertEqual(app.PERSISTED_SETTING_NAMES[-1], "weight_precision")
 
 
@@ -4213,10 +4182,8 @@ class ConversationSamplingTests(unittest.TestCase):
         demo = app.build_app()
         saving = [
             fn
-            for fn in demo.fns.values()
-            if getattr(fn.fn, "__name__", None) == "remember_settings"
-            and fn.targets
-            and fn.targets[0][1] == "input"
+            for fn in listeners_named(demo, "remember_settings")
+            if fn.targets and fn.targets[0][1] == "input"
         ]
 
         self.assertEqual(len(saving), len(settings.CONVERSATION_SAMPLING))
@@ -4258,11 +4225,7 @@ class ConversationSamplingTests(unittest.TestCase):
         # would claim it from another page that really had changed it, so the
         # write hangs off input rather than change.
         demo = app.build_app()
-        listeners = [
-            fn
-            for fn in demo.fns.values()
-            if getattr(fn.fn, "__name__", None) == "remember_branch_sampling"
-        ]
+        listeners = listeners_named(demo, "remember_branch_sampling")
         sliders = [fn for fn in listeners if fn.targets[0][0] is not None]
 
         self.assertEqual(len(sliders), len(settings.CONVERSATION_SAMPLING))
@@ -4591,17 +4554,10 @@ class CancelWiringTests(unittest.TestCase):
     def setUp(self):
         self.demo = app.build_app()
 
-    def named(self, name):
-        return next(
-            fn
-            for fn in self.demo.fns.values()
-            if getattr(fn.fn, "__name__", None) == name
-        )
-
     def conversation_state(self):
         """Stop reads the conversation state first, then token provenance."""
 
-        state, _scale = self.named("stop_generation").inputs[:2]
+        state, _scale = listener_named(self.demo, "stop_generation").inputs[:2]
         return state
 
     def writers(self):
@@ -4914,7 +4870,7 @@ class LayerInspectionTests(unittest.TestCase):
     def test_score_context_is_wired_separately_from_chat_context(self):
         demo = app.build_app()
         score = next(fn for fn in demo.fns.values() if fn.fn is app.score_text)
-        chat = next(fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", None) == "chat")
+        chat = listener_named(demo, "chat")
         inspect = next(fn for fn in demo.fns.values() if fn.fn is app.inspect_layers)
         context_ids, chat_metrics, chat_context_ids = components(
             demo, ("context_ids", "chat_metrics", "chat_context_ids")

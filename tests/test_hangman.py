@@ -15,6 +15,7 @@ from chatlab.extensions.hangman.game import (
 )
 from chatlab.extensions.hangman.page import build_page, turn_note
 from chatlab.model_runtime import GENERATING
+from ui_support import handlers_by_name
 
 STOP = 0
 
@@ -246,7 +247,7 @@ class PageTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        self.fn = {f.fn.__name__: f.fn for f in demo.fns.values() if f.fn}
+        self.fn = handlers_by_name(demo)
 
     def test_game_streams_saves_and_releases_the_model(self):
         frames = list(self.fn["start_game"](SYSTEM, "Let's play.", "owner", 1.0, 7, 64))

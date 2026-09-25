@@ -23,6 +23,7 @@ from fakes import FakeTokenizer, PIECES, EOS_ID
 from chatlab.ui import runtime
 from chatlab.ui import steering as controls
 from chatlab.ui.conversations import fork_conversation, new_conversation, save_conversation
+from ui_support import listener_named
 
 
 def setUpModule():
@@ -322,10 +323,10 @@ class ConversationTests(unittest.TestCase):
         from chatlab.ui.layout import build_app
 
         demo = build_app().queue(default_concurrency_limit=1)
-        remember = next(fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", "") == "remember_steering")
+        remember = listener_named(demo, "remember_steering")
 
         async def run_pane_action(action):
-            pane = next(fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", "") == action)
+            pane = listener_named(demo, action)
             self.assertEqual(pane.concurrency_id, remember.concurrency_id)
             demo._queue.create_event_queue_for_fn(remember)
             demo._queue.create_event_queue_for_fn(pane)

@@ -17,6 +17,7 @@ from chatlab.extensions.maze_experiments.runner import from_payload
 from chatlab.extensions.maze_experiments.trials import FORMAT, read_trials
 from maze_support import CONFIG, MAZE, Manager
 from maze_support import VECTOR
+from ui_support import listener_named, listeners_by_name
 
 MOVE = call_text(MAZE.maze_id, "east")
 ARRIVE = (MOVE, list(MOVE.encode()) + [0])
@@ -153,7 +154,7 @@ class BatchTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        batch = next(fn for fn in demo.fns.values() if fn.fn is not None and fn.fn.__name__ == "run_batch")
+        batch = listener_named(demo, "run_batch")
         real, failures = batch_module.write_summary, []
 
         def write_summary(directory, manifest, rows):
@@ -202,7 +203,7 @@ class BatchTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        batch = next(fn for fn in demo.fns.values() if fn.fn is not None and fn.fn.__name__ == "run_batch")
+        batch = listener_named(demo, "run_batch")
         # Unqueued, so a competing batch reaches the model session and is refused.
         self.assertIsNone(batch.concurrency_limit)
         with mock.patch.object(gr, "Warning") as warning:
@@ -217,7 +218,7 @@ class BatchTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        batch = next(fn for fn in demo.fns.values() if fn.fn is not None and fn.fn.__name__ == "run_batch")
+        batch = listener_named(demo, "run_batch")
         with mock.patch("chatlab.extensions.maze_experiments.page.downloads", side_effect=OSError("No space left on device")):
             status, _table, files, run_button, stop_button = list(batch.fn(data, BatchControl(), None))[-1]
         self.assertIn("Finished 1 trial", status)
@@ -269,7 +270,7 @@ class BatchTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
-        callbacks = {fn.fn.__name__: fn for fn in demo.fns.values() if fn.fn is not None}
+        callbacks = listeners_by_name(demo)
         batch = callbacks["run_batch"]
         # A batch runs for hours, so it cannot hold the view's queue.
         self.assertNotEqual(batch.concurrency_id, callbacks["load_trial"].concurrency_id)

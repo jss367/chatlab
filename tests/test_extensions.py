@@ -21,6 +21,7 @@ from chatlab.extensions.registry import ExtensionSpec, LoadedExtension, load_ena
 from chatlab.ui.extensions_page import (extension_css, nav_divider_css, restart_now,
                                 restore_extensions, save_extensions)
 from fakes import FakeManager
+from ui_support import listener_named
 
 
 def setUpModule():
@@ -340,7 +341,7 @@ class ExtensionSettingsTests(unittest.TestCase):
             hint = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'maze-goal-hint')
             wording = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'maze-instruction')
             select = next(fn for fn in demo.fns.values() if fn.targets == [(mode._id, 'input')])
-            prepare = next(fn for fn in demo.fns.values() if getattr(fn.fn, '__name__', '') == 'prepare_episode')
+            prepare = listener_named(demo, 'prepare_episode')
             values = [b.value for b in prepare.inputs]
             original = values[0]
             supplied = select.outputs[1]
