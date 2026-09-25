@@ -143,11 +143,11 @@ class Frames:
     on the update belongs to the generator, which goes on appending to it.
 
     The generation slot is released here too, when the generator is done with
-    the model, rather than by whoever reads the last frame - on the manager
-    ``manager`` answers with at that moment.
+    the model, rather than by whoever reads the last frame - on ``manager``,
+    the one the request claimed it on.
     """
 
-    def __init__(self, stream: Iterator, manager: ManagerSource) -> None:
+    def __init__(self, stream: Iterator, manager: ModelManager) -> None:
         self._frames: queue.Queue = queue.Queue(maxsize=FRAME_BUFFER)
         self._stream = stream
         self._manager = manager
@@ -204,7 +204,7 @@ class Frames:
                 # truncated answer as a whole one.
                 self._abandoned = True
         finally:
-            self._manager().release_generation()
+            self._manager.release_generation()
             self._finished.set()
 
     def _next(self):
@@ -588,9 +588,10 @@ def build_router(manager: ManagerSource) -> APIRouter:
         """
 
         profile = device_profile()
+        current = manager()
         # One reading of the four, so a status asked for while a load is
         # landing cannot describe one model's weights with another's device.
-        in_memory = manager().loaded_model()
+        in_memory = current.loaded_model()
         # One reading of what has the model, for the same reason. The two
         # flags below are two words for one answer, and asking twice would
         # publish a state the manager was never in: a response ending as a
@@ -601,7 +602,7 @@ def build_router(manager: ManagerSource) -> APIRouter:
         # once. Nothing is claimed here - a status reserves nothing - so this
         # is the one read, and by the time the answer is on the wire it is
         # already only a report of the instant it was taken.
-        held = manager().occupant
+        held = current.occupant
         return JSONResponse(
             {
                 "model": in_memory.model_id,
@@ -640,7 +641,11 @@ def build_router(manager: ManagerSource) -> APIRouter:
         # is given back at once when the request turns out not to be
         # answerable - the checks are string and number work, so nothing is
         # held for longer than it takes to read the body.
-        held = manager().claim_generation()
+        # One manager for the whole request, so the slot is given back on
+        # the manager that granted it even if another is put in its place
+        # part way through.
+        current = manager()
+        held = current.claim_generation()
         if held:
             return error_response(occupied_error(held))
         # True until Frames has the run and the slot with it. Every way out
@@ -653,14 +658,14 @@ def build_router(manager: ManagerSource) -> APIRouter:
         handed_on = False
         try:
             try:
-                model_id, load_id = loaded_model(body.get("model"), manager())
+                model_id, load_id = loaded_model(body.get("model"), current)
                 # Read with the load, not after the generation: by then the
                 # model lock is free and a queued load can have replaced both.
                 # A load that lands in between makes the runtime refuse this
                 # request against its load ID, so these can only describe the
                 # weights that answered.
-                device = manager().device_name
-                precision = manager().precision
+                device = current.device_name
+                precision = current.precision
                 turns, prefill = conversation_from(body)
                 sampling = sampling_from(body)
                 measured, wants = token_detail(body)
@@ -676,7 +681,7 @@ def build_router(manager: ManagerSource) -> APIRouter:
             # token, and without this the answer would come from the new
             # weights while the response named the old ones; the runtime
             # compares it under the lock and refuses instead.
-            stream = manager().generate(
+            stream = current.generate(
                 turns,
                 temperature=sampling["temperature"],
                 top_p=sampling["top_p"],
@@ -691,11 +696,11 @@ def build_router(manager: ManagerSource) -> APIRouter:
             # One thread owns the generator from here on; see Frames. It also
             # gives the generation slot back when the model is done with, so
             # nothing below releases it.
-            produced = Frames(stream, manager)
+            produced = Frames(stream, current)
             handed_on = True
         finally:
             if not handed_on:
-                manager().release_generation()
+                current.release_generation()
         try:
             first = produced.first()
         except ApiError as error:
@@ -751,7 +756,11 @@ def build_router(manager: ManagerSource) -> APIRouter:
         # the reason a completion is: memory stands empty for the weight-
         # reading phase of a load, and a request that validated first would
         # be told to load a model rather than that one is loading.
-        held = manager().claim_generation()
+        # One manager for the whole request, so the slot is given back on
+        # the manager that granted it even if another is put in its place
+        # part way through.
+        current = manager()
+        held = current.claim_generation()
         if held:
             return error_response(occupied_error(held))
         # Nothing here hands the slot on to a worker, so one finally covers
@@ -762,12 +771,12 @@ def build_router(manager: ManagerSource) -> APIRouter:
         # stop and give it back.
         try:
             try:
-                model_id, load_id = loaded_model(body.get("model"), manager())
+                model_id, load_id = loaded_model(body.get("model"), current)
                 # Read with the load, as a completion does: the same model ID
                 # can be loaded at several precisions, and asking afterwards
                 # may describe a load that has since replaced this one.
-                device = manager().device_name
-                precision = manager().precision
+                device = current.device_name
+                precision = current.precision
                 text = body.get("text")
                 if not isinstance(text, str):
                     raise ApiError(400, "text must be a string.")
@@ -785,7 +794,7 @@ def build_router(manager: ManagerSource) -> APIRouter:
             except ApiError as error:
                 return error_response(error)
             try:
-                scored = manager().score_text(
+                scored = current.score_text(
                     text,
                     context=context,
                     use_chat_template=use_template,
@@ -796,7 +805,7 @@ def build_router(manager: ManagerSource) -> APIRouter:
             except Exception as error:
                 return error_response(refusal(error))
         finally:
-            manager().release_generation()
+            current.release_generation()
         return JSONResponse(
             {
                 "object": "chatlab.score",

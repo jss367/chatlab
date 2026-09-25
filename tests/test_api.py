@@ -1179,7 +1179,7 @@ class FramesTests(ApiTestCase):
             live.append(metric(2, "two"))
             yield update("one two", metrics=live)
 
-        produced = api.Frames(generate([]), runtime.current_manager)
+        produced = api.Frames(generate([]), runtime.MANAGER)
 
         first = produced.first()
         rest = list(produced.rest())
@@ -1192,7 +1192,7 @@ class FramesTests(ApiTestCase):
             yield update("one")
 
         self.manager.reserve_generation()
-        produced = api.Frames(generate([]), runtime.current_manager)
+        produced = api.Frames(generate([]), runtime.MANAGER)
         produced.first()
         list(produced.rest())
 
@@ -1219,7 +1219,7 @@ class FramesTests(ApiTestCase):
         api.ABANDONED_AFTER_SECONDS = 0.05
 
         self.manager.reserve_generation()
-        produced = api.Frames(generate([]), runtime.current_manager)
+        produced = api.Frames(generate([]), runtime.MANAGER)
         produced.first()  # and then nothing reads the rest
 
         self.assertTrue(closed.wait(timeout=5))
@@ -1241,7 +1241,7 @@ class FramesTests(ApiTestCase):
                 yield update("x" * (index + 1))
 
         self.manager.reserve_generation()
-        produced = api.Frames(generate([]), runtime.current_manager)
+        produced = api.Frames(generate([]), runtime.MANAGER)
         produced.first()  # and then nothing reads the rest
 
         for _ in range(200):
@@ -1260,7 +1260,7 @@ class FramesTests(ApiTestCase):
             raise RuntimeError("the gpu fell over")
 
         self.manager.reserve_generation()
-        produced = api.Frames(generate([]), runtime.current_manager)
+        produced = api.Frames(generate([]), runtime.MANAGER)
         produced.first()
 
         for _ in range(200):
@@ -1290,7 +1290,7 @@ class FramesTests(ApiTestCase):
                 yield update("x" * (index + 1))
 
         self.manager.reserve_generation()
-        produced = api.Frames(generate([]), runtime.current_manager)
+        produced = api.Frames(generate([]), runtime.MANAGER)
         produced.first()
         for _ in range(200):
             if not self.manager.busy:
@@ -1317,7 +1317,7 @@ class FramesTests(ApiTestCase):
                 yield update("x" * (index + 1))
 
         self.manager.reserve_generation()
-        produced = api.Frames(generate([]), runtime.current_manager)
+        produced = api.Frames(generate([]), runtime.MANAGER)
         first = produced.first()
         for _ in range(200):
             if not self.manager.busy:
@@ -1357,7 +1357,7 @@ class FramesTests(ApiTestCase):
             return
             yield  # pragma: no cover - never reached
 
-        produced = api.Frames(generate([]), runtime.current_manager)
+        produced = api.Frames(generate([]), runtime.MANAGER)
 
         with self.assertRaises(api.ApiError) as caught:
             produced.first()
