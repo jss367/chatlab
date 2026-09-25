@@ -736,13 +736,17 @@ def prompt_tokens(pipeline, prompt: str, keys: int | None = None) -> list[dict]:
     return tokens
 
 
-def _call_arguments(pipeline, request: ImageRequest, generator, callback) -> dict:
+def call_arguments(pipeline, request: ImageRequest, generator, callback) -> dict:
     """The keyword arguments this pipeline's own call signature will take.
 
     Pipelines differ over what they accept - a fixed-size one has no
     ``width``, an unguided one no ``guidance_scale`` - so what is offered is
     filtered by the signature rather than assumed. Anything left out simply
     goes unset and the pipeline's default stands.
+
+    Public because the draw is not its only reader: the manager asks it too,
+    before a word comparison, whether this pipeline takes a seeded generator
+    at all.
     """
 
     offered = {
@@ -844,7 +848,7 @@ def run(
     try:
         with torch.inference_mode():
             result = pipeline(
-                **_call_arguments(pipeline, request, generator, on_step_end)
+                **call_arguments(pipeline, request, generator, on_step_end)
             )
         images = getattr(result, "images", None)
         image = images[0] if images else None

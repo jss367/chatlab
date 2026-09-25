@@ -75,7 +75,7 @@ def _check_type(model_type) -> None:
 
 def model_layout(engine) -> Layout:
     """Keep the support boundary explicit; other layouts need validation."""
-    if getattr(engine, "backend", "torch") == "mlx":
+    if engine.backend == "mlx":
         return _mlx_layout(engine)
     model = engine.model
     config = model.config

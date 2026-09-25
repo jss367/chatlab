@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 
 from chatlab import kv_cache
-from chatlab.mlx_runtime import LensReading
+from chatlab.engine import LensReading
 
 
 # The final norm of a decoder stack, under the names the common architectures

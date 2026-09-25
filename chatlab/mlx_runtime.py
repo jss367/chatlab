@@ -40,6 +40,9 @@ from typing import Any
 import numpy as np
 
 from chatlab import kv_cache
+# Defined with the engine interface both backends share; still importable
+# from here, where it used to live.
+from chatlab.engine import LensReading
 from chatlab.kv_cache import CacheLayer, LayerShape, recent_positions
 
 logger = logging.getLogger(__name__)
@@ -294,27 +297,6 @@ class MlxLogits:
         ranks = mx.sum(rows > rows[:, token_id:token_id + 1], axis=-1) + 1
         mx.eval(ranks, scores)
         return np.array(ranks).astype(np.int64), np.array(scores)
-
-
-@dataclass
-class LensReading:
-    """What one inspection step saw, in numpy, whatever backend produced it.
-
-    ``layer_logits`` holds one logit vector per layer below the last, read
-    through the final norm and the head as though the stack had ended there;
-    it is empty when the reading could not be trusted (see
-    :meth:`MlxEngine.inspect_step`). ``final_logits`` is the model's own
-    output. ``layer_count`` is how many residual states were seen, which
-    numbers the final row even when the intermediate ones are withheld.
-    ``attention`` has one row per layer, each over the keys that layer could
-    see, or nothing when the weights could not be recovered.
-    """
-
-    final_logits: np.ndarray
-    layer_count: int
-    layer_logits: list[np.ndarray] = field(default_factory=list)
-    attention: list[list[float]] = field(default_factory=list)
-    cache: Any = None
 
 
 class _RecordingLayer:
