@@ -97,7 +97,7 @@ from chatlab.trace_export import (
     write_private_text,
     write_trace_export,
 )
-from chatlab.ui.runtime import MANAGER
+from chatlab.ui.runtime import MANAGER, current_manager
 from chatlab.ui.common import (
     CHART_EVERY,
     CHAT_PAGE,
