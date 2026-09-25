@@ -19,7 +19,15 @@ from chatlab.model_runtime import ModelManager
 
 from models_support import OLMO, cached
 import settings_sandbox
-from ui_support import listeners_named
+from ui_support import (
+    css_declarations,
+    css_media,
+    css_rule,
+    css_rule_list,
+    css_rules,
+    css_selectors,
+    listeners_named,
+)
 
 
 def setUpModule():
@@ -147,11 +155,10 @@ class PageLayoutTests(unittest.TestCase):
                 # so it generates no text for a screen reader to read out and
                 # the label's own name - printed under it - stands for the
                 # tile on its own.
-                self.assertIn(
-                    icons.mask_rule(f"{tile}::before", app.NAV_ICONS[page]),
-                    app.CSS,
-                )
-        self.assertIn("#nav label span { font-size:", app.CSS)
+                mask = css_declarations(icons.mask(app.NAV_ICONS[page]))
+                drawn = css_rule(app.CSS, f"{tile}::before")
+                self.assertEqual({name: drawn.get(name) for name in mask}, mask)
+        self.assertIn("font-size", css_rule(app.CSS, "#nav label span"))
 
     def test_no_nav_tile_is_drawn_with_an_emoji(self):
         # Emoji are a different typeface per glyph: the weights, the colours
@@ -165,12 +172,11 @@ class PageLayoutTests(unittest.TestCase):
         # Its two panes want about 620px between them, so in a narrow window
         # the readings would sit off the side of a row that neither wraps
         # nor scrolls sideways.
-        compact = app.CSS[app.CSS.index("@media (max-width: 850px)") :]
-        compact = compact[: compact.index("\n}")]
+        compact = css_rules(app.CSS)
 
-        self.assertIn("#images-columns", compact)
-        self.assertIn("#images-workspace", compact)
-        self.assertIn("#image-inspector", compact)
+        self.assertIn(("(max-width: 850px)", "#images-columns"), compact)
+        self.assertIn(("(max-width: 850px)", "#images-workspace"), compact)
+        self.assertIn(("(max-width: 850px)", "#image-inspector"), compact)
 
     def test_each_readings_pane_has_a_handle_on_its_seam(self):
         # The handle is a flex item between the workspace and the pane, so
@@ -189,14 +195,22 @@ class PageLayoutTests(unittest.TestCase):
                 # A width the reader chose is written to that property, so
                 # every rule that sizes the pane has to read it - including
                 # the narrower window's, which sets a smaller default.
-                for rule in [
-                    line
-                    for line in app.CSS.splitlines()
-                    if "flex" in line and f"--{pane_id}-width" in line
-                ]:
-                    self.assertIn(f"var(--{pane_id}-width,", rule)
+                sizing = [
+                    value
+                    for rule in css_rule_list(app.CSS)
+                    for name, value in rule.declarations
+                    if name.startswith("flex") and f"--{pane_id}-width" in value
+                ]
+                for value in sizing:
+                    self.assertIn(f"var(--{pane_id}-width,", value)
                 self.assertEqual(
-                    app.CSS.count(f"var(--{pane_id}-width,"), 2, pane_id
+                    sum(
+                        value.count(f"var(--{pane_id}-width,")
+                        for rule in css_rule_list(app.CSS)
+                        for _name, value in rule.declarations
+                    ),
+                    2,
+                    pane_id,
                 )
                 # And the script that writes it knows the pane by the same name.
                 self.assertIn(f"'{pane_id}'", app.RESIZE_JS)
@@ -225,19 +239,15 @@ class PageLayoutTests(unittest.TestCase):
         # handle, and a browser that reads that drag as a pan or a zoom takes
         # the pointer back mid-resize, which leaves the pane part-moved.
         # Refusing the pointerdown does not stop it; only this does.
-        rule = app.CSS[app.CSS.index(".pane-resizer {") :]
-        rule = rule[: rule.index("}")]
-
-        self.assertIn("touch-action: none", rule)
+        self.assertEqual(css_rule(app.CSS, ".pane-resizer")["touch-action"], "none")
 
     def test_the_stacked_layout_drops_the_handles(self):
         # Under 850px the panes are rows, one above the other, where a width
         # would mean a height and a sideways drag would mean nothing.
-        compact = app.CSS[app.CSS.index("@media (max-width: 850px)") :]
-        compact = compact[: compact.index("\n}")]
-
-        self.assertIn("#inspector-resizer, #image-inspector-resizer", compact)
-        self.assertIn("display: none", compact)
+        for handle in ("#inspector-resizer", "#image-inspector-resizer"):
+            with self.subTest(handle=handle):
+                hidden = css_rule(app.CSS, handle, "(max-width: 850px)")
+                self.assertEqual(hidden["display"].removesuffix(" !important"), "none")
 
     def test_a_saved_width_is_fitted_to_the_room_the_pane_has(self):
         # A width chosen on a wide window has to be cut down when the window
@@ -255,7 +265,7 @@ class PageLayoutTests(unittest.TestCase):
         # script stops fitting at the same width the stylesheet stops
         # reading the property.
         stacked = "(max-width: 850px)"
-        self.assertIn(f"@media {stacked}", app.CSS)
+        self.assertIn(stacked, css_media(app.CSS))
         self.assertIn(f"matchMedia('{stacked}')", app.RESIZE_JS)
 
     def test_the_shell_is_not_pushed_off_the_bottom_of_the_window(self):
@@ -265,8 +275,9 @@ class PageLayoutTests(unittest.TestCase):
         # menu's bridge controls are hidden, but Gradio wraps each in a form
         # that is not, and a shown wrapper is still a flex item earning a gap
         # in the column it shares with the shell.
-        self.assertIn(".form:has(> .token-menu-bridge) { display: none", app.CSS)
-        self.assertIn("#shell {\n  height: 100dvh;", app.CSS)
+        bridge = css_rule(app.CSS, ".form:has(> .token-menu-bridge)")
+        self.assertEqual(bridge["display"].removesuffix(" !important"), "none")
+        self.assertEqual(css_rule(app.CSS, "#shell")["height"], "100dvh")
 
     def test_every_icon_in_the_interface_comes_from_the_one_set(self):
         # Emoji are a different typeface per glyph, so a row of them agreed on
@@ -289,11 +300,13 @@ class PageLayoutTests(unittest.TestCase):
         # A mask is painted in the element's own colour, so one drawing
         # serves a quiet button, a primary one, dark mode and every theme.
         # An image would hold whatever colour it was exported at.
-        self.assertIn(f".{icons.ICON_CLASS}::before", app.CSS)
-        self.assertIn("background-color: currentColor;", app.CSS)
+        icon = css_rule(app.CSS, f".{icons.ICON_CLASS}::before")
+        self.assertEqual(icon["background-color"], "currentColor")
         for name in icons.ICONS:
             with self.subTest(icon=name):
-                self.assertIn(icons.mask_rule(f".icon-{name}::before", name), app.CSS)
+                mask = css_declarations(icons.mask(name))
+                drawn = css_rule(app.CSS, f".icon-{name}::before")
+                self.assertEqual({prop: drawn.get(prop) for prop in mask}, mask)
 
     def test_the_message_box_and_its_controls_are_one_composer(self):
         # The border belongs to the pair, so the row reads as part of the box
@@ -309,9 +322,11 @@ class PageLayoutTests(unittest.TestCase):
         ]
         self.assertIn(self.by_id("message-input"), inside)
         self.assertIn(self.by_id("chat-actions"), inside)
-        self.assertIn("#composer {", app.CSS)
-        self.assertIn("#chat-actions button.primary, #chat-actions #stop-button {", app.CSS)
-        self.assertIn("order: 2; margin-left: auto;", app.CSS)
+        self.assertIn((None, "#composer"), css_rules(app.CSS))
+        for button in ("#chat-actions button.primary", "#chat-actions #stop-button"):
+            with self.subTest(button=button):
+                moved = css_rule(app.CSS, button)
+                self.assertEqual((moved.get("order"), moved.get("margin-left")), ("2", "auto"))
 
     def test_send_is_written_before_the_buttons_it_is_drawn_after(self):
         # Keyboard order is the written order, so Send stays first there; only
@@ -327,53 +342,64 @@ class PageLayoutTests(unittest.TestCase):
         # A filled block of the primary colour was the loudest thing in a pane
         # of two or three conversations, and said far more than "this is the
         # one you are in".
-        rules = app.CSS[app.CSS.index("#conversation-list label.selected {") :]
-        rules = rules[: rules.index("\n}")]
+        selected = " ".join(css_rule(app.CSS, "#conversation-list label.selected").values())
 
-        self.assertIn("var(--primary-50)", rules)
-        self.assertNotIn("var(--button-primary-background-fill)", rules)
-        self.assertIn(
-            "#conversation-list label.selected span {\n  color: var(--body-text-color)",
-            app.CSS,
+        self.assertIn("var(--primary-50)", selected)
+        self.assertNotIn("var(--button-primary-background-fill)", selected)
+        self.assertEqual(
+            css_rule(app.CSS, "#conversation-list label.selected span")["color"],
+            "var(--body-text-color)",
         )
 
     def test_a_model_wears_its_verdict_on_its_edge_not_across_its_name(self):
         # A row turned amber from end to end because its last word was
         # "tight", which read as a warning about the name rather than about
         # the memory.
-        self.assertNotIn('.model-list label[data-testid*="· tight"] span', app.CSS)
-        self.assertIn(
-            '.model-list label[data-testid*="· tight"]::before,', app.CSS
+        self.assertFalse(
+            [
+                selector
+                for selector in css_selectors(app.CSS)
+                if '.model-list label[data-testid*="· tight"] span' in selector
+            ]
         )
-        self.assertIn("background: var(--fit-tight);", app.CSS)
+        self.assertEqual(
+            css_rule(app.CSS, '.model-list label[data-testid*="· tight"]::before')["background"],
+            "var(--fit-tight)",
+        )
 
     def test_a_reply_is_not_drawn_inside_a_box(self):
         # It arrived inside a bordered card holding a bordered reasoning box
         # holding the text: three edges deep for one answer. Space separates
         # the turns now, and your own message keeps the only bubble.
-        self.assertIn("#conversation .message.bot {", app.CSS)
-        self.assertIn("#conversation .message.user {", app.CSS)
-        bot = app.CSS[app.CSS.index("#conversation .message.bot {") :]
-        bot = bot[: bot.index("\n}")]
-        self.assertIn("background: transparent !important;", bot)
-        self.assertIn("border-color: transparent !important;", bot)
+        self.assertIn((None, "#conversation .message.bot"), css_rules(app.CSS))
+        self.assertIn((None, "#conversation .message.user"), css_rules(app.CSS))
+        bot = css_rule(app.CSS, "#conversation .message.bot")
+        self.assertEqual(bot["background"], "transparent !important")
+        self.assertEqual(bot["border-color"], "transparent !important")
 
     def test_figures_meant_to_be_compared_are_set_in_one_digit_width(self):
         # Proportional digits are drawn at the width each digit wants, so a
         # column of token counts arrives ragged and a count ticking up during
         # a response jitters under the eye.
-        self.assertIn("font-variant-numeric: tabular-nums;", app.CSS)
         for selector in ("#generation-status", "#conversation-list label span"):
             with self.subTest(selector=selector):
-                rules = app.CSS[app.CSS.index(f"{selector} {{") :]
-                self.assertIn("tabular-nums", rules[: rules.index("\n}")])
+                self.assertEqual(
+                    css_rule(app.CSS, selector)["font-variant-numeric"], "tabular-nums"
+                )
 
     def test_the_nav_names_are_on_screen_rather_than_a_hover_away(self):
         # Four pages is not a number worth hiding. Nothing clips the name
         # out of sight, and no tooltip stands in for it.
-        self.assertNotIn("clip-path: inset(50%)", app.CSS)
-        self.assertNotIn("#nav label::after", app.CSS)
-        self.assertNotIn(":hover::after", app.CSS)
+        clipped = [
+            rule.selectors
+            for rule in css_rule_list(app.CSS)
+            if ("clip-path", "inset(50%)") in rule.declarations
+        ]
+        self.assertEqual(clipped, [])
+        self.assertNotIn("#nav label::after", css_selectors(app.CSS))
+        self.assertFalse(
+            [selector for selector in css_selectors(app.CSS) if ":hover::after" in selector]
+        )
 
     def test_only_the_chat_page_starts_visible(self):
         self.assertTrue(self.by_id("chat-page").visible)

@@ -21,7 +21,7 @@ from chatlab.extensions.registry import ExtensionSpec, LoadedExtension, load_ena
 from chatlab.ui.extensions_page import (extension_css, nav_divider_css, restart_now,
                                 restore_extensions, save_extensions)
 from fakes import FakeManager
-from ui_support import listener_named
+from ui_support import css_selectors, listener_named
 
 
 def setUpModule():
@@ -312,8 +312,8 @@ class RegistryTests(unittest.TestCase):
         ]
         loaded = [LoadedExtension(spec, lambda context: None, '') for spec in specs]
         css = extension_css(loaded)
-        self.assertIn('#nav label[data-testid="One-radio-label"]::after', css)
-        self.assertNotIn('#nav label[data-testid="Two-radio-label"]::after', css)
+        self.assertIn('#nav label[data-testid="One-radio-label"]::after', css_selectors(css))
+        self.assertNotIn('#nav label[data-testid="Two-radio-label"]::after', css_selectors(css))
         self.assertEqual(nav_divider_css([]), '')
 
         with mock.patch('chatlab.ui.layout.load_enabled', return_value=(loaded, [])):

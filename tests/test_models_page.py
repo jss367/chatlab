@@ -39,6 +39,7 @@ from chatlab.progress_bars import DownloadProgress
 
 from models_support import COMMIT, OLMO, cached, painted, picked
 import settings_sandbox
+from ui_support import css_selectors
 
 
 def setUpModule():
@@ -1161,7 +1162,9 @@ class MyModelsPaneTests(unittest.TestCase):
         labels = dict((v, k) for k, v in radio["choices"])
         self.assertIn("· incomplete", labels["org/partial"])
         self.assertNotIn("incomplete", labels[OLMO])
-        self.assertIn('[data-testid*="· incomplete"]', app.CSS)
+        self.assertTrue(
+            [s for s in css_selectors(app.CSS) if '[data-testid*="· incomplete"]' in s]
+        )
 
     def test_a_whole_repo_of_another_kind_is_listed_as_unsupported(self):
         self.entries = [UNSUPPORTED]
@@ -1495,12 +1498,17 @@ class ModelFitTests(unittest.TestCase):
         # stay spelled the same. "unsupported" is greyed by the same rule as
         # "won't fit": both mean the row will not load.
         for verdict in ("· won't fit", "· tight", "· unsupported"):
-            self.assertIn(f'[data-testid*="{verdict}"]', app.CSS)
+            self.assertTrue(
+                [s for s in css_selectors(app.CSS) if f'[data-testid*="{verdict}"]' in s],
+                verdict,
+            )
 
     def test_a_row_that_fits_is_left_untinted(self):
         # Most of the list fits, so tinting it would leave nothing to stand
         # out; only the rows that need a second look are coloured.
-        self.assertNotIn('[data-testid*="· fits"]', app.CSS)
+        self.assertFalse(
+            [s for s in css_selectors(app.CSS) if '[data-testid*="· fits"]' in s]
+        )
 
     def test_a_reload_at_another_precision_is_judged_again(self):
         # Load cached on the model in memory is how a new precision is

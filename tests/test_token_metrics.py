@@ -1,5 +1,4 @@
 import math
-import re
 import unittest
 
 import numpy as np
@@ -24,6 +23,7 @@ from chatlab.token_metrics import (
     UNSCORED_FIRST_TOKEN,
     unscored_metric,
 )
+from ui_support import css_rule_list
 
 
 class TokenMetricTests(unittest.TestCase):
@@ -406,17 +406,17 @@ class StripInkTests(unittest.TestCase):
         # The fills are only readable under dark text, and extensions mount
         # their own strips off the same palette, so the rule that pins the ink
         # must not be scoped to the ids the app happens to ship today.
-        stylesheet = re.sub(r"/\*.*?\*/", "", CSS, flags=re.S)
         rules = [
-            rule.partition("{")
-            for rule in stylesheet.split("}")
-            if ".textspan.hl" in rule.split("{")[0]
+            rule
+            for rule in css_rule_list(CSS)
+            if any(".textspan.hl" in selector for selector in rule.selectors)
         ]
         self.assertTrue(rules, "no rule pins ink on highlighted spans")
-        for selector, _, body in rules:
-            with self.subTest(selector=selector.strip()):
+        for rule in rules:
+            selector = ", ".join(rule.selectors)
+            with self.subTest(selector=selector):
                 self.assertNotIn("#", selector)
-                self.assertIn(STRIP_INK, body)
+                self.assertIn(STRIP_INK, " ".join(value for _name, value in rule.declarations))
 
 
 if __name__ == "__main__":

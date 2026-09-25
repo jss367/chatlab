@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from chatlab import app
+from ui_support import css_rule, css_selectors
 
 
 # Enough of a Gradio dataframe for COLUMN_JS to run against: the two nested
@@ -468,20 +469,18 @@ class ColumnResizeTests(unittest.TestCase):
         self.assertTrue(any(fn.js == app.COLUMN_JS for fn in demo.fns.values()))
 
     def test_the_seam_is_drawn_where_the_script_marks_it(self):
-        self.assertIn("th.column-seam", app.CSS)
-        self.assertIn("cursor: col-resize", app.CSS)
+        (seam,) = [s for s in css_selectors(app.CSS) if s.endswith("th.column-seam")]
+        self.assertEqual(css_rule(app.CSS, seam)["cursor"], "col-resize")
         self.assertIn("'column-seam'", app.COLUMN_JS)
         # The line is inset rather than a border: a border would widen the
         # header and change the width the drag is measuring.
-        seam = app.CSS[app.CSS.index("th.column-seam {") :]
-        self.assertIn("box-shadow: inset", seam[: seam.index("}")])
+        self.assertTrue(css_rule(app.CSS, seam)["box-shadow"].startswith("inset"))
 
     def test_the_cursor_holds_for_the_whole_drag(self):
         # A drag that leaves the header behind still has the cursor over
         # whatever it crosses, and a page that keeps selecting text under
         # the pointer selects the whole table on the way past.
-        self.assertIn("body.column-dragging", app.CSS)
-        self.assertIn("user-select: none", app.CSS)
+        self.assertEqual(css_rule(app.CSS, "body.column-dragging")["user-select"], "none")
         self.assertIn("'column-dragging'", app.COLUMN_JS)
 
 

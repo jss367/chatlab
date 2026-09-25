@@ -7,7 +7,7 @@ from chatlab import app
 from chatlab import settings
 import settings_sandbox
 from chatlab import themes
-from ui_support import listeners_named
+from ui_support import css_rule, css_rule_list, listeners_named
 
 
 def setUpModule():
@@ -187,14 +187,18 @@ class StylesheetTests(unittest.TestCase):
         for ramp in ("primary", "neutral"):
             for step, color in theme.ramp(ramp).items():
                 with self.subTest(ramp=ramp, step=step):
-                    self.assertIn(f"--{ramp}-{step}: {color} !important;", css)
+                    self.assertEqual(
+                        css_rule(css, ":root").get(f"--{ramp}-{step}"), f"{color} !important"
+                    )
 
     def test_the_ramps_reach_the_dark_body_as_well_as_the_page(self):
         # Gradio writes its own copy of every variable under ``.dark``, and a
         # value set on that element beats one inherited from the page however
         # important the inherited one is. So the ramps have to name both.
         css = themes.stylesheet("nebula")
-        self.assertIn(":root, :root body.dark {", css)
+        self.assertIn(
+            (":root", ":root body.dark"), [rule.selectors for rule in css_rule_list(css)]
+        )
 
     def test_the_paper_is_light_mode_s_alone(self):
         # Dark mode's surfaces already read from the neutral ramp, so writing
