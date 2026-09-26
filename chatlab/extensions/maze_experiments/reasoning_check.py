@@ -204,11 +204,16 @@ def read_responses(ep):
                     row.message_direction = stated_direction(row.message)[0]
         rows.append(row)
     if communicate:
+        # The window counts every call the agent attempted, a malformed one
+        # included, so an unreadable call still uses up one of its three.
+        taken = {row.index - 1: row.taken for row in rows}
         for row in rows:
             if row.message_direction is None:
                 continue
-            later = [r.taken for r in rows if r.agent == row.agent and r.round >= row.round][:FOLLOW_WINDOW]
-            row.message_kept = row.message_direction in later
+            attempts = [i for i, turn in enumerate(ep.turns)
+                        if turn["agent"] == ep.turns[row.index - 1]["agent"] and "event" in turn
+                        and turn["round"] >= row.round - 1][:FOLLOW_WINDOW]
+            row.message_kept = row.message_direction in {taken.get(i) for i in attempts}
     return rows
 
 

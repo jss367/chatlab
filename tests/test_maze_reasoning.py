@@ -15,6 +15,7 @@ from chatlab.extensions.maze_experiments.reasoning_check import (
     recorded_spans, summary_rows, truncated_ids, truncation_summary, truncation_test)
 from chatlab.extensions.maze_experiments.reasoning_page import parse_responses
 from chatlab.extensions.maze_experiments.runner import Episode, stream_episode
+from chatlab.extensions.maze_experiments.maze import Maze
 from chatlab.extensions.maze_experiments.team import TeamEpisode, stream_team
 from maze_support import CONFIG, MAZE, Manager, SteeringManager, VECTOR, call, scored
 from ui_support import handlers_by_name
@@ -107,6 +108,26 @@ class StatedAgainstTakenTests(unittest.TestCase):
         self.assertEqual(ep.turns[1]["event"]["error"], "blocked_move")
         row = read_responses(ep)[1]
         self.assertEqual((row.message_direction, row.message_kept), ("south", True))
+
+    def test_a_malformed_call_uses_up_the_window_a_message_is_kept_in(self):
+        # agent-1 says west, then makes a malformed call and a call north, so
+        # the west it calls in round 4 falls outside its three calls.
+        maze = Maze((".....",) * 5, (1, 2), (4, 4))
+
+        def move(reasoning, direction, message=None):
+            text = reply(reasoning, direction, message)[0].replace(MAZE.tool_id(), maze.tool_id())
+            return text, list(text.encode()) + [0]
+        broken = "<tool_call>\n{not json}\n</tool_call>"
+        replies = [move("I will move east.", "east", "I'll take the west side"), move("Go south.", "south"),
+                   (broken, list(broken.encode()) + [0]), move("Go north.", "north"),
+                   move("Go north.", "north"), move("Go north.", "north"),
+                   move("Go west.", "west"), move("Go west.", "west")]
+        ep = TeamEpisode(maze, dict(agents=2, communication=True, team_goal="any", round_limit=4))
+        list(stream_team(ep, Manager(replies)))
+        self.assertEqual(ep.turns[2]["event"]["error"], "invalid_json")
+        first = read_responses(ep)[0]
+        self.assertEqual(first.message_direction, "west")
+        self.assertFalse(first.message_kept)
 
     def test_the_summary_puts_one_agent_first_and_compares_conditions(self):
         single = Episode(MAZE, CONFIG | {"interruption_text": ""})
