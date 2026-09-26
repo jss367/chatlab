@@ -130,7 +130,9 @@ def build_reasoning_page(context):
         if not ctl.claim("load"):
             raise gr.Error("Stop the truncation test before loading more runs.")
         try:
-            return load_runs(paths, held, done_before)
+            result = load_runs(paths, held, done_before)
+            ctl.publish(result[0])
+            return result
         finally:
             ctl.release("load")
 
@@ -163,7 +165,9 @@ def build_reasoning_page(context):
         if not ctl.claim("clear"):
             raise gr.Error("Stop the truncation test before clearing the runs.")
         try:
-            return (*reasoning_scored({}), [], [], [], None, "")
+            result = (*reasoning_scored({}), [], [], [], None, "")
+            ctl.publish(result[0])
+            return result
         finally:
             ctl.release("clear")
 
@@ -182,7 +186,7 @@ def build_reasoning_page(context):
         buttons = (gr.update(visible=False), gr.update(visible=True))
         found, failure = [], None
         try:
-            for done, total, found in truncation_test(ep, context.models, ctl, indices):
+            for done, total, found in truncation_test(ep, context.models, ctl, indices, runs=held):
                 note = f"**Running** · {done} of {total} responses of {run_label(ep)}"
                 every = kept + found
                 yield (every, note, truncation_summary(every), truncation_rows(every), gr.skip(), *buttons)
@@ -190,10 +194,17 @@ def build_reasoning_page(context):
             logger.warning("Truncation test on run %s refused: %s", ep.run_id, exc)
             gr.Warning(str(exc))
             failure = exc
+        except Exception as exc:
+            # Whatever else ends it, a model that ran out of memory most
+            # often, the pane still has to give the Run button back.
+            logger.exception("Truncation test on run %s failed", ep.run_id)
+            gr.Warning(f"The truncation test failed: {type(exc).__name__}: {exc}")
+            failure = exc
         every = kept + found
         table = truncation_rows(every)
         path = write_csv("chatlab-reasoning-truncation-", TRUNCATION_HEADERS, table) if table else None
-        ended = "Refused" if failure else "Stopped" if ctl.stop_requested else "Finished"
+        ended = ("Refused" if isinstance(failure, ValueError) else "Failed" if failure
+                 else "Stopped" if ctl.stop_requested else "Finished")
         note = f"**{ended}** · {len(found)} responses of {run_label(ep)} read"
         if failure:
             note += f" · {html.escape(str(failure))}"

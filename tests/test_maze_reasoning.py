@@ -173,6 +173,25 @@ class TruncationTests(unittest.TestCase):
         cut = manager.calls[0][1]["forced_ids"]
         self.assertEqual(manager.replacements[0], (cut, "west"))
 
+    def test_a_candidate_that_would_write_a_space_counts_for_no_direction(self):
+        # Its standalone text reads "east", but after the cut it writes " east",
+        # a value the call rejects.
+        ep = team_run(TEAM_REPLIES)
+        manager = ReadingManager(spaced=.1)
+        frames = list(truncation_test(ep, manager, TruncationControl(), {1}))
+        self.assertAlmostEqual(frames[-1][2][0].probabilities[0]["east"], .2)
+
+    def test_a_test_started_before_the_runs_changed_is_refused(self):
+        ep = team_run(TEAM_REPLIES)
+        control = TruncationControl()
+        before, after = {ep.run_id: ep}, {ep.run_id: ep}
+        control.publish(after)
+        manager = ReadingManager()
+        with self.assertRaisesRegex(ValueError, "changed after this test was started"):
+            list(truncation_test(ep, manager, control, {1}, runs=before))
+        self.assertIsNone(control.holder)
+        self.assertEqual(len(list(truncation_test(ep, manager, control, {1}, runs=after))), 2)
+
     def test_a_response_recording_no_prompt_is_refused(self):
         ep = team_run(TEAM_REPLIES)
         ep.turns[1]["prompt_ids"] = []
@@ -273,12 +292,29 @@ class ReadingManager(SteeringManager):
     token is measured at ``forced_probability``, as the runtime measures one.
     """
 
-    def __init__(self, on_call=None, omit=(), forced_probability=.02):
+    # Whole-word tokens past the byte range, so a candidate spells its word.
+    WORDS = {1000: "east", 1001: "north", 1002: "south", 1003: "west", 1004: " east"}
+
+    def __init__(self, on_call=None, omit=(), forced_probability=.02, spaced=0.):
         super().__init__(iter(()))
         self.on_call = on_call
         self.omit = set(omit)
         self.forced_probability = forced_probability
+        self.spaced = spaced
         self.replacements = []
+        self.tokenizer = SimpleNamespace(encode=lambda text, **kw: list(text.encode()), decode=self.spell)
+
+    def spell(self, ids, **kwargs):
+        text, run = "", []
+        for token in list(ids) + [None]:
+            if token is not None and token < 256:
+                run.append(token)
+                continue
+            text += bytes(run).decode()
+            run = []
+            if token is not None:
+                text += self.WORDS[token]
+        return text
 
     def encode_replacement(self, kept_ids, text, **kwargs):
         self.replacements.append((list(kept_ids), text))
@@ -291,8 +327,11 @@ class ReadingManager(SteeringManager):
         prefix = kwargs["forced_ids"]
         reasoning = bytes(prefix).decode().split("<tool_call>")[0]
         east = .9 if "east" in reasoning else .3
-        candidates = [{"raw_text": "east", "probability": east}, {"raw_text": "north", "probability": 1 - east},
-                      {"raw_text": "south", "probability": 0.}, {"raw_text": "west", "probability": 0.}]
+        candidates = [{"token_id": 1000, "raw_text": "east", "probability": east - self.spaced},
+                      {"token_id": 1001, "raw_text": "north", "probability": 1 - east},
+                      {"token_id": 1002, "raw_text": "south", "probability": 0.},
+                      {"token_id": 1003, "raw_text": "west", "probability": 0.},
+                      {"token_id": 1004, "raw_text": "east", "probability": self.spaced}]
         sampled = {"token_id": 101, "top_candidates": [c for c in candidates if c["raw_text"] not in self.omit]}
         forced = [{"token_id": t, "raw_probability": self.forced_probability} for t in prefix]
         yield SimpleNamespace(text="e", metrics=forced + [sampled], prompt_ids=[],
@@ -354,6 +393,17 @@ class ReasoningPageTests(unittest.TestCase):
                 frames = list(callbacks["reasoning_truncate"](held, team.run_id, "all", results, TruncationControl()))
                 self.assertIn("**Refused**", frames[-1][1])
                 self.assertEqual(frames[-1][0], [])
+                # Any other failure still gives the Run button back.
+                for turn in held[team.run_id].turns:
+                    turn["model_id"] = "test/model"
+
+                def fail():
+                    raise RuntimeError("out of memory")
+                manager.on_call = fail
+                frames = list(callbacks["reasoning_truncate"](held, team.run_id, "all", [], TruncationControl()))
+                self.assertIn("**Failed**", frames[-1][1])
+                self.assertEqual((frames[-1][5]["visible"], frames[-1][6]["visible"]), (True, False))
+                self.assertFalse(manager.busy)
             finally:
                 demo.close()
 

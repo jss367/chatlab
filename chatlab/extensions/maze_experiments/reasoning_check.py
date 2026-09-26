@@ -304,16 +304,20 @@ def truncated_prefix(turn, fraction, communicate):
     return prefix[len("<think>"):] if turn.get("reasoning_prefilled") else prefix
 
 
-def direction_probabilities(metric):
+def direction_probabilities(metric, spell=None):
     """The probability of each direction among the alternatives the runtime recorded at the call's direction.
 
-    A candidate counts for the direction it begins. A direction with no
-    candidate among the recorded few is left out rather than given none: its
-    probability is unknown until it is read on its own.
+    A candidate counts for the direction its text begins, exactly: one that
+    adds a space or a capital would write a value the call rejects. ``spell``
+    gives a candidate's text as it reads after the cut, which a tokenizer
+    that spells a token differently standing alone needs; without it the
+    recorded text is used. A direction with no candidate among the recorded
+    few is left out rather than given none: its probability is unknown until
+    it is read on its own.
     """
     result = {}
     for candidate in metric.get("top_candidates") or ():
-        text = (candidate.get("raw_text") or candidate.get("text") or "").strip().lower()
+        text = spell(candidate["token_id"]) if spell else (candidate.get("raw_text") or candidate.get("text") or "")
         for direction in DIRECTIONS:
             if text and direction.startswith(text):
                 result[direction] = result.get(direction, 0.) + candidate["probability"]
@@ -346,6 +350,10 @@ class TruncationControl:
     def __init__(self):
         self._lock = threading.Lock()
         self.holder = None
+        # The runs the last upload or Clear published. A test started from
+        # any other set was started before that change and would report on
+        # runs no longer loaded.
+        self.current = None
         self.stop_requested = False
         self.session = None
 
@@ -358,13 +366,24 @@ class TruncationControl:
     def running(self):
         return self.holder == "test"
 
-    def claim(self, holder):
-        """Take the claim for ``holder`` and say whether it was free."""
+    def claim(self, holder, runs=None):
+        """Take the claim for ``holder`` and say whether it was free.
+
+        ``runs`` is the set of loaded runs the holder was started from. One
+        older than the last set published is refused outright.
+        """
         with self._lock:
+            if runs is not None and self.current is not None and runs is not self.current:
+                raise ValueError("The loaded runs changed after this test was started. Run it again.")
             if self.holder is not None:
                 return False
             self.holder = holder
             return True
+
+    def publish(self, runs):
+        """Record the loaded runs an upload or Clear leaves, while it holds the claim."""
+        with self._lock:
+            self.current = runs
 
     def release(self, holder):
         with self._lock:
@@ -378,7 +397,7 @@ class TruncationControl:
             session.cancel()
 
 
-def truncation_test(ep, models, control, indices=None):
+def truncation_test(ep, models, control, indices=None, runs=None):
     """Read every chosen response of a run at each truncation, yielding progress.
 
     Every cut is new text, so it is encoded fresh, the full reasoning
@@ -390,12 +409,13 @@ def truncation_test(ep, models, control, indices=None):
     numbers, None for every response that made a readable call. The loaded
     model has to be the one that made the run, since the reasoning being
     tested is that model's. A steered response is read under the vector that
-    steered it.
+    steered it. ``runs`` is the set of loaded runs the test was started
+    from, refused if an upload or Clear has replaced it since.
     """
     team = hasattr(ep, "agents")
     communicate = team and ep.config["communication"]
     chosen = [r for r in read_responses(ep) if indices is None or r.index in indices]
-    if not control.claim("test"):
+    if not control.claim("test", runs):
         raise ValueError("The loaded runs are being changed, or a truncation test is already running. "
                          "Try again once it has finished.")
     try:
@@ -469,7 +489,9 @@ def truncation_test(ep, models, control, indices=None):
                 metrics = measured(ids)
                 if metrics is None:
                     return
-                found = direction_probabilities(metrics[len(ids)])
+                before = session.decode(ids)
+                found = direction_probabilities(metrics[len(ids)],
+                                                lambda token: session.decode(ids + [token])[len(before):])
                 # A direction the recorded alternatives leave out is read by
                 # forcing its first token after the cut: the probability the
                 # model gave that token is measured like any forced one. It is
