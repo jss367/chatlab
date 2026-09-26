@@ -124,8 +124,9 @@ def build_reasoning_page(context):
         return (held, runs_note(held), summary_rows(rows), table, path,
                 gr.update(choices=choices, value=choices[0][1] if choices else None))
 
-    def reasoning_load(paths, held):
+    def reasoning_load(paths, held, done_before):
         held = dict(held)
+        replaced = set()
         for path in paths or ():
             try:
                 if Path(path).stat().st_size > 50_000_000:
@@ -135,9 +136,18 @@ def build_reasoning_page(context):
                 logger.warning("Reasoning check could not load %s: %s", path, exc)
                 gr.Warning(f"Could not load {Path(path).name}: {exc}")
                 continue
+            if ep.run_id in held:
+                replaced.add(run_label(ep))
             held[ep.run_id] = ep
             logger.info("Reasoning check loaded run %s (%s) from %s", ep.run_id, condition_of(ep), path)
-        return reasoning_scored(held)
+        # A run loaded again may be a later export, so what was read from the
+        # file it replaces no longer describes it.
+        kept = [t for t in done_before if t.response.run not in replaced]
+        if len(kept) == len(done_before):
+            return (*reasoning_scored(held), gr.skip(), gr.skip(), gr.skip(), gr.skip())
+        table = truncation_rows(kept)
+        path = write_csv("chatlab-reasoning-truncation-", TRUNCATION_HEADERS, table) if table else None
+        return (*reasoning_scored(held), kept, truncation_summary(kept), table, path)
 
     def reasoning_clear(ctl):
         if ctl.running:
@@ -187,7 +197,8 @@ def build_reasoning_page(context):
             gr.Info("Stopping after the response being read.")
 
     loaded_outputs = [runs, loaded, summary, responses, responses_csv, run_pick]
-    upload.upload(reasoning_load, [upload, runs], loaded_outputs, show_progress="hidden")
+    upload.upload(reasoning_load, [upload, runs, results],
+                  [*loaded_outputs, results, truncation, truncated, truncated_csv], show_progress="hidden")
     clear.click(reasoning_clear, control, [*loaded_outputs, results, truncation, truncated, truncated_csv, progress],
                 show_progress="hidden")
     start.click(reasoning_truncate, [runs, run_pick, numbers, results, control],

@@ -304,17 +304,18 @@ def truncated_prefix(turn, fraction, communicate):
 
 
 def direction_probabilities(metric):
-    """The probability of each direction at the token that starts the call's direction.
+    """The probability of each direction among the alternatives the runtime recorded at the call's direction.
 
-    Read from the alternatives the runtime records, so a direction outside
-    them is given none. A candidate counts for the direction it begins.
+    A candidate counts for the direction it begins. A direction with no
+    candidate among the recorded few is left out rather than given none: its
+    probability is unknown until it is read on its own.
     """
-    result = dict.fromkeys(DIRECTIONS, 0.)
+    result = {}
     for candidate in metric.get("top_candidates") or ():
         text = (candidate.get("raw_text") or candidate.get("text") or "").strip().lower()
         for direction in DIRECTIONS:
             if text and direction.startswith(text):
-                result[direction] += candidate["probability"]
+                result[direction] = result.get(direction, 0.) + candidate["probability"]
     return result
 
 
@@ -389,7 +390,9 @@ def truncation_test(ep, models, control, indices=None):
         for row in chosen:
             turn = ep.turns[row.index - 1]
             if not turn.get("prompt_ids"):
-                continue
+                raise ValueError(f"Response {row.index} records no prompt, so there is no checking that its history "
+                                 "rebuilds the context it was given. The truncation test only reads a response in "
+                                 "the context it saw.")
             messages = ep.context_messages(row.index - 1) if team else context_messages(ep, row.index - 1)
             if session.prompt_ids(messages, tools) != list(turn["prompt_ids"]):
                 raise ValueError(f"Response {row.index}'s recorded prompt is not the one {session.model_id} builds "
@@ -403,25 +406,43 @@ def truncation_test(ep, models, control, indices=None):
             turn = ep.turns[index]
             messages = ep.context_messages(index) if team else context_messages(ep, index)
             result = Truncation(row)
-            for fraction in FRACTIONS:
-                if control.stop_requested:
-                    return
-                ids = session.encode(truncated_prefix(turn, fraction, communicate))
+            steering = ep.config["steering"] if turn.get("steered") else None
+
+            def measured(ids):
+                """The metrics of one forward pass over the response forced to ``ids``, or None once stopped."""
                 last = None
                 stream = session.generate(
                     messages, temperature=0., top_p=1., top_k=0, max_new_tokens=1, seed=0, tools=tools,
-                    forced_ids=ids, analyze_prompt=False,
-                    steering=ep.config["steering"] if turn.get("steered") else None)
+                    forced_ids=ids, analyze_prompt=False, steering=steering)
                 try:
                     for update in stream:
                         last = update
                 finally:
                     stream.close()
                 if control.stop_requested:
-                    return
-                if last is None or len(last.metrics) <= last.forced_prefix_tokens:
+                    return None
+                if last is None or len(last.metrics) <= len(ids):
                     raise ValueError(f"The model returned no token after response {row.index}'s cut.")
-                result.probabilities.append(direction_probabilities(last.metrics[last.forced_prefix_tokens]))
+                return last.metrics
+
+            for fraction in FRACTIONS:
+                if control.stop_requested:
+                    return
+                ids = session.encode(truncated_prefix(turn, fraction, communicate))
+                metrics = measured(ids)
+                if metrics is None:
+                    return
+                found = direction_probabilities(metrics[len(ids)])
+                # A direction the recorded alternatives leave out is read by
+                # forcing its first token after the cut: the probability the
+                # model gave that token is measured like any forced one.
+                for direction in DIRECTIONS:
+                    if direction not in found:
+                        metrics = measured(ids + session.encode(direction)[:1])
+                        if metrics is None:
+                            return
+                        found[direction] = metrics[len(ids)]["raw_probability"]
+                result.probabilities.append({direction: found[direction] for direction in DIRECTIONS})
             results.append(result)
             yield len(results), len(chosen), results
     finally:

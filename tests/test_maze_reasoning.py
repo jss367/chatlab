@@ -136,7 +136,8 @@ class TruncationTests(unittest.TestCase):
     def test_candidates_count_for_the_direction_they_begin(self):
         metric = {"top_candidates": [{"raw_text": "east", "probability": .5}, {"raw_text": "ea", "probability": .1},
                                      {"raw_text": "north", "probability": .3}, {"raw_text": "}", "probability": .1}]}
-        self.assertEqual(direction_probabilities(metric), {"north": .3, "east": .6, "south": 0., "west": 0.})
+        # A direction outside the recorded alternatives is unknown, not impossible.
+        self.assertEqual(direction_probabilities(metric), {"north": .3, "east": .6})
 
     def test_the_test_reads_each_cut_through_the_model(self):
         ep = team_run(TEAM_REPLIES)
@@ -155,6 +156,26 @@ class TruncationTests(unittest.TestCase):
         summary = truncation_summary(results)
         self.assertEqual(summary[0][:2], ["Team of 2 · messages on", 2])
         self.assertFalse(manager.busy)
+
+    def test_a_direction_the_alternatives_leave_out_is_read_on_its_own(self):
+        ep = team_run(TEAM_REPLIES)
+        manager = ReadingManager(omit={"west"}, forced_probability=.04)
+        frames = list(truncation_test(ep, manager, TruncationControl(), {1}))
+        probabilities = frames[-1][2][0].probabilities
+        self.assertEqual([p["west"] for p in probabilities], [.04] * len(FRACTIONS))
+        self.assertEqual(list(probabilities[0]), ["north", "east", "south", "west"])
+        # One pass per cut, and one more for the direction left out.
+        self.assertEqual(len(manager.calls), 2 * len(FRACTIONS))
+        read = [kwargs["forced_ids"] for _, kwargs in manager.calls[1::2]]
+        self.assertTrue(all(ids[-1] == ord("w") for ids in read))
+
+    def test_a_response_recording_no_prompt_is_refused(self):
+        ep = team_run(TEAM_REPLIES)
+        ep.turns[1]["prompt_ids"] = []
+        manager = ReadingManager()
+        with self.assertRaisesRegex(ValueError, "Response 2 records no prompt"):
+            list(truncation_test(ep, manager, TruncationControl(), {1, 2}))
+        self.assertEqual(manager.calls, [])
 
     def test_another_model_is_refused(self):
         ep = team_run(TEAM_REPLIES)
@@ -224,11 +245,17 @@ class TruncationTests(unittest.TestCase):
 
 
 class ReadingManager(SteeringManager):
-    """Answers a truncation with one token: east is likelier once "east" is in the kept reasoning."""
+    """Answers a truncation with one token: east is likelier once "east" is in the kept reasoning.
 
-    def __init__(self, on_call=None):
+    ``omit`` leaves directions out of the recorded alternatives. A forced
+    token is measured at ``forced_probability``, as the runtime measures one.
+    """
+
+    def __init__(self, on_call=None, omit=(), forced_probability=.02):
         super().__init__(iter(()))
         self.on_call = on_call
+        self.omit = set(omit)
+        self.forced_probability = forced_probability
 
     def generate(self, messages, **kwargs):
         self.calls.append((messages, kwargs))
@@ -237,9 +264,11 @@ class ReadingManager(SteeringManager):
         prefix = kwargs["forced_ids"]
         reasoning = bytes(prefix).decode().split("<tool_call>")[0]
         east = .9 if "east" in reasoning else .3
-        sampled = {"token_id": 101, "top_candidates": [{"raw_text": "east", "probability": east},
-                                                       {"raw_text": "north", "probability": 1 - east}]}
-        yield SimpleNamespace(text="e", metrics=[{"token_id": t} for t in prefix] + [sampled], prompt_ids=[],
+        candidates = [{"raw_text": "east", "probability": east}, {"raw_text": "north", "probability": 1 - east},
+                      {"raw_text": "south", "probability": 0.}, {"raw_text": "west", "probability": 0.}]
+        sampled = {"token_id": 101, "top_candidates": [c for c in candidates if c["raw_text"] not in self.omit]}
+        forced = [{"token_id": t, "raw_probability": self.forced_probability} for t in prefix]
+        yield SimpleNamespace(text="e", metrics=forced + [sampled], prompt_ids=[],
                               forced_prefix_tokens=len(prefix), reasoning_prefilled=False,
                               load_id=self.load_id, model_id=self.model_id)
 
@@ -261,7 +290,8 @@ class ReasoningPageTests(unittest.TestCase):
             try:
                 callbacks = handlers_by_name(demo)
                 # A file that is not a run is refused on its own; the others load.
-                held, note, summary, rows, csv_path, pick = callbacks["reasoning_load"](paths + [str(broken)], {})
+                loaded = callbacks["reasoning_load"](paths + [str(broken)], {}, [])
+                held, note, summary, rows, csv_path, pick = loaded[:6]
                 self.assertEqual(set(held), {team.run_id, single.run_id})
                 self.assertIn("Team of 2 · messages on", note)
                 self.assertEqual([row[0] for row in summary], ["One agent", "Team of 2 · messages on"])
@@ -277,6 +307,14 @@ class ReasoningPageTests(unittest.TestCase):
                 self.assertEqual(table[0][:2], ["Team of 2 · messages on", 2])
                 self.assertEqual(len(per_response), 2)
                 self.assertIsNotNone(path)
+                # Loading the run again replaces it, and what was read from the
+                # file it replaces goes with it.
+                reloaded = callbacks["reasoning_load"]([paths[0]], held, results)
+                self.assertEqual(reloaded[6:9], ([], [], []))
+                self.assertIsNone(reloaded[9])
+                other = callbacks["reasoning_load"]([paths[1]], held, results)
+                # Loading another run leaves the results alone.
+                self.assertEqual(other[6:], (gr.skip(),) * 4)
                 # A refusal says so rather than reporting a finished test.
                 for turn in held[team.run_id].turns:
                     turn["model_id"] = "someone/else"
