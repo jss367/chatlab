@@ -178,6 +178,15 @@ class TruncationTests(unittest.TestCase):
         frames = list(truncation_test(single, manager, TruncationControl(), {1}))
         self.assertEqual(frames[-1][:2], (1, 1))
 
+    def test_a_prompt_the_loaded_template_no_longer_builds_is_refused(self):
+        ep = team_run(TEAM_REPLIES)
+        manager = ReadingManager()
+        ep.turns[1]["prompt_ids"] = list(b"<system>an older template")
+        with self.assertRaisesRegex(ValueError, "Response 2's recorded prompt"):
+            list(truncation_test(ep, manager, TruncationControl(), {1, 2}))
+        self.assertEqual(manager.calls, [])
+        self.assertFalse(manager.busy)
+
     def test_a_steered_response_is_read_under_its_vector(self):
         ep = team_run(TEAM_REPLIES, SteeringManager, steering=dict(VECTOR), steer_when={"moves": 0}, steer_responses=0)
         self.assertTrue(ep.turns[0]["steered"])

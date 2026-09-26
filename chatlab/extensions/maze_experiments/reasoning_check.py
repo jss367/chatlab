@@ -373,6 +373,17 @@ def truncation_test(ep, models, control, indices=None):
         if ep.config.get("steering") is not None and any(ep.turns[r.index - 1].get("steered") for r in chosen):
             session.check_steering(ep.config["steering"])
         tools = ep.tools if team else TOOLS
+        # The same model ID can name an updated tokenizer or template, which
+        # would read every cut in a context the response never saw.
+        for row in chosen:
+            turn = ep.turns[row.index - 1]
+            if not turn.get("prompt_ids"):
+                continue
+            messages = ep.context_messages(row.index - 1) if team else context_messages(ep, row.index - 1)
+            if session.prompt_text(messages, tools) != session.decode(turn["prompt_ids"]):
+                raise ValueError(f"Response {row.index}'s recorded prompt is not the one {session.model_id} builds "
+                                 "from its history now. The model's tokenizer or chat template has changed since "
+                                 "the run, so its cuts would be read in a context the response never saw.")
         logger.info("Truncation test on run %s: %s responses at %s cuts with %s", ep.run_id, len(chosen),
                     len(FRACTIONS), session.model_id)
         yield 0, len(chosen), results
