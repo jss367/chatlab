@@ -12,7 +12,7 @@ from chatlab.extensions.maze_experiments.page import build_page
 
 from chatlab.extensions.maze_experiments.reasoning_check import (
     FRACTIONS, TruncationControl, direction_probabilities, load_run, read_responses, response_rows, stated_direction,
-    summary_rows, truncated_ids, truncation_summary, truncation_test)
+    recorded_spans, summary_rows, truncated_ids, truncation_summary, truncation_test)
 from chatlab.extensions.maze_experiments.reasoning_page import parse_responses
 from chatlab.extensions.maze_experiments.runner import Episode, stream_episode
 from chatlab.extensions.maze_experiments.team import TeamEpisode, stream_team
@@ -164,13 +164,24 @@ class TruncationTests(unittest.TestCase):
         self.assertTrue(all(i >= 1000 for i in half[:kept] + half[kept + 1:]))
         self.assertEqual(half[kept], ord("\n"))
 
-    def test_a_run_whose_tokens_do_not_spell_a_response_is_refused_before_any_pass(self):
+    def test_a_run_whose_token_labels_do_not_add_up_is_read_through_the_tokenizer(self):
         ep = team_run(TEAM_REPLIES)
         ep.turns[1]["metrics"][0]["text"] = "?"
         manager = ReadingManager()
-        with self.assertRaisesRegex(ValueError, "Response 2: The response's recorded tokens do not spell"):
-            list(truncation_test(ep, manager, TruncationControl(), {1, 2}))
-        self.assertEqual(manager.calls, [])
+        frames = list(truncation_test(ep, manager, TruncationControl(), {1, 2}))
+        self.assertEqual(frames[-1][:2], (2, 2))
+
+    def test_token_boundaries_come_from_the_tokenizer_when_labels_do_not_add_up(self):
+        # A tokenizer that drops a word-boundary space when a token is read
+        # alone records labels that do not concatenate to the response.
+        turn = recorded(reply("I see a wall. I will move east.", "east")[0])
+        for metric in turn["metrics"][:-1]:
+            metric["text"] = metric["text"].strip() or "_"
+        self.assertIsNone(recorded_spans(turn))
+        spans = recorded_spans(turn, spelled)
+        self.assertEqual(spelled(truncated_ids(turn, .5, False, encode, spans)), "I see a wall.\n" + self.CALL)
+        self.assertEqual(spelled(truncated_ids(turn, 1, False, encode, spans)),
+                         "I see a wall. I will move east.\n" + self.CALL)
 
     def test_tokens_that_do_not_spell_the_response_are_refused(self):
         turn = recorded(reply("I will move east.", "east")[0])
@@ -190,6 +201,11 @@ class TruncationTests(unittest.TestCase):
                                      {"raw_text": "north", "probability": .3}, {"raw_text": "}", "probability": .1}]}
         # A direction outside the recorded alternatives is unknown, not impossible.
         self.assertEqual(direction_probabilities(metric), {"north": .3, "east": .6})
+        # A token that spells the direction and closes the value chooses it;
+        # one that runs on into another word does not.
+        closing = {"top_candidates": [{"raw_text": 'west"', "probability": .4},
+                                      {"raw_text": "western", "probability": .2}]}
+        self.assertEqual(direction_probabilities(closing), {"west": .4})
 
     def test_the_test_reads_each_cut_through_the_model(self):
         ep = team_run(TEAM_REPLIES)

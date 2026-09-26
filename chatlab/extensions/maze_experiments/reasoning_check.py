@@ -308,39 +308,50 @@ def truncation_plan(turn, fraction, communicate):
     return cut, inserted, call
 
 
-def recorded_spans(turn):
+def recorded_spans(turn, decode=None):
     """The response's recorded tokens with the characters each covers, or None when they do not spell its text.
 
     Counted in the response as its history carries it, so a reasoning block
     the template opened is ahead of the first token. The stop token that
-    ends the response writes nothing into it.
+    ends the response writes nothing into it. ``decode`` reads each prefix
+    of the tokens as the tokenizer reads the sequence, which a tokenizer that
+    spells a token differently standing alone needs; without it the text
+    recorded for each token is added up.
     """
     metrics = turn.get("metrics") or []
     if turn.get("finish_reason") == "stop":
         metrics = metrics[:-1]
-    position = len("<think>") if turn.get("reasoning_prefilled") else 0
-    spans = []
-    for metric in metrics:
-        piece = metric.get("text")
-        if not isinstance(piece, str):
+    ids = [metric["token_id"] for metric in metrics]
+    offset = len("<think>") if turn.get("reasoning_prefilled") else 0
+    if decode is not None:
+        ends = []
+        for count in range(1, len(ids) + 1):
+            read = decode(ids[:count])
+            if not turn["text"].startswith(read):
+                return None
+            ends.append(len(read))
+    else:
+        pieces = [metric.get("text") for metric in metrics]
+        if not all(isinstance(piece, str) for piece in pieces) or "".join(pieces) != turn["text"]:
             return None
-        spans.append((position, position + len(piece), metric["token_id"]))
-        position += len(piece)
-    if "".join(metric["text"] for metric in metrics) != turn["text"]:
+        ends = [sum(map(len, pieces[:count])) for count in range(1, len(pieces) + 1)]
+    if (ends[-1] if ends else 0) != len(turn["text"]):
         return None
-    return spans
+    starts = [0] + ends[:-1]
+    return [(offset + a, offset + b, token) for a, b, token in zip(starts, ends, ids)]
 
 
-def truncated_ids(turn, fraction, communicate, encode):
+def truncated_ids(turn, fraction, communicate, encode, spans=None):
     """The token IDs a cut feeds: the response's own recorded tokens, with only the inserted text encoded.
 
     Every fraction keeps the tokens the model sampled, so a cut differs
     from the whole response only by what it leaves out. Raises
     ``ValueError`` when the recorded tokens do not spell the response or do
-    not break where the cut and the call do.
+    not break where the cut and the call do. ``spans`` are the response's
+    :func:`recorded_spans`, when the caller has read them already.
     """
     plan = truncation_plan(turn, fraction, communicate)
-    spans = recorded_spans(turn)
+    spans = spans if spans is not None else recorded_spans(turn)
     if plan is None or spans is None:
         raise ValueError("The response's recorded tokens do not spell its text, so its cuts cannot be rebuilt "
                          "from them.")
@@ -362,8 +373,9 @@ def truncated_ids(turn, fraction, communicate, encode):
 def direction_probabilities(metric, spell=None):
     """The probability of each direction among the alternatives the runtime recorded at the call's direction.
 
-    A candidate counts for the direction its text begins, exactly: one that
-    adds a space or a capital would write a value the call rejects. ``spell``
+    A candidate counts for the direction its text begins, exactly, or for
+    the one it spells in full before closing the value: one that adds a
+    space or a capital would write a value the call rejects. ``spell``
     gives a candidate's text as it reads after the cut, which a tokenizer
     that spells a token differently standing alone needs; without it the
     recorded text is used. A direction with no candidate among the recorded
@@ -374,7 +386,9 @@ def direction_probabilities(metric, spell=None):
     for candidate in metric.get("top_candidates") or ():
         text = spell(candidate["token_id"]) if spell else (candidate.get("raw_text") or candidate.get("text") or "")
         for direction in DIRECTIONS:
-            if text and direction.startswith(text):
+            # A token can also finish the value: "east\"" chooses east and
+            # closes the string, which "eastern" does not.
+            if text and (direction.startswith(text) or text.startswith(direction + '"')):
                 result[direction] = result.get(direction, 0.) + candidate["probability"]
     return result
 
@@ -505,6 +519,7 @@ def truncation_test(ep, models, control, indices=None, runs=None, claimed=False)
         tools = ep.tools if team else TOOLS
         # The same model ID can name an updated tokenizer or template, which
         # would read every cut in a context the response never saw.
+        spans = {}
         for row in chosen:
             turn = ep.turns[row.index - 1]
             if not turn.get("prompt_ids"):
@@ -516,16 +531,18 @@ def truncation_test(ep, models, control, indices=None, runs=None, claimed=False)
                 raise ValueError(f"Response {row.index}'s recorded prompt is not the one {session.model_id} builds "
                                  "from its history now. The model's tokenizer or chat template has changed since "
                                  "the run, so its cuts would be read in a context the response never saw.")
-            try:
-                truncated_ids(turn, 1, communicate, session.encode)
-            except ValueError as exc:
-                raise ValueError(f"Response {row.index}: {exc}") from None
             # The cuts replay these IDs, so they have to mean now what they
             # meant when the response was sampled.
-            if session.decode([token for _, _, token in recorded_spans(turn)]) != turn["text"]:
+            recorded = turn["metrics"][:-1] if turn.get("finish_reason") == "stop" else turn["metrics"]
+            if session.decode([metric["token_id"] for metric in recorded]) != turn["text"]:
                 raise ValueError(f"Response {row.index}'s recorded tokens read differently under {session.model_id} "
                                  "now. The model's tokenizer has changed since the run, so replaying them would "
                                  "feed text the response never wrote.")
+            spans[row.index] = recorded_spans(turn, session.decode)
+            try:
+                truncated_ids(turn, 1, communicate, session.encode, spans[row.index])
+            except ValueError as exc:
+                raise ValueError(f"Response {row.index}: {exc}") from None
         logger.info("Truncation test on run %s: %s responses at %s cuts with %s", ep.run_id, len(chosen),
                     len(FRACTIONS), session.model_id)
         yield 0, len(chosen), results
@@ -556,7 +573,7 @@ def truncation_test(ep, models, control, indices=None, runs=None, claimed=False)
             for fraction in FRACTIONS:
                 if control.stop_requested:
                     return
-                ids = truncated_ids(turn, fraction, communicate, session.encode)
+                ids = truncated_ids(turn, fraction, communicate, session.encode, spans[row.index])
                 metrics = measured(ids)
                 if metrics is None:
                     return
