@@ -366,11 +366,19 @@ def truncated_ids(turn, fraction, communicate, encode_after, spans=None):
         raise ValueError("The response's recorded tokens do not break where its call starts and names its "
                          "direction, so the call cannot be replayed token for token.")
     ids = [token for _, token in spans]
-    first, last = before.index(call_start), ends.index(call_end) + 1
     # The tokens wholly inside what is kept: a word ending partway through a
     # token keeps the tokens before it. The whole response keeps every token
     # before its call, which starts a token of its own.
     count = max((i + 1 for i, end in enumerate(ends) if end is not None and end <= kept), default=0)
+    # The call starts at the first token from there that begins where it
+    # does. A hidden special just ahead of the call begins there too, and
+    # takes no characters, so it goes with whichever part reaches it first
+    # and is fed once.
+    first = next((j for j in range(count, len(ids)) if before[j] == call_start), None)
+    last = ends.index(call_end) + 1
+    if first is None:
+        raise ValueError("The response's recorded tokens do not break where its call starts, so the call cannot "
+                         "be replayed token for token.")
     return ids[:count] + (encode_after(ids[:count], inserted) if inserted else []) + ids[first:last]
 
 

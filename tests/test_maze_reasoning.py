@@ -189,6 +189,17 @@ class TruncationTests(unittest.TestCase):
         self.assertIsNotNone(spans)
         self.assertIn(2000, truncated_ids(turn, 1, False, encode, spans))
 
+    def test_a_hidden_special_just_before_the_call_is_fed_once(self):
+        turn = recorded(reply("I will move east.", "east")[0])
+        at = [chr(m["token_id"]) for m in turn["metrics"]].index("<")
+        turn["metrics"].insert(at, {"token_id": 2000, "text": ""})
+        spans = recorded_spans(turn, spelled, hidden={2000})
+        recorded_ids = [m["token_id"] for m in turn["metrics"][:-1]]
+        whole = truncated_ids(turn, 1, False, encode, spans)
+        self.assertEqual(whole.count(2000), 1)
+        self.assertEqual(whole, recorded_ids[:len(whole)])
+        self.assertEqual(truncated_ids(turn, 0, False, encode, spans).count(2000), 1)
+
     def test_a_run_whose_token_labels_do_not_add_up_is_read_through_the_tokenizer(self):
         ep = team_run(TEAM_REPLIES)
         ep.turns[1]["metrics"][0]["text"] = "?"
