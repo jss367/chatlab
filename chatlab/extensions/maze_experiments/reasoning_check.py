@@ -452,7 +452,11 @@ class TruncationControl:
             session.cancel()
 
 
-def truncation_test(ep, models, control, indices=None, runs=None):
+BUSY = ("The loaded runs are being changed, or a truncation test is already running. "
+        "Try again once it has finished.")
+
+
+def truncation_test(ep, models, control, indices=None, runs=None, claimed=False):
     """Read every chosen response of a run at each truncation, yielding progress.
 
     Every cut is new text, so it is encoded fresh, the full reasoning
@@ -465,18 +469,20 @@ def truncation_test(ep, models, control, indices=None, runs=None):
     model has to be the one that made the run, since the reasoning being
     tested is that model's. A steered response is read under the vector that
     steered it. ``runs`` is the set of loaded runs the test was started
-    from, refused if an upload or Clear has replaced it since.
+    from, refused if an upload or Clear has replaced it since. ``claimed``
+    says the caller already holds the test's claim and releases it itself,
+    once whatever it publishes from the results is out.
     """
     team = hasattr(ep, "agents")
     communicate = team and ep.config["communication"]
     chosen = [r for r in read_responses(ep) if indices is None or r.index in indices]
-    if not control.claim("test", runs):
-        raise ValueError("The loaded runs are being changed, or a truncation test is already running. "
-                         "Try again once it has finished.")
+    if not claimed and not control.claim("test", runs):
+        raise ValueError(BUSY)
     try:
         session = models.open_session()
     except BaseException:
-        control.release("test")
+        if not claimed:
+            control.release("test")
         raise
     control.stop_requested, control.session = False, session
     results = []
@@ -514,6 +520,12 @@ def truncation_test(ep, models, control, indices=None, runs=None):
                 truncated_ids(turn, 1, communicate, session.encode)
             except ValueError as exc:
                 raise ValueError(f"Response {row.index}: {exc}") from None
+            # The cuts replay these IDs, so they have to mean now what they
+            # meant when the response was sampled.
+            if session.decode([token for _, _, token in recorded_spans(turn)]) != turn["text"]:
+                raise ValueError(f"Response {row.index}'s recorded tokens read differently under {session.model_id} "
+                                 "now. The model's tokenizer has changed since the run, so replaying them would "
+                                 "feed text the response never wrote.")
         logger.info("Truncation test on run %s: %s responses at %s cuts with %s", ep.run_id, len(chosen),
                     len(FRACTIONS), session.model_id)
         yield 0, len(chosen), results
@@ -567,7 +579,8 @@ def truncation_test(ep, models, control, indices=None, runs=None):
             yield len(results), len(chosen), results
     finally:
         control.session = None
-        control.release("test")
+        if not claimed:
+            control.release("test")
         session.close()
         logger.info("Truncation test on run %s ended after %s of %s responses", ep.run_id, len(results), len(chosen))
 

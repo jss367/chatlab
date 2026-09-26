@@ -10,7 +10,7 @@ from pathlib import Path
 
 import gradio as gr
 
-from .reasoning_check import (FOLLOW_WINDOW, FRACTIONS, RESPONSE_HEADERS, SUMMARY_HEADERS, TRUNCATION_HEADERS,
+from .reasoning_check import (BUSY, FOLLOW_WINDOW, FRACTIONS, RESPONSE_HEADERS, SUMMARY_HEADERS, TRUNCATION_HEADERS,
                               TRUNCATION_SUMMARY_HEADERS, TruncationControl, condition_of, csv_text, load_run,
                               read_responses, response_rows, run_label, summary_rows, truncation_rows,
                               truncation_summary, truncation_test)
@@ -172,8 +172,6 @@ def build_reasoning_page(context):
             ctl.release("clear")
 
     def reasoning_truncate(held, run_id, text, done_before, ctl):
-        if ctl.running:
-            raise gr.Error("A truncation test is already running.")
         ep = held.get(run_id)
         if ep is None:
             raise gr.Error("Load a run and choose it first.")
@@ -181,12 +179,25 @@ def build_reasoning_page(context):
             indices = parse_responses(text, len(ep.turns))
         except ValueError as exc:
             raise gr.Error(str(exc)) from exc
+        # Held until the last update is out, so an upload or Clear cannot
+        # land between the test ending and its results being published.
+        try:
+            if not ctl.claim("test", held):
+                raise ValueError(BUSY)
+        except ValueError as exc:
+            raise gr.Error(str(exc)) from exc
+        try:
+            yield from truncate(ep, indices, done_before, ctl)
+        finally:
+            ctl.release("test")
+
+    def truncate(ep, indices, done_before, ctl):
         # A second test of the same run replaces its first.
         kept = [t for t in done_before if t.response.run_id != ep.run_id]
         buttons = (gr.update(visible=False), gr.update(visible=True))
         found, failure = [], None
         try:
-            for done, total, found in truncation_test(ep, context.models, ctl, indices, runs=held):
+            for done, total, found in truncation_test(ep, context.models, ctl, indices, claimed=True):
                 note = f"**Running** · {done} of {total} responses of {run_label(ep)}"
                 every = kept + found
                 yield (every, note, truncation_summary(every), truncation_rows(every), gr.skip(), *buttons)

@@ -243,6 +243,18 @@ class TruncationTests(unittest.TestCase):
         self.assertIsNone(control.holder)
         self.assertEqual(len(list(truncation_test(ep, manager, control, {1}, runs=after))), 2)
 
+    def test_tokens_the_loaded_tokenizer_reads_differently_are_refused(self):
+        ep = team_run(TEAM_REPLIES)
+        manager = ReadingManager()
+        # The recorded text still matches, but the loaded vocabulary spells
+        # one of the IDs as something else.
+        first = ep.turns[0]["metrics"][0]["token_id"]
+        spell = manager.spell
+        manager.tokenizer.decode = lambda ids, **kw: spell([1000 if i == first else i for i in ids])
+        with self.assertRaisesRegex(ValueError, "Response 1's recorded tokens read differently"):
+            list(truncation_test(ep, manager, TruncationControl(), {1}))
+        self.assertEqual(manager.calls, [])
+
     def test_a_response_recording_no_prompt_is_refused(self):
         ep = team_run(TEAM_REPLIES)
         ep.turns[1]["prompt_ids"] = []
@@ -419,7 +431,18 @@ class ReasoningPageTests(unittest.TestCase):
                 self.assertEqual(pick["value"], team.run_id)
                 button, wanted = callbacks["reasoning_pick"](held, team.run_id)
                 self.assertEqual((button["value"], wanted), ("Load test/model", "test/model"))
-                frames = list(callbacks["reasoning_truncate"](held, team.run_id, "1-2", [], TruncationControl()))
+                control = TruncationControl()
+                frames = []
+                for frame in callbacks["reasoning_truncate"](held, team.run_id, "1-2", [], control):
+                    # The claim is held through every update, the last included.
+                    self.assertEqual(control.holder, "test")
+                    frames.append(frame)
+                self.assertIsNone(control.holder)
+                busy = TruncationControl()
+                busy.claim("load")
+                with self.assertRaisesRegex(gr.Error, "being changed"):
+                    list(callbacks["reasoning_truncate"](held, team.run_id, "1-2", [], busy))
+                self.assertEqual(busy.holder, "load")
                 results, progress, table, per_response, path = frames[-1][:5]
                 self.assertEqual(len(results), 2)
                 self.assertIn("**Finished** · 2 responses", progress)
