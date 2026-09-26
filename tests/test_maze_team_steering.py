@@ -214,7 +214,7 @@ class TeamSteeringPageTests(unittest.TestCase):
                 prepare = callbacks["team_prepare_episode"]
                 values = (2, True, "all", 5, 7, 8, .7, "coordinates", "", "Be brief.", "Deliver the solution.",
                           .7, 1, 200, 4000, 24)
-                steering = [True, VECTOR, 6., 2, "cell", "", 3, 2, "0"]
+                steering = [True, VECTOR, 6., 2, "cell", "", 3, 2, "1"]
                 ep = TeamEpisode(CORRIDOR, {})
                 prepared = prepare.fn(ep, False, *values, *steering)
                 self.assertEqual(len(prepared), len(prepare.outputs))

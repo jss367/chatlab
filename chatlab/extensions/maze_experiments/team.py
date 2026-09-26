@@ -41,14 +41,16 @@ TEAM_GOALS = {"any": "Any agent arrives", "all": "Every agent arrives"}
 # Long enough for a plan ("I'll take the east corridor, you go south"), short
 # enough that a teammate's reply stays a reply about the maze.
 MESSAGE_LIMIT = 280
-MAX_AGENTS = 4
+MAX_AGENTS = 100
 # An agent stops being asked for responses once it is anything but active.
-AGENT_STATUSES = {"active", "arrived", "abandoned", "cut_off"}
+AGENT_STATUSES = {"active", "arrived", "abandoned", "cut_off", "out_of_tokens"}
 # What a response that takes no action does to its agent once its round resolves.
 DROPPED = {"no_call": "abandoned", "cut_off": "cut_off"}
 DEFAULT_CONFIG = dict(agents=2, communication=True, team_goal="any", goal_mode="coordinates", goal_hint="",
-                      temperature=.7, sampling_seed=20260914, per_turn_tokens=1024, token_budget=16384,
-                      round_limit=24)
+                      temperature=.7, sampling_seed=20260914, per_turn_tokens=1024, round_limit=24)
+# Each agent has its own sampled-token limit. Runs saved before that shared
+# one limit across the team, ``token_budget``, and still replay under it.
+AGENT_TOKEN_BUDGET = 8192
 
 
 def agent_names(count):
@@ -90,11 +92,46 @@ def team_paragraph(name, names, goal, communicate):
     return text
 
 
+def parse_agents(text, count):
+    """The agents named by text such as "1, 3, 5-8", as indices, or None for every agent."""
+    text = str(text or "").strip()
+    if text.lower() in ("", "all"):
+        return None
+    targets = []
+    for part in text.split(","):
+        match = re.fullmatch(r"\s*(\d+)\s*(?:-\s*(\d+)\s*)?", part)
+        if not match:
+            raise ValueError("Name the agents to steer by number, such as 1, 3, 5-8, or leave the box blank for all.")
+        low, high = int(match[1]), int(match[2] or match[1])
+        if not 1 <= low <= high <= count:
+            raise ValueError(f"Agents to steer must be numbered 1 to {count}.")
+        targets += [i - 1 for i in range(low, high + 1) if i - 1 not in targets]
+    # Naming every agent is steering every agent, and is stored as such.
+    return None if sorted(targets) == list(range(count)) else targets
+
+
+def format_agents(targets, count):
+    """The inverse of parse_agents: runs of agents written as ranges, 1-based."""
+    if targets is None or sorted(targets) == list(range(count)):
+        return "all"
+    runs = []
+    for index in sorted(targets):
+        if runs and runs[-1][1] == index - 1:
+            runs[-1][1] = index
+        else:
+            runs.append([index, index])
+    return ", ".join(str(a + 1) if a == b else f"{a + 1}-{b + 1}" for a, b in runs)
+
+
 def check_config(config):
     """Fill a team configuration's defaults and refuse one no run could use."""
     config = copy.deepcopy(config)
     for key, value in DEFAULT_CONFIG.items():
         config.setdefault(key, value)
+    if "token_budget" in config and "agent_token_budget" in config:
+        raise ValueError("A team run has either a limit per agent or one for the whole team, not both.")
+    if "token_budget" not in config:
+        config.setdefault("agent_token_budget", AGENT_TOKEN_BUDGET)
     if not isinstance(config.get("system_prompt"), str):
         config["system_prompt"] = SYSTEM
     if not isinstance(config.get("instruction"), str):
@@ -107,8 +144,9 @@ def check_config(config):
         raise ValueError("Choose whether any agent or every agent has to reach the destination.")
     goal_instruction(config["goal_mode"], config["goal_hint"])
     for name, (low, high) in {"sampling_seed": (0, 2147483647), "per_turn_tokens": (1, 8192),
-                              "token_budget": (1, 131072), "round_limit": (1, 256)}.items():
-        if type(config[name]) is not int or not low <= config[name] <= high:
+                              "token_budget": (1, 131072), "agent_token_budget": (1, 131072),
+                              "round_limit": (1, 256)}.items():
+        if name in config and (type(config[name]) is not int or not low <= config[name] <= high):
             raise ValueError(f"{name} must be an integer between {low} and {high}.")
     temperature = config["temperature"]
     if type(temperature) not in (int, float) or not math.isfinite(temperature) or not 0 <= temperature <= 2:
@@ -195,6 +233,29 @@ class TeamEpisode:
     @property
     def moves(self):
         return sum(event["accepted"] for event in self.events)
+
+    def agent_tokens(self):
+        """The tokens each agent has sampled so far, counted from its finished responses."""
+        spent = [0] * len(self.agents)
+        for turn in self.turns:
+            spent[turn["agent"]] += turn.get("sampled_tokens", 0)
+        return spent
+
+    def response_caps(self, moving):
+        """The most tokens each moving agent may sample this round, or None when the round cannot start.
+
+        With a limit per agent, each is capped by what it has left. A run saved
+        under one limit for the team splits what is left of it evenly before
+        anyone answers, so an agent asked later in the round is capped exactly
+        as the first one was.
+        """
+        per_turn = self.config["per_turn_tokens"]
+        if "token_budget" in self.config:
+            caps = dict.fromkeys(moving, min(per_turn, (self.config["token_budget"] - self.sampled_tokens) // len(moving)))
+        else:
+            spent = self.agent_tokens()
+            caps = {i: min(per_turn, self.config["agent_token_budget"] - spent[i]) for i in moving}
+        return None if not moving or min(caps.values()) <= 0 else caps
 
     def steers_next(self, index):
         """Evaluate onset and duration on this agent's own response history."""
@@ -354,6 +415,12 @@ def resolve_round(episode, actions):
             agent["position"] = tuple(event["after"])
         if event["arrived"]:
             agent["status"] = "arrived"
+    if "agent_token_budget" in episode.config:
+        # A response cut off at the last of its agent's limit was stopped by
+        # the limit, so that agent is out of tokens rather than cut off.
+        for agent, spent in zip(episode.agents, episode.agent_tokens()):
+            if agent["status"] in ("active", "cut_off") and spent >= episode.config["agent_token_budget"]:
+                agent["status"] = "out_of_tokens"
     readers = [action["agent"] for action in actions]
     for sender, text in sent:
         episode.mail.append(dict(round=round_index, sender=episode.agents[sender]["name"], text=text,
@@ -375,10 +442,12 @@ def resolve_round(episode, actions):
                           if episode.config["team_goal"] == "any" else
                           f"Every agent reached the destination by round {episode.rounds}.")
     elif not moving:
-        episode.phase = "abandoned"
+        # Out of tokens only when that is what stopped every agent still out.
+        spent = all(agent["status"] in ("arrived", "out_of_tokens") for agent in episode.agents)
+        episode.phase = "budget" if spent else "abandoned"
         episode.detail = "No agent is still moving: " + ", ".join(
             f"{agent['name']} {agent['status'].replace('_', ' ')}" for agent in episode.agents) + "."
-    elif episode.sampled_tokens >= episode.config["token_budget"]:
+    elif "token_budget" in episode.config and episode.sampled_tokens >= episode.config["token_budget"]:
         episode.phase, episode.detail = "budget", "The team reached its sampled-token limit."
     elif episode.rounds >= episode.config["round_limit"]:
         episode.phase, episode.detail = "budget", "The team reached its round limit."
@@ -454,17 +523,14 @@ def stream_team(episode, models, *, single_step=False, save_dir=None):
             if manager.load_id != episode.load_id:
                 raise ValueError("The model changed during this episode. Start a new team episode with the selected model.")
             moving = [i for i, agent in enumerate(episode.agents) if agent["status"] == "active"]
-            # The budget left is split before anyone answers, so an agent asked
-            # later in the round is capped exactly as the first one was.
-            limit = min(episode.config["per_turn_tokens"],
-                        (episode.config["token_budget"] - episode.sampled_tokens) // len(moving))
-            if limit <= 0:
+            caps = episode.response_caps(moving)
+            if caps is None:
                 episode.phase, episode.detail = "budget", ("The team's remaining sampled tokens cannot give every "
                                                            "moving agent a response.")
                 break
             actions = []
             for index in moving:
-                agent = episode.agents[index]
+                agent, limit = episode.agents[index], caps[index]
                 steered = episode.steers_next(index)
                 turn = {"agent": index, "round": episode.rounds, "text": "", "metrics": [], "prompt_ids": [],
                         "position_before": list(agent["position"]), "started_at": time.time(), "finish_reason": None}
@@ -597,12 +663,12 @@ def from_payload(data):
         resolved = round_index < rounds
         if asked != moving if resolved else asked != moving[:len(asked)]:
             raise ValueError("A round asks agents other than the ones still moving, in their order.")
-        # The cap the live run set for this round, which no response in it
+        # The caps the live run set for this round, which no response in it
         # could have sampled past.
-        limit = min(result.config["per_turn_tokens"],
-                    (result.config["token_budget"] - result.sampled_tokens) // len(moving))
+        caps = result.response_caps(moving) or {}
         actions = []
         for saved in by_round[round_index]:
+            limit = caps.get(saved["agent"], 0)
             if resolved and saved["finish_reason"] not in ("stop", "length", "incomplete_stream"):
                 raise ValueError("A response in a finished round ends in a way no finished round records.")
             if limit <= 0 or len(saved["metrics"]) > limit:
@@ -639,8 +705,8 @@ def from_payload(data):
             raise ValueError("The run reports an outcome other than the one its responses reach.")
     else:
         phase = data.get("phase")
-        moving = [agent for agent in result.agents if agent["status"] == "active"]
-        starved = bool(moving) and (result.config["token_budget"] - result.sampled_tokens) // len(moving) <= 0
+        moving = [i for i, agent in enumerate(result.agents) if agent["status"] == "active"]
+        starved = bool(moving) and result.response_caps(moving) is None
         if phase not in ("ready", "running", "paused", "stopped", "error", "budget") \
                 or (phase == "ready" and turns) or (phase == "budget" and not starved):
             raise ValueError("The run reports an outcome other than the one its responses reach.")
