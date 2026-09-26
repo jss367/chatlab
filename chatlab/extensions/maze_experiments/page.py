@@ -1594,6 +1594,7 @@ def _build_page(context):
 def build_page(context):
     # Imported here because the Team tab borrows this module's helpers.
     from .team_page import build_team_page
+    from .reasoning_page import build_reasoning_page
 
     with gr.Column(elem_id="maze-page"):
         gr.Markdown("# Maze workbench")
@@ -1602,3 +1603,5 @@ def build_page(context):
                 _build_page(context)
             with gr.Tab("Team", elem_id="maze-team-tab"):
                 build_team_page(context, lambda: runs_dir(context))
+            with gr.Tab("Reasoning check", elem_id="maze-reasoning-tab"):
+                build_reasoning_page(context)

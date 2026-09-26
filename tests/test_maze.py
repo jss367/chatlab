@@ -1471,10 +1471,12 @@ class MazeTests(unittest.TestCase):
                 self.assertEqual(fresh[-1], '')
                 # The ID reaches the Models page through the state the page
                 # registered, not through the button's own label. The Team
-                # tab's button registers too, naming no model.
-                self.assertEqual(len(registered), 2)
+                # tab's button registers too, naming no model, and the
+                # Reasoning check's names the model of the run it tests.
+                self.assertEqual(len(registered), 3)
                 self.assertIsInstance(registered[0], gr.State)
                 self.assertIsNone(registered[1])
+                self.assertIsInstance(registered[2], gr.State)
             finally:
                 demo.close()
 
