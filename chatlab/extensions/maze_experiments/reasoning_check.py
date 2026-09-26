@@ -26,7 +26,7 @@ import threading
 from dataclasses import dataclass, field
 
 from .maze import DIRECTIONS, TOOLS, parse_call
-from .runner import context_messages, from_payload as single_from_payload
+from .runner import context_messages, from_payload as single_from_payload, visible_token_ids
 from .team import FORMAT as TEAM_FORMAT, MESSAGE_LIMIT, from_payload as team_from_payload
 
 logger = logging.getLogger(__name__)
@@ -308,47 +308,51 @@ def truncation_plan(turn, fraction, communicate):
     return cut, inserted, call
 
 
-def recorded_spans(turn, decode=None):
-    """The response's recorded tokens with the characters each covers, or None when they do not spell its text.
+def recorded_spans(turn, decode=None, hidden=()):
+    """Where each of the response's recorded tokens ends in its text, with its ID, or None when they do not spell it.
 
     Counted in the response as its history carries it, so a reasoning block
     the template opened is ahead of the first token. The stop token that
-    ends the response writes nothing into it. ``decode`` reads each prefix
+    ends the response writes nothing into it, nor does a ``hidden`` special,
+    which the runtime records without decoding. ``decode`` reads each prefix
     of the tokens as the tokenizer reads the sequence, which a tokenizer that
     spells a token differently standing alone needs; without it the text
-    recorded for each token is added up.
+    recorded for each token is added up. A token after which the text so far
+    is not yet a prefix of the response, one ending partway through a
+    character most often, has no end of its own: nothing is cut there.
     """
     metrics = turn.get("metrics") or []
     if turn.get("finish_reason") == "stop":
         metrics = metrics[:-1]
     ids = [metric["token_id"] for metric in metrics]
     offset = len("<think>") if turn.get("reasoning_prefilled") else 0
+    text = turn["text"]
     if decode is not None:
-        ends = []
-        for count in range(1, len(ids) + 1):
-            read = decode(ids[:count])
-            if not turn["text"].startswith(read):
-                return None
-            ends.append(len(read))
+        ends, visible = [], []
+        for token in ids:
+            if token not in hidden:
+                visible.append(token)
+            read = decode(visible)
+            ends.append(len(read) if text.startswith(read) else None)
+        if decode(visible) != text:
+            return None
     else:
         pieces = [metric.get("text") for metric in metrics]
-        if not all(isinstance(piece, str) for piece in pieces) or "".join(pieces) != turn["text"]:
+        if not all(isinstance(piece, str) for piece in pieces) or "".join(pieces) != text:
             return None
         ends = [sum(map(len, pieces[:count])) for count in range(1, len(pieces) + 1)]
-    if (ends[-1] if ends else 0) != len(turn["text"]):
-        return None
-    starts = [0] + ends[:-1]
-    return [(offset + a, offset + b, token) for a, b, token in zip(starts, ends, ids)]
+    return [(None if end is None else offset + end, token) for end, token in zip(ends, ids)]
 
 
-def truncated_ids(turn, fraction, communicate, encode, spans=None):
+def truncated_ids(turn, fraction, communicate, encode_after, spans=None):
     """The token IDs a cut feeds: the response's own recorded tokens, with only the inserted text encoded.
 
     Every fraction keeps the tokens the model sampled, so a cut differs
-    from the whole response only by what it leaves out. Raises
-    ``ValueError`` when the recorded tokens do not spell the response or do
-    not break where the cut and the call do. ``spans`` are the response's
-    :func:`recorded_spans`, when the caller has read them already.
+    from the whole response only by what it leaves out. The inserted text is
+    encoded by ``encode_after(kept_ids, text)``, in the context of the tokens
+    it follows. Raises ``ValueError`` when the recorded tokens do not spell
+    the response or do not break where the cut and the call do. ``spans``
+    are the response's :func:`recorded_spans`, when the caller has read them.
     """
     plan = truncation_plan(turn, fraction, communicate)
     spans = spans if spans is not None else recorded_spans(turn)
@@ -356,18 +360,18 @@ def truncated_ids(turn, fraction, communicate, encode, spans=None):
         raise ValueError("The response's recorded tokens do not spell its text, so its cuts cannot be rebuilt "
                          "from them.")
     kept, inserted, (call_start, call_end) = plan
-    ends = [end for _, end, _ in spans]
-    starts = [start for start, _, _ in spans]
-    if call_start not in starts or call_end not in ends:
+    ends = [end for end, _ in spans]
+    before = [len("<think>") if turn.get("reasoning_prefilled") else 0] + ends[:-1]
+    if call_start not in before or call_end not in ends:
         raise ValueError("The response's recorded tokens do not break where its call starts and names its "
                          "direction, so the call cannot be replayed token for token.")
-    ids = [token for _, _, token in spans]
-    first, last = starts.index(call_start), ends.index(call_end) + 1
+    ids = [token for _, token in spans]
+    first, last = before.index(call_start), ends.index(call_end) + 1
     # The tokens wholly inside what is kept: a word ending partway through a
     # token keeps the tokens before it. The whole response keeps every token
     # before its call, which starts a token of its own.
-    count = sum(1 for end in ends if end <= kept)
-    return ids[:count] + (encode(inserted) if inserted else []) + ids[first:last]
+    count = max((i + 1 for i, end in enumerate(ends) if end is not None and end <= kept), default=0)
+    return ids[:count] + (encode_after(ids[:count], inserted) if inserted else []) + ids[first:last]
 
 
 def direction_probabilities(metric, spell=None):
@@ -519,7 +523,8 @@ def truncation_test(ep, models, control, indices=None, runs=None, claimed=False)
         tools = ep.tools if team else TOOLS
         # The same model ID can name an updated tokenizer or template, which
         # would read every cut in a context the response never saw.
-        spans = {}
+        hidden = session.hidden_token_ids
+        cuts = {}
         for row in chosen:
             turn = ep.turns[row.index - 1]
             if not turn.get("prompt_ids"):
@@ -534,13 +539,16 @@ def truncation_test(ep, models, control, indices=None, runs=None, claimed=False)
             # The cuts replay these IDs, so they have to mean now what they
             # meant when the response was sampled.
             recorded = turn["metrics"][:-1] if turn.get("finish_reason") == "stop" else turn["metrics"]
-            if session.decode([metric["token_id"] for metric in recorded]) != turn["text"]:
+            if session.decode(visible_token_ids(recorded, 0, hidden)) != turn["text"]:
                 raise ValueError(f"Response {row.index}'s recorded tokens read differently under {session.model_id} "
                                  "now. The model's tokenizer has changed since the run, so replaying them would "
                                  "feed text the response never wrote.")
-            spans[row.index] = recorded_spans(turn, session.decode)
+            # Every cut is built before any is read, so a response that cannot
+            # be cut is refused before the model is asked anything.
+            spans = recorded_spans(turn, session.decode, hidden)
             try:
-                truncated_ids(turn, 1, communicate, session.encode, spans[row.index])
+                cuts[row.index] = [truncated_ids(turn, fraction, communicate, session.encode_replacement, spans)
+                                   for fraction in FRACTIONS]
             except ValueError as exc:
                 raise ValueError(f"Response {row.index}: {exc}") from None
         logger.info("Truncation test on run %s: %s responses at %s cuts with %s", ep.run_id, len(chosen),
@@ -570,16 +578,16 @@ def truncation_test(ep, models, control, indices=None, runs=None, claimed=False)
                     raise ValueError(f"The model returned no token after response {row.index}'s cut.")
                 return last.metrics
 
-            for fraction in FRACTIONS:
+            for ids in cuts[row.index]:
                 if control.stop_requested:
                     return
-                ids = truncated_ids(turn, fraction, communicate, session.encode, spans[row.index])
                 metrics = measured(ids)
                 if metrics is None:
                     return
-                before = session.decode(ids)
+                visible = [token for token in ids if token not in hidden]
+                before = session.decode(visible)
                 found = direction_probabilities(metrics[len(ids)],
-                                                lambda token: session.decode(ids + [token])[len(before):])
+                                                lambda token: session.decode(visible + [token])[len(before):])
                 # A direction the recorded alternatives leave out is read by
                 # forcing its first token after the cut: the probability the
                 # model gave that token is measured like any forced one. It is

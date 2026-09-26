@@ -42,10 +42,11 @@ def recorded(text, prefilled=False, offset=0):
 
 
 def spelled(ids):
-    return bytes(i % 1000 for i in ids).decode()
+    """Bytes decoded as the runtime decodes a prefix: a character cut short reads as a replacement."""
+    return bytes(i % 1000 for i in ids if i < 2000).decode(errors="replace")
 
 
-def encode(text):
+def encode(kept, text):
     return list(text.encode())
 
 
@@ -163,6 +164,30 @@ class TruncationTests(unittest.TestCase):
         kept = len("I see a wall.")
         self.assertTrue(all(i >= 1000 for i in half[:kept] + half[kept + 1:]))
         self.assertEqual(half[kept], ord("\n"))
+        # The break is encoded after the tokens it follows.
+        seen = []
+        truncated_ids(turn, .5, False, lambda kept_ids, text: seen.append((kept_ids, text)) or encode(kept_ids, text))
+        self.assertEqual(seen, [(half[:kept], "\n")])
+
+    def test_a_character_split_across_tokens_is_not_cut_inside(self):
+        # A byte-level tokenizer spells "→" in three tokens, and the prefixes
+        # ending inside it read as a replacement character.
+        turn = recorded(reply("Go → then east.", "east")[0])
+        for metric in turn["metrics"][:-1]:
+            metric["text"] = "?"
+        spans = recorded_spans(turn, spelled)
+        self.assertEqual([end is None for end, _ in spans[3:6]], [True, True, False])
+        self.assertEqual(spelled(truncated_ids(turn, 1, False, encode, spans)), "Go → then east.\n" + self.CALL)
+        self.assertEqual(spelled(truncated_ids(turn, .5, False, encode, spans)), "Go →\n" + self.CALL)
+
+    def test_a_hidden_special_is_replayed_but_not_read(self):
+        # The runtime records a hidden special among the metrics and leaves it
+        # out of the text; the cut still feeds it.
+        turn = recorded(reply("I see a wall. I will move east.", "east")[0])
+        turn["metrics"].insert(3, {"token_id": 2000, "text": ""})
+        spans = recorded_spans(turn, spelled, hidden={2000})
+        self.assertIsNotNone(spans)
+        self.assertIn(2000, truncated_ids(turn, 1, False, encode, spans))
 
     def test_a_run_whose_token_labels_do_not_add_up_is_read_through_the_tokenizer(self):
         ep = team_run(TEAM_REPLIES)
@@ -238,7 +263,7 @@ class TruncationTests(unittest.TestCase):
         self.assertTrue(all(ids[-1] == ord("w") for ids in read))
         # Encoded after the cut, in the decoder context it continues.
         cut = manager.calls[0][1]["forced_ids"]
-        self.assertEqual(manager.replacements[0], (cut, "west"))
+        self.assertIn((cut, "west"), manager.replacements)
 
     def test_a_candidate_that_would_write_a_space_counts_for_no_direction(self):
         # Its standalone text reads "east", but after the cut it writes " east",
