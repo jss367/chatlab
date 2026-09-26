@@ -435,10 +435,12 @@ def truncation_test(ep, models, control, indices=None):
                 found = direction_probabilities(metrics[len(ids)])
                 # A direction the recorded alternatives leave out is read by
                 # forcing its first token after the cut: the probability the
-                # model gave that token is measured like any forced one.
+                # model gave that token is measured like any forced one. It is
+                # encoded after the cut, since a tokenizer can spell a word
+                # differently standing alone than it does following a quote.
                 for direction in DIRECTIONS:
                     if direction not in found:
-                        metrics = measured(ids + session.encode(direction)[:1])
+                        metrics = measured(ids + session.encode_replacement(ids, direction)[:1])
                         if metrics is None:
                             return
                         found[direction] = metrics[len(ids)]["raw_probability"]

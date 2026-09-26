@@ -124,7 +124,11 @@ def build_reasoning_page(context):
         return (held, runs_note(held), summary_rows(rows), table, path,
                 gr.update(choices=choices, value=choices[0][1] if choices else None))
 
-    def reasoning_load(paths, held, done_before):
+    def reasoning_load(paths, held, done_before, ctl):
+        # A test still reading a run would hand back results from the file a
+        # new upload replaces.
+        if ctl.running:
+            raise gr.Error("Stop the truncation test before loading more runs.")
         held = dict(held)
         replaced = set()
         for path in paths or ():
@@ -197,7 +201,7 @@ def build_reasoning_page(context):
             gr.Info("Stopping after the response being read.")
 
     loaded_outputs = [runs, loaded, summary, responses, responses_csv, run_pick]
-    upload.upload(reasoning_load, [upload, runs, results],
+    upload.upload(reasoning_load, [upload, runs, results, control],
                   [*loaded_outputs, results, truncation, truncated, truncated_csv], show_progress="hidden")
     clear.click(reasoning_clear, control, [*loaded_outputs, results, truncation, truncated, truncated_csv, progress],
                 show_progress="hidden")

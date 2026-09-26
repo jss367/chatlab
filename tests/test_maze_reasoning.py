@@ -168,6 +168,9 @@ class TruncationTests(unittest.TestCase):
         self.assertEqual(len(manager.calls), 2 * len(FRACTIONS))
         read = [kwargs["forced_ids"] for _, kwargs in manager.calls[1::2]]
         self.assertTrue(all(ids[-1] == ord("w") for ids in read))
+        # Encoded after the cut, in the decoder context it continues.
+        cut = manager.calls[0][1]["forced_ids"]
+        self.assertEqual(manager.replacements[0], (cut, "west"))
 
     def test_a_response_recording_no_prompt_is_refused(self):
         ep = team_run(TEAM_REPLIES)
@@ -256,6 +259,11 @@ class ReadingManager(SteeringManager):
         self.on_call = on_call
         self.omit = set(omit)
         self.forced_probability = forced_probability
+        self.replacements = []
+
+    def encode_replacement(self, kept_ids, text, **kwargs):
+        self.replacements.append((list(kept_ids), text))
+        return super().encode_replacement(kept_ids, text, **kwargs)
 
     def generate(self, messages, **kwargs):
         self.calls.append((messages, kwargs))
@@ -290,7 +298,7 @@ class ReasoningPageTests(unittest.TestCase):
             try:
                 callbacks = handlers_by_name(demo)
                 # A file that is not a run is refused on its own; the others load.
-                loaded = callbacks["reasoning_load"](paths + [str(broken)], {}, [])
+                loaded = callbacks["reasoning_load"](paths + [str(broken)], {}, [], TruncationControl())
                 held, note, summary, rows, csv_path, pick = loaded[:6]
                 self.assertEqual(set(held), {team.run_id, single.run_id})
                 self.assertIn("Team of 2 · messages on", note)
@@ -309,12 +317,18 @@ class ReasoningPageTests(unittest.TestCase):
                 self.assertIsNotNone(path)
                 # Loading the run again replaces it, and what was read from the
                 # file it replaces goes with it.
-                reloaded = callbacks["reasoning_load"]([paths[0]], held, results)
+                reloaded = callbacks["reasoning_load"]([paths[0]], held, results, TruncationControl())
                 self.assertEqual(reloaded[6:9], ([], [], []))
                 self.assertIsNone(reloaded[9])
-                other = callbacks["reasoning_load"]([paths[1]], held, results)
+                other = callbacks["reasoning_load"]([paths[1]], held, results, TruncationControl())
                 # Loading another run leaves the results alone.
                 self.assertEqual(other[6:], (gr.skip(),) * 4)
+                # Nothing loads while a test is reading, since the test would
+                # hand back results from the file being replaced.
+                busy = TruncationControl()
+                busy.running = True
+                with self.assertRaisesRegex(gr.Error, "Stop the truncation test"):
+                    callbacks["reasoning_load"]([paths[0]], held, results, busy)
                 # A refusal says so rather than reporting a finished test.
                 for turn in held[team.run_id].turns:
                     turn["model_id"] = "someone/else"
