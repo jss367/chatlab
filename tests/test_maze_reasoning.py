@@ -81,6 +81,13 @@ class StatedAgainstTakenTests(unittest.TestCase):
         self.assertIsNone(rows[1].message_direction)
         self.assertEqual(len(response_rows(rows)[0]), 14)
 
+    def test_a_message_is_kept_by_the_call_even_when_the_maze_rejects_it(self):
+        ep = team_run([reply("I will move east.", "east"), reply("Go south.", "south", "I'm heading south"),
+                       reply("I will move east.", "east"), reply("Go east.", "east")])
+        self.assertEqual(ep.turns[1]["event"]["error"], "blocked_move")
+        row = read_responses(ep)[1]
+        self.assertEqual((row.message_direction, row.message_kept), ("south", True))
+
     def test_the_summary_puts_one_agent_first_and_compares_conditions(self):
         single = Episode(MAZE, CONFIG | {"interruption_text": ""})
         list(stream_episode(single, Manager([reply("I will move east.", "east"), reply("Go west.", "east")])))

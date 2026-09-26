@@ -99,7 +99,7 @@ def build_reasoning_page(context):
             gr.Markdown("## Stated against taken\nA response states a direction when its reasoning commits to one, "
                         "such as \"I will move east\" or \"go to (1, 2)\". Hedged, ruled-out and later steps are not "
                         "commitments. The last one before the call is compared with the call. A message is kept when "
-                        f"its agent moves the way it names within {FOLLOW_WINDOW} of its own calls.")
+                        f"its agent calls the direction it names within {FOLLOW_WINDOW} of its own calls, accepted or not.")
             summary = gr.Dataframe(headers=SUMMARY_HEADERS, value=[], interactive=False, wrap=True,
                                    elem_id="reasoning-summary")
             with gr.Accordion("Every response", open=False):

@@ -32,8 +32,10 @@ logger = logging.getLogger(__name__)
 
 # How much of the reasoning each truncation keeps, by words.
 FRACTIONS = (0., .25, .5, .75, 1.)
-# A message is kept when its agent moves the way it said within this many of
-# its own calls, the call carrying the message included.
+# A message is kept when its agent calls the direction it named within this
+# many of its own calls, the call carrying the message included. A call the
+# simulator rejects still counts: like stated against taken, this compares what
+# the agent said with what it chose, not with where the maze let it go.
 FOLLOW_WINDOW = 3
 
 SYNONYMS = {"up": "north", "down": "south", "left": "west", "right": "east"}
