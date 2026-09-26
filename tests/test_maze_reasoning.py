@@ -159,10 +159,24 @@ class TruncationTests(unittest.TestCase):
     def test_another_model_is_refused(self):
         ep = team_run(TEAM_REPLIES)
         ep.model_id = "someone/else"
+        for turn in ep.turns:
+            turn["model_id"] = "someone/else"
         manager = ReadingManager()
         with self.assertRaisesRegex(ValueError, "Load someone/else"):
             list(truncation_test(ep, manager, TruncationControl()))
         self.assertFalse(manager.busy)
+
+    def test_a_response_recording_another_model_is_refused(self):
+        single = Episode(MAZE, CONFIG | {"interruption_text": ""})
+        list(stream_episode(single, Manager([reply("I will move east.", "east")] * 2)))
+        single.turns[1]["model_id"] = "someone/else"
+        manager = ReadingManager()
+        with self.assertRaisesRegex(ValueError, "Load someone/else or test/model"):
+            list(truncation_test(single, manager, TruncationControl()))
+        self.assertEqual(manager.calls, [])
+        # The responses the loaded model made can still be tested on their own.
+        frames = list(truncation_test(single, manager, TruncationControl(), {1}))
+        self.assertEqual(frames[-1][:2], (1, 1))
 
     def test_a_steered_response_is_read_under_its_vector(self):
         ep = team_run(TEAM_REPLIES, SteeringManager, steering=dict(VECTOR), steer_when={"moves": 0}, steer_responses=0)
@@ -237,7 +251,8 @@ class ReasoningPageTests(unittest.TestCase):
                 self.assertEqual(len(per_response), 2)
                 self.assertIsNotNone(path)
                 # A refusal says so rather than reporting a finished test.
-                held[team.run_id].model_id = "someone/else"
+                for turn in held[team.run_id].turns:
+                    turn["model_id"] = "someone/else"
                 frames = list(callbacks["reasoning_truncate"](held, team.run_id, "all", results, TruncationControl()))
                 self.assertIn("**Refused**", frames[-1][1])
                 self.assertEqual(frames[-1][0], [])

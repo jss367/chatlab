@@ -363,9 +363,13 @@ def truncation_test(ep, models, control, indices=None):
     control.running, control.stop_requested, control.session = True, False, session
     results = []
     try:
-        if ep.model_id and session.model_id != ep.model_id:
-            raise ValueError(f"Load {ep.model_id}, the model that made this run. The truncation test reads that "
-                             f"model's own reasoning, and {session.model_id} is loaded.")
+        # A response names the model that wrote it where a run spans more than
+        # one, as a one-agent run forked under another load can.
+        recorded = sorted({ep.turns[r.index - 1].get("model_id") or ep.model_id for r in chosen} - {None})
+        if any(model != session.model_id for model in recorded):
+            raise ValueError(f"Load {' or '.join(recorded)}, the model that made these responses. The truncation "
+                             f"test reads that model's own reasoning, and {session.model_id} is loaded."
+                             + (" Test the responses each model made separately." if len(recorded) > 1 else ""))
         if ep.config.get("steering") is not None and any(ep.turns[r.index - 1].get("steered") for r in chosen):
             session.check_steering(ep.config["steering"])
         tools = ep.tools if team else TOOLS
