@@ -127,8 +127,14 @@ def build_reasoning_page(context):
     def reasoning_load(paths, held, done_before, ctl):
         # A test still reading a run would hand back results from the file a
         # new upload replaces.
-        if ctl.running:
+        if not ctl.claim("load"):
             raise gr.Error("Stop the truncation test before loading more runs.")
+        try:
+            return load_runs(paths, held, done_before)
+        finally:
+            ctl.release("load")
+
+    def load_runs(paths, held, done_before):
         held = dict(held)
         replaced = set()
         for path in paths or ():
@@ -154,9 +160,12 @@ def build_reasoning_page(context):
         return (*reasoning_scored(held), kept, truncation_summary(kept), table, path)
 
     def reasoning_clear(ctl):
-        if ctl.running:
+        if not ctl.claim("clear"):
             raise gr.Error("Stop the truncation test before clearing the runs.")
-        return (*reasoning_scored({}), [], [], [], None, "")
+        try:
+            return (*reasoning_scored({}), [], [], [], None, "")
+        finally:
+            ctl.release("clear")
 
     def reasoning_truncate(held, run_id, text, done_before, ctl):
         if ctl.running:

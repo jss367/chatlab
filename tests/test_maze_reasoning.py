@@ -1,3 +1,4 @@
+import copy
 import json
 import tempfile
 import unittest
@@ -180,6 +181,24 @@ class TruncationTests(unittest.TestCase):
             list(truncation_test(ep, manager, TruncationControl(), {1, 2}))
         self.assertEqual(manager.calls, [])
 
+    def test_a_test_is_refused_while_the_runs_are_changing(self):
+        # An upload holding the claim refuses a test that starts meanwhile,
+        # and the refusal leaves the upload's claim in place.
+        ep = team_run(TEAM_REPLIES)
+        control = TruncationControl()
+        self.assertTrue(control.claim("load"))
+        manager = ReadingManager()
+        with self.assertRaisesRegex(ValueError, "being changed"):
+            list(truncation_test(ep, manager, control))
+        self.assertEqual(control.holder, "load")
+        self.assertFalse(manager.busy)
+        control.release("load")
+        list(truncation_test(ep, manager, control, {1}))
+        self.assertIsNone(control.holder)
+        # Each browser session gets its own claim.
+        control.claim("test")
+        self.assertIsNone(copy.deepcopy(control).holder)
+
     def test_another_model_is_refused(self):
         ep = team_run(TEAM_REPLIES)
         ep.model_id = "someone/else"
@@ -326,7 +345,7 @@ class ReasoningPageTests(unittest.TestCase):
                 # Nothing loads while a test is reading, since the test would
                 # hand back results from the file being replaced.
                 busy = TruncationControl()
-                busy.running = True
+                busy.claim("test")
                 with self.assertRaisesRegex(gr.Error, "Stop the truncation test"):
                     callbacks["reasoning_load"]([paths[0]], held, results, busy)
                 # A refusal says so rather than reporting a finished test.

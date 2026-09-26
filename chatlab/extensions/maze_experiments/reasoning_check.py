@@ -22,6 +22,7 @@ import csv
 import io
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 
 from .maze import DIRECTIONS, TOOLS, parse_call
@@ -334,12 +335,41 @@ class Truncation:
 
 
 class TruncationControl:
-    """What the Stop button reaches while a truncation test runs, one per browser session."""
+    """What the Stop button reaches while a truncation test runs, one per browser session.
+
+    Also the one claim on the tab's loaded runs. A test reads the runs it was
+    started on until it ends, and an upload or Clear replaces them, so each
+    takes the claim for as long as it works: whichever comes second is
+    refused rather than left to publish results for runs no longer loaded.
+    """
 
     def __init__(self):
-        self.running = False
+        self._lock = threading.Lock()
+        self.holder = None
         self.stop_requested = False
         self.session = None
+
+    def __deepcopy__(self, memo):
+        # Gradio copies a State's initial value once per session, and each
+        # session needs its own claim.
+        return type(self)()
+
+    @property
+    def running(self):
+        return self.holder == "test"
+
+    def claim(self, holder):
+        """Take the claim for ``holder`` and say whether it was free."""
+        with self._lock:
+            if self.holder is not None:
+                return False
+            self.holder = holder
+            return True
+
+    def release(self, holder):
+        with self._lock:
+            if self.holder == holder:
+                self.holder = None
 
     def request_stop(self):
         self.stop_requested = True
@@ -365,8 +395,15 @@ def truncation_test(ep, models, control, indices=None):
     team = hasattr(ep, "agents")
     communicate = team and ep.config["communication"]
     chosen = [r for r in read_responses(ep) if indices is None or r.index in indices]
-    session = models.open_session()
-    control.running, control.stop_requested, control.session = True, False, session
+    if not control.claim("test"):
+        raise ValueError("The loaded runs are being changed, or a truncation test is already running. "
+                         "Try again once it has finished.")
+    try:
+        session = models.open_session()
+    except BaseException:
+        control.release("test")
+        raise
+    control.stop_requested, control.session = False, session
     results = []
     try:
         # A response names the model that wrote it where a run spans more than
@@ -448,7 +485,8 @@ def truncation_test(ep, models, control, indices=None):
             results.append(result)
             yield len(results), len(chosen), results
     finally:
-        control.running, control.session = False, None
+        control.session = None
+        control.release("test")
         session.close()
         logger.info("Truncation test on run %s ended after %s of %s responses", ep.run_id, len(results), len(chosen))
 
