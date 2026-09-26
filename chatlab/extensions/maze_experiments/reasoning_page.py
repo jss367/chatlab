@@ -149,12 +149,12 @@ def build_reasoning_page(context):
                 gr.Warning(f"Could not load {Path(path).name}: {exc}")
                 continue
             if ep.run_id in held:
-                replaced.add(run_label(ep))
+                replaced.add(ep.run_id)
             held[ep.run_id] = ep
             logger.info("Reasoning check loaded run %s (%s) from %s", ep.run_id, condition_of(ep), path)
         # A run loaded again may be a later export, so what was read from the
         # file it replaces no longer describes it.
-        kept = [t for t in done_before if t.response.run not in replaced]
+        kept = [t for t in done_before if t.response.run_id not in replaced]
         if len(kept) == len(done_before):
             return (*reasoning_scored(held), gr.skip(), gr.skip(), gr.skip(), gr.skip())
         table = truncation_rows(kept)
@@ -182,7 +182,7 @@ def build_reasoning_page(context):
         except ValueError as exc:
             raise gr.Error(str(exc)) from exc
         # A second test of the same run replaces its first.
-        kept = [t for t in done_before if t.response.run != run_label(ep)]
+        kept = [t for t in done_before if t.response.run_id != ep.run_id]
         buttons = (gr.update(visible=False), gr.update(visible=True))
         found, failure = [], None
         try:

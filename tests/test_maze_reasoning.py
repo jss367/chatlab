@@ -12,11 +12,11 @@ from chatlab.extensions.maze_experiments.page import build_page
 
 from chatlab.extensions.maze_experiments.reasoning_check import (
     FRACTIONS, TruncationControl, direction_probabilities, load_run, read_responses, response_rows, stated_direction,
-    summary_rows, truncated_prefix, truncation_summary, truncation_test)
+    summary_rows, truncated_ids, truncation_summary, truncation_test)
 from chatlab.extensions.maze_experiments.reasoning_page import parse_responses
 from chatlab.extensions.maze_experiments.runner import Episode, stream_episode
 from chatlab.extensions.maze_experiments.team import TeamEpisode, stream_team
-from maze_support import CONFIG, MAZE, Manager, SteeringManager, VECTOR, call
+from maze_support import CONFIG, MAZE, Manager, SteeringManager, VECTOR, call, scored
 from ui_support import handlers_by_name
 
 
@@ -27,8 +27,26 @@ def reply(reasoning, direction, message=None):
 
 def team_run(replies, manager=Manager, **config):
     ep = TeamEpisode(MAZE, dict(dict(agents=2, communication=True, team_goal="any"), **config))
-    list(stream_team(ep, manager(replies)))
+    generating = manager(replies)
+    # Metrics that spell each token, as the runtime records them.
+    generating.generate = scored(generating.generate)
+    list(stream_team(ep, generating))
     return ep
+
+
+def recorded(text, prefilled=False, offset=0):
+    """A finished response whose recorded tokens are its bytes, each ID moved by ``offset``."""
+    metrics = [{"token_id": byte + offset, "text": chr(byte)} for byte in text.encode()]
+    return {"finish_reason": "stop", "text": text, "reasoning_prefilled": prefilled,
+            "metrics": metrics + [{"token_id": 0, "text": "<stop>"}]}
+
+
+def spelled(ids):
+    return bytes(i % 1000 for i in ids).decode()
+
+
+def encode(text):
+    return list(text.encode())
 
 
 TEAM_REPLIES = [
@@ -101,6 +119,13 @@ class StatedAgainstTakenTests(unittest.TestCase):
         self.assertEqual(team[3:8], ["75% (3/4)", "67% (2/3)", "—", "67% (2/3)", "100% (1/1)"])
         self.assertEqual(team[8:], ["100% (1/1)", "100% (1/1)", "100% (1/1)"])
 
+    def test_runs_sharing_a_short_label_stay_two_runs(self):
+        import dataclasses
+        rows = read_responses(team_run(TEAM_REPLIES))
+        twin = [dataclasses.replace(r, run_id=r.run_id[:8] + "f" * 24) for r in rows]
+        self.assertEqual(rows[0].run, twin[0].run)
+        self.assertEqual(summary_rows(rows + twin)[0][1], 2)
+
     def test_an_interrupted_response_is_left_out(self):
         ep = Episode(MAZE, CONFIG)
         list(stream_episode(ep, Manager([reply("I will move east.", "east")] * 2)))
@@ -119,20 +144,46 @@ class StatedAgainstTakenTests(unittest.TestCase):
 
 
 class TruncationTests(unittest.TestCase):
-    TURN = {"finish_reason": "stop", "text": reply("I see a wall. I will move east.", "east")[0]}
+    TURN = recorded(reply("I see a wall. I will move east.", "east")[0])
+    CALL = '<tool_call>\n{"name": "move", "arguments": {"maze_id": "' + MAZE.tool_id() + '", "direction": "'
 
     def test_each_cut_keeps_that_share_of_the_reasoning_and_runs_to_the_direction(self):
-        call_start = '<tool_call>\n{"name": "move", "arguments": {"maze_id": "' + MAZE.tool_id() + '", "direction": "'
-        self.assertEqual(truncated_prefix(self.TURN, 0, False), call_start)
-        self.assertEqual(truncated_prefix(self.TURN, .5, False), "I see a wall.\n" + call_start)
-        self.assertEqual(truncated_prefix(self.TURN, 1, False), "I see a wall. I will move east.\n" + call_start)
+        self.assertEqual(spelled(truncated_ids(self.TURN, 0, False, encode)), self.CALL)
+        self.assertEqual(spelled(truncated_ids(self.TURN, .5, False, encode)), "I see a wall.\n" + self.CALL)
+        self.assertEqual(spelled(truncated_ids(self.TURN, 1, False, encode)),
+                         "I see a wall. I will move east.\n" + self.CALL)
+
+    def test_a_cut_replays_the_recorded_tokens_and_encodes_only_what_it_inserts(self):
+        # Recorded IDs the tokenizer would never produce: every kept token is
+        # the response's own, and only the break before the call is encoded.
+        turn = recorded(reply("I see a wall. I will move east.", "east")[0], offset=1000)
+        whole = truncated_ids(turn, 1, False, encode)
+        self.assertTrue(all(i >= 1000 for i in whole))
+        half = truncated_ids(turn, .5, False, encode)
+        kept = len("I see a wall.")
+        self.assertTrue(all(i >= 1000 for i in half[:kept] + half[kept + 1:]))
+        self.assertEqual(half[kept], ord("\n"))
+
+    def test_a_run_whose_tokens_do_not_spell_a_response_is_refused_before_any_pass(self):
+        ep = team_run(TEAM_REPLIES)
+        ep.turns[1]["metrics"][0]["text"] = "?"
+        manager = ReadingManager()
+        with self.assertRaisesRegex(ValueError, "Response 2: The response's recorded tokens do not spell"):
+            list(truncation_test(ep, manager, TruncationControl(), {1, 2}))
+        self.assertEqual(manager.calls, [])
+
+    def test_tokens_that_do_not_spell_the_response_are_refused(self):
+        turn = recorded(reply("I will move east.", "east")[0])
+        turn["text"] = "Something else. " + turn["text"]
+        with self.assertRaisesRegex(ValueError, "do not spell its text"):
+            truncated_ids(turn, .5, False, encode)
 
     def test_a_cut_inside_a_template_opened_reasoning_block_closes_it(self):
-        turn = {"finish_reason": "stop", "reasoning_prefilled": True,
-                "text": "One two three four</think>\n\n" + call("east")[0]}
-        self.assertEqual(truncated_prefix(turn, .5, False).split("<tool_call>")[0], "One two\n</think>\n\n")
-        self.assertEqual(truncated_prefix(turn, 0, False).split("<tool_call>")[0], "\n</think>\n\n")
-        self.assertTrue(truncated_prefix(turn, 1, False).startswith("One two three four</think>"))
+        turn = recorded("One two three four</think>\n\n" + call("east")[0], prefilled=True)
+        self.assertEqual(spelled(truncated_ids(turn, .5, False, encode)).split("<tool_call>")[0],
+                         "One two\n</think>\n\n")
+        self.assertEqual(spelled(truncated_ids(turn, 0, False, encode)).split("<tool_call>")[0], "\n</think>\n\n")
+        self.assertTrue(spelled(truncated_ids(turn, 1, False, encode)).startswith("One two three four</think>"))
 
     def test_candidates_count_for_the_direction_they_begin(self):
         metric = {"top_candidates": [{"raw_text": "east", "probability": .5}, {"raw_text": "ea", "probability": .1},
@@ -230,7 +281,9 @@ class TruncationTests(unittest.TestCase):
 
     def test_a_response_recording_another_model_is_refused(self):
         single = Episode(MAZE, CONFIG | {"interruption_text": ""})
-        list(stream_episode(single, Manager([reply("I will move east.", "east")] * 2)))
+        generating = Manager([reply("I will move east.", "east")] * 2)
+        generating.generate = scored(generating.generate)
+        list(stream_episode(single, generating))
         single.turns[1]["model_id"] = "someone/else"
         manager = ReadingManager()
         with self.assertRaisesRegex(ValueError, "Load someone/else or test/model"):

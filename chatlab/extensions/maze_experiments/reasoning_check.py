@@ -141,7 +141,11 @@ def stated_direction(text, position=None):
 
 @dataclass
 class Response:
-    """One response that made a readable move call, and what the check read from it."""
+    """One response that made a readable move call, and what the check read from it.
+
+    ``run_id`` is the run's identity; ``run`` is its short label for display.
+    """
+    run_id: str
     run: str
     condition: str
     index: int
@@ -186,7 +190,7 @@ def read_responses(ep):
         reasoning, _, args = split
         position = turn.get("position_before")
         stated, evidence = stated_direction(reasoning, position)
-        row = Response(label, condition, index + 1, ep.agents[turn["agent"]]["name"] if team else "—",
+        row = Response(ep.run_id, label, condition, index + 1, ep.agents[turn["agent"]]["name"] if team else "—",
                        turn["round"] + 1 if team else index + 1, args["direction"], stated, evidence,
                        len(re.findall(r"\S+", reasoning)))
         if team:
@@ -241,7 +245,7 @@ def summary_rows(rows):
         read = [r for r in group if r.read_messages]
         unread = [r for r in group if r.read_messages == 0]
         table.append([
-            name, len({r.run for r in group}), len(group),
+            name, len({r.run_id for r in group}), len(group),
             share(sum(r.stated is not None for r in group), len(group)), agreement(group),
             agreement(read) if team else "—", agreement(unread) if team else "—",
             agreement([r for r in group if r.mentions_teammate]) if team else "—",
@@ -272,13 +276,17 @@ def csv_text(headers, rows):
     return out.getvalue()
 
 
-def truncated_prefix(turn, fraction, communicate):
-    """The response cut after ``fraction`` of its reasoning's words, running on to where its call names a direction.
+def truncation_plan(turn, fraction, communicate):
+    """Where the response is cut after ``fraction`` of its reasoning's words, and what runs on to its direction.
 
-    The call is the response's own, so every fraction asks for the direction
-    in the words the model used for it. A cut that leaves a reasoning block
-    open closes it, since a call inside reasoning is not a call. None for a
-    response with no readable call.
+    Returns ``(kept, inserted, call)`` in the characters of the response as
+    its history carries it: the response is kept up to ``kept``, then
+    ``inserted`` follows, then the response's own call over the ``call``
+    span, which ends where the call names its direction. So every fraction
+    asks for the direction in the words the model used for it. ``inserted``
+    is the only text the response never wrote: the break before the call,
+    and the close of a reasoning block the cut leaves open, since a call
+    inside reasoning is not a call. None for a response with no readable call.
     """
     split = split_response(turn, communicate)
     if split is None:
@@ -288,20 +296,67 @@ def truncated_prefix(turn, fraction, communicate):
     named = re.search(r'"direction"\s*:\s*"', text[start:])
     if named is None:
         return None
-    call = text[start:start + named.end()]
+    call = (start, start + named.end())
     if fraction >= 1:
-        prefix = text[:start + named.end()]
-    else:
-        words = list(re.finditer(r"\S+", reasoning))
-        kept = round(fraction * len(words))
-        cut = reasoning[:words[kept - 1].end()] if kept else "<think>" if turn.get("reasoning_prefilled") else ""
-        if "<think>" in cut and "</think>" not in cut:
-            cut += "\n</think>\n\n"
-        gap = reasoning[len(reasoning.rstrip()):] or "\n"
-        prefix = cut + (gap if cut and not cut.endswith("\n") else "") + call
-    # The template opened the reasoning block itself, so the response it
-    # continues starts inside it.
-    return prefix[len("<think>"):] if turn.get("reasoning_prefilled") else prefix
+        return start, "", call
+    words = list(re.finditer(r"\S+", reasoning))
+    kept = round(fraction * len(words))
+    cut = words[kept - 1].end() if kept else len("<think>") if turn.get("reasoning_prefilled") else 0
+    inserted = "\n</think>\n\n" if "<think>" in text[:cut] and "</think>" not in text[:cut] else ""
+    if cut and not inserted:
+        inserted = reasoning[len(reasoning.rstrip()):] or "\n"
+    return cut, inserted, call
+
+
+def recorded_spans(turn):
+    """The response's recorded tokens with the characters each covers, or None when they do not spell its text.
+
+    Counted in the response as its history carries it, so a reasoning block
+    the template opened is ahead of the first token. The stop token that
+    ends the response writes nothing into it.
+    """
+    metrics = turn.get("metrics") or []
+    if turn.get("finish_reason") == "stop":
+        metrics = metrics[:-1]
+    position = len("<think>") if turn.get("reasoning_prefilled") else 0
+    spans = []
+    for metric in metrics:
+        piece = metric.get("text")
+        if not isinstance(piece, str):
+            return None
+        spans.append((position, position + len(piece), metric["token_id"]))
+        position += len(piece)
+    if "".join(metric["text"] for metric in metrics) != turn["text"]:
+        return None
+    return spans
+
+
+def truncated_ids(turn, fraction, communicate, encode):
+    """The token IDs a cut feeds: the response's own recorded tokens, with only the inserted text encoded.
+
+    Every fraction keeps the tokens the model sampled, so a cut differs
+    from the whole response only by what it leaves out. Raises
+    ``ValueError`` when the recorded tokens do not spell the response or do
+    not break where the cut and the call do.
+    """
+    plan = truncation_plan(turn, fraction, communicate)
+    spans = recorded_spans(turn)
+    if plan is None or spans is None:
+        raise ValueError("The response's recorded tokens do not spell its text, so its cuts cannot be rebuilt "
+                         "from them.")
+    kept, inserted, (call_start, call_end) = plan
+    ends = [end for _, end, _ in spans]
+    starts = [start for start, _, _ in spans]
+    if call_start not in starts or call_end not in ends:
+        raise ValueError("The response's recorded tokens do not break where its call starts and names its "
+                         "direction, so the call cannot be replayed token for token.")
+    ids = [token for _, _, token in spans]
+    first, last = starts.index(call_start), ends.index(call_end) + 1
+    # The tokens wholly inside what is kept: a word ending partway through a
+    # token keeps the tokens before it. The whole response keeps every token
+    # before its call, which starts a token of its own.
+    count = sum(1 for end in ends if end <= kept)
+    return ids[:count] + (encode(inserted) if inserted else []) + ids[first:last]
 
 
 def direction_probabilities(metric, spell=None):
@@ -455,6 +510,10 @@ def truncation_test(ep, models, control, indices=None, runs=None):
                 raise ValueError(f"Response {row.index}'s recorded prompt is not the one {session.model_id} builds "
                                  "from its history now. The model's tokenizer or chat template has changed since "
                                  "the run, so its cuts would be read in a context the response never saw.")
+            try:
+                truncated_ids(turn, 1, communicate, session.encode)
+            except ValueError as exc:
+                raise ValueError(f"Response {row.index}: {exc}") from None
         logger.info("Truncation test on run %s: %s responses at %s cuts with %s", ep.run_id, len(chosen),
                     len(FRACTIONS), session.model_id)
         yield 0, len(chosen), results
@@ -485,7 +544,7 @@ def truncation_test(ep, models, control, indices=None, runs=None):
             for fraction in FRACTIONS:
                 if control.stop_requested:
                     return
-                ids = session.encode(truncated_prefix(turn, fraction, communicate))
+                ids = truncated_ids(turn, fraction, communicate, session.encode)
                 metrics = measured(ids)
                 if metrics is None:
                     return
