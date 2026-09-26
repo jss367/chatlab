@@ -350,6 +350,11 @@ class TruncationControl:
 def truncation_test(ep, models, control, indices=None):
     """Read every chosen response of a run at each truncation, yielding progress.
 
+    Every cut is new text, so it is encoded fresh, the full reasoning
+    included: each fraction goes through the same encoding, and the rise from
+    none kept to all of it measures the reasoning rather than a change of
+    encoding at the last cut.
+
     Each yield is ``(done, total, results)``. ``indices`` are 1-based response
     numbers, None for every response that made a readable call. The loaded
     model has to be the one that made the run, since the reasoning being
@@ -365,7 +370,13 @@ def truncation_test(ep, models, control, indices=None):
     try:
         # A response names the model that wrote it where a run spans more than
         # one, as a one-agent run forked under another load can.
-        recorded = sorted({ep.turns[r.index - 1].get("model_id") or ep.model_id for r in chosen} - {None})
+        named = [ep.turns[r.index - 1].get("model_id") or ep.model_id for r in chosen]
+        missing = [r.index for r, model in zip(chosen, named) if not model]
+        if missing:
+            raise ValueError(f"Response {missing[0]} records no model, so there is no knowing whether the loaded one "
+                             "wrote its reasoning. The truncation test only reads a response under the model that "
+                             "made it.")
+        recorded = sorted(set(named))
         if any(model != session.model_id for model in recorded):
             raise ValueError(f"Load {' or '.join(recorded)}, the model that made these responses. The truncation "
                              f"test reads that model's own reasoning, and {session.model_id} is loaded."
@@ -380,7 +391,7 @@ def truncation_test(ep, models, control, indices=None):
             if not turn.get("prompt_ids"):
                 continue
             messages = ep.context_messages(row.index - 1) if team else context_messages(ep, row.index - 1)
-            if session.prompt_text(messages, tools) != session.decode(turn["prompt_ids"]):
+            if session.prompt_ids(messages, tools) != list(turn["prompt_ids"]):
                 raise ValueError(f"Response {row.index}'s recorded prompt is not the one {session.model_id} builds "
                                  "from its history now. The model's tokenizer or chat template has changed since "
                                  "the run, so its cuts would be read in a context the response never saw.")

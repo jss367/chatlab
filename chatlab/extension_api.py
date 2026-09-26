@@ -184,9 +184,18 @@ class GenerationSession:
         Built on the path generation takes, so a caller can compare a recorded
         prompt with the one these messages would be fed as.
         """
+        return self.decode(self.prompt_ids(messages, tools))
+
+    def prompt_ids(self, messages, tools=None):
+        """The token IDs these messages become under this pinned model's template.
+
+        What :meth:`prompt_text` decodes. Compare these rather than the text
+        when a recorded prompt has to be the one generation would feed: a
+        tokenizer can split the same text into different tokens.
+        """
         self._check()
         ids, _ = self._manager._prompt_token_ids(messages, tools)
-        return self.decode(ids)
+        return [int(value) for value in ids]
 
     @property
     def stop_token_ids(self):

@@ -178,6 +178,24 @@ class TruncationTests(unittest.TestCase):
         frames = list(truncation_test(single, manager, TruncationControl(), {1}))
         self.assertEqual(frames[-1][:2], (1, 1))
 
+    def test_a_response_recording_no_model_is_refused(self):
+        ep = team_run(TEAM_REPLIES)
+        ep.model_id = None
+        for turn in ep.turns:
+            turn.pop("model_id", None)
+        manager = ReadingManager()
+        with self.assertRaisesRegex(ValueError, "Response 1 records no model"):
+            list(truncation_test(ep, manager, TruncationControl()))
+        self.assertEqual(manager.calls, [])
+
+    def test_a_prompt_recorded_in_other_token_ids_is_refused(self):
+        ep = team_run(TEAM_REPLIES)
+        manager = ReadingManager()
+        # The token IDs are compared, not the text they decode to.
+        ep.turns[0]["prompt_ids"] = ep.turns[0]["prompt_ids"][:-1] + [ep.turns[0]["prompt_ids"][-1] + 256]
+        with self.assertRaisesRegex(ValueError, "Response 1's recorded prompt"):
+            list(truncation_test(ep, manager, TruncationControl(), {1}))
+
     def test_a_prompt_the_loaded_template_no_longer_builds_is_refused(self):
         ep = team_run(TEAM_REPLIES)
         manager = ReadingManager()
