@@ -14,9 +14,8 @@ from chatlab.extensions.maze_experiments.reasoning_check import (
     FRACTIONS, TruncationControl, direction_probabilities, load_run, read_responses, response_rows, stated_direction,
     recorded_spans, summary_rows, truncated_ids, truncation_summary, truncation_test)
 from chatlab.extensions.maze_experiments.reasoning_page import parse_responses
-from chatlab.extensions.maze_experiments.runner import Episode, stream_episode
+from chatlab.extensions.maze_experiments.runner import Episode, context_messages, stream_episode
 from chatlab.extensions.maze_experiments.maze import Maze
-from chatlab.extensions.maze_experiments.team import TeamEpisode, stream_team
 from maze_support import CONFIG, MAZE, Manager, SteeringManager, VECTOR, call, scored
 from ui_support import handlers_by_name
 
@@ -27,11 +26,11 @@ def reply(reasoning, direction, message=None):
 
 
 def team_run(replies, manager=Manager, **config):
-    ep = TeamEpisode(MAZE, dict(dict(agents=2, communication=True, team_goal="any"), **config))
+    ep = Episode(MAZE, dict(dict(agents=2, communication=True, team_goal="any"), **config))
     generating = manager(replies)
     # Metrics that spell each token, as the runtime records them.
     generating.generate = scored(generating.generate)
-    list(stream_team(ep, generating))
+    list(stream_episode(ep, generating))
     return ep
 
 
@@ -122,8 +121,8 @@ class StatedAgainstTakenTests(unittest.TestCase):
                    (broken, list(broken.encode()) + [0]), move("Go north.", "north"),
                    move("Go north.", "north"), move("Go north.", "north"),
                    move("Go west.", "west"), move("Go west.", "west")]
-        ep = TeamEpisode(maze, dict(agents=2, communication=True, team_goal="any", round_limit=4))
-        list(stream_team(ep, Manager(replies)))
+        ep = Episode(maze, dict(agents=2, communication=True, team_goal="any", round_limit=4))
+        list(stream_episode(ep, Manager(replies)))
         self.assertEqual(ep.turns[2]["event"]["error"], "invalid_json")
         first = read_responses(ep)[0]
         self.assertEqual(first.message_direction, "west")
@@ -276,7 +275,7 @@ class TruncationTests(unittest.TestCase):
         self.assertEqual(first[0], .3)
         self.assertEqual(first[-1], .9)
         # Every cut is read in the context the response was given.
-        self.assertEqual(manager.calls[0][0], ep.context_messages(0))
+        self.assertEqual(manager.calls[0][0], context_messages(ep, 0))
         self.assertEqual(manager.calls[0][1]["max_new_tokens"], 1)
         summary = truncation_summary(results)
         self.assertEqual(summary[0][:2], ["Team of 2 · messages on", 2])

@@ -11,9 +11,9 @@ import gradio as gr
 from chatlab.extension_api import SteeringError, TokenInspector
 from chatlab.extensions.maze_experiments.maze import Maze, generate, unavoidable_cells
 from chatlab.extensions.maze_experiments.page import build_page
-from chatlab.extensions.maze_experiments.team import TeamEpisode, from_payload, stream_team
+from chatlab.extensions.maze_experiments.runner import from_payload, stream_episode
 from chatlab.extensions.maze_experiments.team_page import response_view, team_board, team_status, team_timeline
-from maze_support import Manager, scored
+from maze_support import Manager, scored, team_episode
 from maze_support import SteeringManager, VECTOR
 from maze_support import call
 from ui_support import listeners_by_name
@@ -37,10 +37,10 @@ def saved(ep):
 
 
 def run(walk=WALK, **changes):
-    ep = TeamEpisode(CORRIDOR, CONFIG | changes)
+    ep = team_episode(CORRIDOR, CONFIG | changes)
     manager = SteeringManager(replies(walk))
     manager.generate = scored(manager.generate)
-    list(stream_team(ep, manager))
+    list(stream_episode(ep, manager))
     return ep, manager
 
 
@@ -78,12 +78,12 @@ class TeamSteeringTests(unittest.TestCase):
         from_payload(saved(ep))
 
     def test_pause_resume_preserves_each_agents_remaining_duration(self):
-        ep = TeamEpisode(CORRIDOR, CONFIG)
+        ep = team_episode(CORRIDOR, CONFIG)
         manager = SteeringManager(replies(WALK))
-        list(stream_team(ep, manager, single_step=True))
-        list(stream_team(ep, manager, single_step=True))
+        list(stream_episode(ep, manager, single_step=True))
+        list(stream_episode(ep, manager, single_step=True))
         self.assertEqual([t["steered"] for t in ep.turns], [False, False, True, False])
-        list(stream_team(ep, manager))
+        list(stream_episode(ep, manager))
         expected, _ = run()
         self.assertEqual([t["steered"] for t in ep.turns], [t["steered"] for t in expected.turns])
         from_payload(saved(ep))
@@ -101,19 +101,19 @@ class TeamSteeringTests(unittest.TestCase):
                 from_payload(saved(ep))
 
     def test_incompatible_vector_refused_before_any_response_and_session_released(self):
-        ep = TeamEpisode(CORRIDOR, CONFIG)
+        ep = team_episode(CORRIDOR, CONFIG)
         manager = SteeringManager([], refuse="wrong model")
         with self.assertRaisesRegex(SteeringError, "wrong model"):
-            list(stream_team(ep, manager))
+            list(stream_episode(ep, manager))
         self.assertEqual(ep.phase, "ready")
         self.assertEqual(ep.turns, [])
         self.assertFalse(manager.busy)
         self.assertFalse(ep.busy)
 
     def test_stop_before_generation_does_not_mark_the_opening_frame_steered(self):
-        ep = TeamEpisode(CORRIDOR, CONFIG | dict(steer_when={"moves": 0}))
+        ep = team_episode(CORRIDOR, CONFIG | dict(steer_when={"moves": 0}))
         manager = SteeringManager([])
-        for frame in stream_team(ep, manager):
+        for frame in stream_episode(ep, manager):
             if frame.turns:
                 ep.request_stop()
         self.assertEqual(manager.calls, [])
@@ -123,9 +123,9 @@ class TeamSteeringTests(unittest.TestCase):
     def test_interrupted_steered_round_keeps_provenance_without_applying_moves(self):
         for ending in ("stop", "failure", "closed"):
             with self.subTest(ending):
-                ep = TeamEpisode(CORRIDOR, CONFIG | dict(steer_when={"moves": 0}))
+                ep = team_episode(CORRIDOR, CONFIG | dict(steer_when={"moves": 0}))
                 manager = SteeringManager(replies(["east"]))
-                stream = stream_team(ep, manager)
+                stream = stream_episode(ep, manager)
                 for frame in stream:
                     if len(frame.turns) == 2:
                         if ending == "stop":
@@ -156,8 +156,8 @@ class TeamSteeringTests(unittest.TestCase):
                 from_payload(forged)
 
     def test_unsteered_baseline_preserves_checkpoint_and_has_no_vector_marks(self):
-        ep = TeamEpisode(CORRIDOR, dict(team_goal="all", required_checkpoint=[0, 1]))
-        list(stream_team(ep, Manager(replies(["east"] * 8))))
+        ep = team_episode(CORRIDOR, dict(team_goal="all", required_checkpoint=[0, 1]))
+        list(stream_episode(ep, Manager(replies(["east"] * 8))))
         self.assertEqual(ep.phase, "arrived")
         self.assertTrue(all("steered" not in t for t in ep.turns))
         from_payload(saved(ep))
@@ -174,9 +174,9 @@ class TeamSteeringTests(unittest.TestCase):
                  dict(required_checkpoint=[0, 0]), dict(required_checkpoint=[0, 4])]
         for changes in cases:
             with self.subTest(changes), self.assertRaises(ValueError):
-                TeamEpisode(CORRIDOR, CONFIG | changes)
+                team_episode(CORRIDOR, CONFIG | changes)
         with self.assertRaisesRegex(ValueError, "every route"):
-            TeamEpisode(ROOM, CONFIG)
+            team_episode(ROOM, CONFIG)
 
 
 class RequiredCheckpointTests(unittest.TestCase):
@@ -193,7 +193,7 @@ class RequiredCheckpointTests(unittest.TestCase):
             self.assertTrue(cells)
             self.assertNotIn(maze.start, cells)
             self.assertNotIn(maze.goal, cells)
-            TeamEpisode(maze, dict(required_checkpoint=list(cells[0])))
+            team_episode(maze, dict(required_checkpoint=list(cells[0])))
         with self.assertRaisesRegex(ValueError, "at least two"):
             generate(3, 1, 1, require_checkpoint=True)
 
@@ -215,7 +215,7 @@ class TeamSteeringPageTests(unittest.TestCase):
                 values = (2, True, "all", 5, 7, 8, .7, "coordinates", "", "Be brief.", "Deliver the solution.",
                           .7, 1, 200, 4000, 24)
                 steering = [True, VECTOR, 6., 2, "cell", "", 3, 2, "1"]
-                ep = TeamEpisode(CORRIDOR, {})
+                ep = team_episode(CORRIDOR, {})
                 prepared = prepare.fn(ep, False, *values, *steering)
                 self.assertEqual(len(prepared), len(prepare.outputs))
                 new = prepared[0]
