@@ -273,7 +273,9 @@ class Episode:
         self.lock = threading.RLock()
         self.config = copy.deepcopy(self.config)
         # A run of one agent names no count, as every run did before teams.
-        if self.config.get("agents") == 1:
+        # Only the integer 1 is that: True and 1.0 compare equal to it, and
+        # are left for the team's own check to refuse.
+        if type(self.config.get("agents")) is int and self.config["agents"] == 1:
             del self.config["agents"]
         team = "agents" in self.config
         if team:
@@ -392,7 +394,7 @@ class Episode:
         its own, so the map the simulator moves on is the same one a replay of
         this run reconstructs and neither can drift from the other.
         """
-        return maze_at_turn(self.maze, self.config.get("map_updates", ()), None)
+        return maze_at_turn(self.maze, self.config.get("map_updates", ()), None, self.boundary_key)
 
     @property
     def map_changes(self):
@@ -655,7 +657,10 @@ class Episode:
             # simulator before this lands, so only an idle run is asked.
             if not self.busy:
                 render_insert(agent["messages"], insert)
-            agent["insert_next"], self.manual_intervention = insert, True
+            # Named with the boundary it was queued for, so one queued while a
+            # team round is generating waits for the next round rather than
+            # reaching an agent this round asks later than its teammates.
+            agent["insert_next"], self.manual_intervention = dict(insert, for_boundary=boundary), True
 
 
 def describe_insert(insert):
@@ -688,7 +693,8 @@ def apply_insert(episode, manager=None, index=0):
     """
     with episode.lock:
         agent = episode.agents[index]
-        if not agent["insert_next"]:
+        now = episode.rounds if episode.team else len(episode.turns)
+        if not agent["insert_next"] or agent["insert_next"]["for_boundary"] > now:
             return None
         before = agent["messages"]
         queued, agent["insert_next"] = agent["insert_next"], None
@@ -939,7 +945,7 @@ def interrupted_prefix(episode, manager, index=0):
     or on the one it was queued for.
     """
     agent = episode.agents[index]
-    if agent["interrupted"] or not episode.config.get("interruption_text"):
+    if agent["interrupted"] or not episode.config.get("interruption_text", "").strip():
         return []
     if index not in targeted(episode.config, "interrupt_agents", len(episode.agents)):
         return []
@@ -1335,7 +1341,12 @@ def fork_team(episode, turn_index):
                for insert, _ in kept_inserts(episode, turn_index)}
     result = Episode(episode.maze, config)
     kept = copy.deepcopy(episode.turns[:turn_index])
-    result.open_round = replay_rounds(result, kept, edited["round"], updates, carried, True, open_round=True)
+    queued = {index for index, agent in enumerate(episode.agents) if agent["interrupt_next"]}
+    result.open_round = replay_rounds(result, kept, edited["round"], updates, carried, True, queued, open_round=True)
+    # Carried as the parent had them, so an interruption asked for early
+    # still reads as asked for in the fork's own file.
+    for index in queued:
+        result.agents[index]["interrupt_next"] = True
     own = carried.pop((edited["agent"], edited["round"]), None)
     if own is not None:
         result.edit_insert = (edited["agent"], result.agents[edited["agent"]]["messages"])
@@ -1489,7 +1500,8 @@ def settle_limits(episode, spent):
     """Take out of the run every agent a limit has stopped, once its round has landed.
 
     An agent that was interrupted and has not moved since stops when its
-    recovery window closes. Otherwise it stops when it has spent its
+    recovery window closes, a response the window cut off included, since
+    the window is what cut it. Otherwise it stops when it has spent its
     sampled-token limit, including one whose response was cut off at the last
     of it, since the limit is what stopped that response, or when it has made
     as many calls as the run allows. A team saved under one limit for the
@@ -1501,7 +1513,7 @@ def settle_limits(episode, spent):
         if agent["status"] not in ("active", "cut_off"):
             continue
         waiting = agent["interrupted"] and agent["resumed"] is None
-        if agent["status"] == "active" and waiting and (
+        if waiting and (
                 spent[index] - agent["intervention_tokens"] >= config["recovery_tokens"]
                 or episode.agent_attempts(index) - agent["intervention_attempts"] >= config["recovery_attempts"]):
             agent["status"] = "not_recovered"
@@ -2245,7 +2257,7 @@ def land_saved_insert(episode, record, saved):
                          f"placed. {exc}") from None
 
 
-def read_interruption(episode, saved, index, manual):
+def read_interruption(episode, saved, index, manual, asked=()):
     """Check the interruption a saved team response records, or records the absence of, and land it.
 
     Returns whether the response was planned to open with it, which narrows its
@@ -2254,8 +2266,10 @@ def read_interruption(episode, saved, index, manual):
     be checked against: it is the one the response planned, its tokens open the
     response, it lands on an agent the run interrupts that has not been
     interrupted yet, and it lands on the first response after that agent's
-    trigger unless the run records a reader asking for it sooner. A planned
-    prefix the model never read belongs to a response stopped before it began.
+    trigger unless the run records a reader asking for it sooner, for that
+    agent: ``asked`` holds the agents whose queued flag the file records. A
+    planned prefix the model never read belongs to a response stopped before
+    it began.
 
     A response a token edit regenerated plans a longer prefix: the tokens it
     kept from the response it replaced and the replacement, of which only an
@@ -2289,7 +2303,7 @@ def read_interruption(episode, saved, index, manual):
     if not interruption and due:
         raise ValueError(f"{agent['name']} was due its interruption at a response that does not open with it.")
     if interruption:
-        if not eligible or (not due and not manual):
+        if not eligible or (not due and saved["agent"] not in asked):
             raise ValueError(f"A response of {agent['name']} opens with an interruption the run could not have given it there.")
         if config.get("prefix_tokens") and len(interruption) > config["prefix_tokens"]:
             raise ValueError("A response's interruption is longer than the run's supplied token count.")
@@ -2303,7 +2317,7 @@ def read_interruption(episode, saved, index, manual):
     return bool(interruption)
 
 
-def replay_rounds(result, turns, rounds, updates, by_answer, manual, *, open_round=False):
+def replay_rounds(result, turns, rounds, updates, by_answer, manual, queued=(), *, open_round=False):
     """Read saved team responses into ``result`` round by round, as the live run read them.
 
     Each closure in ``updates`` lands before the round it names, and each
@@ -2311,16 +2325,21 @@ def replay_rounds(result, turns, rounds, updates, by_answer, manual, *, open_rou
     they land so the caller can refuse any left over. The first ``rounds``
     rounds resolve. What the round after them holds is discarded, as a
     stopped round's responses are, unless ``open_round`` keeps it open for a
-    fork to finish, and then its actions and caps come back.
+    fork to finish, and then its actions and caps come back. ``queued`` holds
+    the agents a reader asked to interrupt ahead of their trigger.
     """
     by_round = {}
     for turn in turns:
         by_round.setdefault(turn["round"], []).append(turn)
     for round_index in range(rounds + 1):
-        while updates and isinstance(updates[0], dict) and updates[0].get("before_round") == round_index:
+        if updates and isinstance(updates[0], dict) and updates[0].get("before_round") == round_index:
             if result.phase in TERMINAL:
                 raise ValueError("The run records a map change after it had ended.")
             land_saved_closure(result, updates.pop(0), round_index)
+            # A live run queues one closure at a time and lands it before a round.
+            if updates and isinstance(updates[0], dict) and updates[0].get("before_round") == round_index:
+                raise ValueError(f"A team run records two map changes before round {round_index + 1}. One lands "
+                                 "before a round.")
         if round_index not in by_round:
             continue
         if result.phase in TERMINAL:
@@ -2335,7 +2354,7 @@ def replay_rounds(result, turns, rounds, updates, by_answer, manual, *, open_rou
         caps = result.response_caps(moving) or {}
         actions = []
         for saved in by_round[round_index]:
-            interrupting = read_interruption(result, saved, len(result.turns), manual)
+            interrupting = read_interruption(result, saved, len(result.turns), manual, queued)
             if (saved["agent"], round_index) in by_answer:
                 land_saved_insert(result, by_answer.pop((saved["agent"], round_index)), saved)
             limit = response_limit(result, saved["agent"], caps.get(saved["agent"], 0), interrupting)
@@ -2426,6 +2445,20 @@ def team_from_payload(data, read_prompt=None):
     if (updates or drops or pending or inserts) and not manual:
         raise ValueError("A run carrying a closure or an inserted message cannot report that nobody intervened in it.")
     result = Episode(load_maze(data["maze"]) if changing else Maze.from_dict(data["maze"]), config)
+    # A queued interruption that had not landed leaves no other trace, and
+    # one that has landed stays queued, so the flag is read from the file,
+    # once the run says a reader asked for one. It is what lets an agent be
+    # interrupted ahead of its own trigger, so it is read before the rounds.
+    saved_agents, queued_agents = data.get("agents"), set()
+    if not legacy:
+        if not isinstance(saved_agents, list) or len(saved_agents) != len(result.agents):
+            raise ValueError("The run's agents do not match what its responses produce.")
+        for index, recorded in enumerate(saved_agents):
+            queued = recorded.get("interrupt_next") if isinstance(recorded, dict) else None
+            if type(queued) is not bool or (queued and not manual):
+                raise ValueError("An agent's queued interruption is not one anyone asked for.")
+            if queued:
+                queued_agents.add(index)
     turns, rounds = data.get("turns"), data.get("rounds")
     if type(rounds) is not int or not 0 <= rounds <= result.config["round_limit"]:
         raise ValueError("The run's round count must be within its round limit.")
@@ -2455,7 +2488,7 @@ def team_from_payload(data, read_prompt=None):
     if -1 in places or places != sorted(places):
         raise ValueError("A team run's inserted messages are out of order, or name a response it never recorded.")
     updates = list(updates)
-    replay_rounds(result, turns, rounds, updates, by_answer, manual)
+    replay_rounds(result, turns, rounds, updates, by_answer, manual, queued_agents)
     if updates:
         raise ValueError("A team run records a map change at a round it never reached, or out of order.")
     if by_answer:
@@ -2495,16 +2528,8 @@ def team_from_payload(data, read_prompt=None):
         result.phase = phase
         if isinstance(data.get("detail"), str):
             result.detail = data["detail"]
-    # A queued interruption that had not landed leaves no other trace, and
-    # one that has landed stays queued, so the flag is read from the file
-    # once the run says a reader asked for one.
-    saved_agents = data.get("agents")
-    if not legacy and isinstance(saved_agents, list) and len(saved_agents) == len(result.agents):
-        for agent, recorded in zip(result.agents, saved_agents):
-            queued = recorded.get("interrupt_next") if isinstance(recorded, dict) else None
-            if type(queued) is not bool or (queued and not manual):
-                raise ValueError("An agent's queued interruption is not one anyone asked for.")
-            agent["interrupt_next"] = queued
+    for index in queued_agents:
+        result.agents[index]["interrupt_next"] = True
     kept = ("name", "position", "status", "messages") if legacy else None
     rebuilt = [{key: value for key, value in agent.items() if (kept is None or key in kept) and key != "insert_next"}
                for agent in json.loads(json.dumps(result.agents))]
