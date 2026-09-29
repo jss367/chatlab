@@ -13,7 +13,7 @@ from chatlab.extensions.maze_experiments.maze import Maze, generate, unavoidable
 from chatlab.extensions.maze_experiments.page import build_page
 from chatlab.extensions.maze_experiments.runner import from_payload, stream_episode
 from chatlab.extensions.maze_experiments.team_views import response_line, team_board, team_status, team_timeline
-from maze_support import Manager, scenario, scored, team_episode
+from maze_support import Manager, output_index, scenario, scored, team_episode
 from maze_support import SteeringManager, VECTOR
 from maze_support import call
 from ui_support import listeners_by_name
@@ -228,6 +228,8 @@ class TeamSteeringPageTests(unittest.TestCase):
                 load = callbacks["load"]
                 loaded = load.fn(str(new.export()), ep, False, "s", None)
                 self.assertEqual(len(loaded), len(load.outputs))
+                # Steering at the generated checkpoint loads as a blank cell, which is how it was set up.
+                self.assertEqual(loaded[output_index(load, "maze-steer-cell")], "")
                 # Fill controls exactly as the upload does, then create the same condition again.
                 filled = {block._id: value.get("value") if isinstance(value, dict) and value.get("__type__") == "update"
                           else value for block, value in zip(load.outputs, loaded)}

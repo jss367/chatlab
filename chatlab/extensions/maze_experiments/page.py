@@ -287,9 +287,15 @@ def checkpoint_values(ep):
     vector, when = config.get("steering"), config.get("steer_when") or {}
     off = vector is None or not vector.get("enabled", True)
     mode = "off" if off else "cell" if "cell" in when else "moves"
+    # A team steering at its generated checkpoint was set up with the cell
+    # left blank, which is what steers at whichever checkpoint a new maze
+    # generates, so the box is left blank again rather than pinned to this one.
+    cell = when.get("cell")
+    if cell is not None and cell == config.get("required_checkpoint"):
+        cell = None
     return (cell_text(config.get("waypoint")), vector,
             vector["strength"] if vector else 1.0, vector["layer"] if vector else 0,
-            mode, cell_text(when.get("cell")), when.get("moves", 3), config.get("steer_responses", 1),
+            mode, cell_text(cell), when.get("moves", 3), config.get("steer_responses", 1),
             vector_note(vector))
 
 

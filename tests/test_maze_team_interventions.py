@@ -5,7 +5,7 @@ import unittest
 
 from chatlab.extensions.maze_experiments.maze import Maze
 from chatlab.extensions.maze_experiments.runner import Episode, context_messages, from_payload, stream_episode
-from chatlab.extensions.maze_experiments.team_views import team_board
+from chatlab.extensions.maze_experiments.team_views import team_board, team_status
 from maze_support import Manager, call
 
 CORRIDOR = Maze((".....", "#####", "#####", "#####", "#####"), (0, 0), (0, 4))
@@ -94,6 +94,9 @@ class TeamInterruptionTests(unittest.TestCase):
         self.assertEqual(ep.turns[3]["text"][:2], "Di")
         self.assertFalse(ep.manual_intervention)
         self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+        # Run details reports only the agents the interruption reaches.
+        self.assertIn("agent-2 interrupted, moved again after 2 sampled tokens", team_status(ep))
+        self.assertNotIn("agent-1 not interrupted", team_status(ep))
 
         def altered(change):
             copy = saved(ep)

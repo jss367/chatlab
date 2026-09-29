@@ -185,11 +185,17 @@ def team_status(ep):
 
 
 def interruption_status(ep):
-    """How each agent the run interrupts has done since, for a team given an interruption."""
+    """How each agent the run interrupts has done since, for a team given an interruption.
+
+    Only the agents it reaches are listed: the rest never get it, so a line
+    saying they have not been interrupted yet would describe a condition the
+    run was not under.
+    """
     if not ep.config.get("interruption_text", "").strip():
         return ""
     lines = []
-    for agent in ep.agents:
+    reached = ep.config.get("interrupt_agents") or range(len(ep.agents))
+    for agent in (ep.agents[index] for index in reached):
         if not agent["interrupted"]:
             state = "not interrupted" if ep.phase in TERMINAL else "not interrupted yet"
         elif agent["resumed"] is None:
