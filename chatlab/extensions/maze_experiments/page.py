@@ -1607,7 +1607,7 @@ def _build_page(context):
             if view_id != selected["view_id"] or view_id[:2] != (ep.run_id, id(ep)):
                 raise ValueError(STALE_TOKEN)
             turn_index = view_id[2]
-            token_index = ep.turns[turn_index]["forced_prefix_tokens"] + index
+            token_index = ep.turns[turn_index].get("forced_prefix_tokens", 0) + index
             with context.models.open_session() as manager:
                 new = fork_token_edit(ep, turn_index, token_index, text_value, manager,
                                       candidate_id=None if candidate_value == "text" else int(candidate_value))
