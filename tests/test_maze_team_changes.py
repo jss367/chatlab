@@ -188,6 +188,8 @@ class TeamInsertTests(unittest.TestCase):
             "other words": (lambda c: c["config"]["context_inserts"][0].update(text="The exit is west."),
                             "agents do not match"),
             "an unread message": (lambda c: c["turns"][3].update(prompt_ids=[]), "records no prompt"),
+            "a later response that read it unrecorded": (lambda c: c["turns"][5].update(prompt_ids=[]),
+                                                          "records no prompt"),
             "a response never asked for": (lambda c: c["config"]["context_inserts"][0].update(before_round=9),
                                            "never recorded"),
             "two to one response": (lambda c: c["config"]["context_inserts"].append(
