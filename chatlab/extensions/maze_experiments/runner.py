@@ -2289,8 +2289,6 @@ def team_from_payload(data, read_prompt=None):
                         or not result.config.get("interruption_text", "").strip()):
                     raise ValueError("An agent's queued interruption is not one this run could request.")
                 queued_agents.add(index)
-        if manual and not queued_agents:
-            raise ValueError("A manual interruption must record the agent whose interruption was requested.")
     turns, rounds = data.get("turns"), data.get("rounds")
     if type(rounds) is not int or not 0 <= rounds <= result.config["round_limit"]:
         raise ValueError("The run's round count must be within its round limit.")
