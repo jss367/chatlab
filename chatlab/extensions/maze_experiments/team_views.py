@@ -53,10 +53,11 @@ def positions_after(ep, index):
 def team_board(ep, index=None, reveal=False, map_round=None):
     """The board after round ``index``, drawn under the map that round was played on.
 
-    ``map_round`` draws the map of another round instead: a round that never
-    resolved, whose agents still stand where the round before left them, was
-    played on the map as it stood when it began, closures landed at its start
-    included.
+    ``map_round`` draws another round's map and interventions instead: a
+    round that never resolved, whose agents still stand where the round
+    before left them, was played on the map as it stood when it began,
+    closures landed at its start included, and its responses were
+    interrupted where they were.
     """
     index = ep.rounds - 1 if index is None else index
     map_round = index if map_round is None else map_round
@@ -113,7 +114,7 @@ def team_board(ep, index=None, reveal=False, map_round=None):
     # Where each agent was interrupted, from the round it happened in.
     for agent in ep.agents:
         turn = agent.get("intervention_turn")
-        if agent.get("interrupted") and turn is not None and ep.turns[turn]["round"] <= index:
+        if agent.get("interrupted") and turn is not None and ep.turns[turn]["round"] <= map_round:
             x, y = center(ep.turns[turn]["position_before"])
             parts.append(f'<circle cx="{x}" cy="{y}" r="23" stroke="#f59e0b" stroke-width="3" fill="none">'
                          f'<title>{html.escape(agent["name"])} interrupted</title></circle>')

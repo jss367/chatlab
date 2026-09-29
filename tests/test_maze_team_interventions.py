@@ -5,6 +5,7 @@ import unittest
 
 from chatlab.extensions.maze_experiments.maze import Maze
 from chatlab.extensions.maze_experiments.runner import Episode, context_messages, from_payload, stream_episode
+from chatlab.extensions.maze_experiments.team_views import team_board
 from maze_support import Manager, call
 
 CORRIDOR = Maze((".....", "#####", "#####", "#####", "#####"), (0, 0), (0, 4))
@@ -118,6 +119,18 @@ class TeamInterruptionTests(unittest.TestCase):
         for name, (change, message) in refused.items():
             with self.subTest(name), self.assertRaisesRegex(ValueError, message):
                 from_payload(altered(change))
+
+    def test_an_interruption_in_a_round_that_never_resolved_is_still_drawn(self):
+        ep = team(interruption_text="Distracted", interrupt_after=1, prefix_tokens=2, interrupt_agents=[1])
+        list(stream_episode(ep, Manager([step("east"), step("east")]), single_step=True))
+        stream = stream_episode(ep, Manager([step("east"), step("east")]))
+        for _ in stream:
+            if ep.agents[1]["interrupted"] and ep.turns[-1]["finish_reason"] == "stop":
+                ep.request_stop()
+        self.assertEqual((ep.phase, ep.rounds, ep.agents[1]["intervention_turn"]), ("stopped", 1, 3))
+        ring = 'stroke="#f59e0b"'
+        self.assertNotIn(ring, team_board(ep, 0))
+        self.assertIn(ring, team_board(ep, 0, map_round=1))
 
     def test_an_agent_that_does_not_come_back_in_its_window_stops_and_its_teammate_carries_on(self):
         blocked = step("north")

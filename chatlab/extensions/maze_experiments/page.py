@@ -1245,9 +1245,11 @@ def _build_page(context):
             # Refused here rather than in the episode, which reads back runs
             # saved before anyone checked: a trigger the supplied moves walk
             # past is one no response ever stands on, so the run would read as
-            # steered while nothing steered it.
+            # steered while nothing steered it. Moves that end on it leave the
+            # first response standing there, which steers it.
             cell = (new.config.get("steer_when") or {}).get("cell")
-            if cell is not None and any(e["source"] == "supplied" and list(e["after"]) == list(cell) for e in new.events):
+            walked = any(e["source"] == "supplied" and list(e["after"]) == list(cell or ()) for e in new.events)
+            if cell is not None and walked and list(new.agents[0]["position"]) != list(cell):
                 raise ValueError("The supplied starting moves pass the steering cell, so steering there would never "
                                  "start. Supply fewer moves, or steer at another cell.")
         except (ValueError, TypeError) as exc:

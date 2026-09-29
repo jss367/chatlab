@@ -243,6 +243,10 @@ class TeamSteeringPageTests(unittest.TestCase):
                 # checkpoint, so steering there would never start.
                 with self.assertRaisesRegex(gr.Error, "pass the steering cell"):
                     prepare.fn(ep, False, "s", None, *scenario(**team, steer="cell", supplied=7))
+                # Moves that stop on it leave every agent's first response standing there, which steers it.
+                reach = new.maze.route().index(tuple(new.config["required_checkpoint"]))
+                ending = prepare.fn(ep, False, "s", None, *scenario(**team, steer="cell", supplied=reach))[0]
+                self.assertTrue(all(ending.steers_next(i) for i in range(len(ending.agents))))
             finally:
                 demo.close()
 
