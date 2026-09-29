@@ -150,7 +150,7 @@ def new_agent(name, position, messages):
     """One agent as a run starts it: moving, not yet interrupted, with the history its setup wrote."""
     return dict(name=name, position=tuple(position), status="active", messages=messages, interrupted=False,
                 intervention_turn=None, intervention_tokens=0, intervention_attempts=0, resumed=None,
-                first_move_progress=None, latency=None, interrupt_next=False)
+                first_move_progress=None, latency=None, interrupt_next=False, insert_next=None)
 
 
 class AgentField:
@@ -207,9 +207,6 @@ class Episode:
     # that could not happen by the time its response came round.
     close_next: tuple = ()
     dropped_closures: list = field(default_factory=list)
-    # A message queued to go into the context before the next response. Not
-    # written to the run: one still waiting when the episode ends is dropped.
-    insert_next: dict | None = None
     pause_requested: bool = False
     stop_requested: bool = False
     # Why the last write of this run failed, or None once it is on disk. Kept
@@ -226,6 +223,11 @@ class Episode:
     viewing: int = -1
     # The team response selected in the round on screen.
     selected_turn: int | None = None
+    # Whether a team round has begun, which it has from the moment its caps
+    # are set, before its first response is appended: every agent in it
+    # answers the state it began with, so whatever is queued then waits for
+    # the next round. Not written to the run.
+    round_open: bool = False
     # Which playback run owns the view. Starting one supersedes the last, so
     # two runs in the same session cannot repaint each other's frames.
     playback_token: int = 0
@@ -242,6 +244,10 @@ class Episode:
     first_move_progress = AgentField()
     latency = AgentField()
     interrupt_next = AgentField()
+    # A message queued to go into the context before the agent's next
+    # response. Not written to the run: one still waiting when the episode
+    # ends is dropped.
+    insert_next = AgentField()
 
     def __deepcopy__(self, memo):
         # Gradio copies the initial State once per browser/API session. Each
@@ -384,7 +390,7 @@ class Episode:
         its own, so the map the simulator moves on is the same one a replay of
         this run reconstructs and neither can drift from the other.
         """
-        return maze_at_turn(self.maze, self.config.get("map_updates", ()), None)
+        return maze_at_turn(self.maze, self.config.get("map_updates", ()), None, self.boundary_key)
 
     @property
     def map_changes(self):
@@ -465,11 +471,14 @@ class Episode:
 
     def payload(self):
         if self.team:
-            keys = ("run_id", "phase", "detail", "agents", "turns", "events", "mail", "rounds", "model_id", "load_id",
-                    "sampled_tokens", "tool_attempts", "supplied_moves", "manual_intervention", "created_at")
+            keys = ("run_id", "phase", "detail", "turns", "events", "mail", "rounds", "model_id", "load_id",
+                    "sampled_tokens", "tool_attempts", "supplied_moves", "manual_intervention", "created_at",
+                    "dropped_closures", "close_next")
             with self.lock:
+                # A queued message is not written, as a run of one agent does not write its own.
+                agents = [{key: value for key, value in agent.items() if key != "insert_next"} for agent in self.agents]
                 return {"format": TEAM_FORMAT, "maze": self.maze.to_dict(), "config": self.config, "exploratory": True,
-                        **{key: getattr(self, key) for key in keys}}
+                        "agents": agents, **{key: getattr(self, key) for key in keys}}
         keys = ("run_id", "phase", "detail", "messages", "events", "turns", "position", "model_id", "load_id",
                 "sampled_tokens", "tool_attempts", "supplied_moves", "interrupted", "intervention_turn",
                 "intervention_tokens", "intervention_attempts", "resumed", "first_move_progress", "latency",
@@ -552,12 +561,34 @@ class Episode:
             raise ValueError("Choose interruption text before starting this episode.")
         agent["interrupt_next"], self.manual_intervention = True, True
 
-    def request_closure(self, cell):
-        """Queue one cell to be walled off before the next generated response.
+    @property
+    def boundary_key(self):
+        """What a closure or an inserted message names the point it landed at by.
 
-        Checked here against the map and the position as they stand, so a cell
+        A run of one agent lands them between responses, and a team between
+        rounds.
+        """
+        return "before_round" if self.team else "before_turn"
+
+    def next_boundary(self):
+        """The point the next closure or inserted message would land at.
+
+        The round being generated, or about to be, is past: whatever is queued
+        now lands before the one after it. On a run of one agent that is its
+        next response.
+        """
+        return self.rounds + bool(self.round_open or self.round_turns(self.rounds))
+
+    def moving_positions(self):
+        """Where each agent still moving stands, by index, which a closure has to leave a way on from."""
+        return {index: agent["position"] for index, agent in enumerate(self.agents) if agent["status"] == "active"}
+
+    def request_closure(self, cell):
+        """Queue one cell to be walled off before the next generated response, or a team's next round.
+
+        Checked here against the map and the positions as they stand, so a cell
         that cannot be closed is refused where it was asked for. It is checked
-        again when it lands, because the character moves in between.
+        again when it lands, because the agents move in between.
 
         One at a time, as an interruption is. A second request would replace a
         queued cell that the reader has already been told will close, and the
@@ -577,48 +608,55 @@ class Episode:
                 raise ValueError("This episode's map is fixed. Start an episode with a changing map to close cells during a run.")
             if self.phase in TERMINAL or self.replay_only:
                 raise ValueError("Start a new episode to change the map. This episode is finished or is a saved replay.")
+            step = "round" if self.team else "response"
             if self.close_next:
                 raise ValueError(f"Row {self.close_next[0]}, column {self.close_next[1]} is already queued to close "
-                                 "before the next response. Let it land before queueing another.")
-            # One closure to a response. A fork of the response after a closure
+                                 f"before the next {step}. Let it land before queueing another.")
+            # One closure to a boundary. A fork of the response after a closure
             # starts holding that closure at the boundary it is about to
             # regenerate, and a run that wrote two there could not be read back.
-            boundary = len(self.turns)
-            if any(record["before_turn"] == boundary
+            boundary = self.next_boundary()
+            if any(record[self.boundary_key] == boundary
                    for record in (*self.config.get("map_updates", ()), *self.dropped_closures)):
-                raise ValueError("The map already changed before this response. Generate it before closing another cell.")
-            check_checkpoint_closure(self, cell, check_closure(self.current_maze, self.position, cell))
+                raise ValueError(f"The map already changed before this {step}. Generate it before closing another cell.")
+            checked_closure(self, cell)
             self.close_next, self.manual_intervention = tuple(cell), True
 
-    def request_insert(self, channel, text, sender=None, advised_direction=None):
-        """Queue one message to go into the context before the next generated response.
+    def request_insert(self, channel, text, sender=None, advised_direction=None, index=0):
+        """Queue one message to go into agent ``index``'s context before its next generated response.
 
-        The rules are the closure's. One is queued at a time, and a second
-        request is refused naming the first, which the reader has already been
-        told will land. One lands at a boundary, so a fork carrying an
-        insertion at the boundary it is about to regenerate refuses another.
-        The check and the assignment are one operation under the lock, because
-        the button runs off Gradio's queue and two clicks arrive at once.
+        The rules are the closure's. One is queued to an agent at a time, and a
+        second request is refused naming the first, which the reader has
+        already been told will land. One lands at a boundary, so a fork
+        carrying an insertion at the boundary it is about to regenerate refuses
+        another. The check and the assignment are one operation under the lock,
+        because the button runs off Gradio's queue and two clicks arrive at once.
         """
         with self.lock:
             if self.phase in TERMINAL or self.replay_only:
                 raise ValueError("Start a new episode to insert a message. This episode is finished or is a saved replay.")
-            if self.team:
-                raise ValueError("Messages are inserted into a run of one agent.")
-            if self.insert_next:
-                queued = self.insert_next
-                raise ValueError(f"{describe_insert(queued)} is already queued before the next response. "
-                                 "Let it land before queueing another.")
-            boundary = len(self.turns)
-            if any(record["before_turn"] == boundary for record in self.config.get("context_inserts", ())):
-                raise ValueError("A message was already inserted before this response. Generate it before inserting another.")
+            agent = self.agents[index]
+            if agent["status"] != "active":
+                raise ValueError(f"{agent['name']} has stopped moving, so it will read no more messages.")
+            whose = f" for {agent['name']}" if self.team else ""
+            if agent["insert_next"]:
+                raise ValueError(f"{describe_insert(agent['insert_next'])} is already queued{whose} before the next "
+                                 "response. Let it land before queueing another.")
+            boundary = self.next_boundary()
+            if any(record[self.boundary_key] == boundary and record.get("agent", 0) == index
+                   for record in self.config.get("context_inserts", ())):
+                raise ValueError(f"A message was already inserted{whose} before this response. "
+                                 "Generate it before inserting another.")
             insert = check_insert(dict(channel=channel, text=text, sender=sender or None,
                                        advised_direction=advised_direction or None))
             # A response being generated now will be answered by the
             # simulator before this lands, so only an idle run is asked.
             if not self.busy:
-                render_insert(self.messages, insert)
-            self.insert_next, self.manual_intervention = insert, True
+                render_insert(agent["messages"], insert)
+            # Named with the boundary it was queued for, so one queued while a
+            # team round is generating waits for the next round rather than
+            # reaching an agent this round asks later than its teammates.
+            agent["insert_next"], self.manual_intervention = dict(insert, for_boundary=boundary), True
 
 
 def describe_insert(insert):
@@ -629,13 +667,14 @@ def describe_insert(insert):
 
 
 def land_insert(episode, insert):
-    """Write one insertion into the history and the record together. The caller holds the lock."""
-    episode.messages = render_insert(episode.messages, insert)
+    """Write one insertion into its agent's history and the record together. The caller holds the lock."""
+    agent = episode.agents[insert.get("agent", 0)]
+    agent["messages"] = render_insert(agent["messages"], insert)
     episode.config.setdefault("context_inserts", []).append(insert)
 
 
-def apply_insert(episode, manager=None):
-    """Put the queued message into the context, if one is queued, and record where it landed.
+def apply_insert(episode, manager=None, index=0):
+    """Put agent ``index``'s queued message into its context, if one is queued, and record where it landed.
 
     Called with a response about to be appended. Returns the history as it
     stood before, so the stream can withdraw the message if that response
@@ -649,13 +688,18 @@ def apply_insert(episode, manager=None):
     inserts.py missed.
     """
     with episode.lock:
-        if not episode.insert_next:
+        agent = episode.agents[index]
+        now = episode.rounds if episode.team else len(episode.turns)
+        if not agent["insert_next"] or agent["insert_next"]["for_boundary"] > now:
             return None
-        before = episode.messages
-        queued, episode.insert_next = episode.insert_next, None
-        insert = dict(before_turn=len(episode.turns), channel=queued["channel"], text=queued["text"],
-                      sender=queued["sender"], position=list(episode.position),
-                      advised_direction=queued["advised_direction"])
+        before = agent["messages"]
+        queued, agent["insert_next"] = agent["insert_next"], None
+        insert = {episode.boundary_key: episode.rounds if episode.team else len(episode.turns),
+                  **(dict(agent=index) if episode.team else {}),
+                  "channel": queued["channel"], "text": queued["text"], "sender": queued["sender"],
+                  "position": list(agent["position"]), "advised_direction": queued["advised_direction"]}
+        where = f"{agent['name']}'s response in round {episode.rounds + 1}" if episode.team \
+            else f"response {len(episode.turns) + 1}"
         try:
             if manager is not None and any(set(manager.encode(value)) & manager.hidden_token_ids
                                            for value in (insert["text"], insert["sender"] or "")):
@@ -663,16 +707,14 @@ def apply_insert(episode, manager=None):
             land_insert(episode, insert)
         except ValueError as exc:
             episode.detail = f"{describe_insert(insert)} was dropped. {exc}"
-            logger.warning("Run %s dropped the message queued before response %s: %s",
-                           episode.run_id, insert["before_turn"] + 1, exc)
+            logger.warning("Run %s dropped the message queued before %s: %s", episode.run_id, where, exc)
             return None
-        episode.detail = f"{describe_insert(insert)} went into the context before this response."
-        logger.info("Run %s inserted a %s before response %s at %s", episode.run_id, insert["channel"],
-                    insert["before_turn"] + 1, insert["position"])
+        episode.detail = f"{describe_insert(insert)} went into the context before {'this response' if not episode.team else where}."
+        logger.info("Run %s inserted a %s before %s at %s", episode.run_id, insert["channel"], where, insert["position"])
         return before
 
 
-def withdraw_insert(episode, before):
+def withdraw_insert(episode, before, index=0):
     """Take back the message the last apply_insert landed, its response never having been generated.
 
     A stop at the opening frame, or a model call that fails before its first
@@ -684,68 +726,105 @@ def withdraw_insert(episode, before):
         withdrawn = episode.config["context_inserts"].pop()
         if not episode.config["context_inserts"]:
             del episode.config["context_inserts"]
-        episode.messages = before
-    logger.warning("Run %s withdrew the %s before response %s: that response was never generated",
-                   episode.run_id, withdrawn["channel"], withdrawn["before_turn"] + 1)
+        episode.agents[index]["messages"] = before
+    logger.warning("Run %s withdrew the %s before %s %s: that response was never generated", episode.run_id,
+                   withdrawn["channel"], "round" if episode.team else "response", withdrawn[episode.boundary_key] + 1)
 
 
 def abandon_insert(episode):
-    """Drop a queued message the run will never reach. The caller holds the lock."""
-    if episode.insert_next:
-        logger.warning("Run %s ended %s with a %s still queued; it was dropped", episode.run_id,
-                       episode.phase, episode.insert_next["channel"])
-        episode.insert_next = None
+    """Drop every queued message the run will never reach. The caller holds the lock."""
+    for agent in episode.agents:
+        if agent["insert_next"]:
+            logger.warning("Run %s ended %s with a %s still queued for %s; it was dropped", episode.run_id,
+                           episode.phase, agent["insert_next"]["channel"], agent["name"])
+            agent["insert_next"] = None
 
 
-def check_checkpoint_closure(episode, cell, changed, boundary=None, position=None):
+def turn_round(episode, index):
+    """The round of the response at ``index``, -1 standing for the supplied moves before any."""
+    return index if index < 0 or not episode.team else episode.turns[index]["round"]
+
+
+def check_checkpoint_closure(episode, cell, changed, boundary=None, positions=None):
     """Refuse a closure that takes away the waypoint or the steering cell.
 
     Neither is ever closed, so the board and the saved run always show the
-    cell the run was set up around. Until the character has reached one, a
-    closure that walls the character off from it is refused as well, since
-    the run could no longer do what it was set up to test. A route left only
-    through the destination counts as walled off, because arriving ends the
-    run before the character gets there.
+    cell the run was set up around. Until an agent has reached one, a closure
+    that walls that agent off from it is refused as well, since the run could
+    no longer do what it was set up to test. A route left only through the
+    destination counts as walled off, because arriving ends the agent's run
+    before it gets there. An agent is only held to the steering cell if the
+    run steers it.
 
-    ``boundary`` and ``position`` default to the run as it stands, which is
-    where a live closure lands. A saved run's closures are asked the same
-    question at the boundary and position each one records, so a file cannot
-    carry a closure the run itself would have refused.
+    ``boundary`` and ``positions`` - each agent still moving, by index -
+    default to the run as it stands, which is where a live closure lands. A
+    saved run's closures are asked the same question at the boundary and
+    positions each one records, so a file cannot carry a closure the run
+    itself would have refused.
     """
     config = episode.config
-    boundary = len(episode.turns) if boundary is None else boundary
-    position = episode.position if position is None else position
-    reached, steered = episode.waypoint_turn, episode.steer_turn
+    boundary = episode.next_boundary() if boundary is None else boundary
+    positions = episode.moving_positions() if positions is None else positions
     checkpoints = []
     if config.get("waypoint") is not None:
-        checkpoints.append(("waypoint", config["waypoint"], reached is None or reached >= boundary))
+        checkpoints.append(("waypoint", config["waypoint"]))
     when = config.get("steer_when") or {}
     if "cell" in when:
-        checkpoints.append(("steering cell", when["cell"],
-                            steering_active(config) and (steered is None or steered >= boundary)))
-    for label, point, _ in checkpoints:
+        checkpoints.append(("steering cell", when["cell"]))
+    for label, point in checkpoints:
         if tuple(point) == tuple(cell):
             raise ValueError(f"The {label} is never closed.")
-    reachable = reachable_before_arriving(changed, position)
-    for label, point, pending in checkpoints:
-        if pending and tuple(point) not in reachable:
-            raise ValueError(f"Closing this cell would cut the character off from the {label}.")
+    steered = targeted(config, "steer_agents", len(episode.agents))
+    for index, position in positions.items():
+        reachable = reachable_before_arriving(changed, position)
+        for label, point in checkpoints:
+            if label == "waypoint":
+                reached = episode.waypoint_turn_of(index)
+            elif steering_active(config) and index in steered:
+                reached = next((i for i, turn in enumerate(episode.turns)
+                                if turn.get("agent", 0) == index and turn.get("steered")), None)
+            else:
+                continue
+            pending = reached is None or turn_round(episode, reached) >= boundary
+            if pending and tuple(point) not in reachable:
+                whom = episode.agents[index]["name"] if episode.team else "the character"
+                raise ValueError(f"Closing this cell would cut {whom} off from the {label}.")
+
+
+def checked_closure(episode, cell, boundary=None, positions=None):
+    """The map after closing ``cell``, or why that closure cannot happen now.
+
+    Every agent still moving has to be able to reach the destination from
+    where it stands afterwards, and none may be standing in the cell, which
+    is the single-agent rule asked of each of them.
+    """
+    positions = episode.moving_positions() if positions is None else positions
+    maze = maze_at_turn(episode.maze, episode.config.get("map_updates", ()), None, episode.boundary_key)
+    for index, position in positions.items():
+        try:
+            check_closure(maze, position, cell)
+        except ValueError as exc:
+            if not episode.team:
+                raise
+            raise ValueError(f"{episode.agents[index]['name']}: {exc}".replace("the character", "this agent")) from None
+    changed = close_cell(maze, cell)
+    check_checkpoint_closure(episode, cell, changed, boundary, positions)
+    return changed
 
 
 def abandon_closure(episode):
     """Record a queued closure the run will never reach. The caller holds the lock.
 
-    A queued cell is applied by the next response, so an episode that ends
-    without one leaves the reader told a closure would happen and the run
-    showing no sign that anything was asked. That is the same silence
+    A queued cell is applied before the next response or round, so an episode
+    that ends without one leaves the reader told a closure would happen and
+    the run showing no sign that anything was asked. That is the same silence
     dropped_closures was added to break, so it is broken the same way.
     """
     if not episode.close_next:
         return
     cell, episode.close_next = tuple(episode.close_next), ()
-    episode.dropped_closures.append(dict(
-        before_turn=len(episode.turns), cell=list(cell),
-        reason="The episode ended before the closure could land."))
+    episode.dropped_closures.append({episode.boundary_key: episode.next_boundary(), "cell": list(cell),
+                                     "reason": "The episode ended before the closure could land."})
     logger.warning("Run %s ended %s with the closure at %s still queued",
                    episode.run_id, episode.phase, cell)
 
@@ -753,7 +832,7 @@ def abandon_closure(episode):
 def apply_closure(episode):
     """Wall off the queued cell, if there is one, and record what the map became.
 
-    The character has moved since the closure was queued, so the same rules are
+    The agents have moved since the closure was queued, so the same rules are
     asked again here. One that has become impossible is dropped and recorded as
     dropped: the run went on under a map the reader asked to change and which
     did not change, and anything scoring the run needs to know that rather than
@@ -765,27 +844,30 @@ def apply_closure(episode):
     changed yet, and takes the same cell again. The run would then record
     closing a wall, which is a closure no map ever allowed and which the reader
     of that run would refuse.
+
+    A run of one agent records where its character stood; a team, where every
+    agent stood, the ones no longer moving included.
     """
     with episode.lock:
         if not episode.close_next:
             return
         cell, episode.close_next = tuple(episode.close_next), ()
-        boundary = len(episode.turns)
+        boundary = episode.next_boundary()
         try:
-            changed = check_closure(episode.current_maze, episode.position, cell)
-            check_checkpoint_closure(episode, cell, changed)
+            changed = checked_closure(episode, cell)
         except ValueError as exc:
-            episode.dropped_closures.append(dict(before_turn=boundary, cell=list(cell), reason=str(exc)))
+            episode.dropped_closures.append({episode.boundary_key: boundary, "cell": list(cell), "reason": str(exc)})
             episode.detail = f"The queued closure at row {cell[0]}, column {cell[1]} was dropped. {exc}"
-            logger.warning("Run %s dropped the closure at %s before response %s: %s",
-                           episode.run_id, cell, boundary + 1, exc)
+            logger.warning("Run %s dropped the closure at %s before %s %s: %s", episode.run_id, cell,
+                           "round" if episode.team else "response", boundary + 1, exc)
             return
+        where = (dict(positions=[list(agent["position"]) for agent in episode.agents]) if episode.team
+                 else dict(position=list(episode.position)))
         episode.config.setdefault("map_updates", []).append(
-            dict(before_turn=boundary, position=list(episode.position),
-                 closed_cell=list(cell), grid=list(changed.grid)))
+            {episode.boundary_key: boundary, **where, "closed_cell": list(cell), "grid": list(changed.grid)})
         episode.detail = f"The map changed: row {cell[0]}, column {cell[1]} is now a wall."
-        logger.info("Run %s closed %s before response %s, leaving %s moves to the destination",
-                    episode.run_id, cell, boundary + 1, len(changed.route(episode.position)) - 1)
+        logger.info("Run %s closed %s before %s %s", episode.run_id, cell,
+                    "round" if episode.team else "response", boundary + 1)
 
 
 def context_messages(episode, index):
@@ -801,17 +883,21 @@ def context_messages(episode, index):
 
     Counted from the record rather than kept as an index of its own, so the
     two cannot disagree. On a team, the history is the answering agent's own:
-    its setup, its supplied moves, and a pair for each round it made a call in.
+    its setup, its supplied moves, a pair for each round it made a call in,
+    and the user messages inserted for it.
     """
+    inserts = episode.config.get("context_inserts", ())
     if episode.team:
         turn = episode.turns[index]
-        pairs = sum(1 for event in episode.events if event["agent"] == turn["agent"]
-                    and (event["source"] == "supplied" or event["round"] < turn["round"]))
-        return episode.agents[turn["agent"]]["messages"][:2 + 2 * pairs]
+        agent, round_index = turn["agent"], turn["round"]
+        pairs = sum(1 for event in episode.events if event["agent"] == agent
+                    and (event["source"] == "supplied" or event["round"] < round_index))
+        users = sum(insert["channel"] == "user" and insert["agent"] == agent and insert["before_round"] <= round_index
+                    for insert in inserts)
+        return episode.agents[agent]["messages"][:2 + 2 * pairs + users]
     supplied = sum(event["source"] == "supplied" for event in episode.events)
     attempts = sum("event" in turn for turn in episode.turns[:max(index, 0)])
-    users = sum(insert["channel"] == "user" and insert["before_turn"] <= index
-                for insert in episode.config.get("context_inserts", ()))
+    users = sum(insert["channel"] == "user" and insert["before_turn"] <= index for insert in inserts)
     return episode.messages[:2 + 2 * (supplied + attempts) + users]
 
 
@@ -1541,7 +1627,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                                   if team else "The sampled-token budget is exhausted.")
                 settle_recoveries(episode)
                 break
-            actions = []
+            actions, episode.round_open = [], team
             for index in moving:
                 agent = episode.agents[index]
                 edit = episode.pending_edit
@@ -1554,7 +1640,8 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                     break
                 # After the budget is known to allow a response, so an insertion is
                 # only ever recorded with the response that read it.
-                inserted = apply_insert(episode, manager)
+                before = apply_insert(episode, manager, index)
+                inserted = None if before is None else (index, before)
                 turn = {"text": "", "metrics": [], "prompt_ids": [], "forced_prefix_tokens": 0,
                         "prefix_ids": [], "prefix_text": "",
                         "planned_prefix_ids": forced, "planned_prefix_text": manager.decode(forced),
@@ -1579,7 +1666,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                 yield episode
                 if episode.stop_requested:
                     if inserted is not None:
-                        withdraw_insert(episode, inserted)
+                        withdraw_insert(episode, inserted[1], index)
                         inserted = None
                     finish_response(episode, turn, set(), limit)
                     if team:
@@ -1621,7 +1708,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                 finally:
                     generator.close()
                 if inserted is not None:
-                    withdraw_insert(episode, inserted)
+                    withdraw_insert(episode, inserted[1], index)
                     inserted = None
                 turn["seconds"] = time.time() - turn["started_at"]
                 action = finish_response(episode, turn, stop_ids, limit)
@@ -1649,6 +1736,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                     record(turn)
                 break
             resolve_round(episode, actions)
+            episode.round_open = False
             if not team:
                 record(turn)
             # Before this autosave rather than only in the cleanup below. A
@@ -1686,7 +1774,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
     finally:
         # A model call that failed before feeding its prompt.
         if inserted is not None:
-            withdraw_insert(episode, inserted)
+            withdraw_insert(episode, inserted[1], inserted[0])
         if turn is not None and turn.get("finish_reason") is None:
             count = max(0, len(turn["metrics"]) - turn["forced_prefix_tokens"])
             episode.sampled_tokens += count
@@ -1702,7 +1790,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
             # answered are marked the way a stop marks them.
             discard_round(episode)
         with episode.lock:
-            episode.busy = False
+            episode.busy = episode.round_open = False
             # Before the autosave, so the file records the closure this run
             # will now never reach rather than a queue it emptied silently.
             if episode.phase in TERMINAL:
@@ -1774,7 +1862,7 @@ def validate_checkpoint_closures(episode):
     for update in episode.config.get("map_updates", ()):
         maze = close_cell(maze, update["closed_cell"])
         try:
-            check_checkpoint_closure(episode, update["closed_cell"], maze, update["before_turn"], update["position"])
+            check_checkpoint_closure(episode, update["closed_cell"], maze, update["before_turn"], {0: update["position"]})
         except ValueError as exc:
             raise ValueError(f"The map change before response {update['before_turn'] + 1} is one the run "
                              f"could not have made. {exc}") from None
@@ -1957,7 +2045,7 @@ def from_payload(data, read_prompt=None):
     to :func:`validate_inserts` for a run carrying inserted messages.
     """
     if isinstance(data, dict) and data.get("format") in (TEAM_FORMAT, LEGACY_TEAM_FORMAT):
-        return team_from_payload(data)
+        return team_from_payload(data, read_prompt)
     if not isinstance(data, dict) or data.get("format") not in (FORMAT, CHANGING_FORMAT, INSERT_FORMAT):
         raise ValueError("Choose a ChatLab maze run JSON file.")
     if not re.fullmatch(r"[a-f0-9]{32}", str(data.get("run_id", ""))):
@@ -1997,12 +2085,12 @@ def from_payload(data, read_prompt=None):
         # The closures a run reports dropping are read as provenance by Run
         # details and carried into every fork, so they are checked like the
         # ones it reports taking rather than taken as written.
-        validate_drops(maze, result.dropped_closures, updates, result.turns)
+        validate_drops(maze, result.dropped_closures, updates, len(result.turns))
         # A run that has ended clears its queue on the way out, so a finished
         # one still waiting to close a cell is a state no run reaches.
         if result.close_next and result.phase in TERMINAL:
             raise ValueError("A run that has ended cannot still be waiting to close a cell.")
-        validate_pending(maze, result.close_next, updates, result.dropped_closures, result.turns)
+        validate_pending(maze, result.close_next, updates, result.dropped_closures, len(result.turns))
         # Every closure begins as a request from the reader, and requesting one
         # marks the run. A file carrying a closure while reporting an untouched
         # run would be read as a clean control by anything scoring it.
@@ -2035,9 +2123,58 @@ def from_payload(data, read_prompt=None):
     return result
 
 
-# What a team run written before supplied moves, waypoints, interruptions and
-# call limits reached teams cannot have set.
-LEGACY_TEAM_KEYS = ("supplied_moves", "waypoint", "interrupt_agents", "attempt_budget")
+# What a team run written before supplied moves, waypoints, interruptions,
+# call limits, changing maps and inserted messages reached teams cannot have set.
+LEGACY_TEAM_KEYS = ("supplied_moves", "waypoint", "interrupt_agents", "attempt_budget", "map_updates",
+                    "context_inserts")
+# What a team's inserted message records: an insertion's own fields, the agent
+# it went to, and the round it went in before.
+TEAM_INSERT_KEYS = {"before_round", "agent", "channel", "text", "sender", "position", "advised_direction"}
+
+
+def land_saved_closure(episode, update, boundary):
+    """Check one closure a saved team run records against the run rebuilt so far, and land it.
+
+    It has to name the boundary it is being landed at, record where every
+    agent stood, and be one the live run would have made there: the rules a
+    queued closure meets when it lands, asked of the agents still moving.
+    """
+    if not isinstance(update, dict) or set(update) != {"before_round", "positions", "closed_cell", "grid"}:
+        raise ValueError("Each map change of a team run records its round, every agent's position, its cell and "
+                         "the map it made.")
+    if update["positions"] != [list(agent["position"]) for agent in episode.agents]:
+        raise ValueError(f"The map change before round {boundary + 1} records positions the team's paths never reached.")
+    try:
+        changed = checked_closure(episode, update["closed_cell"], boundary)
+    except ValueError as exc:
+        raise ValueError(f"The map change before round {boundary + 1} is one the run could not have made. {exc}") from None
+    if list(changed.grid) != update["grid"]:
+        raise ValueError("A map change records a map its own closure does not produce.")
+    episode.config.setdefault("map_updates", []).append(copy.deepcopy(update))
+
+
+def land_saved_insert(episode, record, saved):
+    """Check one message a saved team run records going in before response ``saved``, and land it."""
+    agent = episode.agents[saved["agent"]]
+    if not isinstance(record, dict) or set(record) != TEAM_INSERT_KEYS:
+        raise ValueError("Each message inserted into a team run records its round, its agent, its channel, text, "
+                         "sender, advice and position.")
+    try:
+        check_insert({key: value for key, value in record.items() if key not in ("before_round", "agent")})
+    except ValueError as exc:
+        raise ValueError(f"The message inserted for {agent['name']} before round {saved['round'] + 1} is refused. "
+                         f"{exc}") from None
+    if record["position"] != list(agent["position"]):
+        raise ValueError(f"The message inserted for {agent['name']} before round {saved['round'] + 1} records a "
+                         "position its path does not reach there.")
+    if not saved.get("prompt_ids"):
+        raise ValueError(f"{agent['name']}'s response in round {saved['round'] + 1} records no prompt, so nothing "
+                         "says it read the message inserted before it.")
+    try:
+        land_insert(episode, copy.deepcopy(record))
+    except ValueError as exc:
+        raise ValueError(f"The message inserted for {agent['name']} before round {saved['round'] + 1} cannot be "
+                         f"placed. {exc}") from None
 
 
 def read_interruption(episode, saved, index, manual, asked=()):
@@ -2084,19 +2221,23 @@ def read_interruption(episode, saved, index, manual, asked=()):
     return True
 
 
-def team_from_payload(data):
+def team_from_payload(data, read_prompt=None):
     """A saved team run, rebuilt for replay from the responses it records.
 
     Nothing the run derived is taken as written. Every recorded response is
-    read again through the rules that read it live, round by round, and the
-    moves, messages, histories, positions, statuses, interruptions, counters
-    and outcome that produces are compared with the file's. A file that
-    disagrees anywhere describes a run these responses could not have made,
-    and is refused.
+    read again through the rules that read it live, round by round, each map
+    change and inserted message landing where it records, and the moves,
+    messages, histories, positions, statuses, interruptions, counters and
+    outcome that produces are compared with the file's. A file that disagrees
+    anywhere describes a run these responses could not have made, and is
+    refused. ``read_prompt`` reads each response's recorded prompt from its
+    agent's first inserted message on, as :func:`validate_inserts` does for a
+    run of one agent.
 
     A team run written as chatlab-maze-team-1 predates supplied moves,
-    waypoints, interruptions and call limits on a team, and is read as having
-    none; its agents record only their name, position, status and history.
+    waypoints, interruptions, call limits, changing maps and inserted messages
+    on a team, and is read as having none; its agents record only their name,
+    position, status and history.
     """
     if not isinstance(data, dict) or data.get("format") not in (TEAM_FORMAT, LEGACY_TEAM_FORMAT):
         raise ValueError("Choose a ChatLab maze team run JSON file.")
@@ -2110,14 +2251,27 @@ def team_from_payload(data):
     count = data["config"].get("agents")
     if type(count) is not int or not 2 <= count <= MAX_AGENTS:
         raise ValueError(f"A team has 2 to {MAX_AGENTS} agents.")
-    if legacy and (any(data["config"].get(key) for key in LEGACY_TEAM_KEYS)
-                   or str(data["config"].get("interruption_text") or "").strip()):
-        raise ValueError(f"A team run with supplied moves, a waypoint, an interruption or a call limit has to be "
-                         f"recorded as {TEAM_FORMAT}.")
+    changing = "environment_id" in data["maze"]
+    if legacy and (any(data["config"].get(key) for key in LEGACY_TEAM_KEYS) or changing
+                   or str(data["config"].get("interruption_text") or "").strip()
+                   or data.get("dropped_closures") or data.get("close_next")):
+        raise ValueError(f"A team run with supplied moves, a waypoint, an interruption, a call limit, a changing map "
+                         f"or an inserted message has to be recorded as {TEAM_FORMAT}.")
     manual = False if legacy else data.get("manual_intervention")
     if type(manual) is not bool:
         raise ValueError("A team run says whether anyone intervened in it.")
-    result = Episode(Maze.from_dict(data["maze"]), data["config"])
+    # Taken out of the config and landed again one at a time, where each says
+    # it landed, as the live run landed them.
+    config = copy.deepcopy(data["config"])
+    updates, inserts = config.pop("map_updates", []), config.pop("context_inserts", [])
+    drops, pending = data.get("dropped_closures", []), data.get("close_next", [])
+    if not all(isinstance(value, list) for value in (updates, inserts, drops, pending)):
+        raise ValueError("A run's map changes, dropped closures, pending closure and inserted messages must be lists.")
+    if not changing and (updates or drops or pending):
+        raise ValueError("A team run whose map changes has to record the changing map, with its environment identifier.")
+    if (updates or drops or pending or inserts) and not manual:
+        raise ValueError("A run carrying a closure or an inserted message cannot report that nobody intervened in it.")
+    result = Episode(load_maze(data["maze"]) if changing else Maze.from_dict(data["maze"]), config)
     # A queued interruption that had not landed leaves no other trace, and
     # one that has landed stays queued, so the flag is read from the file,
     # once the run says a reader asked for one. It is what lets an agent be
@@ -2135,8 +2289,6 @@ def team_from_payload(data):
                         or not result.config.get("interruption_text", "").strip()):
                     raise ValueError("An agent's queued interruption is not one this run could request.")
                 queued_agents.add(index)
-        if manual and not queued_agents:
-            raise ValueError("A manual interruption must record the agent whose interruption was requested.")
     turns, rounds = data.get("turns"), data.get("rounds")
     if type(rounds) is not int or not 0 <= rounds <= result.config["round_limit"]:
         raise ValueError("The run's round count must be within its round limit.")
@@ -2153,7 +2305,28 @@ def team_from_payload(data):
     if [t["round"] for t in turns] != sorted(t["round"] for t in turns) or set(by_round) - set(range(rounds + 1)) \
             or set(range(rounds)) - set(by_round):
         raise ValueError("The saved responses are not in round order.")
+    landed = sorted((record["agent"], record["before_round"]) for record in inserts
+                    if isinstance(record, dict) and type(record.get("agent")) is int
+                    and type(record.get("before_round")) is int)
+    if len(set(landed)) != len(landed) or len(landed) != len(inserts):
+        raise ValueError("Each message inserted into a team run names its agent and round, one to an agent a round.")
+    by_answer = {(record["agent"], record["before_round"]): record for record in inserts}
+    # Each message went in before a response the run records, and the list
+    # holds them in the order those responses were asked for.
+    asked_at = {(t["agent"], t["round"]): i for i, t in enumerate(turns)}
+    places = [asked_at.get(key, -1) for key in by_answer]
+    if -1 in places or places != sorted(places):
+        raise ValueError("A team run's inserted messages are out of order, or name a response it never recorded.")
+    updates = list(updates)
     for round_index in range(rounds + 1):
+        if updates and isinstance(updates[0], dict) and updates[0].get("before_round") == round_index:
+            if result.phase in TERMINAL:
+                raise ValueError("The run records a map change after it had ended.")
+            land_saved_closure(result, updates.pop(0), round_index)
+            # A live run queues one closure at a time and lands it before a round.
+            if updates and isinstance(updates[0], dict) and updates[0].get("before_round") == round_index:
+                raise ValueError(f"A team run records two map changes before round {round_index + 1}. One lands "
+                                 "before a round.")
         if round_index not in by_round:
             continue
         if result.phase in TERMINAL:
@@ -2169,6 +2342,8 @@ def team_from_payload(data):
         actions = []
         for saved in by_round[round_index]:
             interrupting = read_interruption(result, saved, len(result.turns), manual, queued_agents)
+            if (saved["agent"], round_index) in by_answer:
+                land_saved_insert(result, by_answer.pop((saved["agent"], round_index)), saved)
             limit = response_limit(result, saved["agent"], caps.get(saved["agent"], 0), interrupting)
             if resolved and saved["finish_reason"] not in ("stop", "length", "incomplete_stream"):
                 raise ValueError("A response in a finished round ends in a way no finished round records.")
@@ -2201,6 +2376,46 @@ def team_from_payload(data):
             resolve_round(result, actions)
         else:
             discard_round(result)
+    if updates:
+        raise ValueError("A team run records a map change at a round it never reached, or out of order.")
+    if by_answer:
+        raise ValueError("A team run's inserted messages are out of order, or name a response it never recorded.")
+    boundary = result.next_boundary()
+    validate_drops(result.maze, drops, result.config.get("map_updates", []), boundary, "before_round")
+    if pending and result.phase in TERMINAL:
+        raise ValueError("A run that has ended cannot still be waiting to close a cell.")
+    validate_pending(result.maze, pending, result.config.get("map_updates", []), drops, boundary, "before_round")
+    result.dropped_closures, result.close_next = copy.deepcopy(drops), tuple(pending)
+    # Before the prompts are read, since reading one falls back to the run's
+    # model for a response that does not name its own.
+    for key in ("model_id", "load_id"):
+        if key in data:
+            setattr(result, key, data[key])
+    first = {}
+    for record in result.config.get("context_inserts", ()):
+        first.setdefault(record["agent"], record["before_round"])
+    # Every response an agent generated from its first message on records the
+    # prompt it was fed, since a message stays in every later context: one
+    # without it would claim to have read the message with nothing to show.
+    # A response stopped before generation has no tokens and no prompt.
+    for turn in result.turns:
+        if turn["agent"] in first and turn["round"] >= first[turn["agent"]] and turn["metrics"] \
+                and not turn.get("prompt_ids"):
+            raise ValueError(f"{result.agents[turn['agent']]['name']}'s response in round {turn['round'] + 1} records "
+                             "no prompt, so nothing says it read the messages inserted before it.")
+    if read_prompt is not None:
+        for index, turn in enumerate(result.turns):
+            if turn["agent"] not in first or turn["round"] < first[turn["agent"]] or not turn.get("prompt_ids"):
+                continue
+            context = context_messages(result, index)
+            reading = read_prompt(result, turn, context)
+            if reading is None:
+                continue
+            prompt, templated = reading
+            following = result.agents[turn["agent"]]["messages"][len(context):]
+            if not (prompt == templated if templated is not None else prompt_holds(prompt, context, following)):
+                raise ValueError(f"{result.agents[turn['agent']]['name']}'s recorded prompt in round {turn['round'] + 1} "
+                                 "is not the history the run records for it, with the messages inserted up to then.")
     if result.phase in TERMINAL:
         if data.get("phase") != result.phase or len(by_round) > rounds:
             raise ValueError("The run reports an outcome other than the one its responses reach.")
@@ -2219,7 +2434,7 @@ def team_from_payload(data):
     for index in queued_agents:
         result.agents[index]["interrupt_next"] = True
     kept = ("name", "position", "status", "messages") if legacy else None
-    rebuilt = [{key: value for key, value in agent.items() if kept is None or key in kept}
+    rebuilt = [{key: value for key, value in agent.items() if (kept is None or key in kept) and key != "insert_next"}
                for agent in json.loads(json.dumps(result.agents))]
     checks = {"responses": (turns, result.turns), "moves": (data.get("events"), result.events),
               "messages": (data.get("mail"), result.mail), "agents": (saved_agents, rebuilt),
