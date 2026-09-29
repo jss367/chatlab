@@ -5,6 +5,7 @@ import unittest
 
 from chatlab.extensions.maze_experiments.maze import Maze
 from chatlab.extensions.maze_experiments.runner import Episode, context_messages, from_payload, stream_episode
+from chatlab.extensions.maze_experiments.team_page import positions_after, team_board
 from maze_support import Manager, call
 
 CORRIDOR = Maze((".....", "#####", "#####", "#####", "#####"), (0, 0), (0, 4))
@@ -34,6 +35,22 @@ def reply_state(manager, call_index):
 
 
 class TeamSuppliedMovesTests(unittest.TestCase):
+    def test_the_board_includes_supplied_paths_before_the_first_round_and_in_replay(self):
+        ep = team(supplied_moves=2)
+        initial = team_board(ep)
+        self.assertEqual(initial.count('<line '), 4)
+        for name in ep.names:
+            self.assertIn(f"{name} at row 0, column 2", initial)
+        list(stream_episode(ep, Manager([step("east")] * 4)))
+        for run in (ep, from_payload(saved(ep))):
+            for round_index, column, lines in ((-1, 2, 4), (0, 3, 6), (1, 4, 8)):
+                with self.subTest(replay=run.replay_only, round=round_index):
+                    self.assertEqual(positions_after(run, round_index), [(0, column)] * 2)
+                    board = team_board(run, round_index)
+                    self.assertEqual(board.count('<line '), lines)
+                    for name in run.names:
+                        self.assertIn(f"{name} at row 0, column {column}", board)
+
     def test_every_agent_starts_after_the_same_supplied_moves_told_as_itself(self):
         ep = team(supplied_moves=2, communication=True)
         self.assertEqual([agent["position"] for agent in ep.agents], [(0, 2), (0, 2)])
