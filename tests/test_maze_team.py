@@ -496,9 +496,11 @@ class TeamPageTests(unittest.TestCase):
                 # The scenario pane describes the team the run was.
                 self.assertEqual(loaded[output_index(load, "maze-agents")], 2)
                 self.assertEqual(loaded[output_index(load, "maze-budget")], 1000)
-                legacy = team(token_budget=3000)
-                self.assertEqual(load.fn(str(legacy.export()), Episode(MAZE, CONFIG), False, "s", None)
-                                 [output_index(load, "maze-budget")], 1500)
+                legacy = team(token_budget=3000, round_limit=40)
+                reloaded = load.fn(str(legacy.export()), Episode(MAZE, CONFIG), False, "s", None)
+                self.assertEqual(reloaded[output_index(load, "maze-budget")], 1500)
+                # A team saved with no call limit fills the control with one it can never reach.
+                self.assertEqual(reloaded[output_index(load, "maze-attempts")], 40)
                 select = callbacks["select_history"]
                 shown = select.fn(loaded[0], False, "s", SimpleNamespace(index=[1, 0]))
                 self.assertEqual(shown[8]["value"], 0)

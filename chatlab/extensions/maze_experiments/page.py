@@ -213,7 +213,7 @@ def scenario_values(ep):
     return (maze.size, maze.seed, len(maze.route()) - 1, gr.skip() if openness is None else openness,
             config.get("supplied_moves", 0), config.get("interrupt_after", 0), text,
             config.get("prefix_tokens", 0), config.get("temperature", .7), config.get("sampling_seed", 0),
-            config.get("per_turn_tokens", 1024), agent_budget(ep), config.get("attempt_budget", 32),
+            config.get("per_turn_tokens", 1024), agent_budget(ep), attempt_limit(ep),
             config["recovery_tokens"], config["recovery_attempts"],
             mode, gr.update(value=config["goal_hint"], visible=mode == "hint"),
             config["system_prompt"], config["instruction"], ep.map_changes,
@@ -230,6 +230,17 @@ def agent_budget(ep):
     if not ep.team:
         return config.get("token_budget", 8192)
     return config.get("agent_token_budget") or max(1, config["token_budget"] // config["agents"])
+
+
+def attempt_limit(ep):
+    """Each agent's call limit, or for a team saved before there was one, a limit it can never reach.
+
+    A team agent makes one call a round at most, so its round limit is a call
+    limit that never binds, which is what a team without one ran under.
+    """
+    if "attempt_budget" in ep.config or not ep.team:
+        return ep.config.get("attempt_budget", 32)
+    return ep.config["round_limit"]
 
 
 def team_values(ep):
@@ -1086,6 +1097,7 @@ def _build_page(context):
                                    elem_id="maze-budget",
                                    info="Each agent's own on a team. An agent that spends it stops; its teammates continue.")
                 attempts = gr.Number(value=32, precision=0, minimum=1, maximum=256, label="Tool-attempt limit",
+                                     elem_id="maze-attempts",
                                      info="Each agent's own on a team.")
                 recovery_tokens = gr.Number(value=RECOVERY_DEFAULTS["recovery_tokens"], precision=0, minimum=1, maximum=32768,
                                             label="Recovery window · sampled tokens", elem_id="maze-recovery-tokens",
