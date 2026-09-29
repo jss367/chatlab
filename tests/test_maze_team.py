@@ -279,7 +279,7 @@ class TeamEpisodeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             list(stream_episode(ep, manager, save_dir=Path(directory)))
             saved = json.loads((Path(directory) / f"{ep.run_id}.json").read_text())
-        self.assertEqual(saved["format"], "chatlab-maze-team-1")
+        self.assertEqual(saved["format"], "chatlab-maze-team-2")
         replay = from_payload(saved)
         self.assertTrue(replay.replay_only)
         self.assertEqual([a["position"] for a in replay.agents], [(0, 2), (0, 0)])
@@ -342,27 +342,41 @@ class TeamEpisodeTests(unittest.TestCase):
         prompt["agents"][0]["messages"][1]["content"] = "Something else."
         with self.assertRaisesRegex(ValueError, "agents do not match"):
             from_payload(prompt)
-        # A team response carries no supplied prefix, so one claiming a prefix
-        # would have its first tokens left uncounted.
-        with self.assertRaisesRegex(ValueError, "Each saved response"):
+        # A prefix nobody planned would leave the response's first tokens uncounted.
+        with self.assertRaisesRegex(ValueError, "prefix it never planned"):
             from_payload(altered(lambda c: c["turns"][0].update(forced_prefix_tokens=3)))
 
-    def test_a_team_run_saved_before_one_agent_and_a_team_shared_a_loop_still_replays(self):
-        # Team responses now record the prefix fields a run of one agent
-        # always did. A file written before carries none of them.
+    def test_a_team_run_saved_as_team_1_still_replays(self):
+        # A chatlab-maze-team-1 file: its agents record their name, position,
+        # status and history, its responses no prefix fields, and its run
+        # neither supplied moves nor whether anyone intervened.
         manager = Manager([call("east", "east is open"), call("south"), call("east"), call("north")])
         ep = team()
         list(stream_episode(ep, manager))
         older = json.loads(json.dumps(ep.payload()))
-        added = {"forced_prefix_tokens", "prefix_ids", "prefix_text", "planned_prefix_ids", "planned_prefix_text",
-                 "literal_prefill_tokens"}
+        older["format"] = "chatlab-maze-team-1"
+        for key in ("supplied_moves", "manual_intervention"):
+            del older[key]
+        for key in ("interruption_text", "recovery_tokens", "recovery_attempts"):
+            del older["config"][key]
+        older["agents"] = [{key: agent[key] for key in ("name", "position", "status", "messages")}
+                           for agent in older["agents"]]
         for turn in older["turns"]:
-            self.assertEqual(set(turn) & added, added)
-            for key in added:
+            for key in ("forced_prefix_tokens", "prefix_ids", "prefix_text", "planned_prefix_ids",
+                        "planned_prefix_text", "literal_prefill_tokens"):
                 del turn[key]
         replay = from_payload(older)
-        self.assertEqual((replay.phase, replay.rounds), ("arrived", 2))
-        self.assertEqual(json.loads(json.dumps(replay.payload())), older)
+        self.assertEqual((replay.phase, replay.rounds, replay.manual_intervention), ("arrived", 2, False))
+        self.assertEqual([agent["position"] for agent in replay.agents], [(0, 2), (0, 0)])
+        # Written again, it is a team-2 file that reads back as itself.
+        again = json.loads(json.dumps(replay.payload()))
+        self.assertEqual(again["format"], "chatlab-maze-team-2")
+        self.assertEqual(json.loads(json.dumps(from_payload(again).payload())), again)
+        # A team-1 file cannot carry what team-1 never recorded.
+        interrupted = json.loads(json.dumps(older))
+        interrupted["config"]["interruption_text"] = "Look over there."
+        with self.assertRaisesRegex(ValueError, "has to be recorded as chatlab-maze-team-2"):
+            from_payload(interrupted)
 
     def test_the_board_draws_every_agent_and_fans_out_a_shared_cell(self):
         ep = team(maze=OPEN, agents=3)

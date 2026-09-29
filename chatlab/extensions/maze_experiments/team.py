@@ -28,14 +28,20 @@ import re
 
 from .maze import SYSTEM, TOOLS, default_instruction, goal_instruction
 
-FORMAT = "chatlab-maze-team-1"
+FORMAT = "chatlab-maze-team-2"
+# Written before a team could be given supplied moves, a waypoint, an
+# interruption or a limit on its calls. Still read, never written.
+LEGACY_FORMAT = "chatlab-maze-team-1"
 TEAM_GOALS = {"any": "Any agent arrives", "all": "Every agent arrives"}
 # Long enough for a plan ("I'll take the east corridor, you go south"), short
 # enough that a teammate's reply stays a reply about the maze.
 MESSAGE_LIMIT = 280
 MAX_AGENTS = 100
 # An agent stops being asked for responses once it is anything but active.
-AGENT_STATUSES = {"active", "arrived", "abandoned", "cut_off", "out_of_tokens"}
+AGENT_STATUSES = {"active", "arrived", "abandoned", "cut_off", "out_of_tokens", "out_of_calls", "not_recovered"}
+# The statuses a limit of the run's own gives an agent. A team whose agents
+# all stopped on one, or arrived, ran out of budget rather than gave up.
+LIMITED = {"out_of_tokens", "out_of_calls", "not_recovered"}
 # What a response that takes no action does to its agent once its round resolves.
 DROPPED = {"no_call": "abandoned", "cut_off": "cut_off"}
 DEFAULT_CONFIG = dict(communication=True, team_goal="any", goal_mode="coordinates", goal_hint="",
@@ -43,6 +49,14 @@ DEFAULT_CONFIG = dict(communication=True, team_goal="any", goal_mode="coordinate
 # Each agent has its own sampled-token limit. Runs saved before that shared
 # one limit across the team, ``token_budget``, and still replay under it.
 AGENT_TOKEN_BUDGET = 8192
+
+
+TARGET_VERBS = {"steer_agents": "steer", "interrupt_agents": "interrupt"}
+
+
+def targeted(config, name, count):
+    """The agents a team's ``steer_agents`` or ``interrupt_agents`` picks out, every agent when it names none."""
+    return config.get(name) or range(count)
 
 
 def agent_names(count):
@@ -137,9 +151,21 @@ def check_config(config):
     goal_instruction(config["goal_mode"], config["goal_hint"])
     for name, (low, high) in {"sampling_seed": (0, 2147483647), "per_turn_tokens": (1, 8192),
                               "token_budget": (1, 131072), "agent_token_budget": (1, 131072),
-                              "round_limit": (1, 256)}.items():
+                              "round_limit": (1, 256), "attempt_budget": (1, 256), "supplied_moves": (0, 223),
+                              "interrupt_after": (0, 255), "prefix_tokens": (0, 1024)}.items():
         if name in config and (type(config[name]) is not int or not low <= config[name] <= high):
             raise ValueError(f"{name} must be an integer between {low} and {high}.")
+    if not isinstance(config.setdefault("interruption_text", ""), str):
+        raise ValueError("interruption_text must be text.")
+    if config["interruption_text"].strip():
+        config.setdefault("interrupt_after", 0)
+        config.setdefault("prefix_tokens", 0)
+    for name in ("steer_agents", "interrupt_agents"):
+        targets = config.get(name)
+        if targets is not None and (not isinstance(targets, list) or not targets
+                                   or any(type(i) is not int or not 0 <= i < config["agents"] for i in targets)
+                                   or len(set(targets)) != len(targets)):
+            raise ValueError(f"Choose one or more distinct agents in this team to {TARGET_VERBS[name]}.")
     temperature = config["temperature"]
     if type(temperature) not in (int, float) or not math.isfinite(temperature) or not 0 <= temperature <= 2:
         raise ValueError("temperature must be between 0 and 2.")

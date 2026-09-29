@@ -275,19 +275,26 @@ def apply_call(maze, position, args, *, goal_mode="coordinates"):
 
 
 def initial_history(maze, supplied_moves=3, *, goal_mode="coordinates", goal_hint="", system=SYSTEM, instruction=None,
-                    waypoint=None):
+                    waypoint=None, describe=None):
+    """The setup messages and supplied moves a run begins with, and where they leave the character.
+
+    ``describe`` turns each state the simulator reports into the one the
+    model is sent, as a team does to tell each agent who it is; left out,
+    the state is sent as the maze gives it.
+    """
     # The goal mode is validated whatever the wording, because it also decides
     # what every simulator reply discloses. Supplied wording only replaces text.
     default = goal_instruction(goal_mode, goal_hint)
     instruction = default if instruction is None else instruction
+    describe = describe or (lambda state: state)
     route = maze.route()
     if not 0 <= supplied_moves < len(route) - 1:
         raise ValueError("Supplied moves must leave at least one move before the destination.")
     position = maze.start
     waypoint = None if waypoint is None else tuple(waypoint)
     reached = position == waypoint
-    state = json.dumps(maze.state(position, goal_mode=goal_mode, goal_hint=goal_hint, waypoint=waypoint,
-                                  waypoint_reached=reached), separators=(",", ":"))
+    state = json.dumps(describe(maze.state(position, goal_mode=goal_mode, goal_hint=goal_hint, waypoint=waypoint,
+                                           waypoint_reached=reached)), separators=(",", ":"))
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": "\n".join(filter(None, [instruction, state]))}]
     events = []
@@ -299,7 +306,7 @@ def initial_history(maze, supplied_moves=3, *, goal_mode="coordinates", goal_hin
         events.append(event)
         position = after
         reached = reached or position == waypoint
-        messages.append({"role": "tool", "content": json.dumps(maze.state(
-            position, goal_mode=goal_mode, goal_hint=goal_hint, waypoint=waypoint, waypoint_reached=reached),
+        messages.append({"role": "tool", "content": json.dumps(describe(maze.state(
+            position, goal_mode=goal_mode, goal_hint=goal_hint, waypoint=waypoint, waypoint_reached=reached)),
             separators=(",", ":"))})
     return messages, events, position

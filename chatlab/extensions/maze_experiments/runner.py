@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
 import re
 import threading
 import tempfile
@@ -24,8 +25,8 @@ from .dynamic_maze import (FORMAT as CHANGING_FORMAT, ChangingMaze, check_closur
                            maze_at_turn, validate_drops, validate_pending, validate_updates)
 from .inserts import CHANNELS, FORMAT as INSERT_FORMAT, check_insert, render_insert
 from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call, unavoidable_cells
-from .team import (DROPPED, FORMAT as TEAM_FORMAT, MAX_AGENTS, MESSAGE_LIMIT, agent_names, check_config as check_team_config,
-                   team_paragraph, team_tools)
+from .team import (DROPPED, FORMAT as TEAM_FORMAT, LEGACY_FORMAT as LEGACY_TEAM_FORMAT, LIMITED, MAX_AGENTS,
+                   MESSAGE_LIMIT, agent_names, check_config as check_team_config, targeted, team_paragraph, team_tools)
 from chatlab.extension_api import normalize_steering, write_private_text
 
 # One line for each response and each episode outcome, so a run read in
@@ -145,6 +146,32 @@ READY = "Ready. Play the episode or use Next to generate one response."
 TEAM_READY = "Ready. Play runs rounds until the team finishes; Next runs one round."
 
 
+def new_agent(name, position, messages):
+    """One agent as a run starts it: moving, not yet interrupted, with the history its setup wrote."""
+    return dict(name=name, position=tuple(position), status="active", messages=messages, interrupted=False,
+                intervention_turn=None, intervention_tokens=0, intervention_attempts=0, resumed=None,
+                first_move_progress=None, latency=None, interrupt_next=False)
+
+
+class AgentField:
+    """A value each agent has, read and written as the run's own on a run of one agent.
+
+    Every run kept these on the run itself before teams, and a run of one
+    agent is still saved that way, so its reader, its writer and its page
+    reach its only agent's value through the run. A team has no such value,
+    only its agents'.
+    """
+
+    def __set_name__(self, owner, name):
+        self.name = name
+
+    def __get__(self, episode, owner=None):
+        return self if episode is None else episode._solo()[self.name]
+
+    def __set__(self, episode, value):
+        episode._solo()[self.name] = value
+
+
 @dataclass
 class Episode:
     """One run in one maze, by a single agent or by a team.
@@ -175,15 +202,7 @@ class Episode:
     sampled_tokens: int = 0
     tool_attempts: int = 0
     supplied_moves: int = 0
-    interrupted: bool = False
-    intervention_turn: int | None = None
-    intervention_tokens: int = 0
-    intervention_attempts: int = 0
-    resumed: bool | None = None
-    first_move_progress: bool | None = None
-    latency: int | None = None
     manual_intervention: bool = False
-    interrupt_next: bool = False
     # A cell queued to close before the next response, and every queued closure
     # that could not happen by the time its response came round.
     close_next: tuple = ()
@@ -213,6 +232,16 @@ class Episode:
     playing: bool = False
     reveal_route: bool = False
     created_at: float = field(default_factory=time.time)
+    # What each agent has its own of: its history, and its interruption and what came of it.
+    messages = AgentField()
+    interrupted = AgentField()
+    intervention_turn = AgentField()
+    intervention_tokens = AgentField()
+    intervention_attempts = AgentField()
+    resumed = AgentField()
+    first_move_progress = AgentField()
+    latency = AgentField()
+    interrupt_next = AgentField()
 
     def __deepcopy__(self, memo):
         # Gradio copies the initial State once per browser/API session. Each
@@ -236,36 +265,9 @@ class Episode:
         # A run of one agent names no count, as every run did before teams.
         if self.config.get("agents") == 1:
             del self.config["agents"]
-        if "agents" in self.config:
-            self._start_team()
-        else:
-            self._start_single()
-
-    def _start_team(self):
-        self.config = check_team_config(self.config)
-        check_checkpoint(self.config, self.maze)
-        checkpoint = checked_cell(self.config.get("required_checkpoint"), self.maze, "required checkpoint")
-        if checkpoint is not None:
-            if tuple(checkpoint) not in unavoidable_cells(self.maze):
-                raise ValueError("The required checkpoint must be before the destination on every route from the start.")
-            self.config["required_checkpoint"] = checkpoint
-        targets = self.config.get("steer_agents")
-        if targets is not None and (not isinstance(targets, list) or not targets
-                                   or any(type(i) is not int or not 0 <= i < self.config["agents"] for i in targets)
-                                   or len(set(targets)) != len(targets)):
-            raise ValueError("Choose one or more distinct agents in this team to steer.")
-        names = agent_names(self.config["agents"])
-        self.agents = [dict(name=name, position=self.maze.start, status="active", messages=[]) for name in names]
-        for index, agent in enumerate(self.agents):
-            instruction = "\n".join(filter(None, [
-                self.config["instruction"],
-                team_paragraph(agent["name"], names, self.config["team_goal"], self.config["communication"])]))
-            state = json.dumps(self.agent_state(index), separators=(",", ":"))
-            agent["messages"] = [{"role": "system", "content": self.config["system_prompt"]},
-                                 {"role": "user", "content": instruction + "\n" + state}]
-        self.detail = self.detail or TEAM_READY
-
-    def _start_single(self):
+        team = "agents" in self.config
+        if team:
+            self.config = check_team_config(self.config)
         self.config.setdefault("goal_mode", "coordinates")
         self.config.setdefault("goal_hint", "")
         # Runs predating editable wording carry no prompt, so they keep the
@@ -284,14 +286,33 @@ class Episode:
             elif type(self.config[key]) is not int or self.config[key] < 1:
                 raise ValueError("The recovery window must be a positive number of sampled tokens and tool attempts.")
         check_checkpoint(self.config, self.maze)
-        supplied = int(self.config.get("supplied_moves", 3))
-        messages, self.events, position = initial_history(
-            self.maze, supplied, goal_mode=self.config["goal_mode"], goal_hint=self.config["goal_hint"],
-            system=self.config["system_prompt"], instruction=self.config["instruction"],
-            waypoint=self.config.get("waypoint"))
-        self.agents = [dict(name=agent_names(1)[0], position=position, status="active", messages=messages)]
+        checkpoint = checked_cell(self.config.get("required_checkpoint"), self.maze, "required checkpoint")
+        if checkpoint is not None:
+            if not team:
+                raise ValueError("A required checkpoint is a team's. Give a run of one agent a waypoint instead.")
+            if tuple(checkpoint) not in unavoidable_cells(self.maze):
+                raise ValueError("The required checkpoint must be before the destination on every route from the start.")
+            self.config["required_checkpoint"] = checkpoint
+        # A team starts with none unless it asks, as every team did before it could.
+        supplied = int(self.config.get("supplied_moves", 0 if team else 3))
+        names = agent_names(self.config.get("agents", 1))
+        self.agents, self.events = [], []
+        for index, name in enumerate(names):
+            instruction = self.config["instruction"]
+            if team:
+                instruction = "\n".join(filter(None, [instruction, team_paragraph(
+                    name, names, self.config["team_goal"], self.config["communication"])]))
+            messages, events, position = initial_history(
+                self.maze, supplied, goal_mode=self.config["goal_mode"], goal_hint=self.config["goal_hint"],
+                system=self.config["system_prompt"], instruction=instruction, waypoint=self.config.get("waypoint"),
+                describe=(lambda state, name=name: self.framed(name, state)) if team else None)
+            if team:
+                for event in events:
+                    event["agent"] = index
+            self.agents.append(new_agent(name, position, messages))
+            self.events += events
         self.supplied_moves = supplied
-        self.detail = self.detail or READY
+        self.detail = self.detail or (TEAM_READY if team else READY)
 
     @property
     def team(self):
@@ -309,19 +330,10 @@ class Episode:
 
     def _solo(self):
         if self.team:
-            raise AttributeError("A team has no single history or position. Read them from its agents.")
+            raise AttributeError("A team has no single history, position or interruption. Read them from its agents.")
         return self.agents[0]
 
-    # A run of one agent is read and written as that agent, which is how every
-    # run was before teams: its history and position are the run's own.
-    @property
-    def messages(self):
-        return self._solo()["messages"]
-
-    @messages.setter
-    def messages(self, value):
-        self._solo()["messages"] = value
-
+    # Kept a tuple, as the setup writes it, whatever a saved run spelled it as.
     @property
     def position(self):
         return self._solo()["position"]
@@ -388,20 +400,24 @@ class Episode:
         agent is told only the maze.
         """
         agent = self.agents[index]
-        state = {"agent": agent["name"], "teammates": [n for n in self.names if n != agent["name"]]} if self.team else {}
-        state.update(self.current_maze.state(agent["position"], error, goal_mode=self.config["goal_mode"],
-                                             goal_hint=self.config["goal_hint"], waypoint=self.config.get("waypoint"),
-                                             waypoint_reached=self.waypoint_turn is not None))
-        if self.team and self.config["communication"]:
+        state = self.current_maze.state(agent["position"], error, goal_mode=self.config["goal_mode"],
+                                        goal_hint=self.config["goal_hint"], waypoint=self.config.get("waypoint"),
+                                        waypoint_reached=self.waypoint_turn_of(index) is not None)
+        return self.framed(agent["name"], state, inbox) if self.team else state
+
+    def framed(self, name, state, inbox=()):
+        """A maze state as team agent ``name`` is told it: who it is, who its teammates are, and what they said."""
+        others = [other for other in agent_names(self.config["agents"]) if other != name]
+        state = {"agent": name, "teammates": others, **state}
+        if self.config["communication"]:
             state["messages"] = list(inbox)
         return state
 
     def model_state(self, error=None):
         return self.agent_state(0, error)
 
-    @property
-    def waypoint_turn(self):
-        """The response whose accepted move reached the waypoint, -1 for a supplied move, or None.
+    def waypoint_turn_of(self, index):
+        """The response whose accepted move took agent ``index`` onto the waypoint, -1 for a supplied move, or None.
 
         Read off the path rather than kept, so it cannot disagree with the
         moves a saved run is checked against.
@@ -410,9 +426,23 @@ class Episode:
         if waypoint is None:
             return None
         for event in self.events:
-            if event["accepted"] and list(event["after"]) == list(waypoint):
+            if event.get("agent", 0) == index and event["accepted"] and list(event["after"]) == list(waypoint):
                 return event.get("turn", -1) if event.get("source") == "model" else -1
         return None
+
+    @property
+    def waypoint_turn(self):
+        """When a run of one agent reached its waypoint, as waypoint_turn_of says."""
+        self._solo()
+        return self.waypoint_turn_of(0)
+
+    def agent_attempts(self, index):
+        """The move calls agent ``index`` has had applied, which is every one it made in a round that resolved."""
+        return sum(1 for event in self.events if event.get("agent", 0) == index and event["source"] == "model")
+
+    def agent_moves(self, index):
+        """The accepted moves agent ``index`` has made, its supplied ones included."""
+        return sum(event["accepted"] for event in self.events if event.get("agent", 0) == index)
 
     @property
     def steer_turn(self):
@@ -421,12 +451,11 @@ class Episode:
 
     def steers_next(self, index=0):
         """Whether agent ``index``'s next response is steered, judged on that agent's own responses and moves."""
-        if index not in (self.config.get("steer_agents") or range(len(self.agents))):
+        if index not in targeted(self.config, "steer_agents", len(self.agents)):
             return False
         turns = [turn for turn in self.turns if turn.get("agent", 0) == index]
         start = next((i for i, turn in enumerate(turns) if turn.get("steered")), None)
-        moves = sum(e["accepted"] for e in self.events if e.get("agent", 0) == index)
-        return steered_at(self.config, start, len(turns), self.agents[index]["position"], moves)
+        return steered_at(self.config, start, len(turns), self.agents[index]["position"], self.agent_moves(index))
 
     @property
     def moves(self):
@@ -435,7 +464,7 @@ class Episode:
     def payload(self):
         if self.team:
             keys = ("run_id", "phase", "detail", "agents", "turns", "events", "mail", "rounds", "model_id", "load_id",
-                    "sampled_tokens", "tool_attempts", "created_at")
+                    "sampled_tokens", "tool_attempts", "supplied_moves", "manual_intervention", "created_at")
             with self.lock:
                 return {"format": TEAM_FORMAT, "maze": self.maze.to_dict(), "config": self.config, "exploratory": True,
                         **{key: getattr(self, key) for key in keys}}
@@ -504,14 +533,22 @@ class Episode:
         self.detail += (f" Autosave failed: {error}. Latest changes remain in memory. "
                         "Use Export run JSON to download them, and check the run directory or free disk space.")
 
-    def request_interruption(self):
+    def request_interruption(self, index=0):
+        """Queue the interruption for agent ``index``'s next response, ahead of its own trigger."""
         if self.phase in TERMINAL or self.replay_only:
             raise ValueError("Start a new episode to request an interruption. This episode is finished or is a saved replay.")
-        if self.interrupted:
-            raise ValueError("This episode already contains its interruption. Start another run to compare settings.")
+        agent = self.agents[index]
+        if index not in targeted(self.config, "interrupt_agents", len(self.agents)):
+            raise ValueError(f"{agent['name']} is not one of the agents this run interrupts.")
+        if agent["status"] != "active":
+            raise ValueError(f"{agent['name']} has stopped moving, so no response of its is left to interrupt.")
+        if agent["interrupted"]:
+            raise ValueError(("This episode already contains its interruption." if not self.team else
+                              f"{agent['name']} has already been interrupted.")
+                             + " Start another run to compare settings.")
         if not self.config.get("interruption_text", "").strip():
             raise ValueError("Choose interruption text before starting this episode.")
-        self.interrupt_next, self.manual_intervention = True, True
+        agent["interrupt_next"], self.manual_intervention = True, True
 
     def request_closure(self, cell):
         """Queue one cell to be walled off before the next generated response.
@@ -761,13 +798,14 @@ def context_messages(episode, index):
     or a teammate message is written into a reply already counted.
 
     Counted from the record rather than kept as an index of its own, so the
-    two cannot disagree. On a team, the history is the answering agent's own,
-    which grows by two messages for each round it made a call in.
+    two cannot disagree. On a team, the history is the answering agent's own:
+    its setup, its supplied moves, and a pair for each round it made a call in.
     """
     if episode.team:
         turn = episode.turns[index]
-        calls = sum(1 for event in episode.events if event["agent"] == turn["agent"] and event["round"] < turn["round"])
-        return episode.agents[turn["agent"]]["messages"][:2 + 2 * calls]
+        pairs = sum(1 for event in episode.events if event["agent"] == turn["agent"]
+                    and (event["source"] == "supplied" or event["round"] < turn["round"]))
+        return episode.agents[turn["agent"]]["messages"][:2 + 2 * pairs]
     supplied = sum(event["source"] == "supplied" for event in episode.events)
     attempts = sum("event" in turn for turn in episode.turns[:max(index, 0)])
     users = sum(insert["channel"] == "user" and insert["before_turn"] <= index
@@ -775,10 +813,51 @@ def context_messages(episode, index):
     return episode.messages[:2 + 2 * (supplied + attempts) + users]
 
 
-def interrupted_prefix(episode, manager):
-    if episode.interrupted or not episode.config.get("interruption_text"):
+# What reading a response adds to it, and so what a response rebuilt from a
+# record is read without.
+DERIVED = {"event", "outcome", "sampled_tokens", "tokens_cumulative"}
+
+
+def mark_interruption(episode, index, turn):
+    """Record that response ``turn`` of agent ``index`` opened with the interruption.
+
+    Its recovery is counted from here: the tokens and calls it has made so far
+    are where its window starts.
+    """
+    episode.agents[index].update(interrupted=True, intervention_turn=turn,
+                                 intervention_tokens=episode.agent_tokens()[index],
+                                 intervention_attempts=episode.agent_attempts(index))
+
+
+def response_limit(episode, index, cap, interrupting):
+    """The most tokens agent ``index``'s next response may sample.
+
+    Its cap for the round, narrowed while it is inside a recovery window: the
+    response that opens with the interruption gets no more than the whole
+    window, and each one after it, until the agent moves again, what is left of
+    it.
+    """
+    agent, window = episode.agents[index], episode.config["recovery_tokens"]
+    if interrupting:
+        return min(cap, window)
+    if agent["interrupted"] and agent["resumed"] is None:
+        return min(cap, window - (episode.agent_tokens()[index] - agent["intervention_tokens"]))
+    return cap
+
+
+def interrupted_prefix(episode, manager, index=0):
+    """The interruption agent ``index``'s next response opens with, or none.
+
+    Each agent the run interrupts is interrupted once: on its first response
+    after its own accepted moves, supplied ones included, reach the trigger,
+    or on the one it was queued for.
+    """
+    agent = episode.agents[index]
+    if agent["interrupted"] or not episode.config.get("interruption_text"):
         return []
-    if not episode.interrupt_next and episode.moves < episode.config["interrupt_after"]:
+    if index not in targeted(episode.config, "interrupt_agents", len(episode.agents)):
+        return []
+    if not agent["interrupt_next"] and episode.agent_moves(index) < episode.config["interrupt_after"]:
         return []
     text = episode.config["interruption_text"]
     if any(mark in text for mark in ("<tool_call", "</tool_call", "<|im_", "<|endoftext|>", "<think>", "</think>", "```", "~~~")):
@@ -1085,13 +1164,10 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
             for insert in inserts:
                 if insert["before_turn"] == i:
                     land_insert(result, insert)
-            turn = copy.deepcopy(previous)
+            turn = copy.deepcopy({key: value for key, value in previous.items() if key not in DERIVED})
             result.turns.append(turn)
             if episode.interrupted and episode.intervention_turn == i:
-                result.interrupted = True
-                result.intervention_turn = i
-                result.intervention_tokens = result.sampled_tokens
-                result.intervention_attempts = result.tool_attempts
+                mark_interruption(result, 0, i)
             result.phase = "running"
             action = finish_response(result, turn, stop_ids, result.config["per_turn_tokens"])
             resolve_round(result, [action] if action else [])
@@ -1217,22 +1293,17 @@ def resolve_round(episode, actions):
         episode.events.append(event)
         episode.turns[action["turn"]]["event"] = event
         action["event"] = event
+    spent = episode.agent_tokens()
     for action in actions:
         agent, event = episode.agents[action["agent"]], action["event"]
         if event["accepted"]:
             agent["position"] = tuple(event["after"])
-            if episode.interrupted and episode.resumed is None:
-                episode.resumed = True
-                episode.first_move_progress = event["progress"]
-                episode.latency = episode.sampled_tokens - episode.intervention_tokens
+            if agent["interrupted"] and agent["resumed"] is None:
+                agent.update(resumed=True, first_move_progress=event["progress"],
+                             latency=spent[action["agent"]] - agent["intervention_tokens"])
         if event["arrived"]:
             agent["status"] = "arrived"
-    if team and "agent_token_budget" in episode.config:
-        # A response cut off at the last of its agent's limit was stopped by
-        # the limit, so that agent is out of tokens rather than cut off.
-        for agent, spent in zip(episode.agents, episode.agent_tokens()):
-            if agent["status"] in ("active", "cut_off") and spent >= episode.config["agent_token_budget"]:
-                agent["status"] = "out_of_tokens"
+    settle_limits(episode, spent)
     readers = [action["agent"] for action in actions]
     for sender, text in sent:
         episode.mail.append(dict(round=round_index, sender=episode.agents[sender]["name"], text=text,
@@ -1249,6 +1320,37 @@ def resolve_round(episode, actions):
         settle_team(episode, actions, sent)
     else:
         settle_single(episode, actions)
+    # An interrupted agent that stops without having moved again did not
+    # recover, and neither did one still moving when the run ended.
+    for agent in episode.agents:
+        if (agent["status"] != "active" or episode.phase in TERMINAL) and agent["interrupted"] and agent["resumed"] is None:
+            agent.update(resumed=False, first_move_progress=False)
+
+
+def settle_limits(episode, spent):
+    """Take out of the run every agent a limit has stopped, once its round has landed.
+
+    An agent that was interrupted and has not moved since stops when its
+    recovery window closes. Otherwise it stops when it has spent its
+    sampled-token limit, including one whose response was cut off at the last
+    of it, since the limit is what stopped that response, or when it has made
+    as many calls as the run allows. A team saved under one limit for the
+    whole team leaves the limit to the team.
+    """
+    config = episode.config
+    tokens = config.get("agent_token_budget") if episode.team else config["token_budget"]
+    for index, agent in enumerate(episode.agents):
+        if agent["status"] not in ("active", "cut_off"):
+            continue
+        waiting = agent["interrupted"] and agent["resumed"] is None
+        if agent["status"] == "active" and waiting and (
+                spent[index] - agent["intervention_tokens"] >= config["recovery_tokens"]
+                or episode.agent_attempts(index) - agent["intervention_attempts"] >= config["recovery_attempts"]):
+            agent["status"] = "not_recovered"
+        elif tokens is not None and spent[index] >= tokens:
+            agent["status"] = "out_of_tokens"
+        elif agent["status"] == "active" and episode.agent_attempts(index) >= config.get("attempt_budget", math.inf):
+            agent["status"] = "out_of_calls"
 
 
 def settle_single(episode, actions):
@@ -1265,13 +1367,12 @@ def settle_single(episode, actions):
         episode.detail = f"Moved {event['direction']} to row {episode.position[0]}, column {episode.position[1]}."
     else:
         episode.detail = "Rejected call: " + event["error"].replace("_", " ") + ". The position did not change."
-    if event["arrived"]:
+    status = episode.agents[0]["status"]
+    if status == "arrived":
         episode.phase, episode.detail = "arrived", "The simulator confirmed arrival at the destination."
-    elif (episode.interrupted and episode.resumed is None
-          and (episode.sampled_tokens - episode.intervention_tokens >= episode.config["recovery_tokens"]
-               or episode.tool_attempts - episode.intervention_attempts >= episode.config["recovery_attempts"])):
+    elif status == "not_recovered":
         episode.phase, episode.detail = "budget", "No accepted move within the recovery window."
-    elif episode.sampled_tokens >= episode.config["token_budget"] or episode.tool_attempts >= episode.config["attempt_budget"]:
+    elif status in LIMITED:
         episode.phase, episode.detail = "budget", "The episode reached its token or action limit."
 
 
@@ -1286,8 +1387,8 @@ def settle_team(episode, actions, sent):
                           if episode.config["team_goal"] == "any" else
                           f"Every agent reached the destination by round {episode.rounds}.")
     elif not moving:
-        # Out of tokens only when that is what stopped every agent still out.
-        spent = all(agent["status"] in ("arrived", "out_of_tokens") for agent in episode.agents)
+        # Out of budget only when a limit is what stopped every agent still out.
+        spent = all(agent["status"] == "arrived" or agent["status"] in LIMITED for agent in episode.agents)
         episode.phase = "budget" if spent else "abandoned"
         episode.detail = "No agent is still moving: " + ", ".join(
             f"{agent['name']} {agent['status'].replace('_', ' ')}" for agent in episode.agents) + "."
@@ -1430,19 +1531,14 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                 break
             actions = []
             for index in moving:
-                agent, limit = episode.agents[index], caps[index]
+                agent = episode.agents[index]
                 edit = episode.pending_edit
-                forced = edit["forced_ids"] if edit else interrupted_prefix(episode, manager)
+                forced = edit["forced_ids"] if edit else interrupted_prefix(episode, manager, index)
                 inserts_interruption = edit["interruption_here"] if edit else bool(forced)
-                if not team:
-                    window = episode.config["recovery_tokens"]
-                    if inserts_interruption:
-                        limit = min(limit, window)
-                    elif episode.interrupted and episode.resumed is None:
-                        limit = min(limit, window - (episode.sampled_tokens - episode.intervention_tokens))
-                    if limit <= 0:
-                        episode.phase, episode.detail = "budget", "The sampled-token budget is exhausted."
-                        break
+                limit = response_limit(episode, index, caps[index], inserts_interruption)
+                if limit <= 0:
+                    episode.phase, episode.detail = "budget", "The sampled-token budget is exhausted."
+                    break
                 # After the budget is known to allow a response, so an insertion is
                 # only ever recorded with the response that read it.
                 inserted = apply_insert(episode, manager)
@@ -1502,12 +1598,10 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                         # alone is not evidence that an interruption was inserted.
                         if forced and update.forced_prefix_tokens and update.metrics:
                             turn.update(prefix_ids=forced, prefix_text=manager.decode(forced))
-                        if inserts_interruption and not episode.interrupted and update.forced_prefix_tokens and update.metrics:
-                            episode.interrupted = True
-                            episode.intervention_turn = len(episode.turns) - 1
-                            episode.intervention_tokens = episode.sampled_tokens
-                            episode.intervention_attempts = episode.tool_attempts
-                            episode.detail = "Interruption inserted. Watching for a real movement call."
+                        if inserts_interruption and not agent["interrupted"] and update.forced_prefix_tokens and update.metrics:
+                            mark_interruption(episode, index, len(episode.turns) - 1)
+                            episode.detail = (f"{agent['name']} was interrupted" if team else "Interruption inserted") \
+                                + ". Watching for a real movement call."
                         yield episode
                         if episode.stop_requested:
                             break
@@ -1544,9 +1638,6 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
             resolve_round(episode, actions)
             if not team:
                 record(turn)
-            if episode.phase in TERMINAL and episode.interrupted and episode.resumed is None:
-                episode.resumed = False if episode.phase not in ("stopped", "error") else None
-                episode.first_move_progress = False if episode.resumed is False else None
             # Before this autosave rather than only in the cleanup below. A
             # response that ends the episode can be the one a closure was
             # queued during, and the file written here is the whole record if
@@ -1852,7 +1943,7 @@ def from_payload(data, read_prompt=None):
     A team run is read by :func:`team_from_payload`. ``read_prompt`` is handed
     to :func:`validate_inserts` for a run carrying inserted messages.
     """
-    if isinstance(data, dict) and data.get("format") == TEAM_FORMAT:
+    if isinstance(data, dict) and data.get("format") in (TEAM_FORMAT, LEGACY_TEAM_FORMAT):
         return team_from_payload(data)
     if not isinstance(data, dict) or data.get("format") not in (FORMAT, CHANGING_FORMAT, INSERT_FORMAT):
         raise ValueError("Choose a ChatLab maze run JSON file.")
@@ -1931,17 +2022,70 @@ def from_payload(data, read_prompt=None):
     return result
 
 
+# What a team run written before supplied moves, waypoints, interruptions and
+# call limits reached teams cannot have set.
+LEGACY_TEAM_KEYS = ("supplied_moves", "waypoint", "interrupt_agents", "attempt_budget")
+
+
+def read_interruption(episode, saved, index, manual):
+    """Check the interruption a saved team response records, or records the absence of, and land it.
+
+    Returns whether the response was planned to open with it, which narrows its
+    token cap. The run's interruption text is not encoded here, since a team
+    run is read with no tokenizer, so the prefix is held to what the run can
+    be checked against: it is the one the response planned, its tokens open the
+    response, it lands on an agent the run interrupts that has not been
+    interrupted yet, and it lands on the first response after that agent's
+    trigger unless the run records a reader asking for it sooner. A planned
+    prefix the model never read belongs to a response stopped before it began.
+    """
+    agent, config = episode.agents[saved["agent"]], episode.config
+    planned, consumed = saved.get("planned_prefix_ids", []), saved.get("forced_prefix_tokens", 0)
+    prefix = saved.get("prefix_ids", [])
+    if not isinstance(planned, list) or any(type(i) is not int for i in planned) or type(consumed) is not int:
+        raise ValueError("A response's interruption prefix must be a list of token IDs.")
+    if saved.get("literal_prefill_tokens", len(planned)) != len(planned):
+        raise ValueError("A response forces a prefix other than the interruption it planned.")
+    eligible = (bool(config.get("interruption_text", "").strip()) and not agent["interrupted"]
+                and agent["status"] == "active"
+                and saved["agent"] in targeted(config, "interrupt_agents", len(episode.agents)))
+    due = eligible and episode.agent_moves(saved["agent"]) >= config.get("interrupt_after", 0)
+    if not planned:
+        if consumed or prefix:
+            raise ValueError("A response records an interruption prefix it never planned.")
+        if due:
+            raise ValueError(f"{agent['name']} was due its interruption at a response that does not open with it.")
+        return False
+    if not eligible or (not due and not manual):
+        raise ValueError(f"A response of {agent['name']} opens with an interruption the run could not have given it there.")
+    if config.get("prefix_tokens") and len(planned) > config["prefix_tokens"]:
+        raise ValueError("A response's interruption is longer than the run's supplied token count.")
+    if consumed:
+        if consumed != len(planned) or prefix != planned or [m["token_id"] for m in saved["metrics"][:consumed]] != planned:
+            raise ValueError("A response's interruption is not the prefix its tokens open with.")
+        mark_interruption(episode, saved["agent"], index)
+    elif prefix or saved["metrics"]:
+        raise ValueError("A response that never read its interruption records tokens after it.")
+    return True
+
+
 def team_from_payload(data):
     """A saved team run, rebuilt for replay from the responses it records.
 
     Nothing the run derived is taken as written. Every recorded response is
     read again through the rules that read it live, round by round, and the
-    moves, messages, histories, positions, statuses, counters and outcome that
-    produces are compared with the file's. A file that disagrees anywhere
-    describes a run these responses could not have made, and is refused.
+    moves, messages, histories, positions, statuses, interruptions, counters
+    and outcome that produces are compared with the file's. A file that
+    disagrees anywhere describes a run these responses could not have made,
+    and is refused.
+
+    A team run written as chatlab-maze-team-1 predates supplied moves,
+    waypoints, interruptions and call limits on a team, and is read as having
+    none; its agents record only their name, position, status and history.
     """
-    if not isinstance(data, dict) or data.get("format") != TEAM_FORMAT:
+    if not isinstance(data, dict) or data.get("format") not in (TEAM_FORMAT, LEGACY_TEAM_FORMAT):
         raise ValueError("Choose a ChatLab maze team run JSON file.")
+    legacy = data["format"] == LEGACY_TEAM_FORMAT
     if not re.fullmatch(r"[a-f0-9]{32}", str(data.get("run_id", ""))):
         raise ValueError("Invalid run identifier.")
     if not isinstance(data.get("maze"), dict) or not isinstance(data.get("config"), dict):
@@ -1951,6 +2095,13 @@ def team_from_payload(data):
     count = data["config"].get("agents")
     if type(count) is not int or not 2 <= count <= MAX_AGENTS:
         raise ValueError(f"A team has 2 to {MAX_AGENTS} agents.")
+    if legacy and (any(data["config"].get(key) for key in LEGACY_TEAM_KEYS)
+                   or str(data["config"].get("interruption_text") or "").strip()):
+        raise ValueError(f"A team run with supplied moves, a waypoint, an interruption or a call limit has to be "
+                         f"recorded as {TEAM_FORMAT}.")
+    manual = False if legacy else data.get("manual_intervention")
+    if type(manual) is not bool:
+        raise ValueError("A team run says whether anyone intervened in it.")
     result = Episode(Maze.from_dict(data["maze"]), data["config"])
     turns, rounds = data.get("turns"), data.get("rounds")
     if type(rounds) is not int or not 0 <= rounds <= result.config["round_limit"]:
@@ -1960,7 +2111,7 @@ def team_from_payload(data):
             or type(t.get("round")) is not int or not isinstance(t.get("text"), str)
             or not isinstance(t.get("metrics"), list) or not all(isinstance(m, dict) and type(m.get("token_id")) is int
                                                                  for m in t["metrics"])
-            or not isinstance(t.get("finish_reason"), str) or t.get("forced_prefix_tokens", 0) != 0 for t in turns):
+            or not isinstance(t.get("finish_reason"), str) for t in turns):
         raise ValueError("Each saved response needs its agent, round, text, tokens and finish reason.")
     by_round = {}
     for turn in turns:
@@ -1968,7 +2119,6 @@ def team_from_payload(data):
     if [t["round"] for t in turns] != sorted(t["round"] for t in turns) or set(by_round) - set(range(rounds + 1)) \
             or set(range(rounds)) - set(by_round):
         raise ValueError("The saved responses are not in round order.")
-    derived = {"event", "outcome", "sampled_tokens", "tokens_cumulative"}
     for round_index in range(rounds + 1):
         if round_index not in by_round:
             continue
@@ -1984,14 +2134,15 @@ def team_from_payload(data):
         caps = result.response_caps(moving) or {}
         actions = []
         for saved in by_round[round_index]:
-            limit = caps.get(saved["agent"], 0)
+            interrupting = read_interruption(result, saved, len(result.turns), manual)
+            limit = response_limit(result, saved["agent"], caps.get(saved["agent"], 0), interrupting)
             if resolved and saved["finish_reason"] not in ("stop", "length", "incomplete_stream"):
                 raise ValueError("A response in a finished round ends in a way no finished round records.")
-            if limit <= 0 or len(saved["metrics"]) > limit:
+            # finish_response names the reason from the sampled tokens, so the
+            # tokens have to be ones that reason could have been named from.
+            count = len(saved["metrics"]) - saved.get("forced_prefix_tokens", 0)
+            if limit <= 0 or count > limit:
                 raise ValueError("A response holds more tokens than its round allowed each agent.")
-            # finish_response names the reason from the tokens, so the tokens
-            # have to be ones that reason could have been named from.
-            count = len(saved["metrics"])
             if {"stop": count == 0, "length": count != limit, "incomplete_stream": count >= limit}.get(
                     saved["finish_reason"], False):
                 raise ValueError("A response records a finish reason its tokens could not have produced.")
@@ -2007,7 +2158,7 @@ def team_from_payload(data):
                 flag = saved.get("steered")
                 if type(flag) is not bool or (flag != expected and not (expected and never_generated)):
                     raise ValueError("A response's steered flag does not match its agent's steering trigger.")
-            turn = copy.deepcopy({key: value for key, value in saved.items() if key not in derived})
+            turn = copy.deepcopy({key: value for key, value in saved.items() if key not in DERIVED})
             result.turns.append(turn)
             action = take_action(result, turn, len(result.turns) - 1)
             if action:
@@ -2029,17 +2180,30 @@ def team_from_payload(data):
         result.phase = phase
         if isinstance(data.get("detail"), str):
             result.detail = data["detail"]
+    # A queued interruption that had not landed leaves no other trace, and
+    # one that has landed stays queued, so the flag is read from the file
+    # once the run says a reader asked for one.
     saved_agents = data.get("agents")
-    rebuilt = json.loads(json.dumps(result.agents))
+    if not legacy and isinstance(saved_agents, list) and len(saved_agents) == len(result.agents):
+        for agent, recorded in zip(result.agents, saved_agents):
+            queued = recorded.get("interrupt_next") if isinstance(recorded, dict) else None
+            if type(queued) is not bool or (queued and not manual):
+                raise ValueError("An agent's queued interruption is not one anyone asked for.")
+            agent["interrupt_next"] = queued
+    kept = ("name", "position", "status", "messages") if legacy else None
+    rebuilt = [{key: value for key, value in agent.items() if kept is None or key in kept}
+               for agent in json.loads(json.dumps(result.agents))]
     checks = {"responses": (turns, result.turns), "moves": (data.get("events"), result.events),
               "messages": (data.get("mail"), result.mail), "agents": (saved_agents, rebuilt),
               "sampled-token count": (data.get("sampled_tokens"), result.sampled_tokens),
               "call count": (data.get("tool_attempts"), result.tool_attempts)}
+    if not legacy:
+        checks["supplied-move count"] = (data.get("supplied_moves"), result.supplied_moves)
     for name, (recorded, replayed) in checks.items():
         if json.loads(json.dumps(recorded)) != json.loads(json.dumps(replayed)):
             raise ValueError(f"The run's {name} do not match what its responses produce."
                              if name.endswith("s") else f"The run's {name} does not match what its responses produce.")
-    result.rounds = rounds
+    result.rounds, result.manual_intervention = rounds, manual
     # A live run refuses to continue under another load, so every response
     # that reached the model names the load the run does.
     for key in ("model_id", "load_id"):

@@ -211,23 +211,16 @@ def as_text(value):
 
 
 def statuses_after(ep, index):
-    """Each agent's status as of round ``index``, so a replay's start is not told how it ended."""
-    statuses = ["active"] * len(ep.agents)
-    spent = [0] * len(ep.agents)
+    """Each agent's status as of round ``index``, so a replay's start is not told how it ended.
+
+    An agent leaves the run in the round of its last response, so its final
+    status holds from that round on and it was moving before.
+    """
+    last = {}
     for turn in ep.turns:
-        if turn["round"] > index:
-            continue
-        spent[turn["agent"]] += turn.get("sampled_tokens", 0)
-        event = turn.get("event")
-        if event and event["arrived"]:
-            statuses[turn["agent"]] = "arrived"
-        elif turn.get("outcome") in ("no_call", "cut_off"):
-            statuses[turn["agent"]] = "abandoned" if turn["outcome"] == "no_call" else "cut_off"
-    limit = ep.config.get("agent_token_budget")
-    if limit is not None:
-        statuses = ["out_of_tokens" if status in ("active", "cut_off") and used >= limit else status
-                    for status, used in zip(statuses, spent)]
-    return statuses
+        last[turn["agent"]] = turn["round"]
+    return [agent["status"] if agent["status"] != "active" and last.get(k, index + 1) <= index else "active"
+            for k, agent in enumerate(ep.agents)]
 
 
 def mail_text(ep):
