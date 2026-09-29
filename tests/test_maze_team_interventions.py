@@ -183,6 +183,29 @@ class TeamInterruptionTests(unittest.TestCase):
         unasked["agents"][1]["interrupt_next"] = False
         with self.assertRaisesRegex(ValueError, "could not have given it"):
             from_payload(unasked)
+        # Nor can the request be credited to another agent than the one interrupted.
+        moved = saved(ep)
+        moved["agents"][0]["interrupt_next"], moved["agents"][1]["interrupt_next"] = True, False
+        with self.assertRaisesRegex(ValueError, "could not have given it"):
+            from_payload(moved)
+
+    def test_a_response_the_recovery_window_cuts_off_leaves_its_agent_not_recovered(self):
+        ep = team(interruption_text="Distracted", interrupt_after=0, prefix_tokens=2, interrupt_agents=[0],
+                  recovery_tokens=1)
+        # agent-1's interrupted response runs into the one token its window allows.
+        manager = Manager([("\n", [8]), step("east"), step("east"), step("east"), step("east")])
+        list(stream_episode(ep, manager))
+        self.assertEqual(ep.turns[0]["outcome"], "cut_off")
+        self.assertEqual([agent["status"] for agent in ep.agents], ["not_recovered", "arrived"])
+        self.assertEqual(ep.phase, "budget")
+        self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+
+    def test_blank_interruption_text_interrupts_nobody(self):
+        ep = team(interruption_text="   ")
+        manager = Manager([step("east")] * 8)
+        list(stream_episode(ep, manager))
+        self.assertEqual(ep.phase, "arrived")
+        self.assertTrue(all(kwargs["forced_ids"] == [] for _, kwargs in manager.calls))
 
     def test_a_team_stops_an_agent_that_has_made_every_call_the_run_allows(self):
         ep = team(attempt_budget=1, team_goal="any")

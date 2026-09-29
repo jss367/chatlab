@@ -311,7 +311,8 @@ class LiveInsertTests(unittest.TestCase):
         # A sender typed beside another channel is not sent with it.
         shown = queue(episode, "tool_note", ADVICE, "Alex", "east")
         self.assertIn("Simulator note queued", shown[1])
-        self.assertEqual(episode.insert_next, dict(channel="tool_note", text=ADVICE, sender=None, advised_direction="east"))
+        self.assertEqual(episode.insert_next, dict(channel="tool_note", text=ADVICE, sender=None, advised_direction="east",
+                                                   for_boundary=0))
         with self.assertRaisesRegex(gr.Error, "already queued"):
             queue(episode, "user", "Go.", "", "")
 
@@ -557,6 +558,13 @@ class ForkTests(unittest.TestCase):
         next(stream)
         fork.request_stop()
         list(stream)
+        self.assertNotIn("context_inserts", fork.config)
+        self.assertEqual(fork.messages, context_messages(replay, 1)[:-1])
+        self.assertEqual(from_payload(json.loads(json.dumps(fork.payload()))).phase, "stopped")
+
+    def test_a_fork_stopped_while_idle_takes_back_the_message_before_its_edit(self):
+        replay, fork, _, _ = self.forked(hand_built(note("user")), 1, "west")
+        fork.request_stop()
         self.assertNotIn("context_inserts", fork.config)
         self.assertEqual(fork.messages, context_messages(replay, 1)[:-1])
         self.assertEqual(from_payload(json.loads(json.dumps(fork.payload()))).phase, "stopped")

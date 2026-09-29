@@ -133,6 +133,8 @@ class TeamClosureTests(unittest.TestCase):
                 lambda c: c["config"]["map_updates"][0].update(closed_cell=[1, 0], grid=["...", "#..", "..."]),
                 "could not have made"),
             "nobody intervening": (lambda c: c.update(manual_intervention=False), "nobody intervened"),
+            "a second closure before the same round": (lambda c: c["config"]["map_updates"].append(dict(
+                c["config"]["map_updates"][0], closed_cell=[2, 2], grid=[".#.", "...", "..#"])), "two map changes"),
             "a fixed map": (lambda c: c["maze"].pop("environment_id"), "changing map"),
             "a finished run still waiting": (lambda c: c.update(phase="arrived", close_next=[2, 2]),
                                              "outcome other than|cannot still be waiting"),
@@ -195,6 +197,22 @@ class TeamInsertTests(unittest.TestCase):
         for name, (change, message) in refused.items():
             with self.subTest(name), self.assertRaisesRegex(ValueError, message):
                 from_payload(altered(ep, change))
+
+    def test_a_message_queued_mid_round_waits_for_the_next_round(self):
+        # Every response in a round answers the state the round began with, so
+        # a message for agent-2 queued while agent-1 is answering waits.
+        ep = team(maze=CORRIDOR)
+        manager = Manager([step("east", CORRIDOR)] * 4)
+        stream = stream_episode(ep, manager, single_step=True)
+        next(stream)
+        ep.request_insert("tool_note", "Late news.", index=1)
+        list(stream)
+        self.assertNotIn("Late news.", json.dumps(manager.calls[1][0]))
+        self.assertNotIn("context_inserts", ep.config)
+        list(stream_episode(ep, manager, single_step=True))
+        self.assertEqual(last_reply(manager, 3)["note"], "Late news.")
+        self.assertEqual(ep.config["context_inserts"][0]["before_round"], 1)
+        self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
 
     def test_a_message_whose_response_is_never_generated_is_withdrawn(self):
         ep = team(maze=CORRIDOR)
