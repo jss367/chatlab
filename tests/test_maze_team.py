@@ -394,7 +394,7 @@ class TeamEpisodeTests(unittest.TestCase):
         self.assertIn("\\*\\*loud\\*\\*", shown)
 
     def test_config_refuses_more_than_the_cap_and_reads_one_agent_as_a_single_run(self):
-        for count in (0, MAX_AGENTS + 1, "2"):
+        for count in (0, MAX_AGENTS + 1, "2", True, 1.0):
             with self.subTest(count), self.assertRaisesRegex(ValueError, "2 to 100 agents"):
                 team(agents=count)
         solo = Episode(MAZE, dict(CONFIG, agents=1))
