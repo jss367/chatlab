@@ -9,6 +9,7 @@ import gradio as gr
 
 from chatlab.extensions.maze_experiments.maze import Maze
 from chatlab.extensions.maze_experiments.page import export_run
+from chatlab.extensions.maze_experiments.reasoning_check import read_responses
 from chatlab.extensions.maze_experiments.runner import (Episode, context_messages, fork_token_edit, from_payload,
                                                         stream_episode)
 from maze_support import Manager, call
@@ -70,6 +71,8 @@ class TeamForkTests(unittest.TestCase):
         self.assertEqual([a["position"] for a in forked.agents], [(0, 2), (0, 2)])
         self.assertTrue(forked.manual_intervention)
         self.assertEqual(saved(from_payload(saved(forked))), saved(forked))
+        # The edited response's reasoning is partly the reader's, so the reasoning check leaves it out.
+        self.assertEqual([row.index for row in read_responses(forked)], [1, 2, 3])
         refused = {
             "a forgotten edit": (lambda c: c.update(token_edit=None), "names the edit"),
             "another edit": (lambda c: c["token_edit"].update(turn=2), "not one its edited response records"),

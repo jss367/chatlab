@@ -171,16 +171,16 @@ def run_label(ep):
 def read_responses(ep):
     """Every response in a run that made a readable move call, scored.
 
-    A one-agent response that begins with text the model did not write, an
-    interruption or an edited token, is left out: its reasoning is partly the
-    reader's.
+    A response that begins with text the model did not write, an
+    interruption or an edited token, is left out, on a team as on a run of one
+    agent: its reasoning is partly the reader's.
     """
     team = ep.team
     communicate = team and ep.config["communication"]
     label, condition = run_label(ep), condition_of(ep)
     rows = []
     for index, turn in enumerate(ep.turns):
-        if not team and (turn.get("forced_prefix_tokens") or turn.get("token_edit")):
+        if turn.get("forced_prefix_tokens") or turn.get("token_edit"):
             continue
         split = split_response(turn, communicate)
         if split is None:
