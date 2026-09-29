@@ -200,6 +200,16 @@ class TeamInterruptionTests(unittest.TestCase):
         self.assertEqual(ep.phase, "budget")
         self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
 
+    def test_a_shared_budget_that_cannot_start_a_round_scores_a_pending_recovery_as_no_return(self):
+        # Five tokens for the whole team: a round of two-token responses leaves
+        # one, too few to split between two agents, with agent-1 not yet back.
+        ep = team(token_budget=5, interruption_text="Distracted", interrupt_after=0, prefix_tokens=2,
+                  interrupt_agents=[0])
+        list(stream_episode(ep, Manager([step("north"), step("east")])))
+        self.assertEqual((ep.phase, ep.rounds), ("budget", 1))
+        self.assertEqual((ep.agents[0]["resumed"], ep.agents[0]["first_move_progress"]), (False, False))
+        self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+
     def test_blank_interruption_text_interrupts_nobody(self):
         ep = team(interruption_text="   ")
         manager = Manager([step("east")] * 8)
