@@ -41,10 +41,10 @@ def agent_color(k):
 
 
 def positions_after(ep, index):
-    """Where every agent stood after round ``index``, -1 being the start."""
+    """Where every agent stood after round ``index``, -1 being after the supplied moves."""
     positions = [ep.maze.start] * len(ep.agents)
     for event in ep.events:
-        if event["accepted"] and event["round"] <= index:
+        if event["accepted"] and (event.get("source") == "supplied" or event["round"] <= index):
             positions[event["agent"]] = tuple(event["after"])
     return positions
 
@@ -88,7 +88,7 @@ def team_board(ep, index=None, reveal=False):
     # agents so that no path leaves its own cells.
     offsets = [((k % 2) * 2 - 1) * 5 * (k // 2 % 4 + 1) if len(ep.agents) > 1 else 0 for k in range(len(ep.agents))]
     for event in ep.events:
-        if event["accepted"] and event["round"] <= index:
+        if event["accepted"] and (event.get("source") == "supplied" or event["round"] <= index):
             k = event["agent"]
             (x1, y1), (x2, y2) = center(event["before"]), center(event["after"])
             d = offsets[k]
