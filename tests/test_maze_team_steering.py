@@ -11,7 +11,7 @@ import gradio as gr
 from chatlab.extension_api import SteeringError, TokenInspector
 from chatlab.extensions.maze_experiments.maze import Maze, generate, unavoidable_cells
 from chatlab.extensions.maze_experiments.page import build_page
-from chatlab.extensions.maze_experiments.runner import Episode, from_payload, stream_episode
+from chatlab.extensions.maze_experiments.runner import from_payload, stream_episode
 from chatlab.extensions.maze_experiments.team_page import response_view, team_board, team_status, team_timeline
 from maze_support import Manager, scored, team_episode
 from maze_support import SteeringManager, VECTOR
