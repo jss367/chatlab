@@ -50,10 +50,17 @@ def positions_after(ep, index):
     return positions
 
 
-def team_board(ep, index=None, reveal=False):
-    """The board after round ``index``, drawn under the map that round was played on."""
+def team_board(ep, index=None, reveal=False, map_round=None):
+    """The board after round ``index``, drawn under the map that round was played on.
+
+    ``map_round`` draws the map of another round instead: a round that never
+    resolved, whose agents still stand where the round before left them, was
+    played on the map as it stood when it began, closures landed at its start
+    included.
+    """
     index = ep.rounds - 1 if index is None else index
-    updates = [u for u in ep.config.get("map_updates", ()) if u["before_round"] <= index]
+    map_round = index if map_round is None else map_round
+    updates = [u for u in ep.config.get("map_updates", ()) if u["before_round"] <= map_round]
     maze = maze_at_turn(ep.maze, updates, None, "before_round")
     closed = {tuple(u["closed_cell"]) for u in updates}
     positions = positions_after(ep, index)

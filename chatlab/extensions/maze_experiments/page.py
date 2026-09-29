@@ -118,10 +118,10 @@ def export_run(ep, directory):
     return path
 
 
-def board(ep, index=None, reveal=False, animate=False):
-    """The board after response ``index``, or for a team after round ``index``."""
+def board(ep, index=None, reveal=False, animate=False, map_round=None):
+    """The board after response ``index``, or for a team after round ``index`` under the map of ``map_round``."""
     if ep.team:
-        return team_board(ep, index, reveal)
+        return team_board(ep, index, reveal, map_round)
     updates = [u for u in ep.config.get("map_updates", ())
                if index is None or u["before_turn"] <= index]
     maze = maze_at_turn(ep.maze, updates, None)
@@ -878,7 +878,11 @@ def views(ep, reveal, selections, session_id, index=None, animate=False):
                 "Earlier token IDs and your replacement are supplied as context; only the new continuation counts toward sampled-token limits.")
     if ep.team:
         note = "Select a response in the history to read it." if shown is None else f"{response_line(ep, shown)}\n\n{note}"
-    return (board(ep, index, reveal, animate), status(ep), TOKENS.strip(metrics[forced:]),
+    # A selected team response in a round that never resolved is shown on the
+    # board it was given: the positions the round before left, under the map
+    # its own round began with.
+    unfinished = ep.team and shown is not None and t["round"] >= ep.rounds
+    return (board(ep, index, reveal, animate, t["round"] if unfinished else None), status(ep), TOKENS.strip(metrics[forced:]),
             t.get("text", ""), note, t.get("prefix_text") or t.get("planned_prefix_text", ""),
             dict(headers=TEAM_HEADERS if ep.team else HEADERS, data=timeline(ep)), stamped,
             gr.update(choices=response_choices(ep), value=-1 if shown is None else shown),
