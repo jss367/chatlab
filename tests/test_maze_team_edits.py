@@ -86,6 +86,14 @@ class TeamForkTests(unittest.TestCase):
             with self.subTest(name), self.assertRaisesRegex(ValueError, message):
                 from_payload(copy_)
 
+    def test_a_fork_whose_replacement_is_a_stop_token_reads_back(self):
+        ep = two_rounds()
+        forked = fork(ep, 3, 0, "\x00", Manager([]))
+        # The fixture's stop token is 0: the response ends on the replacement, sampling nothing.
+        list(stream_episode(forked, Manager([("", [])]), single_step=True))
+        self.assertEqual((forked.turns[3]["finish_reason"], forked.turns[3]["sampled_tokens"]), ("stop", 0))
+        self.assertEqual(saved(from_payload(saved(forked))), saved(forked))
+
     def test_a_fork_at_the_first_agent_of_a_round_asks_the_whole_round_again(self):
         ep = two_rounds()
         manager = Manager([step("east"), step("east")])

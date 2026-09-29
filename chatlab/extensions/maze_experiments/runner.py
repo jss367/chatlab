@@ -2409,8 +2409,11 @@ def replay_rounds(result, turns, rounds, updates, by_answer, manual, queued=(), 
             count = len(saved["metrics"]) - saved.get("forced_prefix_tokens", 0)
             if limit <= 0 or count > limit:
                 raise ValueError("A response holds more tokens than its round allowed each agent.")
-            if {"stop": count == 0, "length": count != limit, "incomplete_stream": count >= limit}.get(
-                    saved["finish_reason"], False):
+            # An edit whose replacement ends in a stop token stops the response
+            # on it, with nothing sampled after, as finish_response reads it.
+            stopped_by_edit = bool(saved.get("token_edit")) and bool(saved["metrics"])
+            if {"stop": count == 0 and not stopped_by_edit, "length": count != limit,
+                    "incomplete_stream": count >= limit}.get(saved["finish_reason"], False):
                 raise ValueError("A response records a finish reason its tokens could not have produced.")
             if saved.get("position_before") != list(result.agents[saved["agent"]]["position"]):
                 raise ValueError("A response records a starting position its agent was not in.")
