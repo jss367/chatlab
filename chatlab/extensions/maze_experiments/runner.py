@@ -392,7 +392,7 @@ class Episode:
         its own, so the map the simulator moves on is the same one a replay of
         this run reconstructs and neither can drift from the other.
         """
-        return maze_at_turn(self.maze, self.config.get("map_updates", ()), None)
+        return maze_at_turn(self.maze, self.config.get("map_updates", ()), None, self.boundary_key)
 
     @property
     def map_changes(self):
