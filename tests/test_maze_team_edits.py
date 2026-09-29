@@ -93,6 +93,45 @@ class TeamForkTests(unittest.TestCase):
         self.assertEqual([kwargs["forced_ids"] for _, kwargs in manager.calls], [[ord("x")], []])
         self.assertEqual(saved(from_payload(saved(forked))), saved(forked))
 
+    def test_a_fork_does_not_carry_an_interruption_asked_for_after_its_edit(self):
+        ep = team(interruption_text="Distracted", interrupt_after=9, prefix_tokens=2)
+        manager = Manager([step("east")] * 6)
+        list(stream_episode(ep, manager, single_step=True))
+        list(stream_episode(ep, manager, single_step=True))
+        ep.request_interruption(1)
+        list(stream_episode(ep, manager, single_step=True))
+        self.assertEqual(ep.agents[1]["intervention_turn"], 5)
+        # Forked in round 1, before anyone asked: agent-2 is not interrupted early.
+        forked = fork(ep, 1, 0, "x", Manager([]))
+        self.assertFalse(forked.agents[1]["interrupt_next"])
+        regenerating = Manager([step("east")])
+        list(stream_episode(forked, regenerating, single_step=True))
+        self.assertEqual(regenerating.calls[0][1]["forced_ids"], [ord("x")])
+        self.assertFalse(forked.agents[1]["interrupted"])
+        # Forked after the interruption, the request travels with the fork.
+        later = fork(ep, 5, 2, "x", Manager([]))
+        self.assertTrue(later.agents[1]["interrupt_next"])
+
+    def test_a_team_run_saved_as_team_1_can_be_forked(self):
+        # A chatlab-maze-team-1 file's responses record no prefix fields.
+        ep = team()
+        list(stream_episode(ep, Manager([step("east")] * 2), single_step=True))
+        older = saved(ep)
+        older["format"] = "chatlab-maze-team-1"
+        for key in ("supplied_moves", "manual_intervention", "dropped_closures", "close_next", "token_edit"):
+            older.pop(key, None)
+        for key in ("interruption_text", "recovery_tokens", "recovery_attempts"):
+            older["config"].pop(key, None)
+        older["agents"] = [{key: agent[key] for key in ("name", "position", "status", "messages")}
+                           for agent in older["agents"]]
+        for turn in older["turns"]:
+            for key in ("forced_prefix_tokens", "prefix_ids", "prefix_text", "planned_prefix_ids",
+                        "planned_prefix_text", "literal_prefill_tokens"):
+                del turn[key]
+        replay = from_payload(older)
+        forked = fork(replay, 1, 0, "x", Manager([]))
+        self.assertEqual((forked.rounds, len(forked.turns)), (0, 1))
+
     def test_a_fork_of_an_interrupted_response_keeps_its_interruption(self):
         ep = team(interruption_text="Distracted", interrupt_after=1, prefix_tokens=2, interrupt_agents=[1])
         manager = Manager([step("east")] * 4)

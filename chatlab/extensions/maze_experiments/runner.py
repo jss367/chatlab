@@ -1248,7 +1248,7 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
         original = episode.turns[turn_index]
         metrics = original["metrics"]
         if (not isinstance(token_index, int)
-                or not original["forced_prefix_tokens"] <= token_index < len(metrics)):
+                or not original.get("forced_prefix_tokens", 0) <= token_index < len(metrics)):
             raise ValueError("Select a model-generated token to edit.")
         kept = metrics[:token_index]
         kept_ids = [m["token_id"] for m in kept]
@@ -1364,7 +1364,12 @@ def fork_team(episode, turn_index):
                for insert, _ in kept_inserts(episode, turn_index)}
     result = Episode(episode.maze, config)
     kept = copy.deepcopy(episode.turns[:turn_index])
-    queued = {index for index, agent in enumerate(episode.agents) if agent["interrupt_next"]}
+    # Only a request the kept history shows was made: an interruption that
+    # landed at or before the edited response. A flag the parent raised later
+    # would otherwise interrupt the fork's agent rounds before the parent's did.
+    queued = {index for index, agent in enumerate(episode.agents)
+              if agent["interrupt_next"] and agent["intervention_turn"] is not None
+              and agent["intervention_turn"] <= turn_index}
     result.open_round = replay_rounds(result, kept, edited["round"], updates, carried, True, queued, open_round=True)
     # Carried as the parent had them, so an interruption asked for early
     # still reads as asked for in the fork's own file.
