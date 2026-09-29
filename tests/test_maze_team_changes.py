@@ -189,6 +189,39 @@ class TeamInsertTests(unittest.TestCase):
         self.assertEqual(ep.config["context_inserts"][0]["before_round"], 1)
         self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
 
+    def test_prompts_are_read_under_the_runs_model_when_responses_name_none(self):
+        ep = team(maze=CORRIDOR)
+        manager = Manager([step("east", CORRIDOR)] * 4)
+        list(stream_episode(ep, manager, single_step=True))
+        ep.request_insert("tool_note", "The exit is east.", index=1)
+        list(stream_episode(ep, manager, single_step=True))
+        read = lambda run, turn, messages: prompt_reading(run, turn, messages, manager)
+        unnamed = saved(ep)
+        for turn in unnamed["turns"]:
+            turn.pop("model_id")
+        self.assertEqual(saved(from_payload(unnamed, read_prompt=read)), saved(from_payload(unnamed)))
+        # A prompt that left the message out is still caught.
+        unnamed["turns"][3]["prompt_ids"] = unnamed["turns"][1]["prompt_ids"]
+        with self.assertRaisesRegex(ValueError, "recorded prompt in round 2"):
+            from_payload(unnamed, read_prompt=read)
+
+    def test_a_message_queued_as_a_round_opens_waits_for_the_next_round(self):
+        # Queued from another callback once the round has begun but before its
+        # first response is appended, a message still waits: every response in
+        # the round answers the state it began with.
+        ep = team(maze=CORRIDOR)
+        ep.busy = ep.round_open = True
+        ep.request_insert("tool_note", "Late news.", index=1)
+        self.assertEqual(ep.agents[1]["insert_next"]["for_boundary"], 1)
+        # Queued between rounds, one lands in the next round.
+        ep = team(maze=CORRIDOR)
+        manager = Manager([step("east", CORRIDOR)] * 4)
+        list(stream_episode(ep, manager, single_step=True))
+        self.assertFalse(ep.round_open)
+        ep.request_insert("tool_note", "Between rounds.", index=1)
+        list(stream_episode(ep, manager, single_step=True))
+        self.assertEqual(ep.config["context_inserts"][0]["before_round"], 1)
+
     def test_a_message_whose_response_is_never_generated_is_withdrawn(self):
         ep = team(maze=CORRIDOR)
         manager = Manager([step("east", CORRIDOR)] * 4)
