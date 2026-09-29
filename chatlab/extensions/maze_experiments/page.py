@@ -238,10 +238,11 @@ def agent_budget(ep):
 
 
 def attempt_limit(ep):
-    """Each agent's call limit, or for a team saved before there was one, a limit it can never reach.
+    """Each agent's call limit, or for a team without one, its round limit.
 
-    A team agent makes one call a round at most, so its round limit is a call
-    limit that never binds, which is what a team without one ran under.
+    A team agent makes one call a round at most, and a new episode leaves out
+    a call limit the round limit reaches first, so this reads back as the
+    team without one it was.
     """
     if "attempt_budget" in ep.config or not ep.team:
         return ep.config.get("attempt_budget", 32)
@@ -1245,6 +1246,11 @@ def _build_page(context):
             if team:
                 config.update(agents=agent_count, communication=bool(talk), team_goal=goal, round_limit=int(rounds),
                               agent_token_budget=config.pop("token_budget"))
+                # An agent makes one call a round, so a limit the round limit
+                # reaches first is no limit, and is left out as a team saved
+                # without one has it, rather than ending the last round on it.
+                if config["attempt_budget"] >= config["round_limit"]:
+                    del config["attempt_budget"]
                 for key, targets, verb in (("interrupt_agents", interrupted, "interrupt"),
                                            ("steer_agents", steered, "steer")):
                     chosen_agents = parse_agents(targets, agent_count, verb)

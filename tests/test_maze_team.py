@@ -499,8 +499,12 @@ class TeamPageTests(unittest.TestCase):
                 legacy = team(token_budget=3000, round_limit=40)
                 reloaded = load.fn(str(legacy.export()), Episode(MAZE, CONFIG), False, "s", None)
                 self.assertEqual(reloaded[output_index(load, "maze-budget")], 1500)
-                # A team saved with no call limit fills the control with one it can never reach.
+                # A team saved with no call limit fills the control with its round limit,
+                # which prepares a team with no call limit again.
                 self.assertEqual(reloaded[output_index(load, "maze-attempts")], 40)
+                again = prepare.fn(Episode(MAZE, CONFIG), False, "s", None, *scenario(
+                    size=3, seed=1, distance=2, openness=.9, agents=2, round_limit=40, attempts=40))[0]
+                self.assertNotIn("attempt_budget", again.config)
                 select = callbacks["select_history"]
                 shown = select.fn(loaded[0], False, "s", SimpleNamespace(index=[1, 0]))
                 self.assertEqual(shown[8]["value"], 0)
