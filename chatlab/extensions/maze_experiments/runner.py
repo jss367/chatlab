@@ -2596,12 +2596,13 @@ def team_from_payload(data, read_prompt=None):
                              if name.endswith("s") else f"The run's {name} does not match what its responses produce.")
     # A fork names the edit it was made by, which its edited response records
     # too; a fork of a fork keeps the earlier edit on the response it made. A
-    # fork stopped before it regenerated names the response it never reached.
+    # fork stopped, or failed, before it regenerated names the response it
+    # never reached.
     token_edit = data.get("token_edit")
     if token_edit is not None:
         at = token_edit.get("turn") if isinstance(token_edit, dict) else None
         recorded = type(at) is int and 0 <= at < len(turns) and turns[at].get("token_edit") == token_edit
-        unreached = at == len(turns) and result.phase in ("stopped", "paused")
+        unreached = at == len(turns) and result.phase in ("stopped", "paused", "error")
         if legacy or not manual or not (recorded or unreached):
             raise ValueError("The run's token edit is not one its edited response records.")
     if token_edit is None and any("token_edit" in turn for turn in turns):
