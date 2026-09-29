@@ -1322,8 +1322,16 @@ def resolve_round(episode, actions):
         settle_team(episode, actions, sent)
     else:
         settle_single(episode, actions)
-    # An interrupted agent that stops without having moved again did not
-    # recover, and neither did one still moving when the run ended.
+    settle_recoveries(episode)
+
+
+def settle_recoveries(episode):
+    """Score as not recovered every interrupted agent the run is done with that never moved again.
+
+    An agent that has stopped is done with, and so is every agent once the
+    run has ended, however it ended: after a round, or before one because the
+    budget left could not start it.
+    """
     for agent in episode.agents:
         if (agent["status"] != "active" or episode.phase in TERMINAL) and agent["interrupted"] and agent["resumed"] is None:
             agent.update(resumed=False, first_move_progress=False)
@@ -1531,6 +1539,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                 episode.phase = "budget"
                 episode.detail = ("The team's remaining sampled tokens cannot give every moving agent a response."
                                   if team else "The sampled-token budget is exhausted.")
+                settle_recoveries(episode)
                 break
             actions = []
             for index in moving:
@@ -1541,6 +1550,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                 limit = response_limit(episode, index, caps[index], inserts_interruption)
                 if limit <= 0:
                     episode.phase, episode.detail = "budget", "The sampled-token budget is exhausted."
+                    settle_recoveries(episode)
                     break
                 # After the budget is known to allow a response, so an insertion is
                 # only ever recorded with the response that read it.
@@ -2197,6 +2207,8 @@ def team_from_payload(data):
                 or (phase == "ready" and turns) or (phase == "budget" and not starved):
             raise ValueError("The run reports an outcome other than the one its responses reach.")
         result.phase = phase
+        if phase == "budget":
+            settle_recoveries(result)
         if isinstance(data.get("detail"), str):
             result.detail = data["detail"]
     for index in queued_agents:
