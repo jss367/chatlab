@@ -9,7 +9,7 @@ from pathlib import Path
 
 import gradio as gr
 
-from .page import MARKDOWN, STEER_MODES, checkpoint_values, steering_config, vector_note
+from .page import MARKDOWN, STEER_MODES, checkpoint_values, prompt_reading, steering_config, vector_note
 from .maze import GOAL_MODES, SYSTEM, default_instruction, generate, unavoidable_cells
 from .runner import TERMINAL, Episode, context_messages, from_payload, stream_episode
 from .team import MAX_AGENTS, TEAM_GOALS, format_agents, parse_agents
@@ -561,7 +561,8 @@ def build_team_page(context, runs_dir):
         try:
             if Path(path).stat().st_size > 50_000_000:
                 raise ValueError("Run files must be smaller than 50 MB.")
-            replay = from_payload(json.loads(Path(path).read_text()))
+            replay = from_payload(json.loads(Path(path).read_text()),
+                                  read_prompt=lambda run, turn, messages: prompt_reading(run, turn, messages, context.models))
             rendered = team_render(replay, show, -1)
         except (ValueError, TypeError, KeyError, IndexError, OSError) as exc:
             logger.warning("Could not load the team run in %s: %s", path, exc)

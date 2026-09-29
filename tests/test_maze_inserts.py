@@ -311,7 +311,8 @@ class LiveInsertTests(unittest.TestCase):
         # A sender typed beside another channel is not sent with it.
         shown = queue(episode, "tool_note", ADVICE, "Alex", "east")
         self.assertIn("Simulator note queued", shown[1])
-        self.assertEqual(episode.insert_next, dict(channel="tool_note", text=ADVICE, sender=None, advised_direction="east"))
+        self.assertEqual(episode.insert_next, dict(channel="tool_note", text=ADVICE, sender=None, advised_direction="east",
+                                                   for_boundary=0))
         with self.assertRaisesRegex(gr.Error, "already queued"):
             queue(episode, "user", "Go.", "", "")
 

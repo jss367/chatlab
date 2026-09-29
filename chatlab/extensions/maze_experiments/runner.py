@@ -385,7 +385,7 @@ class Episode:
         its own, so the map the simulator moves on is the same one a replay of
         this run reconstructs and neither can drift from the other.
         """
-        return maze_at_turn(self.maze, self.config.get("map_updates", ()), None)
+        return maze_at_turn(self.maze, self.config.get("map_updates", ()), None, self.boundary_key)
 
     @property
     def map_changes(self):
@@ -648,7 +648,10 @@ class Episode:
             # simulator before this lands, so only an idle run is asked.
             if not self.busy:
                 render_insert(agent["messages"], insert)
-            agent["insert_next"], self.manual_intervention = insert, True
+            # Named with the boundary it was queued for, so one queued while a
+            # team round is generating waits for the next round rather than
+            # reaching an agent this round asks later than its teammates.
+            agent["insert_next"], self.manual_intervention = dict(insert, for_boundary=boundary), True
 
 
 def describe_insert(insert):
@@ -681,7 +684,8 @@ def apply_insert(episode, manager=None, index=0):
     """
     with episode.lock:
         agent = episode.agents[index]
-        if not agent["insert_next"]:
+        now = episode.rounds if episode.team else len(episode.turns)
+        if not agent["insert_next"] or agent["insert_next"]["for_boundary"] > now:
             return None
         before = agent["messages"]
         queued, agent["insert_next"] = agent["insert_next"], None
@@ -2296,10 +2300,14 @@ def team_from_payload(data, read_prompt=None):
         raise ValueError("A team run's inserted messages are out of order, or name a response it never recorded.")
     updates = list(updates)
     for round_index in range(rounds + 1):
-        while updates and isinstance(updates[0], dict) and updates[0].get("before_round") == round_index:
+        if updates and isinstance(updates[0], dict) and updates[0].get("before_round") == round_index:
             if result.phase in TERMINAL:
                 raise ValueError("The run records a map change after it had ended.")
             land_saved_closure(result, updates.pop(0), round_index)
+            # A live run queues one closure at a time and lands it before a round.
+            if updates and isinstance(updates[0], dict) and updates[0].get("before_round") == round_index:
+                raise ValueError(f"A team run records two map changes before round {round_index + 1}. One lands "
+                                 "before a round.")
         if round_index not in by_round:
             continue
         if result.phase in TERMINAL:
