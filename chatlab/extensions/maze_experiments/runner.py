@@ -2548,10 +2548,19 @@ def team_from_payload(data, read_prompt=None):
     for key in ("model_id", "load_id"):
         if key in data:
             setattr(result, key, data[key])
+    first = {}
+    for record in result.config.get("context_inserts", ()):
+        first.setdefault(record["agent"], record["before_round"])
+    # Every response an agent generated from its first message on records the
+    # prompt it was fed, since a message stays in every later context: one
+    # without it would claim to have read the message with nothing to show.
+    # A response stopped before generation has no tokens and no prompt.
+    for turn in result.turns:
+        if turn["agent"] in first and turn["round"] >= first[turn["agent"]] and turn["metrics"] \
+                and not turn.get("prompt_ids"):
+            raise ValueError(f"{result.agents[turn['agent']]['name']}'s response in round {turn['round'] + 1} records "
+                             "no prompt, so nothing says it read the messages inserted before it.")
     if read_prompt is not None:
-        first = {}
-        for record in result.config.get("context_inserts", ()):
-            first.setdefault(record["agent"], record["before_round"])
         for index, turn in enumerate(result.turns):
             if turn["agent"] not in first or turn["round"] < first[turn["agent"]] or not turn.get("prompt_ids"):
                 continue
