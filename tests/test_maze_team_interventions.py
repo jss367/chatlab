@@ -184,6 +184,31 @@ class TeamInterruptionTests(unittest.TestCase):
         self.assertEqual(ep.phase, "budget")
         self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
 
+    def test_manual_interruption_provenance_requires_an_eligible_queued_agent(self):
+        ep = team(interruption_text="Distracted", interrupt_after=9, interrupt_agents=[1])
+        self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+        forged = saved(ep)
+        forged["manual_intervention"] = True
+        with self.assertRaisesRegex(ValueError, "manual interruption"):
+            from_payload(forged)
+
+        ep.request_interruption(1)
+        # A request can be saved before any response has read it.
+        self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+        for clear_eligible in (False, True):
+            with self.subTest(clear_eligible=clear_eligible):
+                forged = saved(ep)
+                forged["agents"][0]["interrupt_next"] = True
+                if clear_eligible:
+                    forged["agents"][1]["interrupt_next"] = False
+                with self.assertRaisesRegex(ValueError, "queued interruption"):
+                    from_payload(forged)
+        # Blank text also makes a live interruption request impossible.
+        forged = saved(ep)
+        forged["config"]["interruption_text"] = "   "
+        with self.assertRaisesRegex(ValueError, "queued interruption"):
+            from_payload(forged)
+
     def test_a_shared_budget_that_cannot_start_a_round_scores_a_pending_recovery_as_no_return(self):
         # Five tokens for the whole team: a round of two-token responses leaves
         # one, too few to split between two agents, with agent-1 not yet back.
