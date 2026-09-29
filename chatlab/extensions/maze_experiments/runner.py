@@ -223,6 +223,11 @@ class Episode:
     viewing: int = -1
     # The team response selected in the round on screen.
     selected_turn: int | None = None
+    # Whether a team round has begun, which it has from the moment its caps
+    # are set, before its first response is appended: every agent in it
+    # answers the state it began with, so whatever is queued then waits for
+    # the next round. Not written to the run.
+    round_open: bool = False
     # Which playback run owns the view. Starting one supersedes the last, so
     # two runs in the same session cannot repaint each other's frames.
     playback_token: int = 0
@@ -572,7 +577,7 @@ class Episode:
         now lands before the one after it. On a run of one agent that is its
         next response.
         """
-        return self.rounds + bool(self.round_turns(self.rounds))
+        return self.rounds + bool(self.round_open or self.round_turns(self.rounds))
 
     def moving_positions(self):
         """Where each agent still moving stands, by index, which a closure has to leave a way on from."""
@@ -1622,7 +1627,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                                   if team else "The sampled-token budget is exhausted.")
                 settle_recoveries(episode)
                 break
-            actions = []
+            actions, episode.round_open = [], team
             for index in moving:
                 agent = episode.agents[index]
                 edit = episode.pending_edit
@@ -1731,6 +1736,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                     record(turn)
                 break
             resolve_round(episode, actions)
+            episode.round_open = False
             if not team:
                 record(turn)
             # Before this autosave rather than only in the cleanup below. A
@@ -1784,7 +1790,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
             # answered are marked the way a stop marks them.
             discard_round(episode)
         with episode.lock:
-            episode.busy = False
+            episode.busy = episode.round_open = False
             # Before the autosave, so the file records the closure this run
             # will now never reach rather than a queue it emptied silently.
             if episode.phase in TERMINAL:
@@ -2377,6 +2383,11 @@ def team_from_payload(data, read_prompt=None):
         raise ValueError("A run that has ended cannot still be waiting to close a cell.")
     validate_pending(result.maze, pending, result.config.get("map_updates", []), drops, boundary, "before_round")
     result.dropped_closures, result.close_next = copy.deepcopy(drops), tuple(pending)
+    # Before the prompts are read, since reading one falls back to the run's
+    # model for a response that does not name its own.
+    for key in ("model_id", "load_id"):
+        if key in data:
+            setattr(result, key, data[key])
     if read_prompt is not None:
         first = {}
         for record in result.config.get("context_inserts", ()):
