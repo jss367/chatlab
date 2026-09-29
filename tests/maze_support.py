@@ -142,3 +142,25 @@ def team_episode(maze, config):
     """A team run of two agents unless ``config`` names another count."""
     from chatlab.extensions.maze_experiments.runner import Episode
     return Episode(maze, {"agents": 2, **config})
+
+
+# Every scenario control, as the pane lists them for prepare_episode: the
+# scenario, the waypoint and steering, then the team.
+SCENARIO = dict(size=5, seed=7, distance=8, openness=.7, supplied=0, interrupt_after=0, interruption_text="",
+                prefix_tokens=0, temperature=.7, sampling_seed=1, per_turn=200, budget=4000, attempts=32,
+                recovery_tokens=1024, recovery_attempts=4, goal_mode="coordinates", goal_hint="",
+                system_prompt="Be brief.", instruction="Deliver the solution.", changing=False,
+                waypoint="", vector=None, strength=1.0, layer=0, steer="off", steer_cell="", steer_after=3,
+                steer_responses=1, agents=1, communication=True, team_goal="any", round_limit=24,
+                interrupt_agents="all", steer_agents="all", required=False)
+
+
+def scenario(**changes):
+    unknown = set(changes) - set(SCENARIO)
+    assert not unknown, unknown
+    return tuple({**SCENARIO, **changes}.values())
+
+
+def output_index(listener, elem_id):
+    """Where a listener's outputs put the block with ``elem_id``."""
+    return next(i for i, block in enumerate(listener.outputs) if getattr(block, "elem_id", None) == elem_id)

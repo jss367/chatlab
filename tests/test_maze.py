@@ -1013,7 +1013,7 @@ class MazeTests(unittest.TestCase):
                     frame = callbacks['select_history'](ep, False, session, SimpleNamespace(index=(row, 1)))
                     self.assertEqual(frame[8]['value'], row - 1)
                     self.assertEqual(frame[3], replies[row - 1] if row else '')
-                    self.assertTrue(frame[6][row][0].startswith('▶'))
+                    self.assertTrue(frame[6]['data'][row][0].startswith('▶'))
                 with mock.patch('chatlab.extensions.maze_experiments.page.time.sleep'):
                     self.assertEqual(list(stream), [])
                 ep.interrupt_next = True
@@ -1424,7 +1424,7 @@ class MazeTests(unittest.TestCase):
                 # The pane describes the run on screen, so every control follows
                 # it, ahead of the trial note, the model button and the ID it
                 # hands over.
-                filled = loaded[-24:-3]
+                filled = loaded[-34:-13]
                 self.assertEqual(filled[:16], values[:16])
                 self.assertEqual((filled[16]['value'], filled[16]['visible']), ('', False))
                 self.assertEqual(filled[17:], ('Be brief.', 'Reach the star.', False, 'Custom'))
@@ -1462,21 +1462,19 @@ class MazeTests(unittest.TestCase):
                 # whole rather than starting where it has nothing left to show.
                 self.assertEqual(loaded[0].viewing, -1)
                 self.assertEqual(loaded[9]['value'], -1)
-                self.assertEqual(loaded[-2]['value'], 'Load test/model')
-                self.assertEqual(loaded[-1], 'test/model')
+                self.assertEqual(loaded[-12]['value'], 'Load test/model')
+                self.assertEqual(loaded[-11], 'test/model')
                 values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10, 700, 5,
                           'coordinates', '', 'Be brief.', 'Reach the star.', False, *NO_CHECKPOINT)
                 fresh = callbacks['prepare_episode'](loaded[0], False, session, None, *values)
-                self.assertEqual(fresh[-2]['value'], 'Choose / load model')
-                self.assertEqual(fresh[-1], '')
+                self.assertEqual(fresh[-4]['value'], 'Choose / load model')
+                self.assertEqual(fresh[-3], '')
                 # The ID reaches the Models page through the state the page
-                # registered, not through the button's own label. The Team
-                # tab's button registers too, naming no model, and the
-                # Reasoning check's names the model of the run it tests.
-                self.assertEqual(len(registered), 3)
+                # registered, not through the button's own label. The
+                # Reasoning check's button names the model of the run it tests.
+                self.assertEqual(len(registered), 2)
                 self.assertIsInstance(registered[0], gr.State)
-                self.assertIsNone(registered[1])
-                self.assertIsInstance(registered[2], gr.State)
+                self.assertIsInstance(registered[1], gr.State)
             finally:
                 demo.close()
 

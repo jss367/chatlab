@@ -56,7 +56,7 @@ def write_csv(prefix, headers, rows):
 
 def runs_note(runs):
     if not runs:
-        return "Load saved runs from the One agent or Team tab. Every response that made a move call is scored."
+        return "Load saved runs from the Run tab, of one agent or of a team. Every response that made a move call is scored."
     lines = []
     for ep in runs.values():
         scored = len(read_responses(ep))

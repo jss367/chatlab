@@ -12,8 +12,8 @@ from chatlab.extension_api import SteeringError, TokenInspector
 from chatlab.extensions.maze_experiments.maze import Maze, generate, unavoidable_cells
 from chatlab.extensions.maze_experiments.page import build_page
 from chatlab.extensions.maze_experiments.runner import Episode, from_payload, stream_episode
-from chatlab.extensions.maze_experiments.team_page import response_view, team_board, team_status, team_timeline
-from maze_support import Manager, scored, team_episode
+from chatlab.extensions.maze_experiments.team_views import response_line, team_board, team_status, team_timeline
+from maze_support import Manager, scenario, scored, team_episode
 from maze_support import SteeringManager, VECTOR
 from maze_support import call
 from ui_support import listeners_by_name
@@ -57,8 +57,7 @@ class TeamSteeringTests(unittest.TestCase):
         self.assertIn("first in round 2", team_status(ep))
         self.assertIn("first in round 3", team_status(ep))
         self.assertIn("steered", team_timeline(ep)[3][4])
-        ep.selected_turn = 2
-        self.assertIn("Steered", response_view(ep)[0])
+        self.assertIn("Steered", response_line(ep, 2))
         self.assertIn("Required checkpoint", team_board(ep))
         self.assertIn("Steering cell", team_board(ep))
         # No intervention cue is added to either agent's actual prompt.
@@ -209,39 +208,37 @@ class TeamSteeringPageTests(unittest.TestCase):
                 callbacks = listeners_by_name(demo)
                 vector_path = Path(directory) / "vector.json"
                 vector_path.write_text(json.dumps(VECTOR))
-                imported = callbacks["team_import_vector"].fn(str(vector_path))
+                imported = callbacks["import_vector"].fn(str(vector_path))
                 self.assertEqual(imported[0], VECTOR)
-                prepare = callbacks["team_prepare_episode"]
-                values = (2, True, "all", 5, 7, 8, .7, "coordinates", "", "Be brief.", "Deliver the solution.",
-                          .7, 1, 200, 4000, 24)
-                steering = [True, VECTOR, 6., 2, "cell", "", 3, 2, "1"]
+                prepare = callbacks["prepare_episode"]
+                team = dict(agents=2, team_goal="all", required=True, vector=VECTOR, strength=6., layer=2)
+                steered = scenario(**team, steer="cell", steer_responses=2, steer_agents="1")
                 ep = team_episode(CORRIDOR, {})
-                prepared = prepare.fn(ep, False, *values, *steering)
+                prepared = prepare.fn(ep, False, "s", None, *steered)
                 self.assertEqual(len(prepared), len(prepare.outputs))
                 new = prepared[0]
                 self.assertEqual(new.config["steer_agents"], [0])
+                # A blank steering cell starts steering at the generated checkpoint.
                 self.assertEqual(new.config["steer_when"]["cell"], new.config["required_checkpoint"])
                 self.assertEqual(new.config["steering"], dict(VECTOR, strength=6., layer=2))
-                baseline = steering.copy()
-                baseline[4] = "off"
-                plain = prepare.fn(ep, False, *values, *baseline)[0]
+                plain = prepare.fn(ep, False, "s", None, *scenario(**team, steer="off"))[0]
                 self.assertEqual(new.maze, plain.maze)
                 self.assertEqual(new.config["required_checkpoint"], plain.config["required_checkpoint"])
                 self.assertNotIn("steering", plain.config)
-                load = callbacks["team_load"]
-                loaded = load.fn(str(new.export()), ep, False)
+                load = callbacks["load"]
+                loaded = load.fn(str(new.export()), ep, False, "s", None)
                 self.assertEqual(len(loaded), len(load.outputs))
                 # Fill controls exactly as the upload does, then create the same condition again.
-                settings = [v.get("value") if isinstance(v, dict) and v.get("__type__") == "update" else v
-                            for v in loaded[11:-1]]
-                rebuilt = prepare.fn(ep, False, *settings)[0]
+                filled = {block._id: value.get("value") if isinstance(value, dict) and value.get("__type__") == "update"
+                          else value for block, value in zip(load.outputs, loaded)}
+                settings = [filled[block._id] for block in prepare.inputs[4:]]
+                rebuilt = prepare.fn(ep, False, "s", None, *settings)[0]
                 self.assertEqual(rebuilt.config, new.config)
                 self.assertEqual(rebuilt.maze, new.maze)
-                for bad in ([True, None, 1., 0, "cell", "", 3, 1, "all"],
-                            [False, VECTOR, 1., 0, "cell", "", 3, 1, "all"],
-                            [True, VECTOR, 1., 0, "cell", "", 3, 1, "3"]):
+                for bad in (scenario(**dict(team, vector=None), steer="cell"),
+                            scenario(**team, steer="cell", steer_agents="3")):
                     with self.assertRaises(gr.Error):
-                        prepare.fn(ep, False, *values, *bad)
+                        prepare.fn(ep, False, "s", None, *bad)
             finally:
                 demo.close()
 
