@@ -234,7 +234,9 @@ class Episode:
         self.lock = threading.RLock()
         self.config = copy.deepcopy(self.config)
         # A run of one agent names no count, as every run did before teams.
-        if self.config.get("agents") == 1:
+        # Only the integer 1 is that: True and 1.0 compare equal to it, and
+        # are left for the team's own check to refuse.
+        if type(self.config.get("agents")) is int and self.config["agents"] == 1:
             del self.config["agents"]
         if "agents" in self.config:
             self._start_team()
