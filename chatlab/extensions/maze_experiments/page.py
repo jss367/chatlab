@@ -569,7 +569,7 @@ def prompt_reading(ep, turn, context, models):
     if recorded is None:
         return None
     try:
-        templated, load_id = models.prompt_text(context, TOOLS)
+        templated, load_id = models.prompt_text(context, ep.tools)
     except Exception:
         templated, load_id = None, None
     return recorded, templated if reads_back(recording_model(ep, turn), model_of(load_id)) else None

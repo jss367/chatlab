@@ -101,20 +101,21 @@ def check_closure(maze, position, cell):
     return changed
 
 
-def maze_at_turn(maze, updates, index):
+def maze_at_turn(maze, updates, index, key="before_turn"):
     """The map as the response at ``index`` found it, or its latest version for None.
 
     A closure recorded at boundary ``n`` landed before response ``n``
-    generated, so that response acted on the map it produced.
+    generated, so that response acted on the map it produced. A team's
+    closures land between rounds, and name theirs under ``before_round``.
     """
     for update in updates:
-        if index is not None and update["before_turn"] > index:
+        if index is not None and update[key] > index:
             break
         maze = close_cell(maze, update["closed_cell"])
     return maze
 
 
-def validate_pending(maze, cell, updates, drops, turns):
+def validate_pending(maze, cell, updates, drops, boundary, key="before_turn"):
     """Check a closure a saved run was still waiting to apply.
 
     The cell is read against the map as it stands, because a queued closure
@@ -125,19 +126,18 @@ def validate_pending(maze, cell, updates, drops, turns):
     Where the character is standing is not asked: an autosave written between a
     response and the next one carries a cell the character has since moved
     onto, which is a closure about to be dropped rather than a file that could
-    not have been written.
+    not have been written. ``boundary`` is the next one the run would reach.
     """
     if not cell:
         return
     if not isinstance(cell, (list, tuple)) or len(cell) != 2 or any(type(x) is not int for x in cell):
         raise ValueError("A pending closure names one cell as a row and a column.")
-    boundary = len(turns)
-    if any(record["before_turn"] == boundary for record in (*updates, *drops)):
+    if any(record[key] == boundary for record in (*updates, *drops)):
         raise ValueError("A run cannot be waiting to close a cell before a response whose map already changed.")
-    close_cell(maze_at_turn(maze, updates, None), cell)
+    close_cell(maze_at_turn(maze, updates, None, key), cell)
 
 
-def validate_drops(maze, drops, updates, turns):
+def validate_drops(maze, drops, updates, last, key="before_turn"):
     """Check a run's record of the closures that never happened.
 
     The reason is not checked. A dropped closure is one the map never took, so
@@ -151,23 +151,23 @@ def validate_drops(maze, drops, updates, turns):
     has to be one the run could have queued: a queued closure blocks another
     until it lands, so the map at its boundary is the map it was queued
     against, and an open cell that is neither the start nor the destination is
-    what queueing one required.
+    what queueing one required. ``last`` is the latest boundary the run reached.
     """
     if not isinstance(drops, list):
         raise ValueError("A run's dropped closures must be a list.")
-    taken = {update["before_turn"] for update in updates}
+    taken = {update[key] for update in updates}
     previous = -1
     for drop in drops:
         if not isinstance(drop, dict):
             raise ValueError("Each dropped closure must be an object.")
-        boundary = drop.get("before_turn")
-        if type(boundary) is not int or not previous < boundary <= len(turns) or boundary in taken:
+        boundary = drop.get(key)
+        if type(boundary) is not int or not previous < boundary <= last or boundary in taken:
             raise ValueError("Each dropped closure names one free response boundary, in order.")
         previous = boundary
         cell = drop.get("cell")
         if not isinstance(cell, list) or len(cell) != 2 or any(type(x) is not int for x in cell):
             raise ValueError("A dropped closure names one cell as a row and a column.")
-        close_cell(maze_at_turn(maze, updates, boundary - 1), cell)
+        close_cell(maze_at_turn(maze, updates, boundary - 1, key), cell)
         if not isinstance(drop.get("reason"), str) or not drop["reason"].strip():
             raise ValueError("A dropped closure records why it was dropped.")
 

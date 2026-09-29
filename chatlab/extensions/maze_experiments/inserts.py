@@ -71,8 +71,10 @@ def render_insert(messages, insert):
     A simulator note or a teammate message becomes the last key of the latest
     simulator reply, in the reply's own compact JSON, so the note reads as
     part of the state and a teammate's message reads as it does in a team run.
-    A user message is a turn of its own after that reply. Every channel needs
-    that reply: before it, the history ends on the task's own user turn, and a
+    Where the reply already carries its teammates' messages, as a team that
+    can talk has every reply do, the message joins the end of them. A user
+    message is a turn of its own after that reply. Every channel needs that
+    reply: before it, the history ends on the task's own user turn, and a
     second user turn there is one that templates enforcing alternation refuse.
     ``messages`` is left as it was.
     """
@@ -83,9 +85,12 @@ def render_insert(messages, insert):
     if added is None:
         return [*messages, {"role": "user", "content": insert["text"]}]
     state = json.loads(messages[-1]["content"])
-    if added[0] in state:
+    if added[0] == "messages" and isinstance(state.get("messages"), list):
+        state["messages"] = state["messages"] + added[1]
+    elif added[0] in state:
         raise ValueError(f"The simulator's reply already carries {added[0]}.")
-    state[added[0]] = added[1]
+    else:
+        state[added[0]] = added[1]
     return [*messages[:-1], {**messages[-1], "content": json.dumps(state, separators=(",", ":"))}]
 
 
