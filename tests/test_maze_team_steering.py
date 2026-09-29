@@ -239,6 +239,10 @@ class TeamSteeringPageTests(unittest.TestCase):
                             scenario(**team, steer="cell", steer_agents="3")):
                     with self.assertRaises(gr.Error):
                         prepare.fn(ep, False, "s", None, *bad)
+                # Supplied moves one short of the destination walk past the
+                # checkpoint, so steering there would never start.
+                with self.assertRaisesRegex(gr.Error, "pass the steering cell"):
+                    prepare.fn(ep, False, "s", None, *scenario(**team, steer="cell", supplied=7))
             finally:
                 demo.close()
 

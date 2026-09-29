@@ -1242,6 +1242,14 @@ def _build_page(context):
                     if chosen_agents is not None:
                         config[key] = chosen_agents
             new = Episode(changing(drawn) if map_changes else drawn, config)
+            # Refused here rather than in the episode, which reads back runs
+            # saved before anyone checked: a trigger the supplied moves walk
+            # past is one no response ever stands on, so the run would read as
+            # steered while nothing steered it.
+            cell = (new.config.get("steer_when") or {}).get("cell")
+            if cell is not None and any(e["source"] == "supplied" and list(e["after"]) == list(cell) for e in new.events):
+                raise ValueError("The supplied starting moves pass the steering cell, so steering there would never "
+                                 "start. Supply fewer moves, or steer at another cell.")
         except (ValueError, TypeError) as exc:
             logger.warning("Refused the scenario settings for a new episode: %s", exc)
             raise gr.Error(str(exc)) from exc
