@@ -126,7 +126,7 @@ class TeamInterruptionTests(unittest.TestCase):
                 "due its interruption"),
             "an interruption on an agent the run leaves alone": (moved_to_agent_one, "could not have given it"),
             "a prefix other than the tokens it opens with": (
-                lambda c: c["turns"][3].update(prefix_ids=[1, 2], planned_prefix_ids=[1, 2]), "not the prefix"),
+                lambda c: c["turns"][3].update(prefix_ids=[1, 2], planned_prefix_ids=[1, 2]), "not the one its tokens open"),
             "a forged recovery": (lambda c: c["agents"][1].update(latency=1), "agents do not match"),
             "a forged interruption count": (lambda c: c["agents"][0].update(interrupted=True), "agents do not match"),
             "a queued interruption nobody asked for": (

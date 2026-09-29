@@ -106,6 +106,11 @@ def runs_dir(context):
 def export_run(ep, directory):
     if ep.busy:
         raise gr.Error("Pause or stop the episode before exporting. Completed responses are also autosaved.")
+    # A fork holds what its edited response is about to read until that
+    # response is generated, and a file written in between would record a
+    # message no prompt read, or a round that never resolved.
+    if ep.edit_insert is not None or ep.open_round is not None:
+        raise gr.Error("Generate the edited response before exporting this fork. Stopping it discards the edit.")
     if not ep.replay_only:
         try:
             ep.save(directory)
@@ -1402,7 +1407,7 @@ def _build_page(context):
             if view_id != selected["view_id"] or view_id[:2] != (ep.run_id, id(ep)):
                 raise ValueError(STALE_TOKEN)
             turn_index = view_id[2]
-            token_index = ep.turns[turn_index]["forced_prefix_tokens"] + index
+            token_index = ep.turns[turn_index].get("forced_prefix_tokens", 0) + index
             with context.models.open_session() as manager:
                 new = fork_token_edit(ep, turn_index, token_index, text_value, manager,
                                       candidate_id=None if candidate_value == "text" else int(candidate_value))
