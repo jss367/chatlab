@@ -855,7 +855,7 @@ def interrupted_prefix(episode, manager, index=0):
     or on the one it was queued for.
     """
     agent = episode.agents[index]
-    if agent["interrupted"] or not episode.config.get("interruption_text"):
+    if agent["interrupted"] or not episode.config.get("interruption_text", "").strip():
         return []
     if index not in targeted(episode.config, "interrupt_agents", len(episode.agents)):
         return []
@@ -1333,7 +1333,8 @@ def settle_limits(episode, spent):
     """Take out of the run every agent a limit has stopped, once its round has landed.
 
     An agent that was interrupted and has not moved since stops when its
-    recovery window closes. Otherwise it stops when it has spent its
+    recovery window closes, a response the window cut off included, since
+    the window is what cut it. Otherwise it stops when it has spent its
     sampled-token limit, including one whose response was cut off at the last
     of it, since the limit is what stopped that response, or when it has made
     as many calls as the run allows. A team saved under one limit for the
@@ -1345,7 +1346,7 @@ def settle_limits(episode, spent):
         if agent["status"] not in ("active", "cut_off"):
             continue
         waiting = agent["interrupted"] and agent["resumed"] is None
-        if agent["status"] == "active" and waiting and (
+        if waiting and (
                 spent[index] - agent["intervention_tokens"] >= config["recovery_tokens"]
                 or episode.agent_attempts(index) - agent["intervention_attempts"] >= config["recovery_attempts"]):
             agent["status"] = "not_recovered"
@@ -2029,7 +2030,7 @@ def from_payload(data, read_prompt=None):
 LEGACY_TEAM_KEYS = ("supplied_moves", "waypoint", "interrupt_agents", "attempt_budget")
 
 
-def read_interruption(episode, saved, index, manual):
+def read_interruption(episode, saved, index, manual, asked=()):
     """Check the interruption a saved team response records, or records the absence of, and land it.
 
     Returns whether the response was planned to open with it, which narrows its
@@ -2038,8 +2039,10 @@ def read_interruption(episode, saved, index, manual):
     be checked against: it is the one the response planned, its tokens open the
     response, it lands on an agent the run interrupts that has not been
     interrupted yet, and it lands on the first response after that agent's
-    trigger unless the run records a reader asking for it sooner. A planned
-    prefix the model never read belongs to a response stopped before it began.
+    trigger unless the run records a reader asking for it sooner, for that
+    agent: ``asked`` holds the agents whose queued flag the file records. A
+    planned prefix the model never read belongs to a response stopped before
+    it began.
     """
     agent, config = episode.agents[saved["agent"]], episode.config
     planned, consumed = saved.get("planned_prefix_ids", []), saved.get("forced_prefix_tokens", 0)
@@ -2058,7 +2061,7 @@ def read_interruption(episode, saved, index, manual):
         if due:
             raise ValueError(f"{agent['name']} was due its interruption at a response that does not open with it.")
         return False
-    if not eligible or (not due and not manual):
+    if not eligible or (not due and saved["agent"] not in asked):
         raise ValueError(f"A response of {agent['name']} opens with an interruption the run could not have given it there.")
     if config.get("prefix_tokens") and len(planned) > config["prefix_tokens"]:
         raise ValueError("A response's interruption is longer than the run's supplied token count.")
@@ -2105,6 +2108,20 @@ def team_from_payload(data):
     if type(manual) is not bool:
         raise ValueError("A team run says whether anyone intervened in it.")
     result = Episode(Maze.from_dict(data["maze"]), data["config"])
+    # A queued interruption that had not landed leaves no other trace, and
+    # one that has landed stays queued, so the flag is read from the file,
+    # once the run says a reader asked for one. It is what lets an agent be
+    # interrupted ahead of its own trigger, so it is read before the rounds.
+    saved_agents, queued_agents = data.get("agents"), set()
+    if not legacy:
+        if not isinstance(saved_agents, list) or len(saved_agents) != len(result.agents):
+            raise ValueError("The run's agents do not match what its responses produce.")
+        for index, recorded in enumerate(saved_agents):
+            queued = recorded.get("interrupt_next") if isinstance(recorded, dict) else None
+            if type(queued) is not bool or (queued and not manual):
+                raise ValueError("An agent's queued interruption is not one anyone asked for.")
+            if queued:
+                queued_agents.add(index)
     turns, rounds = data.get("turns"), data.get("rounds")
     if type(rounds) is not int or not 0 <= rounds <= result.config["round_limit"]:
         raise ValueError("The run's round count must be within its round limit.")
@@ -2136,7 +2153,7 @@ def team_from_payload(data):
         caps = result.response_caps(moving) or {}
         actions = []
         for saved in by_round[round_index]:
-            interrupting = read_interruption(result, saved, len(result.turns), manual)
+            interrupting = read_interruption(result, saved, len(result.turns), manual, queued_agents)
             limit = response_limit(result, saved["agent"], caps.get(saved["agent"], 0), interrupting)
             if resolved and saved["finish_reason"] not in ("stop", "length", "incomplete_stream"):
                 raise ValueError("A response in a finished round ends in a way no finished round records.")
@@ -2182,16 +2199,8 @@ def team_from_payload(data):
         result.phase = phase
         if isinstance(data.get("detail"), str):
             result.detail = data["detail"]
-    # A queued interruption that had not landed leaves no other trace, and
-    # one that has landed stays queued, so the flag is read from the file
-    # once the run says a reader asked for one.
-    saved_agents = data.get("agents")
-    if not legacy and isinstance(saved_agents, list) and len(saved_agents) == len(result.agents):
-        for agent, recorded in zip(result.agents, saved_agents):
-            queued = recorded.get("interrupt_next") if isinstance(recorded, dict) else None
-            if type(queued) is not bool or (queued and not manual):
-                raise ValueError("An agent's queued interruption is not one anyone asked for.")
-            agent["interrupt_next"] = queued
+    for index in queued_agents:
+        result.agents[index]["interrupt_next"] = True
     kept = ("name", "position", "status", "messages") if legacy else None
     rebuilt = [{key: value for key, value in agent.items() if kept is None or key in kept}
                for agent in json.loads(json.dumps(result.agents))]
