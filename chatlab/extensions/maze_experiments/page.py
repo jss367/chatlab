@@ -1160,9 +1160,13 @@ def _build_page(context):
                             "added there as `\"messages\"`, as a team run delivers one; a user message is a turn of its "
                             "own after that reply. One message is queued at a time.")
             with gr.Accordion("Playback & view", open=False):
-                pace = gr.Slider(.1, 4, value=1., step=.1, label="Seconds per recorded response")
+                pace = gr.Slider(.1, 4, value=1., step=.1, label="Seconds per recorded response or round")
                 reveal = gr.Checkbox(label="Show shortest route (viewer only)", value=False)
-                gr.Markdown("Play replays recorded responses, then continues generating in a live episode. Next advances one response, First returns to the initial history. Pause lets a generated response finish.")
+                gr.Markdown("Play replays recorded responses, then continues generating in a live episode. Next advances "
+                            "one response, First returns to the initial history. Pause lets a generated response "
+                            "finish. For a team each step is a round: Next at the live end asks every agent still "
+                            "moving for a response, Pause lets the round finish, and Stop discards the unfinished "
+                            "round, keeping its responses and applying none of its moves.")
                 stop = gr.Button("Stop now · end episode", size="sm", elem_id="maze-stop")
         with gr.Column(elem_id="maze-inspector"):
             gr.Markdown("## Emitted tokens")
